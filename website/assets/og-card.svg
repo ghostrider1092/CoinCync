@@ -1,0 +1,21 @@
+<svg viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="630" fill="#0a0a09"/>
+  <!-- Subtle radial glow -->
+  <defs><radialGradient id="og-g" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#d4a059" stop-opacity="0.06"/><stop offset="100%" stop-color="#d4a059" stop-opacity="0"/></radialGradient></defs>
+  <rect width="1200" height="630" fill="url(#og-g)"/>
+  <!-- Mark -->
+  <g transform="translate(360,280)">
+    <circle cx="0" cy="0" r="78" fill="none" stroke="#d4a059" stroke-width="14"/>
+    <path d="M 68 0 A 68 68 0 1 0 0 68" fill="none" stroke="#0a0a09" stroke-width="22"/>
+    <line x1="62" y1="0" x2="78" y2="0" stroke="#0a0a09" stroke-width="22"/>
+    <circle cx="-32" cy="0" r="8" fill="#d4a059"/>
+    <circle cx="32" cy="0" r="8" fill="#d4a059"/>
+  </g>
+  <!-- Text -->
+  <text x="500" y="260" font-family="'Fraunces',Georgia,serif" font-size="64" font-weight="400" fill="#f5f0e8" letter-spacing="-1">Coin<tspan font-style="italic" font-weight="500" fill="#d4a059">Cync</tspan></text>
+  <text x="500" y="310" font-family="'Fraunces',Georgia,serif" font-style="italic" font-size="22" fill="#8a857d">Private by law. Private by math.</text>
+  <!-- Bottom bar -->
+  <line x1="100" y1="530" x2="1100" y2="530" stroke="#25241f" stroke-width="1"/>
+  <text x="100" y="565" font-family="'JetBrains Mono',monospace" font-size="14" fill="#5d5953" letter-spacing="1">coincync.network</text>
+  <text x="1100" y="565" text-anchor="end" font-family="'JetBrains Mono',monospace" font-size="14" fill="#5d5953" letter-spacing="1">100M SUPPLY · 0% DEV TAX · CPU MINING</text>
+</svg>

@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoinCync — Private by law. Private by math.</title>
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.svg">
+<meta name="description" content="CoinCync is a privacy-first cryptocurrency. Every transaction is shielded. Supply is auditable. No permission needed.">
+<meta property="og:title" content="CoinCync — Private by law. Private by math.">
+<meta property="og:description" content="A privacy-first cryptocurrency with mandatory shielding, auditable supply, and constitutional protections.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://coincync.network">
+<meta property="og:image" content="https://coincync.network/assets/og-card.svg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://coincync.network/assets/og-card.svg">
+<link rel="stylesheet" href="/assets/fonts/fonts.css">
+<link rel="preload" as="image" href="banner.svg">
+<style>
+:root{--bg:#0a0a09;--s1:#111110;--s2:#181816;--s3:#1e1e1b;--b:#25241f;--b2:#34332c;--t:#f5f0e8;--t2:#b8b4ac;--t3:#8a857d;--t4:#5d5953;--t4-a:#7a756c;--ac:#d4a059;--ac2:#e8b86d;--ac-dim:#4a3a1f;--green:#7eb87c;--red:#c45c4f;--blue:#6b8cce;--display:'Fraunces',Georgia,serif;--body:'IBM Plex Sans',system-ui,sans-serif;--mono:'JetBrains Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--t);font-family:var(--body);font-weight:300;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+::selection{background:rgba(212,160,89,.25);color:var(--t)}
+
+/* FOCUS */
+a:focus-visible,button:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+.nav-cta:focus-visible{outline-offset:4px}
+
+/* REVEAL ANIMATIONS */
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .6s ease,transform .6s ease}
+.reveal.visible{opacity:1;transform:translateY(0)}
+.reveal-stagger>*{opacity:0;transform:translateY(16px);transition:opacity .5s ease,transform .5s ease}
+.reveal-stagger.visible>*{opacity:1;transform:translateY(0)}
+.reveal-stagger.visible>*:nth-child(1){transition-delay:0s}
+.reveal-stagger.visible>*:nth-child(2){transition-delay:.1s}
+.reveal-stagger.visible>*:nth-child(3){transition-delay:.2s}
+.reveal-stagger.visible>*:nth-child(4){transition-delay:.3s}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,10,9,.85);backdrop-filter:blur(20px);border-bottom:1px solid rgba(37,36,31,.5);padding:0 48px;height:64px;display:flex;align-items:center;justify-content:space-between}
+.nav-logo{font-family:var(--display);font-size:20px;font-weight:400;color:var(--t);text-decoration:none;letter-spacing:-.02em}
+.nav-logo em{color:var(--ac);font-style:italic;font-weight:500}
+.nav-links{display:flex;gap:32px;align-items:center}
+.nav-links a{font-size:13px;color:var(--t3);text-decoration:none;font-weight:400;transition:color .15s;letter-spacing:.02em}
+.nav-links a:hover{color:var(--ac)}
+.nav-cta{background:var(--ac);color:var(--bg);font-size:12px;font-weight:600;padding:8px 20px;border-radius:0;border:none;cursor:pointer;text-decoration:none;letter-spacing:.04em;transition:background .15s}
+.nav-cta:hover{background:var(--ac2)}
+
+/* HAMBURGER NAV */
+.nav-toggle{display:none;background:none;border:none;cursor:pointer;padding:8px;z-index:101}
+.nav-toggle-bar{display:block;width:20px;height:2px;background:var(--t2);margin:4px 0;transition:transform .3s,opacity .3s}
+.nav-toggle.active .nav-toggle-bar:nth-child(1){transform:rotate(45deg) translate(4px,4px)}
+.nav-toggle.active .nav-toggle-bar:nth-child(2){opacity:0}
+.nav-toggle.active .nav-toggle-bar:nth-child(3){transform:rotate(-45deg) translate(4px,-4px)}
+
+/* HERO */
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:120px 32px 80px;position:relative;background:#0a0a09}
+.hero-banner{position:absolute;inset:0;z-index:0;overflow:hidden}
+.hero-banner img,.hero-banner object{width:100%;height:100%;object-fit:cover;opacity:.4}
+.hero-banner::after{content:'';position:absolute;inset:0;background:linear-gradient(to bottom,rgba(10,10,9,.3) 0%,rgba(10,10,9,.1) 40%,rgba(10,10,9,.7) 80%,rgba(10,10,9,1) 100%)}
+.hero>*{position:relative;z-index:1}
+.hero-badge{font-family:var(--mono);font-size:11px;color:var(--ac);letter-spacing:.2em;text-transform:uppercase;margin-bottom:32px;display:flex;align-items:center;gap:10px}
+.hero-badge .dot{width:6px;height:6px;background:var(--ac);border-radius:50%;box-shadow:0 0 12px rgba(212,160,89,.6);animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.hero h1{font-family:var(--display);font-weight:200;font-size:clamp(48px,8vw,96px);line-height:.95;letter-spacing:-.04em;margin-bottom:28px;max-width:900px;font-variation-settings:"opsz" 144}
+.hero h1 em{font-style:italic;font-weight:400;color:var(--ac)}
+.hero-sub{font-family:var(--display);font-style:italic;font-weight:300;font-size:clamp(18px,2.5vw,24px);color:var(--t3);max-width:600px;line-height:1.5;margin-bottom:48px}
+.hero-actions{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}
+.btn-primary{background:var(--ac);color:var(--bg);font-size:14px;font-weight:600;padding:14px 36px;border:none;cursor:pointer;text-decoration:none;letter-spacing:.03em;transition:all .15s}
+.btn-primary:hover{background:var(--ac2);transform:translateY(-1px)}
+.btn-ghost{background:none;color:var(--t2);font-size:14px;font-weight:400;padding:14px 36px;border:1px solid var(--b);cursor:pointer;text-decoration:none;letter-spacing:.03em;transition:all .15s}
+.btn-ghost:hover{border-color:var(--ac);color:var(--ac)}
+.hero-stats{display:flex;gap:48px;margin-top:80px;flex-wrap:wrap;justify-content:center}
+.hero-stat{text-align:center}
+.hero-stat .val{font-family:var(--display);font-size:32px;font-weight:400;color:var(--t);margin-bottom:4px}
+.hero-stat .label{font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.15em;text-transform:uppercase}
+
+/* SECTIONS */
+section{padding:120px 48px;max-width:1200px;margin:0 auto}
+.section-header{margin-bottom:64px}
+.section-num{font-family:var(--mono);font-size:12px;color:var(--ac);letter-spacing:.15em;margin-bottom:12px}
+.section-title{font-family:var(--display);font-weight:300;font-size:clamp(32px,5vw,56px);line-height:1.05;letter-spacing:-.03em;margin-bottom:16px;max-width:700px}
+.section-title em{font-style:italic;font-weight:400;color:var(--ac)}
+.section-desc{font-size:18px;color:var(--t3);max-width:600px;line-height:1.6;font-weight:300}
+
+/* MANIFESTO */
+.manifesto{border-top:1px solid var(--b);border-bottom:1px solid var(--b);padding:80px 48px;text-align:center;background:var(--s1);position:relative}
+.manifesto::before,.manifesto::after{content:'';position:absolute;left:50%;transform:translateX(-50%);width:120px;height:2px;background:linear-gradient(90deg,transparent,var(--ac),transparent)}
+.manifesto::before{top:0}
+.manifesto::after{bottom:0}
+.manifesto blockquote{font-family:var(--display);font-style:italic;font-weight:300;font-size:clamp(20px,3vw,28px);color:var(--t2);line-height:1.6;max-width:700px;margin:0 auto 24px;border-left:2px solid var(--ac-dim);padding-left:24px;text-align:left}
+.manifesto cite{font-family:var(--mono);font-size:11px;color:var(--t4);letter-spacing:.15em;text-transform:uppercase;font-style:normal}
+
+/* THREE PILLARS */
+.pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--b);border:1px solid var(--b)}
+.pillar{background:var(--s1);padding:48px 36px}
+.pillar-num{font-family:var(--mono);font-size:11px;color:var(--ac);letter-spacing:.15em;margin-bottom:20px}
+.pillar h3{font-family:var(--display);font-size:22px;font-weight:400;margin-bottom:12px;letter-spacing:-.01em}
+.pillar p{font-size:14px;color:var(--t3);line-height:1.7}
+
+/* PRIVACY LAYERS */
+.layers{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.layer-card{background:var(--s1);border:1px solid var(--b);padding:36px;transition:border-color .2s}
+.layer-card:hover{border-color:rgba(212,160,89,.3)}
+.layer-num{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;margin-bottom:12px;text-transform:uppercase}
+.layer-card h3{font-family:var(--display);font-size:20px;font-weight:400;margin-bottom:8px}
+.layer-card p{font-size:13px;color:var(--t3);line-height:1.6;margin-bottom:16px}
+.layer-features{list-style:none;display:flex;flex-direction:column;gap:6px}
+.layer-features li{font-size:12px;color:var(--t3);display:flex;align-items:baseline;gap:8px}
+.layer-features li::before{content:"\203A";color:var(--ac);font-weight:600;font-size:14px;flex-shrink:0}
+
+/* COMPARISON */
+.compare-table{width:100%;border-collapse:collapse;border:1px solid var(--b)}
+.compare-table th{padding:14px 20px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--t4);text-align:left;border-bottom:1px solid var(--b)}
+.compare-table th:first-child{color:var(--t3)}
+.compare-table td{padding:12px 20px;font-size:13px;border-bottom:1px solid var(--b);color:var(--t3);font-weight:300}
+.compare-table td:nth-child(2){color:var(--ac);font-weight:500}
+.compare-table tr:hover td{background:rgba(212,160,89,.02)}
+
+/* LEDGER */
+.ledger{border:1px solid var(--b);background:var(--s1)}
+.ledger-row{display:grid;grid-template-columns:1fr auto;padding:20px 28px;border-bottom:1px solid var(--b);align-items:baseline}
+.ledger-row:last-child{border-bottom:none}
+.ledger-label{font-family:var(--mono);font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:.12em}
+.ledger-value{font-family:var(--mono);font-size:18px;font-weight:500;color:var(--t);text-align:right}
+.ledger-value .unit{font-size:10px;color:var(--t4);margin-left:6px;letter-spacing:.08em}
+
+/* CTA SECTION */
+.cta-section{text-align:center;padding:120px 48px;background:var(--s1);border-top:1px solid var(--b);position:relative}
+.cta-section::before{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);width:200px;height:2px;background:linear-gradient(90deg,transparent,var(--ac),transparent)}
+.cta-section h2{font-family:var(--display);font-size:clamp(28px,4vw,48px);font-weight:300;letter-spacing:-.02em;margin-bottom:16px}
+.cta-section h2 em{font-style:italic;font-weight:400;color:var(--ac)}
+.cta-section p{font-size:16px;color:var(--t3);max-width:500px;margin:0 auto 40px;font-weight:300}
+.cta-buttons{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+
+/* LINK GRID */
+.link-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);margin-top:48px}
+.link-card{background:var(--s1);padding:32px 28px;text-decoration:none;transition:background .15s}
+.link-card:hover{background:var(--s2)}
+.link-card .link-title{font-family:var(--display);font-size:16px;font-weight:400;color:var(--t);margin-bottom:6px}
+.link-card .link-desc{font-size:12px;color:var(--t4);line-height:1.5}
+.link-card .link-arrow{font-size:14px;color:var(--ac);margin-top:12px;display:block}
+
+/* ROADMAP */
+.roadmap{position:relative;padding-left:32px;border-left:2px solid var(--b)}
+.roadmap-item{position:relative;margin-bottom:40px}
+.roadmap-item:last-child{margin-bottom:0}
+.roadmap-item::before{content:'';position:absolute;left:-38px;top:6px;width:10px;height:10px;border-radius:50%;border:2px solid var(--b);background:var(--bg)}
+.roadmap-item.completed::before{background:var(--ac);border-color:var(--ac)}
+.roadmap-item.current::before{background:var(--bg);border-color:var(--ac);box-shadow:0 0 8px rgba(212,160,89,.4)}
+.roadmap-phase{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;text-transform:uppercase;margin-bottom:4px}
+.roadmap-title{font-family:var(--display);font-size:18px;font-weight:400;margin-bottom:6px}
+.roadmap-desc{font-size:13px;color:var(--t3);line-height:1.6}
+.roadmap-tag{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.08em;padding:3px 10px;margin-top:8px;border:1px solid var(--b);color:var(--t4)}
+.roadmap-tag.done{color:var(--green);border-color:rgba(126,184,124,.3)}
+.roadmap-tag.active{color:var(--ac);border-color:var(--ac-dim)}
+
+/* COMPARE CARDS (mobile only) */
+.compare-cards{display:none}
+.compare-card{background:var(--s1);border:1px solid var(--b);padding:20px}
+.compare-card-feature{font-family:var(--display);font-size:16px;font-weight:400;margin-bottom:12px;color:var(--t)}
+.compare-card-row{display:flex;justify-content:space-between;padding:6px 0;font-size:13px;border-bottom:1px solid var(--b)}
+.compare-card-row:last-child{border-bottom:none}
+.compare-card-coin{color:var(--t4-a)}
+.compare-card-value{color:var(--t3)}
+.compare-card-value.highlight{color:var(--ac);font-weight:500}
+.compare-card-value.negative{color:var(--red)}
+
+/* TX FLOW DIAGRAM */
+.tx-flow{max-width:800px;margin:0 auto}
+.tx-flow svg{width:100%;height:auto}
+
+/* EMISSION CURVE */
+.curve-wrap{max-width:700px;margin:0 auto;background:var(--s1);border:1px solid var(--b);padding:28px 32px 20px}
+.curve-wrap svg{width:100%;height:auto}
+.curve-label{font-family:var(--mono);font-size:9px;fill:var(--t4);letter-spacing:.08em}
+.curve-line{fill:none;stroke:var(--ac);stroke-width:2}
+.curve-tail{fill:none;stroke:var(--ac);stroke-width:1.5;stroke-dasharray:4 3}
+.curve-fill{fill:url(#curve-grad);opacity:.15}
+.curve-axis{stroke:var(--b);stroke-width:1}
+.curve-grid{stroke:var(--b);stroke-width:.5;opacity:.5}
+
+/* COUNTDOWN */
+.countdown{display:flex;gap:24px;justify-content:center;flex-wrap:wrap;margin-top:32px}
+.cd-unit{text-align:center}
+.cd-val{font-family:var(--display);font-size:clamp(28px,4vw,48px);font-weight:400;color:var(--t);line-height:1}
+.cd-label{font-family:var(--mono);font-size:9px;color:var(--t4);letter-spacing:.15em;text-transform:uppercase;margin-top:6px}
+
+/* FEE BURN */
+.fee-visual{display:flex;align-items:center;gap:24px;max-width:600px;margin:24px auto 0;flex-wrap:wrap;justify-content:center}
+.fee-bar{flex:1;min-width:200px;height:32px;background:var(--s2);border:1px solid var(--b);display:flex;overflow:hidden}
+.fee-burn{background:var(--ac);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:10px;color:var(--bg);font-weight:600}
+.fee-miner{background:var(--s3);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:10px;color:var(--t3);font-weight:500;flex:1}
+
+/* CONSTITUTION */
+.const-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.const-card{background:var(--s1);border:1px solid var(--b);padding:28px;transition:border-color .2s}
+.const-card:hover{border-color:rgba(212,160,89,.3)}
+.const-art{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;text-transform:uppercase;margin-bottom:10px}
+.const-quote{font-family:var(--display);font-style:italic;font-size:15px;color:var(--t2);line-height:1.6}
+
+/* QUICK START */
+.terminal{background:#050504;border:1px solid var(--b);padding:0;font-family:var(--mono);font-size:12px;max-width:700px}
+.terminal-bar{background:var(--s1);padding:8px 14px;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:6px}
+.terminal-dot{width:8px;height:8px;border-radius:50%}
+.terminal-body{padding:20px;line-height:2;color:var(--t2);overflow-x:auto}
+.terminal-body .prompt{color:var(--ac)}
+.terminal-body .comment{color:var(--t4)}
+.terminal-body .output{color:var(--t3);opacity:.7}
+
+/* SECURITY */
+.bounty-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.bounty-card{background:var(--s1);border:1px solid var(--b);padding:20px;text-align:center}
+.bounty-tier{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px}
+.bounty-range{font-family:var(--display);font-size:20px;font-weight:400;color:var(--t);margin-bottom:6px}
+.bounty-desc{font-size:11px;color:var(--t3);line-height:1.5}
+
+/* FAQ */
+.faq-list{max-width:800px}
+.faq-item{border-bottom:1px solid var(--b)}
+.faq-q{padding:20px 0;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-family:var(--display);font-size:17px;font-weight:400;color:var(--t);transition:color .15s}
+.faq-q:hover{color:var(--ac)}
+.faq-q::after{content:'+';font-family:var(--mono);font-size:18px;color:var(--t4);transition:transform .2s}
+.faq-item.open .faq-q::after{transform:rotate(45deg);color:var(--ac)}
+.faq-a{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.faq-item.open .faq-a{max-height:400px}
+.faq-a-inner{padding:0 0 20px;font-size:14px;color:var(--t3);line-height:1.7}
+
+/* STATS LIVE */
+.stat-live{position:relative}
+.stat-live .live-indicator{position:absolute;top:4px;right:4px;width:5px;height:5px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+
+/* FAUCET BANNER */
+.faucet-banner{background:linear-gradient(135deg,var(--ac-dim),transparent);border:1px solid var(--b);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:24px;flex-wrap:wrap}
+.faucet-banner p{font-size:13px;color:var(--t2)}
+.faucet-banner a{font-size:12px;color:var(--ac);font-family:var(--mono);text-decoration:none;border:1px solid var(--ac-dim);padding:6px 16px;transition:all .15s;flex-shrink:0}
+.faucet-banner a:hover{background:var(--ac);color:var(--bg)}
+
+/* FOOTER */
+footer{border-top:1px solid var(--b);padding:48px}
+.footer-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:40px;text-align:left;max-width:1200px;margin:0 auto 40px}
+.footer-col h4{font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--ac);margin-bottom:16px}
+.footer-col a{display:block;font-size:13px;color:var(--t4);text-decoration:none;padding:4px 0;transition:color .15s}
+.footer-col a:hover{color:var(--ac)}
+.footer-bottom{text-align:center;border-top:1px solid var(--b);padding-top:32px}
+.footer-logo{font-family:var(--display);font-size:16px;font-weight:400;color:var(--t3);margin-bottom:8px}
+.footer-logo em{color:var(--ac);font-style:italic}
+.footer-credit{margin-top:24px}
+.footer-credit .lab{font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.15em;text-transform:uppercase}
+.footer-credit .lab-name{font-size:13px;color:var(--t3);font-weight:500;margin-top:3px}
+.footer-credit .lab-desc{font-family:var(--display);font-style:italic;font-size:11px;color:var(--t4);margin-top:2px}
+
+/* RESPONSIVE */
+@media(max-width:768px){
+  nav{padding:0 20px;height:56px}
+  .nav-toggle{display:block}
+  .nav-links{display:none;position:fixed;top:56px;left:0;right:0;background:rgba(10,10,9,.97);backdrop-filter:blur(20px);flex-direction:column;padding:24px 20px;gap:0;border-bottom:1px solid var(--b)}
+  .nav-links.open{display:flex}
+  .nav-links a{padding:14px 0;font-size:15px;border-bottom:1px solid var(--b);color:var(--t2)}
+  .nav-links a:last-child{border-bottom:none}
+  .nav-cta{margin-top:12px;text-align:center;padding:14px 20px}
+  .hero{padding:100px 20px 60px}
+  section{padding:80px 20px}
+  .pillars{grid-template-columns:1fr}
+  .layers{grid-template-columns:1fr}
+  .link-grid{grid-template-columns:1fr 1fr}
+  .hero-stats{gap:24px}
+  .manifesto{padding:60px 20px}
+  .manifesto blockquote{padding-left:16px}
+  .compare-table{display:none}
+  .compare-cards{display:flex;flex-direction:column;gap:16px}
+  .footer-grid{grid-template-columns:1fr 1fr;gap:32px 20px}
+  .roadmap{padding-left:20px}
+  .roadmap-item::before{left:-26px}
+  .const-grid{grid-template-columns:1fr}
+  .bounty-grid{grid-template-columns:1fr 1fr}
+  .countdown{gap:16px}
+  .fee-visual{flex-direction:column}
+}
+@media(max-width:480px){
+  .link-grid{grid-template-columns:1fr}
+  .hero-actions{flex-direction:column;width:100%}
+  .btn-primary,.btn-ghost{width:100%;text-align:center}
+  .footer-grid{grid-template-columns:1fr}
+  .compare-cards{gap:12px}
+  .bounty-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="/" class="nav-logo" aria-label="CoinCync home"><svg viewBox="0 0 200 200" width="28" height="28" aria-label="CoinCync logo" role="img" style="vertical-align:middle;margin-right:10px"><circle cx="100" cy="100" r="78" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#d4a059"/><circle cx="132" cy="100" r="8" fill="#d4a059"/></svg>Coin<em>Cync</em></a>
+  <button class="nav-toggle" aria-label="Toggle navigation menu" aria-expanded="false"><span class="nav-toggle-bar"></span><span class="nav-toggle-bar"></span><span class="nav-toggle-bar"></span></button>
+  <div class="nav-links">
+    <a href="#privacy">Privacy</a>
+    <a href="#economics">Economics</a>
+    <a href="#compare">Compare</a>
+    <a href="https://explorer.coincync.network" target="_blank">Explorer</a>
+    <a href="/docs/pages/whitepaper.html">Whitepaper</a>
+    <a href="/docs/pages/api-reference.html">Developers</a>
+    <a href="https://discord.gg/5tYNSCsqzy" target="_blank">Discord</a>
+    <a href="/brand.html">Brand</a>
+    <a href="#download" class="nav-cta">Download Wallet</a>
+  </div>
+</nav>
+
+<main>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-banner">
+    <img src="banner.svg" alt="The Reading Room — CoinCync" loading="eager">
+  </div>
+  <div class="hero-badge">
+    <span class="dot"></span>
+    <span>Testnet live &mdash; <span id="live-nodes">9</span> nodes &mdash; block <span id="live-height">&mdash;</span></span>
+  </div>
+  <h1>Your money<br>is <em>yours</em>.</h1>
+  <p class="hero-sub">A privacy-first cryptocurrency where every transaction is shielded by default, supply is cryptographically auditable, and no permission is required to participate.</p>
+  <div class="hero-actions">
+    <a href="#download" class="btn-primary">Download Wallet</a>
+    <a href="https://explorer.coincync.network" class="btn-ghost" target="_blank">Explore the chain</a>
+  </div>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="val">22</div><div class="label">Privacy features</div></div>
+    <div class="hero-stat"><div class="val">100M</div><div class="label">Supply cap</div></div>
+    <div class="hero-stat"><div class="val">0%</div><div class="label">Dev tax</div></div>
+    <div class="hero-stat"><div class="val">16</div><div class="label">Ring size</div></div>
+    <div class="hero-stat"><div class="val">30%</div><div class="label">Fee burn</div></div>
+  </div>
+</section>
+
+<!-- MANIFESTO -->
+<div class="manifesto reveal">
+  <blockquote>"We built CoinCync on one principle: your money is yours. Not visible to surveillance. Not subject to seizure. Not dependent on permission. Enforced by proofs, not promises."</blockquote>
+  <cite>&mdash; The CoinCync Manifesto</cite>
+</div>
+
+<!-- THREE PILLARS -->
+<section>
+  <div class="section-header">
+    <div class="section-num">&sect; 01</div>
+    <h2 class="section-title">Three principles.<br>Zero <em>compromise</em>.</h2>
+  </div>
+  <div class="pillars reveal-stagger">
+    <div class="pillar">
+      <div class="pillar-num">&sect; 01</div>
+      <h3>Private by default</h3>
+      <p>Every transaction is shielded with CLSAG ring-16 signatures, Pedersen commitments, Bulletproofs+ range proofs, and stealth addresses. No opt-out. No transparent mode. Privacy is mandatory.</p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-num">&sect; 02</div>
+      <h3>Auditable by anyone</h3>
+      <p>Supply is cryptographically verifiable. Pedersen commitments are additively homomorphic &mdash; they balance without revealing amounts. No trusted setup. No ceremony. Anyone can audit.</p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-num">&sect; 03</div>
+      <h3>No permission needed</h3>
+      <p>CPU-only RandomX mining. 0% developer tax. No premine. No founder allocation. The Constitution enforces these rules at the protocol level &mdash; permanently.</p>
+    </div>
+  </div>
+</section>
+
+<!-- PRIVACY LAYERS -->
+<section id="privacy">
+  <div class="section-header">
+    <div class="section-num">&sect; 02</div>
+    <h2 class="section-title">Four layers of <em>privacy</em>.</h2>
+    <p class="section-desc">Each layer addresses a different attack surface. Together they provide the strongest privacy guarantees of any cryptocurrency.</p>
+  </div>
+  <div class="layers reveal-stagger">
+    <div class="layer-card">
+      <div class="layer-num">Layer 1 &mdash; Cryptographic</div>
+      <h3>Protects the content</h3>
+      <p>Who sent. Who received. How much.</p>
+      <ul class="layer-features">
+        <li>CLSAG ring-16 signatures &mdash; real signer hidden among 16 decoys</li>
+        <li>Stealth addresses &mdash; one-time Ristretto255 destinations</li>
+        <li>Pedersen commitments &mdash; amounts hidden, homomorphic balance</li>
+        <li>Bulletproofs+ &mdash; compact non-negative range proofs</li>
+        <li>Encrypted memos &mdash; ChaCha20-Poly1305 + ECDH</li>
+        <li>Key images &mdash; double-spend prevention without revealing source</li>
+        <li>View tags &mdash; 90% faster wallet sync</li>
+      </ul>
+    </div>
+    <div class="layer-card">
+      <div class="layer-num">Layer 2 &mdash; Network</div>
+      <h3>Protects the metadata</h3>
+      <p>IP addresses. Timing. Traffic patterns.</p>
+      <ul class="layer-features">
+        <li>Dandelion++ &mdash; random stem path before broadcast</li>
+        <li>Noise_XX &mdash; Signal-grade encrypted P2P</li>
+        <li>Traffic shaping &mdash; 0&ndash;200ms random jitter</li>
+        <li>Constant-rate padding &mdash; masks activity patterns</li>
+      </ul>
+    </div>
+    <div class="layer-card">
+      <div class="layer-num">Layer 3 &mdash; Wallet</div>
+      <h3>Protects the user</h3>
+      <p>Selective disclosure. Plausible deniability. Recovery.</p>
+      <ul class="layer-features">
+        <li>Uniform decoy selection &mdash; defeats recency analysis</li>
+        <li>Time-scoped view keys &mdash; export for a specific block range</li>
+        <li>Plausible deniability &mdash; dual-password encryption</li>
+        <li>Auto-churn &mdash; Poisson-distributed self-sends</li>
+        <li>Dead man's switch &mdash; time-locked recovery</li>
+        <li>Uniform 2-in/2-out shape &mdash; defeats heuristic analysis</li>
+        <li>FROST multi-sig &mdash; indistinguishable from single-sig</li>
+      </ul>
+    </div>
+    <div class="layer-card">
+      <div class="layer-num">Layer 4 &mdash; Constitutional</div>
+      <h3>Enforced by consensus</h3>
+      <p>Hardcoded rules that no one can change.</p>
+      <ul class="layer-features">
+        <li>Mandatory privacy &mdash; no opt-out, no transparent mode</li>
+        <li>No surveillance &mdash; no blacklists, no freezing, no backdoors</li>
+        <li>No balance lookup &mdash; no RPC to query an address</li>
+        <li>4th Amendment &mdash; financial records constitutionally protected</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- HOW A TRANSACTION WORKS -->
+<section>
+  <div class="section-header">
+    <div class="section-num">&sect; 03</div>
+    <h2 class="section-title">How a transaction <em>works</em>.</h2>
+    <p class="section-desc">Four cryptographic layers protect every transaction. Here's what happens when you send CYNC.</p>
+  </div>
+  <div class="tx-flow reveal">
+    <svg viewBox="0 0 800 280" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <!-- Connecting lines -->
+      <line x1="120" y1="140" x2="230" y2="140" stroke="#25241f" stroke-width="2" stroke-dasharray="4 3"/>
+      <line x1="330" y1="140" x2="440" y2="140" stroke="#25241f" stroke-width="2" stroke-dasharray="4 3"/>
+      <line x1="540" y1="140" x2="650" y2="140" stroke="#25241f" stroke-width="2" stroke-dasharray="4 3"/>
+      <!-- Arrow heads -->
+      <polygon points="228,135 238,140 228,145" fill="#25241f"/>
+      <polygon points="438,135 448,140 438,145" fill="#25241f"/>
+      <polygon points="648,135 658,140 648,145" fill="#25241f"/>
+
+      <!-- Sender -->
+      <circle cx="70" cy="140" r="40" fill="none" stroke="#d4a059" stroke-width="2"/>
+      <circle cx="58" cy="130" r="3" fill="#d4a059"/>
+      <circle cx="82" cy="130" r="3" fill="#d4a059"/>
+      <text x="70" y="200" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="9" fill="#8a857d" letter-spacing=".5">SENDER</text>
+
+      <!-- Ring signature -->
+      <g transform="translate(280,140)">
+        <circle r="48" fill="none" stroke="#25241f" stroke-width="1.5"/>
+        <circle cx="0" cy="-38" r="6" fill="none" stroke="#5d5953" stroke-width="1.5"/>
+        <circle cx="33" cy="-18" r="6" fill="none" stroke="#5d5953" stroke-width="1.5"/>
+        <circle cx="33" cy="18" r="6" fill="none" stroke="#5d5953" stroke-width="1.5"/>
+        <circle cx="0" cy="38" r="6" fill="#d4a059" stroke="#d4a059" stroke-width="1.5"/>
+        <circle cx="-33" cy="18" r="6" fill="none" stroke="#5d5953" stroke-width="1.5"/>
+        <circle cx="-33" cy="-18" r="6" fill="none" stroke="#5d5953" stroke-width="1.5"/>
+      </g>
+      <text x="280" y="200" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="9" fill="#d4a059" letter-spacing=".5">CLSAG RING-16</text>
+      <text x="280" y="215" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="8" fill="#5d5953">hide sender</text>
+
+      <!-- Pedersen commitment -->
+      <g transform="translate(490,140)">
+        <rect x="-44" y="-38" width="88" height="76" rx="4" fill="none" stroke="#25241f" stroke-width="1.5"/>
+        <text x="0" y="-10" text-anchor="middle" font-family="'Fraunces',Georgia,serif" font-style="italic" font-size="18" fill="#f5f0e8">C</text>
+        <text x="0" y="10" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="8" fill="#d4a059">rG + vH</text>
+        <text x="0" y="28" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="7" fill="#5d5953">BP+ PROOF</text>
+      </g>
+      <text x="490" y="200" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="9" fill="#d4a059" letter-spacing=".5">PEDERSEN + BP+</text>
+      <text x="490" y="215" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="8" fill="#5d5953">hide amount</text>
+
+      <!-- Receiver -->
+      <g transform="translate(700,140)">
+        <rect x="-40" y="-36" width="80" height="72" rx="4" fill="none" stroke="#d4a059" stroke-width="1.5" stroke-dasharray="3 2"/>
+        <text x="0" y="-8" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="7" fill="#8a857d">ONE-TIME</text>
+        <text x="0" y="6" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="8" fill="#d4a059">STEALTH</text>
+        <text x="0" y="20" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="7" fill="#8a857d">ADDRESS</text>
+      </g>
+      <text x="700" y="200" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="9" fill="#d4a059" letter-spacing=".5">STEALTH ADDR</text>
+      <text x="700" y="215" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="8" fill="#5d5953">hide receiver</text>
+
+      <!-- Bottom summary -->
+      <line x1="100" y1="250" x2="700" y2="250" stroke="#25241f" stroke-width="1"/>
+      <text x="400" y="270" text-anchor="middle" font-family="'Fraunces',Georgia,serif" font-style="italic" font-size="12" fill="#8a857d">No observer can link sender, receiver, or amount.</text>
+    </svg>
+  </div>
+</section>
+
+<!-- ECONOMICS -->
+<section id="economics">
+  <div class="section-header">
+    <div class="section-num">&sect; 04</div>
+    <h2 class="section-title">Sound money.<br>Provable <em>scarcity</em>.</h2>
+    <p class="section-desc">An asymptotic emission curve with tail emission and fee burn creates a self-sustaining, naturally deflationary currency.</p>
+  </div>
+  <div class="ledger reveal">
+    <div class="ledger-row"><span class="ledger-label">Supply cap</span><span class="ledger-value">100,000,000 <span class="unit">CYNC</span></span></div>
+    <div class="ledger-row"><span class="ledger-label">Block time</span><span class="ledger-value">120 <span class="unit">SECONDS</span></span></div>
+    <div class="ledger-row"><span class="ledger-label">Algorithm</span><span class="ledger-value">RandomX <span class="unit">CPU-ONLY</span></span></div>
+    <div class="ledger-row"><span class="ledger-label">Initial reward</span><span class="ledger-value">~50 <span class="unit">CYNC/BLOCK</span></span></div>
+    <div class="ledger-row"><span class="ledger-label">Tail emission</span><span class="ledger-value">0.6 <span class="unit">CYNC/BLOCK FOREVER</span></span></div>
+    <div class="ledger-row"><span class="ledger-label">Fee burn</span><span class="ledger-value">30% <span class="unit">DESTROYED (50% CONGESTED)</span></span></div>
+    <div class="ledger-row"><span class="ledger-label">Developer tax</span><span class="ledger-value">0% <span class="unit">CONSTITUTIONAL LOCK</span></span></div>
+    <div class="ledger-row"><span class="ledger-label">Premine</span><span class="ledger-value">0 <span class="unit">EVERY CYNC WAS MINED</span></span></div>
+  </div>
+
+  <!-- Emission Curve -->
+  <div class="curve-wrap reveal" style="margin-top:40px">
+    <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.12em;text-transform:uppercase;margin-bottom:16px">Emission Curve &mdash; reward = max(0.6, (100M &minus; mined) / 2M)</div>
+    <svg viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg">
+      <defs><linearGradient id="curve-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#d4a059" stop-opacity=".3"/><stop offset="100%" stop-color="#d4a059" stop-opacity="0"/></linearGradient></defs>
+      <!-- Grid -->
+      <line x1="50" y1="20" x2="50" y2="170" class="curve-axis"/><line x1="50" y1="170" x2="580" y2="170" class="curve-axis"/>
+      <line x1="50" y1="70" x2="580" y2="70" class="curve-grid"/><line x1="50" y1="120" x2="580" y2="120" class="curve-grid"/>
+      <!-- Y labels -->
+      <text x="45" y="25" text-anchor="end" class="curve-label">50</text>
+      <text x="45" y="75" text-anchor="end" class="curve-label">25</text>
+      <text x="45" y="125" text-anchor="end" class="curve-label">12.5</text>
+      <text x="45" y="173" text-anchor="end" class="curve-label">0.6</text>
+      <!-- X labels -->
+      <text x="50" y="188" text-anchor="middle" class="curve-label">0</text>
+      <text x="182" y="188" text-anchor="middle" class="curve-label">5y</text>
+      <text x="315" y="188" text-anchor="middle" class="curve-label">10y</text>
+      <text x="448" y="188" text-anchor="middle" class="curve-label">20y</text>
+      <text x="580" y="188" text-anchor="middle" class="curve-label">50y</text>
+      <!-- Curve fill -->
+      <path d="M50,20 Q150,22 182,70 Q250,110 315,140 Q400,155 448,162 L580,165 L580,170 L50,170 Z" class="curve-fill"/>
+      <!-- Curve line -->
+      <path d="M50,20 Q150,22 182,70 Q250,110 315,140 Q400,155 448,162 L520,164" class="curve-line"/>
+      <!-- Tail emission line -->
+      <line x1="520" y1="164" x2="580" y2="165" class="curve-tail"/>
+      <!-- Tail label -->
+      <text x="555" y="158" font-family="'JetBrains Mono',monospace" font-size="8" fill="#d4a059">TAIL 0.6</text>
+      <!-- Axis titles -->
+      <text x="5" y="100" transform="rotate(-90,5,100)" font-family="'JetBrains Mono',monospace" font-size="8" fill="#5d5953" letter-spacing=".5">CYNC / BLOCK</text>
+      <text x="315" y="200" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="8" fill="#5d5953" letter-spacing=".5">YEARS SINCE GENESIS</text>
+    </svg>
+    <div style="font-size:12px;color:var(--t3);margin-top:12px;line-height:1.6">No halvings. No cliffs. Smooth asymptotic decay to 0.6 CYNC/block tail emission &mdash; sustaining miners forever while keeping supply capped at 100M.</div>
+  </div>
+
+  <!-- Fee Burn Visual -->
+  <div style="margin-top:40px">
+    <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.12em;text-transform:uppercase;margin-bottom:12px;text-align:center">Fee Distribution</div>
+    <div class="fee-visual reveal">
+      <div style="text-align:center">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--t4);margin-bottom:4px">NORMAL</div>
+        <div class="fee-bar" style="width:260px">
+          <div class="fee-burn" style="width:30%">30% BURN</div>
+          <div class="fee-miner">70% MINER</div>
+        </div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--t4);margin-bottom:4px">CONGESTED</div>
+        <div class="fee-bar" style="width:260px">
+          <div class="fee-burn" style="width:50%">50% BURN</div>
+          <div class="fee-miner">50% MINER</div>
+        </div>
+      </div>
+    </div>
+    <div style="text-align:center;font-size:12px;color:var(--t4);margin-top:10px">Burned CYNC is permanently destroyed &mdash; reducing effective supply over time.</div>
+  </div>
+</section>
+
+<!-- COMPARE -->
+<section id="compare">
+  <div class="section-header">
+    <div class="section-num">&sect; 05</div>
+    <h2 class="section-title">How CoinCync <em>compares</em>.</h2>
+  </div>
+  <table class="compare-table reveal">
+    <thead><tr><th>Feature</th><th>CoinCync</th><th>Monero</th><th>Zcash</th><th>Bitcoin</th></tr></thead>
+    <tbody>
+      <tr><td>Privacy</td><td>Mandatory</td><td>Mandatory</td><td style="color:var(--t4-a)">Optional</td><td style="color:var(--red)">None</td></tr>
+      <tr><td>Ring signatures</td><td>CLSAG-16</td><td>CLSAG-16</td><td style="color:var(--t4-a)">&mdash;</td><td style="color:var(--t4-a)">&mdash;</td></tr>
+      <tr><td>Range proofs</td><td>Bulletproofs+</td><td>Bulletproofs+</td><td style="color:var(--t4-a)">Halo2</td><td style="color:var(--t4-a)">&mdash;</td></tr>
+      <tr><td>Trusted setup</td><td>None</td><td>None</td><td style="color:var(--red)">Was required</td><td style="color:var(--t4-a)">N/A</td></tr>
+      <tr><td>Supply auditable</td><td>Pedersen</td><td>Pedersen</td><td>Yes</td><td>Transparent</td></tr>
+      <tr><td>Mining</td><td>RandomX (CPU)</td><td style="color:var(--t3)">RandomX (CPU)</td><td style="color:var(--t3)">Equihash (GPU)</td><td style="color:var(--t3)">SHA-256 (ASIC)</td></tr>
+      <tr><td>Dev tax</td><td>0%</td><td>0%</td><td style="color:var(--red)">20% (ended)</td><td>0%</td></tr>
+      <tr><td>Fee burn</td><td>30%</td><td style="color:var(--t4-a)">0%</td><td style="color:var(--t4-a)">0%</td><td style="color:var(--t4-a)">0%</td></tr>
+      <tr><td>Multi-sig privacy</td><td>FROST (hidden)</td><td style="color:var(--t4-a)">Visible</td><td style="color:var(--t4-a)">Visible</td><td style="color:var(--t4-a)">Visible</td></tr>
+      <tr><td>Constitution</td><td>Enforced</td><td style="color:var(--t4-a)">&mdash;</td><td style="color:var(--t4-a)">&mdash;</td><td style="color:var(--t4-a)">&mdash;</td></tr>
+    </tbody>
+  </table>
+  <!-- MOBILE COMPARISON CARDS -->
+  <div class="compare-cards">
+    <div class="compare-card">
+      <div class="compare-card-feature">Privacy</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">Mandatory</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">Mandatory</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Optional</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value negative">None</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Ring signatures</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">CLSAG-16</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">CLSAG-16</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">&mdash;</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">&mdash;</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Range proofs</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">Bulletproofs+</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">Bulletproofs+</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Halo2</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">&mdash;</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Trusted setup</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">None</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">None</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value negative">Was required</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">N/A</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Mining</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">RandomX (CPU)</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">RandomX (CPU)</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Equihash (GPU)</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">SHA-256 (ASIC)</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Dev tax</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">0%</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">0%</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value negative">20% (ended)</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">0%</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Fee burn</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">30%</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">0%</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">0%</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">0%</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Multi-sig privacy</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">FROST (hidden)</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">Visible</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Visible</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">Visible</span></div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-card-feature">Constitution</div>
+      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">Enforced</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">&mdash;</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">&mdash;</span></div>
+      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">&mdash;</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- CONSTITUTION QUOTES -->
+<section>
+  <div class="section-header">
+    <div class="section-num">&sect; 06</div>
+    <h2 class="section-title">Written in <em>stone</em>.</h2>
+    <p class="section-desc">The CoinCync Constitution is permanent. It cannot be amended, repealed, or superseded. These are not promises &mdash; they are protocol rules.</p>
+  </div>
+  <div class="const-grid reveal-stagger">
+    <div class="const-card">
+      <div class="const-art">Article I &mdash; Fixed Supply</div>
+      <div class="const-quote">"The total supply of CYNC shall never exceed 100,000,000 coins. The network itself will reject any block that violates this formula."</div>
+    </div>
+    <div class="const-card">
+      <div class="const-art">Article III &mdash; Mandatory Privacy</div>
+      <div class="const-quote">"All transactions on CoinCync are private. There is no transparent mode. There is no opt-in privacy tier. Privacy is mandatory."</div>
+    </div>
+    <div class="const-card">
+      <div class="const-art">Article IX &mdash; No Surveillance</div>
+      <div class="const-quote">"The CoinCync protocol shall never include any feature whose primary purpose is to enable financial surveillance. Blacklists, chain analysis hooks, mandatory memos are permanently prohibited."</div>
+    </div>
+    <div class="const-card">
+      <div class="const-art">Article X &mdash; Immutability</div>
+      <div class="const-quote">"This Constitution is permanent. It cannot be amended. It cannot be repealed. It cannot be superseded by any governance process."</div>
+    </div>
+  </div>
+</section>
+
+<!-- QUICK START -->
+<section>
+  <div class="section-header">
+    <div class="section-num">&sect; 07</div>
+    <h2 class="section-title">Three commands to <em>mine</em>.</h2>
+    <p class="section-desc">Build from source and mine your first block. Any CPU. No GPU required. No pool required.</p>
+  </div>
+  <div class="terminal reveal">
+    <div class="terminal-bar">
+      <div class="terminal-dot" style="background:#c45c4f"></div>
+      <div class="terminal-dot" style="background:#e8b86d"></div>
+      <div class="terminal-dot" style="background:#7eb87c"></div>
+      <span style="font-family:var(--mono);font-size:10px;color:var(--t4);margin-left:8px">coincync &mdash; bash</span>
+    </div>
+    <div class="terminal-body">
+      <span class="comment"># Clone and build (Rust 1.75+, ~3 min)</span><br>
+      <span class="prompt">$</span> git clone https://github.com/CoinCync/Coincync-Testnet-.git<br>
+      <span class="prompt">$</span> cd Coincync-Testnet-<br>
+      <span class="prompt">$</span> cargo build --release --features "randomx testnet"<br>
+      <span class="output">&nbsp;&nbsp;Compiling coincync v1.0.1 &mdash; 520 tests pass</span><br><br>
+      <span class="comment"># Start a node</span><br>
+      <span class="prompt">$</span> ./target/release/coincync-node --network testnet<br>
+      <span class="output">&nbsp;&nbsp;Syncing... block 43891 of 43891 (100%)</span><br><br>
+      <span class="comment"># Mine with your CPU</span><br>
+      <span class="prompt">$</span> ./target/release/coincync-miner --address tCYNC3... --threads 4<br>
+      <span class="output">&nbsp;&nbsp;Mining at 142 H/s &mdash; RandomX &mdash; 4 threads</span>
+    </div>
+  </div>
+  <div class="faucet-banner reveal">
+    <p>Don't want to build from source? Get <strong style="color:var(--t)">10 free tCYNC</strong> from the testnet faucet to try the wallet.</p>
+    <a href="https://explorer.coincync.network" target="_blank">Open Faucet &rarr;</a>
+  </div>
+</section>
+
+<!-- DOWNLOAD -->
+<section id="download">
+  <div class="section-header">
+    <div class="section-num">&sect; 08</div>
+    <h2 class="section-title">Get <em>started</em>.</h2>
+    <p class="section-desc">Download the wallet, mine with your CPU, or run a node to strengthen the network.</p>
+  </div>
+  <div class="link-grid reveal-stagger">
+    <a href="/release/v1.0.1-testnet/" class="link-card">
+      <div class="link-title">Desktop Wallet</div>
+      <div class="link-desc">Windows, macOS, Linux. Create a wallet, send and receive CYNC with full privacy.</div>
+      <span class="link-arrow">&darr; Download</span>
+    </a>
+    <a href="/docs/pages/mining-guide.html" class="link-card">
+      <div class="link-title">Start Mining</div>
+      <div class="link-desc">RandomX CPU-only. Any computer can mine. 50 CYNC per block at genesis.</div>
+      <span class="link-arrow">&rarr; Mining Guide</span>
+    </a>
+    <a href="/docs/pages/node-guide.html" class="link-card">
+      <div class="link-title">Run a Node</div>
+      <div class="link-desc">Strengthen the network. 2GB RAM, 20GB disk. Ubuntu, macOS, or Windows.</div>
+      <span class="link-arrow">&rarr; Node Guide</span>
+    </a>
+    <a href="/docs/pages/api-reference.html" class="link-card">
+      <div class="link-title">Build on CoinCync</div>
+      <div class="link-desc">JSON-RPC API. 16 methods. Full documentation with curl examples.</div>
+      <span class="link-arrow">&rarr; API Reference</span>
+    </a>
+  </div>
+</section>
+
+<!-- ROADMAP -->
+<section id="roadmap">
+  <div class="section-header">
+    <div class="section-num">&sect; 09</div>
+    <h2 class="section-title">What's <em>next</em>.</h2>
+    <p class="section-desc">A transparent roadmap for CoinCync development.</p>
+  </div>
+  <div class="roadmap reveal-stagger">
+    <div class="roadmap-item completed">
+      <div class="roadmap-phase">Phase 1 &mdash; Foundation</div>
+      <div class="roadmap-title">Core Protocol &amp; Testnet Launch</div>
+      <div class="roadmap-desc">RandomX CPU mining, CLSAG-16 ring signatures, Bulletproofs+ range proofs, stealth addresses, Dandelion++ propagation, desktop wallet, block explorer.</div>
+      <div class="roadmap-tag done">Complete</div>
+    </div>
+    <div class="roadmap-item completed">
+      <div class="roadmap-phase">Phase 2 &mdash; Privacy Innovations</div>
+      <div class="roadmap-title">7 Advanced Privacy Features</div>
+      <div class="roadmap-desc">Decoy defense, encrypted memos, scoped view keys, deniable wallets, traffic shaping, dead man's switch, auto-churn. FROST multi-sig indistinguishable from single-sig.</div>
+      <div class="roadmap-tag done">Complete</div>
+    </div>
+    <div class="roadmap-item current">
+      <div class="roadmap-phase">Phase 3 &mdash; Hardening</div>
+      <div class="roadmap-title">Security Audits &amp; Mainnet Prep</div>
+      <div class="roadmap-desc">Third-party security audits, stress testing, wallet UX improvements, documentation, community growth, exchange outreach.</div>
+      <div class="roadmap-tag active">In Progress</div>
+    </div>
+    <div class="roadmap-item">
+      <div class="roadmap-phase">Phase 4 &mdash; Launch</div>
+      <div class="roadmap-title">Mainnet Genesis</div>
+      <div class="roadmap-desc">Mainnet launch October 2026. Mobile wallet beta, hardware wallet support, atomic swaps, merchant tools, decentralized pool infrastructure.</div>
+      <div class="roadmap-tag">Planned</div>
+    </div>
+  </div>
+</section>
+
+<!-- MAINNET COUNTDOWN -->
+<div class="manifesto reveal" style="background:var(--bg)">
+  <div style="font-family:var(--mono);font-size:11px;color:var(--ac);letter-spacing:.2em;text-transform:uppercase;margin-bottom:8px">Mainnet Genesis</div>
+  <div style="font-family:var(--display);font-size:clamp(24px,3vw,36px);font-weight:300;color:var(--t);margin-bottom:4px">October 1, 2026</div>
+  <div style="font-size:13px;color:var(--t3);margin-bottom:0">00:00:00 UTC &mdash; the first block that can never be changed</div>
+  <div class="countdown" id="countdown">
+    <div class="cd-unit"><div class="cd-val" id="cd-days">&mdash;</div><div class="cd-label">Days</div></div>
+    <div class="cd-unit"><div class="cd-val" id="cd-hours">&mdash;</div><div class="cd-label">Hours</div></div>
+    <div class="cd-unit"><div class="cd-val" id="cd-mins">&mdash;</div><div class="cd-label">Minutes</div></div>
+    <div class="cd-unit"><div class="cd-val" id="cd-secs">&mdash;</div><div class="cd-label">Seconds</div></div>
+  </div>
+</div>
+
+<!-- SECURITY -->
+<section>
+  <div class="section-header">
+    <div class="section-num">&sect; 10</div>
+    <h2 class="section-title">Security &amp; <em>bug bounty</em>.</h2>
+    <p class="section-desc">We pay for vulnerabilities. Responsible disclosure protects everyone.</p>
+  </div>
+  <div class="bounty-grid reveal-stagger">
+    <div class="bounty-card">
+      <div class="bounty-tier" style="color:var(--red)">Critical</div>
+      <div class="bounty-range">$5K&ndash;$50K</div>
+      <div class="bounty-desc">Supply inflation, chain split, privacy break, key extraction</div>
+    </div>
+    <div class="bounty-card">
+      <div class="bounty-tier" style="color:var(--ac)">High</div>
+      <div class="bounty-range">$1K&ndash;$5K</div>
+      <div class="bounty-desc">Node crash, double-spend, key image bypass, consensus bypass</div>
+    </div>
+    <div class="bounty-card">
+      <div class="bounty-tier" style="color:var(--t2)">Medium</div>
+      <div class="bounty-range">$100&ndash;$1K</div>
+      <div class="bounty-desc">Mempool manipulation, DoS vectors, privacy leak for specific users</div>
+    </div>
+    <div class="bounty-card">
+      <div class="bounty-tier" style="color:var(--t3)">Low</div>
+      <div class="bounty-range">$50&ndash;$100</div>
+      <div class="bounty-desc">Minor info leak, non-consensus crash, documentation errors</div>
+    </div>
+  </div>
+  <div style="text-align:center;margin-top:24px;font-size:12px;color:var(--t3)">
+    Report to <a href="mailto:security@coincync.org" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">security@coincync.org</a> &mdash; PGP: <span style="font-family:var(--mono);font-size:11px;color:var(--t4)">2CAA 920F 8B96 1772</span> &mdash; 520+ tests in CI
+  </div>
+</section>
+
+<!-- FAQ -->
+<section>
+  <div class="section-header">
+    <div class="section-num">&sect; 11</div>
+    <h2 class="section-title">Frequently <em>asked</em>.</h2>
+  </div>
+  <div class="faq-list reveal">
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Is CoinCync a Monero fork?</div>
+      <div class="faq-a"><div class="faq-a-inner">No. CoinCync is written from scratch in Rust. It uses similar cryptographic primitives (CLSAG ring signatures, Pedersen commitments, Bulletproofs+, stealth addresses) because those are the strongest known tools for transaction privacy. But the codebase, consensus rules, emission curve, fee model, and Constitution are entirely original.</div></div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Can I mine on a laptop?</div>
+      <div class="faq-a"><div class="faq-a-inner">Yes. CoinCync uses RandomX, a CPU-only proof-of-work algorithm. GPUs and ASICs offer no advantage. Any modern CPU with 2GB of free RAM per thread can mine. At genesis, a laptop with 4 cores earns roughly 50 CYNC per block found.</div></div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">How is supply auditable if amounts are hidden?</div>
+      <div class="faq-a"><div class="faq-a-inner">Pedersen commitments are additively homomorphic. This means you can verify that inputs equal outputs without knowing the actual amounts. Every node independently checks that no coins are created from nothing &mdash; the math balances without revealing any values. Combined with Bulletproofs+ range proofs (which prove amounts are non-negative), this guarantees no hidden inflation.</div></div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Why no GPU or ASIC mining?</div>
+      <div class="faq-a"><div class="faq-a-inner">RandomX is designed so that the most efficient hardware to execute it is a general-purpose CPU. An ASIC for RandomX would essentially be a CPU, offering no economic advantage. This keeps mining accessible to anyone with a computer and prevents the centralization that GPU farms and ASICs create in other networks.</div></div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">What happens if I lose my keys?</div>
+      <div class="faq-a"><div class="faq-a-inner">Your funds are controlled by your 24-word seed phrase, encrypted with Argon2id + XChaCha20-Poly1305. If you lose both your seed phrase and your wallet file, the funds are permanently inaccessible. CoinCync includes a dead man's switch feature &mdash; time-locked recovery that can send funds to a backup address after a configurable period of inactivity.</div></div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Can I disclose transactions for tax or audit purposes?</div>
+      <div class="faq-a"><div class="faq-a-inner">Yes. Time-scoped view keys let you selectively reveal transactions within a specific block range to an auditor, exchange, or tax authority &mdash; without exposing your full history or breaking anyone else's privacy. You choose what to reveal and to whom.</div></div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">When does mainnet launch?</div>
+      <div class="faq-a"><div class="faq-a-inner">October 1, 2026 at 00:00:00 UTC. The genesis message reads: "CoinCync Mainnet Genesis - Privacy You Can Audit - October 2026". Until then, the testnet is live with mining active. All testnet coins will be wiped at mainnet launch.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<div class="cta-section reveal">
+  <h2>Don't trust.<br><em>Verify</em>.</h2>
+  <p>Every CYNC in existence traces to the emission curve. The math can be checked by anyone, at any block, on their own node.</p>
+  <div class="cta-buttons">
+    <a href="/docs/pages/whitepaper.html" class="btn-primary">Read the Whitepaper</a>
+    <a href="https://explorer.coincync.network" class="btn-ghost" target="_blank">Supply Audit</a>
+  </div>
+</div>
+
+</main>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-grid">
+    <div class="footer-col">
+      <h4>Product</h4>
+      <a href="/release/v1.0.1-testnet/">Desktop Wallet</a>
+      <a href="https://explorer.coincync.network" target="_blank">Block Explorer</a>
+      <a href="/docs/pages/mining-guide.html">Mining Guide</a>
+      <a href="/docs/pages/node-guide.html">Run a Node</a>
+    </div>
+    <div class="footer-col">
+      <h4>Resources</h4>
+      <a href="/docs/pages/whitepaper.html">Whitepaper</a>
+      <a href="/docs/pages/privacy-architecture.html">Privacy Architecture</a>
+      <a href="/docs/pages/tokenomics.html">Tokenomics</a>
+      <a href="/docs/pages/api-reference.html">API Reference</a>
+    </div>
+    <div class="footer-col">
+      <h4>Community</h4>
+      <a href="https://github.com/CoinCync/Coincync-Testnet-" target="_blank">GitHub</a>
+      <a href="https://discord.gg/5tYNSCsqzy" target="_blank">Discord</a>
+      <a href="https://x.com/coincync" target="_blank">X / Twitter</a>
+    </div>
+    <div class="footer-col">
+      <h4>About</h4>
+      <a href="/brand.html">Brand Assets</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="/docs/pages/wallet-guide.html">Wallet Guide</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <div class="footer-logo"><svg viewBox="0 0 200 200" width="24" height="24" aria-label="CoinCync logo" role="img" style="vertical-align:middle;margin-right:8px"><circle cx="100" cy="100" r="78" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#d4a059"/><circle cx="132" cy="100" r="8" fill="#d4a059"/></svg>Coin<em>Cync</em></div>
+    <div style="font-family:var(--display);font-style:italic;font-size:13px;color:var(--t4)">Private by law. Private by math.</div>
+    <div class="footer-credit">
+      <div class="lab">Developed by</div>
+      <div class="lab-name">Cync Lab</div>
+      <div class="lab-desc">Applied cryptography for financial privacy</div>
+    </div>
+  </div>
+</footer>
+
+<script>
+// --- HAMBURGER NAV ---
+(function(){
+  var toggle=document.querySelector('.nav-toggle');
+  var links=document.querySelector('.nav-links');
+  if(!toggle||!links) return;
+  toggle.addEventListener('click',function(){
+    var open=links.classList.toggle('open');
+    toggle.classList.toggle('active');
+    toggle.setAttribute('aria-expanded',open);
+  });
+  links.querySelectorAll('a').forEach(function(a){
+    a.addEventListener('click',function(){
+      links.classList.remove('open');
+      toggle.classList.remove('active');
+      toggle.setAttribute('aria-expanded','false');
+    });
+  });
+})();
+
+// --- SCROLL REVEAL ---
+(function(){
+  var els=document.querySelectorAll('.reveal,.reveal-stagger');
+  if(!els.length) return;
+  var observer=new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if(entry.isIntersecting){
+        entry.target.classList.add('visible');
+        observer.unobserve(entry.target);
+      }
+    });
+  },{threshold:0.15});
+  els.forEach(function(el){observer.observe(el);});
+})();
+
+// --- HERO STAT COUNTER ANIMATION ---
+(function(){
+  var stats=document.querySelectorAll('.hero-stat .val');
+  if(!stats.length) return;
+  var animated=false;
+  var observer=new IntersectionObserver(function(entries){
+    if(animated) return;
+    entries.forEach(function(entry){
+      if(!entry.isIntersecting) return;
+      animated=true;
+      observer.disconnect();
+      stats.forEach(function(stat){
+        var text=stat.textContent.trim();
+        var suffix=text.replace(/^[\d.]+/,'');
+        var num=parseFloat(text);
+        if(isNaN(num)||num===0) return;
+        var duration=1200;
+        var startTime=null;
+        function step(ts){
+          if(!startTime) startTime=ts;
+          var progress=Math.min((ts-startTime)/duration,1);
+          var eased=1-Math.pow(1-progress,3);
+          var current=eased*num;
+          stat.textContent=Math.round(current)+suffix;
+          if(progress<1) requestAnimationFrame(step);
+        }
+        stat.textContent='0'+suffix;
+        requestAnimationFrame(step);
+      });
+    });
+  },{threshold:0.5});
+  var heroStats=document.querySelector('.hero-stats');
+  if(heroStats) observer.observe(heroStats);
+})();
+
+// --- MAINNET COUNTDOWN ---
+(function(){
+  var genesis=new Date('2026-10-01T00:00:00Z').getTime();
+  function tick(){
+    var now=Date.now();
+    var diff=genesis-now;
+    if(diff<=0){
+      document.getElementById('cd-days').textContent='0';
+      document.getElementById('cd-hours').textContent='0';
+      document.getElementById('cd-mins').textContent='0';
+      document.getElementById('cd-secs').textContent='0';
+      return;
+    }
+    var d=Math.floor(diff/86400000);
+    var h=Math.floor((diff%86400000)/3600000);
+    var m=Math.floor((diff%3600000)/60000);
+    var s=Math.floor((diff%60000)/1000);
+    document.getElementById('cd-days').textContent=d;
+    document.getElementById('cd-hours').textContent=h;
+    document.getElementById('cd-mins').textContent=m;
+    document.getElementById('cd-secs').textContent=s;
+  }
+  tick();
+  setInterval(tick,1000);
+})();
+
+// --- LIVE CHAIN STATS ---
+(function(){
+  fetch('https://explorer.coincync.network/api/testnet',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:'{"jsonrpc":"2.0","id":1,"method":"get_info"}'
+  }).then(function(r){return r.json()}).then(function(d){
+    if(d&&d.result){
+      var r=d.result;
+      var h=document.getElementById('live-height');
+      if(h&&r.height) h.textContent=Number(r.height).toLocaleString();
+      var n=document.getElementById('live-nodes');
+      if(n&&r.outgoing_connections_count!=null&&r.incoming_connections_count!=null){
+        n.textContent=r.outgoing_connections_count+r.incoming_connections_count;
+      }
+    }
+  }).catch(function(){});
+})();
+</script>
+
+</body>
+</html>

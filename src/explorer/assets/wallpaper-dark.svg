@@ -1,0 +1,48 @@
+<svg viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
+  <!-- CoinCync Wallpaper — Gold on Dark -->
+  <defs>
+    <radialGradient id="glow1" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#d4a059" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#d4a059" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="30%" cy="20%" r="60%">
+      <stop offset="0%" stop-color="#d4a059" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="transparent"/>
+    </radialGradient>
+    <radialGradient id="glow3" cx="70%" cy="80%" r="40%">
+      <stop offset="0%" stop-color="#d4a059" stop-opacity="0.025"/>
+      <stop offset="100%" stop-color="transparent"/>
+    </radialGradient>
+    <pattern id="grain" width="200" height="200" patternUnits="userSpaceOnUse">
+      <filter id="noise"><feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+      <rect width="200" height="200" filter="url(#noise)" opacity="0.03"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1920" height="1080" fill="#0a0a09"/>
+  <rect width="1920" height="1080" fill="url(#glow1)"/>
+  <rect width="1920" height="1080" fill="url(#glow2)"/>
+  <rect width="1920" height="1080" fill="url(#glow3)"/>
+  <rect width="1920" height="1080" fill="url(#grain)"/>
+
+  <!-- Faint construction lines -->
+  <line x1="960" y1="280" x2="960" y2="800" stroke="rgba(212,160,89,0.03)" stroke-width="0.5"/>
+  <line x1="700" y1="540" x2="1220" y2="540" stroke="rgba(212,160,89,0.03)" stroke-width="0.5"/>
+  <circle cx="960" cy="540" r="100" fill="none" stroke="rgba(212,160,89,0.02)" stroke-width="0.5" stroke-dasharray="4 6"/>
+
+  <!-- Centered mark -->
+  <g transform="translate(960,540)">
+    <circle cx="0" cy="0" r="180" fill="none" stroke="#d4a059" stroke-width="16" opacity="0.9"/>
+    <path d="M 157 0 A 157 157 0 1 0 0 157" fill="none" stroke="#0a0a09" stroke-width="28"/>
+    <line x1="152" y1="0" x2="196" y2="0" stroke="#0a0a09" stroke-width="28"/>
+    <circle cx="-75" cy="0" r="18" fill="#d4a059"/>
+    <circle cx="75" cy="0" r="18" fill="#d4a059"/>
+  </g>
+
+  <!-- Faint corner accents -->
+  <line x1="60" y1="60" x2="140" y2="60" stroke="rgba(212,160,89,0.06)" stroke-width="0.5"/>
+  <line x1="60" y1="60" x2="60" y2="140" stroke="rgba(212,160,89,0.06)" stroke-width="0.5"/>
+  <line x1="1860" y1="1020" x2="1780" y2="1020" stroke="rgba(212,160,89,0.06)" stroke-width="0.5"/>
+  <line x1="1860" y1="1020" x2="1860" y2="940" stroke="rgba(212,160,89,0.06)" stroke-width="0.5"/>
+</svg>

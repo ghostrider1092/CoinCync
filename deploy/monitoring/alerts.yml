@@ -1,0 +1,59 @@
+groups:
+  - name: coincync
+    rules:
+
+      # Node is down
+      - alert: NodeDown
+        expr: up{job="coincync-nodes"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CoinCync node {{ $labels.node_label }} is down"
+          description: "Node {{ $labels.node_label }} has been unreachable for 2 minutes."
+
+      # Block height stuck (not advancing)
+      - alert: ChainStuck
+        expr: increase(coincync_block_height[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Chain not advancing on {{ $labels.node_label }}"
+          description: "No new blocks in 10 minutes. Expected ~5 blocks."
+
+      # Nodes diverged (more than 3 blocks apart)
+      - alert: NodesDiverged
+        expr: max(coincync_block_height) - min(coincync_block_height) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nodes have diverged by {{ $value }} blocks"
+
+      # Mempool growing unusually large
+      - alert: MempoolHigh
+        expr: coincync_mempool_transactions > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mempool has {{ $value }} transactions"
+
+      # Peer count too low
+      - alert: LowPeerCount
+        expr: coincync_peer_count < 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.node_label }} has only {{ $value }} peers"
+
+      # Hash rate dropped significantly
+      - alert: HashrateDropped
+        expr: coincync_hashrate_hps < 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hash rate dropped to {{ $value }} H/s"

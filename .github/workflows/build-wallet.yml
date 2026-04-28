@@ -1,0 +1,84 @@
+name: Build CoinCync Wallet
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt update
+          sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        working-directory: coincync-wallet
+        run: npm install
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: coincync-wallet
+          args: --target ${{ matrix.target }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coincync-wallet-${{ matrix.name }}
+          path: |
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.deb
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.AppImage
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.dmg
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.msi
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.exe
+      - name: Attest wallet artifact provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.deb
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.AppImage
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.dmg
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.msi
+            coincync-wallet/src-tauri/target/*/release/bundle/**/*.exe

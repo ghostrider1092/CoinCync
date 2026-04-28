@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CoinCync Wallpaper: "The Commitment Field" — Landscape
+  3840×2160, scales cleanly to 5K / 4K / QHD / 1080p.
+
+  A single brass commitment point dead center. Faint concentric arcs
+  radiate outward, barely visible at a glance, deliberate on inspection.
+  The wallpaper equivalent of sitting in a quiet room.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 3840 2160"
+     width="3840" height="2160"
+     preserveAspectRatio="xMidYMid slice"
+     style="display:block">
+
+  <defs>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="11"/>
+      <feColorMatrix values="0 0 0 0 0.83  0 0 0 0 0.63  0 0 0 0 0.35  0 0 0 0.025 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+
+    <radialGradient id="center-halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#d4a059" stop-opacity="0.18"/>
+      <stop offset="40%"  stop-color="#d4a059" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#d4a059" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="3840" height="2160" fill="#0a0a09"/>
+
+  <g transform="translate(1920 1080)" fill="none" stroke-linecap="round">
+    <circle r="1300" stroke="#1a1612" stroke-width="0.75"/>
+    <circle r="1150" stroke="#1a1612" stroke-width="0.5" stroke-dasharray="2 12"/>
+    <circle r="1000" stroke="#2a2720" stroke-width="0.75"/>
+    <circle r="870"  stroke="#2a2720" stroke-width="0.5"  stroke-dasharray="4 10"/>
+    <circle r="750"  stroke="#2a2720" stroke-width="0.75"/>
+    <circle r="640"  stroke="#2a2720" stroke-width="0.5"/>
+    <circle r="540"  stroke="#3a3328" stroke-width="0.6"  stroke-dasharray="1 8"/>
+    <circle r="450"  stroke="#3a3328" stroke-width="0.75"/>
+    <circle r="370"  stroke="#3a3328" stroke-width="0.6"/>
+    <circle r="300"  stroke="#5a5448" stroke-width="0.5"  stroke-dasharray="2 6" opacity="0.7"/>
+    <circle r="240"  stroke="#5a5448" stroke-width="0.75" opacity="0.8"/>
+    <circle r="190"  stroke="#8a6838" stroke-width="0.6"  opacity="0.7"/>
+    <circle r="148"  stroke="#8a6838" stroke-width="0.75" opacity="0.85"/>
+    <circle r="112"  stroke="#d4a059" stroke-width="0.6"  opacity="0.45"/>
+    <circle r="82"   stroke="#d4a059" stroke-width="0.85" opacity="0.6"/>
+    <circle r="58"   stroke="#d4a059" stroke-width="1"    opacity="0.8"/>
+    <circle r="38"   stroke="#d4a059" stroke-width="1.1"/>
+    <circle r="22"   stroke="#f5f0e6" stroke-width="0.9"/>
+  </g>
+
+  <circle cx="1920" cy="1080" r="220" fill="url(#center-halo)"/>
+
+  <g stroke="#d4a059" fill="none" stroke-linecap="round">
+    <line x1="1920" y1="1050" x2="1920" y2="1110" stroke-width="0.85"/>
+    <line x1="1890" y1="1080" x2="1950" y2="1080" stroke-width="0.85"/>
+  </g>
+
+  <circle cx="1920" cy="1080" r="5" fill="#f5f0e6"/>
+  <circle cx="1920" cy="1080" r="11" fill="none" stroke="#f5f0e6" stroke-width="0.85"/>
+
+  <rect width="3840" height="2160" fill="#0a0a09" filter="url(#grain)" opacity="0.35" pointer-events="none"/>
+</svg>

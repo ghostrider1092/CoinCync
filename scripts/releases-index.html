@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoinCync Downloads</title>
+<style>
+:root{--bg:#0a0a09;--s1:#111110;--b:#25241f;--t:#f5f0e8;--t2:#b8b4ac;--t3:#8a857d;--t4:#5d5953;--ac:#d4a059;--ac2:#e8b86d;--ac-dim:#4a3a1f;--display:"Fraunces",Georgia,serif;--body:"IBM Plex Sans",system-ui,sans-serif;--mono:"JetBrains Mono",monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--t);font-family:var(--body);font-weight:300;line-height:1.7;min-height:100vh}
+a{color:var(--ac);text-decoration:none;transition:color .15s}a:hover{color:var(--ac2)}
+nav{background:rgba(10,10,9,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--b);padding:0 48px;height:64px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.nav-logo{font-family:var(--display);font-size:20px;color:var(--t);text-decoration:none;letter-spacing:-.02em}
+.nav-logo em{color:var(--ac);font-style:italic;font-weight:500}
+.nav-links{display:flex;gap:28px;align-items:center}
+.nav-links a{font-size:13px;color:var(--t3);letter-spacing:.02em}
+.container{max-width:860px;margin:0 auto;padding:80px 32px 120px}
+h1{font-family:var(--display);font-size:42px;font-weight:400;letter-spacing:-.03em;margin-bottom:8px}
+h1 em{color:var(--ac);font-style:italic}
+.subtitle{color:var(--t3);font-size:16px;margin-bottom:48px}
+.badge{display:inline-block;background:var(--ac-dim);color:var(--ac);font-family:var(--mono);font-size:11px;padding:4px 12px;letter-spacing:.08em;margin-bottom:32px}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:56px}
+.card{background:var(--s1);border:1px solid var(--b);padding:32px;transition:border-color .2s,transform .2s}
+.card:hover{border-color:var(--ac-dim);transform:translateY(-2px)}
+.card-icon{font-size:32px;margin-bottom:16px}
+.card-title{font-family:var(--display);font-size:18px;margin-bottom:4px}
+.card-file{font-family:var(--mono);font-size:11px;color:var(--t4);word-break:break-all;margin-bottom:16px}
+.card-size{font-family:var(--mono);font-size:12px;color:var(--t3);margin-bottom:20px}
+.btn{display:inline-block;background:var(--ac);color:var(--bg);font-size:13px;font-weight:600;padding:10px 28px;letter-spacing:.04em;transition:background .15s}
+.btn:hover{background:var(--ac2);color:var(--bg)}
+.sec{margin-bottom:48px}
+.sec h2{font-family:var(--display);font-size:22px;letter-spacing:-.02em;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--b)}
+.sec h2 em{color:var(--ac);font-style:italic}
+.code{background:var(--s1);border:1px solid var(--b);padding:24px;font-family:var(--mono);font-size:13px;line-height:2;color:var(--t3);overflow-x:auto}
+.code .c{color:var(--t4)}
+.code .v{color:var(--ac2)}
+.code .h{color:var(--t2);word-break:break-all}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.item{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--t2)}
+.item .d{width:6px;height:6px;background:var(--ac);border-radius:50%;flex-shrink:0}
+footer{border-top:1px solid var(--b);padding:32px 48px;text-align:center}
+.f-logo{font-family:var(--display);font-size:16px;color:var(--t3);margin-bottom:6px}
+.f-logo em{color:var(--ac);font-style:italic}
+.f-tag{font-family:var(--display);font-style:italic;font-size:12px;color:var(--t4)}
+.f-links{margin-top:16px;display:flex;gap:24px;justify-content:center}
+.f-links a{font-size:12px;color:var(--t4)}
+@media(max-width:640px){nav{padding:0 20px}.container{padding:48px 20px 80px}h1{font-size:28px}.cards,.grid{grid-template-columns:1fr}.cards-3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="https://coincync.network" class="nav-logo">Coin<em>Cync</em></a>
+  <div class="nav-links">
+    <a href="https://coincync.network">Home</a>
+    <a href="https://explorer.coincync.network">Explorer</a>
+    <a href="https://discord.gg/5tYNSCsqzy">Discord</a>
+    <a href="https://github.com/CoinCync/Coincync-Testnet-">GitHub</a>
+  </div>
+</nav>
+
+<div class="container">
+  <div class="badge">TESTNET v1.0.0</div>
+  <h1>Down<em>loads</em></h1>
+  <p class="subtitle">Everything you need to run a node, mine, and transact on the CoinCync testnet.</p>
+
+  <div class="cards" style="grid-template-columns:repeat(3,1fr)">
+    <div class="card">
+      <div class="card-icon">&#x1f427;</div>
+      <div class="card-title">Linux x86_64</div>
+      <div class="card-file">coincync-1.0.0-testnet-linux-x86_64.tar.gz</div>
+      <div class="card-size">11 MB &middot; Ubuntu 22.04+, Debian 12+</div>
+      <a href="coincync-1.0.0-testnet-linux-x86_64.tar.gz" class="btn">Download</a>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#x1fa9f;</div>
+      <div class="card-title">Windows x64</div>
+      <div class="card-file">coincync-1.0.0-testnet-windows-x64.tar.gz</div>
+      <div class="card-size">13 MB &middot; Windows 10/11</div>
+      <a href="coincync-1.0.0-testnet-windows-x64.tar.gz" class="btn">Download</a>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#x1f34e;</div>
+      <div class="card-title">macOS (Apple Silicon + Intel)</div>
+      <div class="card-file">coincync-1.0.0-testnet-macos-arm64.tar.gz</div>
+      <div class="card-size">Coming via GitHub Actions</div>
+      <a href="https://github.com/CoinCync/Coincync-Testnet-/actions" class="btn" style="background:var(--b);color:var(--t3)">Build from Source</a>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>What's <em>included</em></h2>
+    <div class="grid">
+      <div class="item"><span class="d"></span> coincync-node &mdash; full node</div>
+      <div class="item"><span class="d"></span> coincync-miner &mdash; CPU miner (RandomX)</div>
+      <div class="item"><span class="d"></span> coincync-wallet &mdash; CLI wallet</div>
+      <div class="item"><span class="d"></span> SHA256SUMS.txt &mdash; checksums</div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2><em>Verify</em> your download</h2>
+    <div class="code">
+      <span class="v">$ sha256sum -c SHA256SUMS.txt</span><br>
+      <span class="h">coincync-node: OK</span><br>
+      <span class="h">coincync-miner: OK</span>
+    </div>
+    <p style="margin-top:12px;font-size:13px;color:var(--t4)"><a href="SHA256SUMS.txt">View SHA256SUMS.txt</a></p>
+  </div>
+
+  <div class="sec">
+    <h2>Quick <em>start</em></h2>
+    <div class="code">
+      <span class="c"># Extract</span><br>
+      <span class="v">tar xzf coincync-1.0.0-testnet-linux-x86_64.tar.gz</span><br><br>
+      <span class="c"># Run a node (auto-discovers peers)</span><br>
+      <span class="v">./coincync-node --network testnet</span><br><br>
+      <span class="c"># Create a wallet</span><br>
+      <span class="v">./coincync-wallet create -p YOUR_PASSWORD</span><br><br>
+      <span class="c"># Start mining</span><br>
+      <span class="v">./coincync-miner --testnet --address YOUR_tCYNC_ADDRESS --threads 4</span>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>This <em>release</em></h2>
+    <div class="grid">
+      <div class="item"><span class="d"></span> CLSAG ring-16 privacy signatures</div>
+      <div class="item"><span class="d"></span> Bulletproofs+ range proofs</div>
+      <div class="item"><span class="d"></span> Stealth addresses (mandatory)</div>
+      <div class="item"><span class="d"></span> RandomX CPU-only PoW</div>
+      <div class="item"><span class="d"></span> Dandelion++ transaction relay</div>
+      <div class="item"><span class="d"></span> Encrypted memo support</div>
+      <div class="item"><span class="d"></span> FROST multi-sig (2-of-3, 3-of-5)</div>
+      <div class="item"><span class="d"></span> MESS hybrid reorg defense</div>
+    </div>
+  </div>
+
+  <div style="text-align:center;padding-top:24px">
+    <p style="color:var(--t4);font-size:13px">Testnet coins have zero monetary value.<br>Need help? Join <a href="https://discord.gg/5tYNSCsqzy">Discord</a> or check <a href="https://github.com/CoinCync/Coincync-Testnet-">GitHub</a>.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="f-logo">Coin<em>Cync</em></div>
+  <div class="f-tag">Private by law. Private by math.</div>
+  <div class="f-links">
+    <a href="https://coincync.network">Website</a>
+    <a href="https://explorer.coincync.network">Explorer</a>
+    <a href="https://discord.gg/5tYNSCsqzy">Discord</a>
+    <a href="https://github.com/CoinCync/Coincync-Testnet-">GitHub</a>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CoinCync Wallpaper: "The Veil" — Landscape
+  3840×2160.
+
+  Dense concentric arcs at multiple radii from the center — atmospheric
+  rather than focal. The whole field is the design. Ambient, not focal.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 3840 2160"
+     width="3840" height="2160"
+     preserveAspectRatio="xMidYMid slice"
+     style="display:block">
+
+  <defs>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="17"/>
+      <feColorMatrix values="0 0 0 0 0.83  0 0 0 0 0.63  0 0 0 0 0.35  0 0 0 0.02 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+  </defs>
+
+  <rect width="3840" height="2160" fill="#0a0a09"/>
+
+  <g transform="translate(1000 700)" fill="none" stroke-linecap="round">
+    <circle r="800" stroke="#1a1612" stroke-width="0.5"/>
+    <circle r="680" stroke="#1a1612" stroke-width="0.5" stroke-dasharray="1 8"/>
+    <circle r="560" stroke="#2a2720" stroke-width="0.5"/>
+    <circle r="460" stroke="#2a2720" stroke-width="0.5" stroke-dasharray="2 10"/>
+    <circle r="375" stroke="#2a2720" stroke-width="0.5"/>
+    <circle r="305" stroke="#3a3328" stroke-width="0.5"/>
+    <circle r="245" stroke="#3a3328" stroke-width="0.5" stroke-dasharray="1 5"/>
+    <circle r="195" stroke="#3a3328" stroke-width="0.5"/>
+    <circle r="155" stroke="#5a5448" stroke-width="0.45"/>
+    <circle r="122" stroke="#8a6838" stroke-width="0.5" opacity="0.55"/>
+    <circle r="95"  stroke="#d4a059" stroke-width="0.45" opacity="0.3"/>
+    <circle r="72"  stroke="#d4a059" stroke-width="0.55" opacity="0.4"/>
+    <circle r="52"  stroke="#d4a059" stroke-width="0.7"  opacity="0.5"/>
+    <circle r="36"  stroke="#d4a059" stroke-width="0.8"  opacity="0.65"/>
+  </g>
+
+  <g transform="translate(2900 1400)" fill="none" stroke-linecap="round">
+    <circle r="950" stroke="#1a1612" stroke-width="0.5"/>
+    <circle r="810" stroke="#1a1612" stroke-width="0.5" stroke-dasharray="1 10"/>
+    <circle r="680" stroke="#2a2720" stroke-width="0.5"/>
+    <circle r="560" stroke="#2a2720" stroke-width="0.5" stroke-dasharray="2 8"/>
+    <circle r="455" stroke="#2a2720" stroke-width="0.5"/>
+    <circle r="365" stroke="#3a3328" stroke-width="0.5"/>
+    <circle r="290" stroke="#3a3328" stroke-width="0.5" stroke-dasharray="1 6"/>
+    <circle r="230" stroke="#3a3328" stroke-width="0.5"/>
+    <circle r="180" stroke="#5a5448" stroke-width="0.45"/>
+    <circle r="140" stroke="#8a6838" stroke-width="0.5"  opacity="0.55"/>
+    <circle r="108" stroke="#d4a059" stroke-width="0.5"  opacity="0.35"/>
+    <circle r="82"  stroke="#d4a059" stroke-width="0.6"  opacity="0.45"/>
+    <circle r="60"  stroke="#d4a059" stroke-width="0.75" opacity="0.55"/>
+    <circle r="42"  stroke="#d4a059" stroke-width="0.9"  opacity="0.7"/>
+    <circle r="28"  stroke="#d4a059" stroke-width="1"/>
+    <circle r="17"  stroke="#f5f0e6" stroke-width="0.8"/>
+  </g>
+
+  <g transform="translate(600 1800)" fill="none" stroke-linecap="round" opacity="0.55">
+    <circle r="400" stroke="#1a1612" stroke-width="0.5"/>
+    <circle r="320" stroke="#2a2720" stroke-width="0.5" stroke-dasharray="1 6"/>
+    <circle r="255" stroke="#2a2720" stroke-width="0.5"/>
+    <circle r="200" stroke="#3a3328" stroke-width="0.45"/>
+    <circle r="155" stroke="#3a3328" stroke-width="0.5"/>
+    <circle r="115" stroke="#5a5448" stroke-width="0.5"/>
+    <circle r="85"  stroke="#8a6838" stroke-width="0.55"/>
+    <circle r="60"  stroke="#d4a059" stroke-width="0.6" opacity="0.6"/>
+    <circle r="40"  stroke="#d4a059" stroke-width="0.75"/>
+  </g>
+
+  <rect width="3840" height="2160" fill="#0a0a09" filter="url(#grain)" opacity="0.4" pointer-events="none"/>
+</svg>

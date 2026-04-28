@@ -1,0 +1,8 @@
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- CoinCync Mark — Reversed / Ink on Brass -->
+  <circle cx="100" cy="100" r="78" fill="none" stroke="#3a3328" stroke-width="14"/>
+  <path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#d4a059" stroke-width="22"/>
+  <line x1="162" y1="100" x2="178" y2="100" stroke="#d4a059" stroke-width="22"/>
+  <circle cx="68" cy="100" r="8" fill="#3a3328"/>
+  <circle cx="132" cy="100" r="8" fill="#3a3328"/>
+</svg>

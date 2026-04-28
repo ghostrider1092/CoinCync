@@ -1,0 +1,44 @@
+@import url('/fonts/fonts.css');
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{height:100%;overflow:hidden}
+body{font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif;font-weight:300;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--b2);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--t3)}
+
+/* Button reset */
+button{cursor:pointer;font-family:'IBM Plex Sans',system-ui,sans-serif;transition:all .15s ease}
+button:active{transform:scale(0.97)}
+input{font-family:'IBM Plex Sans',system-ui,sans-serif}
+input:focus{outline:none}
+
+/* Focus visible */
+a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--ac2);outline-offset:2px}
+
+/* Animations */
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeInFast{from{opacity:0}to{opacity:1}}
+@keyframes slideDown{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideInRight{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+@keyframes glow{0%,100%{box-shadow:0 0 8px rgba(212,160,89,0.15)}50%{box-shadow:0 0 20px rgba(212,160,89,0.3)}}
+@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.02)}}
+@keyframes notif{from{opacity:0;transform:translateX(30px) scale(0.95)}to{opacity:1;transform:translateX(0) scale(1)}}
+@keyframes ripple{0%{transform:scale(0);opacity:.5}100%{transform:scale(2.5);opacity:0}}
+@keyframes goldPulse{0%{box-shadow:0 0 0 0 rgba(212,160,89,0.4)}70%{box-shadow:0 0 0 8px rgba(212,160,89,0)}100%{box-shadow:0 0 0 0 rgba(212,160,89,0)}}
+
+/* Skeleton loader */
+.skeleton{background:linear-gradient(90deg,var(--b) 25%,var(--b2) 50%,var(--b) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:6px}
+
+/* Glass effect */
+.glass{backdrop-filter:blur(12px) saturate(180%);-webkit-backdrop-filter:blur(12px) saturate(180%)}
+
+/* Selection */
+::selection{background:rgba(212,160,89,0.25);color:inherit}

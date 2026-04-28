@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────
+# CoinCync documentation — mdBook configuration
+# ─────────────────────────────────────────────────────────────────────
+#
+# Source files live in `src/` (Markdown + a SUMMARY.md table of
+# contents). `mdbook build` produces a static HTML site under `book/`
+# that drops directly into `/var/www/docs/` on the NYC landing host
+# (see deploy/landing/README.md).
+#
+# Build: `cd docs && mdbook build`            → output under `book/`
+# Serve locally: `mdbook serve --open`        → http://localhost:3000
+#
+# Deploy (from a dev machine):
+#   cd docs && mdbook build && \
+#     rsync -avz --delete book/ root@45.55.32.13:/var/www/docs/
+
+[book]
+title       = "CoinCync Documentation"
+authors     = ["CoinCync 1.0 Contributors"]
+description = "The privacy cryptocurrency with CPU-only proof of work — protocol, deployment, and API reference."
+language    = "en"
+multilingual = false
+src         = "src"
+
+[build]
+build-dir       = "book"
+create-missing  = false   # never silently create empty files for missing SUMMARY entries
+
+[output.html]
+default-theme       = "navy"
+preferred-dark-theme = "navy"
+copy-fonts          = true        # bundle the fonts so the docs work offline / on Tor
+git-repository-url  = "https://github.com/CoinCync/Coincync-Testnet-"
+git-repository-icon = "fa-github"
+edit-url-template   = "https://github.com/CoinCync/Coincync-Testnet-/edit/main/docs/{path}"
+no-section-label    = false
+mathjax-support     = false       # we don't render math in the docs (yet)
+additional-css      = ["theme/coincync.css"]
+
+[output.html.fold]
+enable      = true
+level       = 1
+
+[output.html.search]
+enable          = true
+limit-results   = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title     = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand          = true
+heading-split-level = 3
+
+[output.html.print]
+enable = true

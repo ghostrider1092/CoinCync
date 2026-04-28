@@ -1,0 +1,533 @@
+//! # Transaction History
+//!
+//! Stores and manages wallet transaction history with full metadata.
+
+use serde::{Deserialize, Serialize};
+use crate::primitives::{Hash, Amount};
+use crate::wallet::SubaddressIndex;
+
+/// Transaction direction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TxDirection {
+    /// Incoming transaction (received funds)
+    Incoming,
+    /// Outgoing transaction (sent funds)
+    Outgoing,
+}
+
+impl std::fmt::Display for TxDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TxDirection::Incoming => write!(f, "Incoming"),
+            TxDirection::Outgoing => write!(f, "Outgoing"),
+        }
+    }
+}
+
+/// Transaction status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TxStatus {
+    /// Transaction is in mempool, not yet confirmed
+    Pending,
+    /// Transaction is confirmed but outputs not yet spendable
+    Confirming,
+    /// Transaction is fully confirmed and spendable
+    Confirmed,
+    /// Transaction failed (rejected by network)
+    Failed,
+}
+
+impl TxStatus {
+    /// Get status from confirmation count
+    pub fn from_confirmations(confirmations: u64, unlock_height: u64, current_height: u64) -> Self {
+        if confirmations == 0 {
+            TxStatus::Pending
+        } else if current_height < unlock_height {
+            TxStatus::Confirming
+        } else {
+            TxStatus::Confirmed
+        }
+    }
+}
+
+impl std::fmt::Display for TxStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TxStatus::Pending => write!(f, "Pending"),
+            TxStatus::Confirming => write!(f, "Confirming"),
+            TxStatus::Confirmed => write!(f, "Confirmed"),
+            TxStatus::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
+/// A single transaction record in wallet history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionRecord {
+    // === Essential Fields ===
+
+    /// Transaction hash (unique identifier)
+    pub tx_hash: Hash,
+
+    /// Unix timestamp when the transaction was mined (0 if pending)
+    pub timestamp: u64,
+
+    /// Amount transferred (in atomic units)
+    pub amount: Amount,
+
+    /// Transaction direction (incoming/outgoing)
+    pub direction: TxDirection,
+
+    /// Current status
+    pub status: TxStatus,
+
+    // === Context Fields ===
+
+    /// Block height where transaction was included (0 if pending)
+    pub block_height: u64,
+
+    /// Transaction fee (only for outgoing, 0 for incoming)
+    pub fee: Amount,
+
+    /// Subaddress that received the funds (for incoming)
+    pub subaddress: Option<SubaddressIndex>,
+
+    /// Payment ID (if provided)
+    pub payment_id: Option<String>,
+
+    /// User-added memo/note (stored locally only)
+    pub memo: Option<String>,
+
+    /// Recipient address (for outgoing transactions)
+    pub recipient_address: Option<String>,
+
+    /// Block height when outputs become spendable
+    pub unlock_height: u64,
+
+    // === Internal Fields ===
+
+    /// Output indices in this transaction that belong to us
+    pub output_indices: Vec<u8>,
+
+    /// Whether this transaction has been spent (for incoming)
+    pub spent: bool,
+
+    /// Key image (for tracking spent status)
+    pub key_image: Option<Hash>,
+}
+
+impl TransactionRecord {
+    /// Create a new incoming transaction record
+    pub fn incoming(
+        tx_hash: Hash,
+        amount: Amount,
+        block_height: u64,
+        timestamp: u64,
+        output_index: u8,
+        subaddress: Option<SubaddressIndex>,
+    ) -> Self {
+        TransactionRecord {
+            tx_hash,
+            timestamp,
+            amount,
+            direction: TxDirection::Incoming,
+            status: TxStatus::Pending,
+            block_height,
+            fee: Amount::from_atomic(0),
+            subaddress,
+            payment_id: None,
+            memo: None,
+            recipient_address: None,
+            unlock_height: block_height.saturating_add(10), // MIN_OUTPUT_AGE
+            output_indices: vec![output_index],
+            spent: false,
+            key_image: None,
+        }
+    }
+
+    /// Create a new outgoing transaction record
+    pub fn outgoing(
+        tx_hash: Hash,
+        amount: Amount,
+        fee: Amount,
+        block_height: u64,
+        timestamp: u64,
+    ) -> Self {
+        TransactionRecord {
+            tx_hash,
+            timestamp,
+            amount,
+            direction: TxDirection::Outgoing,
+            status: TxStatus::Pending,
+            block_height,
+            fee,
+            subaddress: None,
+            payment_id: None,
+            memo: None,
+            recipient_address: None,
+            unlock_height: 0, // N/A for outgoing
+            output_indices: vec![],
+            spent: false,
+            key_image: None,
+        }
+    }
+
+    /// Calculate confirmations based on current height
+    pub fn confirmations(&self, current_height: u64) -> u64 {
+        if self.block_height == 0 || current_height < self.block_height {
+            0
+        } else {
+            current_height - self.block_height + 1
+        }
+    }
+
+    /// Update status based on current blockchain state
+    pub fn update_status(&mut self, current_height: u64) {
+        let confirmations = self.confirmations(current_height);
+        self.status = TxStatus::from_confirmations(
+            confirmations,
+            self.unlock_height,
+            current_height,
+        );
+    }
+
+    /// Check if outputs are spendable
+    pub fn is_spendable(&self, current_height: u64) -> bool {
+        self.direction == TxDirection::Incoming
+            && !self.spent
+            && current_height >= self.unlock_height
+    }
+
+    /// Set user memo
+    pub fn set_memo(&mut self, memo: &str) {
+        self.memo = Some(memo.to_string());
+    }
+
+    /// Set payment ID
+    pub fn set_payment_id(&mut self, payment_id: &str) {
+        self.payment_id = Some(payment_id.to_string());
+    }
+
+    /// Mark as spent
+    pub fn mark_spent(&mut self) {
+        self.spent = true;
+    }
+
+    /// Format timestamp as human-readable string
+    pub fn format_timestamp(&self) -> String {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        if self.timestamp == 0 {
+            return "Pending".to_string();
+        }
+
+        let _datetime = UNIX_EPOCH + Duration::from_secs(self.timestamp);
+
+        // Use chrono for correct date formatting (handles leap years, etc.)
+        use chrono::DateTime;
+        match DateTime::from_timestamp(self.timestamp as i64, 0) {
+            Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            None => format!("{}s", self.timestamp),
+        }
+    }
+}
+
+/// Transaction history manager
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransactionHistory {
+    /// All transaction records
+    records: Vec<TransactionRecord>,
+}
+
+impl TransactionHistory {
+    /// Create empty history
+    pub fn new() -> Self {
+        TransactionHistory {
+            records: Vec::new(),
+        }
+    }
+
+    /// Add a transaction record, merging output indices if the same tx_hash
+    /// and direction already exists (e.g., a tx sending to two of our subaddresses).
+    pub fn add(&mut self, record: TransactionRecord) {
+        if let Some(existing) = self.records.iter_mut().find(|r| r.tx_hash == record.tx_hash && r.direction == record.direction) {
+            // Merge: add only new output indices and accumulate amount once
+            let mut has_new_index = false;
+            for idx in &record.output_indices {
+                if !existing.output_indices.contains(idx) {
+                    existing.output_indices.push(*idx);
+                    has_new_index = true;
+                }
+            }
+            // Add the record's amount once if any new outputs were found
+            if has_new_index {
+                existing.amount = existing.amount.saturating_add(record.amount);
+            }
+        } else {
+            self.records.push(record);
+        }
+    }
+
+    /// Get transaction by hash
+    pub fn get(&self, tx_hash: &Hash) -> Option<&TransactionRecord> {
+        self.records.iter().find(|r| &r.tx_hash == tx_hash)
+    }
+
+    /// Get mutable transaction by hash
+    pub fn get_mut(&mut self, tx_hash: &Hash) -> Option<&mut TransactionRecord> {
+        self.records.iter_mut().find(|r| &r.tx_hash == tx_hash)
+    }
+
+    /// Get all records
+    pub fn all(&self) -> &[TransactionRecord] {
+        &self.records
+    }
+
+    /// Get records filtered by direction
+    pub fn by_direction(&self, direction: TxDirection) -> Vec<&TransactionRecord> {
+        self.records.iter().filter(|r| r.direction == direction).collect()
+    }
+
+    /// Get incoming transactions
+    pub fn incoming(&self) -> Vec<&TransactionRecord> {
+        self.by_direction(TxDirection::Incoming)
+    }
+
+    /// Get outgoing transactions
+    pub fn outgoing(&self) -> Vec<&TransactionRecord> {
+        self.by_direction(TxDirection::Outgoing)
+    }
+
+    /// Get pending transactions
+    pub fn pending(&self) -> Vec<&TransactionRecord> {
+        self.records.iter().filter(|r| r.status == TxStatus::Pending).collect()
+    }
+
+    /// Get recent transactions (sorted by timestamp, newest first)
+    pub fn recent(&self, limit: usize) -> Vec<&TransactionRecord> {
+        let mut sorted: Vec<_> = self.records.iter().collect();
+        sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sorted.into_iter().take(limit).collect()
+    }
+
+    /// Get transactions since a specific timestamp
+    pub fn since(&self, timestamp: u64) -> Vec<&TransactionRecord> {
+        self.records.iter().filter(|r| r.timestamp >= timestamp).collect()
+    }
+
+    /// Get transactions in a block range
+    pub fn in_block_range(&self, start: u64, end: u64) -> Vec<&TransactionRecord> {
+        self.records.iter()
+            .filter(|r| r.block_height >= start && r.block_height <= end)
+            .collect()
+    }
+
+    /// Update all transaction statuses based on current height
+    pub fn update_all_statuses(&mut self, current_height: u64) {
+        for record in &mut self.records {
+            record.update_status(current_height);
+        }
+    }
+
+    /// Mark a transaction as spent by key image
+    pub fn mark_spent_by_key_image(&mut self, key_image: &Hash) {
+        for record in &mut self.records {
+            if record.key_image.as_ref() == Some(key_image) {
+                record.mark_spent();
+            }
+        }
+    }
+
+    /// Set memo for a transaction
+    pub fn set_memo(&mut self, tx_hash: &Hash, memo: &str) -> bool {
+        if let Some(record) = self.get_mut(tx_hash) {
+            record.set_memo(memo);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if an address has been used in any prior transaction.
+    /// Returns true if the address appears as a recipient in any outgoing tx
+    /// OR as a receiving address in any incoming tx (via recipient_address field).
+    /// Useful for address reuse detection to protect privacy.
+    pub fn has_address(&self, address: &str) -> bool {
+        self.records.iter().any(|r| {
+            // Check recipient_address on both outgoing and incoming records
+            r.recipient_address.as_deref() == Some(address)
+        })
+    }
+
+    /// Set recipient address for a transaction (works for both directions).
+    /// Should be called after record_outgoing/record_incoming to enable
+    /// address reuse detection via has_address().
+    pub fn set_recipient_address(&mut self, tx_hash: &Hash, address: &str) -> bool {
+        if let Some(record) = self.get_mut(tx_hash) {
+            record.recipient_address = Some(address.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Total received amount
+    pub fn total_received(&self) -> Amount {
+        self.incoming()
+            .iter()
+            .fold(Amount::from_atomic(0), |acc, r| acc.saturating_add(r.amount))
+    }
+
+    /// Total sent amount (including fees)
+    pub fn total_sent(&self) -> Amount {
+        self.outgoing()
+            .iter()
+            .fold(Amount::from_atomic(0), |acc, r| {
+                acc.saturating_add(r.amount).saturating_add(r.fee)
+            })
+    }
+
+    /// Total fees paid
+    pub fn total_fees(&self) -> Amount {
+        self.outgoing()
+            .iter()
+            .fold(Amount::from_atomic(0), |acc, r| acc.saturating_add(r.fee))
+    }
+
+    /// Number of transactions
+    pub fn count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Clear all history
+    pub fn clear(&mut self) {
+        self.records.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_hash() -> Hash {
+        Hash::from_bytes([1u8; 32])
+    }
+
+    #[test]
+    fn test_incoming_record() {
+        let record = TransactionRecord::incoming(
+            test_hash(),
+            Amount::from_atomic(1_000_000_000_000), // 1 CYNC
+            100,
+            1700000000,
+            0,
+            None,
+        );
+
+        assert_eq!(record.direction, TxDirection::Incoming);
+        assert_eq!(record.block_height, 100);
+        assert_eq!(record.unlock_height, 110);
+        assert!(!record.spent);
+    }
+
+    #[test]
+    fn test_outgoing_record() {
+        let record = TransactionRecord::outgoing(
+            test_hash(),
+            Amount::from_atomic(500_000_000_000), // 0.5 CYNC
+            Amount::from_atomic(3_000_000), // fee
+            100,
+            1700000000,
+        );
+
+        assert_eq!(record.direction, TxDirection::Outgoing);
+        assert_eq!(record.fee, Amount::from_atomic(3_000_000));
+    }
+
+    #[test]
+    fn test_confirmations() {
+        let record = TransactionRecord::incoming(
+            test_hash(),
+            Amount::from_atomic(1_000_000_000_000),
+            100,
+            1700000000,
+            0,
+            None,
+        );
+
+        assert_eq!(record.confirmations(99), 0);
+        assert_eq!(record.confirmations(100), 1);
+        assert_eq!(record.confirmations(110), 11);
+    }
+
+    #[test]
+    fn test_history() {
+        let mut history = TransactionHistory::new();
+
+        let incoming = TransactionRecord::incoming(
+            Hash::from_bytes([1u8; 32]),
+            Amount::from_atomic(1_000_000_000_000),
+            100,
+            1700000000,
+            0,
+            None,
+        );
+
+        let outgoing = TransactionRecord::outgoing(
+            Hash::from_bytes([2u8; 32]),
+            Amount::from_atomic(500_000_000_000),
+            Amount::from_atomic(3_000_000),
+            101,
+            1700001000,
+        );
+
+        history.add(incoming);
+        history.add(outgoing);
+
+        assert_eq!(history.count(), 2);
+        assert_eq!(history.incoming().len(), 1);
+        assert_eq!(history.outgoing().len(), 1);
+    }
+
+    #[test]
+    fn test_set_memo() {
+        let mut history = TransactionHistory::new();
+
+        let record = TransactionRecord::incoming(
+            test_hash(),
+            Amount::from_atomic(1_000_000_000_000),
+            100,
+            1700000000,
+            0,
+            None,
+        );
+
+        history.add(record);
+        history.set_memo(&test_hash(), "Coffee payment");
+
+        let updated = history.get(&test_hash()).unwrap();
+        assert_eq!(updated.memo, Some("Coffee payment".to_string()));
+    }
+
+    #[test]
+    fn test_pagination() {
+        let mut history = TransactionHistory::new();
+        for i in 0..10u8 {
+            let record = TransactionRecord::incoming(
+                Hash::from_bytes([i; 32]),
+                Amount::from_atomic(1_000_000_000_000),
+                i as u64 * 10,
+                1700000000 + i as u64,
+                0,
+                None,
+            );
+            history.add(record);
+        }
+        assert_eq!(history.count(), 10);
+        let all = history.incoming();
+        assert_eq!(all.len(), 10);
+        // Verify distinct hashes
+        let unique: std::collections::HashSet<_> = all.iter().map(|r| r.tx_hash).collect();
+        assert_eq!(unique.len(), 10);
+    }
+}

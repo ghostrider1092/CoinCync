@@ -1,0 +1,32 @@
+# CoinCync Node Configuration
+# Copy to ~/.coincync/coincync.conf and edit as needed
+
+# Network: testnet or mainnet
+network = testnet
+
+# Data directory
+data-dir = /data/coincync
+
+# RPC bind address (set to 0.0.0.0 to allow external access)
+rpc-bind = 127.0.0.1:28081
+
+# P2P bind address
+p2p-bind = 0.0.0.0:28080
+
+# Seed nodes (testnet) — optional extras; built-in DNS + seeds match src/testnet.rs
+# addnode = 138.68.172.80:28080
+# addnode = 64.227.49.44:28080
+# addnode = 192.34.59.42:28080
+# addnode = 46.101.138.120:28080
+# addnode = 45.55.32.13:28080
+# addnode = 143.110.218.99:28080
+# addnode = 165.245.161.62:28080
+# addnode = 165.245.140.113:28080
+# addnode = 164.92.153.24:28080
+
+# Mining (uncomment to mine)
+# mining-threads = 4
+# mining-address = tCYNC3Z...your_address_here
+
+# Logging
+log-level = info

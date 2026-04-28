@@ -1,0 +1,109 @@
+/* ─────────────────────────────────────────────────────────────────
+   CoinCync mdBook theme overrides
+   ─────────────────────────────────────────────────────────────────
+
+   Layered on top of the stock `navy` theme (declared in book.toml).
+   Goals:
+     - Match the project's accent color (#4fd4e0) used by the
+       embedded explorer and the landing page
+     - Tighter monospace blocks (the docs are full of code)
+     - Larger reading column for long-form prose
+     - Keep things working with JavaScript disabled (Tor Browser
+       hardened mode)
+
+   The cascade order is:
+     1. mdBook's stock CSS (navy)
+     2. This file
+   ───────────────────────────────────────────────────────────────── */
+
+:root {
+    --coincync-accent: #4fd4e0;
+    --coincync-accent-2: #b0e0a0;
+}
+
+/* Reading column: stock mdBook is 750px which is fine for prose
+   but feels cramped for tables and code blocks. Bump it. */
+.content {
+    max-width: 880px;
+}
+
+/* Heading anchors picked up the project accent. */
+.content h1 {
+    color: var(--coincync-accent);
+    border-bottom: 1px solid rgba(79, 212, 224, 0.18);
+    padding-bottom: 0.3em;
+}
+.content h2 {
+    color: var(--coincync-accent);
+    margin-top: 1.6em;
+}
+.content h3 {
+    color: var(--coincync-accent-2);
+}
+
+/* Code blocks: tighter, monospace size up slightly so it's readable
+   against prose at 16px. */
+.content pre,
+.content code {
+    font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.92em;
+}
+.content pre {
+    border-radius: 6px;
+    padding: 14px 16px;
+}
+
+/* Inline code highlight: the stock theme uses a very pale background.
+   A faint accent tint reads better. */
+.content :not(pre) > code {
+    background: rgba(79, 212, 224, 0.10);
+    color: var(--coincync-accent-2);
+    padding: 1px 6px;
+    border-radius: 3px;
+}
+
+/* Tables: stock mdBook tables look fine but the borders feel heavy. */
+.content table {
+    border-collapse: collapse;
+}
+.content table th {
+    color: var(--coincync-accent);
+    text-transform: none;
+    font-weight: 600;
+    border-bottom: 2px solid rgba(79, 212, 224, 0.25);
+}
+.content table td {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Links — reuse the explorer accent for internal consistency */
+.content a:link,
+.content a:visited {
+    color: var(--coincync-accent);
+}
+.content a:hover {
+    color: var(--coincync-accent-2);
+}
+
+/* Sidebar tweaks — mdBook's nav is fine but the active-chapter
+   highlight could pop more. */
+.chapter li.chapter-item.expanded > a.active,
+.chapter li.chapter-item > a.active {
+    color: var(--coincync-accent) !important;
+    font-weight: 600;
+}
+
+/* Print stylesheet — page breaks before each h1, smaller headers,
+   no sidebar. mdBook's print mode handles most of this; just tighten
+   the margins. */
+@media print {
+    .content {
+        max-width: none;
+    }
+    .content h1 {
+        page-break-before: always;
+    }
+    .content h1:first-of-type {
+        page-break-before: auto;
+    }
+}

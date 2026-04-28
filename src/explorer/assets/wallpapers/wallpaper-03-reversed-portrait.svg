@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1170 2532" width="1170" height="2532" preserveAspectRatio="xMidYMid slice" style="display:block">
+  <defs>
+    <filter id="g" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.82" numOctaves="2" seed="19"/>
+      <feColorMatrix values="0 0 0 0 0.30  0 0 0 0 0.23  0 0 0 0 0.13  0 0 0 0.04 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+    <radialGradient id="warm" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#dcac6b"/>
+      <stop offset="60%" stop-color="#d4a059"/>
+      <stop offset="100%" stop-color="#b8883f"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1170" height="2532" fill="url(#warm)"/>
+
+  <g transform="translate(585 1266) scale(2.6)">
+    <circle cx="0" cy="0" r="78" fill="none" stroke="#0a0a09" stroke-width="14"/>
+    <path d="M 68 0 A 68 68 0 1 0 0 68" fill="none" stroke="#d4a059" stroke-width="22"/>
+    <line x1="62" y1="0" x2="78" y2="0" stroke="#d4a059" stroke-width="22"/>
+    <circle cx="-32" cy="0" r="8" fill="#0a0a09"/>
+    <circle cx="32" cy="0" r="8" fill="#0a0a09"/>
+  </g>
+
+  <text x="80" y="2420" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" letter-spacing="3" fill="#4a3a2e">CYNC LAB</text>
+  <text x="1090" y="2420" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" letter-spacing="3" fill="#4a3a2e">REVERSED · 03</text>
+
+  <rect width="1170" height="2532" fill="#d4a059" filter="url(#g)" opacity="0.5" pointer-events="none"/>
+</svg>

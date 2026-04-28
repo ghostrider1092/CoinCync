@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoinCync — Brand Assets</title>
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<meta name="description" content="CoinCync brand assets, logo variants, wallpapers, and visual identity guidelines.">
+<link rel="stylesheet" href="/assets/fonts/fonts.css">
+<style>
+:root{--bg:#0a0a09;--s1:#111110;--s2:#181816;--s3:#1e1e1b;--b:#25241f;--b2:#34332c;--t:#f5f0e8;--t2:#b8b4ac;--t3:#8a857d;--t4:#5d5953;--ac:#d4a059;--ac2:#e8b86d;--ac-dim:#4a3a1f;--display:'Fraunces',Georgia,serif;--body:'IBM Plex Sans',system-ui,sans-serif;--mono:'JetBrains Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--t);font-family:var(--body);font-weight:300;line-height:1.6;-webkit-font-smoothing:antialiased}
+::selection{background:rgba(212,160,89,.25);color:var(--t)}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,10,9,.85);backdrop-filter:blur(20px);border-bottom:1px solid rgba(37,36,31,.5);padding:0 48px;height:64px;display:flex;align-items:center;justify-content:space-between}
+.nav-logo{font-family:var(--display);font-size:20px;font-weight:400;color:var(--t);text-decoration:none;letter-spacing:-.02em;display:flex;align-items:center;gap:10px}
+.nav-logo em{color:var(--ac);font-style:italic;font-weight:500}
+.nav-links{display:flex;gap:24px;align-items:center}
+.nav-links a{font-size:13px;color:var(--t3);text-decoration:none;font-weight:400;transition:color .15s;letter-spacing:.02em}
+.nav-links a:hover{color:var(--ac)}
+
+/* PAGE */
+.page-header{padding:160px 48px 80px;text-align:center}
+.page-header h1{font-family:var(--display);font-weight:200;font-size:clamp(40px,6vw,72px);line-height:.95;letter-spacing:-.04em;margin-bottom:20px}
+.page-header h1 em{font-style:italic;font-weight:400;color:var(--ac)}
+.page-header p{font-family:var(--display);font-style:italic;font-weight:300;font-size:18px;color:var(--t3);max-width:600px;margin:0 auto}
+
+/* SECTIONS */
+.brand-section{padding:80px 48px;max-width:1400px;margin:0 auto}
+.section-label{font-family:var(--mono);font-size:11px;color:var(--ac);letter-spacing:.2em;text-transform:uppercase;margin-bottom:16px}
+.section-title{font-family:var(--display);font-weight:300;font-size:32px;letter-spacing:-.02em;margin-bottom:12px}
+.section-desc{font-size:15px;color:var(--t3);max-width:600px;margin-bottom:48px;font-weight:300}
+.divider{border:none;border-top:1px solid var(--b);margin:0 48px}
+
+/* LOGO GRID */
+.logo-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:24px}
+.logo-card{border:1px solid var(--b);overflow:hidden;transition:border-color .2s}
+.logo-card:hover{border-color:rgba(212,160,89,.3)}
+.logo-preview{display:flex;align-items:center;justify-content:center;padding:64px;min-height:320px}
+.logo-preview.bg-dark{background:#0a0a09}
+.logo-preview.bg-cream{background:#f5f0e6}
+.logo-preview.bg-brass{background:#d4a059}
+.logo-preview img,.logo-preview svg{width:160px;height:160px}
+.logo-info{padding:20px 24px;background:var(--s1);border-top:1px solid var(--b)}
+.logo-name{font-family:var(--mono);font-size:12px;color:var(--t2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px}
+.logo-colors{font-size:12px;color:var(--t4)}
+.logo-colors code{font-family:var(--mono);color:var(--ac);font-size:11px}
+.logo-dl{display:inline-block;margin-top:8px;font-size:11px;color:var(--ac);text-decoration:none;font-family:var(--mono);letter-spacing:.05em;border:1px solid var(--b);padding:4px 12px;transition:all .15s}
+.logo-dl:hover{border-color:var(--ac);background:rgba(212,160,89,.08)}
+
+/* WORDMARK & CONSTRUCTION */
+.feature-card{border:1px solid var(--b);overflow:hidden;transition:border-color .2s}
+.feature-card:hover{border-color:rgba(212,160,89,.3)}
+.feature-preview{display:flex;align-items:center;justify-content:center;padding:48px;background:#0a0a09}
+.feature-preview img{max-width:100%;height:auto}
+.feature-info{padding:20px 24px;background:var(--s1);border-top:1px solid var(--b)}
+
+/* COLOR PALETTE */
+.palette{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}
+.swatch{border:1px solid var(--b);overflow:hidden}
+.swatch-color{height:100px;display:flex;align-items:end;justify-content:start;padding:12px}
+.swatch-label{padding:12px 16px;background:var(--s1)}
+.swatch-name{font-family:var(--mono);font-size:11px;color:var(--t2);text-transform:uppercase;letter-spacing:.08em}
+.swatch-hex{font-family:var(--mono);font-size:13px;color:var(--ac);margin-top:2px}
+
+/* TYPOGRAPHY */
+.type-specimen{border:1px solid var(--b);padding:40px;background:var(--s1);margin-bottom:16px}
+.type-name{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;text-transform:uppercase;margin-bottom:12px}
+.type-sample-display{font-family:var(--display);font-size:48px;font-weight:300;margin-bottom:8px;letter-spacing:-.02em}
+.type-sample-body{font-family:var(--body);font-size:16px;color:var(--t2);margin-bottom:8px}
+.type-sample-mono{font-family:var(--mono);font-size:14px;color:var(--t3)}
+
+/* WALLPAPERS */
+.wall-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:24px}
+.wall-card{border:1px solid var(--b);overflow:hidden;transition:border-color .2s}
+.wall-card:hover{border-color:rgba(212,160,89,.3)}
+.wall-preview{aspect-ratio:16/9;overflow:hidden}
+.wall-preview img{width:100%;height:100%;object-fit:cover}
+.wall-info{padding:16px 20px;background:var(--s1);border-top:1px solid var(--b);display:flex;justify-content:space-between;align-items:center}
+.wall-name{font-family:var(--mono);font-size:11px;color:var(--t2);text-transform:uppercase;letter-spacing:.08em}
+
+/* FOOTER */
+footer{border-top:1px solid var(--b);padding:48px;text-align:center;margin-top:80px}
+.footer-logo{font-family:var(--display);font-size:16px;font-weight:400;color:var(--t3)}
+.footer-logo em{color:var(--ac);font-style:italic}
+
+/* RESPONSIVE */
+@media(max-width:768px){
+  nav{padding:0 20px}
+  .page-header,.brand-section{padding-left:20px;padding-right:20px}
+  .logo-grid,.wall-grid{grid-template-columns:1fr}
+  .palette{grid-template-columns:repeat(2,1fr)}
+  .divider{margin:0 20px}
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="/" class="nav-logo">
+    <svg viewBox="0 0 200 200" width="28" height="28"><circle cx="100" cy="100" r="78" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#d4a059"/><circle cx="132" cy="100" r="8" fill="#d4a059"/></svg>
+    Coin<em>Cync</em>
+  </a>
+  <div class="nav-links">
+    <a href="/">Home</a>
+    <a href="https://explorer.coincync.network">Explorer</a>
+    <a href="/docs/pages/whitepaper.html">Whitepaper</a>
+  </div>
+</nav>
+
+<!-- HEADER -->
+<div class="page-header">
+  <h1>Brand <em>Assets</em></h1>
+  <p>The CoinCync visual identity. Logo variants, color palette, typography, and wallpapers for every context.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- MARK VARIANTS -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="brand-section">
+  <div class="section-label">01 &mdash; The Mark</div>
+  <h2 class="section-title">Logo variants</h2>
+  <p class="section-desc">The CoinCync mark encodes the Pedersen commitment C&nbsp;=&nbsp;rG&nbsp;+&nbsp;vH. The two dots are the generator points. The broken ring is the commitment itself &mdash; complete in math, open in spirit.</p>
+
+  <div class="logo-grid">
+    <!-- Gold on Dark -->
+    <div class="logo-card">
+      <div class="logo-preview bg-dark">
+        <svg viewBox="0 0 200 200" width="160" height="160"><circle cx="100" cy="100" r="78" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#d4a059"/><circle cx="132" cy="100" r="8" fill="#d4a059"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">Gold on Dark</div>
+        <div class="logo-colors">Mark <code>#d4a059</code> &middot; Background <code>#0a0a09</code></div>
+        <a href="/assets/logo-gold-dark.svg" download class="logo-dl">&darr; SVG</a>
+      </div>
+    </div>
+
+    <!-- Mono / Cream on Dark -->
+    <div class="logo-card">
+      <div class="logo-preview bg-dark">
+        <svg viewBox="0 0 200 200" width="160" height="160"><circle cx="100" cy="100" r="78" fill="none" stroke="#f5f0e8" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#f5f0e8"/><circle cx="132" cy="100" r="8" fill="#f5f0e8"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">Mono / Cream on Dark</div>
+        <div class="logo-colors">Mark <code>#f5f0e8</code> &middot; Background <code>#0a0a09</code></div>
+        <a href="/assets/logo-cream-dark.svg" download class="logo-dl">&darr; SVG</a>
+      </div>
+    </div>
+
+    <!-- Mono / Ink on Cream -->
+    <div class="logo-card">
+      <div class="logo-preview bg-cream">
+        <svg viewBox="0 0 200 200" width="160" height="160"><circle cx="100" cy="100" r="78" fill="none" stroke="#3a3328" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#f5f0e6" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#f5f0e6" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#3a3328"/><circle cx="132" cy="100" r="8" fill="#3a3328"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">Mono / Ink on Cream</div>
+        <div class="logo-colors">Mark <code>#3a3328</code> &middot; Background <code>#f5f0e6</code></div>
+        <a href="/assets/logo-ink-cream.svg" download class="logo-dl">&darr; SVG</a>
+      </div>
+    </div>
+
+    <!-- Reversed / Ink on Brass -->
+    <div class="logo-card">
+      <div class="logo-preview bg-brass">
+        <svg viewBox="0 0 200 200" width="160" height="160"><circle cx="100" cy="100" r="78" fill="none" stroke="#3a3328" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#d4a059" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#d4a059" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#3a3328"/><circle cx="132" cy="100" r="8" fill="#3a3328"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">Reversed / Ink on Brass</div>
+        <div class="logo-colors">Mark <code>#3a3328</code> &middot; Background <code>#d4a059</code></div>
+        <a href="/assets/logo-ink-brass.svg" download class="logo-dl">&darr; SVG</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- WORDMARK & CONSTRUCTION -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="brand-section">
+  <div class="section-label">02 &mdash; Wordmark &amp; Construction</div>
+  <h2 class="section-title">Lockup and grid</h2>
+  <p class="section-desc">The horizontal wordmark pairs the mark with Fraunces set in regular weight, "Cync" in italic accent. The construction grid reveals the Pedersen commitment geometry.</p>
+
+  <div class="logo-grid">
+    <div class="feature-card">
+      <div class="feature-preview" style="padding:48px 64px">
+        <img src="/assets/logo-wordmark-gold-dark.svg" alt="CoinCync wordmark" style="max-height:80px">
+      </div>
+      <div class="feature-info">
+        <div class="logo-name">Wordmark / Gold on Dark</div>
+        <a href="/assets/logo-wordmark-gold-dark.svg" download class="logo-dl">&darr; SVG</a>
+      </div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-preview" style="padding:32px">
+        <img src="/assets/logo-construction.svg" alt="CoinCync construction grid" style="max-height:280px">
+      </div>
+      <div class="feature-info">
+        <div class="logo-name">Construction grid &mdash; C = rG + vH</div>
+        <a href="/assets/logo-construction.svg" download class="logo-dl">&darr; SVG</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- FAVICON -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="brand-section">
+  <div class="section-label">03 &mdash; Favicon</div>
+  <h2 class="section-title">App icon</h2>
+  <p class="section-desc">Rounded-square container for browser tabs, bookmarks, and app launchers.</p>
+
+  <div class="logo-grid" style="grid-template-columns:repeat(4,1fr)">
+    <div class="logo-card">
+      <div class="logo-preview bg-dark" style="padding:32px;min-height:auto">
+        <svg viewBox="0 0 200 200" width="80" height="80"><rect width="200" height="200" rx="40" fill="#0a0a09"/><circle cx="100" cy="100" r="68" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 158 100 A 58 58 0 1 0 100 158" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="152" y1="100" x2="168" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="72" cy="100" r="10" fill="#d4a059"/><circle cx="128" cy="100" r="10" fill="#d4a059"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">Favicon</div>
+        <a href="/assets/favicon.svg" download class="logo-dl">&darr; SVG</a>
+      </div>
+    </div>
+    <div class="logo-card">
+      <div class="logo-preview bg-dark" style="padding:32px;min-height:auto">
+        <svg viewBox="0 0 200 200" width="48" height="48"><rect width="200" height="200" rx="40" fill="#0a0a09"/><circle cx="100" cy="100" r="68" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 158 100 A 58 58 0 1 0 100 158" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="152" y1="100" x2="168" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="72" cy="100" r="10" fill="#d4a059"/><circle cx="128" cy="100" r="10" fill="#d4a059"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">48px</div>
+      </div>
+    </div>
+    <div class="logo-card">
+      <div class="logo-preview bg-dark" style="padding:32px;min-height:auto">
+        <svg viewBox="0 0 200 200" width="32" height="32"><rect width="200" height="200" rx="40" fill="#0a0a09"/><circle cx="100" cy="100" r="68" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 158 100 A 58 58 0 1 0 100 158" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="152" y1="100" x2="168" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="72" cy="100" r="10" fill="#d4a059"/><circle cx="128" cy="100" r="10" fill="#d4a059"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">32px</div>
+      </div>
+    </div>
+    <div class="logo-card">
+      <div class="logo-preview bg-dark" style="padding:32px;min-height:auto">
+        <svg viewBox="0 0 200 200" width="16" height="16"><rect width="200" height="200" rx="40" fill="#0a0a09"/><circle cx="100" cy="100" r="68" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 158 100 A 58 58 0 1 0 100 158" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="152" y1="100" x2="168" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="72" cy="100" r="10" fill="#d4a059"/><circle cx="128" cy="100" r="10" fill="#d4a059"/></svg>
+      </div>
+      <div class="logo-info">
+        <div class="logo-name">16px</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- COLOR PALETTE -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="brand-section">
+  <div class="section-label">04 &mdash; Color Palette</div>
+  <h2 class="section-title">Colors</h2>
+  <p class="section-desc">A warm, minimal palette built around brass gold on warm-black. Every surface uses the same temperature.</p>
+
+  <div class="palette">
+    <div class="swatch">
+      <div class="swatch-color" style="background:#d4a059"></div>
+      <div class="swatch-label"><div class="swatch-name">Brass / Primary</div><div class="swatch-hex">#d4a059</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#e8b86d"></div>
+      <div class="swatch-label"><div class="swatch-name">Gold / Accent Light</div><div class="swatch-hex">#e8b86d</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#9e7a3e"></div>
+      <div class="swatch-label"><div class="swatch-name">Antique / Accent Muted</div><div class="swatch-hex">#9e7a3e</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#0a0a09"><span style="color:#f5f0e8;font-family:var(--mono);font-size:10px"></span></div>
+      <div class="swatch-label"><div class="swatch-name">Warm Black / Background</div><div class="swatch-hex">#0a0a09</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#111110"></div>
+      <div class="swatch-label"><div class="swatch-name">Surface 1</div><div class="swatch-hex">#111110</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#181816"></div>
+      <div class="swatch-label"><div class="swatch-name">Surface 2</div><div class="swatch-hex">#181816</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#f5f0e8"></div>
+      <div class="swatch-label"><div class="swatch-name">Cream / Text Primary</div><div class="swatch-hex">#f5f0e8</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#b8b4ac"></div>
+      <div class="swatch-label"><div class="swatch-name">Stone / Text Secondary</div><div class="swatch-hex">#b8b4ac</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#3a3328"></div>
+      <div class="swatch-label"><div class="swatch-name">Ink / Dark Mark</div><div class="swatch-hex">#3a3328</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#f5f0e6"></div>
+      <div class="swatch-label"><div class="swatch-name">Paper / Light Background</div><div class="swatch-hex">#f5f0e6</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#7eb87c"></div>
+      <div class="swatch-label"><div class="swatch-name">Verified / Green</div><div class="swatch-hex">#7eb87c</div></div>
+    </div>
+    <div class="swatch">
+      <div class="swatch-color" style="background:#c45c4f"></div>
+      <div class="swatch-label"><div class="swatch-name">Critical / Red</div><div class="swatch-hex">#c45c4f</div></div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- TYPOGRAPHY -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="brand-section">
+  <div class="section-label">05 &mdash; Typography</div>
+  <h2 class="section-title">Type system</h2>
+  <p class="section-desc">Three typeface families. Fraunces for display and editorial. IBM Plex Sans for body and UI. JetBrains Mono for code and data.</p>
+
+  <div class="type-specimen">
+    <div class="type-name">Display &mdash; Fraunces</div>
+    <div class="type-sample-display">Your money is <em style="color:var(--ac);font-style:italic">yours</em>.</div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--t4)">Weights: 200&ndash;700 &middot; Optical size: 9&ndash;144 &middot; Variable font</div>
+  </div>
+  <div class="type-specimen">
+    <div class="type-name">Body &mdash; IBM Plex Sans</div>
+    <div class="type-sample-body">A privacy-first cryptocurrency where every transaction is shielded by default, supply is cryptographically auditable, and no permission is required to participate.</div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--t4)">Weights: 300, 400, 500, 600</div>
+  </div>
+  <div class="type-specimen">
+    <div class="type-name">Mono &mdash; JetBrains Mono</div>
+    <div class="type-sample-mono">C = rG + vH &nbsp;&middot;&nbsp; 0x7a2f...e8b1 &nbsp;&middot;&nbsp; 100,000,000 CYNC</div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--t4);margin-top:4px">Weights: 400, 500</div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- INTERACTIVE THEME PREVIEW -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="brand-section">
+  <div class="section-label">06 &mdash; Live Preview</div>
+  <h2 class="section-title">Explorer themes</h2>
+  <p class="section-desc">Nine themes built into the CoinCync Explorer. Click any theme to preview the mark, surfaces, and type in context.</p>
+
+  <div class="theme-tabs" id="theme-tabs">
+    <button class="tab active" onclick="previewTheme('dark','#0a0a09','#141412','#d4a059','#f5f0e8','#8a857d','Dark')">Dark</button>
+    <button class="tab" onclick="previewTheme('paper','#F5F3EE','#FEFDFB','#D4A059','#111110','#8A857D','Paper')">Paper</button>
+    <button class="tab" onclick="previewTheme('brass','#D4A059','#C89548','#3A3328','#1A1510','#4A3828','Brass')">Brass</button>
+    <button class="tab" onclick="previewTheme('cream','#F5F0E6','#FAF7F0','#3A3328','#3A3328','#8A7D6D','Cream')">Cream</button>
+    <button class="tab" onclick="previewTheme('midnight','#08090E','#0E1018','#D4A059','#E8E4F0','#6A6A80','Midnight')">Midnight</button>
+    <button class="tab" onclick="previewTheme('forge','#121010','#1A1616','#E07840','#F0E8E0','#887868','Forge')">Forge</button>
+    <button class="tab" onclick="previewTheme('vault','#0A0C0A','#10140F','#A0B060','#E0E8DC','#708068','Vault')">Vault</button>
+    <button class="tab" onclick="previewTheme('mono','#0A0A09','#131312','#F5F0E8','#F5F0E8','#787570','Mono')">Mono</button>
+    <button class="tab" onclick="previewTheme('contrast','#000000','#0A0A0A','#FFB840','#FFFFFF','#888888','Contrast')">Contrast</button>
+  </div>
+
+  <div class="preview-frame" id="preview-frame" style="background:#0a0a09;border:1px solid #25241f">
+    <!-- Mock nav -->
+    <div class="preview-nav" id="pv-nav" style="background:#141412;border-bottom:1px solid #25241f">
+      <div style="display:flex;align-items:center;gap:10px">
+        <svg id="pv-logo" viewBox="0 0 200 200" width="24" height="24"><circle cx="100" cy="100" r="78" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#d4a059"/><circle cx="132" cy="100" r="8" fill="#d4a059"/></svg>
+        <span id="pv-title" style="font-family:var(--display);font-size:16px;color:#f5f0e8">Coin<em style="color:#d4a059;font-style:italic">Cync</em></span>
+      </div>
+      <div style="display:flex;gap:16px">
+        <span id="pv-link1" class="preview-link" style="color:#8a857d">Home</span>
+        <span id="pv-link2" class="preview-link" style="color:#8a857d">Blocks</span>
+        <span id="pv-link3" class="preview-link" style="color:#d4a059">Supply</span>
+      </div>
+    </div>
+    <!-- Mock content -->
+    <div style="padding:32px">
+      <div id="pv-heading" style="font-family:var(--display);font-size:28px;font-weight:300;color:#f5f0e8;margin-bottom:6px">Your money is <em style="color:#d4a059;font-style:italic">yours</em>.</div>
+      <div id="pv-sub" style="font-size:13px;color:#8a857d;margin-bottom:24px">Privacy-first blockchain explorer</div>
+      <!-- Mock stat cards -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+        <div id="pv-card1" class="preview-card" style="background:#141412;border:1px solid #25241f;padding:16px">
+          <div style="font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#8a857d;margin-bottom:6px">Block Height</div>
+          <div style="font-family:var(--display);font-size:22px;color:#f5f0e8">42,891</div>
+        </div>
+        <div id="pv-card2" class="preview-card" style="background:#141412;border:1px solid #25241f;padding:16px">
+          <div style="font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#8a857d;margin-bottom:6px">Supply</div>
+          <div style="font-family:var(--display);font-size:22px;color:#f5f0e8">2.14M <span style="font-size:11px;color:#8a857d;font-family:var(--mono)">CYNC</span></div>
+        </div>
+        <div id="pv-card3" class="preview-card" style="background:#141412;border:1px solid #25241f;padding:16px">
+          <div style="font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#8a857d;margin-bottom:6px">Fee Burn</div>
+          <div style="font-family:var(--display);font-size:22px;color:#d4a059">30%</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.theme-tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap}
+.tab{padding:8px 16px;border:1px solid var(--b);background:var(--s1);color:var(--t3);font-family:var(--mono);font-size:11px;cursor:pointer;transition:all .15s;letter-spacing:.04em}
+.tab:hover{border-color:var(--ac);color:var(--ac)}
+.tab.active{border-color:var(--ac);color:var(--ac);background:var(--ac-dim)}
+.preview-frame{border-radius:0;overflow:hidden;transition:background .4s}
+.preview-nav{padding:12px 24px;display:flex;align-items:center;justify-content:space-between;transition:background .4s,border-color .4s}
+.preview-link{font-size:12px;cursor:default;transition:color .4s}
+.preview-card{transition:background .4s,border-color .4s}
+</style>
+
+<script>
+function previewTheme(name, bg, surface, accent, text, muted, label) {
+  // Update tabs
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  // Update preview frame
+  const f = document.getElementById('preview-frame');
+  f.style.background = bg;
+  f.style.borderColor = surface;
+  // Nav
+  const nav = document.getElementById('pv-nav');
+  nav.style.background = surface;
+  nav.style.borderColor = surface;
+  // Logo
+  const logo = document.getElementById('pv-logo');
+  logo.querySelector('circle').setAttribute('stroke', accent);
+  logo.querySelectorAll('path, line').forEach(el => el.setAttribute('stroke', bg));
+  logo.querySelectorAll('circle:not(:first-child)').forEach(el => el.setAttribute('fill', accent));
+  // Title
+  const title = document.getElementById('pv-title');
+  title.style.color = text;
+  title.querySelector('em').style.color = accent;
+  // Links
+  document.getElementById('pv-link1').style.color = muted;
+  document.getElementById('pv-link2').style.color = muted;
+  document.getElementById('pv-link3').style.color = accent;
+  // Heading
+  const h = document.getElementById('pv-heading');
+  h.style.color = text;
+  h.querySelector('em').style.color = accent;
+  document.getElementById('pv-sub').style.color = muted;
+  // Cards
+  ['pv-card1','pv-card2','pv-card3'].forEach(id => {
+    const c = document.getElementById(id);
+    c.style.background = surface;
+    c.style.borderColor = muted + '30';
+    c.children[0].style.color = muted;
+    c.children[1].style.color = text;
+  });
+  // Accent value on third card
+  document.getElementById('pv-card3').children[1].style.color = accent;
+}
+</script>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- WALLPAPERS -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="brand-section">
+  <div class="section-label">07 &mdash; Wallpapers</div>
+  <h2 class="section-title">Background wallpapers</h2>
+  <p class="section-desc">Desktop (3840&times;2160) and mobile (1170&times;2532) wallpapers in the CoinCync visual language. All SVG, scale to any resolution.</p>
+
+  <!-- Desktop / Landscape -->
+  <h3 style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;text-transform:uppercase;margin-bottom:16px;margin-top:8px">Desktop &mdash; Landscape</h3>
+  <div class="wall-grid">
+    <div class="wall-card">
+      <div class="wall-preview"><img src="/assets/wallpapers/01-commitment-field-landscape.svg" alt="The Commitment Field"></div>
+      <div class="wall-info"><span class="wall-name">01 &mdash; The Commitment Field</span><a href="/assets/wallpapers/01-commitment-field-landscape.svg" download class="logo-dl">&darr; SVG</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview"><img src="/assets/wallpapers/02-proof-landscape.svg" alt="The Proof"></div>
+      <div class="wall-info"><span class="wall-name">02 &mdash; The Proof</span><a href="/assets/wallpapers/02-proof-landscape.svg" download class="logo-dl">&darr; SVG</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview"><img src="/assets/wallpapers/03-veil-landscape.svg" alt="The Veil"></div>
+      <div class="wall-info"><span class="wall-name">03 &mdash; The Veil</span><a href="/assets/wallpapers/03-veil-landscape.svg" download class="logo-dl">&darr; SVG</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview"><img src="/assets/wallpapers/04-formula-landscape.svg" alt="The Formula"></div>
+      <div class="wall-info"><span class="wall-name">04 &mdash; The Formula</span><a href="/assets/wallpapers/04-formula-landscape.svg" download class="logo-dl">&darr; SVG</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview"><img src="/assets/wallpapers/04-mono-pair-landscape.svg" alt="Mono Pair"></div>
+      <div class="wall-info"><span class="wall-name">04 &mdash; Mono Pair</span><a href="/assets/wallpapers/04-mono-pair-landscape.svg" download class="logo-dl">&darr; SVG</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview"><img src="/assets/wallpapers/05-library-landscape.svg" alt="The Library"></div>
+      <div class="wall-info"><span class="wall-name">05 &mdash; The Library</span><a href="/assets/wallpapers/05-library-landscape.svg" download class="logo-dl">&darr; SVG</a></div>
+    </div>
+  </div>
+
+  <!-- Mobile / Portrait -->
+  <h3 style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;text-transform:uppercase;margin:32px 0 16px">Mobile &mdash; Portrait</h3>
+  <div class="wall-grid" style="grid-template-columns:repeat(4,1fr)">
+    <div class="wall-card">
+      <div class="wall-preview" style="aspect-ratio:9/19.5"><img src="/assets/wallpapers/01-commitment-field-portrait.svg" alt="Commitment Field portrait"></div>
+      <div class="wall-info"><span class="wall-name">01 &mdash; Field</span><a href="/assets/wallpapers/01-commitment-field-portrait.svg" download class="logo-dl">&darr;</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview" style="aspect-ratio:9/19.5"><img src="/assets/wallpapers/01-mark-portrait.svg" alt="Mark portrait"></div>
+      <div class="wall-info"><span class="wall-name">01 &mdash; Mark</span><a href="/assets/wallpapers/01-mark-portrait.svg" download class="logo-dl">&darr;</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview" style="aspect-ratio:9/19.5"><img src="/assets/wallpapers/02-proof-portrait.svg" alt="Proof portrait"></div>
+      <div class="wall-info"><span class="wall-name">02 &mdash; Proof</span><a href="/assets/wallpapers/02-proof-portrait.svg" download class="logo-dl">&darr;</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview" style="aspect-ratio:9/19.5"><img src="/assets/wallpapers/03-veil-portrait.svg" alt="Veil portrait"></div>
+      <div class="wall-info"><span class="wall-name">03 &mdash; Veil</span><a href="/assets/wallpapers/03-veil-portrait.svg" download class="logo-dl">&darr;</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview" style="aspect-ratio:9/19.5"><img src="/assets/wallpapers/04-formula-portrait.svg" alt="Formula portrait"></div>
+      <div class="wall-info"><span class="wall-name">04 &mdash; Formula</span><a href="/assets/wallpapers/04-formula-portrait.svg" download class="logo-dl">&darr;</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview" style="aspect-ratio:9/19.5"><img src="/assets/wallpapers/05-library-portrait.svg" alt="Library portrait"></div>
+      <div class="wall-info"><span class="wall-name">05 &mdash; Library</span><a href="/assets/wallpapers/05-library-portrait.svg" download class="logo-dl">&darr;</a></div>
+    </div>
+    <div class="wall-card">
+      <div class="wall-preview" style="aspect-ratio:9/19.5"><img src="/assets/wallpapers/06-construction-portrait.svg" alt="Construction portrait"></div>
+      <div class="wall-info"><span class="wall-name">06 &mdash; Construction</span><a href="/assets/wallpapers/06-construction-portrait.svg" download class="logo-dl">&darr;</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-logo">
+    <svg viewBox="0 0 200 200" width="24" height="24" style="vertical-align:middle;margin-right:8px"><circle cx="100" cy="100" r="78" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#d4a059"/><circle cx="132" cy="100" r="8" fill="#d4a059"/></svg>
+    Coin<em>Cync</em>
+  </div>
+  <div style="font-family:var(--display);font-style:italic;font-size:13px;color:var(--t4);margin-top:8px">Private by law. Private by math.</div>
+</footer>
+
+</body>
+</html>

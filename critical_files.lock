@@ -1,0 +1,21 @@
+# CoinCync Critical File Integrity Lockfile
+#
+# These SHA-256 hashes protect consensus-critical files from accidental changes.
+# The build will FAIL if any hash doesn't match.
+#
+# Hashes are computed over the file bytes with CRLF line endings
+# normalized to LF, so Windows and Linux produce the same values.
+#
+# To refresh after an INTENTIONAL change:
+#   cargo run --bin update-critical-hashes
+#
+# NEVER refresh these hashes without a thorough review of the changes.
+# Accidental modifications to these files can cause chain forks.
+
+CONSTITUTION.md=bcf140fcf42c56d1ae6209aac4f785128c97284d2c1243c440866c388a972c04
+src/testnet.rs=24ff4838ff311c310a4de65e57c8f1de967a01e056595b2acf04d10531e21351
+src/constants.rs=fc7f01b285839c81846e59b3f4b1c66b28e59c53538b6414718cdf62da9fef58
+src/consensus/difficulty.rs=079bacc1b32cf0b3768ca2ff6a996425ed7b63ba32609ba84544c6cfc7281477
+src/consensus/pow.rs=3ef4a4ec9b1996e23f6760106dbd91795216f0244ad2d2dba37358b4664b261e
+src/consensus/validation.rs=969d5d5f5ac699fd3473a1daf7ae2eb64412acb97405cecdbc07271701d14e1a
+src/emission/curve.rs=53fb9ab28e7297a7d2ba84940b9fe7c059f5c9855dcc2a1eb8317f9acbf40935

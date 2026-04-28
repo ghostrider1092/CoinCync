@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1170 2532" width="1170" height="2532" preserveAspectRatio="xMidYMid slice" style="display:block">
+  <defs>
+    <filter id="g" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="37"/>
+      <feColorMatrix values="0 0 0 0 0.83  0 0 0 0 0.63  0 0 0 0 0.35  0 0 0 0.025 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+  </defs>
+
+  <rect width="1170" height="2532" fill="#0a0a09"/>
+
+  <g stroke="#2a2720" stroke-width="0.75" fill="none" opacity="0.7">
+    <line x1="120" y1="280" x2="1050" y2="280"/>
+    <line x1="120" y1="2300" x2="1050" y2="2300"/>
+    <line x1="120" y1="274" x2="120" y2="286"/>
+    <line x1="1050" y1="274" x2="1050" y2="286"/>
+    <line x1="120" y1="2294" x2="120" y2="2306"/>
+    <line x1="1050" y1="2294" x2="1050" y2="2306"/>
+  </g>
+
+  <text x="120" y="240" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" letter-spacing="3" fill="#5a5448">FIG. I · SPECIMENS</text>
+  <text x="1050" y="240" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" letter-spacing="3" fill="#5a5448">CYNC LAB</text>
+
+  <g transform="translate(585 600)">
+    <g transform="scale(3.4)">
+      <circle cx="0" cy="0" r="78" fill="none" stroke="#d4a059" stroke-width="14"/>
+      <path d="M 68 0 A 68 68 0 1 0 0 68" fill="none" stroke="#0a0a09" stroke-width="22"/>
+      <line x1="62" y1="0" x2="78" y2="0" stroke="#0a0a09" stroke-width="22"/>
+      <circle cx="-32" cy="0" r="8" fill="#d4a059"/>
+      <circle cx="32" cy="0" r="8" fill="#d4a059"/>
+    </g>
+    <text x="0" y="430" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" letter-spacing="4" fill="#8a6838">320 PX</text>
+  </g>
+
+  <g transform="translate(585 1280)">
+    <g transform="scale(2.2)">
+      <circle cx="0" cy="0" r="78" fill="none" stroke="#d4a059" stroke-width="14"/>
+      <path d="M 68 0 A 68 68 0 1 0 0 68" fill="none" stroke="#0a0a09" stroke-width="22"/>
+      <line x1="62" y1="0" x2="78" y2="0" stroke="#0a0a09" stroke-width="22"/>
+      <circle cx="-32" cy="0" r="8" fill="#d4a059"/>
+      <circle cx="32" cy="0" r="8" fill="#d4a059"/>
+    </g>
+    <text x="0" y="290" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="20" letter-spacing="4" fill="#5a5448">192 PX</text>
+  </g>
+
+  <g transform="translate(585 1780)">
+    <g transform="scale(1.3)">
+      <circle cx="0" cy="0" r="78" fill="none" stroke="#d4a059" stroke-width="14"/>
+      <path d="M 68 0 A 68 68 0 1 0 0 68" fill="none" stroke="#0a0a09" stroke-width="22"/>
+      <line x1="62" y1="0" x2="78" y2="0" stroke="#0a0a09" stroke-width="22"/>
+      <circle cx="-32" cy="0" r="8" fill="#d4a059"/>
+      <circle cx="32" cy="0" r="8" fill="#d4a059"/>
+    </g>
+    <text x="0" y="190" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" letter-spacing="4" fill="#5a5448">96 PX</text>
+  </g>
+
+  <g transform="translate(585 2100)">
+    <g transform="scale(0.8)">
+      <circle cx="0" cy="0" r="78" fill="none" stroke="#d4a059" stroke-width="14"/>
+      <path d="M 68 0 A 68 68 0 1 0 0 68" fill="none" stroke="#0a0a09" stroke-width="22"/>
+      <line x1="62" y1="0" x2="78" y2="0" stroke="#0a0a09" stroke-width="22"/>
+      <circle cx="-32" cy="0" r="8" fill="#d4a059"/>
+      <circle cx="32" cy="0" r="8" fill="#d4a059"/>
+    </g>
+    <text x="0" y="130" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="16" letter-spacing="4" fill="#5a5448">48 PX</text>
+  </g>
+
+  <text x="80" y="2420" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" letter-spacing="3" fill="#5a5448">SPECIMEN</text>
+  <text x="1090" y="2420" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" letter-spacing="3" fill="#5a5448">05</text>
+
+  <rect width="1170" height="2532" fill="#0a0a09" filter="url(#g)" opacity="0.3" pointer-events="none"/>
+</svg>

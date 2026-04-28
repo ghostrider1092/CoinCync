@@ -1,0 +1,84 @@
+{
+  "$schema": "https://coincync.network/mirrors.schema.json",
+  "version": 1,
+  "generated": "manual",
+  "notes": [
+    "Canonical list of CoinCync public infrastructure endpoints.",
+    "Served from https://coincync.network/mirrors.json and",
+    "https://docs.coincync.network/mirrors.json on the NYC landing host.",
+    "Machine-readable so wallets, tooling, and docs pages can cross-reference",
+    "federation members without hardcoding URLs. Update on every host add/remove."
+  ],
+
+  "explorer": {
+    "primary": {
+      "url": "https://explorer.coincync.network",
+      "host": "RIC",
+      "ipv4": "165.245.161.62",
+      "operator": "coincync-core",
+      "status": "live",
+      "capabilities": ["testnet", "mainnet-pre-launch"]
+    },
+    "mirrors": []
+  },
+
+  "api": {
+    "primary": {
+      "url": "https://api.coincync.network",
+      "host": "Toronto",
+      "ipv4": "143.110.218.99",
+      "operator": "coincync-core",
+      "status": "live",
+      "capabilities": ["json-rpc", "rest-v1", "testnet", "mainnet-pre-launch"]
+    },
+    "mirrors": []
+  },
+
+  "seeds": [
+    {
+      "hostname": "seed1.coincync.network",
+      "host": "Toronto",
+      "ipv4": "143.110.218.99",
+      "p2p_port_testnet": 28080,
+      "p2p_port_mainnet": 19080
+    },
+    {
+      "hostname": "seed2.coincync.network",
+      "host": "ATL",
+      "ipv4": "165.245.140.113",
+      "p2p_port_testnet": 28080,
+      "p2p_port_mainnet": 19080
+    },
+    {
+      "hostname": "seed3.coincync.network",
+      "host": "SFO",
+      "ipv4": "64.227.49.44",
+      "p2p_port_testnet": 28080,
+      "p2p_port_mainnet": 19080
+    }
+  ],
+
+  "docs": {
+    "url": "https://docs.coincync.network",
+    "host": "NYC",
+    "ipv4": "45.55.32.13"
+  },
+
+  "landing": {
+    "url": "https://coincync.network",
+    "host": "NYC",
+    "ipv4": "45.55.32.13"
+  },
+
+  "onion": {
+    "explorer": null,
+    "api": null,
+    "docs": null
+  },
+
+  "policy": {
+    "add_mirror": "A mirror may be added to explorer.mirrors or api.mirrors once its operator opens a PR against deploy/landing/mirrors.json with the URL, the IP it resolves to, the operator contact, and a verification transcript (curl against /get_info returning a chain tip consistent with the primary within 1 block). The PR is reviewed for basic sanity; the mirror is NOT trusted as a source of truth — each mirror is an independent observation that clients can cross-check.",
+    "remove_mirror": "A mirror is removed if it is offline for more than 72h, serves stale data (>1 block behind the primary for >10m), or the operator requests removal.",
+    "trust_model": "Every mirror runs its own independent cyncd node. Wallets and tooling that consume this file MUST treat each mirror as a separate observation. Agreement between 2+ mirrors strongly suggests the query result is correct; disagreement is a signal to query more mirrors or fall back to running your own node. There is no consensus authority in this file — it is a directory, not a source of truth."
+  }
+}

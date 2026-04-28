@@ -1,0 +1,11 @@
+<svg viewBox="0 0 480 120" xmlns="http://www.w3.org/2000/svg">
+  <!-- CoinCync Wordmark — Gold on Dark -->
+  <g transform="translate(10,10)">
+    <circle cx="50" cy="50" r="40" fill="none" stroke="#d4a059" stroke-width="7"/>
+    <path d="M 84 50 A 34 34 0 1 0 50 84" fill="none" stroke="#0a0a09" stroke-width="11"/>
+    <line x1="81" y1="50" x2="90" y2="50" stroke="#0a0a09" stroke-width="11"/>
+    <circle cx="34" cy="50" r="4.5" fill="#d4a059"/>
+    <circle cx="66" cy="50" r="4.5" fill="#d4a059"/>
+  </g>
+  <text x="120" y="72" font-family="'Fraunces', Georgia, serif" font-size="52" font-weight="400" fill="#f5f0e8" letter-spacing="-1">Coin<tspan font-style="italic" font-weight="500" fill="#d4a059">Cync</tspan></text>
+</svg>

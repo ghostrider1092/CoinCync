@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CoinCync Wallpaper: "The Proof" — Landscape
+  3840×2160.
+
+  A grid of short horizontal rules at Fibonacci-derived positions
+  across the canvas. Reads like a page of mathematical proof.
+  Most rules are faint ink; one is brass. A single commitment point
+  at the brass rule's centerline marks where the math resolves.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 3840 2160"
+     width="3840" height="2160"
+     preserveAspectRatio="xMidYMid slice"
+     style="display:block">
+
+  <defs>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="5"/>
+      <feColorMatrix values="0 0 0 0 0.83  0 0 0 0 0.63  0 0 0 0 0.35  0 0 0 0.03 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+    <radialGradient id="proof-halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#d4a059" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#d4a059" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="3840" height="2160" fill="#0a0a09"/>
+
+  <g stroke="#3a3328" stroke-width="1" stroke-linecap="round">
+    <line x1="320"  y1="240"  x2="480"  y2="240"/>
+    <line x1="580"  y1="340"  x2="700"  y2="340"/>
+    <line x1="840"  y1="290"  x2="990"  y2="290"/>
+    <line x1="1110" y1="400"  x2="1230" y2="400"/>
+    <line x1="1380" y1="250"  x2="1520" y2="250"/>
+    <line x1="1680" y1="360"  x2="1820" y2="360"/>
+    <line x1="1970" y1="280"  x2="2110" y2="280"/>
+    <line x1="2280" y1="420"  x2="2420" y2="420"/>
+    <line x1="2540" y1="260"  x2="2700" y2="260"/>
+    <line x1="2820" y1="370"  x2="2960" y2="370"/>
+    <line x1="3080" y1="300"  x2="3220" y2="300"/>
+    <line x1="3360" y1="410"  x2="3500" y2="410"/>
+
+    <line x1="260"  y1="520"  x2="400"  y2="520"/>
+    <line x1="520"  y1="620"  x2="680"  y2="620"/>
+    <line x1="760"  y1="570"  x2="900"  y2="570"/>
+    <line x1="1040" y1="680"  x2="1200" y2="680"/>
+    <line x1="1310" y1="540"  x2="1460" y2="540"/>
+    <line x1="1600" y1="640"  x2="1750" y2="640"/>
+    <line x1="1920" y1="580"  x2="2080" y2="580"/>
+    <line x1="2220" y1="700"  x2="2360" y2="700"/>
+    <line x1="2510" y1="560"  x2="2650" y2="560"/>
+    <line x1="2790" y1="660"  x2="2940" y2="660"/>
+    <line x1="3060" y1="600"  x2="3200" y2="600"/>
+    <line x1="3350" y1="690"  x2="3490" y2="690"/>
+
+    <line x1="300"  y1="820"  x2="440"  y2="820"/>
+    <line x1="560"  y1="920"  x2="710"  y2="920"/>
+    <line x1="820"  y1="870"  x2="960"  y2="870"/>
+    <line x1="1100" y1="970"  x2="1240" y2="970"/>
+
+    <line x1="2640" y1="970"  x2="2780" y2="970"/>
+    <line x1="2900" y1="870"  x2="3050" y2="870"/>
+    <line x1="3170" y1="920"  x2="3310" y2="920"/>
+    <line x1="3430" y1="840"  x2="3570" y2="840"/>
+
+    <line x1="240"  y1="1260" x2="380"  y2="1260"/>
+    <line x1="500"  y1="1180" x2="640"  y2="1180"/>
+    <line x1="770"  y1="1290" x2="910"  y2="1290"/>
+    <line x1="1060" y1="1200" x2="1210" y2="1200"/>
+
+    <line x1="2680" y1="1210" x2="2820" y2="1210"/>
+    <line x1="2960" y1="1290" x2="3110" y2="1290"/>
+    <line x1="3230" y1="1180" x2="3370" y2="1180"/>
+    <line x1="3490" y1="1260" x2="3630" y2="1260"/>
+
+    <line x1="280"  y1="1490" x2="420"  y2="1490"/>
+    <line x1="550"  y1="1580" x2="700"  y2="1580"/>
+    <line x1="820"  y1="1520" x2="970"  y2="1520"/>
+    <line x1="1090" y1="1620" x2="1230" y2="1620"/>
+    <line x1="1370" y1="1500" x2="1510" y2="1500"/>
+    <line x1="1660" y1="1600" x2="1800" y2="1600"/>
+    <line x1="1950" y1="1530" x2="2090" y2="1530"/>
+    <line x1="2240" y1="1640" x2="2380" y2="1640"/>
+    <line x1="2520" y1="1510" x2="2670" y2="1510"/>
+    <line x1="2800" y1="1610" x2="2940" y2="1610"/>
+    <line x1="3080" y1="1560" x2="3220" y2="1560"/>
+    <line x1="3350" y1="1650" x2="3500" y2="1650"/>
+
+    <line x1="260"  y1="1790" x2="400"  y2="1790"/>
+    <line x1="540"  y1="1880" x2="690"  y2="1880"/>
+    <line x1="800"  y1="1830" x2="940"  y2="1830"/>
+    <line x1="1080" y1="1920" x2="1230" y2="1920"/>
+    <line x1="1360" y1="1800" x2="1500" y2="1800"/>
+    <line x1="1650" y1="1900" x2="1790" y2="1900"/>
+    <line x1="1940" y1="1840" x2="2080" y2="1840"/>
+    <line x1="2230" y1="1930" x2="2370" y2="1930"/>
+    <line x1="2520" y1="1810" x2="2660" y2="1810"/>
+    <line x1="2810" y1="1910" x2="2950" y2="1910"/>
+    <line x1="3090" y1="1850" x2="3230" y2="1850"/>
+    <line x1="3370" y1="1940" x2="3510" y2="1940"/>
+  </g>
+
+  <circle cx="1920" cy="1080" r="420" fill="url(#proof-halo)"/>
+
+  <line x1="1700" y1="1080" x2="2140" y2="1080"
+        stroke="#d4a059" stroke-width="1.3" stroke-linecap="round"/>
+
+  <circle cx="1920" cy="1080" r="5"  fill="#f5f0e6"/>
+  <circle cx="1920" cy="1080" r="10" fill="none" stroke="#f5f0e6" stroke-width="0.85"/>
+
+  <g stroke="#d4a059" fill="none" stroke-linecap="round">
+    <line x1="1920" y1="1056" x2="1920" y2="1104" stroke-width="0.6" opacity="0.6"/>
+  </g>
+
+  <rect width="3840" height="2160" fill="#0a0a09" filter="url(#grain)" opacity="0.35" pointer-events="none"/>
+</svg>

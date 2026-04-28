@@ -1,0 +1,40 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://localhost:1420",
+    "distDir": "../dist"
+  },
+  "package": {
+    "productName": "CoinCync Wallet",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "shell": { "all": false, "open": true },
+      "notification": { "all": true },
+      "process": { "relaunch": true }
+    },
+    "bundle": {
+      "active": true,
+      "category": "Finance",
+      "identifier": "org.coincync.wallet",
+      "icon": ["icons/icon.png", "icons/32x32.png"],
+      "targets": "all"
+    },
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' https://explorer.coincync.network https://api.github.com; img-src 'self' data: blob: https://explorer.coincync.network; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    },
+    "updater": { "active": false },
+    "windows": [{
+      "fullscreen": false,
+      "resizable": true,
+      "title": "CoinCync Wallet",
+      "width": 1280,
+      "height": 820,
+      "minWidth": 960,
+      "minHeight": 640
+    }]
+  }
+}

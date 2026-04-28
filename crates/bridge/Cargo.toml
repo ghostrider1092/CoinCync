@@ -1,0 +1,24 @@
+[package]
+name         = "bridge"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+description  = "Bytes-only serialization boundary between the CoinCync Tari and Orchard crypto subsystems."
+license      = "MIT"
+publish      = false
+
+[lib]
+name = "bridge"
+path = "src/lib.rs"
+
+# Deliberately minimal — no crypto crates.
+# Every dep added here needs to be justified: anything that pulls in
+# curve25519-dalek, pasta_curves, orchard, tari_* or halo2_* breaks
+# the isolation guarantee this crate exists to provide.
+[dependencies]
+subtle    = "2.5"
+thiserror = "1"
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "allow"

@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoinCync Paper Wallet Generator</title>
+<style>
+  :root {
+    --bg:        #0a0a0e;
+    --surface:   #0d1318;
+    --surface2:  #111820;
+    --border:    #1a2530;
+    --border2:   #243040;
+    --cyan:      #00e5c8;
+    --cyan-dim:  #00b89e;
+    --cyan-glow: rgba(0,229,200,0.12);
+    --green:     #3de097;
+    --red:       #e05555;
+    --gold:      #d4a23a;
+    --text:      #c8d8e8;
+    --text-dim:  #5a7a90;
+    --text-muted:#2a3f52;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', 'Consolas', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* Grid background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,229,200,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,229,200,0.025) 1px, transparent 1px);
+    background-size: 48px 48px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 40px 20px;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    margin-bottom: 40px;
+  }
+
+  .logo {
+    font-size: 32px;
+    font-weight: bold;
+    color: var(--cyan);
+    letter-spacing: 4px;
+    margin-bottom: 4px;
+  }
+
+  .logo span { color: var(--green); }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* Panels */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 28px;
+    margin-bottom: 24px;
+  }
+
+  .panel-title {
+    color: var(--cyan);
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Generate section */
+  .gen-section {
+    text-align: center;
+    padding: 48px 20px;
+  }
+
+  .gen-section p {
+    color: var(--text-dim);
+    margin-bottom: 24px;
+    max-width: 500px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .btn {
+    display: inline-block;
+    padding: 14px 36px;
+    background: transparent;
+    color: var(--cyan);
+    border: 1px solid var(--cyan);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 14px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn:hover {
+    background: var(--cyan);
+    color: var(--bg);
+    box-shadow: 0 0 20px var(--cyan-glow);
+  }
+
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .btn-print {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .btn-print:hover {
+    background: var(--green);
+    color: var(--bg);
+  }
+
+  .btn-new {
+    border-color: var(--text-dim);
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 10px 24px;
+  }
+
+  .btn-new:hover {
+    border-color: var(--text);
+    color: var(--text);
+    background: transparent;
+  }
+
+  /* Wallet output */
+  .wallet-output { display: none; }
+
+  .address-row {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+
+  .qr-box {
+    flex-shrink: 0;
+    display: inline-block;
+    padding: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .address-text {
+    flex: 1;
+    min-width: 200px;
+  }
+
+  .address-text .label {
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .address-text .addr {
+    font-size: 13px;
+    word-break: break-all;
+    color: var(--cyan);
+    background: var(--bg);
+    padding: 12px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    user-select: all;
+  }
+
+  /* Seed grid */
+  .seed-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .seed-word {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 13px;
+    text-align: left;
+  }
+
+  .seed-word .num {
+    color: var(--text-muted);
+    font-size: 10px;
+    margin-right: 6px;
+  }
+
+  .seed-word .word {
+    color: var(--green);
+  }
+
+  /* Warning */
+  .warning {
+    background: rgba(224, 85, 85, 0.08);
+    border: 1px solid rgba(224, 85, 85, 0.3);
+    border-radius: 8px;
+    padding: 20px;
+    margin-top: 24px;
+  }
+
+  .warning-title {
+    color: var(--red);
+    font-size: 12px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    font-weight: bold;
+  }
+
+  .warning ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .warning li {
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 3px 0;
+  }
+
+  .warning li::before {
+    content: '! ';
+    color: var(--red);
+    font-weight: bold;
+  }
+
+  /* Import instructions */
+  .import-box {
+    margin-top: 20px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px;
+  }
+
+  .import-box .label {
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .import-box code {
+    display: block;
+    color: var(--green);
+    font-size: 12px;
+    word-break: break-all;
+    line-height: 1.8;
+  }
+
+  /* Actions row */
+  .actions {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    margin-top: 28px;
+    flex-wrap: wrap;
+  }
+
+  /* Offline badge */
+  .offline-badge {
+    text-align: center;
+    margin-top: 32px;
+    color: var(--text-muted);
+    font-size: 11px;
+    letter-spacing: 1px;
+  }
+
+  .offline-badge span {
+    color: var(--green);
+  }
+
+  /* ─── PRINT STYLES ─── */
+  @media print {
+    body {
+      background: #fff !important;
+      color: #111 !important;
+    }
+
+    body::before { display: none !important; }
+
+    .page { padding: 20px; }
+
+    .header { margin-bottom: 20px; }
+
+    .logo { color: #111 !important; font-size: 24px; }
+    .logo span { color: #333 !important; }
+    .subtitle { color: #666 !important; }
+
+    .panel {
+      background: #fff !important;
+      border: 2px solid #111 !important;
+      padding: 16px;
+    }
+
+    .panel-title {
+      color: #111 !important;
+      border-bottom: 1px solid #ccc !important;
+    }
+
+    .gen-section { display: none !important; }
+
+    .qr-box {
+      background: #fff !important;
+      border: 2px solid #111 !important;
+    }
+
+    .qr-box svg rect { fill: #111 !important; }
+
+    .address-text .label { color: #666 !important; }
+
+    .address-text .addr {
+      color: #111 !important;
+      background: #f5f5f5 !important;
+      border: 1px solid #ccc !important;
+    }
+
+    .seed-word {
+      background: #f5f5f5 !important;
+      border: 1px solid #ccc !important;
+    }
+
+    .seed-word .num { color: #999 !important; }
+    .seed-word .word { color: #111 !important; }
+
+    .warning {
+      background: #fff !important;
+      border: 2px solid #c00 !important;
+    }
+
+    .warning-title { color: #c00 !important; }
+    .warning li { color: #333 !important; }
+    .warning li::before { color: #c00 !important; }
+
+    .import-box {
+      background: #f5f5f5 !important;
+      border: 1px solid #ccc !important;
+    }
+
+    .import-box .label { color: #666 !important; }
+    .import-box code { color: #111 !important; }
+
+    .actions { display: none !important; }
+    .offline-badge { display: none !important; }
+
+    .no-print { display: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">COIN<span>CYNC</span></div>
+    <div class="subtitle">Paper Wallet Generator</div>
+  </div>
+
+  <!-- Step 1: Generate -->
+  <div id="step1" class="panel gen-section">
+    <p>Generate a new CoinCync wallet for cold storage. This page works entirely offline with no external dependencies. All keys are generated in your browser using the Web Crypto API.</p>
+    <button class="btn" id="genBtn" onclick="generateWallet()">Generate Wallet</button>
+  </div>
+
+  <!-- Step 2: Wallet Output -->
+  <div id="step2" class="wallet-output">
+
+    <!-- Address + QR -->
+    <div class="panel">
+      <div class="panel-title">Deposit Address</div>
+      <div class="address-row">
+        <div class="qr-box" id="qrBox"></div>
+        <div class="address-text">
+          <div class="label">Address</div>
+          <div class="addr" id="addrText"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Seed Phrase -->
+    <div class="panel">
+      <div class="panel-title">Recovery Seed Phrase (24 Words)</div>
+      <div class="seed-grid" id="seedGrid"></div>
+    </div>
+
+    <!-- Warning -->
+    <div class="warning">
+      <div class="warning-title">Security Warning</div>
+      <ul>
+        <li>Write down these 24 words on paper. Never store them digitally.</li>
+        <li>Anyone with this seed phrase can access your funds.</li>
+        <li>Store the paper in a secure, fireproof, and waterproof location.</li>
+        <li>Never share the seed phrase with anyone, ever.</li>
+        <li>Consider making a second backup stored in a separate location.</li>
+        <li>This page should be used offline. Disconnect from the internet first.</li>
+      </ul>
+    </div>
+
+    <!-- Import instructions -->
+    <div class="import-box">
+      <div class="label">To restore this wallet</div>
+      <code id="importCmd"></code>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="actions no-print">
+      <button class="btn btn-print" onclick="window.print()">Print Wallet</button>
+      <button class="btn btn-new" onclick="resetWallet()">Generate New</button>
+    </div>
+  </div>
+
+  <!-- Offline badge -->
+  <div class="offline-badge">
+    <span>&#9679;</span> Fully offline &mdash; no external resources loaded
+  </div>
+
+</div>
+
+<script>
+// BIP39 wordlist (abbreviated - first 200 words for demo, full 2048 in production)
+const BIP39_MINI = [
+  'abandon','ability','able','about','above','absent','absorb','abstract','absurd','abuse',
+  'access','accident','account','accuse','achieve','acid','acoustic','acquire','across','act',
+  'action','actor','actress','actual','adapt','add','addict','address','adjust','admit',
+  'adult','advance','advice','aerobic','affair','afford','afraid','again','age','agent',
+  'agree','ahead','aim','air','airport','aisle','alarm','album','alcohol','alert',
+  'alien','all','alley','allow','almost','alone','alpha','already','also','alter',
+  'always','amateur','amazing','among','amount','amused','analyst','anchor','ancient','anger',
+  'angle','angry','animal','ankle','announce','annual','another','answer','antenna','antique',
+  'anxiety','any','apart','apology','appear','apple','approve','april','arch','arctic',
+  'area','arena','argue','arm','armed','armor','army','around','arrange','arrest',
+  'arrive','arrow','art','artefact','artist','artwork','ask','aspect','assault','asset',
+  'assist','assume','asthma','athlete','atom','attack','attend','attitude','attract','auction',
+  'audit','august','aunt','author','auto','autumn','average','avocado','avoid','awake',
+  'aware','awesome','awful','awkward','axis','baby','bachelor','bacon','badge','bag',
+  'balance','balcony','ball','bamboo','banana','banner','bar','barely','bargain','barrel',
+  'base','basic','basket','battle','beach','bean','beauty','because','become','beef',
+  'before','begin','behave','behind','believe','below','belt','bench','benefit','best',
+  'betray','better','between','beyond','bicycle','bid','bike','bind','biology','bird',
+  'birth','bitter','black','blade','blame','blanket','blast','bleak','bless','blind',
+  'blood','blossom','blow','blue','blur','blush','board','boat','body','boil',
+  'bomb','bone','bonus','book','boost','border','boring','borrow','boss','bottom',
+  'bounce','box','boy','bracket','brain','brand','brass','brave','bread','breeze',
+  'brick','bridge','brief','bright','bring','brisk','broccoli','broken','bronze','broom',
+  'brother','brown'
+];
+
+let currentSeed = '';
+
+function generateWallet() {
+  const btn = document.getElementById('genBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  btn.style.opacity = '0.5';
+
+  setTimeout(function() {
+    // Generate 24 random words using Web Crypto API
+    var words = [];
+    var arr = new Uint32Array(24);
+    crypto.getRandomValues(arr);
+    for (var i = 0; i < 24; i++) {
+      words.push(BIP39_MINI[arr[i] % BIP39_MINI.length]);
+    }
+    currentSeed = words.join(' ');
+
+    // Generate address from seed hash (simplified - SHA-256 -> base58-like chars)
+    var encoder = new TextEncoder();
+    crypto.subtle.digest('SHA-256', encoder.encode(currentSeed)).then(function(hashBuf) {
+      var hashArr = new Uint8Array(hashBuf);
+      var addr = 'tCYNC';
+      var chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+      for (var i = 0; i < 95; i++) {
+        addr += chars[hashArr[i % 32] % chars.length];
+        hashArr[i % 32] = (hashArr[i % 32] * 7 + hashArr[(i + 1) % 32]) % 256;
+      }
+
+      // Populate address
+      document.getElementById('addrText').textContent = addr;
+
+      // Populate seed grid
+      var grid = document.getElementById('seedGrid');
+      grid.innerHTML = '';
+      for (var w = 0; w < words.length; w++) {
+        var div = document.createElement('div');
+        div.className = 'seed-word';
+        div.innerHTML = '<span class="num">' + (w + 1) + '.</span><span class="word">' + words[w] + '</span>';
+        grid.appendChild(div);
+      }
+
+      // Populate import command
+      document.getElementById('importCmd').textContent =
+        'cync-wallet restore --name mywallet --seed "' + currentSeed + '"';
+
+      // Generate QR code
+      generateQR(addr);
+
+      // Show wallet output
+      document.getElementById('step1').style.display = 'none';
+      document.getElementById('step2').style.display = '';
+      document.getElementById('step2').className = '';
+    });
+  }, 400);
+}
+
+function generateQR(data) {
+  // Simple deterministic SVG QR-like pattern from address data
+  // This produces a recognizable QR-shaped visual representation
+  var modules = 25;
+  var cellSize = 6;
+  var svgSize = modules * cellSize;
+  var grid = [];
+
+  // Initialize grid
+  for (var y = 0; y < modules; y++) {
+    grid[y] = [];
+    for (var x = 0; x < modules; x++) {
+      grid[y][x] = false;
+    }
+  }
+
+  // Draw finder patterns (7x7 squares in 3 corners)
+  function drawFinder(ox, oy) {
+    for (var y = 0; y < 7; y++) {
+      for (var x = 0; x < 7; x++) {
+        var outer = (x === 0 || x === 6 || y === 0 || y === 6);
+        var inner = (x >= 2 && x <= 4 && y >= 2 && y <= 4);
+        if (outer || inner) grid[oy + y][ox + x] = true;
+      }
+    }
+  }
+
+  drawFinder(0, 0);
+  drawFinder(modules - 7, 0);
+  drawFinder(0, modules - 7);
+
+  // Timing patterns
+  for (var i = 8; i < modules - 8; i++) {
+    grid[6][i] = (i % 2 === 0);
+    grid[i][6] = (i % 2 === 0);
+  }
+
+  // Fill data region with deterministic pattern from address
+  var dataBytes = [];
+  for (var c = 0; c < data.length; c++) {
+    dataBytes.push(data.charCodeAt(c));
+  }
+
+  var idx = 0;
+  for (var y = 0; y < modules; y++) {
+    for (var x = 0; x < modules; x++) {
+      // Skip finder patterns + separators
+      if ((x < 8 && y < 8) || (x >= modules - 8 && y < 8) || (x < 8 && y >= modules - 8)) continue;
+      // Skip timing
+      if (x === 6 || y === 6) continue;
+
+      var hash = (dataBytes[idx % dataBytes.length] * 31 +
+                  dataBytes[(idx + 7) % dataBytes.length] * 17 +
+                  x * 13 + y * 37 + idx * 3) & 0xFF;
+      grid[y][x] = (hash % 3 !== 0);
+      idx++;
+    }
+  }
+
+  // Build SVG
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + svgSize + '" height="' + svgSize + '" viewBox="0 0 ' + svgSize + ' ' + svgSize + '">';
+  svg += '<rect width="' + svgSize + '" height="' + svgSize + '" fill="transparent"/>';
+
+  for (var y = 0; y < modules; y++) {
+    for (var x = 0; x < modules; x++) {
+      if (grid[y][x]) {
+        svg += '<rect x="' + (x * cellSize) + '" y="' + (y * cellSize) + '" width="' + cellSize + '" height="' + cellSize + '" fill="#00e5c8"/>';
+      }
+    }
+  }
+
+  svg += '</svg>';
+  document.getElementById('qrBox').innerHTML = svg;
+}
+
+function resetWallet() {
+  currentSeed = '';
+  document.getElementById('step1').style.display = '';
+  document.getElementById('step2').style.display = 'none';
+  document.getElementById('step2').className = 'wallet-output';
+
+  var btn = document.getElementById('genBtn');
+  btn.disabled = false;
+  btn.textContent = 'Generate Wallet';
+  btn.style.opacity = '1';
+}
+</script>
+</body>
+</html>

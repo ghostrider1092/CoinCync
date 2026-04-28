@@ -1,0 +1,296 @@
+[workspace]
+members  = [".", "crates/bridge"]
+# orchard-side removed: depends on yanked orchard v0.12 (Phase 2/3)
+exclude  = ["coincync-wallet/src-tauri"]
+resolver = "2"
+
+[package]
+name         = "coincync"
+version      = "1.0.0"
+edition      = "2021"
+rust-version = "1.75"
+authors      = ["CoinCync 1.0 Contributors"]
+description  = "CoinCync — a compliant privacy cryptocurrency with CPU-only proof of work"
+license      = "MIT"
+
+[lib]
+name = "coincync"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coincync-node"
+path = "src/bin/node.rs"
+
+[[bin]]
+name = "coincync-wallet"
+path = "src/bin/wallet.rs"
+
+[[bin]]
+name = "coincync-miner"
+path = "src/bin/miner.rs"
+
+[[bin]]
+name = "coincync-tui-miner"
+path = "src/bin/tui_miner.rs"
+
+[[bin]]
+name = "coincync-tui-operator"
+path = "src/bin/tui_operator.rs"
+
+[[bin]]
+# Utility for refreshing `critical_files.lock` after an intentional change
+# to a consensus-critical file. See src/bin/update_critical_hashes.rs.
+name = "update-critical-hashes"
+path = "src/bin/update_critical_hashes.rs"
+
+[features]
+default = ["randomx"]
+testnet = ["randomx"]
+mainnet = ["randomx"]
+randomx = ["randomx-rs"]
+metrics = []
+# Test/diagnostic knobs. Opt-in, off by default.
+test-vdf        = []
+test-utilities  = []
+# Future consensus knob (demand-responsive emission). Gated off until activation.
+demand-responsive = []
+# Phase 2 modules (Halo2 circuit stubs, etc.). Off by default.
+phase2 = []
+# Experimental IronConsensus engine — fork recovery + peer reputation.
+# Not wired up yet; enable only after completing IronEngine::spawn().
+iron-consensus = []
+
+[dependencies]
+# ── Elliptic curves ───────────────────────────────────────────
+curve25519-dalek    = { version = "4", features = ["serde", "rand_core"] }
+ed25519-dalek       = { version = "2", features = ["serde", "rand_core"] }
+x25519-dalek        = { version = "2", features = ["serde", "static_secrets"] }
+
+# ── Range proofs ──────────────────────────────────────────────
+tari_bulletproofs_plus = "0.4"
+merlin                 = "3"
+
+# ── Hashing ──────────────────────────────────────────────────
+blake3 = "1"
+sha3   = "0.10"
+sha2   = "0.10"
+hmac   = "0.12"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+
+# ── RNG ──────────────────────────────────────────────────────
+rand        = "0.8"
+rand_chacha = "0.3"
+rand_core   = "0.6"
+rand_distr  = "0.4"
+getrandom   = { version = "0.2", features = ["std"] }
+
+# ── Serialization ────────────────────────────────────────────
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+borsh      = { version = "1", features = ["derive"] }
+hex        = "0.4"
+base64     = "0.21"
+bs58       = "0.5"
+
+# ── Async runtime ────────────────────────────────────────────
+tokio       = { version = "1", features = ["full", "signal"] }
+tokio-util  = { version = "0.7", features = ["codec"] }
+futures     = "0.3"
+async-trait = "0.1"
+rayon       = "1.8"
+crossbeam-channel = "0.5"
+flume       = "0.11"
+
+# ── JSON-RPC + HTTP ──────────────────────────────────────────
+jsonrpsee  = { version = "0.24", features = ["server", "client", "macros"] }
+http       = "1"
+tower      = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "validate-request"] }
+http-body-util = "0.1"
+bytes      = "1"
+hyper      = { version = "1", features = ["full"] }
+axum       = { version = "0.7", features = ["ws"] }
+reqwest    = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# ── Networking ───────────────────────────────────────────────
+hickory-resolver = "0.25"
+socket2            = "0.5"
+igd                = { version = "0.12", features = ["aio"] }
+tokio-socks        = "0.5"
+snow               = "0.9"
+
+# ── TLS ──────────────────────────────────────────────────────
+rustls               = "0.23"
+tokio-rustls         = "0.26"
+pem                  = "3"
+rustls-native-certs  = "0.8"
+rcgen                = "0.13"
+
+# ── Storage ──────────────────────────────────────────────────
+# Migrated to RocksDB via the db::shim layer — see src/db/shim.rs.
+rocksdb  = { version = "0.22", features = ["multi-threaded-cf", "lz4"] }
+bech32   = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+redb     = "2"
+
+# ── Security ─────────────────────────────────────────────────
+zeroize          = { version = "1", features = ["derive"] }
+subtle           = "2"
+secrecy          = { version = "0.8", features = ["serde"] }
+chacha20poly1305 = "0.10"
+argon2           = "0.5"
+
+# ── RandomX PoW ──────────────────────────────────────────────
+randomx-rs = { version = "1", optional = true }
+
+# ── FROST threshold signatures (multi-sig) ───────────────────
+frost-ed25519 = "3"
+frost-core = "3"
+
+# ── BIP39/BIP32 ──────────────────────────────────────────────
+bip39        = "2"
+
+# ── Big int ──────────────────────────────────────────────────
+primitive-types = "0.12"
+uint            = "0.9"
+
+# ── Merkle ───────────────────────────────────────────────────
+rs_merkle = "1"
+
+# ── Utilities ────────────────────────────────────────────────
+thiserror  = "1"
+anyhow     = "1"
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender   = "0.2"
+chrono     = { version = "0.4", features = ["serde"] }
+clap       = { version = "4", features = ["derive", "env"] }
+dirs-next  = "2.0"
+directories = "5"
+parking_lot = "0.12"
+dashmap    = "5"
+num_cpus   = "1"
+byteorder  = "1"
+once_cell  = "1"
+uuid       = { version = "1", features = ["v4", "serde"] }
+url        = "2.5"
+urlencoding = "2.1"
+tokio-retry = "0.3"
+ordered-float = "4"
+
+# ── CLI ──────────────────────────────────────────────────────
+colored   = "2"
+indicatif = { version = "0.18", features = ["tokio"] }
+dialoguer = { version = "0.11", features = ["password"], optional = true }
+console   = "0.15"
+rustyline = "13"
+strsim    = "0.11"
+
+# ── Terminal UI (tui_miner, tui_operator) ─────────────────────
+ratatui   = "0.30"
+crossterm = "0.27"
+
+# ── Config ───────────────────────────────────────────────────
+config    = "0.14"
+toml      = "0.8"
+figment   = "0.10"
+dotenvy   = "0.15"
+
+# ── RPC extras ───────────────────────────────────────────────
+utoipa             = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui  = { version = "9", features = ["axum"] }
+jsonwebtoken       = "9"
+governor           = "0.6"
+tokio-tungstenite  = "0.21"
+
+# ── Misc ─────────────────────────────────────────────────────
+qrcode     = "0.14"
+image      = { version = "0.25", default-features = false, features = ["png"] }
+hashlink   = "0.9"
+bloomfilter = "1"
+prometheus  = "0.14"
+
+# ── ZK / Halo2 (Phase 2) ─────────────────────────────────────
+# The `orchard` crate lives in its own workspace member at
+# crates/orchard-side/ — it is deliberately NOT in this crate's
+# dep graph. See crates/bridge/ for the byte-level interface and
+# memory/project_cync1_orchard_tari_conflict.md for the background.
+halo2_proofs          = "0.3"
+halo2_gadgets         = "0.3"
+incrementalmerkletree = "0.5"
+bridgetree            = "0.4"
+pasta_curves          = "0.5"
+blake2b_simd          = "1.0"
+ff                    = "0.13"
+group                 = "0.13"
+
+# Bridge crate — bytes-only cross-stack boundary types.
+bridge                = { path = "crates/bridge" }
+
+[dev-dependencies]
+criterion         = "0.5"
+proptest          = "1"
+tempfile          = "3"
+tokio-test        = "0.4"
+test-log          = "0.2"
+quickcheck        = "1"
+quickcheck_macros = "1"
+mockall           = "0.13"
+test-case         = "3"
+# Self-dep with `test-utilities` feature enabled so integration tests in
+# `tests/*.rs` can use `Mempool::add_skip_crypto` and similar cfg-gated
+# test-only helpers. This is the standard Rust pattern for exposing
+# `#[cfg(any(test, feature = "test-utilities"))]` APIs to the
+# integration-test crate.
+coincync = { path = ".", features = ["test-utilities"] }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
+strip         = true
+
+[profile.dev]
+opt-level = 1
+debug     = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[lints.rust]
+unsafe_code  = "allow"
+missing_docs = "allow"
+
+[lints.clippy]
+# Three-tier priority hierarchy:
+#
+#   priority = -2  — broadest catch-all groups (all / pedantic / nursery)
+#   priority = -1  — specific groups we want to enforce (correctness, suspicious)
+#   priority =  0  — individual lint overrides (unwrap_used, expect_used)
+#
+# Why three tiers and not two:
+#
+# Cargo's `clippy::lint_groups_priority` check rejects a config where a
+# lint group and an individual lint that belongs to the same group sit at
+# the same numeric priority, because the outcome would depend on file
+# ordering (which Cargo explicitly ignores). So `correctness = "warn"`
+# and `unwrap_used = "allow"` (which IS a correctness lint) can't both
+# live at priority 0. Pushing `correctness` down to -1 resolves it:
+# `unwrap_used` at priority 0 still wins, so wallet/crypto code can keep
+# using `.unwrap()` in `#[cfg(test)]` blocks and the handful of places
+# where panic is the right behavior, while EVERY OTHER correctness lint
+# fires as a warning on every build. Same story for `suspicious`.
+#
+# The broadest groups then move to priority -2 so `correctness = "warn"`
+# at -1 still wins against them. Without this, `all = "allow"` at -1
+# would tie with `correctness = "warn"` at -1 and we'd be back to
+# file-ordering roulette.
+
+all          = { level = "allow", priority = -2 }
+pedantic     = { level = "allow", priority = -2 }
+nursery      = { level = "allow", priority = -2 }
+correctness  = { level = "warn",  priority = -1 }
+suspicious   = { level = "warn",  priority = -1 }
+unwrap_used  = "allow"
+expect_used  = "allow"

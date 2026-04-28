@@ -1,0 +1,19 @@
+name: Community bootstrap check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dig
+        run: sudo apt-get update && sudo apt-get install -y dnsutils netcat-openbsd
+
+      - name: Verify DNS seeds + P2P reachability
+        run: bash deploy/ops/verify-community-bootstrap.sh

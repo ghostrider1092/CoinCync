@@ -1,0 +1,125 @@
+# ── Build artifacts ─────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+# Cargo.lock — COMMITTED for reproducible builds (binary project, not library)
+# See: https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control
+
+# ── Editor / IDE / tooling state ────────────────────────────────────
+.idea/
+.vscode/
+.claude/
+*.swp
+.DS_Store
+
+# ── Local-only cargo config (may hold machine-specific target-dir
+#    overrides, env vars, or private registry creds) ────────────────
+.cargo/config.toml
+
+# ── Runtime data and logs ───────────────────────────────────────────
+/data/
+/node_data/
+/db/
+*.log
+nul
+
+# ── Agent / automation artifacts ────────────────────────────────────
+agents/
+
+# ── Keys and secrets (never commit) ─────────────────────────────────
+# Node identity private keys (ed25519, 32-byte secret + 32-byte public).
+# Belong in the node's data dir, not in the source tree.
+node_key
+**/node_key
+*.key
+*.pem
+*.p12
+*.pfx
+*.seed
+*.mnemonic
+
+# Wallet state and datafiles — contain spend keys and history.
+wallet.dat
+wallet*.db
+wallet*.json
+*.wallet
+
+# Credential files that sometimes sneak in from ad-hoc local config.
+.env
+.env.*
+credentials.json
+secrets.json
+discord_webhooks.json
+
+# Testnet operator helper: one-line COINCYNC_RPC_API_KEY for scripts/lib RPC curl (see fetch_testnet_rpc_key.sh).
+scripts/.coincync_testnet_rpc_key
+scripts/fetch_testnet_rpc_key.sh
+scripts/lib/coincync_rpc_auth.sh
+scripts/setup_atl_miner.sh
+scripts/discord_*.py
+scripts/deploy.sh
+scripts/deploy_all.sh
+scripts/fix_systemd.sh
+scripts/recover_stale_nodes.sh
+scripts/check_nodes.sh
+scripts/daily-health-check.sh
+scripts/wipe_and_restart.sh
+scripts/wipe_chain.sh
+
+# Atomic-swap ceremony artifacts (from coincync 2.0 era, some contain
+# the private half of a swap — `*_SECRET.json` pattern).
+swap_*.json
+swap_*_SECRET.json
+
+# ── CoinCync wallet (Preact/Vite + Tauri) — never commit deps / builds ──
+coincync-wallet/node_modules/
+coincync-wallet/dist/
+coincync-wallet/.vite/
+coincync-wallet/src-tauri/target/
+
+# ── mdBook output (generated; deploy from CI or local mdbook build) ──
+docs/book/
+docs/pages/
+docs/node_key
+docs/*_REPORT.md
+docs/BEST_PRACTICES_BY_FILE.md
+docs/BLOCKCHAIN_FEATURE_BEST_PRACTICES.md
+docs/HARDENING_ROADMAP.md
+docs/AGGRESSIVE_TESTING.md
+
+# ── Cursor / local IDE (not part of the protocol) ──
+.cursor/
+
+# ── Local binary drops (ship via GitHub Releases, not git blobs) ──
+*.tar.gz
+*.tgz
+*.zip
+# Prebuilt Linux/macOS binaries under release/ (checksums + README only in git)
+release/**/coincync-node-*
+release/**/coincync-miner-*
+release/**/coincync-wallet-*
+release/**/coincync-tui-miner-*
+release/**/coincync-tui-operator-*
+release/**/SHA256SUMS.txt
+
+# ── Internal ops-only scripts (private infra; keep only public helpers) ──
+deploy/ops/coincync-miner-watchdog.*
+deploy/ops/fix-node-port-conflict.sh
+deploy/ops/miner-deep-log-check.sh
+deploy/ops/miner-liveness-check.sh
+deploy/ops/miner-log-check.sh
+deploy/ops/node-info-check.sh
+deploy/ops/read-diag.sh
+deploy/ops/template-check.sh
+
+# ── Local scratch / operator dumps (do not publish) ──
+/Screenshot*.png
+/backups/
+/logs/
+/tmp-deploy-fix/
+/tmp-testnet-snapshot/
+/fuzz/target/

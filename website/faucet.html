@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoinCync Faucet — Free Testnet Coins</title>
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<meta name="description" content="Get free CoinCync testnet coins. Paste your tCYNC address and receive 10 CYNC instantly.">
+<link rel="stylesheet" href="/assets/fonts/fonts.css">
+<style>
+:root{--bg:#0a0a09;--s1:#111110;--s2:#181816;--s3:#1e1e1b;--b:#25241f;--b2:#34332c;--t:#f5f0e8;--t2:#b8b4ac;--t3:#8a857d;--t4:#5d5953;--ac:#d4a059;--ac2:#e8b86d;--ac-dim:#4a3a1f;--green:#7eb87c;--red:#c45c4f;--display:'Fraunces',Georgia,serif;--body:'IBM Plex Sans',system-ui,sans-serif;--mono:'JetBrains Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--t);font-family:var(--body);font-weight:300;line-height:1.6;-webkit-font-smoothing:antialiased;min-height:100vh;display:flex;flex-direction:column}
+::selection{background:rgba(212,160,89,.25);color:var(--t)}
+a{color:var(--ac);text-decoration:none}
+a:hover{color:var(--ac2)}
+a:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+
+/* NAV */
+nav{background:rgba(10,10,9,.85);backdrop-filter:blur(20px);border-bottom:1px solid rgba(37,36,31,.5);padding:0 48px;height:64px;display:flex;align-items:center;justify-content:space-between}
+.nav-logo{font-family:var(--display);font-size:20px;font-weight:400;color:var(--t);text-decoration:none;letter-spacing:-.02em}
+.nav-logo em{color:var(--ac);font-style:italic;font-weight:500}
+.nav-links{display:flex;gap:32px;align-items:center}
+.nav-links a{font-size:13px;color:var(--t3);text-decoration:none;font-weight:400;transition:color .15s;letter-spacing:.02em}
+.nav-links a:hover{color:var(--ac)}
+
+/* MAIN */
+.faucet-page{flex:1;display:flex;align-items:center;justify-content:center;padding:32px}
+.faucet-card{width:100%;max-width:560px}
+
+.faucet-header{text-align:center;margin-bottom:40px}
+.faucet-header h1{font-family:var(--display);font-size:42px;font-weight:400;letter-spacing:-.03em;margin-bottom:8px}
+.faucet-header h1 em{color:var(--ac);font-style:italic}
+.faucet-header p{color:var(--t3);font-size:14px}
+
+/* DRIP ICON */
+.drip-icon{width:64px;height:64px;margin:0 auto 24px;border-radius:50%;background:linear-gradient(135deg,var(--ac-dim),rgba(212,160,89,.15));display:flex;align-items:center;justify-content:center;border:1px solid var(--ac-dim)}
+.drip-icon svg{width:28px;height:28px;fill:var(--ac)}
+
+/* FORM */
+.faucet-form{background:var(--s1);border:1px solid var(--b);border-radius:12px;padding:32px;margin-bottom:24px}
+.form-label{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;display:block}
+.form-input{width:100%;background:var(--bg);border:1px solid var(--b);border-radius:8px;padding:14px 16px;font-family:var(--mono);font-size:13px;color:var(--t);outline:none;transition:border-color .15s}
+.form-input::placeholder{color:var(--t4)}
+.form-input:focus{border-color:var(--ac)}
+.form-btn{width:100%;margin-top:20px;padding:14px;background:linear-gradient(135deg,var(--ac),var(--ac2));color:var(--bg);font-size:14px;font-weight:700;font-family:var(--body);border:none;border-radius:8px;cursor:pointer;transition:opacity .15s;letter-spacing:.02em}
+.form-btn:hover{opacity:.9}
+.form-btn:disabled{opacity:.5;cursor:wait}
+
+/* RESULT */
+.result{margin-top:16px;padding:14px 16px;border-radius:8px;font-size:13px;font-family:var(--mono);display:none;word-break:break-all}
+.result.success{background:rgba(126,184,124,.08);border:1px solid rgba(126,184,124,.2);color:var(--green);display:block}
+.result.error{background:rgba(196,92,79,.08);border:1px solid rgba(196,92,79,.2);color:var(--red);display:block}
+.result.loading{background:rgba(212,160,89,.06);border:1px solid var(--ac-dim);color:var(--ac);display:block}
+
+/* INFO */
+.faucet-info{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--b);border-radius:10px;overflow:hidden;margin-bottom:24px}
+.info-cell{background:var(--s1);padding:16px;text-align:center}
+.info-val{font-family:var(--mono);font-size:18px;font-weight:700;color:var(--ac2)}
+.info-label{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;margin-top:4px}
+
+/* RULES */
+.faucet-rules{background:var(--s1);border:1px solid var(--b);border-radius:10px;padding:20px 24px}
+.faucet-rules h3{font-family:var(--display);font-size:16px;font-weight:400;color:var(--t2);margin-bottom:12px}
+.rule{display:flex;align-items:flex-start;gap:10px;margin-bottom:8px;font-size:12px;color:var(--t3)}
+.rule-dot{width:6px;height:6px;border-radius:50%;background:var(--ac-dim);margin-top:6px;flex-shrink:0}
+
+/* FOOTER */
+.faucet-footer{text-align:center;padding:24px;font-size:11px;color:var(--t4);border-top:1px solid var(--b)}
+
+/* MOBILE */
+@media(max-width:640px){
+    nav{padding:0 20px}
+    .faucet-card{padding:0 8px}
+    .faucet-header h1{font-size:32px}
+    .faucet-form{padding:20px}
+    .faucet-info{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<nav>
+    <a href="/" class="nav-logo">Coin<em>Cync</em></a>
+    <div class="nav-links">
+        <a href="/">Home</a>
+        <a href="https://explorer.coincync.network">Explorer</a>
+        <a href="/brand.html">Brand</a>
+    </div>
+</nav>
+
+<main class="faucet-page">
+<div class="faucet-card">
+
+    <div class="drip-icon">
+        <svg viewBox="0 0 24 24"><path d="M12 2c0 0-8 9.27-8 14a8 8 0 0 0 16 0c0-4.73-8-14-8-14zm0 20a6 6 0 0 1-6-6c0-3.7 6-10.8 6-10.8s6 7.1 6 10.8a6 6 0 0 1-6 6z"/><circle cx="12" cy="16" r="2" opacity=".6"/></svg>
+    </div>
+
+    <div class="faucet-header">
+        <h1>Testnet <em>Faucet</em></h1>
+        <p>Get 10 CYNC to start testing. Free, instant, private.</p>
+    </div>
+
+    <div class="faucet-info">
+        <div class="info-cell">
+            <div class="info-val">10</div>
+            <div class="info-label">CYNC per drip</div>
+        </div>
+        <div class="info-cell">
+            <div class="info-val" id="total-sent">0</div>
+            <div class="info-label">Total sent</div>
+        </div>
+        <div class="info-cell">
+            <div class="info-val" id="chain-height">—</div>
+            <div class="info-label">Chain height</div>
+        </div>
+    </div>
+
+    <div class="faucet-form">
+        <label class="form-label" for="addr">Your testnet address</label>
+        <input id="addr" class="form-input" type="text" placeholder="tCYNC3Z..." autocomplete="off" spellcheck="false">
+        <button id="claim-btn" class="form-btn" onclick="claim()">Request 10 CYNC</button>
+        <div id="result" class="result"></div>
+    </div>
+
+    <div class="faucet-rules">
+        <h3>Rules</h3>
+        <div class="rule"><div class="rule-dot"></div>One claim per address per hour</div>
+        <div class="rule"><div class="rule-dot"></div>One claim per IP per 30 minutes</div>
+        <div class="rule"><div class="rule-dot"></div>Testnet coins have zero monetary value</div>
+        <div class="rule"><div class="rule-dot"></div>Transactions are fully private (ring-11, stealth, Bulletproofs+)</div>
+        <div class="rule"><div class="rule-dot"></div>Need a wallet? <a href="/docs/pages/GETTING_STARTED.html">Get started here</a></div>
+    </div>
+
+</div>
+</main>
+
+<footer class="faucet-footer">
+    CoinCync Testnet — coins have no real value · <a href="https://explorer.coincync.network">Explorer</a> · <a href="/">Home</a>
+</footer>
+
+<script>
+const FAUCET_API = '/api/faucet';
+const RPC_API = '/api/';
+
+async function claim() {
+    const addr = document.getElementById('addr').value.trim();
+    const btn = document.getElementById('claim-btn');
+    const res = document.getElementById('result');
+
+    if (!addr.startsWith('tCYNC') || addr.length < 60) {
+        res.className = 'result error';
+        res.textContent = 'Enter a valid tCYNC address (from your wallet)';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    res.className = 'result loading';
+    res.textContent = 'Building private transaction...';
+
+    try {
+        const r = await fetch(FAUCET_API, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({address: addr})
+        });
+        const d = await r.json();
+
+        if (d.success) {
+            res.className = 'result success';
+            res.innerHTML = `Sent 10 CYNC<br><span style="font-size:11px;opacity:.7">TX: ${d.tx_hash}</span>`;
+            loadStats();
+        } else {
+            res.className = 'result error';
+            res.textContent = d.error || 'Request failed';
+        }
+    } catch (e) {
+        res.className = 'result error';
+        res.textContent = 'Faucet offline — try again later';
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Request 10 CYNC';
+}
+
+async function loadStats() {
+    try {
+        // Chain height from explorer API
+        const r = await fetch(RPC_API, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({jsonrpc:'2.0',id:1,method:'get_info'})
+        });
+        const d = await r.json();
+        if (d.result) {
+            document.getElementById('chain-height').textContent = d.result.height.toLocaleString();
+        }
+    } catch(e) {}
+
+    try {
+        // Faucet stats
+        const r = await fetch(FAUCET_API);
+        const d = await r.json();
+        if (d.total_sent !== undefined) {
+            document.getElementById('total-sent').textContent = d.total_sent.toLocaleString();
+        }
+    } catch(e) {}
+}
+
+// Enter key submits
+document.getElementById('addr').addEventListener('keydown', e => {
+    if (e.key === 'Enter') claim();
+});
+
+loadStats();
+setInterval(loadStats, 30000);
+</script>
+</body>
+</html>

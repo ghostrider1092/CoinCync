@@ -1,0 +1,45 @@
+<svg viewBox="0 0 400 480" xmlns="http://www.w3.org/2000/svg">
+  <!-- CoinCync Mark — Construction Grid -->
+  <defs>
+    <style>
+      .grid-line { stroke: rgba(245,240,232,0.08); stroke-width: 0.5; }
+      .guide { stroke: rgba(245,240,232,0.12); stroke-width: 0.5; stroke-dasharray: 4 4; }
+      .label { font-family: 'JetBrains Mono', monospace; font-size: 14px; fill: #d4a059; }
+      .formula { font-family: 'Fraunces', Georgia, serif; font-style: italic; font-size: 18px; fill: #f5f0e8; }
+      .caption { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 12px; fill: rgba(245,240,232,0.5); }
+    </style>
+  </defs>
+
+  <!-- Grid lines -->
+  <line x1="200" y1="40" x2="200" y2="360" class="grid-line"/>
+  <line x1="40" y1="200" x2="360" y2="200" class="grid-line"/>
+  <line x1="87" y1="87" x2="313" y2="313" class="grid-line"/>
+  <line x1="313" y1="87" x2="87" y2="313" class="grid-line"/>
+
+  <!-- Inner construction circle -->
+  <circle cx="200" cy="200" r="80" fill="none" class="guide"/>
+
+  <!-- Main mark -->
+  <circle cx="200" cy="200" r="120" fill="none" stroke="#d4a059" stroke-width="14"/>
+  <path d="M 308 200 A 100 100 0 1 0 200 308" fill="none" stroke="#0a0a09" stroke-width="22"/>
+  <line x1="302" y1="200" x2="320" y2="200" stroke="#0a0a09" stroke-width="22"/>
+
+  <!-- Points -->
+  <circle cx="145" cy="200" r="10" fill="#d4a059"/>
+  <circle cx="255" cy="200" r="10" fill="#d4a059"/>
+
+  <!-- Point labels -->
+  <text x="130" y="240" class="label">rG</text>
+  <text x="245" y="240" class="label">vH</text>
+  <text x="310" y="195" class="label" font-size="12">C</text>
+
+  <!-- Caption box -->
+  <rect x="195" y="310" rx="4" ry="4" width="180" height="28" fill="rgba(245,240,232,0.9)" stroke="none"/>
+  <text x="205" y="329" font-family="'IBM Plex Sans', sans-serif" font-size="12" fill="#0a0a09">Construction grid for CoinCync mark</text>
+
+  <!-- Separator -->
+  <line x1="60" y1="400" x2="340" y2="400" stroke="rgba(245,240,232,0.1)" stroke-width="1"/>
+
+  <!-- Formula -->
+  <text x="200" y="445" text-anchor="middle" class="formula">C = r G + v H</text>
+</svg>

@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoinCync Vanity Address Generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0a0a0e;
+    --surface:   #0d1318;
+    --surface2:  #111820;
+    --border:    #1a2530;
+    --border2:   #243040;
+    --cyan:      #00e5c8;
+    --cyan-dim:  #00b89e;
+    --cyan-glow: rgba(0,229,200,0.12);
+    --gold:      #d4a23a;
+    --gold-dim:  #a07c28;
+    --red:       #e05555;
+    --green:     #3de097;
+    --text:      #c8d8e8;
+    --text-dim:  #5a7a90;
+    --text-muted:#2a3f52;
+    --mono: 'Space Mono', monospace;
+    --sans: 'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,229,200,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,229,200,0.025) 1px, transparent 1px);
+    background-size: 48px 48px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 32px 24px;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    margin-bottom: 40px;
+  }
+
+  .header h1 {
+    font-family: var(--sans);
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--cyan);
+    letter-spacing: -0.5px;
+    margin-bottom: 4px;
+  }
+
+  .header .subtitle {
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  /* Card */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    margin-bottom: 20px;
+  }
+
+  .card h2 {
+    font-family: var(--sans);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 16px;
+  }
+
+  /* Warning banner */
+  .warning {
+    background: rgba(212, 162, 58, 0.08);
+    border: 1px solid var(--gold-dim);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 24px;
+    font-size: 11px;
+    color: var(--gold);
+    line-height: 1.7;
+  }
+
+  .warning strong { color: var(--gold); }
+
+  /* Difficulty table */
+  .diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-size: 11px;
+  }
+
+  .diff-table th {
+    text-align: left;
+    color: var(--text-dim);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 400;
+  }
+
+  .diff-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  /* Input area */
+  .input-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .prefix-group {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .prefix-label {
+    padding: 0 12px;
+    color: var(--cyan);
+    font-size: 13px;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .prefix-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 12px 12px 12px 0;
+  }
+
+  .prefix-input::placeholder { color: var(--text-muted); }
+
+  .case-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 20px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .case-toggle input {
+    accent-color: var(--cyan);
+    width: 14px;
+    height: 14px;
+  }
+
+  /* Buttons */
+  .btn {
+    padding: 12px 28px;
+    border: none;
+    border-radius: 8px;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn-start {
+    background: var(--cyan);
+    color: var(--bg);
+  }
+
+  .btn-start:hover { background: #00ffd5; }
+  .btn-start:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-stop {
+    background: var(--red);
+    color: #fff;
+  }
+
+  .btn-stop:hover { background: #f06666; }
+
+  .btn-row {
+    display: flex;
+    gap: 10px;
+  }
+
+  /* Stats */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-top: 20px;
+  }
+
+  .stat-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    text-align: center;
+  }
+
+  .stat-box .label {
+    color: var(--text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+
+  .stat-box .value {
+    color: var(--cyan);
+    font-size: 18px;
+    font-weight: 700;
+    font-family: var(--sans);
+  }
+
+  /* Progress bar */
+  .progress-bar {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 16px;
+    overflow: hidden;
+  }
+
+  .progress-bar .fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--cyan), var(--cyan-dim));
+    width: 0%;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Result */
+  .result {
+    display: none;
+    margin-top: 24px;
+  }
+
+  .result.show { display: block; }
+
+  .result-label {
+    color: var(--text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+
+  .result-value {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    word-break: break-all;
+    font-size: 12px;
+    color: var(--text);
+    margin-bottom: 16px;
+    position: relative;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+
+  .result-value:hover { border-color: var(--cyan-dim); }
+
+  .result-value .match { color: var(--cyan); font-weight: 700; }
+
+  .result-value .copy-hint {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    font-size: 10px;
+  }
+
+  .seed-warning {
+    background: rgba(224, 85, 85, 0.08);
+    border: 1px solid rgba(224, 85, 85, 0.3);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 11px;
+    color: var(--red);
+    margin-bottom: 16px;
+  }
+
+  .seed-box {
+    background: var(--bg);
+    border: 1px solid var(--red);
+    border-radius: 8px;
+    padding: 14px 16px;
+    word-break: break-all;
+    font-size: 12px;
+    color: var(--gold);
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+
+  .seed-box:hover { border-color: var(--gold); }
+
+  .copied-toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(60px);
+    background: var(--cyan);
+    color: var(--bg);
+    padding: 10px 24px;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 12px;
+    opacity: 0;
+    transition: all 0.3s;
+    z-index: 1000;
+  }
+
+  .copied-toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  /* Workers indicator */
+  .workers-info {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-top: 8px;
+  }
+
+  /* Responsive */
+  @media (max-width: 600px) {
+    .page { padding: 20px 14px; }
+    .stats { grid-template-columns: 1fr; }
+    .input-row { flex-direction: column; }
+    .btn { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="header">
+    <h1>CoinCync Vanity Gen</h1>
+    <div class="subtitle">Brute-force a custom tCYNC address prefix</div>
+  </div>
+
+  <div class="warning">
+    <strong>Longer prefixes take exponentially longer.</strong>
+    Each additional character multiplies the average search time by ~58x.
+    The address charset is base58 (no 0, O, I, l), so not all characters are valid.
+    <table class="diff-table">
+      <tr><th>Prefix length</th><th>Avg. attempts</th><th>Est. time*</th></tr>
+      <tr><td>1 char</td><td>~58</td><td>&lt; 1 sec</td></tr>
+      <tr><td>2 chars</td><td>~3,364</td><td>~1 sec</td></tr>
+      <tr><td>3 chars</td><td>~195,112</td><td>~30 sec</td></tr>
+      <tr><td>4 chars</td><td>~11.3M</td><td>~30 min</td></tr>
+      <tr><td>5 chars</td><td>~656M</td><td>~30 hrs</td></tr>
+    </table>
+    <div style="margin-top:6px;font-size:10px;color:var(--text-muted)">* Estimates assume ~100k attempts/sec per thread. Actual speed depends on your hardware.</div>
+  </div>
+
+  <div class="card">
+    <h2>Enter desired prefix</h2>
+    <div class="input-row">
+      <div class="prefix-group">
+        <span class="prefix-label">tCYNC</span>
+        <input id="prefixInput" class="prefix-input" type="text" placeholder="your prefix here..." maxlength="8" spellcheck="false" autocomplete="off">
+      </div>
+    </div>
+    <label class="case-toggle">
+      <input type="checkbox" id="caseInsensitive" checked>
+      Case-insensitive matching
+    </label>
+    <div id="charError" style="display:none;color:var(--red);font-size:11px;margin-bottom:12px;"></div>
+    <div class="btn-row">
+      <button id="startBtn" class="btn btn-start" onclick="startSearch()">Start Generating</button>
+      <button id="stopBtn" class="btn btn-stop" onclick="stopSearch()" style="display:none">Stop</button>
+    </div>
+    <div class="progress-bar" id="progressBar" style="display:none">
+      <div class="fill" id="progressFill"></div>
+    </div>
+    <div class="workers-info" id="workersInfo" style="display:none"></div>
+
+    <div class="stats" id="statsPanel" style="display:none">
+      <div class="stat-box">
+        <div class="label">Attempts/sec</div>
+        <div class="value" id="statSpeed">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">Total attempts</div>
+        <div class="value" id="statTotal">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">Time elapsed</div>
+        <div class="value" id="statTime">0s</div>
+      </div>
+    </div>
+
+    <div class="result" id="resultPanel">
+      <div class="result-label">Matching address</div>
+      <div class="result-value" id="resultAddress" onclick="copyText(this, 'address')">
+        <span class="copy-hint">click to copy</span>
+      </div>
+      <div class="seed-warning">
+        Save this seed phrase somewhere safe. This is the ONLY way to access this wallet.
+        Do NOT share it with anyone.
+      </div>
+      <div class="result-label">Seed phrase (24 words)</div>
+      <div class="seed-box" id="resultSeed" onclick="copyText(this, 'seed')"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="copied-toast" id="toast">Copied!</div>
+
+<script>
+// ─── BIP39 WORDLIST (200 words, matching explorer) ───
+const BIP39_MINI = ['abandon','ability','able','about','above','absent','absorb','abstract','absurd','abuse','access','accident','account','accuse','achieve','acid','acoustic','acquire','across','act','action','actor','actress','actual','adapt','add','addict','address','adjust','admit','adult','advance','advice','aerobic','affair','afford','afraid','again','age','agent','agree','ahead','aim','air','airport','aisle','alarm','album','alcohol','alert','alien','all','alley','allow','almost','alone','alpha','already','also','alter','always','amateur','amazing','among','amount','amused','analyst','anchor','ancient','anger','angle','angry','animal','ankle','announce','annual','another','answer','antenna','antique','anxiety','any','apart','apology','appear','apple','approve','april','arch','arctic','area','arena','argue','arm','armed','armor','army','around','arrange','arrest','arrive','arrow','art','artefact','artist','artwork','ask','aspect','assault','asset','assist','assume','asthma','athlete','atom','attack','attend','attitude','attract','auction','audit','august','aunt','author','auto','autumn','average','avocado','avoid','awake','aware','awesome','awful','awkward','axis','baby','bachelor','bacon','badge','bag','balance','balcony','ball','bamboo','banana','banner','bar','barely','bargain','barrel','base','basic','basket','battle','beach','bean','beauty','because','become','beef','before','begin','behave','behind','believe','below','belt','bench','benefit','best','betray','better','between','beyond','bicycle','bid','bike','bind','biology','bird','birth','bitter','black','blade','blame','blanket','blast','bleak','bless','blind','blood','blossom','blow','blue','blur','blush','board','boat','body','boil','bomb','bone','bonus','book','boost','border','boring','borrow','boss','bottom','bounce','box','boy','bracket','brain','brand','brass','brave','bread','breeze','brick','bridge','brief','bright','bring','brisk','broccoli','broken','bronze','broom','brother','brown'];
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+let workers = [];
+let running = false;
+let startTime = 0;
+let totalAttempts = 0;
+let lastAttempts = 0;
+let lastSpeedTime = 0;
+let statsInterval = null;
+
+// Validate prefix characters against base58
+function validatePrefix(prefix) {
+  for (let i = 0; i < prefix.length; i++) {
+    if (BASE58.indexOf(prefix[i]) === -1) {
+      // Check case-insensitive: maybe the other case is in base58
+      const ci = document.getElementById('caseInsensitive').checked;
+      if (ci) {
+        const lower = prefix[i].toLowerCase();
+        const upper = prefix[i].toUpperCase();
+        if (BASE58.indexOf(lower) === -1 && BASE58.indexOf(upper) === -1) {
+          return `Character "${prefix[i]}" is not in the base58 alphabet (no 0, O, I, l).`;
+        }
+      } else {
+        return `Character "${prefix[i]}" is not in the base58 alphabet (no 0, O, I, l). Valid: ${BASE58}`;
+      }
+    }
+  }
+  return null;
+}
+
+function startSearch() {
+  const prefix = document.getElementById('prefixInput').value.trim();
+  const errorEl = document.getElementById('charError');
+
+  if (!prefix) {
+    errorEl.textContent = 'Please enter a prefix.';
+    errorEl.style.display = 'block';
+    return;
+  }
+
+  const err = validatePrefix(prefix);
+  if (err) {
+    errorEl.textContent = err;
+    errorEl.style.display = 'block';
+    return;
+  }
+
+  errorEl.style.display = 'none';
+
+  const caseInsensitive = document.getElementById('caseInsensitive').checked;
+  const numWorkers = Math.max(1, navigator.hardwareConcurrency || 4);
+
+  // UI state
+  running = true;
+  totalAttempts = 0;
+  lastAttempts = 0;
+  startTime = performance.now();
+  lastSpeedTime = startTime;
+
+  document.getElementById('startBtn').style.display = 'none';
+  document.getElementById('stopBtn').style.display = '';
+  document.getElementById('progressBar').style.display = '';
+  document.getElementById('statsPanel').style.display = '';
+  document.getElementById('resultPanel').classList.remove('show');
+  document.getElementById('workersInfo').style.display = '';
+  document.getElementById('workersInfo').textContent = `Running ${numWorkers} worker thread${numWorkers > 1 ? 's' : ''}...`;
+  document.getElementById('statSpeed').textContent = '0';
+  document.getElementById('statTotal').textContent = '0';
+  document.getElementById('statTime').textContent = '0s';
+
+  // Create worker blob
+  const workerCode = buildWorkerCode();
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+
+  workers = [];
+  for (let i = 0; i < numWorkers; i++) {
+    const w = new Worker(url);
+    w.onmessage = handleWorkerMessage;
+    w.postMessage({ prefix, caseInsensitive });
+    workers.push(w);
+  }
+
+  URL.revokeObjectURL(url);
+
+  // Stats update loop
+  statsInterval = setInterval(updateStats, 250);
+}
+
+function stopSearch() {
+  running = false;
+  workers.forEach(w => w.terminate());
+  workers = [];
+  if (statsInterval) clearInterval(statsInterval);
+  statsInterval = null;
+
+  document.getElementById('startBtn').style.display = '';
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('progressBar').style.display = 'none';
+  document.getElementById('workersInfo').textContent = 'Stopped.';
+}
+
+function handleWorkerMessage(e) {
+  const { type, data } = e.data;
+
+  if (type === 'progress') {
+    totalAttempts += data.batchSize;
+  } else if (type === 'found') {
+    // Found a match
+    stopSearch();
+    showResult(data.address, data.seed, document.getElementById('prefixInput').value.trim());
+  }
+}
+
+function updateStats() {
+  const now = performance.now();
+  const elapsed = (now - startTime) / 1000;
+  const dt = (now - lastSpeedTime) / 1000;
+  const da = totalAttempts - lastAttempts;
+  const speed = dt > 0 ? Math.round(da / dt) : 0;
+  lastAttempts = totalAttempts;
+  lastSpeedTime = now;
+
+  document.getElementById('statSpeed').textContent = formatNum(speed);
+  document.getElementById('statTotal').textContent = formatNum(totalAttempts);
+  document.getElementById('statTime').textContent = formatTime(elapsed);
+}
+
+function showResult(address, seed, prefix) {
+  const panel = document.getElementById('resultPanel');
+  const addrEl = document.getElementById('resultAddress');
+  const seedEl = document.getElementById('resultSeed');
+
+  // Highlight the matching prefix
+  const prefixFull = 'tCYNC' + prefix;
+  const ci = document.getElementById('caseInsensitive').checked;
+  let matchLen = prefixFull.length;
+  if (ci) {
+    // Find actual match length
+    for (let i = 0; i < prefixFull.length; i++) {
+      if (address[i].toLowerCase() !== prefixFull[i].toLowerCase()) {
+        matchLen = i;
+        break;
+      }
+    }
+  }
+
+  addrEl.innerHTML = '<span class="match">' + escapeHtml(address.slice(0, matchLen)) +
+    '</span>' + escapeHtml(address.slice(matchLen)) +
+    '<span class="copy-hint">click to copy</span>';
+  addrEl.dataset.text = address;
+
+  seedEl.textContent = seed;
+  seedEl.dataset.text = seed;
+
+  panel.classList.add('show');
+  document.getElementById('statsPanel').style.display = '';
+  updateStats();
+}
+
+function copyText(el, label) {
+  const text = el.dataset.text || el.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const toast = document.getElementById('toast');
+    toast.textContent = (label === 'seed' ? 'Seed phrase' : 'Address') + ' copied!';
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1500);
+  });
+}
+
+function formatNum(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function formatTime(secs) {
+  if (secs < 60) return Math.floor(secs) + 's';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ' + Math.floor(secs % 60) + 's';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Handle enter key
+document.getElementById('prefixInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !running) startSearch();
+});
+
+// ─── WEB WORKER CODE ───
+function buildWorkerCode() {
+  return `
+const BIP39_MINI = ${JSON.stringify(BIP39_MINI)};
+const BASE58 = '${BASE58}';
+
+// Synchronous SHA-256 (pure JS, no crypto.subtle needed in worker)
+// This is a compact implementation for brute-force speed.
+function sha256(data) {
+  const K = new Uint32Array([
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+  ]);
+
+  // Pre-process
+  const msg = (typeof data === 'string') ? new TextEncoder().encode(data) : data;
+  const bitLen = msg.length * 8;
+  const padLen = (msg.length + 9 + 63) & ~63;
+  const padded = new Uint8Array(padLen);
+  padded.set(msg);
+  padded[msg.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(padLen - 4, bitLen, false);
+
+  let h0=0x6a09e667, h1=0xbb67ae85, h2=0x3c6ef372, h3=0xa54ff53a;
+  let h4=0x510e527f, h5=0x9b05688c, h6=0x1f83d9ab, h7=0x5be0cd19;
+
+  const w = new Uint32Array(64);
+
+  for (let off = 0; off < padLen; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = ((w[i-15]>>>7)|(w[i-15]<<25)) ^ ((w[i-15]>>>18)|(w[i-15]<<14)) ^ (w[i-15]>>>3);
+      const s1 = ((w[i-2]>>>17)|(w[i-2]<<15)) ^ ((w[i-2]>>>19)|(w[i-2]<<13)) ^ (w[i-2]>>>10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) | 0;
+    }
+
+    let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e>>>6)|(e<<26)) ^ ((e>>>11)|(e<<21)) ^ ((e>>>25)|(e<<7));
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+      const S0 = ((a>>>2)|(a<<30)) ^ ((a>>>13)|(a<<19)) ^ ((a>>>22)|(a<<10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) | 0;
+      h=g; g=f; f=e; e=(d+t1)|0; d=c; c=b; b=a; a=(t1+t2)|0;
+    }
+    h0=(h0+a)|0; h1=(h1+b)|0; h2=(h2+c)|0; h3=(h3+d)|0;
+    h4=(h4+e)|0; h5=(h5+f)|0; h6=(h6+g)|0; h7=(h7+h)|0;
+  }
+
+  const out = new Uint8Array(32);
+  const ov = new DataView(out.buffer);
+  ov.setUint32(0,h0,false); ov.setUint32(4,h1,false); ov.setUint32(8,h2,false); ov.setUint32(12,h3,false);
+  ov.setUint32(16,h4,false); ov.setUint32(20,h5,false); ov.setUint32(24,h6,false); ov.setUint32(28,h7,false);
+  return out;
+}
+
+// Generate address from seed (same logic as explorer)
+function seedToAddress(seed) {
+  const hashArr = sha256(seed);
+  let addr = 'tCYNC';
+  for (let i = 0; i < 95; i++) {
+    addr += BASE58[hashArr[i % 32] % BASE58.length];
+    hashArr[i % 32] = (hashArr[i % 32] * 7 + hashArr[(i + 1) % 32]) % 256;
+  }
+  return addr;
+}
+
+// Generate random seed phrase
+function randomSeed() {
+  const arr = new Uint32Array(24);
+  crypto.getRandomValues(arr);
+  const words = new Array(24);
+  for (let i = 0; i < 24; i++) {
+    words[i] = BIP39_MINI[arr[i] % BIP39_MINI.length];
+  }
+  return words.join(' ');
+}
+
+// Main search loop
+self.onmessage = function(e) {
+  const { prefix, caseInsensitive } = e.data;
+  const target = caseInsensitive ? ('tCYNC' + prefix).toLowerCase() : 'tCYNC' + prefix;
+  const targetLen = target.length;
+  const BATCH = 500;
+
+  while (true) {
+    for (let i = 0; i < BATCH; i++) {
+      const seed = randomSeed();
+      const addr = seedToAddress(seed);
+      const check = caseInsensitive ? addr.slice(0, targetLen).toLowerCase() : addr.slice(0, targetLen);
+
+      if (check === target) {
+        self.postMessage({ type: 'found', data: { address: addr, seed } });
+        return;
+      }
+    }
+    self.postMessage({ type: 'progress', data: { batchSize: BATCH } });
+  }
+};
+`;
+}
+</script>
+</body>
+</html>

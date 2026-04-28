@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CoinCync Wallpaper: "The Proof" — Portrait
+  1170×2532. Reflows the proof-rules composition vertically.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1170 2532"
+     width="1170" height="2532"
+     preserveAspectRatio="xMidYMid slice"
+     style="display:block">
+
+  <defs>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="5"/>
+      <feColorMatrix values="0 0 0 0 0.83  0 0 0 0 0.63  0 0 0 0 0.35  0 0 0 0.03 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+    <radialGradient id="proof-halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#d4a059" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#d4a059" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1170" height="2532" fill="#0a0a09"/>
+
+  <g stroke="#3a3328" stroke-width="1.1" stroke-linecap="round">
+    <line x1="140" y1="220"  x2="260" y2="220"/>
+    <line x1="350" y1="320"  x2="470" y2="320"/>
+    <line x1="560" y1="270"  x2="680" y2="270"/>
+    <line x1="760" y1="380"  x2="880" y2="380"/>
+    <line x1="210" y1="460"  x2="330" y2="460"/>
+    <line x1="420" y1="540"  x2="550" y2="540"/>
+    <line x1="640" y1="480"  x2="770" y2="480"/>
+    <line x1="850" y1="580"  x2="980" y2="580"/>
+    <line x1="170" y1="680"  x2="290" y2="680"/>
+    <line x1="380" y1="760"  x2="510" y2="760"/>
+    <line x1="600" y1="700"  x2="720" y2="700"/>
+    <line x1="820" y1="800"  x2="950" y2="800"/>
+    <line x1="240" y1="900"  x2="360" y2="900"/>
+    <line x1="460" y1="980"  x2="580" y2="980"/>
+    <line x1="680" y1="920"  x2="800" y2="920"/>
+
+    <line x1="160" y1="1580" x2="280" y2="1580"/>
+    <line x1="380" y1="1660" x2="500" y2="1660"/>
+    <line x1="600" y1="1600" x2="730" y2="1600"/>
+    <line x1="820" y1="1690" x2="950" y2="1690"/>
+    <line x1="220" y1="1790" x2="340" y2="1790"/>
+    <line x1="440" y1="1870" x2="560" y2="1870"/>
+    <line x1="650" y1="1810" x2="780" y2="1810"/>
+    <line x1="870" y1="1900" x2="990" y2="1900"/>
+    <line x1="180" y1="2010" x2="300" y2="2010"/>
+    <line x1="400" y1="2090" x2="520" y2="2090"/>
+    <line x1="620" y1="2030" x2="740" y2="2030"/>
+    <line x1="840" y1="2120" x2="960" y2="2120"/>
+    <line x1="250" y1="2230" x2="370" y2="2230"/>
+    <line x1="470" y1="2310" x2="590" y2="2310"/>
+    <line x1="680" y1="2260" x2="800" y2="2260"/>
+    <line x1="330" y1="2410" x2="460" y2="2410"/>
+  </g>
+
+  <circle cx="585" cy="1266" r="340" fill="url(#proof-halo)"/>
+
+  <line x1="410" y1="1266" x2="760" y2="1266"
+        stroke="#d4a059" stroke-width="1.3" stroke-linecap="round"/>
+
+  <circle cx="585" cy="1266" r="5" fill="#f5f0e6"/>
+  <circle cx="585" cy="1266" r="10" fill="none" stroke="#f5f0e6" stroke-width="0.85"/>
+
+  <g stroke="#d4a059" fill="none" stroke-linecap="round">
+    <line x1="585" y1="1245" x2="585" y2="1287" stroke-width="0.6" opacity="0.6"/>
+  </g>
+
+  <rect width="1170" height="2532" fill="#0a0a09" filter="url(#grain)" opacity="0.35" pointer-events="none"/>
+</svg>

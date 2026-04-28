@@ -1,0 +1,123 @@
+name: Build Release Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag
+        required: true
+        default: v1.0.0-testnet
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libssl-dev pkg-config
+      - name: Build
+        run: cargo build --release --features "randomx testnet"
+      - name: Package
+        run: |
+          mkdir pkg
+          cp target/release/coincync-node target/release/coincync-miner target/release/coincync-wallet pkg/ 2>/dev/null || true
+          cp target/release/coincync-tui-miner pkg/ 2>/dev/null || true
+          cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
+          cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
+          chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
+          cd pkg && sha256sum * > SHA256SUMS.txt && cd ..
+          tar czf coincync-linux-x86_64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coincync-linux-x86_64
+          path: coincync-linux-x86_64.tar.gz
+      - name: Attest Linux artifact provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: coincync-linux-x86_64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --features "randomx testnet"
+      - name: Package
+        shell: bash
+        run: |
+          mkdir pkg
+          cp target/release/coincync-node.exe target/release/coincync-miner.exe target/release/coincync-wallet.exe pkg/ 2>/dev/null || true
+          cp target/release/coincync-tui-miner.exe pkg/ 2>/dev/null || true
+          cd pkg && sha256sum * > SHA256SUMS.txt && cd ..
+          tar czf coincync-windows-x64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coincync-windows-x64
+          path: coincync-windows-x64.tar.gz
+      - name: Attest Windows artifact provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: coincync-windows-x64.tar.gz
+
+  build-macos-intel:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install deps
+        run: brew install cmake
+      - name: Build
+        run: cargo build --release --features "randomx testnet"
+      - name: Package
+        run: |
+          mkdir pkg
+          cp target/release/coincync-node target/release/coincync-miner target/release/coincync-wallet pkg/ 2>/dev/null || true
+          cp target/release/coincync-tui-miner pkg/ 2>/dev/null || true
+          cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
+          cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
+          chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
+          cd pkg && shasum -a 256 * > SHA256SUMS.txt && cd ..
+          tar czf coincync-macos-x64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coincync-macos-x64
+          path: coincync-macos-x64.tar.gz
+      - name: Attest macOS x64 artifact provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: coincync-macos-x64.tar.gz
+
+  build-macos-arm:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install deps
+        run: brew install cmake
+      - name: Build
+        run: cargo build --release --features "randomx testnet"
+      - name: Package
+        run: |
+          mkdir pkg
+          cp target/release/coincync-node target/release/coincync-miner target/release/coincync-wallet pkg/ 2>/dev/null || true
+          cp target/release/coincync-tui-miner pkg/ 2>/dev/null || true
+          cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
+          cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
+          chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
+          cd pkg && shasum -a 256 * > SHA256SUMS.txt && cd ..
+          tar czf coincync-macos-arm64.tar.gz -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coincync-macos-arm64
+          path: coincync-macos-arm64.tar.gz
+      - name: Attest macOS arm64 artifact provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: coincync-macos-arm64.tar.gz

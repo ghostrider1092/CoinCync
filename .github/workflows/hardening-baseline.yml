@@ -1,0 +1,46 @@
+name: Hardening Baseline
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  hardening-baseline:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust deps
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      - name: Verify insecure-default guardrails
+        run: python scripts/check_insecure_defaults.py
+
+      - name: Verify best-practices policy
+        run: python scripts/verify_best_practices_policy.py
+
+      - name: Verify audit ignore policy
+        run: python scripts/verify_audit_policy.py
+
+      - name: Build-check all targets
+        run: cargo check --workspace --all-targets
+
+      - name: Run security-focused RPC tests
+        run: cargo test --workspace --test tier8_rpc_security
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Dependency vulnerability audit
+        run: cargo audit

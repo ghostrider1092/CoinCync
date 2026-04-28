@@ -1,0 +1,31 @@
+name: Best Practices Policy
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  verify-best-practices:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Regenerate best-practices report
+        run: python scripts/generate_best_practices_report.py
+
+      - name: Ensure report is up to date
+        run: git diff --exit-code -- docs/BEST_PRACTICES_BY_FILE.md
+
+      - name: Verify critical-path status policy
+        run: python scripts/verify_best_practices_policy.py
+
+      - name: Check insecure default guardrails
+        run: python scripts/check_insecure_defaults.py

@@ -1,0 +1,61 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    chain: 'coincync-testnet'
+
+rule_files:
+  - "alerts.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+scrape_configs:
+
+  # ── CoinCync 1.0 nodes ────────────────────────────────────────
+  - job_name: 'coincync-nodes'
+    static_configs:
+      - targets:
+          - '45.55.32.13:9091'      # NYC
+          - '165.245.161.62:9091'   # RIC
+          - '143.110.218.99:9091'   # TOR
+          - '165.245.140.113:9091'  # ATL (miner)
+          - '64.227.49.44:9091'     # SFO
+          - '138.68.172.80:9091'    # LON
+        labels:
+          network: testnet
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '45\.55\.32\.13:.*'
+        target_label: node_label
+        replacement: NYC
+      - source_labels: [__address__]
+        regex: '165\.245\.161\.62:.*'
+        target_label: node_label
+        replacement: RIC
+      - source_labels: [__address__]
+        regex: '143\.110\.218\.99:.*'
+        target_label: node_label
+        replacement: TOR
+      - source_labels: [__address__]
+        regex: '165\.245\.140\.113:.*'
+        target_label: node_label
+        replacement: ATL
+      - source_labels: [__address__]
+        regex: '64\.227\.49\.44:.*'
+        target_label: node_label
+        replacement: SFO
+      - source_labels: [__address__]
+        regex: '138\.68\.172\.80:.*'
+        target_label: node_label
+        replacement: LON
+    metrics_path: /metrics
+    scheme: http
+    scrape_timeout: 10s
+
+  # ── Prometheus self-monitoring ─────────────────────────────
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

@@ -1,0 +1,5 @@
+# Empty placeholder so docker-compose's nested bind mount at
+# ./static/vendor:/var/www/explorer/static/vendor:ro works — docker
+# needs this directory to exist in the read-only parent bind mount
+# src/explorer:/var/www/explorer:ro, otherwise runc fails to create
+# the nested mount point on a read-only filesystem.

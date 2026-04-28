@@ -1,0 +1,601 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CoinCync hero banner — "The Reading Room"
+
+  A warm interior scene. Illustrated, hand-drawn quality.
+  The response to what Ethereum's atrium does for its brand —
+  but in CoinCync's own register: lamplit, wooden, paper, brass.
+  People at work in a place where people think carefully.
+
+  Palette (matches coincync.org):
+    bg        #0a0a09   warm near-black
+    paper     #f5f0e6   cream
+    paper-dim #d9cfb8   weathered cream
+    ink       #3a3328   warm dark brown (lines)
+    ink-dim   #5a5448
+    brass     #d4a059   accent
+    brass-d   #8a6838
+    rust      #a35d3f   occasional warmth
+    teal      #4a7d7a   cold accent, used sparingly
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1920 720"
+     width="1920" height="720"
+     role="img"
+     aria-labelledby="banner-title banner-desc"
+     preserveAspectRatio="xMidYMid slice"
+     style="display:block">
+
+  <title id="banner-title">CoinCync — The Reading Room</title>
+  <desc id="banner-desc">An illustrated interior scene: a lamplit reading room with wooden beams, tall arched windows showing night, and figures working at tables. A large ornate device displays a cryptographic commitment formula. Warm dark palette with brass accents.</desc>
+
+  <defs>
+    <!-- Subtle grain for paper texture -->
+    <filter id="paper-grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="3"/>
+      <feColorMatrix values="0 0 0 0 0.22   0 0 0 0 0.18   0 0 0 0 0.13   0 0 0 0.08 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+
+    <!-- Lamp glow -->
+    <radialGradient id="lamp-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#d4a059" stop-opacity="0.55"/>
+      <stop offset="40%"  stop-color="#d4a059" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#d4a059" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Large window — cool night behind -->
+    <linearGradient id="window-night" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#141821"/>
+      <stop offset="55%" stop-color="#1d1f28"/>
+      <stop offset="100%" stop-color="#2a2825"/>
+    </linearGradient>
+
+    <!-- Floor wash -->
+    <linearGradient id="floor-wash" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#1a1612"/>
+      <stop offset="100%" stop-color="#0a0a09"/>
+    </linearGradient>
+
+    <!-- Brass device glow -->
+    <radialGradient id="brass-halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#d4a059" stop-opacity="0.3"/>
+      <stop offset="50%" stop-color="#d4a059" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#d4a059" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Reusable: simple figure silhouette seated at a desk -->
+    <g id="figure-seated-left">
+      <!-- chair back -->
+      <rect x="-4" y="-6" width="3" height="48" fill="#3a3328" opacity="0.9"/>
+      <!-- torso -->
+      <path d="M -16 0 Q -20 -22 -6 -26 Q 8 -26 12 -10 L 14 26 L -14 26 Z"
+            fill="#5a5448" stroke="#3a3328" stroke-width="1.2"/>
+      <!-- head -->
+      <ellipse cx="0" cy="-34" rx="9" ry="11" fill="#d9cfb8" stroke="#3a3328" stroke-width="1.2"/>
+      <!-- hair -->
+      <path d="M -9 -39 Q 0 -46 9 -39 L 9 -31 Q 0 -34 -9 -31 Z" fill="#3a3328"/>
+      <!-- arm reaching to table -->
+      <path d="M 10 -8 Q 22 -6 26 6" stroke="#3a3328" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+    </g>
+
+    <g id="figure-seated-right">
+      <rect x="1" y="-6" width="3" height="48" fill="#3a3328" opacity="0.9"/>
+      <path d="M 16 0 Q 20 -22 6 -26 Q -8 -26 -12 -10 L -14 26 L 14 26 Z"
+            fill="#6d5a47" stroke="#3a3328" stroke-width="1.2"/>
+      <ellipse cx="0" cy="-34" rx="9" ry="11" fill="#d9cfb8" stroke="#3a3328" stroke-width="1.2"/>
+      <path d="M -9 -39 Q 0 -43 9 -39 Q 10 -32 9 -28 Q 2 -32 -9 -28 Z" fill="#a35d3f"/>
+      <path d="M -10 -8 Q -22 -6 -26 6" stroke="#3a3328" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+    </g>
+
+    <g id="figure-standing">
+      <!-- legs -->
+      <rect x="-8" y="10" width="6" height="34" fill="#3a3328"/>
+      <rect x="2" y="10" width="6" height="34" fill="#3a3328"/>
+      <!-- coat/body -->
+      <path d="M -14 -22 Q -16 -26 -8 -30 L 8 -30 Q 16 -26 14 -22 L 16 18 L -16 18 Z"
+            fill="#4a3a2e" stroke="#3a3328" stroke-width="1.2"/>
+      <!-- head -->
+      <ellipse cx="0" cy="-40" rx="9" ry="11" fill="#d9cfb8" stroke="#3a3328" stroke-width="1.2"/>
+      <path d="M -9 -45 Q 0 -50 9 -45 L 9 -38 Q 0 -41 -9 -38 Z" fill="#3a3328"/>
+    </g>
+  </defs>
+
+  <!-- ═══════════════ BACKGROUND: WARM DARK ROOM ═══════════════ -->
+  <rect width="1920" height="720" fill="#0a0a09"/>
+
+  <!-- Floor, lower third -->
+  <rect x="0" y="520" width="1920" height="200" fill="url(#floor-wash)"/>
+
+  <!-- Floor grain lines — wooden planks -->
+  <g stroke="#1a1612" stroke-width="0.5" opacity="0.6">
+    <line x1="0" y1="540" x2="1920" y2="540"/>
+    <line x1="0" y1="562" x2="1920" y2="562"/>
+    <line x1="0" y1="588" x2="1920" y2="588"/>
+    <line x1="0" y1="618" x2="1920" y2="618"/>
+    <line x1="0" y1="652" x2="1920" y2="652"/>
+    <line x1="0" y1="690" x2="1920" y2="690"/>
+  </g>
+
+  <!-- ═══════════════ ARCHITECTURE: ARCHED WINDOWS ═══════════════ -->
+
+  <!-- Central great window — arched, dominant -->
+  <g>
+    <!-- Arch shape -->
+    <path d="M 720 520 L 720 280 Q 720 120 960 120 Q 1200 120 1200 280 L 1200 520 Z"
+          fill="url(#window-night)"/>
+    <!-- Window mullions -->
+    <g stroke="#3a3328" stroke-width="2.5" fill="none" stroke-linejoin="round">
+      <path d="M 720 520 L 720 280 Q 720 120 960 120 Q 1200 120 1200 280 L 1200 520"/>
+      <line x1="960" y1="120" x2="960" y2="520"/>
+      <line x1="840" y1="200" x2="840" y2="520"/>
+      <line x1="1080" y1="200" x2="1080" y2="520"/>
+      <!-- horizontal muntins -->
+      <line x1="720" y1="300" x2="1200" y2="300"/>
+      <line x1="720" y1="400" x2="1200" y2="400"/>
+      <!-- Fine radial mullions in the arch -->
+      <line x1="780" y1="150" x2="960" y2="120"/>
+      <line x1="1140" y1="150" x2="960" y2="120"/>
+      <line x1="830" y1="135" x2="960" y2="120"/>
+      <line x1="1090" y1="135" x2="960" y2="120"/>
+    </g>
+
+    <!-- Distant lights outside — tiny warm points for atmosphere -->
+    <g fill="#d4a059" opacity="0.6">
+      <circle cx="790" cy="340" r="1.2"/>
+      <circle cx="815" cy="360" r="0.9"/>
+      <circle cx="870" cy="380" r="1.1"/>
+      <circle cx="900" cy="420" r="1"/>
+      <circle cx="1030" cy="355" r="1.3"/>
+      <circle cx="1070" cy="380" r="0.9"/>
+      <circle cx="1125" cy="420" r="1.1"/>
+      <circle cx="1155" cy="450" r="1"/>
+      <circle cx="950" cy="460" r="1.4"/>
+      <circle cx="985" cy="440" r="1"/>
+    </g>
+
+    <!-- A thin moon, partial, soft -->
+    <circle cx="900" cy="200" r="20" fill="#f5f0e6" opacity="0.3"/>
+    <circle cx="908" cy="198" r="20" fill="#1d1f28" opacity="0.85"/>
+  </g>
+
+  <!-- Side windows: smaller arches flanking -->
+  <g>
+    <!-- Left side window -->
+    <path d="M 380 520 L 380 320 Q 380 230 480 230 Q 580 230 580 320 L 580 520 Z"
+          fill="url(#window-night)"/>
+    <g stroke="#3a3328" stroke-width="2" fill="none">
+      <path d="M 380 520 L 380 320 Q 380 230 480 230 Q 580 230 580 320 L 580 520"/>
+      <line x1="480" y1="230" x2="480" y2="520"/>
+      <line x1="380" y1="380" x2="580" y2="380"/>
+      <line x1="380" y1="450" x2="580" y2="450"/>
+    </g>
+    <g fill="#d4a059" opacity="0.5">
+      <circle cx="420" cy="400" r="0.9"/>
+      <circle cx="510" cy="420" r="1.1"/>
+      <circle cx="455" cy="460" r="0.8"/>
+    </g>
+
+    <!-- Right side window -->
+    <path d="M 1340 520 L 1340 320 Q 1340 230 1440 230 Q 1540 230 1540 320 L 1540 520 Z"
+          fill="url(#window-night)"/>
+    <g stroke="#3a3328" stroke-width="2" fill="none">
+      <path d="M 1340 520 L 1340 320 Q 1340 230 1440 230 Q 1540 230 1540 320 L 1540 520"/>
+      <line x1="1440" y1="230" x2="1440" y2="520"/>
+      <line x1="1340" y1="380" x2="1540" y2="380"/>
+      <line x1="1340" y1="450" x2="1540" y2="450"/>
+    </g>
+    <g fill="#d4a059" opacity="0.5">
+      <circle cx="1400" cy="410" r="1"/>
+      <circle cx="1485" cy="430" r="1.2"/>
+      <circle cx="1460" cy="470" r="0.9"/>
+    </g>
+  </g>
+
+  <!-- ═══════════════ WALLS / ARCHITECTURE: BOOKSHELVES ═══════════════ -->
+
+  <!-- Far-left bookshelf -->
+  <g>
+    <rect x="40" y="200" width="280" height="320" fill="#1a1612" stroke="#3a3328" stroke-width="1.5"/>
+    <!-- shelves -->
+    <g stroke="#3a3328" stroke-width="1.2">
+      <line x1="40" y1="270" x2="320" y2="270"/>
+      <line x1="40" y1="340" x2="320" y2="340"/>
+      <line x1="40" y1="410" x2="320" y2="410"/>
+      <line x1="40" y1="470" x2="320" y2="470"/>
+    </g>
+    <!-- books — varied widths, colors -->
+    <g stroke="#3a3328" stroke-width="0.8">
+      <rect x="55" y="210" width="12" height="58" fill="#8a6838"/>
+      <rect x="69" y="210" width="10" height="58" fill="#a35d3f"/>
+      <rect x="81" y="212" width="14" height="56" fill="#4a3a2e"/>
+      <rect x="97" y="214" width="11" height="54" fill="#6d5a47"/>
+      <rect x="110" y="210" width="13" height="58" fill="#8a6838"/>
+      <rect x="125" y="212" width="10" height="56" fill="#a35d3f"/>
+      <rect x="137" y="210" width="15" height="58" fill="#3a3328"/>
+      <rect x="154" y="214" width="11" height="54" fill="#6d5a47"/>
+      <rect x="167" y="210" width="12" height="58" fill="#8a6838"/>
+      <rect x="181" y="212" width="14" height="56" fill="#4a3a2e"/>
+      <rect x="197" y="210" width="11" height="58" fill="#a35d3f"/>
+      <rect x="210" y="214" width="13" height="54" fill="#6d5a47"/>
+      <rect x="225" y="210" width="10" height="58" fill="#3a3328"/>
+      <rect x="237" y="212" width="15" height="56" fill="#8a6838"/>
+      <rect x="254" y="210" width="12" height="58" fill="#a35d3f"/>
+      <rect x="268" y="214" width="11" height="54" fill="#4a3a2e"/>
+      <rect x="281" y="210" width="14" height="58" fill="#6d5a47"/>
+      <rect x="297" y="212" width="10" height="56" fill="#8a6838"/>
+
+      <rect x="55" y="280" width="14" height="58" fill="#4a3a2e"/>
+      <rect x="71" y="282" width="11" height="56" fill="#8a6838"/>
+      <rect x="84" y="280" width="13" height="58" fill="#a35d3f"/>
+      <rect x="99" y="284" width="10" height="54" fill="#6d5a47"/>
+      <rect x="111" y="280" width="15" height="58" fill="#3a3328"/>
+      <rect x="128" y="282" width="12" height="56" fill="#8a6838"/>
+      <rect x="142" y="280" width="11" height="58" fill="#a35d3f"/>
+      <rect x="155" y="284" width="14" height="54" fill="#4a3a2e"/>
+      <rect x="171" y="280" width="13" height="58" fill="#6d5a47"/>
+      <rect x="186" y="282" width="10" height="56" fill="#3a3328"/>
+      <rect x="198" y="280" width="15" height="58" fill="#8a6838"/>
+      <rect x="215" y="284" width="11" height="54" fill="#a35d3f"/>
+      <rect x="228" y="280" width="12" height="58" fill="#4a3a2e"/>
+      <rect x="242" y="282" width="14" height="56" fill="#6d5a47"/>
+      <rect x="258" y="280" width="10" height="58" fill="#8a6838"/>
+      <rect x="270" y="284" width="13" height="54" fill="#3a3328"/>
+      <rect x="285" y="280" width="11" height="58" fill="#a35d3f"/>
+      <rect x="298" y="282" width="14" height="56" fill="#4a3a2e"/>
+
+      <rect x="55" y="350" width="12" height="58" fill="#a35d3f"/>
+      <rect x="69" y="352" width="14" height="56" fill="#6d5a47"/>
+      <rect x="85" y="350" width="11" height="58" fill="#8a6838"/>
+      <rect x="98" y="354" width="13" height="54" fill="#3a3328"/>
+      <rect x="113" y="350" width="10" height="58" fill="#a35d3f"/>
+      <rect x="125" y="352" width="15" height="56" fill="#4a3a2e"/>
+      <rect x="142" y="350" width="12" height="58" fill="#8a6838"/>
+      <rect x="156" y="354" width="11" height="54" fill="#6d5a47"/>
+      <rect x="169" y="350" width="14" height="58" fill="#3a3328"/>
+      <rect x="185" y="352" width="10" height="56" fill="#a35d3f"/>
+      <rect x="197" y="350" width="13" height="58" fill="#4a3a2e"/>
+      <rect x="212" y="354" width="12" height="54" fill="#8a6838"/>
+      <rect x="226" y="350" width="15" height="58" fill="#6d5a47"/>
+      <rect x="243" y="352" width="11" height="56" fill="#3a3328"/>
+      <rect x="256" y="350" width="14" height="58" fill="#a35d3f"/>
+      <rect x="272" y="354" width="10" height="54" fill="#4a3a2e"/>
+      <rect x="284" y="350" width="13" height="58" fill="#8a6838"/>
+      <rect x="299" y="352" width="11" height="56" fill="#6d5a47"/>
+
+      <rect x="55" y="420" width="13" height="48" fill="#6d5a47"/>
+      <rect x="70" y="422" width="11" height="46" fill="#a35d3f"/>
+      <rect x="83" y="420" width="14" height="48" fill="#8a6838"/>
+      <rect x="99" y="424" width="12" height="44" fill="#3a3328"/>
+      <rect x="113" y="420" width="10" height="48" fill="#4a3a2e"/>
+      <rect x="125" y="422" width="15" height="46" fill="#a35d3f"/>
+      <rect x="142" y="420" width="11" height="48" fill="#6d5a47"/>
+      <rect x="155" y="424" width="13" height="44" fill="#8a6838"/>
+      <rect x="170" y="420" width="12" height="48" fill="#3a3328"/>
+      <rect x="184" y="422" width="14" height="46" fill="#a35d3f"/>
+      <rect x="200" y="420" width="10" height="48" fill="#4a3a2e"/>
+      <rect x="212" y="424" width="13" height="44" fill="#6d5a47"/>
+      <rect x="227" y="420" width="11" height="48" fill="#8a6838"/>
+      <rect x="240" y="422" width="15" height="46" fill="#3a3328"/>
+      <rect x="257" y="420" width="12" height="48" fill="#a35d3f"/>
+      <rect x="271" y="424" width="10" height="44" fill="#4a3a2e"/>
+      <rect x="283" y="420" width="14" height="48" fill="#6d5a47"/>
+      <rect x="299" y="422" width="11" height="46" fill="#8a6838"/>
+    </g>
+    <!-- small brass lamp on top of bookshelf -->
+    <g transform="translate(180 200)">
+      <rect x="-2" y="-8" width="4" height="8" fill="#8a6838"/>
+      <path d="M -14 -8 L 14 -8 L 10 -22 L -10 -22 Z" fill="#d4a059" stroke="#3a3328" stroke-width="1"/>
+      <circle cx="0" cy="-8" r="18" fill="url(#lamp-glow)"/>
+    </g>
+  </g>
+
+  <!-- Far-right bookshelf (mirror) -->
+  <g>
+    <rect x="1600" y="200" width="280" height="320" fill="#1a1612" stroke="#3a3328" stroke-width="1.5"/>
+    <g stroke="#3a3328" stroke-width="1.2">
+      <line x1="1600" y1="270" x2="1880" y2="270"/>
+      <line x1="1600" y1="340" x2="1880" y2="340"/>
+      <line x1="1600" y1="410" x2="1880" y2="410"/>
+      <line x1="1600" y1="470" x2="1880" y2="470"/>
+    </g>
+    <g stroke="#3a3328" stroke-width="0.8">
+      <rect x="1615" y="210" width="12" height="58" fill="#a35d3f"/>
+      <rect x="1629" y="212" width="14" height="56" fill="#6d5a47"/>
+      <rect x="1645" y="210" width="11" height="58" fill="#8a6838"/>
+      <rect x="1658" y="214" width="13" height="54" fill="#3a3328"/>
+      <rect x="1673" y="210" width="10" height="58" fill="#a35d3f"/>
+      <rect x="1685" y="212" width="15" height="56" fill="#4a3a2e"/>
+      <rect x="1702" y="210" width="12" height="58" fill="#8a6838"/>
+      <rect x="1716" y="214" width="11" height="54" fill="#6d5a47"/>
+      <rect x="1729" y="210" width="14" height="58" fill="#3a3328"/>
+      <rect x="1745" y="212" width="10" height="56" fill="#a35d3f"/>
+      <rect x="1757" y="210" width="13" height="58" fill="#4a3a2e"/>
+      <rect x="1772" y="214" width="12" height="54" fill="#8a6838"/>
+      <rect x="1786" y="210" width="15" height="58" fill="#6d5a47"/>
+      <rect x="1803" y="212" width="11" height="56" fill="#3a3328"/>
+      <rect x="1816" y="210" width="14" height="58" fill="#a35d3f"/>
+      <rect x="1832" y="214" width="10" height="54" fill="#4a3a2e"/>
+      <rect x="1844" y="210" width="13" height="58" fill="#8a6838"/>
+      <rect x="1859" y="212" width="11" height="56" fill="#6d5a47"/>
+
+      <rect x="1615" y="280" width="13" height="58" fill="#6d5a47"/>
+      <rect x="1630" y="282" width="11" height="56" fill="#a35d3f"/>
+      <rect x="1643" y="280" width="14" height="58" fill="#8a6838"/>
+      <rect x="1659" y="284" width="12" height="54" fill="#3a3328"/>
+      <rect x="1673" y="280" width="10" height="58" fill="#4a3a2e"/>
+      <rect x="1685" y="282" width="15" height="56" fill="#a35d3f"/>
+      <rect x="1702" y="280" width="11" height="58" fill="#6d5a47"/>
+      <rect x="1715" y="284" width="13" height="54" fill="#8a6838"/>
+      <rect x="1730" y="280" width="12" height="58" fill="#3a3328"/>
+      <rect x="1744" y="282" width="14" height="56" fill="#a35d3f"/>
+      <rect x="1760" y="280" width="10" height="58" fill="#4a3a2e"/>
+      <rect x="1772" y="284" width="13" height="54" fill="#6d5a47"/>
+      <rect x="1787" y="280" width="11" height="58" fill="#8a6838"/>
+      <rect x="1800" y="282" width="15" height="56" fill="#3a3328"/>
+      <rect x="1817" y="280" width="12" height="58" fill="#a35d3f"/>
+      <rect x="1831" y="284" width="10" height="54" fill="#4a3a2e"/>
+      <rect x="1843" y="280" width="14" height="58" fill="#6d5a47"/>
+      <rect x="1859" y="282" width="11" height="56" fill="#8a6838"/>
+
+      <rect x="1615" y="350" width="11" height="58" fill="#8a6838"/>
+      <rect x="1628" y="352" width="14" height="56" fill="#4a3a2e"/>
+      <rect x="1644" y="350" width="10" height="58" fill="#a35d3f"/>
+      <rect x="1656" y="354" width="13" height="54" fill="#6d5a47"/>
+      <rect x="1671" y="350" width="12" height="58" fill="#3a3328"/>
+      <rect x="1685" y="352" width="15" height="56" fill="#8a6838"/>
+      <rect x="1702" y="350" width="11" height="58" fill="#a35d3f"/>
+      <rect x="1715" y="354" width="13" height="54" fill="#4a3a2e"/>
+      <rect x="1730" y="350" width="10" height="58" fill="#6d5a47"/>
+      <rect x="1742" y="352" width="14" height="56" fill="#3a3328"/>
+      <rect x="1758" y="350" width="12" height="58" fill="#8a6838"/>
+      <rect x="1772" y="354" width="15" height="54" fill="#a35d3f"/>
+      <rect x="1789" y="350" width="11" height="58" fill="#6d5a47"/>
+      <rect x="1802" y="352" width="13" height="56" fill="#4a3a2e"/>
+      <rect x="1817" y="350" width="10" height="58" fill="#8a6838"/>
+      <rect x="1829" y="354" width="14" height="54" fill="#3a3328"/>
+      <rect x="1845" y="350" width="12" height="58" fill="#a35d3f"/>
+      <rect x="1859" y="352" width="11" height="56" fill="#6d5a47"/>
+
+      <rect x="1615" y="420" width="14" height="48" fill="#3a3328"/>
+      <rect x="1631" y="422" width="12" height="46" fill="#a35d3f"/>
+      <rect x="1645" y="420" width="10" height="48" fill="#6d5a47"/>
+      <rect x="1657" y="424" width="15" height="44" fill="#8a6838"/>
+      <rect x="1674" y="420" width="11" height="48" fill="#4a3a2e"/>
+      <rect x="1687" y="422" width="13" height="46" fill="#a35d3f"/>
+      <rect x="1702" y="420" width="12" height="48" fill="#6d5a47"/>
+      <rect x="1716" y="424" width="14" height="44" fill="#3a3328"/>
+      <rect x="1732" y="420" width="10" height="48" fill="#8a6838"/>
+      <rect x="1744" y="422" width="15" height="46" fill="#a35d3f"/>
+      <rect x="1761" y="420" width="11" height="48" fill="#4a3a2e"/>
+      <rect x="1774" y="424" width="13" height="44" fill="#6d5a47"/>
+      <rect x="1789" y="420" width="12" height="48" fill="#3a3328"/>
+      <rect x="1803" y="422" width="14" height="46" fill="#a35d3f"/>
+      <rect x="1819" y="420" width="10" height="48" fill="#8a6838"/>
+      <rect x="1831" y="424" width="13" height="44" fill="#4a3a2e"/>
+      <rect x="1846" y="420" width="11" height="48" fill="#6d5a47"/>
+      <rect x="1859" y="422" width="15" height="46" fill="#3a3328"/>
+    </g>
+    <!-- small brass lamp on top -->
+    <g transform="translate(1740 200)">
+      <rect x="-2" y="-8" width="4" height="8" fill="#8a6838"/>
+      <path d="M -14 -8 L 14 -8 L 10 -22 L -10 -22 Z" fill="#d4a059" stroke="#3a3328" stroke-width="1"/>
+      <circle cx="0" cy="-8" r="18" fill="url(#lamp-glow)"/>
+    </g>
+  </g>
+
+  <!-- ═══════════════ CENTERPIECE: THE COMMITMENT INSTRUMENT ═══════════════ -->
+
+  <!-- A large brass astrolabe / commitment instrument in the center window -->
+  <g transform="translate(960 340)">
+    <!-- Halo behind the instrument -->
+    <circle r="180" fill="url(#brass-halo)"/>
+
+    <!-- Outer bronze ring -->
+    <circle r="130" fill="none" stroke="#d4a059" stroke-width="3"/>
+    <circle r="130" fill="none" stroke="#8a6838" stroke-width="1" stroke-dasharray="2 3"/>
+
+    <!-- Degree markings around the outer ring -->
+    <g stroke="#d4a059" stroke-width="1" opacity="0.9">
+      <line x1="0" y1="-130" x2="0" y2="-120"/>
+      <line x1="65" y1="-112.6" x2="60" y2="-104"/>
+      <line x1="112.6" y1="-65" x2="104" y2="-60"/>
+      <line x1="130" y1="0" x2="120" y2="0"/>
+      <line x1="112.6" y1="65" x2="104" y2="60"/>
+      <line x1="65" y1="112.6" x2="60" y2="104"/>
+      <line x1="0" y1="130" x2="0" y2="120"/>
+      <line x1="-65" y1="112.6" x2="-60" y2="104"/>
+      <line x1="-112.6" y1="65" x2="-104" y2="60"/>
+      <line x1="-130" y1="0" x2="-120" y2="0"/>
+      <line x1="-112.6" y1="-65" x2="-104" y2="-60"/>
+      <line x1="-65" y1="-112.6" x2="-60" y2="-104"/>
+    </g>
+
+    <!-- Inner concentric rings -->
+    <circle r="105" fill="none" stroke="#d4a059" stroke-width="1" opacity="0.7"/>
+    <circle r="85" fill="none" stroke="#8a6838" stroke-width="1.5"/>
+    <circle r="62" fill="none" stroke="#d4a059" stroke-width="1" opacity="0.85"/>
+    <circle r="42" fill="none" stroke="#d4a059" stroke-width="1.5"/>
+    <circle r="22" fill="none" stroke="#f5f0e6" stroke-width="1.2"/>
+
+    <!-- Crosshair -->
+    <g stroke="#d4a059" stroke-width="1" opacity="0.8">
+      <line x1="-85" y1="0" x2="-45" y2="0"/>
+      <line x1="45" y1="0" x2="85" y2="0"/>
+      <line x1="0" y1="-85" x2="0" y2="-45"/>
+      <line x1="0" y1="45" x2="0" y2="85"/>
+    </g>
+
+    <!-- Alidade — the rotating bar -->
+    <g transform="rotate(25)">
+      <line x1="-125" y1="0" x2="125" y2="0" stroke="#8a6838" stroke-width="3"/>
+      <line x1="-125" y1="0" x2="125" y2="0" stroke="#d4a059" stroke-width="1.5"/>
+      <circle cx="-110" cy="0" r="5" fill="#8a6838" stroke="#d4a059" stroke-width="0.8"/>
+      <circle cx="110" cy="0" r="5" fill="#8a6838" stroke="#d4a059" stroke-width="0.8"/>
+    </g>
+
+    <!-- Central commitment point -->
+    <circle r="6" fill="#f5f0e6"/>
+    <circle r="12" fill="none" stroke="#f5f0e6" stroke-width="0.8"/>
+
+    <!-- Stand / pillar under the instrument -->
+    <g transform="translate(0 140)">
+      <rect x="-8" y="0" width="16" height="75" fill="#8a6838" stroke="#3a3328" stroke-width="1"/>
+      <rect x="-30" y="75" width="60" height="12" fill="#6d5a47" stroke="#3a3328" stroke-width="1"/>
+      <rect x="-45" y="87" width="90" height="8" fill="#4a3a2e" stroke="#3a3328" stroke-width="1"/>
+    </g>
+
+    <!-- Engraved label on the pillar: C = rG + vH -->
+    <text y="180" text-anchor="middle"
+          font-family="'JetBrains Mono', ui-monospace, monospace"
+          font-size="11" letter-spacing="1.5" fill="#d4a059">
+      C = rG + vH
+    </text>
+  </g>
+
+  <!-- ═══════════════ MIDGROUND: TABLES AND FIGURES ═══════════════ -->
+
+  <!-- Left table — a figure writing, candle, papers -->
+  <g transform="translate(470 550)">
+    <!-- Table top -->
+    <ellipse cx="0" cy="0" rx="130" ry="18" fill="#4a3a2e" stroke="#3a3328" stroke-width="1.5"/>
+    <ellipse cx="0" cy="-3" rx="130" ry="18" fill="#6d5a47" stroke="#3a3328" stroke-width="1.5"/>
+    <!-- Table legs -->
+    <rect x="-120" y="0" width="4" height="90" fill="#3a3328"/>
+    <rect x="116" y="0" width="4" height="90" fill="#3a3328"/>
+    <!-- Candle with flame and glow -->
+    <g transform="translate(-50 -8)">
+      <circle cx="0" cy="-22" r="28" fill="url(#lamp-glow)"/>
+      <rect x="-2" y="-14" width="4" height="12" fill="#f5f0e6"/>
+      <path d="M -1 -24 Q 0 -30 1 -24 Q 2 -19 0 -14 Q -2 -19 -1 -24 Z"
+            fill="#d4a059"/>
+      <circle cx="0" cy="-22" r="2" fill="#f5f0e6"/>
+      <circle cx="-3" cy="-2" r="6" fill="#6d5a47" stroke="#3a3328" stroke-width="0.8"/>
+    </g>
+    <!-- Papers on table -->
+    <g>
+      <rect x="10" y="-8" width="50" height="36" fill="#f5f0e6" stroke="#3a3328" stroke-width="0.7"
+            transform="rotate(-6 35 10)"/>
+      <rect x="30" y="-4" width="50" height="36" fill="#d9cfb8" stroke="#3a3328" stroke-width="0.7"
+            transform="rotate(8 55 14)"/>
+      <!-- ink lines on top paper -->
+      <g stroke="#3a3328" stroke-width="0.5" transform="rotate(8 55 14)">
+        <line x1="36" y1="4" x2="74" y2="4"/>
+        <line x1="36" y1="10" x2="74" y2="10"/>
+        <line x1="36" y1="16" x2="64" y2="16"/>
+        <line x1="36" y1="22" x2="74" y2="22"/>
+      </g>
+    </g>
+    <!-- Figure seated at table -->
+    <use href="#figure-seated-left" transform="translate(-80 -24)"/>
+  </g>
+
+  <!-- Right table — two people, one open laptop/book -->
+  <g transform="translate(1450 560)">
+    <ellipse cx="0" cy="0" rx="140" ry="20" fill="#4a3a2e" stroke="#3a3328" stroke-width="1.5"/>
+    <ellipse cx="0" cy="-3" rx="140" ry="20" fill="#6d5a47" stroke="#3a3328" stroke-width="1.5"/>
+    <rect x="-130" y="0" width="4" height="90" fill="#3a3328"/>
+    <rect x="126" y="0" width="4" height="90" fill="#3a3328"/>
+    <!-- Open book / laptop -->
+    <g transform="translate(0 -8)">
+      <path d="M -30 0 L 30 0 L 26 -18 L -26 -18 Z" fill="#d9cfb8" stroke="#3a3328" stroke-width="1"/>
+      <line x1="0" y1="0" x2="0" y2="-18" stroke="#3a3328" stroke-width="0.8"/>
+      <g stroke="#5a5448" stroke-width="0.4">
+        <line x1="-22" y1="-14" x2="-5" y2="-14"/>
+        <line x1="-22" y1="-10" x2="-5" y2="-10"/>
+        <line x1="-22" y1="-6" x2="-5" y2="-6"/>
+        <line x1="5" y1="-14" x2="22" y2="-14"/>
+        <line x1="5" y1="-10" x2="22" y2="-10"/>
+        <line x1="5" y1="-6" x2="22" y2="-6"/>
+      </g>
+    </g>
+    <!-- Small brass lamp -->
+    <g transform="translate(-85 -12)">
+      <circle r="22" fill="url(#lamp-glow)"/>
+      <rect x="-1.5" y="-12" width="3" height="16" fill="#6d5a47"/>
+      <path d="M -10 -12 L 10 -12 L 7 -22 L -7 -22 Z" fill="#d4a059" stroke="#3a3328" stroke-width="0.8"/>
+    </g>
+    <!-- Two figures -->
+    <use href="#figure-seated-left" transform="translate(-45 -30)"/>
+    <use href="#figure-seated-right" transform="translate(45 -30)"/>
+  </g>
+
+  <!-- Central foreground — person walking, plus a cat -->
+  <g>
+    <!-- A standing figure to the left of the instrument, gesturing/walking -->
+    <use href="#figure-standing" transform="translate(810 580)"/>
+    <!-- Another walking figure to the right, in conversation -->
+    <use href="#figure-standing" transform="translate(1110 580) scale(-1, 1)"/>
+
+    <!-- A cat in foreground — curled up -->
+    <g transform="translate(960 670)">
+      <ellipse cx="0" cy="0" rx="22" ry="10" fill="#3a3328"/>
+      <ellipse cx="-15" cy="-4" rx="9" ry="7" fill="#3a3328"/>
+      <path d="M -20 -8 L -18 -14 L -14 -10 Z" fill="#3a3328"/>
+      <path d="M -12 -10 L -10 -14 L -8 -10 Z" fill="#3a3328"/>
+      <circle cx="-18" cy="-5" r="0.6" fill="#d4a059"/>
+      <circle cx="-13" cy="-5" r="0.6" fill="#d4a059"/>
+      <!-- tail curled -->
+      <path d="M 18 -2 Q 28 -8 24 2" stroke="#3a3328" stroke-width="5" fill="none" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <!-- ═══════════════ FOREGROUND: CEILING BEAMS / FRAMING ═══════════════ -->
+
+  <!-- Ceiling beam line across top — adds architectural weight -->
+  <g>
+    <rect x="0" y="95" width="1920" height="28" fill="#3a3328"/>
+    <rect x="0" y="123" width="1920" height="4" fill="#1a1612"/>
+    <!-- beam joints -->
+    <g stroke="#1a1612" stroke-width="1.5">
+      <line x1="320" y1="95" x2="320" y2="123"/>
+      <line x1="640" y1="95" x2="640" y2="123"/>
+      <line x1="960" y1="95" x2="960" y2="123"/>
+      <line x1="1280" y1="95" x2="1280" y2="123"/>
+      <line x1="1600" y1="95" x2="1600" y2="123"/>
+    </g>
+  </g>
+
+  <!-- Hanging brass chandelier in the center -->
+  <g transform="translate(960 123)">
+    <line x1="0" y1="0" x2="0" y2="28" stroke="#3a3328" stroke-width="1.5"/>
+    <ellipse cx="0" cy="32" rx="28" ry="6" fill="#8a6838" stroke="#3a3328" stroke-width="1"/>
+    <path d="M -28 32 Q -20 46 -4 50 L 4 50 Q 20 46 28 32" fill="#d4a059" stroke="#3a3328" stroke-width="1"/>
+    <circle cx="0" cy="40" r="45" fill="url(#lamp-glow)"/>
+    <!-- small candle flames on chandelier -->
+    <path d="M -17 38 Q -16 32 -15 38 Z" fill="#d4a059"/>
+    <path d="M -6 42 Q -5 36 -4 42 Z" fill="#d4a059"/>
+    <path d="M 4 42 Q 5 36 6 42 Z" fill="#d4a059"/>
+    <path d="M 15 38 Q 16 32 17 38 Z" fill="#d4a059"/>
+  </g>
+
+  <!-- ═══════════════ WORDMARK ═══════════════ -->
+  <g transform="translate(60 660)">
+    <text x="0" y="0"
+          font-family="'Fraunces', 'Playfair Display', ui-serif, Georgia, serif"
+          font-style="italic" font-weight="500"
+          font-size="54"
+          letter-spacing="-0.5"
+          fill="#f5f0e6">
+      <tspan fill="#d4a059">C</tspan>oinCync
+    </text>
+    <text x="4" y="26"
+          font-family="'JetBrains Mono', ui-monospace, monospace"
+          font-size="11" letter-spacing="2.2" fill="#a39d8e">
+      CYNC LAB · RESEARCH IN PRIVACY
+    </text>
+  </g>
+
+  <!-- Subtle corner mark top-right -->
+  <g transform="translate(1860 70)" text-anchor="end">
+    <text x="0" y="0"
+          font-family="'JetBrains Mono', ui-monospace, monospace"
+          font-size="10" letter-spacing="1.8" fill="#5a5448">
+      THE READING ROOM
+    </text>
+  </g>
+
+  <!-- Global grain overlay, very faint, unifies the image -->
+  <rect width="1920" height="720" fill="#0a0a09" filter="url(#paper-grain)" opacity="0.5" pointer-events="none"/>
+
+</svg>

@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+  # RA-2026-04-atomic-polyfill:
+  # Transitive through frost-core -> postcard -> heapless.
+  # Upstream chain still depends on atomic-polyfill as of frost-core 3.0.0.
+  # Re-evaluate on every dependency refresh.
+  "RUSTSEC-2023-0089",
+]

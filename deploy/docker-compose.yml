@@ -1,0 +1,149 @@
+version: "3.9"
+
+# ── CoinCync 1.0 testnet node stack ───────────────────────────────
+# Usage:
+#   Relay only:     docker compose up -d
+#   + Mining:       MINING_ADDRESS=ty1... docker compose --profile mining up -d
+#   + Faucet:       FAUCET_PASSWORD=xxx docker compose --profile faucet up -d
+#   + Monitoring:   docker compose --profile monitoring up -d
+#   + Explorer:     docker compose --profile explorer up -d
+
+x-node-base: &node-base
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    args:
+      NETWORK: testnet
+  restart: unless-stopped
+  volumes:
+    - node-data:/data
+  environment:
+    - RUST_LOG=info,coincync=debug
+    - RUST_BACKTRACE=1
+
+services:
+
+  # ── Full node (all nodes run this) ──────────────────────────
+  node:
+    <<: *node-base
+    ports:
+      - "28333:28333"    # P2P
+      - "127.0.0.1:28332:28332"  # RPC (localhost only)
+      - "9091:9091"      # Prometheus metrics
+    command: >
+      coincync-node
+        --data-dir /data
+        --network testnet
+        --p2p-bind 0.0.0.0:28333
+        --rpc-bind 0.0.0.0:28332
+        --metrics-bind 0.0.0.0:9091
+        --addnode 45.55.32.13:28333
+        --addnode 165.245.161.62:28333
+        --addnode 143.110.218.99:28333
+        --addnode 165.245.140.113:28333
+        --addnode 64.227.49.44:28333
+        --addnode 138.68.172.80:28333
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:28332"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Miner (ATL node only) ────────────────────────────────────
+  miner:
+    <<: *node-base
+    depends_on:
+      node:
+        condition: service_healthy
+    entrypoint: ["coincync-miner"]
+    command: >
+      --node http://node:28332
+      --address ${MINING_ADDRESS:?Set MINING_ADDRESS}
+      --threads 1
+      --stats-interval 30
+    profiles: [mining]
+
+  # ── Faucet (SFO node only) ────────────────────────────────────
+  faucet:
+    build:
+      context: ../faucet
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      node:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./faucet.wallet:/wallet.wallet:ro
+    environment:
+      - NODE_URL=http://node:28332
+      - FAUCET_WALLET=/wallet.wallet
+      - FAUCET_PASSWORD=${FAUCET_PASSWORD:?Set FAUCET_PASSWORD}
+      - DRIP_AMOUNT=10000000000
+      - COOLDOWN_HOURS=24
+    profiles: [faucet]
+
+  # ── Block explorer (RIC node) ─────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB:       coincync_explorer
+      POSTGRES_USER:     explorer
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-changeme}
+    profiles: [explorer]
+
+  explorer:
+    image: node:20-alpine
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - node
+    volumes:
+      - ../explorer:/app:ro
+    working_dir: /app
+    command: sh -c "npm ci && npm start"
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_RPC=http://node:28332
+      - POSTGRES_URL=postgres://explorer:${PG_PASSWORD:-changeme}@postgres:5432/coincync_explorer
+    profiles: [explorer]
+
+  # ── Monitoring (LON node) ─────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+    ports:
+      - "9090:9090"
+    profiles: [monitoring]
+
+  grafana:
+    image: grafana/grafana:10.3.0
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    profiles: [monitoring]
+
+volumes:
+  node-data:
+  pg-data:
+  prom-data:
+  grafana-data:

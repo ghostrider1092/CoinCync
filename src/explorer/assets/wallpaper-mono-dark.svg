@@ -1,0 +1,43 @@
+<svg viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg">
+  <!-- CoinCync Wallpaper — Mono / Cream on Dark -->
+  <defs>
+    <radialGradient id="mglow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f5f0e8" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="transparent"/>
+    </radialGradient>
+    <radialGradient id="mglow2" cx="65%" cy="30%" r="35%">
+      <stop offset="0%" stop-color="#f5f0e8" stop-opacity="0.015"/>
+      <stop offset="100%" stop-color="transparent"/>
+    </radialGradient>
+    <pattern id="mgrain" width="200" height="200" patternUnits="userSpaceOnUse">
+      <filter id="mg"><feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+      <rect width="200" height="200" filter="url(#mg)" opacity="0.025"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1920" height="1080" fill="#0a0a09"/>
+  <rect width="1920" height="1080" fill="url(#mglow)"/>
+  <rect width="1920" height="1080" fill="url(#mglow2)"/>
+  <rect width="1920" height="1080" fill="url(#mgrain)"/>
+
+  <!-- Faint construction lines -->
+  <line x1="960" y1="280" x2="960" y2="800" stroke="rgba(245,240,232,0.02)" stroke-width="0.5"/>
+  <line x1="700" y1="540" x2="1220" y2="540" stroke="rgba(245,240,232,0.02)" stroke-width="0.5"/>
+  <circle cx="960" cy="540" r="100" fill="none" stroke="rgba(245,240,232,0.015)" stroke-width="0.5" stroke-dasharray="4 6"/>
+
+  <!-- Centered mark -->
+  <g transform="translate(960,540)">
+    <circle cx="0" cy="0" r="180" fill="none" stroke="#f5f0e8" stroke-width="16" opacity="0.85"/>
+    <path d="M 157 0 A 157 157 0 1 0 0 157" fill="none" stroke="#0a0a09" stroke-width="28"/>
+    <line x1="152" y1="0" x2="196" y2="0" stroke="#0a0a09" stroke-width="28"/>
+    <circle cx="-75" cy="0" r="18" fill="#f5f0e8" opacity="0.85"/>
+    <circle cx="75" cy="0" r="18" fill="#f5f0e8" opacity="0.85"/>
+  </g>
+
+  <!-- Corner accents -->
+  <line x1="60" y1="60" x2="140" y2="60" stroke="rgba(245,240,232,0.04)" stroke-width="0.5"/>
+  <line x1="60" y1="60" x2="60" y2="140" stroke="rgba(245,240,232,0.04)" stroke-width="0.5"/>
+  <line x1="1860" y1="1020" x2="1780" y2="1020" stroke="rgba(245,240,232,0.04)" stroke-width="0.5"/>
+  <line x1="1860" y1="1020" x2="1860" y2="940" stroke="rgba(245,240,232,0.04)" stroke-width="0.5"/>
+</svg>

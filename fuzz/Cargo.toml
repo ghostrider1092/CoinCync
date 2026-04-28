@@ -1,0 +1,43 @@
+[package]
+name = "coincync-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+borsh = "1"
+
+[dependencies.coincync]
+path = ".."
+
+[[bin]]
+name = "fuzz_p2p_message"
+path = "fuzz_targets/fuzz_p2p_message.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_block"
+path = "fuzz_targets/fuzz_block.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_transaction"
+path = "fuzz_targets/fuzz_transaction.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_clsag"
+path = "fuzz_targets/fuzz_clsag.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_stealth"
+path = "fuzz_targets/fuzz_stealth.rs"
+doc = false
+
+[workspace]
+members = ["."]
