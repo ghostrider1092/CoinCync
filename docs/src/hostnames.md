@@ -1,6 +1,6 @@
 # Hostname Reference
 
-> **Updated:** April 22, 2026 — reflects 10-node public testnet configuration.
+> **Updated:** April 28, 2026 — reflects the active 6-node public testnet fleet.
 
 ## Public Hostnames
 
@@ -11,20 +11,16 @@
 | `coincync.network` (apex) | NYC3 | 45.55.32.13 | Landing page |
 | `docs.coincync.network` | NYC3 | 45.55.32.13 | Documentation site |
 
-## Testnet Nodes (10 total)
+## Testnet Nodes (active 6)
 
 | Host | IP | Role | Services |
 | --- | --- | --- | --- |
-| LON | 138.68.172.80 | Miner | coincync-node, coincync-miner |
-| SFO | 64.227.49.44 | Miner | coincync-node, coincync-miner |
-| SYD | 170.64.142.146 | Miner | coincync-node, coincync-miner |
-| NYC1 | 192.34.59.42 | Seed | coincync-node |
-| NYC3 | 45.55.32.13 | Seed | coincync-node |
-| FRA | 46.101.138.120 | Seed | coincync-node |
-| TOR | 143.110.218.99 | Seed + API | coincync-node, nginx |
-| RIC | 165.245.161.62 | Seed + Explorer | coincync-node, nginx |
-| ATL | 165.245.140.113 | Seed | coincync-node |
-| AMS | 164.92.153.24 | Seed | coincync-node |
+| NYC1 | 192.34.59.42 | Mempool + relay | coincync-node |
+| FRA | 46.101.138.120 | Mempool + relay | coincync-node |
+| TOR | 143.110.218.99 | Seed1 + public API | coincync-node, nginx |
+| RIC | 165.245.161.62 | Explorer + relay | coincync-node, nginx |
+| ATL | 165.245.140.113 | Miner + relay | coincync-node, coincync-miner |
+| AMS | 164.92.153.24 | Seed3 + relay | coincync-node |
 
 ## Port Map
 

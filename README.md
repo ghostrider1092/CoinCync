@@ -3,7 +3,7 @@
 A privacy-first cryptocurrency with mandatory shielding, auditable supply, and constitutional protections.
 
 **Status:** Public Testnet  
-**Network:** Nodes across 6 continents  
+**Network:** Active public testnet fleet across North America and Europe  
 **Launch:** Mainnet October 2026  
 **Discord:** [Join the community](https://discord.gg/5tYNSCsqzy)
 

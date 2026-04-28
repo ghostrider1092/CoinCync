@@ -247,9 +247,9 @@ Most production nodes do exactly one of these. Specializing per host limits blas
 | **Explorer host** | cyncd + nginx + explorer assets | 80, 443, 28080 | RIC (165.245.161.62) |
 | **API host** | cyncd + nginx (REST/RPC proxy) | 80, 443, 28080 | Toronto (143.110.218.99) |
 | **Miner** | cyncd + coincync-miner | 28080 | ATL |
-| **Faucet** | cyncd + faucet HTTP service | 28080, 8080 (faucet UI) | SFO |
+| **Faucet** | cyncd + faucet HTTP service | 28080, 8080 (faucet UI) | (operator-assigned host) |
 | **Landing/docs** | nginx (no cyncd needed) | 80, 443 | NYC (45.55.32.13) |
-| **Monitoring** | Prometheus + Grafana | (no public DNS) | LON (138.68.172.80) |
+| **Monitoring** | Prometheus + Grafana | (no public DNS) | (operator-assigned host) |
 
 Splitting roles across hosts is the same federation strategy explained in [Federation & DDoS](./federation-and-ddos.md). One host going down only affects one role.
 

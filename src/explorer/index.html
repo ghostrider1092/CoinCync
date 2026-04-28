@@ -1568,7 +1568,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Node Health</div>
     <div class="page-title" style="margin-bottom:4px">Node health dashboard</div>
-    <div class="page-sub" style="margin-bottom:20px">Live status of all 9 CoinCync testnet nodes</div>
+    <div class="page-sub" style="margin-bottom:20px">Live status of the active 6-node CoinCync public testnet fleet</div>
     <div id="health-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin:-6px 0 14px 0">
       <span class="badge">Online: —</span>
       <span class="badge badge-amber">RPC Protected: —</span>
@@ -2774,16 +2774,12 @@ document.addEventListener('DOMContentLoaded', function() {
 // _rpc: internal RPC endpoint for health queries. Never displayed to users.
 // proxy: nginx proxy path (production). _rpc: direct fallback (local dev / offline).
 const NODES=[
-  {id:'a7f2',label:'LON',loc:'London, UK',role:'RandomX Miner',proxy:'/health/lon',_rpc:'http://138.68.172.80:28081'},
-  {id:'3c91',label:'SFO',loc:'San Francisco, USA',role:'RandomX Miner',proxy:'/health/sfo',_rpc:'http://64.227.49.44:28081'},
-  {id:'b5e8',label:'NYC1',loc:'New York, USA',role:'Mempool Node',proxy:'/health/nyc1',_rpc:'http://192.34.59.42:28081'},
-  {id:'6d4a',label:'FRA',loc:'Frankfurt, Germany',role:'Mempool Node',proxy:'/health/fra',_rpc:'http://46.101.138.120:28081'},
-  {id:'2f1c',label:'NYC3',loc:'New York, USA',role:'Seed · Archive',proxy:'/health/nyc3',_rpc:'http://45.55.32.13:28081'},
-  {id:'e8b3',label:'TOR',loc:'Toronto, Canada',role:'Seed',proxy:'/health/tor',_rpc:'http://143.110.218.99:28081'},
-  {id:'9a07',label:'RIC',loc:'Richmond, USA',role:'Explorer · Monitor',proxy:'/health/ric',_rpc:'http://165.245.161.62:28081'},
-  {id:'4c2d',label:'ATL',loc:'Atlanta, USA',role:'Faucet · RPC',proxy:'/health/atl',_rpc:'http://165.245.140.113:28081'},
-  {id:'5f9e',label:'AMS',loc:'Amsterdam, Netherlands',role:'Seed · Backup',proxy:'/health/ams',_rpc:'http://164.92.153.24:28081'},
-  {id:'8b14',label:'SYD',loc:'Sydney, Australia',role:'RandomX Miner',proxy:'/health/syd',_rpc:'http://170.64.142.146:28081'},
+  {id:'b5e8',label:'NYC1',loc:'New York, USA',role:'Mempool + Relay',proxy:'/health/nyc1',_rpc:'http://192.34.59.42:28081'},
+  {id:'6d4a',label:'FRA',loc:'Frankfurt, Germany',role:'Mempool + Relay',proxy:'/health/fra',_rpc:'http://46.101.138.120:28081'},
+  {id:'e8b3',label:'TOR',loc:'Toronto, Canada',role:'Seed1 + Public API',proxy:'/health/tor',_rpc:'http://143.110.218.99:28081'},
+  {id:'9a07',label:'RIC',loc:'Richmond, USA',role:'Explorer + Relay',proxy:'/health/ric',_rpc:'http://165.245.161.62:28081'},
+  {id:'4c2d',label:'ATL',loc:'Atlanta, USA',role:'Miner + Relay',proxy:'/health/atl',_rpc:'http://165.245.140.113:28081'},
+  {id:'5f9e',label:'AMS',loc:'Amsterdam, Netherlands',role:'Seed3 + Relay',proxy:'/health/ams',_rpc:'http://164.92.153.24:28081'},
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
@@ -4681,16 +4677,12 @@ function mapReset(){
 // `height`    – last known block height (shown in tooltip)
 // `failCount` – consecutive poll failures before we mark offline
 const GNODES = [
-  {label:'LON', id:'a7f2', lat:51.51,  lng:-0.13,   role:'RandomX Miner',      city:'London, UK',          online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/lon', _rpc:'http://138.68.172.80:28081'},
-  {label:'SFO', id:'3c91', lat:37.77,  lng:-122.42, role:'RandomX Miner',      city:'San Francisco, USA',  online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/sfo', _rpc:'http://64.227.49.44:28081'},
-  {label:'NYC1',id:'b5e8', lat:40.71,  lng:-74.01,  role:'Mempool Node',       city:'New York, USA',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/nyc1',_rpc:'http://192.34.59.42:28081'},
-  {label:'FRA', id:'6d4a', lat:50.11,  lng:8.68,    role:'Mempool Node',       city:'Frankfurt, Germany',  online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/fra', _rpc:'http://46.101.138.120:28081'},
-  {label:'NYC3',id:'2f1c', lat:40.73,  lng:-73.99,  role:'Seed · Archive',     city:'New York, USA',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/nyc3',_rpc:'http://45.55.32.13:28081'},
-  {label:'TOR', id:'e8b3', lat:43.70,  lng:-79.42,  role:'Seed',               city:'Toronto, Canada',     online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/tor', _rpc:'http://143.110.218.99:28081'},
-  {label:'RIC', id:'9a07', lat:37.54,  lng:-77.43,  role:'Explorer · Monitor', city:'Richmond, USA',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/ric', _rpc:'http://165.245.161.62:28081'},
-  {label:'ATL', id:'4c2d', lat:33.75,  lng:-84.39,  role:'Faucet · RPC',       city:'Atlanta, USA',        online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/atl', _rpc:'http://165.245.140.113:28081'},
-  {label:'AMS', id:'5f9e', lat:52.37,  lng:4.90,    role:'Seed · Backup',      city:'Amsterdam, NL',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/ams', _rpc:'http://164.92.153.24:28081'},
-  {label:'SYD', id:'8b14', lat:-33.87, lng:151.21,  role:'RandomX Miner',      city:'Sydney, Australia',   online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/syd', _rpc:'http://170.64.142.146:28081'},
+  {label:'NYC1',id:'b5e8', lat:40.71,  lng:-74.01,  role:'Mempool + Relay',    city:'New York, USA',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/nyc1',_rpc:'http://192.34.59.42:28081'},
+  {label:'FRA', id:'6d4a', lat:50.11,  lng:8.68,    role:'Mempool + Relay',    city:'Frankfurt, Germany',  online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/fra', _rpc:'http://46.101.138.120:28081'},
+  {label:'TOR', id:'e8b3', lat:43.70,  lng:-79.42,  role:'Seed1 + Public API', city:'Toronto, Canada',     online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/tor', _rpc:'http://143.110.218.99:28081'},
+  {label:'RIC', id:'9a07', lat:37.54,  lng:-77.43,  role:'Explorer + Relay',   city:'Richmond, USA',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/ric', _rpc:'http://165.245.161.62:28081'},
+  {label:'ATL', id:'4c2d', lat:33.75,  lng:-84.39,  role:'Miner + Relay',      city:'Atlanta, USA',        online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/atl', _rpc:'http://165.245.140.113:28081'},
+  {label:'AMS', id:'5f9e', lat:52.37,  lng:4.90,    role:'Seed3 + Relay',      city:'Amsterdam, NL',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/ams', _rpc:'http://164.92.153.24:28081'},
 ];
 
 // How many consecutive failures before a node is considered offline
