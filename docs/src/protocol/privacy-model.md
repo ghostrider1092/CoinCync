@@ -96,6 +96,9 @@ The motivation: optional privacy is no privacy at all, because the small populat
 
 ## Phase 2 upgrades
 
+Status: these upgrades are planned and code-gated, but currently disabled on
+the live public testnet until formal activation.
+
 These are implemented in the codebase, header-committed in every block, but verification is gated until the respective fork-signal activation heights:
 
 ### MimbleWimble cut-through

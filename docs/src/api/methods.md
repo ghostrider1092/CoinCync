@@ -245,7 +245,7 @@ A node that isn't mining (just running as a relay) honestly returns `is_mining: 
 
 ### `get_privacy_stats`  *(public)*
 
-Aggregate Phase 2 store snapshot. Pre-activation, all roots are zero and all sizes are 0 — it's the same payload, just a baseline.
+Aggregate Phase 2 store snapshot. Pre-activation, all roots are zero and all sizes are 0 — it's the same payload, just a baseline. Public testnet is currently in this pre-activation mode.
 
 ```json
 {

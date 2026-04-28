@@ -78,6 +78,9 @@ The `algorithm` field is always `0` (RandomX). It is kept in the header for form
 
 The Phase 2 roots (`spark_set_root`, `mw_kernel_root`) are hashed **unconditionally** — zero bytes pre-activation, real accumulator roots post-activation. This means the upgrade is a *soft* fork rather than a *hard* fork: pre-activation blocks already commit to the (zero) roots, so there's no header schema change at activation time, just a new validation rule that starts checking the field is non-zero and well-formed.
 
+Current live status: public testnet is still pre-activation, so both roots are
+expected to remain zero in valid blocks.
+
 The `supply_commitment` field is what lets [Article IV (Auditable Integrity)](../governance/constitution.md#article-iv--auditable-integrity) work. Each block commits to the running Pedersen-accumulator supply, so any node can verify the total in-circulation CYNC matches the emission schedule without seeing individual transaction amounts.
 
 ## Validation rules
