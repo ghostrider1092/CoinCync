@@ -9,6 +9,7 @@ to `standard-review` or `asset-review`.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,7 +67,19 @@ def required_profile(path: str) -> str | None:
 
 def parse_report() -> list[tuple[str, str, str]]:
     if not REPORT_PATH.exists():
-        raise FileNotFoundError(f"missing report: {REPORT_PATH}")
+        gen = ROOT / "scripts" / "generate_best_practices_report.py"
+        if not gen.exists():
+            raise FileNotFoundError(f"missing report: {REPORT_PATH}")
+        try:
+            subprocess.run([sys.executable, str(gen)], cwd=ROOT, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise FileNotFoundError(
+                f"missing report: {REPORT_PATH} and auto-generate failed ({exc})"
+            ) from exc
+        if not REPORT_PATH.exists():
+            raise FileNotFoundError(
+                f"missing report: {REPORT_PATH} (auto-generate produced no file)"
+            )
 
     rows: list[tuple[str, str, str]] = []
     for line in REPORT_PATH.read_text(encoding="utf-8").splitlines():
