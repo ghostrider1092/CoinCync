@@ -9,8 +9,11 @@ CoinCync is a privacy-by-default blockchain. Every transaction hides its sender,
 - **CLSAG ring signatures** — the sender is one of N possible signers, and which one is computationally indistinguishable
 - **Stealth addresses** — every transaction output is a one-time address that only the recipient can recognize
 - **Bulletproofs+ range proofs** — amounts are encrypted, but the network can prove they fall in a valid range without learning the value
-- **MimbleWimble cut-through** (Phase 2) — historical transaction graphs collapse, leaving only unspent commitments
-- **Lelantus Spark anonymity sets** (Phase 2) — large-anonymity-set spend proofs giving up to 16,384-coin rings
+- **MimbleWimble cut-through** (Phase 2, planned) — historical transaction graphs collapse, leaving only unspent commitments
+- **Lelantus Spark anonymity sets** (Phase 2, planned) — large-anonymity-set spend proofs giving up to 16,384-coin rings
+
+> Activation status: Orchard/Spark phase-2 modules are currently **disabled**
+> on the live public testnet and are not active consensus rules yet.
 
 Mining is **RandomX only** by [Constitution Article V](./governance/constitution.md#article-v--open-mining) — the same CPU-biased, memory-hard PoW algorithm Monero has used in production since 2019. Any laptop can participate. No ASICs, no GPU farms, no permission, no KYC, no stake. See [Consensus & PoW](./protocol/consensus.md) for the full rationale on why a single strong algorithm is stronger than a rotation.
 

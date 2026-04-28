@@ -7,6 +7,10 @@ A privacy-first cryptocurrency with mandatory shielding, auditable supply, and c
 **Launch:** Mainnet October 2026  
 **Discord:** [Join the community](https://discord.gg/5tYNSCsqzy)
 
+> Current network scope: Orchard and Lelantus Spark are **not enabled** on the
+> live public testnet. Phase-2 shielded modules remain compile-time gated and
+> inactive in consensus until a future activation decision.
+
 ## Privacy Features (22 total, all mandatory)
 
 **Cryptographic (Layer 1):** CLSAG Ring-16 signatures, stealth addresses, Pedersen commitments, Bulletproofs+ range proofs, encrypted memos, key images, view tags
@@ -34,7 +38,7 @@ tar xzf coincync-1.0.0-testnet-linux-x86_64.tar.gz
 ./coincync-miner --testnet --address YOUR_tCYNC_ADDRESS --threads 4 --node 127.0.0.1:28081
 ```
 
-See [Getting Started](docs/pages/GETTING_STARTED.md) for full instructions.
+See [Getting started docs](docs/src/getting-started/build.md) for full instructions.
 
 ## Testnet
 
@@ -75,10 +79,10 @@ cargo test --release
 
 ## Documentation
 
-- [Getting Started](docs/pages/GETTING_STARTED.md)
-- [Consensus Specification](docs/pages/CONSENSUS_SPECIFICATION.md)
-- [Security Fixes](docs/pages/SECURITY_FIXES.md)
-- [Audit Scope](docs/pages/AUDIT_SCOPE.md)
+- [Getting Started](docs/src/getting-started/build.md)
+- [Consensus Specification](docs/src/protocol/consensus.md)
+- [Privacy Model](docs/src/protocol/privacy-model.md)
+- [Node Operations](docs/src/operations/deployment.md)
 - [Constitution](CONSTITUTION.md)
 - [API Reference](docs/API.md)
 

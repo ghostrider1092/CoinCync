@@ -27,7 +27,7 @@
 Changes to consensus-critical files require:
 1. Update the code
 2. Update `critical_files.lock` hashes
-3. Update `docs/pages/CONSENSUS_SPECIFICATION.md`
+3. Update `docs/src/protocol/consensus.md`
 4. Add regression tests
 5. Review by at least one other contributor
 

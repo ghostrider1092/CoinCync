@@ -41,7 +41,7 @@ All nodes: `/usr/local/bin/coincync-node`, `/usr/local/bin/coincync-miner`
 
 ## systemd Services
 
-All nodes use standardized systemd services. See [DEPLOY_RUNBOOK.md](../pages/DEPLOY_RUNBOOK.md).
+All nodes use standardized systemd services. See [Deploying a node](./operations/deployment.md).
 
 ## nginx Proxy (by role)
 

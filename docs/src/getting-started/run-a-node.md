@@ -1,6 +1,6 @@
 # Run a testnet node
 
-You can use pre-built binaries (see [Getting Started](../../pages/GETTING_STARTED.md)) or build from source (see [build](./build.md)).
+You can use pre-built binaries (see [Build from source](./build.md)) or build from source locally (same page).
 
 ## Quick start
 
