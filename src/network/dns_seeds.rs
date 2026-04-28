@@ -36,12 +36,12 @@ pub const MAINNET_FALLBACK: &[&str] = &[
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
-    "45.55.32.13:28080",       // NYC
-    "165.245.161.62:28080",    // RIC
-    "143.110.218.99:28080",    // Toronto
-    "165.245.140.113:28080",   // ATL
-    "64.227.49.44:28080",      // SFO
-    "138.68.172.80:28080",     // LON
+    "192.34.59.42:28080",      // NYC1 mempool + relay
+    "46.101.138.120:28080",    // FRA mempool + relay
+    "143.110.218.99:28080",    // TOR seed1 + relay
+    "165.245.161.62:28080",    // RIC relay
+    "165.245.140.113:28080",   // ATL miner + relay
+    "164.92.153.24:28080",     // AMS seed3 + relay
 ];
 
 /// Resolve DNS seeds and return a deduplicated list of socket addresses.

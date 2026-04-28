@@ -28,17 +28,15 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
 /// mdBook docs. All six nodes run RandomX under Article V; the role
 /// annotation reflects what *else* the host does (explorer, API, faucet,
 /// monitoring) on top of running a seed peer.
-// M-9 FIX: All 9 testnet seed nodes listed with DNS names where available.
+// Community bootstrap peers: prioritize hosts that are consistently reachable
+// from external networks (seed/relay/mempool/miner nodes on testnet P2P 28080).
 // DNS A records (seed*.coincync.network): seed1→143.110.218.99, seed2→45.55.32.13, seed3→164.92.153.24
 pub const TESTNET_SEED_NODES: &[&str] = &[
-    "138.68.172.80:28080",    // LON       — explorer UI host (explorer.coincync.network)
-    "64.227.49.44:28080",     // SFO       — faucet
     "192.34.59.42:28080",     // NYC1      — mempool1 + relay
     "46.101.138.120:28080",   // FRA       — mempool2 + relay
-    "45.55.32.13:28080",      // NYC3      — apex + docs + DNS seed2 (seed2.coincync.network)
     "143.110.218.99:28080",   // TOR       — public RPC + DNS seed1 (seed1.coincync.network)
     "165.245.161.62:28080",   // RIC       — relay
-    "165.245.140.113:28080",  // ATL       — api + releases + miner
+    "165.245.140.113:28080",  // ATL       — miner + relay
     "164.92.153.24:28080",    // AMS       — relay + DNS seed3 (seed3.coincync.network)
 ];
 
