@@ -27,6 +27,22 @@ EXPLORER_TESTNET_RPC_UPSTREAM='10.0.0.42:28081' \
 sudo bash deploy/explorer/install-nginx-explorer.sh '<COINCYNC_RPC_API_KEY>'
 ```
 
+### One-command deploy helper
+
+For routine explorer updates (when nginx wiring is already configured), use:
+
+```bash
+cd /opt/coincync
+bash deploy/explorer/deploy-explorer.sh
+```
+
+Optional overrides:
+
+```bash
+BRANCH=main REPO_DIR=/opt/coincync NODE_SERVICE=coincync-node \
+bash deploy/explorer/deploy-explorer.sh
+```
+
 ### Explorer wiring model (top-explorer style)
 
 CoinCync explorer follows the Etherscan/Esplora posture:
