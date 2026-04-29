@@ -36,6 +36,8 @@ CoinCync explorer follows the Etherscan/Esplora posture:
 - nginx chooses the canonical upstream node(s).
 - If upstream is unhealthy, explorer fails closed instead of silently mixing sources.
 
+Block history on the **Blocks** tab is filled with batched `get_block_range` JSON-RPC calls (100 blocks per request) against that same `/api/testnet` upstream, so the explorer can enumerate the full chain the node holds while keeping round trips bounded.
+
 ## Verify routes
 
 ```bash

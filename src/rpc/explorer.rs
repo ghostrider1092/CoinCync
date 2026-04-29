@@ -98,6 +98,7 @@ mod tests {
         // assertion accordingly.
         let calls: &[&str] = &[
             "rpc('get_info'",
+            "rpc('get_block_range'",
             "rpc('get_block_by_height'",
             "rpc('get_block'",
             "rpc('get_peers'",

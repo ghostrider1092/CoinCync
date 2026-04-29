@@ -1143,7 +1143,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <tbody id="all-blocks"><tr><td colspan="7" class="loading">Loading blocks...</td></tr></tbody></table>
       <div style="padding:12px 20px;border-top:1px solid var(--b);background:var(--s2);display:flex;align-items:center;gap:12px">
         <button onclick="loadMore()" class="btn btn-outline" style="font-size:11px;padding:5px 14px">Load more ↓</button>
-        <span style="font-size:11px;color:var(--t3);font-family:var(--mono);margin-left:auto">Showing <span id="blocks-shown">0</span> blocks</span>
+        <span style="font-size:11px;color:var(--t3);font-family:var(--mono);margin-left:auto"><span id="blocks-load-status"></span>Showing <span id="blocks-shown">0</span> blocks</span>
       </div>
     </div>
   </div>
@@ -2702,6 +2702,7 @@ function setNetwork(net) {
   if (net !== 'testnet' && net !== 'mainnet') return;
   _activeNetwork = net;
   localStorage.setItem('cync-net', net);
+  _blocksGenesisBackfillGen++;
   RPC  = '/api/' + net;
   REST = '/api/v1/' + net;
 
@@ -2874,6 +2875,10 @@ function blockPulse(height) {
 
 // ── STATE ─────────────────────────────────────────────────────
 let chainHeight=0,chainDiff=0,blockList=[],loadedHeight=0,diffChart=null,miningChart=null;
+// Cancels in-flight "load entire chain" backfill when switching network or re-navigating.
+let _blocksGenesisBackfillGen = 0;
+let _blocksGenesisBackfillRunning = false;
+function _yieldToUi(){return new Promise(r=>requestAnimationFrame(()=>r()));}
 
 // ── RPC ───────────────────────────────────────────────────────
 //
@@ -3501,23 +3506,81 @@ setInterval(() => {
 }, 1000);
 
 // ── BLOCKS ────────────────────────────────────────────────────
+// Loads heights [fromH-count+1 .. fromH] (inclusive) using batched JSON-RPC
+// `get_block_range` (up to 100 blocks per call — server cap). Falls back to
+// per-height `get_block_by_height` if the batch endpoint is unavailable.
 async function loadBlocks(fromH,count){
-  const nb=[];
-  for(let h=fromH;h>Math.max(0,fromH-count);h--){
-    if(blockList.find(b=>b.height===h))continue;
-    const b=await rpc('get_block_by_height',[h]);
-    if(b){b.height=h;nb.push(b);}
+  if(fromH<0)return;
+  const end=fromH;
+  const start=Math.max(0,fromH-count+1);
+  let curStart=start;
+  while(curStart<=end){
+    const curEnd=Math.min(end,curStart+99);
+    const pack=await rpc('get_block_range',[curStart,curEnd]);
+    if(pack&&pack.blocks&&pack.blocks.length){
+      const base=typeof pack.start==='number'?pack.start:curStart;
+      const nb=[];
+      for(let i=0;i<pack.blocks.length;i++){
+        const h=base+i;
+        if(blockList.find(b=>b.height===h))continue;
+        const b=pack.blocks[i];
+        if(b){b.height=h;nb.push(b);}
+      }
+      blockList=[...nb,...blockList].filter((b,i,a)=>a.findIndex(x=>x.height===b.height)===i);
+      blockList.sort((a,b)=>b.height-a.height);
+      curStart=curEnd+1;
+      await _yieldToUi();
+      continue;
+    }
+    for(let h=curStart;h<=curEnd;h++){
+      if(blockList.find(b=>b.height===h))continue;
+      const b=await rpc('get_block_by_height',[h]);
+      if(b){b.height=h;blockList.push(b);}
+    }
+    blockList=blockList.filter((b,i,a)=>a.findIndex(x=>x.height===b.height)===i);
+    blockList.sort((a,b)=>b.height-a.height);
+    curStart=curEnd+1;
+    await _yieldToUi();
   }
-  blockList=[...nb,...blockList].filter((b,i,a)=>a.findIndex(x=>x.height===b.height)===i);
-  blockList.sort((a,b)=>b.height-a.height);
   loadedHeight=fromH;
 }
 async function loadMore(){
   if(!blockList.length)return;
   const oldest=blockList[blockList.length-1];
-  if(oldest.height<=1)return;
-  await loadBlocks(oldest.height-1,15);
+  if(oldest.height===0)return;
+  await loadBlocks(oldest.height-1,100);
   renderAllBlocks();
+}
+// After opening the Blocks page, walk backward to genesis (height 0) in
+// batches so the table can list the full canonical chain from the node.
+async function ensureBlocksBackfillToGenesis(){
+  const myGen=++_blocksGenesisBackfillGen;
+  if(_blocksGenesisBackfillRunning)return;
+  _blocksGenesisBackfillRunning=true;
+  const sub=$('blocks-sub');
+  try{
+    let info=await rpc('get_info');
+    if(!info){if(sub)sub.textContent='Node unreachable — check /api proxy.';return;}
+    if(myGen!==_blocksGenesisBackfillGen)return;
+    if(!blockList.length){
+      await loadBlocks(info.height,Math.min(5000,info.height+1));
+      renderAllBlocks();
+    }
+    while(myGen===_blocksGenesisBackfillGen){
+      if(!blockList.length)break;
+      const oldest=blockList[blockList.length-1];
+      if(!oldest||oldest.height===0){
+        if(sub)sub.textContent='Full chain — '+blockList.length+' blocks (including genesis).';
+        break;
+      }
+      if(sub)sub.textContent='Fetching older blocks… oldest #'+num(oldest.height)+' · '+blockList.length+' loaded';
+      await loadBlocks(oldest.height-1,100);
+      renderAllBlocks();
+      await _yieldToUi();
+    }
+  }finally{
+    _blocksGenesisBackfillRunning=false;
+  }
 }
 // Block decay classes — thresholds tied to the 120s target block time.
 // fresh  < 2 block times  | stale < 10 block times
@@ -3555,6 +3618,7 @@ function renderAllBlocks(){
     <td><span class="badge">✓ shielded</span></td>
   </tr>`).join('');
   const bs=$('blocks-shown');if(bs)bs.textContent=blockList.length;
+  const st=$('blocks-load-status');if(st&&!_blocksGenesisBackfillRunning)st.textContent='';
 }
 
 // ── BLOCK DETAIL ──────────────────────────────────────────────
@@ -5368,7 +5432,7 @@ function go(id){
   ['explorer','network','tools','learn','docs'].forEach(d=>{
     const btn=$('nb-'+d+'-drop');if(btn)btn.className='drop-btn'+(DROP_MAP[id]===d?' active':'');
   });
-  if(id==='blocks')renderAllBlocks();
+  if(id==='blocks'){renderAllBlocks();void ensureBlocksBackfillToGenesis();}
   if(id==='mempool'){loadMempool();}else{if(_mpAutoInterval){clearInterval(_mpAutoInterval);_mpAutoInterval=null;const cb=$('mp-auto-sync');if(cb)cb.checked=false;}}
   if(id==='network'){loadPeers();setTimeout(()=>{initGlobe().catch(()=>{});},200);setTimeout(renderHrHistChart,300);}
   if(id==='health'){
