@@ -15,6 +15,7 @@ use crate::primitives::{Hash, hash_concat, hash_domain};
 use crate::error::Result;
 use crate::constants::SEQ_PAD_ITERATIONS;
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 use parking_lot::Mutex;
 
 // =============================================================================
@@ -66,6 +67,44 @@ impl SeqPadCache {
 
 static SEQ_PAD_CACHE: std::sync::LazyLock<Mutex<SeqPadCache>> =
     std::sync::LazyLock::new(|| Mutex::new(SeqPadCache::new()));
+
+/// Genesis bytes used to derive RandomX VM keys per epoch (`randomx_key_for_height`).
+/// Set once from each binary via [`bind_randomx_genesis_for_network`] so PoW matches
+/// `--network` / `--testnet`. Without this, the code fell back to `COINCYNC_NETWORK`
+/// defaulting to **mainnet** genesis while `coincync-node` defaults to testnet — peers
+/// then appear to send blocks with "invalid PoW".
+#[cfg(feature = "randomx")]
+static RANDOMX_GENESIS_BYTES: OnceLock<[u8; 32]> = OnceLock::new();
+
+/// Bind RandomX epoch keys to the genesis hash for the selected network.
+/// Call once at process startup from `coincync-node` and `coincync-miner` (before PoW).
+pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
+    #[cfg(feature = "randomx")]
+    {
+        let genesis: [u8; 32] = match network {
+            crate::config::NetworkType::Mainnet => crate::mainnet::MAINNET_GENESIS_HASH,
+            crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
+                crate::testnet::TESTNET_GENESIS_HASH
+            }
+        };
+        if let Err(attempted) = RANDOMX_GENESIS_BYTES.set(genesis) {
+            if let Some(existing) = RANDOMX_GENESIS_BYTES.get() {
+                if *existing != attempted {
+                    tracing::warn!(
+                        "bind_randomx_genesis_for_network: genesis already set (prefix {}...) \
+                         — ignoring conflicting request (prefix {}...)",
+                        hex::encode(&existing[..4]),
+                        hex::encode(&attempted[..4])
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "randomx"))]
+    {
+        let _ = network;
+    }
+}
 
 #[cfg(not(feature = "randomx"))]
 static RANDOMX_WARNING_SHOWN: std::sync::Once = std::sync::Once::new();
@@ -403,15 +442,17 @@ mod randomx_cache {
 fn randomx_key_for_height(height: u64) -> [u8; 32] {
     use crate::primitives::hash_domain;
     let epoch = height / RANDOMX_KEY_EPOCH;
-    let network = std::env::var("COINCYNC_NETWORK")
-        .ok()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "mainnet".to_string());
-    let genesis_bytes: [u8; 32] = match network.as_str() {
-        "testnet" => crate::testnet::TESTNET_GENESIS_HASH,
-        "regtest" => crate::testnet::TESTNET_GENESIS_HASH,
-        _ => crate::mainnet::MAINNET_GENESIS_HASH,
-    };
+    let genesis_bytes: [u8; 32] = RANDOMX_GENESIS_BYTES.get().copied().unwrap_or_else(|| {
+        let network = std::env::var("COINCYNC_NETWORK")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            // Match `coincync-node`'s default `--network testnet` when unset.
+            .unwrap_or_else(|| "testnet".to_string());
+        match network.as_str() {
+            "testnet" | "regtest" => crate::testnet::TESTNET_GENESIS_HASH,
+            _ => crate::mainnet::MAINNET_GENESIS_HASH,
+        }
+    });
 
     let mut seed = Vec::with_capacity(8 + 32);
     seed.extend_from_slice(&epoch.to_le_bytes());

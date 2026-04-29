@@ -4,7 +4,7 @@
 //! live metrics, and polls the local node RPC for chain state.
 //!
 //! Usage:
-//!   coincync-tui-miner --address tCYNC1... [--threads 4] [--rpc http://127.0.0.1:28081] [--testnet]
+//!   coincync-tui-miner --address tCYNC1... [--threads 4] [--rpc http://127.0.0.1:28081] [--mainnet]
 //!
 //! Monitor-only (no mining):
 //!   coincync-tui-miner [--rpc http://127.0.0.1:28081]
@@ -54,8 +54,12 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:28081")]
     rpc: String,
 
-    /// Use testnet
+    /// Opt into mainnet (default behavior is testnet)
     #[arg(long)]
+    mainnet: bool,
+
+    /// Use testnet (legacy flag; testnet is now the default)
+    #[arg(long, hide = true)]
     testnet: bool,
 }
 
@@ -229,7 +233,7 @@ impl App {
             address: args.address.clone(),
             threads: args.threads,
             rpc_url: args.rpc.clone(),
-            testnet: args.testnet,
+            testnet: !args.mainnet,
 
             miner_pid: None,
             miner_alive: false,
@@ -244,7 +248,7 @@ impl App {
             tip_age_secs: 0,
             synced: false,
             peer_count: 0,
-            network: if args.testnet { "testnet" } else { "mainnet" }.into(),
+            network: if args.mainnet { "mainnet" } else { "testnet" }.into(),
             block_reward: 0,
             rpc_connected: false,
             rpc_ping_ms: 0,
@@ -648,8 +652,8 @@ fn spawn_miner(args: &Args, tx: mpsc::Sender<AppEvent>) -> Result<MinerGuard> {
         cmd.args(["--threads", &args.threads.to_string()]);
     }
     cmd.args(["--node", node_addr]);
-    if args.testnet {
-        cmd.arg("--testnet");
+    if args.mainnet {
+        cmd.arg("--mainnet");
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 

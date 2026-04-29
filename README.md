@@ -10,6 +10,9 @@ A privacy-first cryptocurrency with mandatory shielding, auditable supply, and c
 > Current network scope: Orchard and Lelantus Spark are **not enabled** on the
 > live public testnet. Phase-2 shielded modules remain compile-time gated and
 > inactive in consensus until a future activation decision.
+>
+> Public binaries and operator defaults are testnet-first. Mainnet code remains
+> in-repo for release readiness but is not a live public network yet.
 
 ## Privacy Features (22 total, all mandatory)
 
@@ -35,7 +38,7 @@ tar xzf coincync-1.0.0-testnet-linux-x86_64.tar.gz
 ./coincync-wallet create -p YOUR_PASSWORD
 
 # Mine
-./coincync-miner --testnet --address YOUR_tCYNC_ADDRESS --threads 4 --node 127.0.0.1:28081
+./coincync-miner --address YOUR_tCYNC_ADDRESS --threads 4 --node 127.0.0.1:28081
 ```
 
 See [Getting started docs](docs/src/getting-started/build.md) for full instructions.

@@ -19,6 +19,7 @@ pub use block::Block;
 pub use header::BlockHeader;
 pub use pow::{
     Anchor, PowAlgorithm,
+    bind_randomx_genesis_for_network,
     compute_full_anchor, compute_pow_hash,
     verify_pow, meets_difficulty, work_from_target,
 };

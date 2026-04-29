@@ -37,7 +37,7 @@ coincync-node --network testnet
 coincync-wallet create -p YOUR_PASSWORD
 
 # Mine
-coincync-miner --testnet --address YOUR_tCYNC_ADDRESS --threads 4 --node 127.0.0.1:28081
+coincync-miner --address YOUR_tCYNC_ADDRESS --threads 4 --node 127.0.0.1:28081
 ```
 
 ## Testnet Info

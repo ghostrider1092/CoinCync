@@ -108,6 +108,9 @@ async fn main() {
         _ => Network::Testnet,
     };
 
+    // RandomX VM keys must use the same genesis binding as the rest of the network.
+    coincync::consensus::bind_randomx_genesis_for_network(network);
+
     // Resolve ~
     let data_dir = if let Some(stripped) = cli
         .data_dir

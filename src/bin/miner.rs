@@ -9,7 +9,7 @@
 //!   --address <ADDR>    Mining reward address (full tCYNC.../CYNC... wallet address)
 //!   --threads <N>       Number of mining threads (default: CPU cores)
 //!   --node <HOST:PORT>  Node RPC endpoint (default: 127.0.0.1:28081)
-//!   --testnet           Use testnet
+//!   --mainnet           Opt into mainnet (default is testnet)
 //!   --demo              Run UI demo mode (no actual mining)
 
 use std::io::{Read, Write};
@@ -56,8 +56,12 @@ struct Args {
     #[arg(long)]
     rpc_api_key: Option<String>,
 
-    /// Use testnet
+    /// Opt into mainnet (default behavior is testnet)
     #[arg(long)]
+    mainnet: bool,
+
+    /// Use testnet (legacy flag; testnet is now the default)
+    #[arg(long, hide = true)]
     testnet: bool,
 
     /// Run UI demo mode (no actual mining)
@@ -358,11 +362,20 @@ fn main() {
         .init();
 
     let args = Args::parse();
+    let use_testnet = !args.mainnet;
+    if args.mainnet && args.testnet {
+        print_warning("Both --mainnet and --testnet were provided; using mainnet.");
+    }
+    coincync::consensus::bind_randomx_genesis_for_network(if use_testnet {
+        coincync::config::NetworkType::Testnet
+    } else {
+        coincync::config::NetworkType::Mainnet
+    });
     let rpc_api_key = resolve_rpc_api_key(args.rpc_api_key.as_deref());
 
     let threads = if args.threads == 0 { num_cpus::get() } else { args.threads };
     let address_str = args.address.clone().unwrap_or_default();
-    let network = if args.testnet { "testnet" } else { "mainnet" };
+    let network = if use_testnet { "testnet" } else { "mainnet" };
 
     // Create display config
     let config = MinerDisplayConfig {
@@ -489,7 +502,7 @@ fn main() {
                         rpc_api_key.as_deref(),
                     ) {
                         Ok(template) => {
-                            let fallback_network = if args.testnet {
+                            let fallback_network = if use_testnet {
                                 coincync::config::NetworkType::Testnet
                             } else {
                                 coincync::config::NetworkType::Mainnet

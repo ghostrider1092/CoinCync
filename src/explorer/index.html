@@ -6552,11 +6552,11 @@ sudo cp target/release/cync-miner /usr/local/bin/</code></pre>
 <div style="height:8px"></div>
 <h4>Start a Node</h4>
 <div style="height:8px"></div>
-<pre><code># Mainnet (default)
-coincync-node
+<pre><code># Public testnet (recommended/default public network)
+coincync-node --network testnet
 
-# Testnet
-coincync-node --testnet</code></pre>
+# Mainnet (reserved for launch window)
+coincync-node --network mainnet</code></pre>
 <div style="height:8px"></div>
 <p>That's it. The node will:</p>
 <p>1. Show the disclaimer (accept once)</p>
@@ -6570,7 +6570,7 @@ coincync-node --testnet</code></pre>
 cync-wallet create --wallet miner
 
 # Note the address shown, then start mining
-coincync-miner --testnet --address tCYNC3your_address_here --threads 1 --node 127.0.0.1:28081</code></pre>
+coincync-miner --address tCYNC3your_address_here --threads 1 --node 127.0.0.1:28081</code></pre>
 <div style="height:8px"></div>
 <h3>Configuration</h3>
 <div style="height:8px"></div>
