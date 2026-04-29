@@ -38,6 +38,8 @@ CoinCync explorer follows the Etherscan/Esplora posture:
 
 Block history on the **Blocks** tab is filled with batched `get_block_range` JSON-RPC calls (100 blocks per request) against that same `/api/testnet` upstream, so the explorer can enumerate the full chain the node holds while keeping round trips bounded.
 
+The UI now surfaces source/freshness badges on chain-critical pages. If operators change upstream wiring, those badges should be validated after deploy (expect `/api/testnet` for chain pages and `/health/*` for fleet probes).
+
 ## Verify routes
 
 ```bash

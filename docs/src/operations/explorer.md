@@ -8,6 +8,11 @@ A single Caddy reverse proxy on port 443, fronting a localhost-bound `coincync-n
 
 The explorer UI loads chain data **only** through that JSON-RPC surface (same-origin `/api/testnet` or `/api/mainnet`). On the **Blocks** page it walks the full canonical height range using batched `get_block_range` (100 heights per request, server-capped) so the table can list every block the upstream node stores, without thousands of per-height round trips.
 
+Recent UX hardening keeps the CoinCync visual style while making chain views more operator-friendly:
+- blocks/mempool/network/health/iron pages show explicit source + freshness badges,
+- the blocks table supports newest reset + height jump + progressive backfill,
+- duplicate low-signal widgets were removed from high-traffic pages to prioritize chain state.
+
 ```text
     public 443/tcp ── Caddy ── 127.0.0.1:28081 (cyncd testnet RPC)
                         │   └─ 127.0.0.1:19081 (cyncd mainnet RPC, post-launch)

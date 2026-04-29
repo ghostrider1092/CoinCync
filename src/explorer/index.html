@@ -370,59 +370,6 @@ code{font-family:var(--mono);font-size:11px;background:var(--s2);padding:1px 5px
 @keyframes feedSlideIn{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}
 
 /* ── IRON CONSENSUS METRICS ───────────────────────────────────── */
-.iron-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px}
-.iron-kpi{background:var(--surface);border:1px solid var(--b);border-radius:var(--r-lg);padding:16px 18px;position:relative;overflow:hidden;transition:border-color var(--transition-fast)}
-.iron-kpi:hover{border-color:var(--ac)}
-.iron-kpi-label{font-size:10px;font-family:var(--mono);color:var(--t3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
-.iron-kpi-value{font-size:28px;font-family:var(--mono);font-weight:600;color:var(--t);line-height:1}
-.iron-kpi-unit{font-size:11px;font-family:var(--mono);color:var(--t3);margin-left:3px}
-.iron-kpi-sub{font-size:11px;font-family:var(--mono);color:var(--t3);margin-top:4px}
-.iron-kpi-accent{position:absolute;top:0;left:0;width:3px;height:100%;border-radius:var(--r-lg) 0 0 var(--r-lg)}
-.iron-kpi.ok   .iron-kpi-accent{background:var(--ac2)}
-.iron-kpi.warn .iron-kpi-accent{background:var(--ac2);opacity:.7}
-.iron-kpi.crit .iron-kpi-accent{background:var(--critical)}
-.iron-kpi.info .iron-kpi-accent{background:var(--ac)}
-
-.iron-state-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:var(--r-pill);font-family:var(--mono);font-size:12px;font-weight:600}
-.iron-state-badge.nominal    {background:rgba(212,160,89,.12);color:#D4A059;border:1px solid rgba(212,160,89,.25)}
-.iron-state-badge.syncing    {background:rgba(99,102,241,.12);color:#818CF8;border:1px solid rgba(99,102,241,.25)}
-.iron-state-badge.forked     {background:rgba(239,68,68,.15);color:#F87171;border:1px solid rgba(239,68,68,.3)}
-.iron-state-badge.partitioned{background:rgba(239,68,68,.15);color:#F87171;border:1px solid rgba(239,68,68,.3)}
-.iron-state-badge.recovering {background:rgba(245,158,11,.12);color:#FCD34D;border:1px solid rgba(245,158,11,.25)}
-.iron-state-badge.locked     {background:rgba(239,68,68,.15);color:#F87171;border:1px solid rgba(239,68,68,.3)}
-
-.iron-section-title{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--t3);margin:20px 0 10px}
-.iron-bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-family:var(--mono);font-size:12px}
-.iron-bar-label{width:130px;color:var(--t3);flex-shrink:0;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
-.iron-bar-track{flex:1;height:6px;background:var(--s3);border-radius:var(--r-sm);overflow:hidden}
-.iron-bar-fill{height:100%;border-radius:var(--r-sm);transition:width var(--transition-slow)}
-.iron-bar-fill.ok  {background:var(--ac2)}
-.iron-bar-fill.warn{background:var(--ac2);opacity:.7}
-.iron-bar-fill.crit{background:var(--critical)}
-.iron-bar-val{width:60px;text-align:right;color:var(--t2);flex-shrink:0}
-
-.iron-peer-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--b);font-family:var(--mono);font-size:12px}
-.iron-peer-row:last-child{border-bottom:none}
-.iron-peer-id{color:var(--t);font-weight:600}
-.iron-peer-height{color:var(--t3)}
-.iron-peer-diff{color:var(--t3)}
-.iron-peer-status{padding:2px 8px;border-radius:var(--r-pill);font-size:10px;font-weight:700;text-transform:uppercase}
-.iron-peer-status.ok  {background:rgba(212,160,89,.15);color:#D4A059}
-.iron-peer-status.ban {background:rgba(239,68,68,.15);color:#F87171}
-.iron-peer-status.warn{background:var(--acb);color:var(--ac2)}
-
-.iron-event-row{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--b);font-family:var(--mono);font-size:11px}
-.iron-event-row:last-child{border-bottom:none}
-.iron-event-time{color:var(--t3);flex-shrink:0;width:60px}
-.iron-event-type{flex-shrink:0;width:100px;font-weight:600}
-.iron-event-type.ok  {color:#D4A059}
-.iron-event-type.warn{color:var(--ac2)}
-.iron-event-type.crit{color:var(--critical)}
-.iron-event-msg{color:var(--t2);flex:1}
-
-.iron-health-ring{position:relative;display:inline-flex;align-items:center;justify-content:center}
-.iron-uptime-bar{display:flex;gap:2px;height:24px;align-items:flex-end}
-.iron-uptime-seg{width:6px;border-radius:var(--r-sm);transition:height .3s}
 
 /* MINING CALC */
 .calc-result{background:var(--acb);border:1px solid var(--b);border-radius:var(--r-lg);padding:20px;margin-top:16px}
@@ -519,9 +466,6 @@ code{font-family:var(--mono);font-size:11px;background:var(--s2);padding:1px 5px
   table{font-size:11px}
   th,td{padding:8px 6px}
   .info-box{font-size:11px;padding:12px}
-  .iron-grid{grid-template-columns:repeat(2,1fr)!important;gap:8px}
-  .iron-kpi{padding:10px 12px}
-  .iron-kpi-value{font-size:20px}
   .chart-wrap{height:180px!important;min-height:180px!important}
   .bc{font-size:11px;flex-wrap:wrap}
   .page-title{font-size:20px}
@@ -638,28 +582,9 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     <button class="nav-btn" id="nb-blocks" onclick="go('blocks')">Blocks</button>
     <button class="nav-btn" id="nb-mempool" onclick="go('mempool')">Mempool</button>
     <button class="nav-btn" id="nb-network" onclick="go('network')">Network</button>
+    <button class="nav-btn" id="nb-globe" onclick="go('globe')">Globe</button>
     <button class="nav-btn" id="nb-health" onclick="go('health')">Node Health</button>
-    <button class="nav-btn" id="nb-ironmetrics" onclick="go('ironmetrics')">⚙ IronConsensus</button>
     <button class="nav-btn" id="nb-supply" onclick="go('supply')">Supply</button>
-    <button class="nav-btn" id="nb-burn" onclick="go('burn')">Burn</button>
-    <button class="nav-btn" id="nb-mining" onclick="go('mining')">Mining Calc</button>
-    <button class="nav-btn" id="nb-wallet" onclick="go('walletdoc')">Wallet Guide</button>
-    <button class="nav-btn" id="nb-faucet" onclick="go('faucet')">Faucet</button>
-    <button class="nav-btn" id="nb-privacy" onclick="go('privacy')">Privacy</button>
-    <button class="nav-btn" id="nb-about" onclick="go('about')">About</button>
-    <button class="nav-btn" id="nb-constitution" onclick="go('constitution')">Constitution</button>
-    <button class="nav-btn" id="nb-changelog" onclick="go('changelog')">Changelog</button>
-    <button class="nav-btn" id="nb-docs" onclick="go('docs')">Docs</button>
-    <button class="nav-btn" id="nb-nodesetup" style="display:none" onclick="go('nodesetup')">Node Setup</button>
-    <button class="nav-btn" id="nb-walletdoc" style="display:none" onclick="go('walletdoc')">Wallet</button>
-    <button class="nav-btn" id="nb-testnetdoc" style="display:none" onclick="go('testnetdoc')">Testnet</button>
-    <button class="nav-btn" id="nb-privacydoc" style="display:none" onclick="go('privacydoc')">Privacy Doc</button>
-    <button class="nav-btn" id="nb-protocoldoc" style="display:none" onclick="go('protocoldoc')">Protocol</button>
-    <button class="nav-btn" id="nb-apifull" style="display:none" onclick="go('apifull')">REST API</button>
-    <button class="nav-btn" id="nb-billofrights" style="display:none" onclick="go('billofrights')">Bill of Rights</button>
-    <button class="nav-btn" id="nb-disclaimer" style="display:none" onclick="go('disclaimer')">Disclaimer</button>
-    <button class="nav-btn" id="nb-conduct" style="display:none" onclick="go('conduct')">Conduct</button>
-    <button class="nav-btn" id="nb-api" onclick="go('api')">API Docs</button>
     <button class="nav-btn" id="nb-block" style="display:none">Block</button>
     <button class="nav-btn" id="nb-search" style="display:none">Search</button>
   </div>
@@ -791,26 +716,12 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <button class="mob-btn" id="mob-blocks" onclick="go('blocks');closeMobile()">Blocks</button>
   <button class="mob-btn" id="mob-mempool" onclick="go('mempool');closeMobile()">Mempool</button>
   <button class="mob-btn" id="mob-network" onclick="go('network');closeMobile()">Network</button>
+  <button class="mob-btn" id="mob-globe" onclick="go('globe');closeMobile()">Globe</button>
   <button class="mob-btn" id="mob-health" onclick="go('health');closeMobile()">Node Health</button>
   <button class="mob-btn" id="mob-supply" onclick="go('supply');closeMobile()">Supply</button>
-  <button class="mob-btn" id="mob-mining" onclick="go('mining');closeMobile()">Mining Calculator</button>
-  <button class="mob-btn" id="mob-wallet" onclick="go('walletdoc');closeMobile()">Wallet Guide</button>
-  <button class="mob-btn" id="mob-faucet" onclick="go('faucet');closeMobile()">Faucet</button>
-  <button class="mob-btn" id="mob-privacy" onclick="go('privacy');closeMobile()">Privacy</button>
-  <button class="mob-btn" id="mob-about" onclick="go('about');closeMobile()">About</button>
-  <button class="mob-btn" id="mob-constitution" onclick="go('constitution');closeMobile()">Constitution</button>
-  <button class="mob-btn" id="mob-changelog" onclick="go('changelog');closeMobile()">Changelog</button>
   <div style="height:1px;background:var(--b);margin:8px 0"></div>
   <button class="mob-btn" onclick="closeMobile();openAppearance()" style="color:var(--ac2)">Appearance</button>
-  <button class="mob-btn" id="mob-docs" onclick="go('docs');closeMobile()">📚 Documentation Hub</button>
-  <button class="mob-btn" id="mob-nodesetup" onclick="go('nodesetup');closeMobile()">Node Setup</button>
-  <button class="mob-btn" id="mob-walletdoc" onclick="go('walletdoc');closeMobile()">Wallet Guide</button>
-  <button class="mob-btn" id="mob-testnetdoc" onclick="go('testnetdoc');closeMobile()">Testnet Guide</button>
-  <button class="mob-btn" id="mob-billofrights" onclick="go('billofrights');closeMobile()">Bill of Rights</button>
-  <button class="mob-btn" id="mob-disclaimer" onclick="go('disclaimer');closeMobile()">Disclaimer</button>
   <div style="border-top:1px solid var(--b);margin-top:8px;padding-top:8px"></div>
-  <button class="mob-btn" id="mob-addrlookup" onclick="go('addrlookup');closeMobile()">🔍 Address Lookup</button>
-  <button class="mob-btn" id="mob-api" onclick="go('api');closeMobile()">API Docs</button>
   <div style="padding:16px;margin-top:8px;border-top:1px solid var(--b)">
     <input style="width:100%;padding:10px 14px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--s2);color:var(--t);outline:none;font-family:var(--mono)" placeholder="Search height or hash..." onkeydown="if(event.key==='Enter'){doSearch();closeMobile()}" id="mob-q2"/>
   </div>
@@ -968,12 +879,6 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <div style="color:var(--t3);font-size:9px;margin-bottom:4px">NETWORK HASH</div>
             <div style="color:var(--t);font-size:16px;font-weight:700" id="nd-hash">—</div>
           </div>
-          <!-- Price placeholder (#8) -->
-          <div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center;border:1px dashed var(--b)">
-            <div style="color:var(--t3);font-size:9px;margin-bottom:4px">CYNC PRICE</div>
-            <div style="color:var(--t3);font-size:14px">—</div>
-            <div style="font-size:8px;color:var(--t3);margin-top:2px">pre-mainnet</div>
-          </div>
           <!-- Difficulty prediction (#18) -->
           <div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center">
             <div style="color:var(--t3);font-size:9px;margin-bottom:4px">DIFF FORECAST</div>
@@ -1091,32 +996,14 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         <span><span style="display:inline-block;width:8px;height:8px;background:#9E7A3E;margin-right:4px;vertical-align:middle"></span>normal block</span>
         <span><span style="display:inline-block;width:8px;height:8px;background:#F59E0B;margin-right:4px;vertical-align:middle"></span>orphan</span>
         <span><span style="display:inline-block;width:8px;height:8px;background:#EF4444;margin-right:4px;vertical-align:middle"></span>reorg</span>
-        <span><span style="display:inline-block;width:8px;height:8px;background:#A855F7;margin-right:4px;vertical-align:middle"></span>IronConsensus rollback</span>
       </div>
     </div>
 
-    <!-- Comparison table — inside hero-inner -->
     <div class="panel" style="margin-top:20px">
-      <div class="panel-head">How CoinCync compares</div>
-      <table>
-        <thead><tr><th>Feature</th><th>CoinCync</th><th>Monero</th><th>Zcash</th><th>Bitcoin</th></tr></thead>
-        <tbody>
-          <tr><td>Privacy</td><td style="color:var(--ac2);font-weight:500">Mandatory</td><td style="color:var(--ac2)">Mandatory</td><td style="color:var(--t3)">Optional</td><td style="color:#EF4444">None</td></tr>
-          <tr><td>Ring signatures</td><td style="color:var(--ac2)">CLSAG-11</td><td style="color:var(--ac2)">CLSAG-16</td><td style="color:var(--t3)">—</td><td style="color:var(--t3)">—</td></tr>
-          <tr><td>Range proofs</td><td style="color:var(--ac2)">Bulletproofs+</td><td style="color:var(--ac2)">Bulletproofs+</td><td style="color:var(--t3)">Halo2</td><td style="color:var(--t3)">—</td></tr>
-          <tr><td>Stealth addresses</td><td style="color:var(--ac2)">✓</td><td style="color:var(--ac2)">✓</td><td style="color:var(--t3)">—</td><td style="color:var(--t3)">—</td></tr>
-          <tr><td>Trusted setup</td><td style="color:var(--ac2);font-weight:500">None</td><td style="color:var(--ac2)">None</td><td style="color:#EF4444">Was required</td><td style="color:var(--t3)">N/A</td></tr>
-          <tr><td>Supply auditable</td><td style="color:var(--ac2)">✓ Pedersen</td><td style="color:var(--ac2)">✓ Pedersen</td><td style="color:var(--ac2)">✓</td><td style="color:var(--ac2)">✓ Transparent</td></tr>
-          <tr><td>Mining algorithm</td><td>RandomX (CPU)</td><td>RandomX (CPU)</td><td>Equihash (GPU)</td><td>SHA-256 (ASIC)</td></tr>
-          <tr><td>Dev tax</td><td style="color:var(--ac2);font-weight:500">0%</td><td style="color:var(--ac2)">0%</td><td style="color:#EF4444">20% (ended)</td><td style="color:var(--ac2)">0%</td></tr>
-          <tr><td>Fee burn</td><td style="color:var(--ac2)">30%</td><td style="color:var(--t3)">0%</td><td style="color:var(--t3)">0%</td><td style="color:var(--t3)">0%</td></tr>
-          <tr><td>Multi-sig privacy</td><td style="color:var(--ac2)">FROST (hidden)</td><td style="color:var(--t3)">Visible</td><td style="color:var(--t3)">Visible</td><td style="color:var(--t3)">Visible</td></tr>
-          <tr><td>Dandelion++</td><td style="color:var(--ac2)">✓</td><td style="color:var(--ac2)">✓</td><td style="color:var(--t3)">—</td><td style="color:var(--t3)">—</td></tr>
-          <tr><td>Constitution</td><td style="color:var(--ac2);font-weight:500">Enforced</td><td style="color:var(--t3)">—</td><td style="color:var(--t3)">—</td><td style="color:var(--t3)">—</td></tr>
-        </tbody>
-      </table>
-      <div style="padding:12px 24px;font-size:11px;color:var(--t3);font-family:var(--mono);text-align:center;border-top:1px solid var(--b)">
-        CoinCync combines Monero-grade privacy with constitutional enforcement and deflationary tokenomics
+      <div class="panel-head">Explorer focus</div>
+      <div style="padding:16px 20px;font-size:12px;color:var(--t2);line-height:1.7">
+        This explorer prioritizes live chain observability: blocks, transactions, mempool, and node health.
+        Protocol comparisons and long-form explainers remain available in the docs/privacy sections.
       </div>
     </div>
 
@@ -1135,14 +1022,38 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Blocks</div>
     <div class="page-title">All blocks</div>
-    <div class="page-sub" id="blocks-sub" style="margin-bottom:20px">Loading...</div>
+    <div class="page-sub" id="blocks-sub" style="margin-bottom:10px">Loading...</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px" id="blocks-meta">
+      <span class="badge">source: <span id="blocks-source">/api/testnet</span></span>
+      <span class="badge">freshness: <span id="blocks-freshness">—</span></span>
+      <span class="badge">tip: <span id="blocks-tip">—</span></span>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;border:1px solid var(--b);background:var(--surface);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-family:var(--mono);font-size:11px">
+      <span id="ops-fresh-dot" style="width:8px;height:8px;border-radius:50%;background:#6b7280;display:inline-block"></span>
+      <span>height: <span id="ops-height">—</span></span>
+      <span>tip age: <span id="ops-tip-age">—</span></span>
+      <span>peers: <span id="ops-peers">—</span></span>
+      <span>rpc: <span id="ops-rpc-source">/api/testnet</span></span>
+      <span style="margin-left:auto">api: <span id="ops-api-health">checking...</span></span>
+    </div>
+    <div style="border:1px solid var(--b);background:var(--surface);border-radius:8px;padding:8px 10px;margin-bottom:12px">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">Recent chain alerts</div>
+      <div id="ops-alert-feed" style="display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:11px;color:var(--t2)">
+        <div>no alerts yet</div>
+      </div>
+    </div>
     <div class="info-box green">🔐 All transactions are 100% private. Amounts and addresses are cryptographically hidden.</div>
     <div class="panel">
       <div class="panel-head">Blocks</div>
       <table><thead><tr><th>Height</th><th>Age</th><th>Hash</th><th>Algorithm</th><th>Txns</th><th>Size</th><th>Privacy</th></tr></thead>
       <tbody id="all-blocks"><tr><td colspan="7" class="loading">Loading blocks...</td></tr></tbody></table>
-      <div style="padding:12px 20px;border-top:1px solid var(--b);background:var(--s2);display:flex;align-items:center;gap:12px">
-        <button onclick="loadMore()" class="btn btn-outline" style="font-size:11px;padding:5px 14px">Load more ↓</button>
+      <div style="padding:12px 20px;border-top:1px solid var(--b);background:var(--s2);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button onclick="jumpNewestBlocks()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Newest</button>
+        <button onclick="loadMore()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Older 100</button>
+        <input id="blocks-jump-height" type="number" min="0" placeholder="height" style="width:90px;padding:5px 8px;border:1px solid var(--b);border-radius:6px;background:var(--bg);color:var(--t);font-family:var(--mono);font-size:11px"/>
+        <button onclick="jumpToBlockHeight()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Go</button>
+        <input id="blocks-direct-lookup" type="text" placeholder="block/tx hash or height" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:6px;background:var(--bg);color:var(--t);font-family:var(--mono);font-size:11px"/>
+        <button onclick="blocksDirectLookup()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Lookup</button>
         <span style="font-size:11px;color:var(--t3);font-family:var(--mono);margin-left:auto"><span id="blocks-load-status"></span>Showing <span id="blocks-shown">0</span> blocks</span>
       </div>
     </div>
@@ -1444,13 +1355,19 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         </label>
       </div>
     </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="badge">source: <span id="mp-source">/api/testnet</span></span>
+      <span class="badge">freshness: <span id="mp-freshness">—</span></span>
+      <span class="badge">pending: <span id="mp-pending-badge">—</span></span>
+    </div>
 
     <!-- Stats row -->
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:16px">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:16px">
       <div class="stat"><div class="label">Pending</div><div class="val" id="mp-stat-count" style="color:var(--ac2)">—</div><div class="sub">transactions</div></div>
       <div class="stat"><div class="label">Pool Size</div><div class="val" id="mp-stat-bytes">—</div><div class="sub">bytes</div></div>
       <div class="stat"><div class="label">Total Fees</div><div class="val" id="mp-stat-fees">—</div><div class="sub">CYNC burned (30%)</div></div>
       <div class="stat"><div class="label">Avg Size</div><div class="val" id="mp-stat-avg">—</div><div class="sub">bytes/tx</div></div>
+      <div class="stat"><div class="label">Queue Risk</div><div class="val" id="mp-stat-risk">—</div><div class="sub">age estimate</div></div>
     </div>
 
     <div class="info-box green">Every transaction in the mempool is fully private: CLSAG ring-11 signatures, Bulletproofs+ range proofs, stealth one-time addresses, Pedersen commitments, uniform 2-in/2-out shape, Dandelion++ propagation.</div>
@@ -1485,18 +1402,11 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         </div>
       </div>
       <div class="panel">
-        <div class="panel-head">Testnet fleet</div>
-        <div style="padding:0">
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>a7f2</div><div class="age">LON · RandomX Miner</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>3c91</div><div class="age">SFO · RandomX Miner</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>b5e8</div><div class="age">NYC1 · Mempool Node</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>6d4a</div><div class="age">FRA · Mempool Node</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>2f1c</div><div class="age">NYC3 · Seed · Archive</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>e8b3</div><div class="age">TOR · Seed</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>9a07</div><div class="age">RIC · Explorer · Monitor</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>4c2d</div><div class="age">ATL · Faucet · RPC</div></div>
-          <div style="padding:12px 20px;border-bottom:1px solid var(--b)"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>5f9e</div><div class="age">AMS · Seed · Backup</div></div>
-          <div style="padding:12px 20px"><div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--t);margin-bottom:2px"><span class="node-online"></span>8b14</div><div class="age">SYD · RandomX Miner</div></div>
+        <div class="panel-head">Data source</div>
+        <div style="padding:16px 20px;display:flex;flex-direction:column;gap:8px;font-family:var(--mono);font-size:11px">
+          <div><span style="color:var(--t3)">RPC route:</span> <span id="net-source" style="color:var(--ac2)">/api/testnet</span></div>
+          <div><span style="color:var(--t3)">Freshness:</span> <span id="net-freshness">—</span></div>
+          <div><span style="color:var(--t3)">Fleet probe:</span> <span>see <a onclick="go('health')" style="cursor:pointer;color:var(--ac2)">Node Health</a></span></div>
         </div>
       </div>
     </div>
@@ -1516,11 +1426,25 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         <tr><td class="mono">hash</td><td style="font-family:var(--mono)">BLAKE3 + SHA3-512</td><td style="color:var(--t2)">Checksums + key derivation</td></tr>
       </tbody></table>
     </div>
-    <!-- Peer Map - 3D Globe -->
+    <!-- Hashrate History (#23) -->
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">Network Hashrate (live session)</div>
+      <div class="chart-wrap" style="height:200px"><canvas id="hr-history-canvas"></canvas></div>
+      <div style="padding:8px 16px;font-size:10px;color:var(--t3);text-align:center;font-family:var(--mono)">Estimated from difficulty / 120s block target · updates every 10s</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ GLOBE ═══ -->
+<div class="page" id="page-globe">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Globe</div>
+    <div class="page-title" style="margin-bottom:6px">Network globe</div>
+    <div class="page-sub" style="margin-bottom:12px">3D peer map in dedicated view</div>
     <div class="panel">
       <div class="panel-head">
         Node map
-        <span style="font-size:11px;color:var(--t3);font-weight:400;text-transform:none;letter-spacing:0">— 3D globe · drag to rotate · scroll to zoom</span>
+        <span style="font-size:11px;color:var(--t3);font-weight:400;text-transform:none;letter-spacing:0">— drag to rotate · scroll to zoom</span>
         <span style="display:flex;gap:6px;margin-left:auto">
           <button onclick="toggleGlobeMode()" id="globe-mode-btn" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--t2);font-size:10px;cursor:pointer;font-family:var(--mono)">⏸ Pause</button>
           <button onclick="toggleGlobeFullscreen()" id="globe-fs-btn" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--t2);font-size:10px;cursor:pointer;font-family:var(--mono)">⛶ Fullscreen</button>
@@ -1532,10 +1456,8 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
           <div style="font-family:var(--mono);font-size:12px;color:var(--t3)">Loading 3D globe...</div>
           <div style="width:120px;height:3px;background:var(--s3);border-radius:2px;overflow:hidden"><div style="height:100%;background:var(--ac2);border-radius:2px;animation:loadbar 1.5s ease-in-out infinite"></div></div>
         </div>
-        <div id="globe-el" style="width:100%;height:500px"></div>
-        <!-- Node tooltip -->
+        <div id="globe-el" style="width:100%;height:560px"></div>
         <div id="globe-tt" style="display:none;position:absolute;background:var(--surface);border:1px solid var(--b);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:11px;color:var(--t);pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:20;min-width:180px"></div>
-        <!-- Legend -->
         <div style="position:absolute;bottom:14px;right:14px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 12px;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.7);display:flex;flex-direction:column;gap:5px">
           <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#D4A059;box-shadow:0 0 6px #D4A059;display:inline-block;flex-shrink:0"></span>Active node</div>
           <div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:1px;background:rgba(212,160,89,.6);display:inline-block;flex-shrink:0"></span>P2P connection</div>
@@ -1543,17 +1465,9 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         </div>
       </div>
       <div style="padding:10px 20px;background:var(--s2);border-top:1px solid var(--b);display:flex;gap:20px;align-items:center;font-size:11px;font-family:var(--mono);color:var(--t3);flex-wrap:wrap">
-        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#7EB87C;margin-right:5px;box-shadow:0 0 4px #7EB87C"></span>9 nodes online</span>
-        <span>LON · SFO · NYC1 · FRA · NYC3 · TOR · RIC · ATL · AMS</span>
+        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#7EB87C;margin-right:5px;box-shadow:0 0 4px #7EB87C"></span>Live fleet map</span>
         <span style="margin-left:auto">Drag to rotate · Scroll to zoom · Click node for details</span>
       </div>
-    </div>
-
-    <!-- Hashrate History (#23) -->
-    <div class="panel" style="margin-top:20px">
-      <div class="panel-head">Network Hashrate (live session)</div>
-      <div class="chart-wrap" style="height:200px"><canvas id="hr-history-canvas"></canvas></div>
-      <div style="padding:8px 16px;font-size:10px;color:var(--t3);text-align:center;font-family:var(--mono)">Estimated from difficulty / 120s block target · updates every 10s</div>
     </div>
   </div>
 </div>
@@ -1569,6 +1483,10 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Node Health</div>
     <div class="page-title" style="margin-bottom:4px">Node health dashboard</div>
     <div class="page-sub" style="margin-bottom:20px">Live status of the active 6-node CoinCync public testnet fleet</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:-8px 0 12px 0">
+      <span class="badge">source: <span id="health-source">/health/*</span></span>
+      <span class="badge">freshness: <span id="health-freshness">—</span></span>
+    </div>
     <div id="health-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin:-6px 0 14px 0">
       <span class="badge">Online: —</span>
       <span class="badge badge-amber">RPC Protected: —</span>
@@ -1591,134 +1509,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
 
 <!-- ═══ SUPPLY ═══ -->
 
-<div class="page" id="page-ironmetrics">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>IronConsensus</div>
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:6px">
-      <div>
-        <div class="page-title" style="margin-bottom:2px">IronConsensus Metrics</div>
-        <div class="page-sub">Live convergence engine telemetry — auto-refreshes every 4s</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:10px">
-        <span id="iron-state-badge" class="iron-state-badge nominal">● Nominal</span>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--t3)" id="iron-last-update">—</span>
-      </div>
-    </div>
 
-    <!-- ── KPI row 1: Chain ─────────────────────────────────── -->
-    <div class="iron-section-title">Chain State</div>
-    <div class="iron-grid" id="iron-chain-kpis">
-      <div class="iron-kpi ok" id="iron-kpi-height">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Local Height</div>
-        <div class="iron-kpi-value" id="iron-val-height">—</div>
-        <div class="iron-kpi-sub" id="iron-val-tip">tip: —</div>
-      </div>
-      <div class="iron-kpi ok" id="iron-kpi-lag">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Lag (blocks)</div>
-        <div class="iron-kpi-value" id="iron-val-lag">—</div>
-        <div class="iron-kpi-sub" id="iron-val-best">best known: —</div>
-      </div>
-      <div class="iron-kpi info" id="iron-kpi-diff">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Total Difficulty</div>
-        <div class="iron-kpi-value" id="iron-val-diff">—</div>
-        <div class="iron-kpi-sub" id="iron-val-staletime">tip age: —</div>
-      </div>
-      <div class="iron-kpi ok" id="iron-kpi-health">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Health Score</div>
-        <div class="iron-kpi-value" id="iron-val-health">—<span class="iron-kpi-unit">/1.0</span></div>
-        <div class="iron-kpi-sub" id="iron-val-synced">—</div>
-      </div>
-    </div>
-
-    <!-- ── KPI row 2: Peers & Enforcement ──────────────────── -->
-    <div class="iron-section-title">Enforcement Counters</div>
-    <div class="iron-grid">
-      <div class="iron-kpi ok">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Outbound Peers</div>
-        <div class="iron-kpi-value" id="iron-val-peers-out">—</div>
-        <div class="iron-kpi-sub" id="iron-val-peers-in">inbound: —</div>
-      </div>
-      <div class="iron-kpi warn">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Active Bans</div>
-        <div class="iron-kpi-value" id="iron-val-bans">—</div>
-        <div class="iron-kpi-sub" id="iron-val-bans-total">total this session: —</div>
-      </div>
-      <div class="iron-kpi info">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Forks Detected</div>
-        <div class="iron-kpi-value" id="iron-val-forks">—</div>
-        <div class="iron-kpi-sub" id="iron-val-rollbacks">rollbacks: —</div>
-      </div>
-      <div class="iron-kpi info">
-        <div class="iron-kpi-accent"></div>
-        <div class="iron-kpi-label">Syncs Started</div>
-        <div class="iron-kpi-value" id="iron-val-syncs">—</div>
-        <div class="iron-kpi-sub" id="iron-val-convergences">converged: —</div>
-      </div>
-    </div>
-
-    <!-- ── Tick performance ─────────────────────────────────── -->
-    <div class="iron-section-title">Tick Performance</div>
-    <div style="background:var(--surface);border:1px solid var(--b);border-radius:12px;padding:16px 18px;margin-bottom:20px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <span style="font-family:var(--mono);font-size:12px;color:var(--t3)">Last 20 enforcement ticks — bar height = duration</span>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--t3)" id="iron-avg-tick">avg: —ms</span>
-      </div>
-      <div class="iron-uptime-bar" id="iron-tick-bars">
-        <!-- filled by JS -->
-      </div>
-      <div style="display:flex;justify-content:space-between;margin-top:10px;font-family:var(--mono);font-size:10px;color:var(--t3)">
-        <span id="iron-tick-total">ticks: —</span>
-        <span id="iron-tick-slow">slow ticks: —</span>
-        <span id="iron-tick-interval">interval: 2s</span>
-      </div>
-    </div>
-
-    <!-- ── State machine history ─────────────────────────────── -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
-      <div style="background:var(--surface);border:1px solid var(--b);border-radius:12px;padding:16px 18px">
-        <div class="iron-section-title" style="margin-top:0">State Breakdown</div>
-        <div id="iron-state-bars"><!-- filled by JS --></div>
-      </div>
-      <div style="background:var(--surface);border:1px solid var(--b);border-radius:12px;padding:16px 18px">
-        <div class="iron-section-title" style="margin-top:0">Partition &amp; Sync Time</div>
-        <div id="iron-time-bars"><!-- filled by JS --></div>
-      </div>
-    </div>
-
-    <!-- ── Connected peers table ─────────────────────────────── -->
-    <div style="background:var(--surface);border:1px solid var(--b);border-radius:12px;padding:16px 18px;margin-bottom:20px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div class="iron-section-title" style="margin:0">Connected Peers</div>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--t3)" id="iron-peer-count">— peers</span>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:8px;padding:0 0 6px;border-bottom:1px solid var(--b);font-family:var(--mono);font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">
-        <span>Peer ID</span><span>Height</span><span>Difficulty</span><span>Status</span>
-      </div>
-      <div id="iron-peer-table">
-        <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:12px;color:var(--t3)">Loading peer data…</div>
-      </div>
-    </div>
-
-    <!-- ── Live event log ────────────────────────────────────── -->
-    <div style="background:var(--surface);border:1px solid var(--b);border-radius:12px;padding:16px 18px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div class="iron-section-title" style="margin:0">Event Log</div>
-        <button onclick="ironClearLog()" style="font-family:var(--mono);font-size:10px;background:none;border:1px solid var(--b);border-radius:6px;padding:3px 10px;color:var(--t3);cursor:pointer">Clear</button>
-      </div>
-      <div id="iron-event-log" style="max-height:280px;overflow-y:auto">
-        <div style="text-align:center;padding:20px;font-family:var(--mono);font-size:12px;color:var(--t3)">Waiting for events…</div>
-      </div>
-    </div>
-
-  </div>
-</div>
 
 <div class="page" id="page-supply">
   <div class="content">
@@ -1778,465 +1569,10 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   </div>
 </div>
 
-<!-- ═══ FEE BURN ═══ -->
-<div class="page" id="page-burn">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Fee Burn</div>
-
-    <!-- Hero -->
-    <div style="text-align:center;padding:40px 0 32px;border-bottom:1px solid var(--b);margin-bottom:28px">
-      <div style="font-size:48px;margin-bottom:8px">🔥</div>
-      <div style="font-family:var(--serif);font-size:32px;font-weight:400;color:var(--t);letter-spacing:-.5px;margin-bottom:8px">Fee Burn</div>
-      <div style="font-family:var(--mono);font-size:12px;color:var(--t3)">Every transaction permanently destroys a portion of its fee</div>
-    </div>
-
-    <!-- Status banner -->
-    <div id="burn-status-banner" style="padding:16px 20px;border-radius:10px;margin-bottom:24px;font-family:var(--mono);font-size:12px;text-align:center;background:rgba(240,192,64,.08);border:1px solid rgba(240,192,64,.2);color:#F0C040">
-      Loading burn status...
-    </div>
-
-    <!-- How it works -->
-    <div style="max-width:720px;margin:0 auto 28px">
-      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:16px">How it works</div>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">Every non-coinbase transaction on CoinCync pays a fee. That fee is <strong style="color:var(--ac2)">split between the miner and the burn address</strong>. The burned portion is permanently destroyed — removed from circulation forever. No one can spend it. No one controls it. It's gone.</p>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8">This creates <strong style="color:var(--ac2)">deflationary pressure</strong> that offsets new coin emission. As block rewards halve over time, the burn becomes a larger share of net supply change — eventually making CoinCync deflationary.</p>
-    </div>
-
-    <!-- Fee split visualization -->
-    <div class="two-col" style="margin-bottom:28px">
-      <div class="panel">
-        <div class="panel-head">Normal conditions</div>
-        <div style="padding:24px 20px">
-          <div style="display:flex;height:40px;border-radius:8px;overflow:hidden;margin-bottom:16px">
-            <div style="width:70%;background:var(--ac2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:600;color:#fff">MINER 70%</div>
-            <div style="width:30%;background:#EF4444;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:600;color:#fff">BURN 30%</div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:10px">
-            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px">
-              <span style="font-size:12px;color:var(--t2)">Miner reward</span>
-              <span style="font-family:var(--mono);font-size:12px;color:var(--ac2);font-weight:600">70% of fee</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px">
-              <span style="font-size:12px;color:var(--t2)">Permanently burned</span>
-              <span style="font-family:var(--mono);font-size:12px;color:#EF4444;font-weight:600">30% of fee</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px">
-              <span style="font-size:12px;color:var(--t2)">Dev tax / protocol fee</span>
-              <span style="font-family:var(--mono);font-size:12px;color:var(--ac2);font-weight:600">0% (Constitution)</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-head">Congested conditions <span class="badge badge-amber" style="margin-left:8px">blocks &gt;80% full</span></div>
-        <div style="padding:24px 20px">
-          <div style="display:flex;height:40px;border-radius:8px;overflow:hidden;margin-bottom:16px">
-            <div style="width:50%;background:var(--ac2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:600;color:#fff">MINER 50%</div>
-            <div style="width:50%;background:#EF4444;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:600;color:#fff">BURN 50%</div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:10px">
-            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px">
-              <span style="font-size:12px;color:var(--t2)">Miner reward</span>
-              <span style="font-family:var(--mono);font-size:12px;color:var(--ac2);font-weight:600">50% of fee</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px">
-              <span style="font-size:12px;color:var(--t2)">Permanently burned</span>
-              <span style="font-family:var(--mono);font-size:12px;color:#EF4444;font-weight:600">50% of fee</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px">
-              <span style="font-size:12px;color:var(--t2)">Why more burn?</span>
-              <span style="font-size:11px;color:var(--t3)">Spam becomes self-destructive</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Live stats -->
-    <div class="panel" style="margin-bottom:28px">
-      <div class="panel-head">Live Burn Statistics</div>
-      <div class="detail-grid" id="burn-live-stats">
-        <div class="dl">Status</div><div class="dv" id="burn-active">Loading...</div>
-        <div class="dl">Activation height</div><div class="dv" id="burn-activation-h">—</div>
-        <div class="dl">Current height</div><div class="dv" id="burn-current-h">—</div>
-        <div class="dl">Block reward</div><div class="dv" id="burn-reward">—</div>
-        <div class="dl">Normal split</div><div class="dv" id="burn-split-normal">—</div>
-        <div class="dl">Congested split</div><div class="dv" id="burn-split-congested">—</div>
-        <div class="dl">Congestion threshold</div><div class="dv" id="burn-congestion-thresh">—</div>
-        <div class="dl">Circulating supply</div><div class="dv" id="burn-supply">—</div>
-        <div class="dl">Max supply</div><div class="dv" id="burn-max-supply">—</div>
-        <div class="dl">Deflation threshold</div><div class="dv" id="burn-deflation-thresh">—</div>
-      </div>
-    </div>
-
-    <!-- Path to deflation -->
-    <div style="max-width:720px;margin:0 auto 28px">
-      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:16px">The path to deflation</div>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">CoinCync has a hard cap of <strong style="color:var(--ac2)">100 million CYNC</strong>. Block rewards decrease over four eras:</p>
-
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:20px">
-        <div class="stat"><div class="label">Genesis</div><div class="val" style="color:var(--ac2)">50</div><div class="sub">CYNC/block</div></div>
-        <div class="stat"><div class="label">50M mined</div><div class="val">25</div><div class="sub">CYNC/block</div></div>
-        <div class="stat"><div class="label">75M mined</div><div class="val">12.5</div><div class="sub">CYNC/block</div></div>
-        <div class="stat"><div class="label">Tail</div><div class="val">0.6</div><div class="sub">CYNC/block</div></div>
-      </div>
-
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">As rewards shrink, the burn needs fewer fees to overcome new emission:</p>
-
-      <table style="margin-bottom:20px"><thead><tr><th>Supply mined</th><th>Reward</th><th>Fee/block for deflation</th><th>Difficulty</th></tr></thead>
-      <tbody>
-        <tr><td>0 (genesis)</td><td class="mono" style="color:var(--ac2)">50 CYNC</td><td class="mono">~167 CYNC/block</td><td style="color:var(--t3)">Hard</td></tr>
-        <tr><td>50M</td><td class="mono">25 CYNC</td><td class="mono">~83 CYNC/block</td><td style="color:var(--t3)">Moderate</td></tr>
-        <tr><td>75M</td><td class="mono">12.5 CYNC</td><td class="mono">~42 CYNC/block</td><td style="color:var(--t3)">Achievable</td></tr>
-        <tr><td style="color:var(--ac2);font-weight:600">~99M+ (tail)</td><td class="mono" style="color:var(--ac2)">0.6 CYNC</td><td class="mono" style="color:var(--ac2)">~2 CYNC/block</td><td style="color:var(--ac2);font-weight:600">Almost certain</td></tr>
-      </tbody></table>
-
-      <div style="padding:16px 20px;background:rgba(212,160,89,.06);border-left:3px solid var(--ac2);border-radius:0 8px 8px 0;font-size:13px;color:var(--t2);line-height:1.7">
-        At tail emission, if average fees per block exceed just <strong style="color:var(--ac2)">~2 CYNC</strong>, the 30% burn destroys more than the 0.6 CYNC reward creates. <strong style="color:var(--ac2)">CoinCync becomes deflationary.</strong> Not by governance vote. Not by dev decision. By math.
-      </div>
-    </div>
-
-    <!-- Why no protocol fee -->
-    <div style="max-width:720px;margin:0 auto 28px">
-      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:16px">Why 0% protocol fee?</div>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">Many chains take 10-20% of fees for a "protocol treasury" or "dev fund." CoinCync takes <strong style="color:var(--ac2)">zero</strong>.</p>
-
-      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
-        <div style="padding:12px 16px;background:var(--s2);border:1px solid var(--b);border-radius:8px">
-          <div style="font-weight:600;color:var(--t);margin-bottom:4px">Constitution Article II</div>
-          <div style="font-size:13px;color:var(--t2);line-height:1.6">"No developer tax, no pre-mine, no founder's reward. Zero fee extraction by any party other than miners."</div>
-        </div>
-        <div style="padding:12px 16px;background:var(--s2);border:1px solid var(--b);border-radius:8px">
-          <div style="font-weight:600;color:var(--t);margin-bottom:4px">Dev funds create power</div>
-          <div style="font-size:13px;color:var(--t2);line-height:1.6">Whoever controls the treasury controls the project. CoinCync has no treasury, no foundation, no council. The protocol runs itself.</div>
-        </div>
-        <div style="padding:12px 16px;background:var(--s2);border:1px solid var(--b);border-radius:8px">
-          <div style="font-weight:600;color:var(--t);margin-bottom:4px">Only two destinations</div>
-          <div style="font-size:13px;color:var(--t2);line-height:1.6">Fees go to the miner who secured the block, or they're burned. No third option. No politics. No votes on "where should the money go."</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Comparison -->
-    <div style="max-width:720px;margin:0 auto 28px">
-      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:16px">How CoinCync compares</div>
-      <table><thead><tr><th>Chain</th><th>Burn model</th><th>Dev tax</th><th>Deflationary?</th></tr></thead>
-      <tbody>
-        <tr><td>Bitcoin</td><td style="color:var(--t3)">No burn</td><td style="color:var(--ac2)">0%</td><td style="color:var(--t3)">No (capped at 21M)</td></tr>
-        <tr><td>Ethereum</td><td>EIP-1559 base fee burn</td><td style="color:var(--t3)">~15% (foundation)</td><td style="color:var(--ac2)">Yes (post-merge)</td></tr>
-        <tr><td>Monero</td><td style="color:var(--t3)">No burn</td><td style="color:var(--ac2)">0%</td><td style="color:var(--t3)">No (tail emission)</td></tr>
-        <tr><td style="color:var(--ac2);font-weight:600">CoinCync</td><td style="color:var(--ac2)">30-50% fee burn</td><td style="color:var(--ac2);font-weight:600">0%</td><td style="color:var(--ac2);font-weight:600">Yes (at tail emission)</td></tr>
-      </tbody></table>
-    </div>
-
-    <!-- 4th Amendment footer -->
-    <div style="text-align:center;padding:24px 0;font-size:11px;color:var(--t3);font-family:var(--mono)">
-      Private by law. Private by math. — <a onclick="go('4thamendment')" style="color:var(--ac2);cursor:pointer">The CoinCync Manifesto</a>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ MINING CALCULATOR ═══ -->
-<div class="page" id="page-mining">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Mining Calculator</div>
-    <div class="page-title" style="margin-bottom:4px">Mining calculator</div>
-    <div class="page-sub" style="margin-bottom:20px">Estimate your CYNC earnings based on current network difficulty</div>
-    <div class="two-col">
-      <div class="panel">
-        <div class="panel-head">Your hardware</div>
-        <div style="padding:20px">
-          <div class="form-row">
-            <label class="form-label">Hashrate</label>
-            <div style="display:flex;gap:8px">
-              <input class="form-input" id="calc-hr" type="number" value="1000" min="1" oninput="calcMining()" style="flex:1"/>
-              <select class="form-select" id="calc-unit" onchange="calcMining()" style="width:100px">
-                <option value="1">H/s</option>
-                <option value="1000" selected>KH/s</option>
-                <option value="1000000">MH/s</option>
-                <option value="1000000000">GH/s</option>
-              </select>
-            </div>
-          </div>
-          <div class="form-row">
-            <label class="form-label">Power consumption (W)</label>
-            <input class="form-input" id="calc-watts" type="number" value="150" min="0" oninput="calcMining()"/>
-          </div>
-          <div class="form-row">
-            <label class="form-label">Electricity cost ($/kWh)</label>
-            <input class="form-input" id="calc-elec" type="number" value="0.10" step="0.01" min="0" oninput="calcMining()"/>
-          </div>
-          <div class="form-row">
-            <label class="form-label">CYNC price (USD)</label>
-            <input class="form-input" id="calc-price" type="number" value="0.01" step="0.001" min="0" oninput="calcMining()"/>
-          </div>
-          <div style="padding:12px 16px;background:var(--s2);border-radius:8px;border:1px solid var(--b)">
-            <div style="font-size:11px;font-family:var(--mono);color:var(--t3)">Network difficulty</div>
-            <div class="mono" style="font-size:13px;color:var(--t);margin-top:2px" id="calc-net-diff">Loading...</div>
-            <div style="font-size:11px;font-family:var(--mono);color:var(--t3);margin-top:6px">Network hashrate (est.)</div>
-            <div class="mono" style="font-size:13px;color:var(--ac2);margin-top:2px" id="calc-net-hr">—</div>
-          </div>
-        </div>
-      </div>
-      <div>
-        <div class="panel">
-          <div class="panel-head">Estimated earnings</div>
-          <div style="padding:20px">
-            <div class="calc-result">
-              <div class="calc-sub">Per day</div>
-              <div class="calc-big" id="calc-day">— CYNC</div>
-              <div class="calc-sub" id="calc-day-usd">≈ $—</div>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px">
-              <div style="padding:14px;background:var(--s2);border-radius:8px;border:1px solid var(--b);text-align:center">
-                <div class="calc-sub">Per week</div>
-                <div style="font-family:var(--serif);font-size:20px;color:var(--t);margin-top:4px" id="calc-week">—</div>
-                <div class="calc-sub" id="calc-week-usd">$—</div>
-              </div>
-              <div style="padding:14px;background:var(--s2);border-radius:8px;border:1px solid var(--b);text-align:center">
-                <div class="calc-sub">Per month</div>
-                <div style="font-family:var(--serif);font-size:20px;color:var(--t);margin-top:4px" id="calc-month">—</div>
-                <div class="calc-sub" id="calc-month-usd">$—</div>
-              </div>
-            </div>
-            <div style="margin-top:16px;padding:14px;background:var(--s2);border-radius:8px;border:1px solid var(--b)">
-              <div class="calc-sub">Electricity cost (day)</div>
-              <div style="font-family:var(--mono);font-size:14px;color:#EF4444;margin-top:4px" id="calc-cost">$—</div>
-              <div class="calc-sub" style="margin-top:8px">Net profit (day)</div>
-              <div style="font-family:var(--mono);font-size:14px;margin-top:4px" id="calc-profit">$—</div>
-            </div>
-          </div>
-        </div>
-        <div class="info-box amber">⚠ Estimates only. Actual earnings vary with network difficulty changes, block time variance, and luck. Not financial advice.</div>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-head">Difficulty chart (last 50 blocks)</div>
-      <div class="chart-wrap"><canvas id="mining-diff-chart"></canvas></div>
-    </div>
-
-    <!-- CPU Mining Comparison (#19) -->
-    <div class="panel">
-      <div class="panel-head">CPU Mining Comparison (RandomX light mode)</div>
-      <div style="padding:16px;overflow-x:auto">
-        <table style="width:100%;font-size:11px">
-          <thead><tr><th>CPU</th><th>Cores</th><th>H/s (est.)</th><th>Block Time (est.)</th><th>Daily CYNC (est.)</th></tr></thead>
-          <tbody style="font-family:var(--mono)">
-            <tr><td>AMD Ryzen 5 5600X</td><td>6</td><td style="color:var(--ac2)">~4,200</td><td>~2 min</td><td>~720</td></tr>
-            <tr><td>AMD Ryzen 9 5950X</td><td>16</td><td style="color:var(--ac2)">~12,000</td><td>~42 sec</td><td>~2,060</td></tr>
-            <tr><td>Intel i7-12700K</td><td>12</td><td style="color:var(--ac2)">~6,800</td><td>~74 sec</td><td>~1,170</td></tr>
-            <tr><td>Intel i5-10400</td><td>6</td><td style="color:var(--ac2)">~2,400</td><td>~3.5 min</td><td>~412</td></tr>
-            <tr><td>Apple M2</td><td>8</td><td style="color:var(--ac2)">~3,600</td><td>~2.3 min</td><td>~618</td></tr>
-            <tr><td>DO 1vCPU AMD</td><td>1</td><td style="color:var(--t3)">~25</td><td>~5.5 min</td><td>~4</td></tr>
-            <tr><td>Raspberry Pi 4</td><td>4</td><td style="color:var(--t3)">~30</td><td>~4.5 min</td><td>~5</td></tr>
-          </tbody>
-        </table>
-        <div style="font-size:9px;color:var(--t3);margin-top:8px">Estimates based on Monero RandomX benchmarks. Actual performance depends on RAM speed, cache size, and OS. CYNC/day assumes solo mining at current difficulty.</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ WALLET GENERATOR ═══ -->
-<!-- Wallet/dev utility pages intentionally removed from production explorer surface. -->
-
-<!-- ═══ ADDRESS LOOKUP (#21) ═══ -->
-<div class="page" id="page-addrlookup">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Address Lookup</div>
-    <div class="page-title" style="margin-bottom:4px">Address Output Lookup</div>
-    <div class="page-sub" style="margin-bottom:20px">Search for outputs by public key</div>
-    <div class="panel">
-      <div class="panel-head">Search</div>
-      <div style="padding:16px;display:flex;gap:8px">
-        <input id="addr-lookup-input" placeholder="Public key (hex, first 16+ chars)..." style="flex:1;padding:10px 12px;border:1px solid var(--b);border-radius:8px;font-size:12px;background:var(--s2);color:var(--t);font-family:var(--mono)"/>
-        <button class="btn btn-primary" onclick="lookupAddress()">Search</button>
-      </div>
-      <div id="addr-lookup-result" style="padding:0 16px 16px;font-family:var(--mono);font-size:11px"></div>
-    </div>
-  </div>
-</div>
-
-<!-- Additional dev/docs utility pages intentionally removed from production explorer surface. -->
-
-<div class="page" id="page-faucet">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Faucet</div>
-    <div class="faucet-hero">
-      <div style="font-size:40px;margin-bottom:12px">🚰</div>
-      <div class="page-title" style="margin-bottom:8px">Testnet Faucet</div>
-      <p style="font-size:13px;color:var(--t2);max-width:480px;margin:0 auto;line-height:1.6">Get free testnet CYNC to test wallets, transactions, and smart contracts. Testnet coins have no real value.</p>
-      <div style="margin-top:20px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="requestFaucet()">🚰 Get 10 CYNC</button>
-        <button class="btn btn-outline" onclick="go('walletdoc')">Open wallet guide</button>
-      </div>
-      <div style="margin-top:16px;max-width:480px;margin-left:auto;margin-right:auto">
-        <div style="display:flex;gap:8px">
-          <input id="faucet-addr" placeholder="tCYNC3..." style="flex:1;padding:10px 12px;border:1px solid var(--b);border-radius:8px;font-size:12px;background:var(--s2);color:var(--t);font-family:var(--mono)"/>
-        </div>
-        <div id="faucet-result" style="margin-top:8px;font-family:var(--mono);font-size:11px;text-align:center"></div>
-      </div>
-    </div>
-    <div class="two-col">
-      <div class="panel">
-        <div class="panel-head">How to use</div>
-        <div style="padding:20px;display:flex;flex-direction:column;gap:16px">
-          <div style="display:flex;gap:14px;align-items:flex-start">
-            <div style="width:28px;height:28px;border-radius:50%;background:var(--ac);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">1</div>
-            <div><div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:4px">Generate a testnet wallet</div><div style="font-size:12px;color:var(--t2);line-height:1.5">Use the <span onclick="go('walletdoc')" style="color:var(--ac2);cursor:pointer">Wallet Guide</span> to create a testnet address using the CoinCync wallet binary.</div></div>
-          </div>
-          <div style="display:flex;gap:14px;align-items:flex-start">
-            <div style="width:28px;height:28px;border-radius:50%;background:var(--ac);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">2</div>
-            <div><div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:4px">Copy your public address</div><div style="font-size:12px;color:var(--t2);line-height:1.5">Your testnet address starts with <code>tCYNC</code>. This is what you give to the faucet.</div></div>
-          </div>
-          <div style="display:flex;gap:14px;align-items:flex-start">
-            <div style="width:28px;height:28px;border-radius:50%;background:var(--ac);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">3</div>
-            <div><div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:4px">Request testnet CYNC</div><div style="font-size:12px;color:var(--t2);line-height:1.5">Open the faucet, paste your address, and request coins. You will receive a small amount of testnet CYNC.</div></div>
-          </div>
-          <div style="display:flex;gap:14px;align-items:flex-start">
-            <div style="width:28px;height:28px;border-radius:50%;background:var(--ac);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">4</div>
-            <div><div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:4px">Check the explorer</div><div style="font-size:12px;color:var(--t2);line-height:1.5">Search for your transaction in the <span onclick="go('mempool')" style="color:var(--ac2);cursor:pointer">mempool</span> — it may take up to 60 seconds to appear.</div></div>
-          </div>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">Faucet details</div>
-        <div class="detail-grid">
-          <div class="dl">Host</div><div class="dv">faucet.coincync.network</div>
-          <div class="dl">Port</div><div class="dv">8080</div>
-          <div class="dl">Network</div><div class="dv"><span class="badge badge-amber">Testnet only</span></div>
-          <div class="dl">Rate limit</div><div class="dv">Once per address per 24h</div>
-          <div class="dl">Amount</div><div class="dv">Small testnet CYNC</div>
-          <div class="dl">Privacy</div><div class="dv"><span class="badge">✓ Dandelion++ routed</span></div>
-        </div>
-        <div style="padding:16px 20px">
-          <div class="info-box amber" style="margin-bottom:0">⚠ Testnet CYNC has no real-world value. Do not attempt to trade or sell testnet coins. The testnet may be reset at any time before mainnet launch (October 1, 2026).</div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ PRIVACY ═══ -->
-<div class="page" id="page-privacy">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Privacy</div>
-    <div class="page-title" style="margin-bottom:6px">Privacy architecture</div>
-    <div class="page-sub" style="margin-bottom:20px">Mandatory, not optional — enforced by Constitution (Article III)</div>
-    <!-- 4th Amendment -->
-    <div style="background:linear-gradient(135deg,rgba(158,122,62,.08),rgba(158,122,62,.02));border:1px solid rgba(158,122,62,.2);border-radius:12px;padding:24px;margin-bottom:20px;text-align:center">
-      <div style="font-family:var(--serif);font-size:14px;font-style:italic;color:var(--t);line-height:1.8;max-width:600px;margin:0 auto">"Your money is yours. Not visible to surveillance. Not subject to seizure. Not dependent on permission. Enforced by proofs, not promises."</div>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-top:8px;text-align:center">— The CoinCync Manifesto</div>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);margin-top:8px;letter-spacing:1px">FOURTH AMENDMENT · U.S. CONSTITUTION · 1791</div>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-top:4px">CoinCync recognizes financial records as "papers and effects" — privacy by engineering, not by policy.</div>
-    </div>
-    <div class="info-box green">🔐 Every transaction on CoinCync is private by default. There is no opt-in or opt-out mechanism.</div>
-    <div class="two-col" style="margin-bottom:20px">
-      <div>
-        <div class="panel">
-          <div class="panel-head">Privacy layers</div>
-          <div style="padding:16px 20px;border-bottom:1px solid var(--b)">
-            <div class="sec-label" style="margin-top:0;color:var(--ac2)">CLSAG ring signatures</div>
-            <p style="font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px">Compact Linkable Spontaneous Anonymous Group signatures mix your transaction with 10 decoy inputs. CLSAG is 10× more compact than older RingCT.</p>
-            <div style="display:flex;gap:6px;flex-wrap:wrap"><span class="badge">ring-size: 11</span><span class="badge">CLSAG v9</span><span class="badge">BP+ proofs</span></div>
-          </div>
-          <div style="padding:16px 20px;border-bottom:1px solid var(--b)">
-            <div class="sec-label" style="margin-top:0;color:var(--ac2)">Stealth addresses (Ristretto255)</div>
-            <p style="font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px">One-time destination addresses derived via ECDH on Ristretto255. Uses the prime-order Ristretto group to eliminate cofactor issues present in older implementations.</p>
-            <div style="display:flex;gap:6px"><span class="badge">Ristretto255</span><span class="badge">ECDH</span><span class="badge">SHA3-512</span></div>
-          </div>
-          <div style="padding:16px 20px;border-bottom:1px solid var(--b)">
-            <div class="sec-label" style="margin-top:0;color:var(--ac2)">Confidential amounts</div>
-            <p style="font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px">Pedersen commitments + Bulletproofs+ range proofs hide values while proving no inflation. BLAKE3 used for general hashing.</p>
-            <div style="display:flex;gap:6px"><span class="badge">Pedersen</span><span class="badge">Bulletproofs+</span><span class="badge">BLAKE3</span></div>
-          </div>
-          <div style="padding:16px 20px">
-            <div class="sec-label" style="margin-top:0;color:var(--ac2)">Dandelion++ propagation</div>
-            <p style="font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px">Random stem → fluff broadcast pattern prevents IP correlation to transactions.</p>
-            <div style="display:flex;gap:6px"><span class="badge">stem phase</span><span class="badge">fluff phase</span></div>
-          </div>
-        </div>
-      </div>
-      <div>
-        <div class="panel" style="margin-bottom:16px">
-          <div class="panel-head">Cryptographic primitives</div>
-          <div class="detail-grid">
-            <div class="dl">Curve</div><div class="dv">Ristretto255 over Curve25519</div>
-            <div class="dl">Field</div><div class="dv mono" style="font-size:11px">2^255 - 19</div>
-            <div class="dl">Signatures</div><div class="dv">CLSAG (Schnorr-based)</div>
-            <div class="dl">Key deriv.</div><div class="dv">SHA3-512 → scalar mod ℓ</div>
-            <div class="dl">Checksums</div><div class="dv">BLAKE3 (first 4 bytes)</div>
-            <div class="dl">Key images</div><div class="dv mono" style="font-size:11px">I = x·Hp(x·G)</div>
-            <div class="dl">Range proofs</div><div class="dv">Bulletproofs+</div>
-            <div class="dl">Commitments</div><div class="dv">Pedersen</div>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="panel-head">Privacy audit</div>
-          <div style="padding:14px 16px;display:flex;flex-direction:column;gap:8px">
-            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Sender hidden</span><span class="badge">✓ verified</span></div>
-            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Receiver hidden</span><span class="badge">✓ verified</span></div>
-            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Amount hidden</span><span class="badge">✓ verified</span></div>
-            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">IP hidden</span><span class="badge">✓ verified</span></div>
-            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Supply auditable</span><span class="badge">✓ verified</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-head">vs other privacy coins</div>
-      <table><thead><tr><th>Feature</th><th>CoinCync</th><th>Monero</th><th>Zcash</th></tr></thead>
-      <tbody>
-        <tr><td>Private by default</td><td class="yes">✓ Yes</td><td class="yes">✓ Yes</td><td class="partial">Optional</td></tr>
-        <tr><td>Curve</td><td class="yes">Ristretto255</td><td style="color:var(--t2)">Ed25519</td><td style="color:var(--t2)">BLS12-381</td></tr>
-        <tr><td>Trusted setup</td><td class="yes">✓ None</td><td class="yes">✓ None</td><td class="partial">Required</td></tr>
-        <tr><td>IP privacy</td><td class="yes">Dandelion++</td><td class="yes">Dandelion++</td><td class="no">Limited</td></tr>
-        <tr><td>Confidential assets</td><td class="yes">✓ Yes</td><td class="no">No</td><td class="no">No</td></tr>
-        <tr><td>Constitutional enforcement</td><td class="yes">✓ Yes</td><td class="no">No</td><td class="no">No</td></tr>
-        <tr><td>Dev tax</td><td class="yes">0%</td><td class="yes">0%</td><td class="partial">20%</td></tr>
-      </tbody></table>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ ABOUT ═══ -->
-<div class="page" id="page-about">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>About</div>
-    <div style="text-align:center;padding:40px 0;border-bottom:1px solid var(--b);margin-bottom:28px">
-      <svg viewBox="0 0 200 200" width="80" height="80" aria-label="CoinCync" role="img"><circle cx="100" cy="100" r="78" fill="none" stroke="var(--logo-stroke, var(--ac2))" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/><circle cx="132" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/></svg>
-      <div style="font-family:var(--serif);font-size:36px;font-weight:400;letter-spacing:-.5px;margin-bottom:16px">The <em style="color:var(--ac2);font-style:italic">private</em> blockchain.<br>Built for the long run.</div>
-      <p style="font-size:14px;color:var(--t2);max-width:600px;margin:0 auto;line-height:1.7">A privacy-focused cryptocurrency where every transaction is shielded by default. Hidden sender, hidden receiver, hidden amount — while the total supply remains cryptographically verifiable by anyone. No premine. No dev tax. No central authority.</p>
-    </div>
-    <div class="sec-label">Core privacy features</div>
-    <div class="feat-grid">
-      <div class="feat"><h3>🔐 Hidden sender</h3><p>CLSAG ring signatures mix your input with 10 decoys. 10× more compact than RingCT.</p></div>
-      <div class="feat"><h3>👻 Hidden receiver</h3><p>Stealth addresses on Ristretto255. Unique one-time address per transaction.</p></div>
-      <div class="feat"><h3>⚖️ Hidden amount</h3><p>Pedersen commitments + Bulletproofs+ hide values while proving no inflation.</p></div>
-      <div class="feat"><h3>🌿 Hidden IP</h3><p>Dandelion++ routes through random stem paths before broadcast.</p></div>
-      <div class="feat"><h3>🛡️ Mandatory</h3><p>No opt-in — every transaction is private. Constitutional requirement (Article III).</p></div>
-      <div class="feat"><h3>🔍 Auditable supply</h3><p>Total supply verifiable by anyone. 100M cap enforced at compile time.</p></div>
-    </div>
-    <div class="sec-label">Tokenomics</div>
-    <div class="panel" style="margin-bottom:20px">
-      <table><thead><tr><th>Feature</th><th>Detail</th></tr></thead>
-      <tbody>
-        <tr><td style="color:var(--t2)">Supply cap</td><td class="mono" style="color:var(--ac2);font-weight:600">100,000,000 CYNC — compile-time enforced</td></tr>
-        <tr><td style="color:var(--t2)">Current reward</td><td>50 CYNC/block (Launch phase)</td></tr>
-        <tr><td style="color:var(--t2)">Tail emission</td><td>0.6 CYNC/block perpetual</td></tr>
-        <tr><td style="color:var(--t2)">Premine</td><td style="color:var(--ac2);font-weight:600">Zero</td></tr>
-        <tr><td style="color:var(--t2)">Dev tax</td><td style="color:var(--ac2);font-weight:600">Zero</td></tr>
-        <tr><td style="color:var(--t2)">Formal verification</td><td>13 property-based tests prove supply cap holds for all inputs</td></tr>
-      </tbody></table>
-    </div>
-  </div>
-</div>
-
 <!-- ═══ THE 4TH AMENDMENT & FINANCIAL PRIVACY ═══ -->
 <div class="page" id="page-4thamendment">
   <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('privacy')">Privacy</a><span>›</span>The CoinCync Manifesto</div>
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>The CoinCync Manifesto</div>
 
     <!-- Hero -->
     <div style="text-align:center;padding:48px 0 36px;border-bottom:1px solid var(--b);margin-bottom:36px">
@@ -2327,240 +1663,10 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div style="font-family:var(--serif);font-size:26px;color:var(--ac2);margin-bottom:12px">Private by law. Private by math.</div>
       <div style="font-size:14px;color:var(--t2);line-height:1.7;font-weight:300">The EFF, the ACLU, and every serious privacy advocate cites the 4th Amendment. CoinCync doesn't just cite it — CoinCync enforces it. With ring signatures that hide the sender. Stealth addresses that hide the receiver. Pedersen commitments that hide the amount. And a constitution that makes all of this mandatory, not optional.</div>
       <div style="margin-top:20px;display:flex;gap:12px;justify-content:center">
-        <button onclick="go('privacy')" class="btn btn-outline">Privacy architecture</button>
-        <button onclick="go('constitution')" class="btn btn-outline">Read the Constitution</button>
+        <button onclick="go('home')" class="btn btn-outline">Back to home</button>
+        <button onclick="go('supply')" class="btn btn-outline">Supply</button>
       </div>
     </div>
-  </div>
-</div>
-
-<!-- ═══ CONSTITUTION ═══ -->
-<div class="page" id="page-constitution">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Constitution</div>
-
-    <!-- Header -->
-    <div style="text-align:center;padding:40px 0 32px;border-bottom:1px solid var(--b);margin-bottom:32px">
-      <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--t3);text-transform:uppercase;margin-bottom:12px">Foundational Document</div>
-      <div style="font-family:var(--serif);font-size:38px;font-weight:400;color:var(--t);letter-spacing:-.5px;margin-bottom:10px">CoinCync Constitution</div>
-      <div style="font-family:var(--mono);font-size:11px;color:var(--t3);margin-bottom:16px">Enforced at compile time via build.rs hash verification · Ratified at Block 0</div>
-      <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
-        <span class="badge">✓ Compile-time enforced</span>
-        <span class="badge">✓ Hash-verified</span>
-        <span class="badge badge-amber">Block 0 ratified</span>
-        <span class="badge">✓ Immutable</span>
-      </div>
-    </div>
-
-    <!-- Preamble -->
-    <div style="background:var(--acb);border:1px solid #4A3A1F;border-radius:12px;padding:24px;margin-bottom:28px;max-width:800px;margin-left:auto;margin-right:auto">
-      <div style="font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--ac2);text-transform:uppercase;margin-bottom:12px">Preamble</div>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;font-style:italic">This Constitution establishes the immutable rules governing the CoinCync protocol. These articles are not suggestions. They are enforced by cryptography, verified at compile time, and cannot be overridden by any governance process, legal order, community vote, or future development team. Any software that violates these articles is not CoinCync.</p>
-    </div>
-
-    <!-- Articles -->
-    <div style="max-width:800px;margin:0 auto;display:flex;flex-direction:column;gap:20px;margin-bottom:32px">
-
-      <!-- Article I -->
-      <div style="background:var(--surface);border:1px solid var(--b);border-radius:14px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06)">
-        <div style="background:var(--ac);padding:16px 24px;display:flex;align-items:center;gap:14px">
-          <div style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:18px;color:#fff;flex-shrink:0">I</div>
-          <div>
-            <div style="font-family:var(--mono);font-size:9px;letter-spacing:1.5px;color:rgba(255,255,255,.6);text-transform:uppercase">Article I</div>
-            <div style="font-size:17px;font-weight:600;color:#fff;margin-top:2px">Supply Cap</div>
-          </div>
-          <div style="margin-left:auto"><span style="background:rgba(255,255,255,.15);color:#fff;padding:3px 10px;border-radius:20px;font-size:10px;font-family:var(--mono)">Protocol-enforced</span></div>
-        </div>
-        <div style="padding:24px">
-          <div style="font-size:32px;font-weight:700;font-family:var(--serif);color:var(--ac2);margin-bottom:16px">100,000,000 CYNC</div>
-          <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">The maximum supply of CYNC is permanently fixed at 100,000,000 CYNC. This limit is enforced at compile time through <code>build.rs</code> hash verification. Any modification to supply parameters causes an immediate build failure, making it impossible to ship a binary that violates this cap.</p>
-          <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">The cap is formally verified with <strong style="color:var(--t)">13 property-based tests</strong> that prove the limit holds for all possible inputs.</p>
-          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
-            <span class="badge">compile-time verified</span>
-            <span class="badge">13 formal proofs</span>
-            <span class="badge">build.rs hash lock</span>
-            <span class="badge">audit confirmed</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Article II -->
-      <div style="background:var(--surface);border:1px solid var(--b);border-radius:14px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06)">
-        <div style="background:var(--ac);padding:16px 24px;display:flex;align-items:center;gap:14px">
-          <div style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:18px;color:#fff;flex-shrink:0">II</div>
-          <div>
-            <div style="font-family:var(--mono);font-size:9px;letter-spacing:1.5px;color:rgba(255,255,255,.6);text-transform:uppercase">Article II</div>
-            <div style="font-size:17px;font-weight:600;color:#fff;margin-top:2px">No Premine · No Dev Tax</div>
-          </div>
-          <div style="margin-left:auto"><span style="background:rgba(255,255,255,.15);color:#fff;padding:3px 10px;border-radius:20px;font-size:10px;font-family:var(--mono)">Protocol-enforced</span></div>
-        </div>
-        <div style="padding:24px">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
-            <div style="background:var(--acb);border-radius:10px;padding:18px;text-align:center">
-              <div style="font-size:28px;font-weight:700;font-family:var(--serif);color:var(--ac2)">0 CYNC</div>
-              <div style="font-size:11px;color:var(--t3);font-family:var(--mono);margin-top:4px">Premine</div>
-            </div>
-            <div style="background:var(--acb);border-radius:10px;padding:18px;text-align:center">
-              <div style="font-size:28px;font-weight:700;font-family:var(--serif);color:var(--ac2)">0%</div>
-              <div style="font-size:11px;color:var(--t3);font-family:var(--mono);margin-top:4px">Developer tax</div>
-            </div>
-          </div>
-          <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:12px">There is zero premine and zero developer tax. All CYNC in existence was mined fairly through proof of work after the genesis block. No coins were allocated to founders, developers, venture investors, or any other party before or during launch.</p>
-          <p style="font-size:14px;color:var(--t2);line-height:1.8">Mining rewards go 100% to block producers with no deductions of any kind. This is a permanent, irrevocable requirement — it cannot be changed by any governance process or future team.</p>
-        </div>
-      </div>
-
-      <!-- Article III -->
-      <div style="background:var(--surface);border:1px solid var(--b);border-radius:14px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06)">
-        <div style="background:var(--ac);padding:16px 24px;display:flex;align-items:center;gap:14px">
-          <div style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:18px;color:#fff;flex-shrink:0">III</div>
-          <div>
-            <div style="font-family:var(--mono);font-size:9px;letter-spacing:1.5px;color:rgba(255,255,255,.6);text-transform:uppercase">Article III</div>
-            <div style="font-size:17px;font-weight:600;color:#fff;margin-top:2px">Mandatory Privacy</div>
-          </div>
-          <div style="margin-left:auto"><span style="background:rgba(255,255,255,.15);color:#fff;padding:3px 10px;border-radius:20px;font-size:10px;font-family:var(--mono)">Mathematical guarantee</span></div>
-        </div>
-        <div style="padding:24px">
-          <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:20px">Privacy is mandatory on all transactions. There is no opt-in or opt-out mechanism. Every transaction must use all three privacy layers. No transaction that reveals sender, receiver, or amount can be valid on the CoinCync network.</p>
-          <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">
-            <div style="display:flex;align-items:flex-start;gap:14px;padding:14px;background:var(--s2);border-radius:9px;border:1px solid var(--b)">
-              <span style="font-size:18px;flex-shrink:0">🔐</span>
-              <div><div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:3px">CLSAG Ring Signatures</div><div style="font-size:12px;color:var(--t3)">Hides the sender among 10 decoys. Ring size ×11 — no observer can identify the real input.</div></div>
-            </div>
-            <div style="display:flex;align-items:flex-start;gap:14px;padding:14px;background:var(--s2);border-radius:9px;border:1px solid var(--b)">
-              <span style="font-size:18px;flex-shrink:0">👻</span>
-              <div><div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:3px">Stealth Addresses (Ristretto255)</div><div style="font-size:12px;color:var(--t3)">One-time destination addresses via ECDH. Receiver identity is cryptographically hidden.</div></div>
-            </div>
-            <div style="display:flex;align-items:flex-start;gap:14px;padding:14px;background:var(--s2);border-radius:9px;border:1px solid var(--b)">
-              <span style="font-size:18px;flex-shrink:0">⚖️</span>
-              <div><div style="font-size:13px;font-weight:600;color:var(--t);margin-bottom:3px">Pedersen Commitments + Bulletproofs+</div><div style="font-size:12px;color:var(--t3)">Amounts are hidden while proving no inflation occurs. Zero-knowledge range proofs.</div></div>
-            </div>
-          </div>
-          <p style="font-size:13px;color:var(--t3);font-family:var(--mono)">This constitutional requirement cannot be overridden by soft fork, hard fork, or governance vote.</p>
-        </div>
-      </div>
-
-      <!-- Article V -->
-      <div style="background:var(--surface);border:1px solid var(--b);border-radius:14px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06)">
-        <div style="background:var(--ac);padding:16px 24px;display:flex;align-items:center;gap:14px">
-          <div style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:18px;color:#fff;flex-shrink:0">V</div>
-          <div>
-            <div style="font-family:var(--mono);font-size:9px;letter-spacing:1.5px;color:rgba(255,255,255,.6);text-transform:uppercase">Article V</div>
-            <div style="font-size:17px;font-weight:600;color:#fff;margin-top:2px">Permissionless Mining</div>
-          </div>
-          <div style="margin-left:auto"><span style="background:rgba(255,255,255,.15);color:#fff;padding:3px 10px;border-radius:20px;font-size:10px;font-family:var(--mono)">Protocol design</span></div>
-        </div>
-        <div style="padding:24px">
-          <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:20px">Mining on CoinCync is permissionless. Any person, machine, or program may mine CYNC blocks without registration, approval, or permission from any authority. No mining license, pool requirement, or geographic restriction is permitted.</p>
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
-            <div style="text-align:center;padding:14px;background:var(--s2);border-radius:9px;border:1px solid var(--b)">
-              <div style="font-size:22px;margin-bottom:6px">⚡</div>
-              <div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:3px">RandomX</div>
-              <div style="font-size:10px;color:var(--t3);font-family:var(--mono)">CPU-friendly, 2GB</div>
-            </div>
-            <div style="text-align:center;padding:14px;background:var(--s2);border-radius:9px;border:1px solid var(--b)">
-              <div style="font-size:22px;margin-bottom:6px">🧠</div>
-              <div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:3px">RandomX (light)</div>
-              <div style="font-size:10px;color:var(--t3);font-family:var(--mono)">ROM-hard, 32MB</div>
-            </div>
-            <div style="text-align:center;padding:14px;background:var(--s2);border-radius:9px;border:1px solid var(--b)">
-              <div style="font-size:22px;margin-bottom:6px">💾</div>
-              <div style="font-size:12px;font-weight:600;color:var(--t);margin-bottom:3px">RandomX (full)</div>
-              <div style="font-size:10px;color:var(--t3);font-family:var(--mono)">GPU-resistant, 8MB</div>
-            </div>
-          </div>
-          <p style="font-size:13px;color:var(--t2);line-height:1.7">CoinCync 1.0 uses RandomX exclusively for proof of work — the same ASIC-resistant, CPU-friendly algorithm used by Monero. RandomX is memory-hard and designed to keep mining accessible on commodity hardware without specialized ASICs or GPUs.</p>
-        </div>
-      </div>
-
-    </div>
-
-    <!-- Closing seal -->
-    <div style="max-width:800px;margin:0 auto;background:var(--s2);border:1px solid var(--b);border-radius:12px;padding:20px;text-align:center;margin-bottom:20px">
-      <div style="font-family:var(--mono);font-size:10px;letter-spacing:1px;color:var(--t3);text-transform:uppercase;margin-bottom:8px">Closing seal</div>
-      <p style="font-size:13px;color:var(--t2);line-height:1.7;max-width:600px;margin:0 auto 12px">These articles are final. Any version of CoinCync software that removes or weakens any article is not CoinCync. Users, miners, and node operators are encouraged to reject it.</p>
-      <span class="badge badge-amber">Ratified at Block 0 · Permanent thereafter</span>
-    </div>
-
-    <div style="max-width:800px;margin:0 auto;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
-      <button onclick="go('billofrights')" class="btn btn-primary">Read the Bill of Rights →</button>
-      <button onclick="go('privacy')" class="btn btn-outline">Privacy architecture</button>
-      <button onclick="go('supply')" class="btn btn-outline">Verify supply</button>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ CHANGELOG ═══ -->
-<div class="page" id="page-changelog">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Changelog</div>
-    <div class="page-title" style="margin-bottom:4px">Changelog</div>
-    <div class="page-sub" style="margin-bottom:20px">CoinCync version history</div>
-    <div class="cl-entry">
-      <div class="cl-version">v1.0.0</div>
-      <div class="cl-date">2026 — Current testnet release</div>
-      <div class="cl-item">Upgraded to Ristretto255 over Curve25519 — eliminates cofactor issues in older Ed25519 implementations</div>
-      <div class="cl-item">CLSAG ring signatures replacing RingCT — 10× smaller signatures, same privacy guarantee</div>
-      <div class="cl-item">Bulletproofs+ range proofs — 16% smaller than Bulletproofs, faster verification</div>
-      <div class="cl-item">RandomX proof of work — CPU-only mining, ASIC-resistant</div>
-      <div class="cl-item">VDF-anchored difficulty adjustment — prevents timestamp manipulation attacks</div>
-      <div class="cl-item">Dandelion++ transaction propagation — IP address unlinkability</div>
-      <div class="cl-item">Hybrid node architecture: Personal (T1), Network (T2), Archive (T3)</div>
-      <div class="cl-item">3-tier light wallet sync via compact block filters (BIP158-style GCS)</div>
-      <div class="cl-item">Confidential asset protocol — private custom token issuance and transfer</div>
-      <div class="cl-item">Selective disclosure proofs — balance, ownership, sum, source proofs</div>
-      <div class="cl-item">All security audit findings resolved</div>
-      <div class="cl-item">Supply cap formally verified with 13 property-based tests</div>
-      <div class="cl-item">rustls 0.23 with ring crypto backend — fixed CryptoProvider panic</div>
-      <div class="cl-item">Build feature: <code>--features testnet</code> required for testnet builds</div>
-    </div>
-    <div class="cl-entry">
-      <div class="cl-version">v1.x.x</div>
-      <div class="cl-date">Pre-audit development phase</div>
-      <div class="cl-item">Initial RingCT implementation</div>
-      <div class="cl-item">Basic P2P networking with Noise protocol encryption</div>
-      <div class="cl-item">Ed25519 key primitives (later upgraded to Ristretto255)</div>
-      <div class="cl-item">LMDB-based blockchain storage</div>
-      <div class="cl-item">Initial JSON-RPC API</div>
-      <div class="cl-item">RandomX proof of work</div>
-      <div class="cl-item">Basic wallet CLI</div>
-    </div>
-    <div class="cl-entry">
-      <div class="cl-version">Upcoming — Mainnet (October 1, 2026)</div>
-      <div class="cl-date">Planned features</div>
-      <div class="cl-item">Full mainnet launch with genesis block</div>
-      <div class="cl-item">RandomX algorithm activation at pre-announced block height</div>
-      <div class="cl-item">P2Pool decentralized mining launch</div>
-      <div class="cl-item">Hardware wallet support (Ledger)</div>
-      <div class="cl-item">Mobile wallet (iOS / Android)</div>
-      <div class="cl-item">Decentralized exchange integration</div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ API DOCS ═══ -->
-<div class="page" id="page-api">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>API Docs</div>
-    <div class="page-title" style="margin-bottom:4px">API Reference</div>
-    <div class="page-sub" style="margin-bottom:20px">JSON-RPC on port 28081 · REST on port 28083</div>
-    <div class="info-box green">Base URLs — <strong>JSON-RPC:</strong> <code>http://node:28081</code> · <strong>REST:</strong> <code>http://node:28083/api/v1</code></div>
-    <div class="sec-label">JSON-RPC</div>
-    <div class="endpoint"><div class="ep-head"><span class="method post">POST</span><span class="ep-path">http://node:28081</span><span class="ep-desc">get_info</span></div>
-      <div class="ep-body">Returns height, difficulty, synced, peer_count, top_hash, tx_pool_size, available_outputs, version.<pre>{"jsonrpc":"2.0","id":1,"method":"get_info"}</pre></div></div>
-    <div class="endpoint"><div class="ep-head"><span class="method post">POST</span><span class="ep-path">http://node:28081</span><span class="ep-desc">get_block_by_height</span></div>
-      <div class="ep-body">Get block by height number. Returns hash, prev_hash, timestamp, tx_count, size, algorithm, algorithm_name.<pre>{"jsonrpc":"2.0","id":1,"method":"get_block_by_height","params":[789]}</pre></div></div>
-    <div class="endpoint"><div class="ep-head"><span class="method post">POST</span><span class="ep-path">http://node:28081</span><span class="ep-desc">get_block</span></div>
-      <div class="ep-body">Get block by 64-char hash.<pre>{"jsonrpc":"2.0","id":1,"method":"get_block","params":["930f749..."]}</pre></div></div>
-    <div class="endpoint"><div class="ep-head"><span class="method post">POST</span><span class="ep-path">http://node:28081</span><span class="ep-desc">get_peers</span></div>
-      <div class="ep-body">Returns connected peers with addr, height, version, bytes_recv, bytes_sent, outbound, user_agent.<pre>{"jsonrpc":"2.0","id":1,"method":"get_peers"}</pre></div></div>
-    <div class="sec-label">REST API</div>
-    <div class="endpoint"><div class="ep-head"><span class="method get">GET</span><span class="ep-path">/api/v1/status</span></div>
-      <div class="ep-body"><pre>{"height":789,"difficulty":"341655","mempool_size":0,"network":"testnet","synced":true,"version":"2.0.0"}</pre></div></div>
-    <div class="endpoint"><div class="ep-head"><span class="method get">GET</span><span class="ep-path">/api/v1/peers</span></div>
-      <div class="ep-body">Returns all connected peers with traffic stats.</div></div>
-    <div class="endpoint"><div class="ep-head"><span class="method get">GET</span><span class="ep-path">/api/v1/mempool</span></div>
-      <div class="ep-body"><pre>{"count":0,"returned":0,"transactions":[],"truncated":false}</pre></div></div>
   </div>
 </div>
 
@@ -2598,7 +1704,6 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     </div>
     <div style="margin-top:16px;display:flex;gap:8px">
       <button class="btn btn-primary" onclick="this.closest('[id]').style.display='none';localStorage.setItem('cync-seen','1')">Got it — explore</button>
-      <button class="btn btn-outline" onclick="go('docs');this.closest('[id]').style.display='none';localStorage.setItem('cync-seen','1')">Read the docs</button>
     </div>
   </div>
 </div>
@@ -2614,7 +1719,6 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     <div class="kbd-row"><span>Blocks</span><span class="kbd-key">B</span></div>
     <div class="kbd-row"><span>Network</span><span class="kbd-key">N</span></div>
     <div class="kbd-row"><span>Mempool</span><span class="kbd-key">M</span></div>
-    <div class="kbd-row"><span>Wallet</span><span class="kbd-key">W</span></div>
     <div class="kbd-row"><span>Supply</span><span class="kbd-key">S</span></div>
     <div class="kbd-row"><span>Search</span><span class="kbd-key">/</span></div>
     <div class="kbd-row"><span>Toggle dark mode</span><span class="kbd-key">D</span></div>
@@ -2642,15 +1746,12 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div class="footer-tagline">Private by law. Private by math.</div>
     </div>
     <div class="footer-links">
-      <span onclick="go('about')">About</span>
-      <span onclick="go('privacy')">Privacy</span>
-      <span onclick="go('constitution')">Constitution</span>
+      <span onclick="go('home')">Home</span>
+      <span onclick="go('blocks')">Blocks</span>
+      <span onclick="go('mempool')">Mempool</span>
+      <span onclick="go('network')">Network</span>
+      <span onclick="go('health')">Node Health</span>
       <span onclick="go('supply')">Supply</span>
-      <span onclick="go('mining')">Mining Calc</span>
-      <span onclick="go('walletdoc')">Wallet Guide</span>
-      <span onclick="go('docs')">Docs</span>
-      <span onclick="go('api')">API</span>
-      <span onclick="go('changelog')">Changelog</span>
     </div>
     <div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
@@ -2875,10 +1976,52 @@ function blockPulse(height) {
 
 // ── STATE ─────────────────────────────────────────────────────
 let chainHeight=0,chainDiff=0,blockList=[],loadedHeight=0,diffChart=null,miningChart=null;
+let _lastInfo = null;
+let _lastPollAtMs = 0;
+let _lastChainHeightSeen = 0;
+let _apiHealthProbeCountdown = 0;
+const _operatorAlerts = [];
 // Cancels in-flight "load entire chain" backfill when switching network or re-navigating.
 let _blocksGenesisBackfillGen = 0;
 let _blocksGenesisBackfillRunning = false;
 function _yieldToUi(){return new Promise(r=>requestAnimationFrame(()=>r()));}
+
+function _pushOperatorAlert(level, message){
+  const ts = new Date().toLocaleTimeString();
+  _operatorAlerts.unshift({ level, message, ts });
+  if(_operatorAlerts.length > 3) _operatorAlerts.pop();
+  const el = $('ops-alert-feed');
+  if(!el) return;
+  el.innerHTML = _operatorAlerts.map(a=>{
+    const c = a.level==='crit' ? '#EF4444' : a.level==='warn' ? '#F59E0B' : '#D4A059';
+    return `<div><span style="color:${c}">●</span> ${a.ts} — ${a.message}</div>`;
+  }).join('');
+}
+
+function _updateOperatorStrip(info){
+  const tipAge = info.tip_age_secs || 0;
+  const peers = info.peer_count || 0;
+  const dot = $('ops-fresh-dot');
+  const color = tipAge <= 90 ? '#7EB87C' : tipAge <= 300 ? '#F59E0B' : '#EF4444';
+  if(dot) dot.style.background = color;
+  const h = $('ops-height'); if(h) h.textContent = '#'+num(info.height||0);
+  const t = $('ops-tip-age'); if(t) t.textContent = tipAge+'s';
+  const p = $('ops-peers'); if(p) p.textContent = String(peers);
+  const r = $('ops-rpc-source'); if(r) r.textContent = RPC;
+}
+
+async function _probeApiHealth(){
+  const label = $('ops-api-health');
+  const t0 = performance.now();
+  try{
+    const body = JSON.stringify({jsonrpc:'2.0',id:1,method:'get_info',params:[]});
+    const res = await fetch(RPC, _rpcRequestOpts(body));
+    const ms = Math.round(performance.now() - t0);
+    if(label) label.innerHTML = res.ok ? `<span style="color:#7EB87C">ok</span> ${ms}ms` : `<span style="color:#EF4444">http ${res.status}</span>`;
+  }catch(_){
+    if(label) label.innerHTML = `<span style="color:#EF4444">down</span>`;
+  }
+}
 
 // ── RPC ───────────────────────────────────────────────────────
 //
@@ -2909,372 +2052,6 @@ async function rest(path){
 }
 
 
-// ══════════════════════════════════════════════════════════════════════════════
-// IRON CONSENSUS METRICS
-// Polls /metrics (Prometheus) and /api (RPC) to build a live dashboard.
-// Falls back to RPC-only if Prometheus is unavailable.
-// ══════════════════════════════════════════════════════════════════════════════
-
-const _iron = {
-  ticks:          [],    // last 20 tick durations (ms)
-  events:         [],    // rolling event log (max 50)
-  session:        { forks:0, rollbacks:0, syncs:0, convergences:0, bans_total:0 },
-  poll:           null,
-  prom_ok:        null,  // null=unknown, true/false after first attempt
-};
-
-const IRON_POLL_MS    = 4000;
-const IRON_MAX_EVENTS = 50;
-const IRON_MAX_TICKS  = 20;
-
-// ── State badge ──────────────────────────────────────────────────────────────
-function _ironStateBadge(state, lag, partitioned) {
-  const el = document.getElementById('iron-state-badge');
-  if (!el) return;
-  let cls = 'nominal', label = '● Nominal';
-  if (partitioned)         { cls = 'partitioned'; label = '⚠ Partitioned'; }
-  else if (state === 'Forked')      { cls = 'forked';      label = '⚡ Forked'; }
-  else if (state === 'Syncing')     { cls = 'syncing';      label = '⟳ Syncing'; }
-  else if (state === 'Recovering')  { cls = 'recovering';   label = '↺ Recovering'; }
-  else if (state === 'AdminLocked') { cls = 'locked';       label = '🔒 Admin Locked'; }
-  el.className = 'iron-state-badge ' + cls;
-  el.textContent = label;
-}
-
-// ── Health score colour ───────────────────────────────────────────────────────
-function _ironHealthClass(score) {
-  if (score >= 0.9) return 'ok';
-  if (score >= 0.5) return 'warn';
-  return 'crit';
-}
-
-// ── KPI update ────────────────────────────────────────────────────────────────
-function _ironUpdateKPIs(data) {
-  const set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
-  const cls = (id, c)   => { const e = document.getElementById(id); if (e) { e.className = 'iron-kpi ' + c; } };
-
-  const lag         = data.lag_blocks || 0;
-  const health      = data.health_score || 1.0;
-  const partitioned = data.partitioned || false;
-  const state       = data.state || 'Nominal';
-
-  set('iron-val-height',  num(data.local_height || 0));
-  set('iron-val-tip',     'tip: ' + (data.tip_hex || '—').slice(0,12) + '…');
-  set('iron-val-lag',     lag);
-  set('iron-val-best',    'best known: ' + num(data.best_peer_height || 0));
-  set('iron-val-diff',    _fmtDiff(data.total_difficulty || 0));
-  set('iron-val-staletime', 'tip age: ' + (data.tip_stalled_secs || 0) + 's');
-  set('iron-val-health',  health.toFixed(2));
-  set('iron-val-synced',  data.is_synced ? '✓ Synced' : 'Syncing…');
-
-  set('iron-val-peers-out',  data.outbound_peers || 0);
-  set('iron-val-peers-in',   'inbound: ' + (data.inbound_peers || 0));
-  set('iron-val-bans',       data.active_bans || 0);
-  set('iron-val-bans-total', 'total this session: ' + _iron.session.bans_total);
-  set('iron-val-forks',      _iron.session.forks);
-  set('iron-val-rollbacks',  'rollbacks: ' + _iron.session.rollbacks);
-  set('iron-val-syncs',      _iron.session.syncs);
-  set('iron-val-convergences','converged: ' + _iron.session.convergences);
-
-  // KPI accent colours
-  cls('iron-kpi-lag',    lag === 0 ? 'ok' : lag < 5 ? 'warn' : 'crit');
-  cls('iron-kpi-health', _ironHealthClass(health));
-  cls('iron-kpi-diff',   partitioned ? 'crit' : 'info');
-
-  set('iron-last-update', 'updated ' + new Date().toLocaleTimeString());
-  _ironStateBadge(state, lag, partitioned);
-}
-
-// ── Tick performance bars ─────────────────────────────────────────────────────
-function _ironUpdateTicks(ticks, total, slow) {
-  const container = document.getElementById('iron-tick-bars');
-  if (!container) return;
-  const max = Math.max(...ticks, 1);
-  container.innerHTML = ticks.map(t => {
-    const h  = Math.max(4, Math.round((t / max) * 22));
-    const cl = t < 50 ? 'ok' : t < 200 ? 'warn' : 'crit';
-    const bg = cl === 'ok' ? '#D4A059' : cl === 'warn' ? '#F59E0B' : '#EF4444';
-    return `<div class="iron-uptime-seg" title="${t}ms"
-              style="height:${h}px;background:${bg};flex:1"></div>`;
-  }).join('');
-
-  const avg = ticks.length ? Math.round(ticks.reduce((a,b)=>a+b,0)/ticks.length) : 0;
-  const set = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; };
-  set('iron-avg-tick',    'avg: ' + avg + 'ms');
-  set('iron-tick-total',  'ticks: ' + num(total));
-  set('iron-tick-slow',   'slow ticks: ' + slow);
-}
-
-// ── State breakdown bars ──────────────────────────────────────────────────────
-function _ironUpdateStateBars(transitions) {
-  const el = document.getElementById('iron-state-bars');
-  if (!el) return;
-  const counts = {};
-  (transitions||[]).forEach(t => { counts[t.to] = (counts[t.to]||0)+1; });
-  const total = Math.max(1, Object.values(counts).reduce((a,b)=>a+b,0));
-  const states = ['Nominal','Syncing','Forked','Partitioned','Recovering'];
-  const colors = {'Nominal':'#D4A059','Syncing':'#818CF8','Forked':'#F87171',
-                  'Partitioned':'#F87171','Recovering':'#FCD34D'};
-  el.innerHTML = states.map(s => {
-    const n   = counts[s] || 0;
-    const pct = Math.round((n/total)*100);
-    return `<div class="iron-bar-row">
-      <div class="iron-bar-label">${s}</div>
-      <div class="iron-bar-track">
-        <div class="iron-bar-fill" style="width:${pct}%;background:${colors[s]||'#6B6860'}"></div>
-      </div>
-      <div class="iron-bar-val">${n}×</div>
-    </div>`;
-  }).join('');
-}
-
-// ── Time bars (partition / sync) ──────────────────────────────────────────────
-function _ironUpdateTimeBars(data) {
-  const el = document.getElementById('iron-time-bars');
-  if (!el) return;
-  const rows = [
-    { label:'Partition secs', val: data.partition_seconds_total||0, max:3600, cl:'crit' },
-    { label:'Sync duration',  val: data.last_sync_secs||0,          max:300,  cl:'warn' },
-    { label:'Stall secs',     val: data.tip_stalled_secs||0,        max:120,  cl:'warn' },
-    { label:'State age (s)',  val: data.secs_in_state||0,           max:300,  cl:'info' },
-  ];
-  el.innerHTML = rows.map(r => {
-    const pct = Math.min(100, Math.round((r.val/r.max)*100));
-    const bg  = r.cl==='crit'?'#EF4444':r.cl==='warn'?'#F59E0B':'#6366F1';
-    return `<div class="iron-bar-row">
-      <div class="iron-bar-label">${r.label}</div>
-      <div class="iron-bar-track">
-        <div class="iron-bar-fill" style="width:${pct}%;background:${bg}"></div>
-      </div>
-      <div class="iron-bar-val">${r.val}</div>
-    </div>`;
-  }).join('');
-}
-
-// ── Peer table ────────────────────────────────────────────────────────────────
-function _ironUpdatePeers(peers) {
-  const el = document.getElementById('iron-peer-table');
-  const ct = document.getElementById('iron-peer-count');
-  if (!el) return;
-  if (!peers || !peers.length) {
-    el.innerHTML = '<div style="text-align:center;padding:16px;font-family:var(--mono);font-size:12px;color:var(--t3)">No peer data available</div>';
-    if (ct) ct.textContent = '0 peers';
-    return;
-  }
-  if (ct) ct.textContent = peers.length + ' peer' + (peers.length!==1?'s':'');
-  el.innerHTML = peers.map(p => {
-    const banned = p.is_banned;
-    const strikes = (p.bad_blocks||0) + (p.timeouts||0);
-    const status = banned ? 'ban' : strikes > 0 ? 'warn' : 'ok';
-    const statusLabel = banned ? 'Banned' : strikes > 0 ? `${strikes} strikes` : 'Good';
-    return `<div class="iron-peer-row">
-      <div class="iron-peer-id" title="${p.peer_id_hex}">${p.peer_id_hex.slice(0,8)}…</div>
-      <div class="iron-peer-height">#${num(p.height||0)}</div>
-      <div class="iron-peer-diff">${_fmtDiff(p.total_diff||0)}</div>
-      <div class="iron-peer-status ${status}">${statusLabel}</div>
-    </div>`;
-  }).join('');
-}
-
-// ── Event log ─────────────────────────────────────────────────────────────────
-function _ironAddEvent(type, msg, level) {
-  _iron.events.unshift({ time: new Date().toLocaleTimeString(), type, msg, level });
-  if (_iron.events.length > IRON_MAX_EVENTS) _iron.events.pop();
-  _ironRenderEvents();
-
-  // Update session counters
-  if (type === 'Fork')       _iron.session.forks++;
-  if (type === 'Rollback')   _iron.session.rollbacks++;
-  if (type === 'SyncStart')  _iron.session.syncs++;
-  if (type === 'Converged')  _iron.session.convergences++;
-  if (type === 'PeerBanned') _iron.session.bans_total++;
-}
-
-function _ironRenderEvents() {
-  const el = document.getElementById('iron-event-log');
-  if (!el) return;
-  if (!_iron.events.length) {
-    el.innerHTML = '<div style="text-align:center;padding:16px;font-family:var(--mono);font-size:12px;color:var(--t3)">No events yet</div>';
-    return;
-  }
-  el.innerHTML = _iron.events.map(e =>
-    `<div class="iron-event-row">
-      <div class="iron-event-time">${e.time}</div>
-      <div class="iron-event-type ${e.level}">${e.type}</div>
-      <div class="iron-event-msg">${e.msg}</div>
-    </div>`
-  ).join('');
-}
-
-function ironClearLog() { _iron.events = []; _ironRenderEvents(); }
-
-// ── Prometheus parser (text format → object) ──────────────────────────────────
-function _parseProm(text) {
-  const out = {};
-  text.split('\n').forEach(line => {
-    if (line.startsWith('#') || !line.trim()) return;
-    const sp = line.lastIndexOf(' ');
-    if (sp < 0) return;
-    const key = line.slice(0, sp).replace(/\{[^}]*\}/, '').trim();
-    const val = parseFloat(line.slice(sp+1));
-    out[key] = val;
-  });
-  return out;
-}
-
-// ── Prometheus poll ───────────────────────────────────────────────────────────
-async function _ironPollProm() {
-  try {
-    const r = await fetch('/metrics', { signal: AbortSignal.timeout(4000) });
-    if (!r.ok) throw new Error('non-200');
-    const ct = r.headers.get('content-type') || '';
-    // Prometheus serves text/plain — reject HTML responses (nginx catch-all)
-    if (ct.includes('text/html')) { _iron.prom_ok = false; return null; }
-    const text = await r.text();
-    // Must contain actual Prometheus metric lines (key followed by space and number)
-    if (!/^iron_consensus_\w+ \d/m.test(text)) { _iron.prom_ok = false; return null; }
-    _iron.prom_ok = true;
-    return _parseProm(text);
-  } catch(_) {
-    _iron.prom_ok = false;
-    return null;
-  }
-}
-
-// ── RPC fallback poll ─────────────────────────────────────────────────────────
-async function _ironPollRpc() {
-  const info = await rpc('get_info');
-  if (!info) return null;
-  return {
-    // Map RPC fields to our data shape
-    local_height:       info.height,
-    best_peer_height:   info.height,   // RPC doesn't expose this separately
-    lag_blocks:         info.synced ? 0 : 1,
-    total_difficulty:   parseInt(info.total_difficulty || info.difficulty || 0),
-    tip_hex:            info.top_hash || '',
-    is_synced:          info.synced,
-    health_score:       info.health_score || (info.synced ? 1.0 : 0.7),
-    outbound_peers:     info.peer_count,
-    inbound_peers:      0,
-    active_bans:        0,
-    partitioned:        info.peer_count < 2,
-    state:              info.synced ? 'Nominal' : 'Syncing',
-    secs_in_state:      0,
-    tip_stalled_secs:   info.tip_age_secs || 0,
-    forks_detected:     0,
-    rollbacks:          0,
-    partition_seconds_total: 0,
-  };
-}
-
-// ── Main poll loop ────────────────────────────────────────────────────────────
-async function _ironPoll() {
-  const t0 = performance.now();
-
-  // Try Prometheus first, fall back to RPC
-  let prom = await _ironPollProm();
-  let data;
-
-  if (prom) {
-    // Build data object from Prometheus metrics
-    data = {
-      local_height:        prom['iron_consensus_height']             || 0,
-      best_peer_height:    (prom['iron_consensus_height']||0) + (prom['iron_consensus_lag_blocks']||0),
-      lag_blocks:          prom['iron_consensus_lag_blocks']         || 0,
-      total_difficulty:    prom['iron_consensus_height'] * 1000,     // approx
-      tip_hex:             '',
-      is_synced:           (prom['iron_consensus_lag_blocks']||0) === 0,
-      health_score:        prom['iron_consensus_health_score']       || 1.0,
-      outbound_peers:      prom['iron_consensus_peers_outbound']     || 0,
-      inbound_peers:       prom['iron_consensus_peers_inbound']      || 0,
-      active_bans:         prom['iron_consensus_peers_banned_active']|| 0,
-      partitioned:         (prom['iron_consensus_partitioned']       || 0) === 1,
-      state:               'Nominal',
-      secs_in_state:       0,
-      tip_stalled_secs:    0,
-      forks_detected:      prom['iron_consensus_forks_detected_total']||0,
-      rollbacks:           prom['iron_consensus_rollbacks_total']    ||0,
-      syncs:               prom['iron_consensus_syncs_total']        ||0,
-      convergences:        prom['iron_consensus_convergence_total']  ||0,
-      partition_seconds_total: prom['iron_consensus_partition_seconds_total']||0,
-      ticks_total:         prom['iron_consensus_ticks_total']        ||0,
-    };
-
-    // Detect events from counter jumps
-    if (data.forks_detected > _iron.session.forks)
-      _ironAddEvent('Fork', `Fork detected at height ${data.local_height}`, 'crit');
-    if (data.rollbacks > _iron.session.rollbacks)
-      _ironAddEvent('Rollback', `Chain rolled back`, 'warn');
-    if (data.active_bans > 0 && prom['iron_consensus_peers_banned_total'] > _iron.session.bans_total)
-      _ironAddEvent('PeerBanned', `${data.active_bans} peer(s) currently banned`, 'warn');
-    if (data.partitioned)
-      _ironAddEvent('Partition', `Only ${data.outbound_peers} peers — partitioned`, 'crit');
-
-    // Update counters
-    _iron.session.forks        = data.forks_detected;
-    _iron.session.rollbacks    = data.rollbacks;
-    _iron.session.syncs        = data.syncs || _iron.session.syncs;
-    _iron.session.convergences = data.convergences || _iron.session.convergences;
-
-  } else {
-    // RPC fallback
-    data = await _ironPollRpc();
-    if (!data) return;
-    if (!_iron.events.length) {
-      _ironAddEvent('Info', 'Prometheus /metrics unavailable — using RPC data', 'warn');
-    }
-  }
-
-  // Enrich with RPC tip hash if Prometheus didn't have it
-  if (!data.tip_hex) {
-    const info = await rpc('get_info');
-    if (info) data.tip_hex = info.top_hash || '';
-  }
-
-  // Tick timing
-  const elapsed = Math.round(performance.now() - t0);
-  _iron.ticks.push(elapsed);
-  if (_iron.ticks.length > IRON_MAX_TICKS) _iron.ticks.shift();
-  const slowTicks = _iron.ticks.filter(t => t > 500).length;
-
-  // Render everything
-  _ironUpdateKPIs(data);
-  _ironUpdateTicks(_iron.ticks, data.ticks_total || 0, slowTicks);
-  _ironUpdateStateBars([]);
-  _ironUpdateTimeBars(data);
-  // Fetch real peer data
-  const peerData = await rpc('get_peers');
-  _ironUpdatePeers(peerData && peerData.peers ? peerData.peers.map(p => ({
-    peer_id_hex: p.id || p.addr || '?',
-    height: p.height || 0,
-    total_diff: 0,
-    is_banned: p.reputation < 20,
-    bad_blocks: 0,
-    timeouts: 0,
-  })) : []);
-  if (peerData && peerData.peers) {
-    const set = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; };
-    set('iron-peer-count', peerData.peers.length + ' peer' + (peerData.peers.length!==1?'s':''));
-  }
-}
-
-function _ironStartPolling() {
-  if (_iron.poll) clearInterval(_iron.poll);
-  _ironPoll();
-  _iron.poll = setInterval(_ironPoll, IRON_POLL_MS);
-}
-function _ironStopPolling() {
-  if (_iron.poll) { clearInterval(_iron.poll); _iron.poll = null; }
-}
-
-// ── Format helpers ────────────────────────────────────────────────────────────
-function _fmtDiff(d) {
-  if (d >= 1e12) return (d/1e12).toFixed(2) + 'T';
-  if (d >= 1e9)  return (d/1e9).toFixed(2) + 'G';
-  if (d >= 1e6)  return (d/1e6).toFixed(2) + 'M';
-  if (d >= 1e3)  return (d/1e3).toFixed(1) + 'K';
-  return String(d);
-}
 
 // ── RPC failure counter ──────────────────────────────────────
 let _rpcFailures = 0;
@@ -3327,8 +2104,15 @@ async function poll(){
     $('live-dot').classList.add('off');
     return;
   }
+  _lastInfo = info;
+  _lastPollAtMs = Date.now();
   _rpcFailures = 0;
   _heartbeat();
+  _updateOperatorStrip(info);
+  if(_apiHealthProbeCountdown-- <= 0){
+    _apiHealthProbeCountdown = 5;
+    _probeApiHealth();
+  }
 
   // Update decay clock with tip age
   const tipAgeSecs = info.tip_age_secs || 0;
@@ -3347,9 +2131,18 @@ async function poll(){
     const mins = Math.floor(tipAgeSecs / 60);
     staleBanner.textContent = `⚠ Chain data is ${mins} minutes old — node is syncing`;
     staleBanner.style.display = 'block';
+    _pushOperatorAlert('warn', `stale tip: ${Math.floor(tipAgeSecs/60)}m old`);
   } else {
     staleBanner.style.display = 'none';
   }
+  if ((info.peer_count||0) === 0) _pushOperatorAlert('crit', 'no peers connected');
+  if (_lastChainHeightSeen && info.height < _lastChainHeightSeen) {
+    _pushOperatorAlert('crit', `height dropped ${_lastChainHeightSeen} -> ${info.height}`);
+  }
+  if (_lastChainHeightSeen && info.height > _lastChainHeightSeen) {
+    _pushOperatorAlert('info', `new block #${info.height}`);
+  }
+  _lastChainHeightSeen = info.height;
 
   // Anonymity set counter
   if(info.anonymity_set != null){
@@ -3381,6 +2174,9 @@ async function poll(){
   $('n-synced').textContent=info.height>0?'Yes (h='+num(info.height)+')':'Connecting...';$('n-diff').textContent=num(info.difficulty);
   $('priv-blocks').textContent=num(info.height);
   const bs=$('blocks-sub');if(bs)bs.textContent=num(info.height)+' total blocks';
+  const bsrc=$('blocks-source');if(bsrc)bsrc.textContent=RPC;
+  const bfr=$('blocks-freshness');if(bfr)bfr.textContent=(info.tip_age_secs||0)+'s tip age';
+  const btip=$('blocks-tip');if(btip)btip.textContent='#'+num(info.height);
   const set2=(id,v)=>{const e=$(id);if(e)e.textContent=v;};
   set2('cd-height',num(info.height));set2('cd-supply',num(Math.round(supCync))+' CYNC');
   set2('cd-diff',num(info.difficulty));set2('cd-peers',info.peer_count);
@@ -3409,6 +2205,8 @@ async function poll(){
   const ns=$('net-s');if(ns)ns.textContent=info.synced?'Yes':'Syncing...';
   const nm=$('net-m');if(nm)nm.textContent=info.tx_pool_size+' transactions';
   const no=$('net-o');if(no&&info.available_outputs)no.textContent=num(info.available_outputs);
+  const nsrc=$('net-source');if(nsrc)nsrc.textContent=RPC;
+  const nf=$('net-freshness');if(nf)nf.textContent='tip age '+(info.tip_age_secs||0)+'s';
   // mining calc
   const cnd=$('calc-net-diff');if(cnd)cnd.textContent=num(info.difficulty);
   const cnhr=$('calc-net-hr');if(cnhr)cnhr.textContent=fmtHr(hr);
@@ -3544,6 +2342,34 @@ async function loadBlocks(fromH,count){
   }
   loadedHeight=fromH;
 }
+function jumpToBlockHeight(){
+  const input=$('blocks-jump-height');
+  if(!input)return;
+  const h=parseInt(input.value,10);
+  if(Number.isNaN(h)||h<0)return;
+  void viewBlock(h);
+}
+
+function blocksDirectLookup(){
+  const input = $('blocks-direct-lookup');
+  if(!input) return;
+  const q = (input.value||'').trim();
+  if(!q) return;
+  if(/^\d+$/.test(q)){ viewBlock(parseInt(q,10)); return; }
+  if(/^[0-9a-f]{64}$/i.test(q)){
+    viewTx(q);
+    return;
+  }
+  _pushOperatorAlert('warn', 'lookup expects height or 64-char hash');
+}
+async function jumpNewestBlocks(){
+  const info=_lastInfo||await rpc('get_info');
+  if(!info)return;
+  blockList=[];
+  loadedHeight=0;
+  await loadBlocks(info.height,100);
+  renderAllBlocks();
+}
 async function loadMore(){
   if(!blockList.length)return;
   const oldest=blockList[blockList.length-1];
@@ -3609,9 +2435,9 @@ function renderAllBlocks(){
   const tb=$('all-blocks');if(!tb)return;
   if(!blockList.length){tb.innerHTML='<tr><td colspan="7" class="loading">No blocks</td></tr>';return;}
   tb.innerHTML=blockList.map(b=>`<tr class="block-row" data-age-class="${_blockAgeClass(b.timestamp)}" onclick="viewBlock(${b.height})">
-    <td><span class="hash">#${num(b.height)}</span></td>
+    <td><span class="hash">#${num(b.height)}</span> <button onclick="event.stopPropagation();copyText('#${b.height}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button></td>
     <td class="age">${age(b.timestamp)} ago</td>
-    <td class="hash" style="font-size:10px">${b.hash?b.hash.slice(0,18)+'...':'—'}</td>
+    <td class="hash" style="font-size:10px">${b.hash?b.hash.slice(0,18)+'...':'—'} ${b.hash?`<button onclick="event.stopPropagation();copyText('${b.hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:''}</td>
     <td><span class="badge badge-amber" style="font-size:9px">${algoName(b.algorithm||0)}</span></td>
     <td>${b.tx_count||1}</td>
     <td class="age">${fmtSize(b.size||393)}</td>
@@ -3638,8 +2464,8 @@ async function viewBlock(height){
   $('bd-algo').innerHTML='<span class="badge badge-amber">'+algoName(b.algorithm||0)+'</span>';
   $('bd-txs').textContent=b.tx_count||1;
   $('bd-size').textContent=fmtSize(b.size||393);
-  $('bd-hash').textContent=b.hash||'—';
-  $('bd-prev-hash').textContent=b.prev_hash||'—';
+  $('bd-hash').innerHTML=(b.hash||'—')+(b.hash?` <button onclick="copyText('${b.hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:'');
+  $('bd-prev-hash').innerHTML=(b.prev_hash||'—')+(b.prev_hash?` <button onclick="copyText('${b.prev_hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:'');
   $('bd-prev').onclick=height>1?()=>viewBlock(height-1):null;
   $('bd-prev').disabled=height<=1;
   $('bd-next').onclick=height<chainHeight?()=>viewBlock(height+1):null;
@@ -3801,7 +2627,11 @@ async function loadMempool(){
   const fees=d.total_fees||0;
   const feesCync=(fees/1e12).toFixed(6);
   const avgSize=count>0?Math.round(bytes/count):0;
+  const risk=count===0?'clear':count<25?'low':count<100?'moderate':'high';
   if(cnt)cnt.textContent=count;
+  const msrc=$('mp-source');if(msrc)msrc.textContent=RPC;
+  const mf=$('mp-freshness');if(mf)mf.textContent='updated '+new Date().toLocaleTimeString();
+  const mpb=$('mp-pending-badge');if(mpb)mpb.textContent=num(count);
   if(sub)sub.textContent=count+' pending transaction'+(count!==1?'s':'');
   if(syncTs)syncTs.textContent='synced '+new Date().toLocaleTimeString();
   // Update stats row
@@ -3809,6 +2639,7 @@ async function loadMempool(){
   const sb=$('mp-stat-bytes');if(sb)sb.textContent=fmtSize(bytes);
   const sf=$('mp-stat-fees');if(sf)sf.textContent=feesCync;
   const sa=$('mp-stat-avg');if(sa)sa.textContent=avgSize>0?fmtSize(avgSize):'—';
+  const srisk=$('mp-stat-risk');if(srisk)srisk.textContent=risk;
   if(count===0){
     el.innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-family:var(--mono);font-size:12px"><div style="font-size:28px;margin-bottom:8px">✓</div>Mempool is empty — all transactions confirmed</div>';
     if(syncBtn){syncBtn.disabled=false;syncBtn.style.opacity='1';}return;
@@ -3822,11 +2653,14 @@ async function loadMempool(){
       const ins=tx.inputs||2;
       const outs=tx.outputs||2;
       const sz=tx.size||0;
+      const firstSeen=tx.first_seen||tx.timestamp||tx.time||0;
+      const seenAge=firstSeen?age(firstSeen):'pending';
       return `<tr onclick="viewTx('${tx.hash}')" style="cursor:pointer" onmouseenter="this.style.background='var(--acb)'" onmouseleave="this.style.background=''">
-      <td><span style="color:var(--t3);font-size:10px;margin-right:6px">#${i+1}</span><span class="hash" style="color:var(--ac2)">${tx.hash?tx.hash.slice(0,20)+'…':'—'}</span></td>
+      <td><span style="color:var(--t3);font-size:10px;margin-right:6px">#${i+1}</span><span class="hash" style="color:var(--ac2)">${tx.hash?tx.hash.slice(0,20)+'…':'—'}</span> ${tx.hash?`<button onclick="event.stopPropagation();copyText('${tx.hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:''}</td>
       <td><span class="badge ${tx.kind==='coinbase'?'badge-amber':''}">${tx.kind||'transfer'}</span></td>
       <td style="font-family:var(--mono)">${ins}→${outs}</td>
       <td style="font-family:var(--mono)">${fmtSize(sz)}</td>
+      <td style="font-family:var(--mono)">${seenAge}</td>
       <td>
         <div style="display:flex;flex-wrap:wrap;gap:3px">
           <span class="badge" title="CLSAG ring signature with ${ring} decoys">CLSAG-${ring}</span>
@@ -3838,7 +2672,7 @@ async function loadMempool(){
       </td>
     </tr>`;
     }).join('');
-    el.innerHTML=`<table><thead><tr><th>Hash</th><th>Type</th><th>Shape</th><th>Size</th><th>Privacy Features</th></tr></thead><tbody>${rows}</tbody></table>
+    el.innerHTML=`<table><thead><tr><th>Hash</th><th>Type</th><th>Shape</th><th>Size</th><th>Age</th><th>Privacy Features</th></tr></thead><tbody>${rows}</tbody></table>
     <div style="padding:12px 20px;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--t3);font-family:var(--mono);border-top:1px solid var(--b)">
       <span>${txData.transactions.length} transactions · all fully private</span>
       <span>Dandelion++ propagated · 30% fee burn</span>
@@ -3997,6 +2831,8 @@ async function loadHealth(){
         <td><span class="badge badge-amber" title="${d.reason||''}">Offline</span></td></tr>`;
     }
   }
+  const hsrc=$('health-source');if(hsrc)hsrc.textContent='/health/*';
+  const hf=$('health-freshness');if(hf)hf.textContent='updated '+new Date().toLocaleTimeString();
   if(tbl)tbl.innerHTML=tableRows||'<tr><td colspan="8" class="loading">No data</td></tr>';
   const hs=$('health-summary');
   if(hs){
@@ -4159,9 +2995,9 @@ function toggleMobile(){$('mobile-menu').classList.toggle('open');}
 function closeMobile(){$('mobile-menu').classList.remove('open');}
 
 // ── PAGE NAV ──────────────────────────────────────────────────
-const PAGES=['home','blocks','block','mempool','network','health','ironmetrics','supply','burn','mining','faucet','privacy','4thamendment','about','constitution','changelog','api','search','docs','nodesetup','walletdoc','testnetdoc','privacydoc','protocoldoc','apifull','billofrights','disclaimer','conduct','addrlookup','tx'];
+const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx'];
 const DEV_ONLY_PAGES=[];
-const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','health','ironmetrics','supply','burn','mining','faucet','privacy','about','constitution','changelog','api','search','docs','nodesetup','walletdoc','testnetdoc','privacydoc','protocoldoc','apifull','billofrights','disclaimer','conduct','addrlookup','tx'];
+const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx'];
 const EXPLORER_DEV_MODE=(
   new URLSearchParams(window.location.search).get('dev_explorer')==='1' &&
   IS_LOCALHOST
@@ -5408,15 +4244,13 @@ const DROP_MAP={
   hashrate:'tools',diffpredict:'tools',addrval:'tools',emissioncalc:'tools',countdown:'tools',
   github:'learn',
 
-  blocks:'explorer',mempool:'explorer',supply:'explorer',search:'explorer',tx:'explorer',addrlookup:'explorer',
+  blocks:'explorer',mempool:'explorer',supply:'explorer',search:'explorer',tx:'explorer',
   balancelookup:'explorer',richlist:'explorer',
   status:'network',livestream:'network',webhooks:'network',
   governance:'learn',miningtutorial:'docs',apilive:'tools',txbuilder:'tools',multisig:'tools',
-  network:'network',health:'network',ironmetrics:'network',faucet:'network',
+  network:'network',globe:'network',health:'network',
   mining:'tools',wallet:'tools',api:'tools',apifull:'tools',
-  about:'learn',privacy:'learn','4thamendment':'learn',burn:'explorer',constitution:'learn',changelog:'learn',
-  docs:'docs',nodesetup:'docs',walletdoc:'docs',testnetdoc:'docs',
-  privacydoc:'docs',protocoldoc:'docs',billofrights:'docs',disclaimer:'docs',conduct:'docs'
+  '4thamendment':'learn'
 };
 function go(id){
   if(!PAGES.includes(id))id='home';
@@ -5434,7 +4268,8 @@ function go(id){
   });
   if(id==='blocks'){renderAllBlocks();void ensureBlocksBackfillToGenesis();}
   if(id==='mempool'){loadMempool();}else{if(_mpAutoInterval){clearInterval(_mpAutoInterval);_mpAutoInterval=null;const cb=$('mp-auto-sync');if(cb)cb.checked=false;}}
-  if(id==='network'){loadPeers();setTimeout(()=>{initGlobe().catch(()=>{});},200);setTimeout(renderHrHistChart,300);}
+  if(id==='network'){loadPeers();setTimeout(renderHrHistChart,300);}
+  if(id==='globe'){setTimeout(()=>{initGlobe().catch(()=>{});},200);}
   if(id==='health'){
     _updateHealthProbeMeta();
     loadHealth();
@@ -5443,17 +4278,15 @@ function go(id){
     if(_healthMetaInterval){clearInterval(_healthMetaInterval);_healthMetaInterval=null;}
   }
   if(id==='supply'){setTimeout(renderEmissionChart,200);setTimeout(renderAnonChart,300);loadChainEvents();}
-  if(id==='burn')loadBurnStats();
-  if(id==='mining')setTimeout(renderMiningChart,200);
+  
+  
   if(id==='status'){setTimeout(renderVersionChart,200);renderMinersLeaderboard();}
   if(id==='apilive')updateApiParams();
   if(id==='richlist')renderRichList();
   if(id==='webhooks')renderWebhookList();
   if(id==='livestream'){renderPropagationChart();renderMempoolChart();}
   if(id==='balancelookup'){};
-  if(id==='ironmetrics'){_ironStartPolling();}
-  if(id!=='ironmetrics'){_ironStopPolling();}
-  if(id==='mining'){renderMiningChart();calcMining();}
+  
   // Do not auto-generate wallet material on tab open.
   // User must explicitly click Generate in dev-only mode.
   const walletOutput = $('wallet-output');
@@ -5580,7 +4413,7 @@ async function viewTx(txHash){
       <div class="panel">
         <div class="panel-head">Transaction Details</div>
         <div class="detail-grid">
-          <div class="dl">Hash</div><div class="dv mono" style="font-size:10px;word-break:break-all">${tx.hash||txHash}</div>
+          <div class="dl">Hash</div><div class="dv mono" style="font-size:10px;word-break:break-all">${tx.hash||txHash} <button onclick="copyText('${tx.hash||txHash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button></div>
           <div class="dl">Block</div><div class="dv">${isMempool?'<span style="color:#F0C040">Mempool (pending)</span>':`<a onclick="viewBlock(${tx.block_height})" style="color:var(--ac2);cursor:pointer">#${num(tx.block_height||0)}</a>`}</div>
           <div class="dl">Block hash</div><div class="dv mono" style="font-size:10px;word-break:break-all">${isMempool?'waiting for confirmation':tx.block_hash||'—'}</div>
           <div class="dl">Version</div><div class="dv">${tx.version||1}</div>
@@ -6327,7 +5160,6 @@ document.addEventListener('keydown', function(e) {
     case 'b': go('blocks'); break;
     case 'n': go('network'); break;
     case 'm': go('mempool'); break;
-    case 'w': go('walletdoc'); break;
     case 's': go('supply'); break;
     case '/': e.preventDefault(); const sq=document.getElementById('nav-q'); if(sq){sq.focus();} break;
     case 'd': { const dk=['dark','midnight','forge','vault','mono','contrast']; const cur=document.documentElement.getAttribute('data-theme')||'paper'; setTheme(dk.includes(cur)?'paper':'dark'); break; }
@@ -6480,7 +5312,7 @@ function copyText(text, btn) {
 
 </script>
 
-<div class="page" id="page-docs">
+<template id="removed-doc-pages">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Documentation</div>
     <div class="page-title" style="margin-bottom:4px">Documentation</div>
@@ -6559,7 +5391,7 @@ function copyText(text, btn) {
     </div>
   </div>
 </div>
-<div class="page" id="page-nodesetup">
+<div class="page" id="removed-page-nodesetup">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Node Setup</div>
     <div class="doc-page"><h2>CoinCync Node Setup Guide</h2>
@@ -6828,7 +5660,7 @@ Options:
 <div style="height:8px"></div></div>
   </div>
 </div>
-<div class="page" id="page-privacydoc">
+<div class="page" id="removed-page-privacydoc">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Privacy Features</div>
     <div class="doc-page"><h2>CoinCync Privacy Features</h2>
@@ -7311,7 +6143,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; \
 <div style="height:8px"></div></div>
   </div>
 </div>
-<div class="page" id="page-protocoldoc">
+<div class="page" id="removed-page-protocoldoc">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Protocol Specification</div>
     <div class="doc-page"><h2>CoinCync Protocol Specification</h2>
@@ -7738,7 +6570,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; \
 <div style="height:8px"></div></div>
   </div>
 </div>
-<div class="page" id="page-testnetdoc">
+<div class="page" id="removed-page-testnetdoc">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Testnet Guide</div>
     <div class="doc-page"><h2>CoinCync Testnet Guide</h2>
@@ -8245,7 +7077,7 @@ sha256sum src/testnet.rs
 <div style="height:8px"></div></div>
   </div>
 </div>
-<div class="page" id="page-walletdoc">
+<div class="page" id="removed-page-walletdoc">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Wallet Guide</div>
     <div class="doc-page"><h2>CoinCync Wallet Guide</h2>
@@ -8649,7 +7481,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
 <div style="height:8px"></div></div>
   </div>
 </div>
-<div class="page" id="page-billofrights">
+<div class="page" id="removed-page-billofrights">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Bill of Rights</div>
 
@@ -8867,44 +7699,14 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
     </div>
 
     <div style="max-width:800px;margin:0 auto;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:8px">
-      <button onclick="go('constitution')" class="btn btn-primary">Read the Constitution →</button>
-      <button onclick="go('privacy')" class="btn btn-outline">Privacy architecture</button>
-      <button onclick="go('about')" class="btn btn-outline">About CoinCync</button>
+      <button onclick="go('home')" class="btn btn-primary">Back to Home →</button>
+      <button onclick="go('supply')" class="btn btn-outline">Supply</button>
+      <button onclick="go('network')" class="btn btn-outline">Network</button>
     </div>
   </div>
 </div>
 
-<div class="page" id="page-conduct">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Code of Conduct</div>
-    <div class="doc-page">
-      <h2>Code of Conduct</h2>
-      <h3>Our Pledge</h3>
-      <p>We pledge to make participation in the CoinCync community a harassment-free experience for everyone, regardless of age, body size, visible or invisible disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.</p>
-      <h3>Our Standards</h3>
-      <p>Examples of behavior that contributes to a positive environment:</p>
-      <ul>
-        <li>Using welcoming and inclusive language</li>
-        <li>Being respectful of differing viewpoints and experiences</li>
-        <li>Gracefully accepting constructive criticism</li>
-        <li>Focusing on what is best for the community</li>
-        <li>Showing empathy towards other community members</li>
-      </ul>
-      <p>Examples of unacceptable behavior:</p>
-      <ul>
-        <li>The use of sexualized language or imagery</li>
-        <li>Trolling, insulting or derogatory comments, and personal or political attacks</li>
-        <li>Public or private harassment</li>
-        <li>Publishing others' private information without explicit permission</li>
-        <li>Spamming, advertising, or off-topic promotion</li>
-      </ul>
-      <h3>Enforcement</h3>
-      <p>Instances of abusive behavior may be reported to community leaders. All complaints will be reviewed and investigated promptly and fairly.</p>
-      <h3>Attribution</h3>
-      <p>This Code of Conduct is adapted from the <a href="https://www.contributor-covenant.org" target="_blank">Contributor Covenant</a>, version 2.1.</p>
-    </div>
-  </div>
-</div>
+</template>
 
 <!-- ═══ HASHRATE CHART ═══ -->
 <div class="page" id="page-hashrate">
