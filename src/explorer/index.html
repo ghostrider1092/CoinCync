@@ -21,7 +21,7 @@
 <!-- Old JPEG favicon removed -->
 
 <link rel="stylesheet" href="/assets/fonts/fonts/fonts.css">
-<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script defer src="/static/vendor/chart.js/4.4.0/chart.umd.min.js"></script>
 <style>
 /* ── THEME SYSTEM ─────────────────────────────────────────────── */
 /* 9 themes reflecting the CoinCync brand identity               */
@@ -1896,9 +1896,9 @@ const EXPLORER_ALLOW_EXTERNAL_DEPS=(
   new URLSearchParams(window.location.search).get('allow_external_deps')==='1'
 );
 const SCRIPT_URLS = {
-  d3: 'https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js',
-  topojson: 'https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js',
-  globe: 'https://cdn.jsdelivr.net/npm/globe.gl@2.27.3/dist/globe.gl.min.js',
+  d3: '/static/vendor/d3/7/d3.min.js',
+  topojson: '/static/vendor/topojson-client/3/topojson-client.min.js',
+  globe: '/static/vendor/globe.gl/2.27.3/globe.gl.min.js',
 };
 const _scriptLoadCache = {};
 function ensureScriptLoaded(url, globalName) {
@@ -3518,7 +3518,7 @@ function initMap(){
     if(load)load.textContent='Map unavailable in hardened mode (external atlas disabled).';
     return;
   }
-  d3.json('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(world=>{
+  d3.json('/static/vendor/world-atlas/2/countries-110m.json').then(world=>{
     const countries=topojson.feature(world,world.objects.countries).features;
     g.selectAll('.ctry').data(countries).join('path').attr('class','ctry')
       .attr('d',path).attr('fill',L).attr('stroke',B).attr('stroke-width',0.3)
@@ -3971,15 +3971,15 @@ async function initGlobe(){
     // jsDelivr is first — it has 99.9% uptime and proper CORS headers.
     const TEXTURE_SOURCES = {
       day: [
-        'https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-day.jpg',
+        '/static/vendor/three-globe/textures/earth-day.jpg',
         'https://unpkg.com/three-globe@2.31.1/example/img/earth-day.jpg',
       ],
       night: [
-        'https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg',
+        '/static/vendor/three-globe/textures/earth-night.jpg',
         'https://unpkg.com/three-globe@2.31.1/example/img/earth-night.jpg',
       ],
       bump: [
-        'https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-topology.png',
+        '/static/vendor/three-globe/textures/earth-topology.png',
         'https://unpkg.com/three-globe@2.31.1/example/img/earth-topology.png',
       ],
     };
@@ -4131,7 +4131,7 @@ async function initGlobe(){
       // Always show photo earth.  Polygon overlay is optional extra detail.
       // We DON'T set globeImageUrl(null) — that's what caused the green earth.
       if (EXPLORER_ALLOW_EXTERNAL_DEPS && typeof d3 !== 'undefined' && typeof topojson !== 'undefined') {
-        d3.json('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(world=>{
+        d3.json('/static/vendor/world-atlas/2/countries-110m.json').then(world=>{
           const countries=topojson.feature(world,world.objects.countries).features;
           globe
             .polygonsData(countries)
