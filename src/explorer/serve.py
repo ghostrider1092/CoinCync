@@ -1,7 +1,14 @@
 import http.server, urllib.request, json, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENABLE_DEV_PROXY = os.environ.get('COINCYNC_EXPLORER_DEV_PROXY', '').strip() in ('1', 'true', 'TRUE', 'yes', 'YES')
+
+# Dev proxy default: ENABLED. This script binds 127.0.0.1 only and is the
+# local-dev tool — production explorer is served by nginx (see
+# deploy/explorer/install-nginx-explorer.sh) and never runs serve.py.
+# Set COINCYNC_EXPLORER_DEV_PROXY=0 (or "false"/"no") to force-disable.
+_DEV_PROXY_ENV = os.environ.get('COINCYNC_EXPLORER_DEV_PROXY', '').strip().lower()
+ENABLE_DEV_PROXY = _DEV_PROXY_ENV not in ('0', 'false', 'no', 'off')
+
 ALLOW_LIVE_HEALTH = os.environ.get('COINCYNC_EXPLORER_LIVE_HEALTH', '').strip() in ('1', 'true', 'TRUE', 'yes', 'YES')
 LOCAL_RPC = os.environ.get('COINCYNC_EXPLORER_RPC', 'http://127.0.0.1:28081').strip() or 'http://127.0.0.1:28081'
 HEALTH = {}
