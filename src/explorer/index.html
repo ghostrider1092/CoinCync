@@ -20,7 +20,7 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='200' height='200' rx='40' fill='%230a0a09'/%3E%3Ccircle cx='100' cy='100' r='68' fill='none' stroke='%23d4a059' stroke-width='14'/%3E%3Cpath d='M 158 100 A 58 58 0 1 0 100 158' fill='none' stroke='%230a0a09' stroke-width='22'/%3E%3Cline x1='152' y1='100' x2='168' y2='100' stroke='%230a0a09' stroke-width='22'/%3E%3Ccircle cx='72' cy='100' r='10' fill='%23d4a059'/%3E%3Ccircle cx='128' cy='100' r='10' fill='%23d4a059'/%3E%3C/svg%3E">
 <!-- Old JPEG favicon removed -->
 
-<link rel="stylesheet" href="/assets/fonts/fonts.css">
+<link rel="stylesheet" href="/assets/fonts/fonts/fonts.css">
 <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 /* ── THEME SYSTEM ─────────────────────────────────────────────── */
@@ -2944,7 +2944,14 @@ function updateNetDashboard(){
 
 // ── MINING CALCULATOR ─────────────────────────────────────────
 function calcMining(){
-  const hr=parseFloat($('calc-hr').value||0)*parseFloat($('calc-unit').value||1000);
+  // Guard: this is invoked from poll() every 10s, but the calc-* inputs
+  // only exist on the mining-calculator page. On Home (and every other
+  // page) $('calc-hr') is null and reading .value would throw, killing
+  // poll() before it ever calls loadBlocks() — leaving Latest Blocks /
+  // charts / dashboards stuck at "Loading...".
+  const hrEl = $('calc-hr');
+  if (!hrEl) return;
+  const hr=parseFloat(hrEl.value||0)*parseFloat($('calc-unit').value||1000);
   const watts=parseFloat($('calc-watts').value||0);
   const elec=parseFloat($('calc-elec').value||0);
   const price=parseFloat($('calc-price').value||0);

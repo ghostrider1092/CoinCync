@@ -78,6 +78,15 @@ class H(http.server.BaseHTTPRequestHandler):
             elif fp.endswith('.jpg') or fp.endswith('.jpeg'): ct = 'image/jpeg'
             self.send_header('Content-Type', ct)
             self.send_header('Access-Control-Allow-Origin', '*')
+            # Vendor assets are content-addressable (versioned paths) and worth caching;
+            # everything else (HTML/JS/CSS) churns during dev — disable cache so a plain
+            # F5 picks up the latest serve.py / index.html and we don't ship users a
+            # stale frontend after a fix lands.
+            if '/static/vendor/' in path or path.endswith('.woff2') or path.endswith('.woff'):
+                self.send_header('Cache-Control', 'public, max-age=86400')
+            else:
+                self.send_header('Cache-Control', 'no-store, must-revalidate')
+                self.send_header('Pragma', 'no-cache')
             self.end_headers()
             with open(fp, 'rb') as f: self.wfile.write(f.read())
         else:
