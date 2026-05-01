@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, createContext } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { THEMES, DARK, LIGHT, applyTheme, applyWallpaper } from "./utils/theme";
 import { loadTheme, saveTheme, isWalletCreated, isSeedBackedUp, loadSettings } from "./utils/storage";
 import { useWallet } from "./hooks/useWallet";
@@ -23,13 +23,10 @@ import Changelog from "./pages/Changelog";
 import Audit from "./pages/Audit";
 import SplashScreen from "./components/SplashScreen";
 import ErrorBoundary from "./components/ErrorBoundary";
-import { rpc } from "./utils/rpc";
+import { ThemeCtx, WalletCtx, NotifCtx, NavCtx } from "./appContexts";
+import { rpc, isWalletBackendAvailable } from "./utils/rpc";
 
 window.React = React;
-
-export const ThemeCtx  = createContext(DARK);
-export const WalletCtx = createContext({});
-export const NotifCtx  = createContext({});
 
 const PAGES = {
   dashboard:Dashboard, send:Send, receive:Receive, history:History,
@@ -99,10 +96,12 @@ export default function App() {
   const currentSettings = loadSettings();
   const autoLockMinutes = Number(currentSettings.autoLockMinutes ?? 15);
   const lockWalletUi = useCallback(async (message) => {
-    try {
-      await rpc.lockWallet();
-    } catch {
-      // UI lock still applies even if backend call fails.
+    if (isWalletBackendAvailable()) {
+      try {
+        await rpc.lockWallet();
+      } catch {
+        // UI lock still applies even if backend call fails.
+      }
     }
     setAppState("locked");
     if (message) notifs.push(message, "info");
@@ -209,6 +208,7 @@ export default function App() {
   return (
     <ThemeCtx.Provider value={T}>
       <WalletCtx.Provider value={wallet}>
+        <NavCtx.Provider value={{ navigateTo }}>
         <NotifCtx.Provider value={notifs}>
           <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
             <TestnetBanner/>
@@ -232,6 +232,7 @@ export default function App() {
           </div>
           <Notifications notifs={notifs.notifs} dismiss={notifs.dismiss}/>
         </NotifCtx.Provider>
+        </NavCtx.Provider>
       </WalletCtx.Provider>
     </ThemeCtx.Provider>
   );

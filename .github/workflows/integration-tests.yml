@@ -1,0 +1,91 @@
+name: Integration Tests
+
+# Runs the full adversarial / consensus / network / wallet test suite on every
+# PR and on pushes to main. The hardening-baseline workflow only runs
+# `tier8_rpc_security`; this workflow gates regressions on the other ~480
+# integration tests (reorg defense, p2p flood/DoS, historical attack
+# reproductions, crypto property tests, etc.) so they're catch regressions
+# before merge instead of after.
+#
+# Sharded into 6 parallel jobs so total wall-clock stays under ~25 min on a
+# warm cache. Each shard owns a slice of the integration corpus; the unit /
+# bin / lib tests live in shard 0.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: integration-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.shard.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: unit-lib-bins
+            cmd: cargo test --release --features "randomx testnet" --workspace --lib --bins
+          - name: reorg-and-dos
+            cmd: cargo test --release --features "randomx testnet" --workspace --test tier14_reorg_defense --test tier5_chain_reorg --test tier6_dos_resource --test tier10_integration_adversarial --test tier11_brutal_attacks
+          - name: p2p-network
+            cmd: cargo test --release --features "randomx testnet" --workspace --test p2p_adversarial --test network_security --test network_adversarial --test rate_limiter --test fuzz_protocol
+          - name: rpc-wallet
+            cmd: cargo test --release --features "randomx testnet" --workspace --test tier8_rpc_security --test tier7_wallet_attacks --test rpc_endpoints --test rest_rate_limit --test wallet_roundtrip
+          - name: crypto-historical
+            cmd: cargo test --release --features "randomx testnet" --workspace --test tier12_crypto_warfare --test tier13_historical_attacks --test tier9_timing_sidechannel --test crypto_properties --test crypto_adversarial_corpora --test crypto_integration --test ic_crypto
+          - name: regression-and-pipeline
+            cmd: cargo test --release --features "randomx testnet" --workspace --test regression_critical --test consensus_edges --test edge_cases --test mempool_ordering --test transaction_lifecycle --test phase1_critical --test full_pipeline_real_crypto --test adversarial --test severity_assessment --test security_critical
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shared key across all shards so the first job warms the dep build
+          # and the rest reuse it. Per-shard suffix keeps target/ cached
+          # separately so Test artifacts don't collide.
+          shared-key: integration-tests-v1
+          key: ${{ matrix.shard.name }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      - name: ${{ matrix.shard.name }}
+        run: ${{ matrix.shard.cmd }}
+
+  # Aggregate gate — depends on all shards so branch-protection rules can
+  # require a single check ("Integration Tests / all-shards") instead of
+  # listing every shard.
+  all-shards:
+    name: all-shards
+    runs-on: ubuntu-22.04
+    needs: test
+    if: always()
+    steps:
+      - name: Verify all shards passed
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "One or more integration-test shards failed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "All integration-test shards passed."

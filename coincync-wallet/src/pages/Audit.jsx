@@ -1,6 +1,6 @@
 import { useState, useEffect, useContext } from "react";
 import { useTheme, Card, Badge, Ico, ICONS, Btn, Lbl, Mono, Divider, Spinner, SP, RAD } from "../components/ui";
-import { WalletCtx } from "../App";
+import { WalletCtx } from "../appContexts";
 import { rpc } from "../utils/rpc";
 
 const SUPPLY_CAP = 100_000_000;

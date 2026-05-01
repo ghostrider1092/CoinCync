@@ -1,5 +1,5 @@
 import { useContext, useState, useEffect, useCallback } from "react";
-import { ThemeCtx } from "../App";
+import { ThemeCtx } from "../appContexts";
 
 export const useTheme = () => useContext(ThemeCtx);
 

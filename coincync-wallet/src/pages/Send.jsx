@@ -1,7 +1,7 @@
 import { useState, useEffect, useContext } from "react";
 import { useTheme, Card, Badge, Btn, Lbl, Input, Ico, CoinLogo, ICONS } from "../components/ui";
 import { rpc } from "../utils/rpc";
-import { WalletCtx, NotifCtx } from "../App";
+import { WalletCtx, NotifCtx } from "../appContexts";
 
 export default function Send() {
   const T = useTheme();

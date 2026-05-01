@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useTheme, CoinLogo, Btn, Input, Ico, ICONS } from "../components/ui";
 import { markWalletCreated, markSeedBackedUp } from "../utils/storage";
-import { rpc } from "../utils/rpc";
+import NonTauriPrompt from "../components/NonTauriPrompt";
+import { rpc, isWalletBackendAvailable, formatWalletError } from "../utils/rpc";
 
 export default function WalletSetup({ onComplete }) {
   const T = useTheme();
@@ -53,7 +54,7 @@ export default function WalletSetup({ onComplete }) {
       setShowSeed(false);
       setStep("backup");
     } catch (e) {
-      setErr(String(e || "Failed to create wallet"));
+      setErr(formatWalletError(e, "Failed to create wallet"));
     } finally {
       setBusy(false);
     }
@@ -70,7 +71,7 @@ export default function WalletSetup({ onComplete }) {
       markSeedBackedUp();
       finish(false);
     } catch (e) {
-      setErr(String(e || "Restore failed"));
+      setErr(formatWalletError(e, "Restore failed"));
     } finally {
       setBusy(false);
     }
@@ -80,6 +81,10 @@ export default function WalletSetup({ onComplete }) {
     background:T.bg, borderRadius:14, padding:"32px 36px", width:480,
     border:`1px solid ${T.b}`, boxShadow:`0 20px 60px ${T.shadow}`,
   };
+
+  if (!isWalletBackendAvailable()) {
+    return <NonTauriPrompt />;
+  }
 
   if (step === "choose") return (
     <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", background:T.bg }}>

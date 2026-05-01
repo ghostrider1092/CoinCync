@@ -1,8 +1,9 @@
-import { useState, useContext } from "react";
+import { useState, useContext, useEffect } from "react";
 import { useTheme, Card, Btn, Ico, Lbl, Input, Select, Section, Row, Toggle, ICONS, SP } from "../components/ui";
-import { loadSettings, saveSettings, isSeedBackedUp, markSeedBackedUp } from "../utils/storage";
+import { loadSettings, saveSettings, isSeedBackedUp, markSeedBackedUp, clearCoincyncLocalState } from "../utils/storage";
 import { THEME_LIST, WALLPAPERS, applyWallpaper } from "../utils/theme";
-import { NotifCtx } from "../App";
+import { NotifCtx } from "../appContexts";
+import { rpc, isWalletBackendAvailable } from "../utils/rpc";
 
 export default function Settings({ onThemeToggle, isDark, themeName, onChangeTheme }) {
   const { push } = useContext(NotifCtx);
@@ -14,6 +15,43 @@ export default function Settings({ onThemeToggle, isDark, themeName, onChangeThe
   const [churnMax, setChurnMax] = useState(360);
   const [deadManBlocks, setDeadManBlocks] = useState(52560);
   const [deadManAddr, setDeadManAddr] = useState("");
+
+  const [secStatus, setSecStatus] = useState({
+    loading: false,
+    backend: isWalletBackendAvailable(),
+    binaries: null,
+    error: "",
+  });
+
+  useEffect(() => {
+    if (tab !== "security") return;
+    if (!isWalletBackendAvailable()) {
+      setSecStatus({ loading: false, backend: false, binaries: null, error: "" });
+      return;
+    }
+    let cancelled = false;
+    setSecStatus((s) => ({ ...s, loading: true, backend: true, error: "" }));
+    (async () => {
+      try {
+        const bins = await rpc.checkBinaries();
+        if (!cancelled) {
+          setSecStatus({ loading: false, backend: true, binaries: bins || null, error: "" });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setSecStatus({
+            loading: false,
+            backend: true,
+            binaries: null,
+            error: String(e?.message || e || "Security check failed"),
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab]);
 
   function update(k, v) { const n = {...cfg,[k]:v}; setCfg(n); saveSettings(n); push("Setting saved","success"); }
 
@@ -258,8 +296,51 @@ export default function Settings({ onThemeToggle, isDark, themeName, onChangeThe
         </Section>
       </>}
 
+
       {/* ── Security Tab ────────────────────────── */}
       {tab==="security" && <>
+        <Card style={{ marginBottom:10 }}>
+          <div style={{ fontSize:10, fontWeight:700, color:T.t3, letterSpacing:.8, textTransform:"uppercase", marginBottom:11 }}>
+            Security Status
+          </div>
+          <div style={{ display:"grid", gap:8 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", borderBottom:`1px solid ${T.b2}` }}>
+              <div>
+                <div style={{ fontSize:11, color:T.t1, fontWeight:500 }}>Backend Mode</div>
+                <div style={{ fontSize:10, color:T.t3 }}>Desktop Tauri backend required for full wallet actions.</div>
+              </div>
+              <div style={{ fontSize:10, fontWeight:700, color:secStatus.backend ? T.teal : T.amber }}>
+                {secStatus.backend ? "ACTIVE" : "BROWSER-ONLY"}
+              </div>
+            </div>
+
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", borderBottom:`1px solid ${T.b2}` }}>
+              <div>
+                <div style={{ fontSize:11, color:T.t1, fontWeight:500 }}>Unlock Brute-Force Guard</div>
+                <div style={{ fontSize:10, color:T.t3 }}>5 failed unlock attempts trigger a 30s cooldown.</div>
+              </div>
+              <div style={{ fontSize:10, fontWeight:700, color:T.teal }}>ENFORCED</div>
+            </div>
+
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0" }}>
+              <div>
+                <div style={{ fontSize:11, color:T.t1, fontWeight:500 }}>Bundled Runtime Binaries</div>
+                <div style={{ fontSize:10, color:T.t3 }}>
+                  Node, wallet CLI, and miner presence in this app environment.
+                </div>
+              </div>
+              <div style={{ fontSize:10, fontWeight:700, color: secStatus.loading ? T.t3 : (secStatus.binaries?.all_installed ? T.teal : T.amber) }}>
+                {secStatus.loading ? "CHECKING..." : (secStatus.binaries?.all_installed ? "OK" : "MISSING")}
+              </div>
+            </div>
+          </div>
+          {!!secStatus.error && (
+            <div style={{ marginTop:8, fontSize:10, color:T.red }}>
+              {secStatus.error}
+            </div>
+          )}
+        </Card>
+
         <Card style={{ background:`${T.red}06`, border:`1px solid ${T.red}20`, marginBottom:10 }}>
           <div style={{ fontSize:10, fontWeight:700, color:T.red, letterSpacing:.8, textTransform:"uppercase", marginBottom:11 }}>
             Layer 4 — Constitutional Locks
@@ -300,7 +381,11 @@ export default function Settings({ onThemeToggle, isDark, themeName, onChangeThe
               <div style={{ fontSize:12, fontWeight:500, color:T.red }}>Reset wallet data</div>
               <div style={{ fontSize:10, color:T.t3 }}>Deletes all local data. Requires seed phrase to recover.</div>
             </div>
-            <Btn small variant="danger" onClick={()=>{ if(confirm("Delete all local wallet data? This cannot be undone.")) { localStorage.clear(); window.location.reload(); } }}>
+            <Btn small variant="danger" onClick={()=>{
+              if (!confirm("Delete all local CoinCync app data? This cannot be undone.")) return;
+              clearCoincyncLocalState();
+              window.location.reload();
+            }}>
               Reset
             </Btn>
           </div>

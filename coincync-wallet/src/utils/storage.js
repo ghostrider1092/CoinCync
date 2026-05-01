@@ -15,3 +15,11 @@ export const isWalletCreated  = ()=>!!localStorage.getItem("cc_wallet_created");
 export const markWalletCreated= ()=>localStorage.setItem("cc_wallet_created","1");
 export const isSeedBackedUp   = ()=>!!localStorage.getItem("cc_seed_backed");
 export const markSeedBackedUp = ()=>localStorage.setItem("cc_seed_backed","1");
+export const clearCoincyncLocalState = ()=>{
+  try {
+    const keys = Object.keys(localStorage);
+    for (const k of keys) {
+      if (k.startsWith("cc_")) localStorage.removeItem(k);
+    }
+  } catch {}
+};

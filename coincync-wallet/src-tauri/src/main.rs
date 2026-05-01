@@ -1,9 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+use tauri::Manager;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::process::{Child, Command, Stdio};
+use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 use zeroize::Zeroize;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -17,6 +24,8 @@ use zeroize::Zeroize;
 const LOCAL_RPC_URL: &str = "http://127.0.0.1:28081";
 const DEFAULT_RPC_PORT: u16 = 28081;
 const DEFAULT_P2P_PORT: u16 = 28080;
+const MAX_UNLOCK_ATTEMPTS: u32 = 5;
+const UNLOCK_LOCKOUT_SECS: u64 = 30;
 
 fn optional_public_https_rpc() -> Option<String> {
     let v = std::env::var("COINCYNC_PUBLIC_RPC_URL").ok()?;
@@ -75,6 +84,8 @@ struct AppState {
     data_dir: PathBuf,
     /// Which RPC URL is currently working (cached after first successful call)
     active_rpc: Option<String>,
+    failed_unlock_attempts: u32,
+    unlock_blocked_until: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -109,6 +120,12 @@ fn resolve_binary(name: &str) -> String {
             dir.join(format!("{}.exe", name)),
             dir.join(name),
             dir.join("binaries").join(format!("{}.exe", name)),
+            dir.join("binaries").join(name),
+            // Tauri `bundle.resources` (see `tauri.conf.json`) — shipped installers
+            dir.join("resources").join("binaries").join(format!("{}.exe", name)),
+            dir.join("resources").join("binaries").join(name),
+            dir.join("../Resources/binaries").join(format!("{}.exe", name)),
+            dir.join("../Resources/binaries").join(name),
             dir.join("../../../target/release").join(format!("{}.exe", name)),
             dir.join("../../target/release").join(format!("{}.exe", name)),
             dir.join("../../../../target/release").join(format!("{}.exe", name)),
@@ -126,6 +143,17 @@ fn resolve_binary(name: &str) -> String {
 
     tracing::warn!("Binary '{}' not found in app directory, trying PATH", name);
     name.to_string()
+}
+
+/// Workspace ships `coincync-wallet`; some dev trees used `coincync-wallet-cli`.
+fn resolve_wallet_cli_binary() -> String {
+    for name in ["coincync-wallet-cli", "coincync-wallet"] {
+        let resolved = resolve_binary(name);
+        if std::path::Path::new(&resolved).exists() {
+            return resolved;
+        }
+    }
+    resolve_binary("coincync-wallet")
 }
 
 fn data_dir() -> PathBuf {
@@ -266,12 +294,21 @@ where
     F: FnOnce(&str) -> Result<T, String>,
 {
     if !state.unlocked {
-        return Err("Wallet is locked".into());
+        return Err("[WALLET_LOCKED] Wallet is locked".into());
     }
     let Some(password) = state.password.as_ref() else {
-        return Err("Wallet session password unavailable — unlock again".into());
+        return Err("[WALLET_SESSION_MISSING] Wallet session password unavailable — unlock again".into());
     };
     f(password.as_str())
+}
+
+fn record_unlock_failure(failed_unlock_attempts: u32, now_secs: u64) -> (u32, u64, bool) {
+    let next = failed_unlock_attempts.saturating_add(1);
+    if next >= MAX_UNLOCK_ATTEMPTS {
+        (0, now_secs.saturating_add(UNLOCK_LOCKOUT_SECS), true)
+    } else {
+        (next, 0, false)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -495,6 +532,35 @@ fn validate_address(address: String, state: tauri::State<'_, State>) -> serde_js
 
 // ── Wallet lifecycle ──────────────────────────────────────────────────
 
+fn looks_like_mnemonic_line(line: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let wc = words.len();
+    if !matches!(wc, 12 | 15 | 18 | 21 | 24) {
+        return false;
+    }
+    words
+        .iter()
+        .all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase()))
+}
+
+fn extract_seed_phrase(output: &str) -> Option<String> {
+    let mut lines = output.lines().skip_while(|l| !l.contains("Write down"));
+    if lines.next().is_some() {
+        for line in lines {
+            let candidate = line.trim();
+            if looks_like_mnemonic_line(candidate) {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    output
+        .lines()
+        .map(str::trim)
+        .find(|l| looks_like_mnemonic_line(l))
+        .map(|s| s.to_string())
+}
+
 #[tauri::command]
 fn create_wallet(password: String, state: tauri::State<'_, State>) -> Result<String, String> {
     let (bin, path) = {
@@ -506,8 +572,12 @@ fn create_wallet(password: String, state: tauri::State<'_, State>) -> Result<Str
 
     let out = wallet_cli(&bin, &["--wallet", &p, "create", "--force"], &password)?;
 
-    let seed = out.lines().skip_while(|l| !l.contains("Write down")).skip(2)
-        .next().unwrap_or("(check terminal)").trim().to_string();
+    let Some(seed) = extract_seed_phrase(&out) else {
+        return Err(
+            "[WALLET_SEED_PARSE_FAILED] Wallet file may have been created, but the seed phrase could not be read from the CLI output."
+                .into(),
+        );
+    };
 
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.wallet_path = path;
@@ -521,7 +591,7 @@ fn restore_wallet(seed: String, password: String, state: tauri::State<'_, State>
     let normalized_seed = seed.split_whitespace().collect::<Vec<_>>().join(" ");
     let word_count = normalized_seed.split_whitespace().count();
     if word_count < 12 {
-        return Err("Seed phrase appears invalid (too few words)".into());
+        return Err("[WALLET_INVALID_SEED] Seed phrase appears invalid (too few words)".into());
     }
 
     let (bin, path) = {
@@ -542,18 +612,52 @@ fn restore_wallet(seed: String, password: String, state: tauri::State<'_, State>
 
 #[tauri::command]
 fn unlock_wallet(password: String, state: tauri::State<'_, State>) -> Result<String, String> {
+    let now_secs = time_secs();
     let (bin, path) = {
         let s = state.lock().map_err(|e| e.to_string())?;
+        if now_secs < s.unlock_blocked_until {
+            let wait = s.unlock_blocked_until.saturating_sub(now_secs);
+            return Err(format!(
+                "[AUTH_RATE_LIMITED] Too many unlock attempts. Try again in {}s.",
+                wait
+            ));
+        }
         (s.wallet_bin.clone(), wallet_dir().join("default.wallet"))
     };
     let p = path.to_string_lossy().to_string();
 
-    wallet_cli(&bin, &["--wallet", &p, "open"], &password)?;
+    if let Err(err) = wallet_cli(&bin, &["--wallet", &p, "open"], &password) {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        let (attempts, blocked_until, locked) =
+            record_unlock_failure(s.failed_unlock_attempts, now_secs);
+        s.failed_unlock_attempts = attempts;
+        s.unlock_blocked_until = blocked_until;
+        if locked {
+            return Err(format!(
+                "[AUTH_RATE_LIMITED] Too many unlock attempts. Try again in {}s.",
+                UNLOCK_LOCKOUT_SECS
+            ));
+        }
+        let lower = err.to_lowercase();
+        if lower.contains("password")
+            || lower.contains("decrypt")
+            || lower.contains("invalid")
+            || lower.contains("authentication")
+        {
+            return Err("[AUTH_INVALID_PASSWORD] Incorrect password".into());
+        }
+        if lower.contains("not found") || lower.contains("no such file") {
+            return Err("[WALLET_NOT_FOUND] Wallet file not found. Restore with your seed phrase.".into());
+        }
+        return Err(format!("[WALLET_UNLOCK_FAILED] {}", err));
+    }
 
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.wallet_path = path;
     set_session_password(&mut s, password);
     s.unlocked = true;
+    s.failed_unlock_attempts = 0;
+    s.unlock_blocked_until = 0;
     Ok("Wallet unlocked".into())
 }
 
@@ -697,7 +801,9 @@ struct MiningStats { is_mining: bool, hashrate: f64, blocks_found: u64, threads:
 fn check_binaries(state: tauri::State<'_, State>) -> serde_json::Value {
     let s = state.lock().unwrap();
     let node_found = std::path::Path::new(&s.node_bin).exists() || find_binary("coincync-node").is_some();
-    let wallet_found = std::path::Path::new(&s.wallet_bin).exists() || find_binary("coincync-wallet").is_some();
+    let wallet_found = std::path::Path::new(&s.wallet_bin).exists()
+        || find_binary("coincync-wallet-cli").is_some()
+        || find_binary("coincync-wallet").is_some();
     let miner_found = std::path::Path::new(&s.miner_bin).exists() || find_binary("coincync-tui-miner").is_some();
 
     serde_json::json!({
@@ -850,7 +956,6 @@ fn get_mining_stats(state: tauri::State<'_, State>) -> MiningStats {
         algorithm: "RandomX".into(),
     }
 }
-
 fn time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -866,7 +971,7 @@ fn main() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let node_bin = resolve_binary("coincync-node");
-    let wallet_bin = resolve_binary("coincync-wallet-cli");
+    let wallet_bin = resolve_wallet_cli_binary();
     let miner_bin = resolve_binary("coincync-tui-miner");
     let dd = data_dir();
 
@@ -896,6 +1001,8 @@ fn main() {
         miner_threads: 1,
         data_dir: dd,
         active_rpc: None,
+        failed_unlock_attempts: 0,
+        unlock_blocked_until: 0,
     }));
 
     // FIX #30: Check local first, then remote.
@@ -918,7 +1025,7 @@ fn main() {
 
     let state_for_shutdown = state.clone();
     tauri::Builder::default()
-        .manage(state)
+        .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             get_balance, get_block_height, get_peer_count,
             get_fee_estimate, get_transactions, get_rsa_state,
@@ -937,4 +1044,46 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error running CoinCync wallet");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_seed_phrase, looks_like_mnemonic_line, record_unlock_failure, UNLOCK_LOCKOUT_SECS};
+
+    #[test]
+    fn mnemonic_line_validation_is_strict() {
+        assert!(looks_like_mnemonic_line(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ));
+        assert!(!looks_like_mnemonic_line("too short"));
+        assert!(!looks_like_mnemonic_line(
+            "ABANDON abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ));
+    }
+
+    #[test]
+    fn extract_seed_phrase_prefers_wallet_backup_section() {
+        let out = r#"
+Wallet created at "/tmp/default.wallet"
+
+Write down your 24-word seed phrase. It is the ONLY way to
+recover this wallet if the file is lost. Never share it.
+
+abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
+"#;
+        let got = extract_seed_phrase(out).expect("seed should parse");
+        assert_eq!(
+            got,
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        );
+    }
+
+    #[test]
+    fn unlock_failure_locks_after_threshold() {
+        let now = 1000u64;
+        let (attempts, blocked_until, locked) = record_unlock_failure(4u32, now);
+        assert!(locked);
+        assert_eq!(attempts, 0);
+        assert_eq!(blocked_until, now + UNLOCK_LOCKOUT_SECS);
+    }
 }

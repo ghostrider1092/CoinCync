@@ -80,6 +80,13 @@ coincync-wallet/node_modules/
 coincync-wallet/dist/
 coincync-wallet/.vite/
 coincync-wallet/src-tauri/target/
+# Copied by coincync-wallet/scripts/bundle-sidecars.js (do not commit blobs)
+coincync-wallet/src-tauri/resources/binaries/coincync-node
+coincync-wallet/src-tauri/resources/binaries/coincync-node.exe
+coincync-wallet/src-tauri/resources/binaries/coincync-wallet
+coincync-wallet/src-tauri/resources/binaries/coincync-wallet.exe
+coincync-wallet/src-tauri/resources/binaries/coincync-tui-miner
+coincync-wallet/src-tauri/resources/binaries/coincync-tui-miner.exe
 
 # ── mdBook output (generated; deploy from CI or local mdbook build) ──
 docs/book/
@@ -123,3 +130,27 @@ deploy/ops/template-check.sh
 /tmp-deploy-fix/
 /tmp-testnet-snapshot/
 /fuzz/target/
+
+# ── Jarvis / Autman assistant (NEVER push to github) ──
+# Keep all assistant-related code, voice models, and the parked
+# Tauri shell strictly local. None of this should appear on the
+# public repo until explicitly approved.
+/OpenJarvis/
+/coincync-jarvis-bridge/
+/future-update/
+
+# Wallet — Jarvis browser entrypoint + standalone build
+/coincync-wallet/jarvis.html
+/coincync-wallet/src/main-jarvis.jsx
+/coincync-wallet/src/JarvisStandaloneApp.jsx
+
+# Wallet — Jarvis-only React surfaces (page, components, utils)
+/coincync-wallet/src/pages/Jarvis.jsx
+/coincync-wallet/src/components/Jarvis*.jsx
+/coincync-wallet/src/utils/jarvis*.js
+/coincync-wallet/src/utils/jarvis*.test.js
+/coincync-wallet/src/utils/agentNamePolicy.js
+
+# Wallet — Jarvis-only dev/launch scripts
+/coincync-wallet/scripts/dev-jarvis.ps1
+/coincync-wallet/scripts/dev-jarvis.sh

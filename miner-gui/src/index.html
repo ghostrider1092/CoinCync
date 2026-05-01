@@ -16,302 +16,235 @@
   body { font-family: var(--sans); background: var(--bg); color: var(--text); overflow: hidden; height: 100vh; display: flex; flex-direction: column; user-select: none; }
 
   /* Title bar */
-  .titlebar { display: flex; align-items: center; padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); -webkit-app-region: drag; }
+  .titlebar { display: flex; align-items: center; padding: 10px 18px; background: var(--surface); border-bottom: 1px solid var(--border); -webkit-app-region: drag; }
   .titlebar .logo { font-size: 16px; font-weight: 700; letter-spacing: -0.5px; }
   .titlebar .logo span { color: var(--cyan); }
-  .titlebar .version { font-size: 10px; color: var(--text-muted); margin-left: 8px; }
-  .titlebar .constitutional { margin-left: auto; font-size: 10px; color: var(--green); letter-spacing: 0.05em; text-transform: uppercase; }
+  .titlebar .version { font-size: 10px; color: var(--text-muted); margin-left: 10px; }
+  .titlebar .net-tag { margin-left: auto; font-size: 10px; color: var(--text-dim); letter-spacing: 0.06em; text-transform: uppercase; }
 
-  /* Main layout */
-  .main { flex: 1; display: grid; grid-template-columns: 220px 1fr; overflow: hidden; }
+  /* Main grid: sidebar + content */
+  .main { flex: 1; display: grid; grid-template-columns: 240px 1fr; overflow: hidden; }
 
   /* Sidebar */
-  .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  .sidebar-section { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 4px; }
+  .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 18px; display: flex; flex-direction: column; gap: 16px; }
 
-  .big-button { width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 16px; font-weight: 800; cursor: pointer; transition: all 0.2s; font-family: var(--sans); letter-spacing: 0.05em; }
-  .big-button.start { background: var(--green); color: #0a0a0a; }
-  .big-button.start:hover { background: #4aeaa8; transform: scale(1.02); }
-  .big-button.stop { background: var(--red); color: #fff; }
+  .big-button { width: 100%; padding: 18px; border: none; border-radius: 12px; font-size: 16px; font-weight: 800; cursor: pointer; transition: all 0.18s; font-family: var(--sans); letter-spacing: 0.05em; }
+  .big-button.start { background: var(--green); color: #0a0a0a; box-shadow: 0 4px 20px rgba(61,224,151,0.18); }
+  .big-button.start:hover { background: #4aeaa8; transform: translateY(-1px); }
+  .big-button.stop { background: var(--red); color: #fff; box-shadow: 0 4px 20px rgba(224,85,85,0.18); }
   .big-button.stop:hover { background: #e87070; }
   .big-button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
-  .stat-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-  .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 4px; }
-  .stat-value { font-size: 18px; font-weight: 700; font-family: var(--mono); }
+  /* Side stat */
+  .side-stat { padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .side-stat:last-of-type { border-bottom: none; }
+  .side-stat .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 6px; }
+  .side-stat .value { font-size: 22px; font-weight: 700; font-family: var(--mono); }
 
-  .thread-slider { width: 100%; margin: 8px 0; accent-color: var(--cyan); }
+  /* Threads */
+  .thread-row { display: flex; justify-content: space-between; align-items: baseline; }
+  .thread-row .threads-label { font-size: 11px; color: var(--text-dim); }
+  .thread-row .threads-count { font-size: 13px; font-weight: 700; font-family: var(--mono); color: var(--text); }
+  .thread-slider { width: 100%; margin-top: 10px; accent-color: var(--cyan); }
+  .thread-bounds { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 4px; }
 
-  .algo-select { width: 100%; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px; }
+  /* Advanced (collapsed by default) */
+  .advanced-toggle { font-size: 11px; color: var(--text-muted); cursor: pointer; padding: 8px 0; user-select: none; -webkit-app-region: no-drag; }
+  .advanced-toggle:hover { color: var(--text-dim); }
+  .advanced-body { display: none; padding-top: 4px; }
+  .advanced-body.open { display: block; }
+  .algo-select { width: 100%; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px; font-family: var(--sans); }
 
   /* Content area */
-  .content { padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+  .content { padding: 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
 
-  .dashboard-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-  .dash-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; text-align: center; }
-  .dash-card .value { font-size: 24px; font-weight: 800; font-family: var(--mono); margin: 8px 0 4px; }
-  .dash-card .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+  /* Chain stats — compact 4-up row */
+  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat-card .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+  .stat-card .value { font-size: 20px; font-weight: 700; font-family: var(--mono); margin-top: 4px; }
 
-  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
-  .panel-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 12px; }
-
-  /* Hashrate chart */
-  .chart-container { height: 150px; position: relative; }
+  /* Chart panel */
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .panel-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 12px; }
+  .chart-container { height: 160px; position: relative; }
   .chart-container canvas { width: 100%; height: 100%; }
+  .chart-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 12px; }
 
-  /* Algorithm race */
-  .algo-race { display: flex; flex-direction: column; gap: 10px; }
-  .algo-bar-wrap { display: flex; align-items: center; gap: 12px; }
-  .algo-name { width: 70px; font-size: 12px; font-weight: 600; }
-  .algo-bar { flex: 1; height: 24px; background: var(--bg); border-radius: 12px; overflow: hidden; }
-  .algo-fill { height: 100%; border-radius: 12px; transition: width 1s ease; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #0a0a0a; }
-  .algo-pct { width: 45px; text-align: right; font-family: var(--mono); font-size: 13px; font-weight: 700; }
-
-  /* CPU meter */
-  .cpu-meter { display: flex; gap: 3px; align-items: flex-end; height: 40px; }
-  .cpu-core { flex: 1; background: var(--cyan); border-radius: 2px 2px 0 0; transition: height 0.3s; opacity: 0.7; }
-
-  /* Mainnet countdown */
-  .countdown { text-align: center; padding: 16px; background: linear-gradient(135deg, rgba(0,229,200,0.05), rgba(0,229,200,0.02)); border: 1px solid rgba(0,229,200,0.15); border-radius: 10px; }
-  .countdown .time { font-size: 28px; font-weight: 800; font-family: var(--mono); color: var(--cyan); letter-spacing: 2px; }
-  .countdown .label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin-top: 4px; }
-
-  /* Privacy badge */
-  .privacy-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-  .privacy-badge.active { background: rgba(61,224,151,0.1); color: var(--green); border: 1px solid rgba(61,224,151,0.2); }
+  /* Earnings */
+  .earnings-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .earn-cell { background: rgba(61,224,151,0.05); border: 1px solid rgba(61,224,151,0.15); border-radius: 10px; padding: 16px 18px; }
+  .earn-cell .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+  .earn-cell .value { font-size: 22px; font-weight: 700; font-family: var(--mono); color: var(--green); margin-top: 6px; }
+  .earn-cell .unit { font-size: 12px; color: var(--text-dim); margin-left: 4px; font-family: var(--sans); font-weight: 500; }
 
   /* Status bar */
-  .statusbar { display: flex; align-items: center; gap: 16px; padding: 6px 16px; background: var(--surface); border-top: 1px solid var(--border); font-size: 10px; color: var(--text-muted); }
-  .statusbar .dot { width: 6px; height: 6px; border-radius: 50%; }
-  .statusbar .dot.online { background: var(--green); }
+  .statusbar { display: flex; align-items: center; gap: 16px; padding: 7px 18px; background: var(--surface); border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
+  .statusbar .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+  .statusbar .dot.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
   .statusbar .dot.offline { background: var(--red); }
+  .statusbar .right { margin-left: auto; }
 
-  /* Wallet setup */
-  .setup-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 100; }
-  .setup-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; max-width: 500px; width: 95%; text-align: center; }
-  .setup-card h2 { font-size: 22px; margin-bottom: 8px; }
+  /* Wallet setup overlay */
+  .setup-overlay { position: fixed; inset: 0; background: rgba(8,8,12,0.92); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .setup-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 36px 32px 32px; max-width: 480px; width: 92%; text-align: center; }
+  .setup-card h2 { font-size: 22px; margin-bottom: 6px; font-weight: 700; }
   .setup-card h2 span { color: var(--cyan); }
-  .setup-card p { font-size: 13px; color: var(--text-dim); margin-bottom: 20px; }
-  .setup-input { width: 100%; padding: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: var(--mono); font-size: 13px; text-align: center; margin-bottom: 12px; }
-  .setup-input:focus { border-color: var(--cyan); outline: none; }
-  .seed-display { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-family: var(--mono); font-size: 12px; line-height: 2; color: var(--gold); text-align: center; margin-bottom: 16px; word-spacing: 8px; }
-  .warning { background: rgba(224,85,85,0.1); border-left: 3px solid var(--red); padding: 10px 14px; font-size: 11px; color: var(--text-dim); text-align: left; margin-bottom: 16px; border-radius: 0 6px 6px 0; }
+  .setup-card p { font-size: 13px; color: var(--text-dim); margin-bottom: 22px; line-height: 1.5; }
+  .setup-input { width: 100%; padding: 14px 16px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 13px; text-align: center; margin-bottom: 14px; }
+  .setup-input:focus { border-color: var(--cyan); outline: none; box-shadow: 0 0 0 3px rgba(0,229,200,0.10); }
+  .setup-help { font-size: 11px; color: var(--text-muted); margin-top: 14px; line-height: 1.7; }
+  .setup-help code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-family: var(--mono); font-size: 10px; color: var(--cyan); }
+  .setup-help a { color: var(--cyan); text-decoration: none; }
+  .setup-help a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 
-<!-- TITLE BAR -->
 <div class="titlebar">
   <div class="logo">Coin<span>Cync</span> Miner</div>
   <div class="version">v1.0.0</div>
-  <div class="constitutional">0% Dev Tax &bull; Constitutional</div>
+  <div class="net-tag" id="netTag">Testnet</div>
 </div>
 
-<!-- MAIN -->
 <div class="main">
 
-  <!-- SIDEBAR -->
   <div class="sidebar">
     <button id="mineBtn" class="big-button start" onclick="toggleMining()">
       &#x26A1; START MINING
     </button>
 
-    <div class="stat-card">
-      <div class="stat-label">Hashrate</div>
-      <div class="stat-value" style="color:var(--cyan)" id="sideHashrate">-- H/s</div>
+    <div class="side-stat">
+      <div class="label">Hashrate</div>
+      <div class="value" style="color:var(--cyan)" id="sideHashrate">— H/s</div>
     </div>
 
-    <div class="stat-card">
-      <div class="stat-label">Earned</div>
-      <div class="stat-value" style="color:var(--green)" id="sideEarned">0 CYNC</div>
+    <div class="side-stat">
+      <div class="label">Earned (session)</div>
+      <div class="value" style="color:var(--green)" id="sideEarned">0 CYNC</div>
     </div>
 
     <div>
-      <div class="sidebar-section">Threads</div>
+      <div class="thread-row">
+        <span class="threads-label">CPU Threads</span>
+        <span class="threads-count" id="threadCount">2 / 16</span>
+      </div>
       <input type="range" class="thread-slider" id="threadSlider" min="1" max="16" value="2" oninput="updateThreads(this.value)">
-      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted)">
-        <span>1</span>
-        <span id="threadCount">2 / 16 cores</span>
-        <span id="maxThreads">16</span>
+      <div class="thread-bounds">
+        <span>1</span><span id="maxThreads">16 cores</span>
       </div>
     </div>
 
-    <div>
-      <div class="sidebar-section">Algorithm</div>
-      <select class="algo-select" id="algoSelect" onchange="updateAlgo(this.value)">
-        <option value="auto">Auto Rotate (Recommended)</option>
-        <option value="randomx">RandomX (CPU-friendly, 2GB)</option>
-        <option value="yescrypt-heavy">Yescrypt-heavy (ROM-hard, 32MB)</option>
-        <option value="yescrypt-light">Yescrypt-light (GPU-resistant, 8MB)</option>
-      </select>
-    </div>
-
     <div style="margin-top:auto">
-      <div class="privacy-badge active">&#x1F6E1; Stealth Mining Active</div>
-      <div style="font-size:10px;color:var(--text-muted);margin-top:8px;line-height:1.6">
-        Rewards sent to one-time stealth addresses. Your mining activity is private.
+      <div class="advanced-toggle" onclick="toggleAdvanced()" id="advToggle">
+        &#x25B8; Advanced
+      </div>
+      <div class="advanced-body" id="advBody">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);margin-bottom:6px">Algorithm</div>
+        <select class="algo-select" id="algoSelect" onchange="updateAlgo(this.value)">
+          <option value="auto">Auto Rotate</option>
+          <option value="randomx">RandomX</option>
+          <option value="yescrypt-heavy">Yescrypt-heavy</option>
+          <option value="yescrypt-light">Yescrypt-light</option>
+        </select>
       </div>
     </div>
   </div>
 
-  <!-- CONTENT -->
   <div class="content">
 
-    <!-- Mainnet countdown -->
-    <div class="countdown">
-      <div class="label">Mainnet Launch</div>
-      <div class="time" id="countdown">--d --h --m --s</div>
-      <div class="label">October 1, 2026</div>
-    </div>
-
-    <!-- Dashboard cards -->
-    <div class="dashboard-grid">
-      <div class="dash-card">
+    <div class="stats-row">
+      <div class="stat-card">
         <div class="label">Block Height</div>
-        <div class="value" id="dashHeight">--</div>
+        <div class="value" id="dashHeight">—</div>
       </div>
-      <div class="dash-card">
+      <div class="stat-card">
         <div class="label">Difficulty</div>
-        <div class="value" id="dashDifficulty">--</div>
+        <div class="value" id="dashDifficulty">—</div>
       </div>
-      <div class="dash-card">
+      <div class="stat-card">
         <div class="label">Peers</div>
-        <div class="value" id="dashPeers">--</div>
+        <div class="value" id="dashPeers">—</div>
       </div>
-      <div class="dash-card">
+      <div class="stat-card">
         <div class="label">Blocks Found</div>
         <div class="value" style="color:var(--gold)" id="dashBlocksFound">0</div>
       </div>
     </div>
 
-    <!-- Hashrate chart + CPU -->
-    <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
-      <div class="panel">
-        <div class="panel-title">Hashrate History</div>
-        <div class="chart-container">
-          <canvas id="hashrateChart"></canvas>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-title">CPU Usage</div>
-        <div id="cpuMeter" class="cpu-meter"></div>
-        <div style="text-align:center;margin-top:8px">
-          <span style="font-size:20px;font-weight:800;font-family:var(--mono)" id="cpuPct">0%</span>
-          <div style="font-size:10px;color:var(--text-muted)" id="cpuName">--</div>
-        </div>
+    <div class="panel">
+      <div class="panel-title">Hashrate</div>
+      <div class="chart-container">
+        <canvas id="hashrateChart"></canvas>
+        <div class="chart-empty" id="chartEmpty">Start mining to see your hashrate over time.</div>
       </div>
     </div>
 
-    <!-- Algorithm race -->
-    <div class="panel">
-      <div class="panel-title">Algorithm Race (Last 100 Blocks)</div>
-      <div class="algo-race">
-        <div class="algo-bar-wrap">
-          <div class="algo-name" style="color:var(--cyan)">RandomX</div>
-          <div class="algo-bar"><div id="algoRandomX" class="algo-fill" style="width:33%;background:var(--cyan)">33%</div></div>
-          <div class="algo-pct" style="color:var(--cyan)" id="algoRandomXPct">33%</div>
-        </div>
-        <div class="algo-bar-wrap">
-          <div class="algo-name" style="color:var(--gold)">Yescrypt-heavy</div>
-          <div class="algo-bar"><div id="algoYescryptHeavy" class="algo-fill" style="width:33%;background:var(--gold)">33%</div></div>
-          <div class="algo-pct" style="color:var(--gold)" id="algoYescryptHeavyPct">33%</div>
-        </div>
-        <div class="algo-bar-wrap">
-          <div class="algo-name" style="color:#e066ff">Yescrypt-light</div>
-          <div class="algo-bar"><div id="algoYescryptLight" class="algo-fill" style="width:33%;background:#e066ff">33%</div></div>
-          <div class="algo-pct" style="color:#e066ff" id="algoYescryptLightPct">33%</div>
-        </div>
+    <div class="earnings-row">
+      <div class="earn-cell">
+        <div class="label">Estimated / hour</div>
+        <div class="value"><span id="earnHour">—</span><span class="unit"> CYNC</span></div>
       </div>
-    </div>
-
-    <!-- Earnings -->
-    <div class="panel">
-      <div class="panel-title">Earnings Estimate (Current Difficulty)</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;text-align:center">
-        <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase">Per Hour</div><div style="font-size:16px;font-weight:700;font-family:var(--mono);color:var(--green);margin-top:4px" id="earnHour">--</div></div>
-        <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase">Per Day</div><div style="font-size:16px;font-weight:700;font-family:var(--mono);color:var(--green);margin-top:4px" id="earnDay">--</div></div>
-        <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase">Per Week</div><div style="font-size:16px;font-weight:700;font-family:var(--mono);color:var(--green);margin-top:4px" id="earnWeek">--</div></div>
-        <div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase">Per Month</div><div style="font-size:16px;font-weight:700;font-family:var(--mono);color:var(--green);margin-top:4px" id="earnMonth">--</div></div>
+      <div class="earn-cell">
+        <div class="label">Estimated / day</div>
+        <div class="value"><span id="earnDay">—</span><span class="unit"> CYNC</span></div>
       </div>
     </div>
 
   </div>
 </div>
 
-<!-- STATUS BAR -->
 <div class="statusbar">
   <div class="dot" id="statusDot"></div>
   <span id="statusText">Ready</span>
-  <span style="margin-left:auto" id="statusNetwork">Testnet</span>
-  <span>&bull;</span>
-  <span id="statusAddress">No wallet</span>
+  <span class="right" id="statusAddress">No address</span>
 </div>
 
-<!-- WALLET SETUP OVERLAY (shown on first launch) -->
 <div class="setup-overlay" id="setupOverlay" style="display:none">
   <div class="setup-card">
     <h2>Welcome to Coin<span>Cync</span> Miner</h2>
-    <p>Enter your CoinCync address to start mining. Don't have one? Create a wallet first.</p>
-
-    <input type="text" class="setup-input" id="setupAddress" placeholder="tCYNC..." spellcheck="false">
-
-    <button class="big-button start" onclick="saveSetup()" style="margin-bottom:12px">Start Mining</button>
-
-    <div style="font-size:11px;color:var(--text-muted)">
-      Need a wallet? Run: <code style="background:var(--bg);padding:2px 6px;border-radius:4px;font-family:var(--mono);font-size:10px">cync-wallet create --name mywallet</code>
-    </div>
-    <div style="font-size:11px;color:var(--text-muted);margin-top:8px">
-      Or get testnet coins from the <a href="https://explorer.coincync.network" style="color:var(--cyan)" target="_blank">Faucet</a>
+    <p>Paste your testnet address (starts with <strong>tCYNC</strong>) and we'll start mining.</p>
+    <input type="text" class="setup-input" id="setupAddress" placeholder="tCYNC..." spellcheck="false" autocomplete="off">
+    <button class="big-button start" onclick="saveSetup()">Save &amp; Continue</button>
+    <div class="setup-help">
+      No address yet? Run <code>cync-wallet create --name mywallet</code> in your terminal,
+      or grab testnet coins at the <a href="https://explorer.coincync.network" target="_blank">faucet</a>.
     </div>
   </div>
 </div>
 
 <script>
-const { invoke } = window.__TAURI__.tauri;
+const tauriApi = (window.__TAURI__ && window.__TAURI__.tauri) || null;
+const invoke = tauriApi ? tauriApi.invoke : async () => { throw new Error('not in tauri'); };
 
 let isMining = false;
 let hashrateHistory = [];
 let pollInterval = null;
+let blocksAtStart = 0;
 
-// ─── INIT ───
+// ─── INIT ─────────────────────────────────────────────────────────────
 async function init() {
-  // Get system info
   try {
     const sys = await invoke('get_system_info');
-    document.getElementById('cpuName').textContent = sys.cpu_name;
-    document.getElementById('threadSlider').max = sys.total_cores;
-    document.getElementById('maxThreads').textContent = sys.total_cores;
-    document.getElementById('threadSlider').value = Math.max(1, Math.floor(sys.total_cores / 2));
-    updateThreads(document.getElementById('threadSlider').value);
-
-    // Build CPU meter
-    const meter = document.getElementById('cpuMeter');
-    meter.innerHTML = '';
-    for (let i = 0; i < sys.total_cores; i++) {
-      const bar = document.createElement('div');
-      bar.className = 'cpu-core';
-      bar.style.height = '10%';
-      bar.id = 'cpuCore' + i;
-      meter.appendChild(bar);
-    }
-  } catch(e) {
-    console.log('Not in Tauri context, running in browser mode');
+    const slider = document.getElementById('threadSlider');
+    const maxLabel = document.getElementById('maxThreads');
+    slider.max = sys.total_cores;
+    maxLabel.textContent = sys.total_cores + ' cores';
+    slider.value = Math.max(1, Math.floor(sys.total_cores / 2));
+    updateThreads(slider.value);
+  } catch {
+    // Browser preview mode — keep the default 16
   }
 
-  // Check for saved address
   const saved = localStorage.getItem('coincync_mining_address');
   if (!saved) {
     document.getElementById('setupOverlay').style.display = '';
   } else {
-    document.getElementById('statusAddress').textContent = saved.substring(0, 12) + '...';
+    document.getElementById('statusAddress').textContent = saved.slice(0, 10) + '…' + saved.slice(-6);
   }
-
-  // Start countdown
-  updateCountdown();
-  setInterval(updateCountdown, 1000);
 }
 
-// ─── WALLET SETUP ───
+// ─── SETUP ────────────────────────────────────────────────────────────
 function saveSetup() {
   const addr = document.getElementById('setupAddress').value.trim();
   if (!addr || !addr.startsWith('tCYNC')) {
@@ -320,10 +253,10 @@ function saveSetup() {
   }
   localStorage.setItem('coincync_mining_address', addr);
   document.getElementById('setupOverlay').style.display = 'none';
-  document.getElementById('statusAddress').textContent = addr.substring(0, 12) + '...';
+  document.getElementById('statusAddress').textContent = addr.slice(0, 10) + '…' + addr.slice(-6);
 }
 
-// ─── MINING TOGGLE ───
+// ─── MINING TOGGLE ───────────────────────────────────────────────────
 async function toggleMining() {
   const btn = document.getElementById('mineBtn');
   if (!isMining) {
@@ -331,30 +264,31 @@ async function toggleMining() {
     if (!addr) { document.getElementById('setupOverlay').style.display = ''; return; }
 
     try {
-      await invoke('set_config', { config: {
-        mining_address: addr,
-        threads: parseInt(document.getElementById('threadSlider').value),
-        algorithm: document.getElementById('algoSelect').value,
-        seed_nodes: ['seed1.coincync.network:28080', 'seed2.coincync.network:28080', 'seed3.coincync.network:28080'],
-        data_dir: '',
-        network: 'testnet'
-      }});
+      await invoke('set_config', {
+        config: {
+          mining_address: addr,
+          threads: parseInt(document.getElementById('threadSlider').value),
+          algorithm: document.getElementById('algoSelect').value,
+          seed_nodes: ['seed1.coincync.network:28080', 'seed2.coincync.network:28080', 'seed3.coincync.network:28080'],
+          data_dir: '',
+          network: 'testnet',
+        },
+      });
       await invoke('start_mining');
-    } catch(e) {
-      // Browser mode fallback
-      console.log('Mining started (UI only):', e);
+    } catch (e) {
+      console.log('Mining started (UI-only fallback):', e);
     }
 
     isMining = true;
     btn.className = 'big-button stop';
     btn.innerHTML = '&#x23F9; STOP MINING';
     document.getElementById('statusDot').className = 'dot online';
-    document.getElementById('statusText').textContent = 'Mining...';
+    document.getElementById('statusText').textContent = 'Mining…';
+    document.getElementById('chartEmpty').style.display = 'none';
 
-    // Start polling
     pollInterval = setInterval(pollStats, 3000);
   } else {
-    try { await invoke('stop_mining'); } catch(e) {}
+    try { await invoke('stop_mining'); } catch {}
     isMining = false;
     btn.className = 'big-button start';
     btn.innerHTML = '&#x26A1; START MINING';
@@ -364,40 +298,27 @@ async function toggleMining() {
   }
 }
 
-// ─── POLL STATS ───
+// ─── POLL STATS ──────────────────────────────────────────────────────
 async function pollStats() {
   try {
     const stats = await invoke('poll_rpc_stats');
     document.getElementById('dashHeight').textContent = (stats.height || 0).toLocaleString();
     document.getElementById('dashDifficulty').textContent = fmtDiff(parseInt(stats.difficulty) || 0);
     document.getElementById('dashPeers').textContent = stats.peers || 0;
-    document.getElementById('cpuPct').textContent = Math.round(stats.cpu_usage) + '%';
 
-    // Update CPU cores visual
-    const cores = document.querySelectorAll('.cpu-core');
-    cores.forEach((core, i) => {
-      const usage = Math.random() * stats.cpu_usage * 1.5;
-      core.style.height = Math.max(5, Math.min(100, usage)) + '%';
-      core.style.background = usage > 80 ? 'var(--red)' : usage > 50 ? 'var(--gold)' : 'var(--cyan)';
-    });
-
-    // Hashrate history
     const hr = (parseInt(stats.difficulty) || 1) / 120;
     hashrateHistory.push(hr);
     if (hashrateHistory.length > 60) hashrateHistory.shift();
     document.getElementById('sideHashrate').textContent = fmtHashrate(hr);
     drawHashrateChart();
 
-    // Earnings estimate
     const blockReward = 50;
     const myShare = (parseInt(document.getElementById('threadSlider').value) * 100) / ((parseInt(stats.difficulty) || 1) / 120);
     const perHour = myShare * (3600 / 120) * blockReward;
     document.getElementById('earnHour').textContent = perHour.toFixed(4);
     document.getElementById('earnDay').textContent = (perHour * 24).toFixed(2);
-    document.getElementById('earnWeek').textContent = (perHour * 168).toFixed(2);
-    document.getElementById('earnMonth').textContent = (perHour * 720).toFixed(2);
-  } catch(e) {
-    // Browser fallback: simulate
+  } catch {
+    // Fallback: simulate for demo
     const fakeHr = 500 + Math.random() * 200;
     hashrateHistory.push(fakeHr);
     if (hashrateHistory.length > 60) hashrateHistory.shift();
@@ -406,38 +327,38 @@ async function pollStats() {
   }
 }
 
-// ─── DRAW HASHRATE CHART ───
+// ─── CHART ───────────────────────────────────────────────────────────
 function drawHashrateChart() {
   const canvas = document.getElementById('hashrateChart');
   if (!canvas || hashrateHistory.length < 2) return;
   const ctx = canvas.getContext('2d');
   const w = canvas.width = canvas.parentElement.clientWidth;
-  const h = canvas.height = 140;
+  const h = canvas.height = 160;
   ctx.clearRect(0, 0, w, h);
 
   const max = Math.max(...hashrateHistory, 1);
   const min = Math.min(...hashrateHistory, 0);
   const range = max - min || 1;
 
-  // Fill gradient
   ctx.beginPath();
   hashrateHistory.forEach((v, i) => {
     const x = (i / (hashrateHistory.length - 1)) * w;
-    const y = h - ((v - min) / range) * (h - 20) - 10;
+    const y = h - ((v - min) / range) * (h - 24) - 12;
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
-  ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
   const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, 'rgba(0, 229, 200, 0.15)');
-  grad.addColorStop(1, 'rgba(0, 229, 200, 0)');
+  grad.addColorStop(0, 'rgba(0,229,200,0.18)');
+  grad.addColorStop(1, 'rgba(0,229,200,0)');
   ctx.fillStyle = grad;
   ctx.fill();
 
-  // Line
   ctx.beginPath();
   hashrateHistory.forEach((v, i) => {
     const x = (i / (hashrateHistory.length - 1)) * w;
-    const y = h - ((v - min) / range) * (h - 20) - 10;
+    const y = h - ((v - min) / range) * (h - 24) - 12;
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
   ctx.strokeStyle = '#00e5c8';
@@ -445,7 +366,7 @@ function drawHashrateChart() {
   ctx.stroke();
 }
 
-// ─── HELPERS ───
+// ─── HELPERS ─────────────────────────────────────────────────────────
 function fmtHashrate(h) {
   if (h >= 1e9) return (h / 1e9).toFixed(2) + ' GH/s';
   if (h >= 1e6) return (h / 1e6).toFixed(2) + ' MH/s';
@@ -463,30 +384,18 @@ function fmtDiff(d) {
 
 function updateThreads(val) {
   const max = document.getElementById('threadSlider').max;
-  document.getElementById('threadCount').textContent = val + ' / ' + max + ' cores';
+  document.getElementById('threadCount').textContent = val + ' / ' + max;
 }
 
-function updateAlgo(val) {
-  // Update config if mining
+function updateAlgo() { /* applied on next start_mining */ }
+
+function toggleAdvanced() {
+  const body = document.getElementById('advBody');
+  const tog = document.getElementById('advToggle');
+  const open = body.classList.toggle('open');
+  tog.innerHTML = (open ? '&#x25BE;' : '&#x25B8;') + ' Advanced';
 }
 
-function updateCountdown() {
-  const target = new Date('2026-10-01T00:00:00Z').getTime();
-  const now = Date.now();
-  const diff = target - now;
-  if (diff <= 0) {
-    document.getElementById('countdown').textContent = 'MAINNET LIVE';
-    return;
-  }
-  const d = Math.floor(diff / 86400000);
-  const h = Math.floor((diff % 86400000) / 3600000);
-  const m = Math.floor((diff % 3600000) / 60000);
-  const s = Math.floor((diff % 60000) / 1000);
-  document.getElementById('countdown').textContent =
-    d + 'd ' + String(h).padStart(2, '0') + 'h ' + String(m).padStart(2, '0') + 'm ' + String(s).padStart(2, '0') + 's';
-}
-
-// ─── START ───
 document.addEventListener('DOMContentLoaded', init);
 </script>
 

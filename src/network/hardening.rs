@@ -1,79 +1,32 @@
 //! # P2P Network Hardening (Layer 4)
 //!
-//! Defense mechanisms for the P2P layer:
-//! - Validate-before-relay enforcement
-//! - Peer message rate limiting with banscore escalation
-//! - Inbound message size validation
-//! - Eclipse attack detection heuristics
+//! Defense mechanisms layered on top of the framed/Noise transport:
+//! - **Eclipse-attack churn detector** (this module)
+//! - **Validate-before-relay enforcement** — caller-side, see [`crate::network::node`]
+//! - **Bandwidth caps** — per-peer 10 MB/s + 100 MB / 60 s, see [`crate::network::peer`]
+//! - **Misbehavior scoring** — banscore-driven disconnects, see [`crate::network::scoring`]
+//!
+//! ## Why no per-message rate limiter here
+//!
+//! An earlier revision wired a `PeerRateLimiter` (sliding 1 s window with
+//! Allow / Warn / Throttle / Ban actions) into [`crate::network::framing`].
+//! It was removed because under Initial Block Download a peer legitimately
+//! bursts hundreds of solicited blocks per second, and the limiter was
+//! dropping that traffic and stalling sync. Bitcoin Core and Monero use the
+//! same posture: no count-based per-message limit on the P2P layer; rely on
+//! bandwidth caps + protocol-violation banscore instead. The breadcrumb in
+//! [`crate::network::framing`] (search for "PeerRateLimiter was removed")
+//! preserves the rationale.
+//!
+//! Flood-class misbehavior is reported through
+//! [`MisbehaviorType::MessageFlood`](crate::network::scoring::MisbehaviorType)
+//! at the call sites that actually detect a flood (e.g. duplicate inv waves,
+//! header spam). Those sites apply the banscore penalty directly via
+//! [`PeerScorer::record_misbehavior`](crate::network::scoring::PeerScorer);
+//! a peer that crosses the ban threshold is disconnected and added to the
+//! local banlist.
 
-use std::net::SocketAddr;
-use std::collections::HashMap;
 use std::time::Instant;
-
-/// Per-peer rate limiter for P2P messages.
-///
-/// Tracks message counts per peer over a sliding window. Peers that
-/// exceed the rate limit get banscore points. Three thresholds:
-/// - Warning: 100 msgs/sec (log)
-/// - Throttle: 200 msgs/sec (drop messages)
-/// - Ban: 500 msgs/sec (disconnect + ban)
-pub struct PeerRateLimiter {
-    /// Message count per peer in current window
-    counts: HashMap<SocketAddr, (u64, Instant)>,
-    /// Window size in seconds
-    window_secs: u64,
-}
-
-impl PeerRateLimiter {
-    pub fn new() -> Self {
-        Self {
-            counts: HashMap::new(),
-            window_secs: 1,
-        }
-    }
-
-    /// Record a message from a peer. Returns the action to take.
-    pub fn record_message(&mut self, addr: &SocketAddr) -> RateLimitAction {
-        let now = Instant::now();
-        let entry = self.counts.entry(*addr).or_insert((0, now));
-
-        // Reset window if expired
-        if now.duration_since(entry.1).as_secs() >= self.window_secs {
-            entry.0 = 0;
-            entry.1 = now;
-        }
-
-        entry.0 += 1;
-
-        match entry.0 {
-            0..=100 => RateLimitAction::Allow,
-            101..=200 => RateLimitAction::Warn,
-            201..=500 => RateLimitAction::Throttle,
-            _ => RateLimitAction::Ban,
-        }
-    }
-
-    /// Prune stale entries to prevent memory growth.
-    pub fn prune(&mut self) {
-        let now = Instant::now();
-        self.counts.retain(|_, (_, last)| {
-            now.duration_since(*last).as_secs() < 60
-        });
-    }
-}
-
-/// Action to take based on rate limiting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RateLimitAction {
-    /// Normal — allow the message
-    Allow,
-    /// Rate is elevated — log warning
-    Warn,
-    /// Rate is high — drop the message silently
-    Throttle,
-    /// Rate is extreme — disconnect and ban the peer
-    Ban,
-}
 
 /// Eclipse attack detector.
 ///
@@ -136,31 +89,6 @@ impl EclipseDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rate_limiter_allows_normal_traffic() {
-        let mut limiter = PeerRateLimiter::new();
-        let addr: SocketAddr = "1.2.3.4:28080".parse().unwrap();
-        for _ in 0..100 {
-            assert_eq!(limiter.record_message(&addr), RateLimitAction::Allow);
-        }
-    }
-
-    #[test]
-    fn rate_limiter_warns_on_elevated() {
-        let mut limiter = PeerRateLimiter::new();
-        let addr: SocketAddr = "1.2.3.4:28080".parse().unwrap();
-        for _ in 0..100 { limiter.record_message(&addr); }
-        assert_eq!(limiter.record_message(&addr), RateLimitAction::Warn);
-    }
-
-    #[test]
-    fn rate_limiter_bans_on_extreme() {
-        let mut limiter = PeerRateLimiter::new();
-        let addr: SocketAddr = "1.2.3.4:28080".parse().unwrap();
-        for _ in 0..501 { limiter.record_message(&addr); }
-        assert_eq!(limiter.record_message(&addr), RateLimitAction::Ban);
-    }
 
     #[test]
     fn eclipse_detector_normal() {

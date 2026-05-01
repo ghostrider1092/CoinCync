@@ -20,16 +20,60 @@ live mining stats, settings persistence.
 
 ## Run
 
+**Desktop app (recommended):** from this folder run **`npm start`** (same as `npx tauri dev`). On Windows you can double‑click **`Open-CoinCync-Wallet.bat`** — it installs dependencies if needed, then opens the **CoinCync Wallet** window. Use that window for balances, unlock, mining, and Send (not a normal browser tab on `/`).
+
 ```bash
 npm install
-npm run tauri dev
+npm start
 ```
 
-## Build (distributable binary)
+## Install (production)
+
+Official installers bundle the **node**, **wallet CLI**, and **TUI miner** next to the app so end users do not install Rust or run separate downloads.
+
+1. **From GitHub (recommended):** open **Actions → “Build CoinCync Wallet”**, pick a successful run, and download the artifact for your OS (`windows-x64`, `linux-x64`, `macos-x64`, or `macos-arm64`). Inside you will find **`.msi` / NSIS `.exe`** (Windows), **`.deb` / `.AppImage`** (Linux), or **`.dmg`** (macOS). Run the installer like any normal desktop app.
+2. **Releases:** when maintainers attach those same files to a **GitHub Release** (often triggered by a `v*` tag on this repo), download the installer for your platform from the **Releases** page and run it.
+
+After install, launch **CoinCync Wallet** from the Start menu / Applications folder. Use that window for the full wallet (not only a browser tab on `http://localhost:1420`).
+
+## Build installers locally
+
+You need a **release** build of the three chain binaries from the **repository root**, then the wallet frontend + Tauri bundle.
 
 ```bash
-npm run tauri build
+# From repo root (parent of coincync-wallet/)
+cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet --bin coincync-tui-miner
+
+# Then from coincync-wallet/
+cd coincync-wallet
+npm install
+npm run pack
 ```
+
+Or one shot from `coincync-wallet/`: **`npm run build:release`** (runs `build:chain` then `npm run tauri build`). The `beforeBuildCommand` copies binaries into `src-tauri/resources/binaries/` and Tauri includes them in the installer.
+
+### Auto-updater (optional)
+
+- **Tauri updater** is scaffolded in `src-tauri/tauri.conf.json` with `"active": false`. To ship updates safely:
+  1. Install the Tauri CLI and run **`tauri signer generate -w ~/.tauri/coincync-wallet.key`** (or your path). Store the **public** key string in `tauri.conf.json` → `updater.pubkey`. Put the **private** key in CI as secret **`TAURI_PRIVATE_KEY`** (file contents or key string per Tauri docs) and optional **`TAURI_KEY_PASSWORD`**.
+  2. On each release, build with those env vars set (see `.github/workflows/build-wallet.yml`, which forwards the secrets to `tauri-apps/tauri-action`). Upload the generated `.sig` files and bundles to your CDN or GitHub Releases.
+  3. Host a **version JSON** that matches your `updater.endpoints` template. Tauri v1 expects a document shaped like:
+
+```json
+{
+  "version": "1.0.1",
+  "notes": "Release notes (markdown allowed).",
+  "pub_date": "2026-04-29T18:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "Content of the .msi.zip.sig or bundle.sig file from tauri signer",
+      "url": "https://your.cdn.example/coincync-wallet_1.0.1_x64_en-US.msi.zip"
+    }
+  }
+}
+```
+
+  4. Set **`"active": true`** only after the endpoint returns valid JSON for the client’s `{{target}}` / `{{arch}}` / `{{current_version}}` substitution pattern.
 
 ## Privacy layers
 

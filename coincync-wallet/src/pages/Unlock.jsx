@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useTheme, CoinLogo, Btn, Input, Ico, ICONS } from "../components/ui";
-import { rpc } from "../utils/rpc";
+import NonTauriPrompt from "../components/NonTauriPrompt";
+import { rpc, isWalletBackendAvailable, formatWalletError } from "../utils/rpc";
+import { clearCoincyncLocalState } from "../utils/storage";
 
 export default function Unlock({ onUnlock }) {
   const T = useTheme();
@@ -17,9 +19,13 @@ export default function Unlock({ onUnlock }) {
       if (result) { onUnlock(); }
       else { setErr("Incorrect password"); }
     } catch (e) {
-      setErr(String(e || "Unlock failed"));
+      setErr(formatWalletError(e, "Unlock failed"));
     }
     setLoading(false);
+  }
+
+  if (!isWalletBackendAvailable()) {
+    return <NonTauriPrompt />;
   }
 
   return (
@@ -38,7 +44,15 @@ export default function Unlock({ onUnlock }) {
           <Ico d={ICONS.unlock} size={14} color="#000"/> Unlock
         </Btn>
         <div style={{ fontSize:11, color:T.t3, marginTop:16, cursor:"pointer" }}
-          onClick={()=>{ if(confirm("This will delete your wallet. Make sure you have your seed phrase!")) { localStorage.clear(); window.location.reload(); } }}>
+          onClick={()=>{
+            const ok = confirm(
+              "Password recovery will reset this app's local CoinCync state and return to wallet setup.\n\n" +
+              "Do this only if you have your seed phrase.\n\nContinue?"
+            );
+            if (!ok) return;
+            clearCoincyncLocalState();
+            window.location.reload();
+          }}>
           Forgot password? (requires seed)
         </div>
       </div>

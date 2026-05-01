@@ -1,6 +1,6 @@
 import { useState, useContext } from "react";
 import { useTheme, Card, Badge, Btn, Lbl, Input, Ico, Divider, ICONS } from "../components/ui";
-import { NotifCtx } from "../App";
+import { NotifCtx } from "../appContexts";
 
 export default function Keys() {
   const T = useTheme();

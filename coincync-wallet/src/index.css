@@ -42,3 +42,4 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(-
 
 /* Selection */
 ::selection{background:rgba(212,160,89,0.25);color:inherit}
+

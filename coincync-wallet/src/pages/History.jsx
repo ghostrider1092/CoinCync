@@ -1,7 +1,7 @@
 import { useState, useContext } from "react";
 import { useTheme, Card, Badge, Btn, Ico, ICONS, EmptyState } from "../components/ui";
 import TxModal from "../components/TxModal";
-import { WalletCtx } from "../App";
+import { WalletCtx } from "../appContexts";
 export default function History() {
   const T = useTheme();
   const { txs } = useContext(WalletCtx);

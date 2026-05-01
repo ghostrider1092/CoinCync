@@ -2,7 +2,7 @@ import { useContext, useState } from "react";
 import { useTheme, Card, Badge, Ico, CoinLogo, ICONS, StatCard } from "../components/ui";
 import Globe3D from "../components/Globe3D";
 import BalanceChart from "../components/BalanceChart";
-import { WalletCtx } from "../App";
+import { WalletCtx } from "../appContexts";
 import { rpc } from "../utils/rpc";
 
 const ALL_LAYERS = [

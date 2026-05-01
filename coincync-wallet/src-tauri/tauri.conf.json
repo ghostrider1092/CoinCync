@@ -1,7 +1,7 @@
 {
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run bundle:sidecars",
     "devPath": "http://localhost:1420",
     "distDir": "../dist"
   },
@@ -21,12 +21,22 @@
       "category": "Finance",
       "identifier": "org.coincync.wallet",
       "icon": ["icons/icon.png", "icons/32x32.png"],
+      "shortDescription": "CoinCync privacy wallet — desktop app with local node & mining.",
+      "longDescription": "CoinCync Wallet is the official desktop client: wallet setup, private send/receive, optional local node, and mining integration. Installers bundle the node, wallet CLI, and miner so you do not need separate downloads.",
+      "resources": ["resources/binaries/*"],
       "targets": "all"
     },
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' https://explorer.coincync.network https://api.github.com; img-src 'self' data: blob: https://explorer.coincync.network; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* https://explorer.coincync.network https://api.github.com; img-src 'self' data: blob: https://explorer.coincync.network; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     },
-    "updater": { "active": false },
+    "updater": {
+      "active": false,
+      "dialog": true,
+      "endpoints": [
+        "https://releases.coincync.network/wallet/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "REPLACE_WITH_TAURI_SIGNER_MINISIGN_PUBLIC_KEY"
+    },
     "windows": [{
       "fullscreen": false,
       "resizable": true,

@@ -7,15 +7,51 @@
 
 let _scanning = false;
 
+/** True only inside the Tauri desktop shell (`npx tauri dev` / packaged app). Plain browser tabs on :1420 are false. */
+export function isWalletBackendAvailable() {
+  return typeof window !== "undefined" && !!window.__TAURI__;
+}
+
 function asErrorMessage(e) {
   if (typeof e === "string") return e;
   return e?.message || String(e);
 }
 
+function extractErrorCode(msg) {
+  const m = String(msg || "").match(/^\[([A-Z0-9_]+)\]\s*/);
+  return m ? m[1] : null;
+}
+
+export function formatWalletError(e, fallback = "Wallet request failed") {
+  const raw = asErrorMessage(e);
+  const code = extractErrorCode(raw);
+  switch (code) {
+    case "AUTH_INVALID_PASSWORD":
+      return "Incorrect password.";
+    case "AUTH_RATE_LIMITED":
+      return raw.replace(/^\[[A-Z0-9_]+\]\s*/, "");
+    case "WALLET_NOT_FOUND":
+      return "Wallet file not found. Restore with your seed phrase.";
+    case "WALLET_INVALID_SEED":
+      return "Seed phrase is invalid. Check spacing and spelling of each word.";
+    case "WALLET_SEED_PARSE_FAILED":
+      return "Wallet created, but seed phrase could not be displayed safely. Try again and keep the terminal open.";
+    case "WALLET_LOCKED":
+      return "Wallet is locked. Unlock first.";
+    case "WALLET_SESSION_MISSING":
+      return "Wallet session expired. Unlock again.";
+    default:
+      return raw || fallback;
+  }
+}
+
 // Require Tauri invoke and propagate real backend failures.
 async function tauri(cmd, args={}) {
-  if (!window.__TAURI__) {
-    throw new Error("Wallet backend unavailable (not running in Tauri)");
+  if (!isWalletBackendAvailable()) {
+    throw new Error(
+      "Wallet backend unavailable — open this app with the CoinCync Wallet desktop window (run: npx tauri dev from coincync-wallet). " +
+        "A normal browser tab at localhost:1420 has no Rust backend."
+    );
   }
   try {
     const { invoke } = await import("@tauri-apps/api/tauri");

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { rpc } from "../utils/rpc";
+import { rpc, isWalletBackendAvailable } from "../utils/rpc";
 
 export function useWallet() {
   const [balance, setBalance]   = useState({ total:"—", unlocked:"—", locked:"0.000000000000" });
@@ -15,6 +15,10 @@ export function useWallet() {
   const [lastScanned, setLastScanned] = useState(null);
 
   const refresh = useCallback(async () => {
+    if (!isWalletBackendAvailable()) {
+      setLoading(false);
+      return;
+    }
     try {
       const results = await Promise.allSettled([
         rpc.getBalance(), rpc.getBlockHeight(), rpc.getPeerCount(),
@@ -41,6 +45,9 @@ export function useWallet() {
   }, []);
 
   const scanWallet = useCallback(async () => {
+    if (!isWalletBackendAvailable()) {
+      return "Wallet backend unavailable — use the desktop app (Tauri).";
+    }
     setScanning(true);
     setScanResult("Scanning chain...");
     try {

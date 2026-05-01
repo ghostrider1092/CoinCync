@@ -1,6 +1,6 @@
 import { useState, useContext } from "react";
 import { useTheme, Card, Btn, Ico, Input, Lbl, ICONS, Divider, EmptyState } from "../components/ui";
-import { NotifCtx } from "../App";
+import { NotifCtx } from "../appContexts";
 
 const STORAGE_KEY = "cc_address_book";
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useContext } from "react";
 import { useTheme, Card, Badge, Btn, Lbl, Input, Ico, CoinLogo, ICONS } from "../components/ui";
-import { WalletCtx, NotifCtx } from "../App";
+import { WalletCtx, NotifCtx } from "../appContexts";
 import { rpc } from "../utils/rpc";
 
 export default function Mining() {

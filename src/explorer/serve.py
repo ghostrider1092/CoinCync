@@ -75,7 +75,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, fmt, *a):
-        msg = a[0] if a else ''
+        msg = str(a[0]) if a else ''
         if '.svg' in msg or '/health/' in msg: return
         super().log_message(fmt, *a)
 
