@@ -11,6 +11,9 @@ ENABLE_DEV_PROXY = _DEV_PROXY_ENV not in ('0', 'false', 'no', 'off')
 
 ALLOW_LIVE_HEALTH = os.environ.get('COINCYNC_EXPLORER_LIVE_HEALTH', '').strip() in ('1', 'true', 'TRUE', 'yes', 'YES')
 LOCAL_RPC = os.environ.get('COINCYNC_EXPLORER_RPC', 'http://127.0.0.1:28081').strip() or 'http://127.0.0.1:28081'
+# REST API (rpc/rest.rs) lives on a separate port from JSON-RPC by design.
+# Default rpc_port + 2 = 28083 when the node is started with --rest-bind.
+LOCAL_REST = os.environ.get('COINCYNC_EXPLORER_REST', 'http://127.0.0.1:28083').strip() or 'http://127.0.0.1:28083'
 HEALTH = {}
 if ALLOW_LIVE_HEALTH:
     HEALTH = {
@@ -29,6 +32,26 @@ if ALLOW_LIVE_HEALTH:
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split('?')[0]
+        # Proxy /api/v1/* GETs to the node's REST API (rpc/rest.rs on LOCAL_REST).
+        # Without this the explorer's block lists / charts / globe panels stay empty.
+        if ENABLE_DEV_PROXY and path.startswith('/api/v1/'):
+            try:
+                req = urllib.request.Request(LOCAL_REST + self.path, method='GET')
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    body = r.read()
+                    self.send_response(r.status)
+                    self.send_header('Content-Type', r.headers.get('Content-Type', 'application/json'))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(body)
+            except urllib.error.HTTPError as e:
+                self.send_response(e.code); self.send_header('Content-Type','application/json'); self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+                self.wfile.write(e.read() if e.fp else json.dumps({'error': str(e)}).encode())
+            except Exception as e:
+                self.send_response(502); self.send_header('Content-Type','application/json'); self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e), 'hint': f'is the node running with --rest-bind 127.0.0.1:28083? Trying {LOCAL_REST}'}).encode())
+            return
+
         if path == '/': path = '/index.html'
         fp = os.path.join(HERE, path.lstrip('/').replace('/', os.sep))
         if os.path.isfile(fp):
@@ -39,6 +62,9 @@ class H(http.server.BaseHTTPRequestHandler):
             elif fp.endswith('.css'): ct = 'text/css'
             elif fp.endswith('.json'): ct = 'application/json'
             elif fp.endswith('.png'): ct = 'image/png'
+            elif fp.endswith('.woff2'): ct = 'font/woff2'
+            elif fp.endswith('.woff'): ct = 'font/woff'
+            elif fp.endswith('.jpg') or fp.endswith('.jpeg'): ct = 'image/jpeg'
             self.send_header('Content-Type', ct)
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
@@ -91,6 +117,8 @@ if __name__ == '__main__':
     print('http://localhost:8080/')
     print(f'Dev proxy enabled: {ENABLE_DEV_PROXY}')
     if ENABLE_DEV_PROXY:
-        print(f'Proxying /api/* to {LOCAL_RPC}')
+        print(f'Proxying POST /api/* to {LOCAL_RPC}')
+        print(f'Proxying GET  /api/v1/* to {LOCAL_REST}')
         print(f'Live /health/* enabled: {ALLOW_LIVE_HEALTH}')
+        print('Note: node must be started with --rest-bind 127.0.0.1:28083 for REST endpoints.')
     http.server.HTTPServer(('127.0.0.1', 8080), H).serve_forever()
