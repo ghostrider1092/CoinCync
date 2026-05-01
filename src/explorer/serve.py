@@ -35,8 +35,19 @@ class H(http.server.BaseHTTPRequestHandler):
         # Proxy /api/v1/* GETs to the node's REST API (rpc/rest.rs on LOCAL_REST).
         # Without this the explorer's block lists / charts / globe panels stay empty.
         if ENABLE_DEV_PROXY and path.startswith('/api/v1/'):
+            # Strip the /testnet/ or /mainnet/ network prefix that the frontend
+            # adds (REST = '/api/v1/' + activeNetwork in index.html). The node's
+            # REST surface at rpc/rest.rs is network-naive — routes are mounted
+            # as /api/v1/status, /api/v1/blocks/recent, etc., with no network
+            # segment. In production nginx the rewrite would happen there;
+            # serve.py emulates it for local dev.
+            upstream_path = self.path
+            for prefix in ('/api/v1/testnet/', '/api/v1/mainnet/'):
+                if upstream_path.startswith(prefix):
+                    upstream_path = '/api/v1/' + upstream_path[len(prefix):]
+                    break
             try:
-                req = urllib.request.Request(LOCAL_REST + self.path, method='GET')
+                req = urllib.request.Request(LOCAL_REST + upstream_path, method='GET')
                 with urllib.request.urlopen(req, timeout=8) as r:
                     body = r.read()
                     self.send_response(r.status)
