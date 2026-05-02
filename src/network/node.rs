@@ -422,6 +422,14 @@ impl P2PNode {
         self.sync.write().await.mark_block_failed(hash);
     }
 
+    /// IBD orphan recovery: when a block came back as Orphan, ask the
+    /// sync manager to fetch the parent so the gap fills, instead of
+    /// re-requesting the orphan itself in a loop. See sync::mark_block_orphan
+    /// for the full rationale.
+    pub async fn notify_block_orphan(&self, orphan_hash: &Hash, parent_hash: &Hash) {
+        self.sync.write().await.mark_block_orphan(orphan_hash, parent_hash);
+    }
+
     /// Force a full resync by clearing sync state and requesting headers again.
     /// Used when a deep chain divergence exceeds the reorg depth limit in chain.rs.
     pub async fn force_resync(&self) {
@@ -1817,6 +1825,9 @@ async fn handle_connection(
     // The framer handles header creation, but version_msg already includes header
     // Write the complete message directly for initial handshake
     framer.write_message(MessageType::Version as u8, &version_bytes[HEADER_SIZE..]).await?;
+    if let Some(mut peer) = peers.get_mut(&peer_id) {
+        peer.bytes_sent = peer.bytes_sent.saturating_add(version_bytes.len() as u64);
+    }
 
     // Firework (Flare capability message) was removed in the 1.0 trim —
     // the convergence engine no longer negotiates per-node feature bits
@@ -1868,6 +1879,12 @@ async fn handle_connection(
                     if let Err(e) = framer.write_message(msg_type, payload).await {
                         debug!("Write error to peer {:?}: {}", &peer_id[..4], e);
                         break;
+                    }
+                    // Track outbound bytes for telemetry (get_peers RPC, sync diagnostics).
+                    // Without this, bytes_sent stays at 0 forever — masking real propagation
+                    // health. Counter is per-peer, behind a DashMap entry guard, so no race.
+                    if let Some(mut peer) = peers.get_mut(&peer_id) {
+                        peer.bytes_sent = peer.bytes_sent.saturating_add(data.len() as u64);
                     }
                 }
             }

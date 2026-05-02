@@ -320,6 +320,7 @@ async fn start_node(
                 Ok(NodeEvent::BlockReceived(block, peer_id)) => {
                     let hash = block.hash();
                     let block_height = block.header.height;
+                    let prev_hash = block.header.prev_hash;
                     let block_txs = block.transactions.clone();
                     let block_for_relay = block.clone();
                     match event_chain.process_block(block) {
@@ -361,15 +362,22 @@ async fn start_node(
                             });
                         }
                         Ok(BlockStatus::Orphan) => {
+                            // Don't re-request the orphan itself — peers will keep handing
+                            // back the same block and we never advance. Instead, ask sync
+                            // to fetch the orphan's parent so the gap fills. When the
+                            // parent connects, gossip re-delivers the orphan and the
+                            // second pass succeeds. See sync::mark_block_orphan for the
+                            // long version of why; root-caused 2026-05-02.
                             warn!(
-                                "Block {} from peer {:?} orphan",
+                                "Block {} from peer {:?} orphan; fetching parent {}",
                                 hex::encode(&hash.as_bytes()[..8]),
-                                &peer_id[..4]
+                                &peer_id[..4],
+                                hex::encode(&prev_hash.as_bytes()[..8]),
                             );
                             let p2p2 = event_p2p.clone();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_failed(&hash).await;
+                                p2p2.notify_block_orphan(&hash, &prev_hash).await;
                             });
                         }
                         Ok(BlockStatus::Invalid(reason)) => {

@@ -330,6 +330,53 @@ impl ChainSync {
         tracing::debug!("Block {} failed — re-queued for retry", &hash.to_hex()[..16]);
     }
 
+    /// IBD orphan-recovery (fixes the "wedge at one height" bug 2026-05-02):
+    ///
+    /// When a block comes back from chain validation as `Orphan` it means
+    /// we don't have its parent. Re-requesting the orphan itself causes
+    /// the same peer to keep handing it back — chain never advances.
+    /// Instead, drop the orphan from active tracking and queue its PARENT
+    /// hash for fetch. When the parent arrives and processes successfully,
+    /// gossip will re-deliver the original orphan and the second pass will
+    /// connect it to the chain.
+    ///
+    /// This is the minimal fix; we don't store the orphan body here
+    /// because the gossip relay path doesn't pass us the block. A more
+    /// thorough fix would also keep the orphan in `orphan_blocks` for
+    /// instant replay when the parent lands. Acceptable trade-off for
+    /// testnet — see the IBD orphan-loop bug memo for full context.
+    pub fn mark_block_orphan(&mut self, orphan_hash: &Hash, parent_hash: &Hash) {
+        // Stop tracking the orphan itself; we're not going to retry it.
+        self.pending_requests.remove(orphan_hash);
+        self.downloading.remove(orphan_hash);
+        self.download_timestamps.remove(orphan_hash);
+
+        // Don't queue the parent if we already have it or are about to.
+        if *parent_hash == self.local_tip {
+            return;
+        }
+        if self.downloading.contains(parent_hash) {
+            return;
+        }
+        if self.pending_headers.contains(parent_hash) {
+            return;
+        }
+
+        // Front-queue with high priority — the orphan is gated on this parent.
+        const MAX_PH: usize = 50_000;
+        if self.pending_headers.len() < MAX_PH {
+            self.pending_headers.push_front(*parent_hash);
+            if matches!(self.state, SyncState::Synced | SyncState::ConfirmingSynced | SyncState::Idle) {
+                self.state = SyncState::Blocks;
+            }
+        }
+        tracing::debug!(
+            "Orphan {} → fetching parent {}",
+            &orphan_hash.to_hex()[..16],
+            &parent_hash.to_hex()[..16]
+        );
+    }
+
     pub fn on_block_processed(&mut self, hash: Hash, height: u64) {
         self.local_height = height;
         self.local_tip = hash;
