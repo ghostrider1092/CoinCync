@@ -36,12 +36,18 @@ pub const MAINNET_FALLBACK: &[&str] = &[
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
-    "192.34.59.42:28080",      // NYC1 mempool + relay
-    "46.101.138.120:28080",    // FRA mempool + relay
-    "143.110.218.99:28080",    // TOR seed1 + relay
-    "165.245.161.62:28080",    // RIC relay
-    "165.245.140.113:28080",   // ATL miner + relay
-    "164.92.153.24:28080",     // AMS seed3 + relay
+    // Pure-seed hosts only — keep in sync with TESTNET_SEED_NODES in
+    // src/testnet.rs. App hosts (NYC3 landing/docs, LON explorer,
+    // TOR api.coincync.network) are intentionally NOT in this list:
+    // the bootstrap layer must stay isolated from public-facing app
+    // surface so a DDoS or TOS event on the apps doesn't blackhole
+    // new-user IBD.
+    "192.34.59.42:28080",      // NYC1 — mempool + relay (US-East)
+    "46.101.138.120:28080",    // FRA  — mempool + relay (Europe)
+    "165.245.161.62:28080",    // RIC  — relay (US-East)
+    "165.245.140.113:28080",   // ATL  — relay (US-South)
+    "164.92.153.24:28080",     // AMS  — relay (Europe)
+    "170.64.142.146:28080",    // SYD  — relay (Asia-Pacific)
 ];
 
 /// Resolve DNS seeds and return a deduplicated list of socket addresses.

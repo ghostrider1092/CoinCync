@@ -23,21 +23,26 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
     "seed3.coincync.network",
 ];
 
-/// Hard-coded testnet seed peers. Roles match the deployment layout in
-/// `/deploy/landing/mirrors.json` and the operations section of the
-/// mdBook docs. All six nodes run RandomX under Article V; the role
-/// annotation reflects what *else* the host does (explorer, API, faucet,
-/// monitoring) on top of running a seed peer.
-// Community bootstrap peers: prioritize hosts that are consistently reachable
-// from external networks (seed/relay/mempool/miner nodes on testnet P2P 28080).
-// DNS A records (seed*.coincync.network): seed1→143.110.218.99, seed2→45.55.32.13, seed3→164.92.153.24
+/// Hard-coded testnet seed peers — Monero-style minimal bootstrap set.
+///
+/// These are PURE SEED hosts: their only job is to accept inbound P2P,
+/// hand out a peer list, and serve the chain to bootstrapping nodes.
+/// They do NOT run app workloads (landing page, explorer, API) — those
+/// live on separate hosts (NYC3, LON, TOR) which are deliberately
+/// excluded from this list so a public-app DDoS doesn't take out the
+/// bootstrap layer too.
+///
+/// Six entries across three continents (US, Europe, Australia) mirrors
+/// Monero's `MIN_WANTED_SEED_NODES = 12` posture but at half the count
+/// (we run a smaller fleet during testnet). Add community-run seeds as
+/// volunteers come online; never remove an entry without a paired add.
 pub const TESTNET_SEED_NODES: &[&str] = &[
-    "192.34.59.42:28080",     // NYC1      — mempool1 + relay
-    "46.101.138.120:28080",   // FRA       — mempool2 + relay
-    "143.110.218.99:28080",   // TOR       — public RPC + DNS seed1 (seed1.coincync.network)
-    "165.245.161.62:28080",   // RIC       — relay
-    "165.245.140.113:28080",  // ATL       — miner + relay
-    "164.92.153.24:28080",    // AMS       — relay + DNS seed3 (seed3.coincync.network)
+    "192.34.59.42:28080",     // NYC1 — mempool + relay (US-East)
+    "46.101.138.120:28080",   // FRA  — mempool + relay (Europe)
+    "165.245.161.62:28080",   // RIC  — relay (US-East)
+    "165.245.140.113:28080",  // ATL  — relay (US-South)
+    "164.92.153.24:28080",    // AMS  — relay (Europe) + DNS seed3
+    "170.64.142.146:28080",   // SYD  — relay (Asia-Pacific)
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;
