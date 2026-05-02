@@ -74,11 +74,23 @@ pub const TESTNET_GENESIS_HASH: [u8; 32] = [
 /// at or below the checkpoint height is rejected immediately.
 pub const TESTNET_CHECKPOINT_LIST: &[(u64, &str)] = &[
     // Checkpoints enable fast sync: blocks below the highest checkpoint
-    // skip expensive crypto verification (range proofs, ring signatures).
-    // Structural checks still run. ~10-50x faster initial sync.
+    // skip expensive crypto verification (range proofs, ring signatures,
+    // RandomX PoW). Structural checks still run. ~10-50x faster initial sync.
     //
-    // Previous checkpoints cleared — chain redeployed April 23, 2026.
-    // New checkpoints will be added after 7 days of stability.
+    // Pulled from the canonical testnet (post-2026-05-02 redeploy) via
+    // `get_block_by_height`. Add new entries every ~50–100 blocks as the
+    // chain matures. Never remove an existing entry — that would let a
+    // long-range attacker rewrite history below the deleted checkpoint.
+    (  50, "9b282b2732ce2b935ecffae92e00c243ea579331d304d522cbf0f507458e04f2"),
+    ( 100, "e2f6cdb8e496ae0b8a526ce8a91150d96d675625c69d64724627bcdbaa546a9b"),
+    ( 150, "4060d5059f25c1be5234da1947495c6128ec9980d37915d06463576bee58ca3d"),
+    ( 200, "8c8a44d79aa4b330e2f731c5323cd24bbed1d819660d3a3569a85bbf92039b29"),
+    ( 250, "a00ffb1ccd0e5acf77cf114937c3ab824bfe7ffb2a90b95ab974231e1e242ce3"),
+    ( 300, "7f026477d87e6a8e73ee47fd7ceb3fbb6f3e449e1ab672bdc1d8b7d59f824af4"),
+    ( 350, "54f346581f666f08e6561e639f9f12b471382bc8fee0c8bf65a9d52a2f1048cc"),
+    ( 400, "da1601f6b62b05f7f8be983fdfe5cf69ffb47bbd277fa1d88f481629038ce37a"),
+    ( 450, "da3f78bd553f2cb36c335a37118d52e630939d88dafa9b3c1d092921233b2e4d"),
+    ( 488, "17384b417ffd0a5bd0f49c26f599bd44cda88010ae2146e8fe260d7e47185e22"),
 ];
 
 pub fn highest_checkpoint_height() -> u64 {
@@ -266,11 +278,26 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoints_ready_to_populate() {
-        // Checkpoint list is empty until real testnet hashes are collected.
-        // Once populated, update this test to verify highest_checkpoint_height() > 0.
+    fn test_checkpoints_populated() {
         // Heights not in the list return None (no opinion).
-        assert_eq!(verify_hardcoded_checkpoint(999, &Hash::zero()), None);
+        assert_eq!(verify_hardcoded_checkpoint(999_999, &Hash::zero()), None);
+        // Highest checkpoint must be at or above the last known good height
+        // captured during list population. Bump this when adding new entries.
+        assert!(highest_checkpoint_height() >= 488,
+            "checkpoint list regressed: highest is {}", highest_checkpoint_height());
+        // List must be strictly monotonic in height — accidental duplicates
+        // or out-of-order entries break the long-range-attack defence.
+        let heights: Vec<u64> = TESTNET_CHECKPOINT_LIST.iter().map(|(h, _)| *h).collect();
+        for w in heights.windows(2) {
+            assert!(w[0] < w[1], "checkpoint heights not strictly increasing: {} >= {}", w[0], w[1]);
+        }
+        // Each hash string must parse to 32 bytes.
+        for (h, hex_str) in TESTNET_CHECKPOINT_LIST {
+            assert_eq!(hex_str.len(), 64, "checkpoint at h={} has wrong hex length", h);
+            for c in hex_str.chars() {
+                assert!(c.is_ascii_hexdigit(), "checkpoint h={} has non-hex char {:?}", h, c);
+            }
+        }
     }
 
     #[test]
