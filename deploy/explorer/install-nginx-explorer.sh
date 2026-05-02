@@ -31,6 +31,26 @@ NGINX_SITE_LINK="/etc/nginx/sites-enabled/$(basename "${NGINX_SITE_PATH}")"
 EXPLORER_TESTNET_RPC_UPSTREAM="${EXPLORER_TESTNET_RPC_UPSTREAM:-127.0.0.1:28081}"
 EXPLORER_MAINNET_RPC_UPSTREAM="${EXPLORER_MAINNET_RPC_UPSTREAM:-127.0.0.1:19081}"
 
+# Refuse to proxy to a remote upstream. The explorer host should always
+# query its own coincync-node, not another fleet member's. We hit this
+# the hard way once: LON was deployed with EXPLORER_TESTNET_RPC_UPSTREAM
+# pointed at RIC, and when RIC's chain stalled the explorer banner read
+# stale data ("Chain data is X minutes old") even though LON itself was
+# fully synced. Rule of thumb: this script renders the public RPC proxy
+# for one nginx host; that host must be self-sufficient.
+for upstream in "${EXPLORER_TESTNET_RPC_UPSTREAM}" "${EXPLORER_MAINNET_RPC_UPSTREAM}"; do
+  host="${upstream%:*}"
+  case "$host" in
+    127.0.0.1|::1|localhost) ;;
+    *)
+      echo "ERROR: RPC upstream '$upstream' is not loopback." >&2
+      echo "  The explorer must proxy to its own local coincync-node." >&2
+      echo "  Set EXPLORER_TESTNET_RPC_UPSTREAM=127.0.0.1:28081 (default)." >&2
+      exit 2
+      ;;
+  esac
+done
+
 cat >"${NGINX_SITE_PATH}" <<EOF
 server {
     server_name ${EXPLORER_SERVER_NAME};
