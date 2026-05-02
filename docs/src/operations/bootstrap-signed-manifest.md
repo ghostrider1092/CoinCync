@@ -51,9 +51,9 @@ cargo run --bin bootstrap_manifest_tool -- \
 cargo run --bin bootstrap_manifest_tool -- \
   create \
   --out ./bootstrap_seeds.json \
-  --peer 45.55.32.13:28333 \
-  --peer 143.110.218.99:28333 \
-  --peer 165.245.161.62:28333
+  --peer seed1.coincync.network:28333 \
+  --peer seed2.coincync.network:28333 \
+  --peer seed3.coincync.network:28333
 ```
 
 ### 3) Sign manifest

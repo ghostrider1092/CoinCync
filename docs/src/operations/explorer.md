@@ -34,7 +34,7 @@ Recent UX hardening keeps the CoinCync visual style while making chain views mor
 
 ## First-time deploy
 
-On the explorer host (RIC, `165.245.161.62`):
+On the explorer host (currently LON):
 
 ```bash
 # 1. Pre-flight: confirm cyncd is bound to localhost only
@@ -45,7 +45,7 @@ ss -tlnp | grep -E ':(28081|19081) '
 # 2. Pre-flight: confirm 80/443 are clear and DNS resolves
 ss -tlnp | grep -E ':(80|443) '   # expect nothing
 dig +short explorer.coincync.network
-# Expect: 165.245.161.62
+# Expect: the IP of the current explorer host (see operator inventory)
 
 # 3. Open public ports in DigitalOcean firewall: 80/tcp and 443/tcp.
 #    DO NOT also open 28081 (the whole point is that only Caddy is public).

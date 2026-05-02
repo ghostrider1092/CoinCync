@@ -19,7 +19,7 @@ For a privacy coin, this matters. The clearnet site is for users who don't need 
 
 ## Setup on the explorer host
 
-Roughly 20 minutes of work on the existing RIC host (`165.245.161.62`) that already runs the explorer Caddy stack.
+Roughly 20 minutes of work on the explorer host that already runs the Caddy stack.
 
 ### 1. Install Tor
 

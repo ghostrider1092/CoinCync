@@ -244,11 +244,11 @@ Most production nodes do exactly one of these. Specializing per host limits blas
 | Role | What runs there | Public ports | Example host |
 |---|---|---|---|
 | **Seed node** | cyncd | 28080 (P2P) | seed1, seed2, seed3 |
-| **Explorer host** | cyncd + nginx + explorer assets | 80, 443, 28080 | RIC (165.245.161.62) |
-| **API host** | cyncd + nginx (REST/RPC proxy) | 80, 443, 28080 | Toronto (143.110.218.99) |
-| **Miner** | cyncd + coincync-miner | 28080 | ATL |
+| **Explorer host** | cyncd + nginx + explorer assets | 80, 443, 28080 | LON (current public host) |
+| **API host** | cyncd + nginx (REST/RPC proxy) | 80, 443, 28080 | TOR |
+| **Miner** | cyncd + coincync-miner | 28080 | NYC3 |
 | **Faucet** | cyncd + faucet HTTP service | 28080, 8080 (faucet UI) | (operator-assigned host) |
-| **Landing/docs** | nginx (no cyncd needed) | 80, 443 | NYC (45.55.32.13) |
+| **Landing/docs** | nginx (no cyncd needed) | 80, 443 | NYC3 |
 | **Monitoring** | Prometheus + Grafana | (no public DNS) | (operator-assigned host) |
 
 Splitting roles across hosts is the same federation strategy explained in [Federation & DDoS](./federation-and-ddos.md). One host going down only affects one role.

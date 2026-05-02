@@ -11,7 +11,7 @@ Architecturally identical to [`/deploy/explorer/`](./explorer.md), with three di
 | Body shape | HTML + static assets + JSON | JSON-only |
 | CORS | required (CDN allowlist) | **none** (server-to-server) |
 | Caching | aggressive on static assets | **no caching** |
-| Host | RIC (165.245.161.62) | **Toronto (143.110.218.99)** |
+| Host | Explorer host | **TOR (api.coincync.network)** |
 
 The strict per-IP limit is calibrated for machine clients. A wallet polling `get_info` once per block (every 120 seconds) uses 0.5 req/min — two orders of magnitude under the limit. Anything faster than ~30 req/min sustained is either a bug or a chain-analysis scraper, and slowing them down is a feature, not a bug.
 
@@ -35,7 +35,7 @@ Every method is **read-only**. The REST proxy in `src/rpc/rest.rs::RPC_ALLOWED_M
 
 ## First-time deploy
 
-On the API host (Toronto, `143.110.218.99`):
+On the API host (TOR — resolve `api.coincync.network` for the current address):
 
 ```bash
 # 1. Pre-flight: cyncd RPC + REST bound to localhost only.
