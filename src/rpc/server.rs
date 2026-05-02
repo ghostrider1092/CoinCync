@@ -744,9 +744,19 @@ pub async fn start_rpc_server(
                 // other nodes; without this, locally-mined blocks stay
                 // local and the chain forks between the miner and its
                 // peers. We don't block the RPC response on propagation.
+                //
+                // Also refresh the handshake-side chain_height/chain_tip
+                // so subsequent peer Version messages advertise the new
+                // tip. The BlockReceived event handler in bin/node.rs
+                // does the same thing for blocks arriving from peers;
+                // locally-mined blocks come through this RPC path
+                // instead and would otherwise leave handshake state stale.
                 if let Some(p2p) = state.p2p.as_ref() {
                     let p2p = p2p.clone();
+                    let new_height = state.chain.height();
+                    let new_tip = state.chain.tip_hash();
                     tokio::spawn(async move {
+                        p2p.set_chain_state(new_height, new_tip).await;
                         if let Err(e) = p2p.broadcast_block(&block_for_broadcast).await {
                             warn!("Block broadcast failed: {}", e);
                         }

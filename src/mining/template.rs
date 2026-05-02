@@ -79,12 +79,20 @@ pub fn build_template_json(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    // Consensus requires `timestamp > prev.timestamp` strictly. After a long
+    // chain stall difficulty collapses to ~0, miners find blocks in <1s, and
+    // two blocks in the same second land at `timestamp == prev.timestamp`,
+    // which fails validation. Bump the template timestamp to at least
+    // `prev + 1` so the miner always has a valid candidate. The miner is free
+    // to roll forward (header.update_timestamp) if its local clock catches up.
+    let timestamp = now.max(tip.timestamp.saturating_add(1));
+
     let network_magic = chain.network().magic_bytes();
 
     serde_json::json!({
         "height":     next_height,
         "prev_hash":  hex::encode(tip.hash.as_bytes()),
-        "timestamp":  now,
+        "timestamp":  timestamp,
         "network_magic": hex::encode(network_magic),
         "target":     hex::encode(next_target.as_bytes()),
         "difficulty": next_difficulty.to_string(),
