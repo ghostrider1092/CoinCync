@@ -235,6 +235,7 @@ tbody tr{cursor:pointer;transition:background .1s}tbody tr:hover td{background:v
 .badge-purple{background:#F3EEFF;color:#5B21B6}.dark .badge-purple{background:#1E1535;color:#9B7BF0}
 .badge-red{background:#FEE2E2;color:#991B1B}.dark .badge-red{background:#2D1111;color:#F87171}
 .badge-blue{background:#EFF6FF;color:#1E3A8A}.dark .badge-blue{background:#0F1E35;color:#60A5FA}
+.badge-grey{background:#E5E1DA;color:#5D5953}.dark .badge-grey{background:#2A2620;color:#928A7E}
 /* Brass theme badge overrides — dark text on gold bg needs opaque badge surfaces */
 [data-theme="brass"] .badge{background:rgba(26,21,16,0.12);color:#1A1510}
 [data-theme="brass"] .badge-amber{background:rgba(26,21,16,0.15);color:#1A1510}
@@ -1271,7 +1272,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div class="panel">
         <div class="panel-head" style="display:flex;align-items:center;gap:8px">
           <span style="font-size:16px">⚡</span> Spark Protocol
-          <span class="badge badge-purple" style="margin-left:auto">ACTIVE</span>
+          <span class="badge badge-grey" style="margin-left:auto" title="Phase-2 module — disabled on testnet">DISABLED</span>
         </div>
         <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
           <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
@@ -1296,7 +1297,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div class="panel">
         <div class="panel-head" style="display:flex;align-items:center;gap:8px">
           <span style="font-size:16px">🌳</span> Shielded Pool (Orchard/Halo2)
-          <span class="badge badge-purple" style="margin-left:auto">ACTIVE</span>
+          <span class="badge badge-grey" style="margin-left:auto" title="Phase-2 module — disabled on testnet">DISABLED</span>
         </div>
         <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
           <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
