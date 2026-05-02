@@ -283,6 +283,13 @@ async fn start_node(
         return Err(e);
     }
 
+    // Seed the handshake-side chain_height / chain_tip with the on-disk
+    // tip so the very first peer Version we send advertises the real
+    // height. Without this, the initial handshake advertises 0 until a
+    // new block is processed, which can take minutes on a quiet chain
+    // and breaks block relay in the meantime.
+    p2p.set_chain_state(tip.height, tip.hash).await;
+
     // Feed any --addnode peers into the address book so the peer-
     // discovery loop dials them on the next tick. This runs AFTER
     // P2PNode::start() so the address book is initialized, and before
@@ -329,10 +336,19 @@ async fn start_node(
                             // batch window; without this the sync engine
                             // keeps re-requesting blocks we've already
                             // applied. Then gossip onward.
+                            //
+                            // Also refresh the handshake-side chain_height /
+                            // chain_tip so subsequent peer Version messages
+                            // advertise our actual tip instead of the stale
+                            // initial value (was a real bug: peers saw us as
+                            // start_height=0 forever, broke block relay).
                             let p2p2 = event_p2p.clone();
+                            let new_height = event_chain.height();
+                            let new_tip = event_chain.tip_hash();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
                                 p2p2.notify_block_processed(hash, block_height).await;
+                                p2p2.set_chain_state(new_height, new_tip).await;
                                 let _ = p2p2.broadcast_block(&block_for_relay).await;
                             });
                         }
