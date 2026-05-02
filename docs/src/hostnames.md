@@ -1,6 +1,7 @@
 # Hostname Reference
 
-> **Updated:** April 28, 2026 — reflects the active 6-node public testnet fleet.
+> **Updated:** May 1, 2026 — miner role moved from ATL to NYC3 alongside the
+> consensus-rules redeploy (commit `805c07d` bound RandomX genesis to network).
 
 ## Public Hostnames
 
@@ -8,10 +9,10 @@
 | --- | --- | --- | --- |
 | `explorer.coincync.network` | RIC | 165.245.161.62 | Explorer frontend + `/health/*` RPC proxy |
 | `api.coincync.network` | TOR | 143.110.218.99 | Public JSON-RPC + REST API proxy |
-| `coincync.network` (apex) | NYC3 | 45.55.32.13 | Landing page |
+| `coincync.network` (apex) | NYC3 | 45.55.32.13 | Landing page + miner |
 | `docs.coincync.network` | NYC3 | 45.55.32.13 | Documentation site |
 
-## Testnet Nodes (active 6)
+## Testnet Nodes (active 7)
 
 | Host | IP | Role | Services |
 | --- | --- | --- | --- |
@@ -19,7 +20,8 @@
 | FRA | 46.101.138.120 | Mempool + relay | coincync-node |
 | TOR | 143.110.218.99 | Seed1 + public API | coincync-node, nginx |
 | RIC | 165.245.161.62 | Explorer + relay | coincync-node, nginx |
-| ATL | 165.245.140.113 | Miner + relay | coincync-node, coincync-miner |
+| NYC3 | 45.55.32.13 | Miner + landing + docs | coincync-node, coincync-miner, nginx |
+| ATL | 165.245.140.113 | Seed2 + relay | coincync-node |
 | AMS | 164.92.153.24 | Seed3 + relay | coincync-node |
 
 ## Port Map
