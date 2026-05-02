@@ -17,7 +17,14 @@
 #   7. Print the new genesis hash so you can confirm all nodes match
 #
 # Run with: sudo bash deploy/ops/redeploy-fleet.sh
-# Override: REPO_DIR, BRANCH, NODE_SERVICE, DATA_DIR, RPC_PORT (env vars).
+# Override: REPO_DIR, BRANCH, NODE_SERVICE, DATA_DIR, RPC_PORT, SKIP_PULL (env vars).
+#
+# SKIP_PULL=1 — skip the `git fetch + pull` step. Use this when the working
+# tree at REPO_DIR was already synced via an out-of-band mechanism (e.g. a
+# direct `git push ssh://root@host/opt/coincync main` from an operator
+# laptop). Useful when the canonical remote is private/unreachable but the
+# operator has SSH access to every fleet host. The script still runs the
+# rebuild from whatever is currently in the working tree.
 # ──────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -30,6 +37,7 @@ RPC_PORT="${RPC_PORT:-28081}"
 BIN_INSTALL_DIR="${BIN_INSTALL_DIR:-/usr/local/bin}"
 CARGO_FEATURES="${CARGO_FEATURES:-randomx testnet}"
 CARGO_BIN_NAMES=(coincync-node coincync-wallet coincync-tui-miner)
+SKIP_PULL="${SKIP_PULL:-0}"
 
 log()   { printf '\e[36m==>\e[0m %s\n' "$*"; }
 warn()  { printf '\e[33m[!]\e[0m %s\n' "$*" >&2; }
@@ -57,10 +65,14 @@ fi
 log "Stopped."
 
 # ── 2. Pull latest source ─────────────────────────────────────────────
-log "git fetch + pull ${BRANCH}"
-sudo -u "$(stat -c '%U' "$REPO_DIR")" git fetch origin "$BRANCH"
-sudo -u "$(stat -c '%U' "$REPO_DIR")" git checkout "$BRANCH"
-sudo -u "$(stat -c '%U' "$REPO_DIR")" git pull --ff-only origin "$BRANCH"
+if [ "$SKIP_PULL" = "1" ] || [ "$SKIP_PULL" = "true" ]; then
+  log "SKIP_PULL=1 — skipping git fetch/pull, using working tree as-is"
+else
+  log "git fetch + pull ${BRANCH}"
+  sudo -u "$(stat -c '%U' "$REPO_DIR")" git fetch origin "$BRANCH"
+  sudo -u "$(stat -c '%U' "$REPO_DIR")" git checkout "$BRANCH"
+  sudo -u "$(stat -c '%U' "$REPO_DIR")" git pull --ff-only origin "$BRANCH"
+fi
 HEAD_HASH="$(git rev-parse --short HEAD)"
 log "HEAD now ${HEAD_HASH}"
 
