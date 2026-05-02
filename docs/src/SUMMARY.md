@@ -7,6 +7,7 @@
 - [Build from source](./getting-started/build.md)
 - [Run a testnet node](./getting-started/run-a-node.md)
 - [Create a wallet](./getting-started/create-a-wallet.md)
+- [Mine CYNC from your PC](./getting-started/mining-on-your-pc.md)
 
 # Protocol
 
