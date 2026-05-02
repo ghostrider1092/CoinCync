@@ -116,12 +116,21 @@ done
 log "Starting ${NODE_SERVICE}"
 systemctl start "$NODE_SERVICE"
 
+# Pick up COINCYNC_RPC_API_KEY from the systemd unit's drop-ins. Required
+# whenever the node binds to a non-loopback interface (rpc/server.rs gates
+# every POST on a Bearer regardless of source IP once auth is enabled).
+RPC_KEY="$(systemctl show "$NODE_SERVICE" -p Environment --value 2>/dev/null \
+           | tr ' ' '\n' | grep '^COINCYNC_RPC_API_KEY=' | head -1 | cut -d= -f2)"
+AUTH_HDR=()
+[ -n "$RPC_KEY" ] && AUTH_HDR=(-H "authorization: Bearer ${RPC_KEY}")
+
 log "Waiting for RPC on 127.0.0.1:${RPC_PORT}…"
-for i in $(seq 1 60); do
-  if curl -sS -m 2 -o /dev/null \
+for _ in $(seq 1 60); do
+  if curl -sS -m 2 -o /dev/null -w '%{http_code}' \
         -X POST "http://127.0.0.1:${RPC_PORT}" \
+        "${AUTH_HDR[@]}" \
         -H 'content-type: application/json' \
-        -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}'; then
+        -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' | grep -q '^2'; then
     break
   fi
   sleep 1
@@ -130,16 +139,19 @@ done
 # ── 7. Print the new genesis (so you can compare across nodes) ────────
 log "RPC up. New tip / genesis:"
 RESP="$(curl -sS -X POST "http://127.0.0.1:${RPC_PORT}" \
+       "${AUTH_HDR[@]}" \
        -H 'content-type: application/json' \
        -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}')"
+# Use single-quoted strings inside the Python source to avoid the f-string
+# "backslash inside expression" SyntaxError that the previous escapes hit.
 echo "$RESP" | python3 -c '
 import sys, json
 d = json.loads(sys.stdin.read())
 r = d.get("result", {})
-print(f"  network:   {r.get(\"network\")}")
-print(f"  height:    {r.get(\"height\")}")
-print(f"  tip_hash:  {r.get(\"tip_hash\", \"\")}")
-print(f"  version:   {r.get(\"version\")}")
+print("  network:   " + str(r.get("network")))
+print("  height:    " + str(r.get("height")))
+print("  tip_hash:  " + str(r.get("tip_hash", "")))
+print("  version:   " + str(r.get("version")))
 '
 
 log "Redeploy complete on $(hostname). HEAD=${HEAD_HASH}"
