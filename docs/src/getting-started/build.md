@@ -1,6 +1,6 @@
 # Build from source
 
-CoinCync is written in Rust. There are no pre-built binaries published yet — you build from source. The build is reproducible: same commit + same Rust version → byte-identical output.
+CoinCync is written in Rust. Pre-built Linux and Windows binaries are available — see the download table at the top of [Run a testnet node](./run-a-node.md). Building from source is for users on other platforms, those who want to verify reproducibility, or contributors patching the code. The build is reproducible: same commit + same Rust version → byte-identical output.
 
 ## Prerequisites
 

@@ -1,11 +1,35 @@
 # Run a testnet node
 
-You can use pre-built binaries (see [Build from source](./build.md)) or build from source locally (same page).
+You can either download a pre-built binary or build from source ([Build from source](./build.md)).
+
+## Download a pre-built binary
+
+|Platform|URL|
+|---|---|
+|Linux x86_64|<https://coincync.network/release/v1.0.1-testnet/coincync-node-linux-x86_64>|
+|Windows x86_64|<https://coincync.network/release/v1.0.1-testnet/coincync-node-windows-x86_64.exe>|
+
+```bash
+# Linux example
+curl -L -o coincync-node \
+  https://coincync.network/release/v1.0.1-testnet/coincync-node-linux-x86_64
+chmod +x coincync-node
+./coincync-node --network testnet --data-dir ~/.coincync
+```
+
+> **Where to run a node, where NOT to mine:** running a `coincync-node` (P2P relay,
+> RPC, no PoW computation) on a cloud VPS is fine. **Mining is different** —
+> DigitalOcean, Cloudflare, AWS, GCP, and most major hosting providers
+> explicitly prohibit cryptocurrency mining in their TOS and will terminate
+> accounts that compute PoW. Run `coincync-miner` / `coincync-tui-miner` on
+> personal hardware (your laptop, desktop, or a server you physically own).
+> RandomX is CPU-only by design specifically so home machines can secure the
+> chain — that's the architecture, not a workaround.
 
 ## Quick start
 
 ```bash
-./target/release/coincync-node --network testnet --data-dir ~/.coincync
+./coincync-node --network testnet --data-dir ~/.coincync
 ```
 
 That's it. The node will:
@@ -27,7 +51,7 @@ INFO  CoinCync 1.0 node starting
 INFO  Network:  Testnet
 INFO  Data dir: "~/.coincync"
 INFO  Opening database at "~/.coincync/testnet"
-INFO  Chain tip: height=0, hash=26ec6abd
+INFO  Chain tip: height=0, hash=41f970df
 INFO  Starting P2P listener on 0.0.0.0:28080
 INFO  Starting RPC server on 127.0.0.1:28081
 INFO  RPC server bound, methods: get_info, get_blockchain_info, ...
