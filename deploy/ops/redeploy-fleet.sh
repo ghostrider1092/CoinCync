@@ -77,11 +77,25 @@ HEAD_HASH="$(git rev-parse --short HEAD)"
 log "HEAD now ${HEAD_HASH}"
 
 # ── 3. Rebuild release binaries ───────────────────────────────────────
-log "cargo build --release --features \"${CARGO_FEATURES}\""
+# Find cargo. sudo strips PATH so a `sudo cargo build` typically can't
+# resolve cargo even when it's installed via rustup. Prefer $CARGO env
+# override, then the repo-owner's ~/.cargo/bin/cargo, then PATH.
+REPO_OWNER="$(stat -c '%U' "$REPO_DIR")"
+OWNER_HOME="$(getent passwd "$REPO_OWNER" | cut -d: -f6)"
+CARGO_BIN="${CARGO:-}"
+if [ -z "$CARGO_BIN" ] && [ -x "$OWNER_HOME/.cargo/bin/cargo" ]; then
+  CARGO_BIN="$OWNER_HOME/.cargo/bin/cargo"
+fi
+if [ -z "$CARGO_BIN" ]; then
+  CARGO_BIN="$(command -v cargo || true)"
+fi
+[ -n "$CARGO_BIN" ] && [ -x "$CARGO_BIN" ] || \
+  fatal "cargo not found. Install rustup as user '$REPO_OWNER' or set CARGO=/path/to/cargo"
+log "cargo build --release --features \"${CARGO_FEATURES}\"  (using $CARGO_BIN)"
 BIN_FLAGS=()
 for n in "${CARGO_BIN_NAMES[@]}"; do BIN_FLAGS+=(--bin "$n"); done
-sudo -u "$(stat -c '%U' "$REPO_DIR")" \
-  cargo build --release --features "$CARGO_FEATURES" "${BIN_FLAGS[@]}"
+sudo -u "$REPO_OWNER" "$CARGO_BIN" build --release \
+  --features "$CARGO_FEATURES" "${BIN_FLAGS[@]}"
 
 # ── 4. Wipe chain DB (keep node identity + peers.json + recovery) ─────
 NETWORK_DIR="${DATA_DIR%/}/testnet"
