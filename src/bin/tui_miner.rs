@@ -61,6 +61,11 @@ struct Args {
     /// Use testnet (legacy flag; testnet is now the default)
     #[arg(long, hide = true)]
     testnet: bool,
+
+    /// Output scrolling tracing-style logs instead of the dashboard.
+    /// Same format as `coincync-node` logs — ANSI-colored timestamp + level + message.
+    #[arg(long)]
+    log: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1108,9 +1113,137 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 // Main
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Decide whether a miner output line is a noisy status update worth
+/// dropping in --log mode, vs a real event worth re-emitting.
+/// The miner uses a spinner glyph (⠂ ⠁ etc., U+2800 block) for ~2 Hz
+/// hashrate readouts. Those are useful in the dashboard; in a scrolling
+/// log they swamp the actual block-found / accepted / error lines.
+fn is_status_spinner_line(line: &str) -> bool {
+    line.chars().next().map_or(false, |c| ('\u{2800}'..='\u{28FF}').contains(&c))
+}
+
+/// Classify a miner log line by its content and dispatch it as a tracing event.
+fn log_classify_and_emit(raw: &str) {
+    // Strip ANSI first so the first-char check sees the actual spinner
+    // glyph instead of the leading `\x1b` of an embedded color sequence.
+    let stripped = strip_ansi(raw);
+    let line = stripped.trim();
+    if line.is_empty() {
+        return;
+    }
+    // The miner emits a half-second spinner heartbeat. Treat any line
+    // that *starts* with a spinner OR contains it after the ansi strip
+    // as noise. Real events ("BLOCK FOUND", "[STARTED]", "ERROR") never
+    // begin with a Braille glyph.
+    if is_status_spinner_line(line) {
+        // BUT — sometimes the miner pastes a real event onto the same
+        // status line (e.g., "⠧ 0 H/s ...    ✓ BLOCK FOUND at height 752!").
+        // Salvage that suffix so we don't drop block-found events.
+        if let Some(idx) = line.find("✓") {
+            let real = line[idx..].trim();
+            if !real.is_empty() {
+                tracing::info!("miner: {}", real);
+            }
+        }
+        return;
+    }
+    let lower = line.to_lowercase();
+    if lower.contains("error") || lower.contains("invalid") || lower.contains("rejected") {
+        tracing::warn!("miner: {}", line);
+    } else if lower.contains("warn") {
+        tracing::warn!("miner: {}", line);
+    } else {
+        tracing::info!("miner: {}", line);
+    }
+}
+
+/// Run in log mode (--log): scrolling tracing-style output, no ratatui.
+/// Same handshake/spawn behavior as the dashboard, just a different presentation layer.
+async fn run_log_mode(args: Args) -> Result<()> {
+    use tracing_subscriber::fmt;
+    fmt()
+        .with_target(false)
+        .with_ansi(true)
+        .init();
+
+    let (tx, rx) = mpsc::channel::<AppEvent>();
+
+    let _miner_guard = if args.address.is_some() {
+        match spawn_miner(&args, tx.clone()) {
+            Ok(g) => {
+                tracing::info!("Mining started: address={} threads={} rpc={}",
+                    args.address.as_deref().unwrap_or("?"),
+                    if args.threads == 0 { "auto".to_string() } else { args.threads.to_string() },
+                    args.rpc);
+                Some(g)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start miner: {} (continuing as monitor-only)", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("Monitor-only mode (no --address) — polling chain only");
+        None
+    };
+
+    spawn_rpc_poller(args.rpc.clone(), tx.clone());
+
+    let mut last_height: Option<u64> = None;
+    let mut last_synced = false;
+    let mut last_peers: Option<u64> = None;
+    let mut rpc_was_up = true;
+
+    loop {
+        match rx.recv() {
+            Ok(AppEvent::MinerLine(line)) => log_classify_and_emit(&line),
+            Ok(AppEvent::MinerExited) => {
+                tracing::warn!("Miner process exited");
+            }
+            Ok(AppEvent::ChainUpdate(info)) => {
+                if !rpc_was_up {
+                    tracing::info!("RPC reachable again");
+                    rpc_was_up = true;
+                }
+                let height_changed = last_height.map(|h| h != info.height).unwrap_or(true);
+                let sync_changed = last_synced != info.synced;
+                let peers_changed = last_peers.map(|p| p != info.peer_count).unwrap_or(true);
+
+                if height_changed {
+                    tracing::info!(
+                        "chain h={} tip_age={}s diff={} peers={} synced={} network={}",
+                        info.height, info.tip_age_secs, info.difficulty,
+                        info.peer_count, info.synced, info.network);
+                } else if sync_changed {
+                    tracing::info!("synced={} (chain h={})", info.synced, info.height);
+                } else if peers_changed {
+                    tracing::info!("peers={} (chain h={})", info.peer_count, info.height);
+                }
+                last_height = Some(info.height);
+                last_synced = info.synced;
+                last_peers = Some(info.peer_count);
+            }
+            Ok(AppEvent::RpcDown) => {
+                if rpc_was_up {
+                    tracing::warn!("RPC unreachable at {}", args.rpc);
+                    rpc_was_up = false;
+                }
+            }
+            Err(_) => break, // channel closed
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Log mode: scrolling tracing-style output instead of the dashboard.
+    if args.log {
+        return run_log_mode(args).await;
+    }
+
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
     // ── Spawn miner subprocess (if address provided) ────────────
