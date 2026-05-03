@@ -60,7 +60,7 @@ footer{border-top:1px solid var(--b);padding:32px 48px;text-align:center}
 </nav>
 
 <div class="container">
-  <div class="badge">TESTNET v1.0.0</div>
+  <div class="badge">TESTNET v1.0.2</div>
   <h1>Down<em>loads</em></h1>
   <p class="subtitle">Everything you need to run a node, mine, and transact on the CoinCync testnet.</p>
 
@@ -68,22 +68,22 @@ footer{border-top:1px solid var(--b);padding:32px 48px;text-align:center}
     <div class="card">
       <div class="card-icon">&#x1f427;</div>
       <div class="card-title">Linux x86_64</div>
-      <div class="card-file">coincync-1.0.0-testnet-linux-x86_64.tar.gz</div>
-      <div class="card-size">11 MB &middot; Ubuntu 22.04+, Debian 12+</div>
-      <a href="coincync-1.0.0-testnet-linux-x86_64.tar.gz" class="btn">Download</a>
+      <div class="card-file">coincync-1.0.2-testnet-linux-x86_64.tar.gz</div>
+      <div class="card-size">31 MB &middot; Ubuntu 22.04+, Debian 12+</div>
+      <a href="coincync-1.0.2-testnet-linux-x86_64.tar.gz" class="btn">Download</a>
     </div>
     <div class="card">
       <div class="card-icon">&#x1fa9f;</div>
       <div class="card-title">Windows x64</div>
-      <div class="card-file">coincync-1.0.0-testnet-windows-x64.tar.gz</div>
-      <div class="card-size">13 MB &middot; Windows 10/11</div>
-      <a href="coincync-1.0.0-testnet-windows-x64.tar.gz" class="btn">Download</a>
+      <div class="card-file">coincync-1.0.2-testnet-windows-x64.tar.gz</div>
+      <div class="card-size">Built via GitHub Actions</div>
+      <a href="coincync-1.0.2-testnet-windows-x64.tar.gz" class="btn">Download</a>
     </div>
     <div class="card">
       <div class="card-icon">&#x1f34e;</div>
       <div class="card-title">macOS (Apple Silicon + Intel)</div>
-      <div class="card-file">coincync-1.0.0-testnet-macos-arm64.tar.gz</div>
-      <div class="card-size">Coming via GitHub Actions</div>
+      <div class="card-file">coincync-1.0.2-testnet-macos-arm64.tar.gz</div>
+      <div class="card-size">Built via GitHub Actions</div>
       <a href="https://github.com/CoinCync/Coincync-Testnet-/actions" class="btn" style="background:var(--b);color:var(--t3)">Build from Source</a>
     </div>
   </div>
@@ -92,7 +92,7 @@ footer{border-top:1px solid var(--b);padding:32px 48px;text-align:center}
     <h2>What's <em>included</em></h2>
     <div class="grid">
       <div class="item"><span class="d"></span> coincync-node &mdash; full node</div>
-      <div class="item"><span class="d"></span> coincync-miner &mdash; CPU miner (RandomX)</div>
+      <div class="item"><span class="d"></span> coincync-rig &mdash; CPU miner (RandomX, blake3-prehash)</div>
       <div class="item"><span class="d"></span> coincync-wallet &mdash; CLI wallet</div>
       <div class="item"><span class="d"></span> SHA256SUMS.txt &mdash; checksums</div>
     </div>
@@ -103,7 +103,8 @@ footer{border-top:1px solid var(--b);padding:32px 48px;text-align:center}
     <div class="code">
       <span class="v">$ sha256sum -c SHA256SUMS.txt</span><br>
       <span class="h">coincync-node: OK</span><br>
-      <span class="h">coincync-miner: OK</span>
+      <span class="h">coincync-rig: OK</span><br>
+      <span class="h">coincync-wallet: OK</span>
     </div>
     <p style="margin-top:12px;font-size:13px;color:var(--t4)"><a href="SHA256SUMS.txt">View SHA256SUMS.txt</a></p>
   </div>
@@ -112,13 +113,13 @@ footer{border-top:1px solid var(--b);padding:32px 48px;text-align:center}
     <h2>Quick <em>start</em></h2>
     <div class="code">
       <span class="c"># Extract</span><br>
-      <span class="v">tar xzf coincync-1.0.0-testnet-linux-x86_64.tar.gz</span><br><br>
+      <span class="v">tar xzf coincync-1.0.2-testnet-linux-x86_64.tar.gz</span><br><br>
       <span class="c"># Run a node (auto-discovers peers)</span><br>
       <span class="v">./coincync-node --network testnet</span><br><br>
       <span class="c"># Create a wallet</span><br>
       <span class="v">./coincync-wallet create -p YOUR_PASSWORD</span><br><br>
-      <span class="c"># Start mining</span><br>
-      <span class="v">./coincync-miner --address YOUR_tCYNC_ADDRESS --threads 4</span>
+      <span class="c"># Start mining solo (auto-detects CPU cores)</span><br>
+      <span class="v">./coincync-rig run-solo --address YOUR_tCYNC_ADDRESS</span>
     </div>
   </div>
 
