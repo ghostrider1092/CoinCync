@@ -18,12 +18,46 @@
 <meta name="twitter:image" content="https://coincync.network/assets/og-card.svg">
 <link rel="stylesheet" href="/assets/fonts/fonts.css">
 <link rel="preload" as="image" href="banner.svg">
+<script>
+// Restore theme + wallpaper BEFORE body paints to prevent flash.
+// Same localStorage keys as the explorer (cync-theme, cync-wallpaper) so
+// switching themes on coincync.network and explorer.coincync.network feels
+// like one site (when served from the same origin).
+(function(){
+  var t=localStorage.getItem('cync-theme');
+  var DARK=['dark','midnight','forge','vault','mono','contrast'];
+  if(t){
+    document.documentElement.setAttribute('data-theme',t);
+    if(DARK.indexOf(t)!==-1) document.documentElement.classList.add('dark');
+  } else {
+    // No stored theme -> default to "dark" (the brand gold-on-near-black).
+    document.documentElement.setAttribute('data-theme','dark');
+    document.documentElement.classList.add('dark');
+  }
+})();
+</script>
 <style>
-:root{--bg:#0a0a09;--s1:#111110;--s2:#181816;--s3:#1e1e1b;--b:#25241f;--b2:#34332c;--t:#f5f0e8;--t2:#b8b4ac;--t3:#8a857d;--t4:#5d5953;--t4-a:#7a756c;--ac:#d4a059;--ac2:#e8b86d;--ac-dim:#4a3a1f;--green:#7eb87c;--red:#c45c4f;--blue:#6b8cce;--display:'Fraunces',Georgia,serif;--body:'IBM Plex Sans',system-ui,sans-serif;--mono:'JetBrains Mono',monospace}
+/* ─── THEME SYSTEM ───────────────────────────────────────────────────
+   9 themes ported verbatim from the explorer for a consistent design
+   language across the coincync.network surface. Default = "dark" (the
+   brand aesthetic). Each theme defines all 17 colour tokens the rest
+   of the stylesheet reads, plus a --surface alias so any rule copied
+   from the explorer just works. Fonts are theme-independent.
+   ──────────────────────────────────────────────────────────────────── */
+[data-theme="paper"]{--bg:#F5F3EE;--s1:#FEFDFB;--s2:#EEEBE4;--s3:#E6E3DB;--b:#D8D4CA;--b2:#C9C4B8;--t:#111110;--t2:#4A4844;--t3:#8A857D;--t4:#A8A39A;--t4-a:#9A948A;--ac:#9E7A3E;--ac2:#D4A059;--ac-dim:#F5EFE3;--green:#7EB87C;--red:#C45C4F;--blue:#6B8CCE;--surface:#FEFDFB;--terminal-bg:#1A1814}
+[data-theme="dark"]{--bg:#0A0A09;--s1:#141412;--s2:#1A1A17;--s3:#222220;--b:#25241F;--b2:#34332C;--t:#F5F0E8;--t2:#B8B4AC;--t3:#8A857D;--t4:#5D5953;--t4-a:#7A756C;--ac:#9E7A3E;--ac2:#D4A059;--ac-dim:#1F1A10;--green:#7EB87C;--red:#C45C4F;--blue:#6B8CCE;--surface:#141412;--terminal-bg:#050504}
+[data-theme="brass"]{--bg:#D4A059;--s1:#C89548;--s2:#C08E42;--s3:#B8863B;--b:#A07630;--b2:#8A6428;--t:#1A1510;--t2:#2A2118;--t3:#4A3828;--t4:#5A4630;--t4-a:#503D28;--ac:#3A3328;--ac2:#1A1510;--ac-dim:rgba(58,51,40,0.10);--green:#2D6A2E;--red:#8B2020;--blue:#1F3A6B;--surface:#C89548;--terminal-bg:#3A3328}
+[data-theme="cream"]{--bg:#F5F0E6;--s1:#FAF7F0;--s2:#EDE8DC;--s3:#E5DFD2;--b:#D8D0C0;--b2:#C9C0AE;--t:#3A3328;--t2:#5A5040;--t3:#8A7D6D;--t4:#9E9080;--t4-a:#94877A;--ac:#3A3328;--ac2:#5A4A30;--ac-dim:rgba(58,51,40,0.06);--green:#4A8A48;--red:#B03030;--blue:#3A5C9E;--surface:#FAF7F0;--terminal-bg:#3A3328}
+[data-theme="midnight"]{--bg:#08090E;--s1:#0E1018;--s2:#141620;--s3:#1A1C28;--b:#1E2030;--b2:#2A2D40;--t:#E8E4F0;--t2:#A0A0B8;--t3:#6A6A80;--t4:#4A4A60;--t4-a:#5A5A70;--ac:#9E7A3E;--ac2:#D4A059;--ac-dim:#1A1510;--green:#7EB87C;--red:#C45C4F;--blue:#6B8CCE;--surface:#0E1018;--terminal-bg:#04050A}
+[data-theme="forge"]{--bg:#121010;--s1:#1A1616;--s2:#201C1C;--s3:#282222;--b:#302828;--b2:#3F3535;--t:#F0E8E0;--t2:#B8A898;--t3:#887868;--t4:#605045;--t4-a:#705E50;--ac:#B85C30;--ac2:#E07840;--ac-dim:#201510;--green:#7EB87C;--red:#D04040;--blue:#5A7AC0;--surface:#1A1616;--terminal-bg:#0A0808}
+[data-theme="vault"]{--bg:#0A0C0A;--s1:#10140F;--s2:#161A15;--s3:#1C201B;--b:#222820;--b2:#2D352B;--t:#E0E8DC;--t2:#A8B0A0;--t3:#708068;--t4:#506050;--t4-a:#5E6E5E;--ac:#7A8A40;--ac2:#A0B060;--ac-dim:#141A10;--green:#7EB87C;--red:#C45C4F;--blue:#6B8CCE;--surface:#10140F;--terminal-bg:#04060A}
+[data-theme="mono"]{--bg:#0A0A09;--s1:#131312;--s2:#1A1A18;--s3:#212120;--b:#282826;--b2:#34342F;--t:#F5F0E8;--t2:#B0ADA6;--t3:#787570;--t4:#56544F;--t4-a:#65625C;--ac:#A8A498;--ac2:#F5F0E8;--ac-dim:rgba(245,240,232,0.05);--green:#A8A498;--red:#C45C4F;--blue:#A8A498;--surface:#131312;--terminal-bg:#050504}
+[data-theme="contrast"]{--bg:#000000;--s1:#0A0A0A;--s2:#141414;--s3:#1E1E1E;--b:#333333;--b2:#444444;--t:#FFFFFF;--t2:#CCCCCC;--t3:#888888;--t4:#666666;--t4-a:#777777;--ac:#D4A059;--ac2:#FFB840;--ac-dim:rgba(212,160,89,0.10);--green:#50E850;--red:#FF4040;--blue:#5AB8FF;--surface:#0A0A0A;--terminal-bg:#000000}
+:root,[data-theme]{--display:'Fraunces',Georgia,serif;--body:'IBM Plex Sans',system-ui,sans-serif;--mono:'JetBrains Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
 body{background:var(--bg);color:var(--t);font-family:var(--body);font-weight:300;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
-::selection{background:rgba(212,160,89,.25);color:var(--t)}
+::selection{background:color-mix(in srgb,var(--ac2) 30%,transparent);color:var(--t)}
 
 /* FOCUS */
 a:focus-visible,button:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
@@ -40,7 +74,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--ac);outline-offset:
 .reveal-stagger.visible>*:nth-child(4){transition-delay:.3s}
 
 /* NAV */
-nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,10,9,.85);backdrop-filter:blur(20px);border-bottom:1px solid rgba(37,36,31,.5);padding:0 48px;height:64px;display:flex;align-items:center;justify-content:space-between}
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:color-mix(in srgb,var(--bg) 85%,transparent);backdrop-filter:blur(20px);border-bottom:1px solid color-mix(in srgb,var(--b) 60%,transparent);padding:0 48px;height:64px;display:flex;align-items:center;justify-content:space-between;transition:background .25s,border-color .25s,color .25s}
 .nav-logo{font-family:var(--display);font-size:20px;font-weight:400;color:var(--t);text-decoration:none;letter-spacing:-.02em}
 .nav-logo em{color:var(--ac);font-style:italic;font-weight:500}
 .nav-links{display:flex;gap:32px;align-items:center}
@@ -57,13 +91,13 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,10,9,.85)
 .nav-toggle.active .nav-toggle-bar:nth-child(3){transform:rotate(-45deg) translate(4px,-4px)}
 
 /* HERO */
-.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:120px 32px 80px;position:relative;background:#0a0a09}
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:120px 32px 80px;position:relative;background:var(--bg)}
 .hero-banner{position:absolute;inset:0;z-index:0;overflow:hidden}
 .hero-banner img,.hero-banner object{width:100%;height:100%;object-fit:cover;opacity:.4}
-.hero-banner::after{content:'';position:absolute;inset:0;background:linear-gradient(to bottom,rgba(10,10,9,.3) 0%,rgba(10,10,9,.1) 40%,rgba(10,10,9,.7) 80%,rgba(10,10,9,1) 100%)}
+.hero-banner::after{content:'';position:absolute;inset:0;background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 30%,transparent) 0%,color-mix(in srgb,var(--bg) 10%,transparent) 40%,color-mix(in srgb,var(--bg) 70%,transparent) 80%,var(--bg) 100%)}
 .hero>*{position:relative;z-index:1}
 .hero-badge{font-family:var(--mono);font-size:11px;color:var(--ac);letter-spacing:.2em;text-transform:uppercase;margin-bottom:32px;display:flex;align-items:center;gap:10px}
-.hero-badge .dot{width:6px;height:6px;background:var(--ac);border-radius:50%;box-shadow:0 0 12px rgba(212,160,89,.6);animation:pulse 2.4s ease-in-out infinite}
+.hero-badge .dot{width:6px;height:6px;background:var(--ac);border-radius:50%;box-shadow:0 0 12px color-mix(in srgb,var(--ac2) 60%,transparent);animation:pulse 2.4s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .hero h1{font-family:var(--display);font-weight:200;font-size:clamp(48px,8vw,96px);line-height:.95;letter-spacing:-.04em;margin-bottom:28px;max-width:900px;font-variation-settings:"opsz" 144}
 .hero h1 em{font-style:italic;font-weight:400;color:var(--ac)}
@@ -104,7 +138,7 @@ section{padding:120px 48px;max-width:1200px;margin:0 auto}
 /* PRIVACY LAYERS */
 .layers{display:grid;grid-template-columns:1fr 1fr;gap:24px}
 .layer-card{background:var(--s1);border:1px solid var(--b);padding:36px;transition:border-color .2s}
-.layer-card:hover{border-color:rgba(212,160,89,.3)}
+.layer-card:hover{border-color:color-mix(in srgb,var(--ac2) 30%,transparent)}
 .layer-num{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;margin-bottom:12px;text-transform:uppercase}
 .layer-card h3{font-family:var(--display);font-size:20px;font-weight:400;margin-bottom:8px}
 .layer-card p{font-size:13px;color:var(--t3);line-height:1.6;margin-bottom:16px}
@@ -118,7 +152,7 @@ section{padding:120px 48px;max-width:1200px;margin:0 auto}
 .compare-table th:first-child{color:var(--t3)}
 .compare-table td{padding:12px 20px;font-size:13px;border-bottom:1px solid var(--b);color:var(--t3);font-weight:300}
 .compare-table td:nth-child(2){color:var(--ac);font-weight:500}
-.compare-table tr:hover td{background:rgba(212,160,89,.02)}
+.compare-table tr:hover td{background:color-mix(in srgb,var(--ac2) 4%,transparent)}
 
 /* LEDGER */
 .ledger{border:1px solid var(--b);background:var(--s1)}
@@ -150,12 +184,12 @@ section{padding:120px 48px;max-width:1200px;margin:0 auto}
 .roadmap-item:last-child{margin-bottom:0}
 .roadmap-item::before{content:'';position:absolute;left:-38px;top:6px;width:10px;height:10px;border-radius:50%;border:2px solid var(--b);background:var(--bg)}
 .roadmap-item.completed::before{background:var(--ac);border-color:var(--ac)}
-.roadmap-item.current::before{background:var(--bg);border-color:var(--ac);box-shadow:0 0 8px rgba(212,160,89,.4)}
+.roadmap-item.current::before{background:var(--bg);border-color:var(--ac);box-shadow:0 0 8px color-mix(in srgb,var(--ac2) 40%,transparent)}
 .roadmap-phase{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;text-transform:uppercase;margin-bottom:4px}
 .roadmap-title{font-family:var(--display);font-size:18px;font-weight:400;margin-bottom:6px}
 .roadmap-desc{font-size:13px;color:var(--t3);line-height:1.6}
 .roadmap-tag{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.08em;padding:3px 10px;margin-top:8px;border:1px solid var(--b);color:var(--t4)}
-.roadmap-tag.done{color:var(--green);border-color:rgba(126,184,124,.3)}
+.roadmap-tag.done{color:var(--green);border-color:color-mix(in srgb,var(--green) 30%,transparent)}
 .roadmap-tag.active{color:var(--ac);border-color:var(--ac-dim)}
 
 /* COMPARE CARDS (mobile only) */
@@ -198,12 +232,12 @@ section{padding:120px 48px;max-width:1200px;margin:0 auto}
 /* CONSTITUTION */
 .const-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}
 .const-card{background:var(--s1);border:1px solid var(--b);padding:28px;transition:border-color .2s}
-.const-card:hover{border-color:rgba(212,160,89,.3)}
+.const-card:hover{border-color:color-mix(in srgb,var(--ac2) 30%,transparent)}
 .const-art{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;text-transform:uppercase;margin-bottom:10px}
 .const-quote{font-family:var(--display);font-style:italic;font-size:15px;color:var(--t2);line-height:1.6}
 
 /* QUICK START */
-.terminal{background:#050504;border:1px solid var(--b);padding:0;font-family:var(--mono);font-size:12px;max-width:700px}
+.terminal{background:var(--terminal-bg);border:1px solid var(--b);padding:0;font-family:var(--mono);font-size:12px;max-width:700px}
 .terminal-bar{background:var(--s1);padding:8px 14px;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:6px}
 .terminal-dot{width:8px;height:8px;border-radius:50%}
 .terminal-body{padding:20px;line-height:2;color:var(--t2);overflow-x:auto}
@@ -257,7 +291,7 @@ footer{border-top:1px solid var(--b);padding:48px}
 @media(max-width:768px){
   nav{padding:0 20px;height:56px}
   .nav-toggle{display:block}
-  .nav-links{display:none;position:fixed;top:56px;left:0;right:0;background:rgba(10,10,9,.97);backdrop-filter:blur(20px);flex-direction:column;padding:24px 20px;gap:0;border-bottom:1px solid var(--b)}
+  .nav-links{display:none;position:fixed;top:56px;left:0;right:0;background:color-mix(in srgb,var(--bg) 97%,transparent);backdrop-filter:blur(20px);flex-direction:column;padding:24px 20px;gap:0;border-bottom:1px solid var(--b)}
   .nav-links.open{display:flex}
   .nav-links a{padding:14px 0;font-size:15px;border-bottom:1px solid var(--b);color:var(--t2)}
   .nav-links a:last-child{border-bottom:none}
@@ -287,14 +321,50 @@ footer{border-top:1px solid var(--b);padding:48px}
   .footer-grid{grid-template-columns:1fr}
   .compare-cards{gap:12px}
   .bounty-grid{grid-template-columns:1fr}
+  .theme-picker{display:none}
 }
+
+/* ─── THEME + WALLPAPER PICKER ──────────────────────────────────────
+   Compact pill in the nav (right of links, left of CTA) that opens a
+   dropdown listing all 9 themes + 12 wallpaper thumbnails. Same UX
+   pattern as the explorer for muscle-memory consistency. */
+.theme-picker{position:relative;display:inline-flex;flex-shrink:0;margin-right:14px}
+.theme-btn{padding:6px 11px;border:1px solid var(--b);border-radius:4px;font-size:11px;font-weight:500;color:var(--t2);cursor:pointer;background:var(--s2);font-family:var(--mono);transition:border-color .15s,color .15s;display:flex;align-items:center;gap:7px;letter-spacing:.04em}
+.theme-btn:hover{border-color:var(--ac2);color:var(--ac2)}
+.theme-btn .theme-dot{width:8px;height:8px;border-radius:50%;border:1px solid var(--b);background:var(--ac2)}
+.theme-menu{display:none;position:absolute;top:calc(100% + 8px);right:0;background:var(--surface);border:1px solid var(--b);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.4);min-width:260px;max-height:70vh;overflow-y:auto;z-index:300;padding:6px;scrollbar-width:thin}
+.theme-picker.open .theme-menu{display:block}
+.theme-opt{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:4px;font-size:12px;font-weight:400;color:var(--t2);cursor:pointer;border:none;background:none;font-family:var(--body);width:100%;text-align:left;transition:background .15s}
+.theme-opt:hover{background:var(--s2);color:var(--t)}
+.theme-opt.active{color:var(--ac2);font-weight:500}
+.theme-opt .t-swatch{width:18px;height:18px;border-radius:3px;border:1px solid color-mix(in srgb,var(--t) 20%,transparent);flex-shrink:0;display:flex;align-items:center;justify-content:center}
+.theme-opt .t-swatch .t-dot{width:6px;height:6px;border-radius:50%}
+.theme-divider{height:1px;background:var(--b);margin:6px 0}
+.theme-section-label{padding:4px 12px 2px;font-size:9px;font-weight:600;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)}
+.wp-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:4px}
+.wp-thumb{aspect-ratio:16/9;border:1px solid var(--b);border-radius:3px;overflow:hidden;cursor:pointer;background:var(--s2);position:relative;padding:0;transition:border-color .15s}
+.wp-thumb:hover{border-color:var(--ac2)}
+.wp-thumb.active{border-color:var(--ac2);box-shadow:0 0 0 1px var(--ac2)}
+.wp-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.wp-off{display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-family:var(--mono);font-size:9px;font-weight:600;color:var(--t3);letter-spacing:.05em}
+
+/* Wallpaper application: sits behind everything via fixed bg-attachment;
+   theme-coloured overlay ::after dims it so foreground text always wins
+   the contrast contest. Nav + footer get a translucent surface tint
+   matching the active theme. */
+body.has-wallpaper{background-size:cover;background-position:center;background-repeat:no-repeat;background-attachment:fixed}
+body.has-wallpaper::after{content:'';position:fixed;inset:0;background:var(--bg);opacity:.65;pointer-events:none;z-index:-1}
+body.has-wallpaper .hero,body.has-wallpaper .hero-banner::after{background:transparent}
+body.has-wallpaper nav{background:color-mix(in srgb,var(--surface) 80%,transparent);backdrop-filter:blur(12px)}
+body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent)}
+.dark body.has-wallpaper::after,html[data-theme="dark"] body.has-wallpaper::after,html[data-theme="midnight"] body.has-wallpaper::after,html[data-theme="forge"] body.has-wallpaper::after,html[data-theme="vault"] body.has-wallpaper::after,html[data-theme="mono"] body.has-wallpaper::after,html[data-theme="contrast"] body.has-wallpaper::after{opacity:.7}
 </style>
 </head>
 <body>
 
 <!-- NAV -->
 <nav>
-  <a href="/" class="nav-logo" aria-label="CoinCync home"><svg viewBox="0 0 200 200" width="28" height="28" aria-label="CoinCync logo" role="img" style="vertical-align:middle;margin-right:10px"><circle cx="100" cy="100" r="78" fill="none" stroke="#d4a059" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="#0a0a09" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="#0a0a09" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="#d4a059"/><circle cx="132" cy="100" r="8" fill="#d4a059"/></svg>Coin<em>Cync</em></a>
+  <a href="/" class="nav-logo" aria-label="CoinCync home"><svg viewBox="0 0 200 200" width="28" height="28" aria-label="CoinCync logo" role="img" style="vertical-align:middle;margin-right:10px"><circle cx="100" cy="100" r="78" fill="none" stroke="var(--ac2)" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="var(--bg)" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="var(--bg)" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="var(--ac2)"/><circle cx="132" cy="100" r="8" fill="var(--ac2)"/></svg>Coin<em>Cync</em></a>
   <button class="nav-toggle" aria-label="Toggle navigation menu" aria-expanded="false"><span class="nav-toggle-bar"></span><span class="nav-toggle-bar"></span><span class="nav-toggle-bar"></span></button>
   <div class="nav-links">
     <a href="#privacy">Privacy</a>
@@ -305,6 +375,39 @@ footer{border-top:1px solid var(--b);padding:48px}
     <a href="https://docs.coincync.network/api/json-rpc.html">Developers</a>
     <a href="https://discord.gg/5tYNSCsqzy" target="_blank">Discord</a>
     <a href="/brand.html">Brand</a>
+    <div class="theme-picker" id="theme-picker">
+      <button class="theme-btn" id="theme-btn" type="button" title="Theme &amp; wallpaper" aria-haspopup="menu" aria-expanded="false">
+        <span class="theme-dot" id="theme-dot"></span>
+        <span id="theme-label">Dark</span>
+      </button>
+      <div class="theme-menu" id="theme-menu" role="menu">
+        <button class="theme-opt" data-theme="paper" type="button"><span class="t-swatch" style="background:#F5F3EE"><span class="t-dot" style="background:#D4A059"></span></span>Paper</button>
+        <button class="theme-opt active" data-theme="dark" type="button"><span class="t-swatch" style="background:#0A0A09"><span class="t-dot" style="background:#D4A059"></span></span>Dark</button>
+        <button class="theme-opt" data-theme="brass" type="button"><span class="t-swatch" style="background:#D4A059"><span class="t-dot" style="background:#3A3328"></span></span>Brass</button>
+        <button class="theme-opt" data-theme="cream" type="button"><span class="t-swatch" style="background:#F5F0E6"><span class="t-dot" style="background:#3A3328"></span></span>Cream</button>
+        <button class="theme-opt" data-theme="midnight" type="button"><span class="t-swatch" style="background:#08090E"><span class="t-dot" style="background:#D4A059"></span></span>Midnight</button>
+        <button class="theme-opt" data-theme="forge" type="button"><span class="t-swatch" style="background:#121010"><span class="t-dot" style="background:#E07840"></span></span>Forge</button>
+        <button class="theme-opt" data-theme="vault" type="button"><span class="t-swatch" style="background:#0A0C0A"><span class="t-dot" style="background:#A0B060"></span></span>Vault</button>
+        <button class="theme-opt" data-theme="mono" type="button"><span class="t-swatch" style="background:#0A0A09"><span class="t-dot" style="background:#F5F0E8"></span></span>Mono</button>
+        <button class="theme-opt" data-theme="contrast" type="button"><span class="t-swatch" style="background:#000000"><span class="t-dot" style="background:#FFB840"></span></span>Contrast</button>
+        <div class="theme-divider"></div>
+        <div class="theme-section-label">Wallpaper</div>
+        <div class="wp-grid" id="wp-grid">
+          <button class="wp-thumb active" data-wp="none" type="button" title="None"><div class="wp-off">OFF</div></button>
+          <button class="wp-thumb" data-wp="01-field" type="button" title="Commitment Field"><img src="/assets/wallpapers/wallpaper-01-commitment-field-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="01-mark" type="button" title="Mark"><img src="/assets/wallpapers/wallpaper-01-mark-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="02-proof" type="button" title="The Proof"><img src="/assets/wallpapers/wallpaper-02-proof-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="02-lockup" type="button" title="Lockup"><img src="/assets/wallpapers/wallpaper-02-lockup-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="03-veil" type="button" title="The Veil"><img src="/assets/wallpapers/wallpaper-03-veil-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="03-reversed" type="button" title="Reversed"><img src="/assets/wallpapers/wallpaper-03-reversed-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="04-formula" type="button" title="The Formula"><img src="/assets/wallpapers/wallpaper-04-formula-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="04-mono" type="button" title="Mono Pair"><img src="/assets/wallpapers/wallpaper-04-mono-pair-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="05-library" type="button" title="The Library"><img src="/assets/wallpapers/wallpaper-05-library-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="05-specimen" type="button" title="Specimen"><img src="/assets/wallpapers/wallpaper-05-specimen-sheet-landscape.svg" alt="" loading="lazy"></button>
+          <button class="wp-thumb" data-wp="06-construct" type="button" title="Construction"><img src="/assets/wallpapers/wallpaper-06-construction-landscape.svg" alt="" loading="lazy"></button>
+        </div>
+      </div>
+    </div>
     <a href="#download" class="nav-cta">Download Wallet</a>
   </div>
 </nav>
@@ -1032,6 +1135,109 @@ footer{border-top:1px solid var(--b);padding:48px}
       }
     }
   }).catch(function(){});
+})();
+
+// ─── THEME + WALLPAPER PICKER ───────────────────────────────────────
+// Same constants and behaviour as the explorer, so user preference
+// carries between coincync.network and explorer.coincync.network on
+// the same origin. Defaults to "dark" (the brand). All UI updates
+// (label, dot, active class) flow through setTheme() so calling it
+// from anywhere keeps the picker in sync.
+(function(){
+  var THEMES=['paper','dark','brass','cream','midnight','forge','vault','mono','contrast'];
+  var DARK_THEMES=['dark','midnight','forge','vault','mono','contrast'];
+  var THEME_LABELS={paper:'Paper',dark:'Dark',brass:'Brass',cream:'Cream',midnight:'Midnight',forge:'Forge',vault:'Vault',mono:'Mono',contrast:'Contrast'};
+  var WALLPAPERS={
+    'none':         {url:null,theme:null,label:'None'},
+    '01-field':     {url:'/assets/wallpapers/wallpaper-01-commitment-field-landscape.svg',theme:'dark',label:'Commitment Field'},
+    '01-mark':      {url:'/assets/wallpapers/wallpaper-01-mark-landscape.svg',theme:'dark',label:'Mark'},
+    '02-proof':     {url:'/assets/wallpapers/wallpaper-02-proof-landscape.svg',theme:'dark',label:'The Proof'},
+    '02-lockup':    {url:'/assets/wallpapers/wallpaper-02-lockup-landscape.svg',theme:'dark',label:'Lockup'},
+    '03-veil':      {url:'/assets/wallpapers/wallpaper-03-veil-landscape.svg',theme:'dark',label:'The Veil'},
+    '03-reversed':  {url:'/assets/wallpapers/wallpaper-03-reversed-landscape.svg',theme:'brass',label:'Reversed'},
+    '04-formula':   {url:'/assets/wallpapers/wallpaper-04-formula-landscape.svg',theme:'dark',label:'The Formula'},
+    '04-mono':      {url:'/assets/wallpapers/wallpaper-04-mono-pair-landscape.svg',theme:'mono',label:'Mono Pair'},
+    '05-library':   {url:'/assets/wallpapers/wallpaper-05-library-landscape.svg',theme:'dark',label:'The Library'},
+    '05-specimen':  {url:'/assets/wallpapers/wallpaper-05-specimen-sheet-landscape.svg',theme:'dark',label:'Specimen'},
+    '06-construct': {url:'/assets/wallpapers/wallpaper-06-construction-landscape.svg',theme:'dark',label:'Construction'}
+  };
+
+  function setTheme(name,keepOpen){
+    if(THEMES.indexOf(name)===-1) name='dark';
+    var el=document.documentElement;
+    el.classList.remove('dark');
+    el.setAttribute('data-theme',name);
+    if(DARK_THEMES.indexOf(name)!==-1) el.classList.add('dark');
+    var label=document.getElementById('theme-label');
+    if(label) label.textContent=THEME_LABELS[name]||name;
+    var btn=document.getElementById('theme-btn');
+    if(btn) btn.setAttribute('aria-expanded','false');
+    document.querySelectorAll('.theme-opt').forEach(function(b){
+      b.classList.toggle('active',b.getAttribute('data-theme')===name);
+    });
+    if(!keepOpen){
+      var picker=document.getElementById('theme-picker');
+      if(picker) picker.classList.remove('open');
+    }
+    try{localStorage.setItem('cync-theme',name);}catch(_){}
+  }
+
+  function setWallpaper(id,userClick){
+    var wp=WALLPAPERS[id];
+    if(!wp) return;
+    var body=document.body;
+    if(id==='none'||!wp.url){
+      body.classList.remove('has-wallpaper');
+      body.style.backgroundImage='';
+      try{localStorage.removeItem('cync-wallpaper');}catch(_){}
+    } else {
+      body.classList.add('has-wallpaper');
+      body.style.backgroundImage='url('+wp.url+')';
+      try{localStorage.setItem('cync-wallpaper',id);}catch(_){}
+      // Only auto-switch theme on an active click (not on page-load
+      // restore — user's chosen theme wins on reload).
+      if(wp.theme && userClick) setTheme(wp.theme,true);
+    }
+    document.querySelectorAll('.wp-thumb').forEach(function(b){
+      b.classList.toggle('active',b.getAttribute('data-wp')===id);
+    });
+  }
+
+  // Wire button handlers (delegating click to data-theme/data-wp attrs).
+  document.querySelectorAll('.theme-opt').forEach(function(b){
+    b.addEventListener('click',function(){setTheme(b.getAttribute('data-theme'));});
+  });
+  document.querySelectorAll('.wp-thumb').forEach(function(b){
+    b.addEventListener('click',function(){setWallpaper(b.getAttribute('data-wp'),true);});
+  });
+  var btn=document.getElementById('theme-btn');
+  if(btn){
+    btn.addEventListener('click',function(e){
+      e.stopPropagation();
+      var picker=document.getElementById('theme-picker');
+      var open=picker.classList.toggle('open');
+      btn.setAttribute('aria-expanded',open?'true':'false');
+    });
+  }
+  // Close on outside click
+  document.addEventListener('click',function(e){
+    var picker=document.getElementById('theme-picker');
+    if(picker && !picker.contains(e.target)){
+      picker.classList.remove('open');
+      if(btn) btn.setAttribute('aria-expanded','false');
+    }
+  });
+
+  // Init from localStorage. Inline head script already applied
+  // data-theme + .dark before paint to prevent flash; here we sync the
+  // picker UI (label, active state) and restore the wallpaper if any.
+  (function init(){
+    var t;try{t=localStorage.getItem('cync-theme');}catch(_){}
+    if(!t||THEMES.indexOf(t)===-1) t='dark';
+    setTheme(t,true);
+    var w;try{w=localStorage.getItem('cync-wallpaper');}catch(_){}
+    if(w && WALLPAPERS[w]) setWallpaper(w);
+  })();
 })();
 </script>
 
