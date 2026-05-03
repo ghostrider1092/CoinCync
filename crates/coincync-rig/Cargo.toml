@@ -1,0 +1,64 @@
+[package]
+name         = "coincync-rig"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+authors      = ["CoinCync 1.0 Contributors"]
+description  = "CoinCync canonical CPU miner — solo + Stratum, RandomX over a blake3-prehashed input."
+license      = "MIT"
+publish      = false
+
+# Canonical CPU miner. Reuses `coincync::consensus::compute_pow_hash` so
+# there's one source of truth for "what is a valid block hash" between
+# miner and validator. Stratum client (Bitcoin-style: subscribe /
+# authorize / submit), per-thread workers with a shared RandomX dataset,
+# TOML config + CLI, benchmark + hash verifier subcommands. Failover
+# pools and a ratatui dashboard are post-launch additions.
+
+[[bin]]
+name = "coincync-rig"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the parent crate's consensus types + hash function so we never
+# drift from the validator. If the validator ever changes the recipe,
+# the miner inherits the change automatically.
+coincync = { path = "../..", default-features = false, features = ["randomx"] }
+
+# Phase 1 — hasher correctness foundation
+blake3 = "1.5"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+# Phase 2 — Stratum client (TCP, JSON-RPC, async runtime)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Phase 4 — Daemon RPC client (HTTP-based JSON-RPC for solo mining).
+# rustls so the bearer token flows over TLS when the operator points at
+# api.coincync.network instead of a localhost daemon.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Block serialization — must use the SAME borsh version as the parent
+# crate or the byte format won't match what the daemon validator
+# decodes. Don't bump this without coordinating with the parent crate.
+borsh = "1"
+
+# Phase 4c — TOML config parsing (run-config subcommand)
+toml = "0.8"
+
+# Phase 4c-5 deps (reserved — uncomment as we need them):
+# ratatui = "0.26"
+# crossterm = "0.27"
+# prometheus = "0.13"
+# rustls = "0.23"
+# tokio-rustls = "0.26"
+
+[dev-dependencies]
+# rand for the correctness test — generate random header inputs to
+# fuzz the hasher against the validator.
+rand = "0.8"
