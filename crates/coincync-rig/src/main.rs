@@ -30,6 +30,7 @@ mod hasher;
 mod metrics;
 mod orchestrator;
 mod stratum;
+mod tui;
 mod worker;
 
 use daemon::DaemonClient;
@@ -104,8 +105,9 @@ enum Command {
 
     /// Solo mining loop: poll a daemon for templates, build the
     /// candidate block (coinbase paying `--address`), search for a
-    /// valid nonce, submit on found, repeat. Multi-thread + auto-
-    /// reconnect supported. Dashboard + failover are Phase 4c/5.
+    /// valid nonce, submit on found, repeat. Multi-thread, auto-
+    /// reconnect, optional Prometheus /metrics endpoint, optional
+    /// ratatui dashboard.
     RunSolo {
         /// Daemon JSON-RPC URL.
         #[arg(long)]
@@ -135,6 +137,12 @@ enum Command {
         /// per scrape, no impact on the mining hot path).
         #[arg(long, default_value = "0")]
         metrics_port: u16,
+        /// Render an interactive ratatui dashboard (stats bar + scrolling
+        /// log pane). Tracing logs are routed into the pane instead of
+        /// stdout while the TUI is up. Press q / Esc to quit. Don't use
+        /// inside systemd units — the TUI needs a real TTY.
+        #[arg(long, default_value_t = false)]
+        tui: bool,
     },
 
     /// Same as `run-solo`, but takes a TOML config file. CLI flags
@@ -164,16 +172,36 @@ impl NetworkArg {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Parse CLI BEFORE installing the tracing subscriber so we can pick
+    // a fmt-to-stdout subscriber (default) vs a TuiLogLayer (--tui) on
+    // the basis of which command was selected. Once a global subscriber
+    // is set, swapping it is not supported, so we have to commit early.
+    let cli = Cli::parse();
+
+    let tui_log_rx: Option<std::sync::mpsc::Receiver<String>> =
+        if matches!(&cli.command, Some(Command::RunSolo { tui: true, .. })) {
+            use tracing_subscriber::layer::SubscriberExt;
+            let (layer, rx) = tui::TuiLogLayer::new();
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            let subscriber = tracing_subscriber::registry()
+                .with(env_filter)
+                .with(layer);
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("setting tracing subscriber failed");
+            Some(rx)
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                )
+                .init();
+            None
+        };
 
     print_banner();
 
-    let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Selftest) {
         Command::Selftest => run_selftest(),
         Command::Verify { anchor, tx_root, height, nonce, target } => {
@@ -181,8 +209,8 @@ fn main() -> Result<()> {
         }
         Command::Bench { threads, duration } => run_bench(threads, duration),
         Command::Info { node, api_key } => run_info(&node, api_key),
-        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port } => {
-            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port)
+        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port, tui } => {
+            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port, tui, tui_log_rx)
         }
         Command::RunConfig { config } => run_config_cli(&config),
     }
@@ -370,6 +398,8 @@ fn run_solo_cli(
     poll_interval_secs: u64,
     threads: usize,
     metrics_port: u16,
+    tui_enabled: bool,
+    tui_log_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
     let n_threads = if threads == 0 {
         std::thread::available_parallelism()
@@ -386,6 +416,12 @@ fn run_solo_cli(
         .enable_all()
         .build()
         .context("creating tokio runtime")?;
+
+    // If --tui is set, the TUI dashboard always wants a MetricsState so
+    // its stats bar has something to read — promote it from "optional
+    // observability surface" to "required when TUI is up".
+    let need_metrics_state = metrics_port != 0 || tui_enabled;
+
     rt.block_on(async {
         let client = DaemonClient::new(node, api_key)?;
         match client.get_info().await {
@@ -400,18 +436,38 @@ fn run_solo_cli(
             }
         }
         println!("mining threads: {n_threads}");
-        let metrics_state = if metrics_port != 0 {
-            let state = metrics::MetricsState::new(n_threads);
-            if let Err(e) = metrics::serve(metrics_port, state.clone()).await {
-                tracing::warn!(error = %e, port = metrics_port,
-                    "metrics: failed to bind /metrics endpoint, continuing without metrics");
-                None
-            } else {
-                Some(state)
-            }
+
+        let metrics_state = if need_metrics_state {
+            Some(metrics::MetricsState::new(n_threads))
         } else {
             None
         };
+        if metrics_port != 0 {
+            if let Some(state) = metrics_state.as_ref() {
+                if let Err(e) = metrics::serve(metrics_port, state.clone()).await {
+                    tracing::warn!(error = %e, port = metrics_port,
+                        "metrics: failed to bind /metrics endpoint, continuing without metrics");
+                }
+            }
+        }
+
+        // If --tui, hand the dashboard the same MetricsState the
+        // orchestrator updates. The dashboard runs on a blocking thread
+        // (raw-mode terminal I/O is sync); when it returns we exit the
+        // process. The orchestrator has no cancel hook — interactive
+        // miners terminate by quitting the TUI.
+        if tui_enabled {
+            let metrics_for_tui = metrics_state.clone()
+                .expect("metrics_state must exist when tui_enabled");
+            let log_rx = tui_log_rx.expect("tui mode set but no log channel");
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = tui::run_dashboard(metrics_for_tui, log_rx) {
+                    eprintln!("tui error: {e}");
+                }
+                std::process::exit(0);
+            });
+        }
+
         orchestrator::run_solo(
             &client,
             address,
@@ -478,6 +534,8 @@ fn run_config_cli(config_path: &str) -> Result<()> {
         network, cfg.mining.poll_interval_secs, cfg.mining.threads
     );
 
+    // run-config never opens a TUI (it's the systemd entry point —
+    // there's no TTY). If you want a TUI, use `run-solo --tui`.
     run_solo_cli(
         &cfg.daemon.node,
         cfg.daemon.api_key,
@@ -486,5 +544,7 @@ fn run_config_cli(config_path: &str) -> Result<()> {
         cfg.mining.poll_interval_secs,
         cfg.mining.threads,
         cfg.mining.metrics_port,
+        false,
+        None,
     )
 }
