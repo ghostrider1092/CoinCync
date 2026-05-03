@@ -34,18 +34,24 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// Message header size in bytes
 pub const HEADER_SIZE: usize = 13; // 4 (magic) + 1 (type) + 4 (length) + 4 (checksum)
 
-/// Connection state for message framing
+/// Connection state for message framing.
+///
+/// All read state lives on this struct (not on local variables in
+/// `read_message_*`) so that a future dropped mid-message — which happens
+/// every iteration of the per-peer `tokio::select!` loop, since outbound
+/// `rx.recv()` cancels the in-flight read — does not lose bytes already
+/// pulled out of the underlying reader.
 pub struct MessageFramer<R, W> {
     reader: BufReader<R>,
     writer: BufWriter<W>,
     magic: [u8; 4],
-    /// Partial header bytes being accumulated
+    /// Partial header bytes being accumulated across (possibly cancelled) reads.
     header_buf: Vec<u8>,
-    /// Partial payload bytes being accumulated
+    /// Partial payload bytes being accumulated across (possibly cancelled) reads.
     payload_buf: Vec<u8>,
     /// Expected payload length (from header)
     expected_len: usize,
-    /// Whether we're reading header or payload
+    /// Whether we're past the header and into payload bytes.
     reading_payload: bool,
 }
 
@@ -179,11 +185,30 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
     /// hard wall, this resets the timer on every chunk received. Large messages
     /// (multi-MB block batches) survive as long as data keeps flowing — but a
     /// stalled peer that stops sending is still caught within `inactivity`.
+    ///
+    /// CANCELLATION SAFETY: This function MUST be cancellation-safe because
+    /// the per-peer connection loop puts it in a `tokio::select!` alongside an
+    /// outbound-message channel. If the future is dropped mid-payload-read,
+    /// any bytes already pulled out of the underlying reader must survive on
+    /// `self` so the next call can resume — otherwise the in-flight bytes are
+    /// silently lost from the duplex/Noise stream and every subsequent header
+    /// parse hits "invalid magic" mid-payload. (Hit on 2026-05-03 during
+    /// fresh-node IBD: the IBD timer fires `rx.recv()` every 500 ms while a
+    /// 535 KB Headers message is still streaming in, cancelling the read and
+    /// dropping ~half a megabyte on the floor each time.)
+    ///
+    /// Concretely: header bytes are accumulated into `self.header_buf` and
+    /// payload bytes into `self.payload_buf`, with `self.reading_payload` and
+    /// `self.expected_len` tracking phase. We only clear those fields on
+    /// successful completion or unrecoverable error — never on a dropped
+    /// future.
     pub async fn read_message_with_inactivity_timeout(
         &mut self, inactivity: Duration,
     ) -> Result<(u8, Vec<u8>)> {
-        // Phase 1: Read HEADER_SIZE bytes with inactivity timeout per chunk
-        while self.header_buf.len() < HEADER_SIZE {
+        // Phase 1: Read HEADER_SIZE bytes with inactivity timeout per chunk.
+        // self.header_buf may already contain partial bytes from a previously
+        // cancelled call — that's the whole point of holding it on `self`.
+        while !self.reading_payload && self.header_buf.len() < HEADER_SIZE {
             let needed = HEADER_SIZE - self.header_buf.len();
             let mut buf = vec![0u8; needed];
             let n = tokio::time::timeout(inactivity, self.reader.read(&mut buf))
@@ -196,37 +221,51 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
             self.header_buf.extend_from_slice(&buf[..n]);
         }
 
-        // Parse header
+        // Parse header (always — header_buf is full whether we got here from
+        // Phase 1 or resumed mid-payload from a prior cancellation).
         let header = self.parse_header()?;
-        if header.magic != self.magic {
-            self.header_buf.clear();
-            return Err(Error::ProtocolError("invalid magic".into()));
-        }
-        if header.length as usize > MAX_MESSAGE_SIZE {
-            self.header_buf.clear();
-            return Err(Error::MessageTooLarge);
-        }
 
-        // SECURITY (H15-FIX): Per-command size limit enforcement
-        if let Ok(msg_type) = crate::network::protocol::MessageType::try_from(header.msg_type) {
-            let type_limit = msg_type.max_size();
-            if header.length as usize > type_limit {
+        // Validate header on the FIRST entry into Phase 2 only.
+        // (On a resumed call where reading_payload is already true, we've
+        // already validated the header on the prior call.)
+        if !self.reading_payload {
+            if header.magic != self.magic {
                 tracing::warn!(
-                    "Message type {:?} exceeds per-type limit: {} > {}",
-                    msg_type, header.length, type_limit
+                    "framing: invalid magic, got_header_buf={} expected_magic={}",
+                    hex::encode(&self.header_buf[..]),
+                    hex::encode(self.magic)
                 );
+                self.header_buf.clear();
+                return Err(Error::ProtocolError("invalid magic".into()));
+            }
+            if header.length as usize > MAX_MESSAGE_SIZE {
                 self.header_buf.clear();
                 return Err(Error::MessageTooLarge);
             }
+
+            // SECURITY (H15-FIX): Per-command size limit enforcement
+            if let Ok(msg_type) = crate::network::protocol::MessageType::try_from(header.msg_type) {
+                let type_limit = msg_type.max_size();
+                if header.length as usize > type_limit {
+                    tracing::warn!(
+                        "Message type {:?} exceeds per-type limit: {} > {}",
+                        msg_type, header.length, type_limit
+                    );
+                    self.header_buf.clear();
+                    return Err(Error::MessageTooLarge);
+                }
+            }
+
+            self.expected_len = header.length as usize;
+            self.reading_payload = true;
+            let initial_cap = std::cmp::min(self.expected_len, 64 * 1024);
+            self.payload_buf = Vec::with_capacity(initial_cap);
         }
 
-        let expected_len = header.length as usize;
-
-        // Phase 2: Read payload with per-chunk inactivity timeout
-        let initial_cap = std::cmp::min(expected_len, 64 * 1024);
-        let mut payload = Vec::with_capacity(initial_cap);
-        while payload.len() < expected_len {
-            let remaining = expected_len - payload.len();
+        // Phase 2: Read payload into self.payload_buf so partial progress
+        // survives a cancellation of this future.
+        while self.payload_buf.len() < self.expected_len {
+            let remaining = self.expected_len - self.payload_buf.len();
             let chunk_size = std::cmp::min(remaining, 65536);
             let mut buf = vec![0u8; chunk_size];
             let n = tokio::time::timeout(inactivity, self.reader.read(&mut buf))
@@ -234,25 +273,28 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
                 .map_err(|_| Error::ConnectionFailed("read stalled (payload)".into()))?
                 .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
             if n == 0 {
+                // Connection closed mid-payload — unrecoverable. Clear state
+                // so the (now-defunct) framer doesn't leak partial buffers.
                 self.header_buf.clear();
+                self.payload_buf.clear();
+                self.reading_payload = false;
+                self.expected_len = 0;
                 return Err(Error::ConnectionFailed("connection closed".into()));
             }
-            payload.extend_from_slice(&buf[..n]);
-            // Timer resets automatically on next loop iteration
+            self.payload_buf.extend_from_slice(&buf[..n]);
         }
 
         // Verify checksum
-        if !header.verify_checksum(&payload) {
+        if !header.verify_checksum(&self.payload_buf) {
             self.header_buf.clear();
+            self.payload_buf.clear();
+            self.reading_payload = false;
+            self.expected_len = 0;
             return Err(Error::InvalidMessage("checksum mismatch".into()));
         }
 
         let msg_type = header.msg_type;
-
-        tracing::trace!(
-            "framer: read complete msg type={} payload={} bytes",
-            msg_type, payload.len()
-        );
+        let payload = std::mem::take(&mut self.payload_buf);
 
         // Reset state for next message
         self.header_buf.clear();
