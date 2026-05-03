@@ -88,7 +88,7 @@ export default function Mining() {
       } catch (e) {
         const msg = String(e);
         if (msg.includes("not found") || msg.includes("program")) {
-          setError("coincync-miner not installed. It should be in the same folder as the wallet app.");
+          setError("coincync-rig not installed. It should be in the same folder as the wallet app.");
         } else {
           setError(msg);
         }

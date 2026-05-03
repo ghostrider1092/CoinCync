@@ -27,19 +27,23 @@ const DEFAULT_P2P_PORT: u16 = 28080;
 const MAX_UNLOCK_ATTEMPTS: u32 = 5;
 const UNLOCK_LOCKOUT_SECS: u64 = 30;
 
+/// Public testnet RPC fallback when the local node is unreachable. nginx on
+/// the API host gates this so unauth'd reads (get_info, etc.) work for new
+/// users who haven't generated a local bearer yet. Override with env.
+const DEFAULT_PUBLIC_RPC_URL: &str = "https://api.coincync.network/rpc/testnet";
+
 fn optional_public_https_rpc() -> Option<String> {
-    let v = std::env::var("COINCYNC_PUBLIC_RPC_URL").ok()?;
-    let t = v.trim().to_string();
-    if t.is_empty() {
-        return None;
-    }
-    if !t.starts_with("https://") {
+    let env_v = std::env::var("COINCYNC_PUBLIC_RPC_URL").ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let v = env_v.unwrap_or_else(|| DEFAULT_PUBLIC_RPC_URL.to_string());
+    if !v.starts_with("https://") {
         tracing::warn!(
-            "COINCYNC_PUBLIC_RPC_URL must start with https:// — ignoring unsafe URL"
+            "Public RPC URL must start with https:// — ignoring unsafe URL"
         );
         return None;
     }
-    Some(t)
+    Some(v)
 }
 
 fn rpc_url_candidates() -> Vec<String> {
@@ -50,11 +54,51 @@ fn rpc_url_candidates() -> Vec<String> {
     urls
 }
 
+fn rpc_key_path() -> Option<PathBuf> {
+    dirs_next::config_dir().map(|d| d.join("coincync").join("rpc.key"))
+}
+
+/// Generate a fresh 64-char hex bearer key, write to $APPDATA/coincync/rpc.key.
+/// Called when the file doesn't exist yet so a first-time user has a working
+/// key without manual setup.
+fn generate_rpc_key() -> Option<String> {
+    use rand::RngCore;
+    let path = rpc_key_path()?;
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("Failed to create rpc.key parent dir: {}", e);
+            return None;
+        }
+    }
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    if let Err(e) = std::fs::write(&path, &hex) {
+        tracing::warn!("Failed to write rpc.key: {}", e);
+        return None;
+    }
+    tracing::info!("Generated new rpc.key at {}", path.display());
+    Some(hex)
+}
+
 fn rpc_bearer_value() -> Option<String> {
-    std::env::var("COINCYNC_RPC_API_KEY")
+    if let Some(v) = std::env::var("COINCYNC_RPC_API_KEY")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty()) {
+        return Some(v);
+    }
+    // Fallback: read from $APPDATA/coincync/rpc.key so users who launch the
+    // wallet from File Explorer (no env var set) can still authenticate.
+    let path = rpc_key_path()?;
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let trimmed = s.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    // First launch — generate one.
+    generate_rpc_key()
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -261,11 +305,18 @@ fn active_node_addr() -> String {
 }
 
 fn wallet_cli(bin: &str, args: &[&str], password: &str) -> Result<String, String> {
-    let output = Command::new(bin)
-        .args(args)
-        .env("COINCYNC_WALLET_PASSWORD", password)
-        .stdout(Stdio::piped()).stderr(Stdio::piped())
-        .output()
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+       .env("COINCYNC_WALLET_PASSWORD", password)
+       .stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Suppress the brief console flash on Windows when GUI parent shells out
+    // to a console binary.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output()
         .map_err(|e| format!("CLI failed: {}", e))?;
     let out = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
@@ -357,9 +408,18 @@ fn start_node(state: &mut AppState) -> Result<(), String> {
     let data = state.data_dir.join("data");
     let _ = std::fs::create_dir_all(&data);
 
+    // Current testnet fleet (post-2026-05-02 redeploy). SFO excluded
+    // (divergent local history); ATL demoted to seed-only.
     let seeds = [
-        "45.55.32.13", "165.245.161.62", "143.110.218.99",
-        "165.245.140.113", "64.227.49.44", "138.68.172.80",
+        "45.55.32.13",     // NYC3 — active miner + landing
+        "138.68.172.80",   // LON — explorer host
+        "143.110.218.99",  // TOR — public API
+        "165.245.161.62",  // RIC — mirror explorer
+        "192.34.59.42",    // NYC1 — mempool
+        "46.101.138.120",  // FRA — mempool
+        "165.245.140.113", // ATL — seed
+        "164.92.153.24",   // AMS — seed
+        "170.64.142.146",  // SYD — relay
     ];
 
     let mut cmd = Command::new(&state.node_bin);
@@ -371,7 +431,22 @@ fn start_node(state: &mut AppState) -> Result<(), String> {
         cmd.arg("--addnode").arg(format!("{}:{}", seed, DEFAULT_P2P_PORT));
     }
 
+    // Pass bearer key so the wallet's own RPC calls (and the spawned TUI
+    // miner) can authenticate to this node.
+    if let Some(key) = rpc_bearer_value() {
+        cmd.env("COINCYNC_RPC_API_KEY", key);
+    }
+
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
+
+    // Run the node hidden — coincync-node is a console binary, so Windows
+    // would otherwise allocate a blank console window when a GUI parent
+    // (the wallet) spawns it. CREATE_NO_WINDOW suppresses that.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
 
     let child = cmd.spawn()
         .map_err(|e| format!("Failed to start node: {}", e))?;
@@ -804,7 +879,7 @@ fn check_binaries(state: tauri::State<'_, State>) -> serde_json::Value {
     let wallet_found = std::path::Path::new(&s.wallet_bin).exists()
         || find_binary("coincync-wallet-cli").is_some()
         || find_binary("coincync-wallet").is_some();
-    let miner_found = std::path::Path::new(&s.miner_bin).exists() || find_binary("coincync-tui-miner").is_some();
+    let miner_found = std::path::Path::new(&s.miner_bin).exists() || find_binary("coincync-rig").is_some();
 
     serde_json::json!({
         "node": node_found,
@@ -820,8 +895,10 @@ fn find_binary(name: &str) -> Option<String> {
     if path.exists() || path.canonicalize().is_ok() { Some(resolved) } else { None }
 }
 
-/// Launch the Mining TUI in its own console window.
-/// The TUI internally spawns coincync-miner and displays a live dashboard.
+/// Launch the coincync-rig solo miner in its own console window.
+/// rig is the canonical retail miner — clean-room implementation, no
+/// donation/telemetry, structured tracing-style log output (the user can
+/// watch hashrate / accepted blocks scroll by in the spawned console).
 #[tauri::command]
 fn start_mining(address: String, threads: u32, state: tauri::State<'_, State>) -> Result<String, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
@@ -830,29 +907,37 @@ fn start_mining(address: String, threads: u32, state: tauri::State<'_, State>) -
         return Err("Invalid address".into());
     }
 
-    let miner_path = resolve_binary("coincync-tui-miner");
+    let miner_path = resolve_binary("coincync-rig");
     let rpc_url = active_node_url(); // http://host:port
 
     let mut cmd = Command::new(&miner_path);
     cmd.args(&[
-        "--testnet",
+        "run-solo",
+        "--node", &rpc_url,
         "--address", &address,
         "--threads", &threads.to_string(),
-        "--rpc", &rpc_url,
+        "--network", "testnet",
     ]);
 
-    // Open the TUI in its own console window so the user sees the dashboard
+    // Propagate the RPC bearer so rig can authenticate to a node that
+    // requires it. coincync-rig reads this env var via clap's env binding
+    // on --api-key — no need to pass it as a CLI arg.
+    if let Some(key) = rpc_bearer_value() {
+        cmd.env("COINCYNC_RPC_API_KEY", key);
+    }
+
+    // Open rig in its own console window so the user sees the live tracing
+    // log (hashrate, accepted blocks, reconnect events). CREATE_NEW_CONSOLE
+    // attaches fresh stdout/stderr handles; do NOT override those with
+    // Stdio::null or the user gets a blank console.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
     }
 
-    // TUI has its own terminal — don't inherit ours
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
-
     let child = cmd.spawn()
-        .map_err(|e| format!("Miner TUI failed: {}", e))?;
+        .map_err(|e| format!("coincync-rig failed: {}", e))?;
 
     s.miner_process = Some(child);
     s.miner_running = true;
@@ -927,10 +1012,12 @@ fn stop_mining(state: tauri::State<'_, State>) -> Result<String, String> {
         let pid = c.id();
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
             let _ = Command::new("taskkill")
                 .args(["/F", "/T", "/PID", &pid.to_string()])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
                 .status();
         }
         #[cfg(not(windows))]
@@ -972,13 +1059,13 @@ fn main() {
 
     let node_bin = resolve_binary("coincync-node");
     let wallet_bin = resolve_wallet_cli_binary();
-    let miner_bin = resolve_binary("coincync-tui-miner");
+    let miner_bin = resolve_binary("coincync-rig");
     let dd = data_dir();
 
     tracing::info!("CoinCync Wallet starting...");
     tracing::info!("  Node binary:   {}", node_bin);
     tracing::info!("  Wallet binary: {}", wallet_bin);
-    tracing::info!("  Miner TUI:     {}", miner_bin);
+    tracing::info!("  Miner:         {}", miner_bin);
     tracing::info!("  Data dir:      {}", dd.display());
 
     let state: State = Arc::new(Mutex::new(AppState {
@@ -1039,6 +1126,18 @@ fn main() {
                 tracing::info!("Shutting down...");
                 if let Ok(mut s) = state_for_shutdown.lock() {
                     clear_session_password(&mut s);
+                    // Stop the spawned local node so it doesn't outlive the
+                    // wallet window. Best-effort; ignore errors on already-dead
+                    // children.
+                    if let Some(mut child) = s.node_process.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        tracing::info!("Stopped spawned local node");
+                    }
+                    if let Some(mut child) = s.miner_process.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
                 }
             }
         })

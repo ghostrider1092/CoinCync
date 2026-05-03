@@ -1,6 +1,7 @@
 /**
- * Copy CoinCync node, wallet CLI, and TUI miner from the repo workspace `target/*/release`
- * into `src-tauri/resources/binaries/` so Tauri bundles them with the desktop installer.
+ * Copy CoinCync node, wallet CLI, and coincync-rig (canonical retail miner)
+ * from the repo workspace target/<triple>/release into
+ * src-tauri/resources/binaries/ so Tauri bundles them with the desktop installer.
  *
  * Env:
  *   COINCYNC_SIDECAR_TARGET — Rust triple (e.g. x86_64-pc-windows-msvc). If unset, uses host `target/release`.
@@ -17,7 +18,7 @@ const releaseDir = triple
   ? path.join(REPO_ROOT, "target", triple, "release")
   : path.join(REPO_ROOT, "target", "release");
 
-const names = ["coincync-node", "coincync-wallet", "coincync-tui-miner"];
+const names = ["coincync-node", "coincync-wallet", "coincync-rig"];
 
 function platformExe(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
@@ -57,7 +58,10 @@ function main() {
         "\n\nBuild them from the repository root first, for example:\n" +
         "  cargo build --release" +
         (triple ? ` --target ${triple}` : "") +
-        " --bin coincync-node --bin coincync-wallet --bin coincync-tui-miner\n"
+        " --bin coincync-node --bin coincync-wallet\n" +
+        "  cargo build --release" +
+        (triple ? ` --target ${triple}` : "") +
+        " -p coincync-rig\n"
     );
     for (const m of missing) console.error("  missing:", m);
     process.exit(1);

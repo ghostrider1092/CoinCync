@@ -26,14 +26,6 @@ name = "coincync-wallet"
 path = "src/bin/wallet.rs"
 
 [[bin]]
-name = "coincync-miner"
-path = "src/bin/miner.rs"
-
-[[bin]]
-name = "coincync-tui-miner"
-path = "src/bin/tui_miner.rs"
-
-[[bin]]
 # Utility for refreshing `critical_files.lock` after an intentional change
 # to a consensus-critical file. See src/bin/update_critical_hashes.rs.
 name = "update-critical-hashes"
@@ -182,7 +174,11 @@ console   = "0.15"
 rustyline = "13"
 strsim    = "0.11"
 
-# ── Terminal UI (tui_miner) ────────────────────────────────────
+# ── Terminal UI (kept as workspace-level shared deps; no
+#    binary in this crate uses them anymore — coincync-rig
+#    has its own, the legacy tui_miner/tui_operator are deleted.
+#    Leaving the entries so any future TUI feature can pick
+#    them up without re-resolving versions.) ──────────────────────
 ratatui   = "0.30"
 crossterm = "0.27"
 

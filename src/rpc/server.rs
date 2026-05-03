@@ -1,9 +1,8 @@
 //! # RPC Server (minimal P0 wiring)
 //!
 //! A minimal JSON-RPC 2.0 server built on jsonrpsee, wired for the P0
-//! running-node milestone. Exposes the methods that `bin/node.rs`,
-//! `bin/miner.rs`, `bin/tui_operator.rs`, and `bin/tui_miner.rs` actually
-//! need:
+//! running-node milestone. Exposes the methods that the node binary,
+//! coincync-rig, and the explorer/wallet HTML UIs need:
 //!
 //! - `get_info` — chain tip height, hash, network, mempool size
 //! - `get_blockchain_info` — alias of `get_info` with more fields
@@ -427,9 +426,9 @@ pub async fn start_rpc_server(
 
     // ── get_info ───────────────────────────────────────────────
     //
-    // Rich node status payload. This is the method both TUIs
-    // (tui_operator, tui_miner) and the block explorer HTML hit
-    // on every poll, so it's the single most important "how is
+    // Rich node status payload. This is the method coincync-rig and
+    // the block explorer HTML hit on every poll, so it's the
+    // single most important "how is
     // my node doing" surface. Every field gets a defined
     // meaning and every "could be unavailable" datum gets an
     // explicit availability flag (see `clock_available`,
@@ -677,8 +676,8 @@ pub async fn start_rpc_server(
 
     // ── get_block_template ────────────────────────────────────
     //
-    // The standalone miner (`src/bin/miner.rs`) polls this to get
-    // the next height, the ASERT-computed target, current mempool
+    // The miner (coincync-rig) polls this to get the next
+    // height, the ASERT-computed target, current mempool
     // txs (fee-ordered), and a fresh timestamp. The miner builds
     // its own coinbase to its configured reward address — we do
     // NOT take the miner's address server-side because the node
@@ -1114,11 +1113,11 @@ pub async fn start_rpc_server(
 
     // ── get_mining_live ───────────────────────────────────────
     //
-    // Live mining state consumed by tui_miner and tui_operator.
-    // The node process itself does NOT mine — mining lives in
-    // `bin/miner.rs` as a separate binary that mines against
-    // block templates fetched from this RPC. So on a plain
-    // node, this method honestly reports `is_mining = false`
+    // Live mining state, polled by external miners. The node
+    // process itself does NOT mine — mining lives in coincync-rig
+    // as a separate binary that polls this RPC for block
+    // templates. So on a plain node, this method honestly
+    // reports `is_mining = false`
     // with zeroed fields. A future in-process miner (or a
     // sidecar that pushes live samples to a shared buffer) can
     // overwrite these values — the shape is fixed so the TUI

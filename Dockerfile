@@ -17,15 +17,14 @@ COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir -p src/bin && \
     echo 'fn main() {}' > src/bin/node.rs && \
     echo 'fn main() {}' > src/bin/wallet.rs && \
-    echo 'fn main() {}' > src/bin/miner.rs && \
     echo 'pub fn main() {}' > src/lib.rs && \
-    cargo build --release --features "miner testnet" 2>/dev/null || true && \
+    cargo build --release --features "testnet" 2>/dev/null || true && \
     rm -rf src/
 
 # Build the real source
 COPY . .
 ARG NETWORK=testnet
-RUN cargo build --release --features "miner ${NETWORK}"
+RUN cargo build --release --features "${NETWORK}"
 
 # ── Stage 2: Runtime ──────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
