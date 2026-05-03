@@ -72,6 +72,7 @@ pub async fn run_solo(
     network: NetworkType,
     poll_interval_secs: u64,
     threads: usize,
+    metrics: Option<std::sync::Arc<crate::metrics::MetricsState>>,
 ) -> Result<()> {
     bind_randomx_genesis_for_network(network);
 
@@ -126,6 +127,10 @@ pub async fn run_solo(
         };
 
         let height = header.height;
+        if let Some(m) = metrics.as_ref() {
+            m.current_template_height
+                .store(height, std::sync::atomic::Ordering::Relaxed);
+        }
         let target = header.target.clone();
         let input = HashInput {
             anchor: header.anchor,
@@ -147,6 +152,11 @@ pub async fn run_solo(
                 let block_hex = hex::encode(&block_bytes);
                 let elapsed = started.elapsed();
                 let hps = total_attempts as f64 / elapsed.as_secs_f64().max(0.001);
+                if let Some(m) = metrics.as_ref() {
+                    m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
+                    m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                    m.blocks_found_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 info!(
                     height,
                     nonce = format!("{:#018x}", n),
@@ -158,9 +168,15 @@ pub async fn run_solo(
                 match daemon.submit_block(&block_hex).await {
                     Ok(_) => {
                         blocks_found = blocks_found.saturating_add(1);
+                        if let Some(m) = metrics.as_ref() {
+                            m.blocks_accepted_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         info!(blocks_found, "orchestrator: block accepted");
                     }
                     Err(e) => {
+                        if let Some(m) = metrics.as_ref() {
+                            m.blocks_rejected_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         warn!(error = %e, "orchestrator: block submit rejected (likely lost race)");
                     }
                 }
@@ -168,6 +184,10 @@ pub async fn run_solo(
             MineResult::Timeout { total_attempts } => {
                 let elapsed = started.elapsed().as_secs_f64();
                 let hps = if elapsed > 0.0 { total_attempts as f64 / elapsed } else { 0.0 };
+                if let Some(m) = metrics.as_ref() {
+                    m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
+                    m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                }
                 info!(
                     height,
                     attempts = total_attempts,

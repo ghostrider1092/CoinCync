@@ -27,6 +27,7 @@ use tracing::info;
 
 mod daemon;
 mod hasher;
+mod metrics;
 mod orchestrator;
 mod stratum;
 mod worker;
@@ -128,6 +129,12 @@ enum Command {
         /// node + nginx still get cycles.
         #[arg(long, default_value = "0")]
         threads: usize,
+        /// If set, expose a Prometheus /metrics endpoint on this TCP
+        /// port. 0 = disabled. Bind is 0.0.0.0:<port> — firewall it if
+        /// you don't want it on the public internet. Cheap (one accept
+        /// per scrape, no impact on the mining hot path).
+        #[arg(long, default_value = "0")]
+        metrics_port: u16,
     },
 
     /// Same as `run-solo`, but takes a TOML config file. CLI flags
@@ -174,8 +181,8 @@ fn main() -> Result<()> {
         }
         Command::Bench { threads, duration } => run_bench(threads, duration),
         Command::Info { node, api_key } => run_info(&node, api_key),
-        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads } => {
-            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads)
+        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port } => {
+            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port)
         }
         Command::RunConfig { config } => run_config_cli(&config),
     }
@@ -362,6 +369,7 @@ fn run_solo_cli(
     network: NetworkArg,
     poll_interval_secs: u64,
     threads: usize,
+    metrics_port: u16,
 ) -> Result<()> {
     let n_threads = if threads == 0 {
         std::thread::available_parallelism()
@@ -371,8 +379,8 @@ fn run_solo_cli(
         threads
     };
     // Multi-thread runtime here (vs current_thread for `info`) because
-    // the orchestrator spawns helper tasks (auto-reconnect, metrics
-    // endpoint in Phase 5).
+    // the orchestrator spawns helper tasks (auto-reconnect + the
+    // Prometheus /metrics accept loop).
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -392,12 +400,25 @@ fn run_solo_cli(
             }
         }
         println!("mining threads: {n_threads}");
+        let metrics_state = if metrics_port != 0 {
+            let state = metrics::MetricsState::new(n_threads);
+            if let Err(e) = metrics::serve(metrics_port, state.clone()).await {
+                tracing::warn!(error = %e, port = metrics_port,
+                    "metrics: failed to bind /metrics endpoint, continuing without metrics");
+                None
+            } else {
+                Some(state)
+            }
+        } else {
+            None
+        };
         orchestrator::run_solo(
             &client,
             address,
             network.into_network_type(),
             poll_interval_secs,
             n_threads,
+            metrics_state,
         )
         .await
     })
@@ -426,6 +447,9 @@ struct MiningSection {
     poll_interval_secs: u64,
     #[serde(default)]
     threads: usize,
+    /// Prometheus /metrics endpoint port. 0 (or unset) = disabled.
+    #[serde(default)]
+    metrics_port: u16,
 }
 
 fn default_network() -> String {
@@ -461,5 +485,6 @@ fn run_config_cli(config_path: &str) -> Result<()> {
         network,
         cfg.mining.poll_interval_secs,
         cfg.mining.threads,
+        cfg.mining.metrics_port,
     )
 }
