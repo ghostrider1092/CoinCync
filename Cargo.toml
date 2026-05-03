@@ -1,5 +1,5 @@
 [workspace]
-members  = [".", "crates/bridge"]
+members  = [".", "crates/bridge", "crates/coincync-rig"]
 # orchard-side removed: depends on yanked orchard v0.12 (Phase 2/3)
 exclude  = ["coincync-wallet/src-tauri"]
 resolver = "2"
@@ -32,10 +32,6 @@ path = "src/bin/miner.rs"
 [[bin]]
 name = "coincync-tui-miner"
 path = "src/bin/tui_miner.rs"
-
-[[bin]]
-name = "coincync-tui-operator"
-path = "src/bin/tui_operator.rs"
 
 [[bin]]
 # Utility for refreshing `critical_files.lock` after an intentional change
@@ -186,7 +182,7 @@ console   = "0.15"
 rustyline = "13"
 strsim    = "0.11"
 
-# ── Terminal UI (tui_miner, tui_operator) ─────────────────────
+# ── Terminal UI (tui_miner) ────────────────────────────────────
 ratatui   = "0.30"
 crossterm = "0.27"
 
