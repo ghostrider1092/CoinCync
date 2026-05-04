@@ -4041,76 +4041,120 @@ function initConstellation(){
   let accent=readAccent();
   let accentRGB=parseAccent(accent);
 
-  // Particle definitions — generated once and recycled. Each particle
-  // owns its angle (stable position around the ring), radius (with
-  // small jitter for organic feel), y offset (vertical scatter), and
-  // a brightness multiplier. The animation loop adds a global rotation
-  // to every particle's angle, so we don't have to rebuild on each
-  // frame.
-  let inner=[];   // peers
-  let outer=[];   // blocks
-  const PEER_MAX=64;
-  const BLOCK_MAX=128;
-  function buildPeerRing(count){
-    const n=Math.min(Math.max(count,1),PEER_MAX);
-    inner=[];
+  // ── MULTI-RING ANONYMITY-SET CONSTELLATION ────────────────────
+  // Four concentric rings, each backed by a distinct privacy primitive.
+  // Particles have a birth/vanish lifecycle so we can animate growth
+  // (new outputs fade in) and consumption (when a transaction lands,
+  // the oldest decoys "puff out" — alpha to 0, scale up briefly, gone).
+  //
+  //   spark    (r=0.7) — Spark commitment accumulator
+  //   shielded (r=1.1) — zero-knowledge shielded note tree
+  //   decoys   (r=1.6) — recent block outputs available as CLSAG decoys
+  //   deep     (r=2.1) — deep-history outputs (older, dimmer)
+  //
+  // Inner rings rotate faster than outer rings, giving the panel a
+  // gear-like depth feel even before the perspective tilt.
+  const RINGS = [
+    { name:'spark',    r:0.7, max:48, spin:1.00, size:2.4, dim:1.00, particles:[] },
+    { name:'shielded', r:1.1, max:80, spin:0.70, size:2.2, dim:0.92, particles:[] },
+    { name:'decoys',   r:1.6, max:96, spin:0.45, size:2.0, dim:0.78, particles:[] },
+    { name:'deep',     r:2.1, max:64, spin:0.25, size:1.7, dim:0.55, particles:[] },
+  ];
+  const BIRTH_MS=700;     // fade-in duration for spawned particles
+  const VANISH_MS=900;    // fade-out duration for consumed particles
+
+  // Spawn `count` new particles in `ring` with born=now so they fade
+  // in. Caps at ring.max so spawn-storms don't overflow the panel.
+  function spawnIn(ring,count){
+    const now=performance.now();
+    const aliveN=ring.particles.filter(p=>!p.vanishAt).length;
+    const slack=ring.max-aliveN;
+    const n=Math.min(count,Math.max(0,slack));
     for(let i=0;i<n;i++){
-      inner.push({
-        ang:(i/n)*Math.PI*2+(Math.random()-0.5)*0.25,
-        r:1.0+(Math.random()-0.5)*0.08,
-        y:(Math.random()-0.5)*0.18,
-        bright:0.75+Math.random()*0.25,
+      ring.particles.push({
+        ang:Math.random()*Math.PI*2,
+        r:ring.r+(Math.random()-0.5)*0.14,
+        y:(Math.random()-0.5)*0.28*(ring.r/0.7),
+        bright:ring.dim*(0.7+Math.random()*0.3),
+        born:now,
+        vanishAt:0,
       });
     }
   }
-  function buildBlockRing(count){
-    const n=Math.min(Math.max(count,1),BLOCK_MAX);
-    outer=[];
-    for(let i=0;i<n;i++){
-      // Age fade: i=0 is the chain tip (newest, brightest). Linear
-      // taper to 25% at the oldest. Visualises chain age around the
-      // outer ring.
-      const ageT=1-(i/Math.max(1,n-1))*0.75;
-      outer.push({
-        ang:(i/n)*Math.PI*2,
-        r:1.7+(Math.random()-0.5)*0.1,
-        y:(Math.random()-0.5)*0.32,
-        bright:ageT,
-      });
+  // Mark the `count` oldest still-alive particles in `ring` for vanish
+  // animation. Older particles get consumed first, mirroring the
+  // statistical intuition that older outputs are likelier to be spent.
+  function vanishIn(ring,count){
+    const alive=ring.particles.filter(p=>!p.vanishAt);
+    if(!alive.length) return;
+    alive.sort((a,b)=>a.born-b.born);
+    const now=performance.now();
+    for(let i=0;i<Math.min(count,alive.length);i++){
+      alive[i].vanishAt=now;
     }
   }
+  function fillRingTo(ring,target){
+    const aliveN=ring.particles.filter(p=>!p.vanishAt).length;
+    if(target>aliveN) spawnIn(ring,target-aliveN);
+    else if(target<aliveN) vanishIn(ring,aliveN-target);
+  }
+
   // ── ANONYMITY-SET DATA SOURCES ────────────────────────────────
-  // Inner ring  = Spark accumulator (one dot per √spark_size, capped 64)
-  //   — Spark is the post-Monero scalable-pool primitive; every entry is
-  //     a commitment that future spends can be cryptographically lost in.
-  // Outer ring  = Shielded note tree (one dot per √shielded_size, capped
-  //   128, age fade by index — newest entries near the chain tip glow
-  //   bright, oldest entries fade) — this is the cumulative shielded
-  //   anonymity pool (zero-knowledge note set).
-  // Sub-linear scaling (√) means small testnet pools still produce
-  // visible rings, while late-mainnet 100k+ pools saturate gracefully
-  // rather than turning the panel into an opaque ball.
-  // If the privacy RPC hasn't returned yet, fall back to peers/blocks
-  // so the panel still has something to render on first paint.
-  function readSparkSize(){
+  // sqrt scaling so small testnet pools render visibly while large
+  // mainnet pools saturate gracefully (sub-linear keeps the panel
+  // readable as the network grows by orders of magnitude). Falls back
+  // to peers/blocks before get_privacy_stats lands.
+  function scaleSqrt(v,mul,cap){
+    if(!v||v<=0) return 0;
+    return Math.min(cap,Math.max(1,Math.round(Math.sqrt(v)*mul)));
+  }
+  function sizeSpark(){
     const v=(window._privStats?.spark_accumulator_size)|0;
-    if(v>0) return Math.min(64,Math.max(1,Math.round(Math.sqrt(v))));
+    if(v>0) return scaleSqrt(v,1.0,RINGS[0].max);
     const t=document.getElementById('s-peers')?.textContent||'';
     const n=parseInt(t,10);
-    return isNaN(n)?0:n;
+    return isNaN(n)?0:Math.min(n,RINGS[0].max);
   }
-  function readShieldedSize(){
+  function sizeShielded(){
     const v=(window._privStats?.shielded_tree_size)|0;
-    if(v>0) return Math.min(128,Math.max(1,Math.round(Math.sqrt(v)*1.4)));
-    if(typeof blockList!=='undefined' && blockList?.length) return blockList.length;
+    if(v>0) return scaleSqrt(v,1.4,RINGS[1].max);
+    if(typeof blockList!=='undefined' && blockList?.length) return Math.min(blockList.length,RINGS[1].max);
     return 0;
   }
-  buildPeerRing(readSparkSize()||8);
-  buildBlockRing(Math.min(readShieldedSize()||32,BLOCK_MAX));
+  function sizeDecoys(){
+    // CLSAG decoy pool — proxied by recent block count × ~16 outputs/block
+    // mapped through sqrt into the ring's particle space.
+    const blocks=(typeof blockList!=='undefined' && blockList?.length)||0;
+    return scaleSqrt(blocks*4,1.0,RINGS[2].max);
+  }
+  function sizeDeep(){
+    // Deep-history pool — log-scaled with chain height so it grows
+    // visibly with each ~10× height bracket without ever saturating.
+    const h=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
+    if(h<=0) return 0;
+    return Math.min(RINGS[3].max,Math.max(1,Math.round(Math.log2(h+2)*4)));
+  }
 
-  // Caption updater — shows the actual numeric sizes under the ring
-  // label so the visual is grounded in real data. Cheap; runs on the
-  // same poll as the data sync below.
+  // Initial seed — born=0 means "already alive, skip the fade-in" so
+  // the panel isn't blank for the first ~700 ms after init.
+  function seedRing(ring,n){
+    for(let i=0;i<n;i++){
+      ring.particles.push({
+        ang:(i/Math.max(1,n))*Math.PI*2+(Math.random()-0.5)*0.2,
+        r:ring.r+(Math.random()-0.5)*0.14,
+        y:(Math.random()-0.5)*0.28*(ring.r/0.7),
+        bright:ring.dim*(0.7+Math.random()*0.3),
+        born:0,
+        vanishAt:0,
+      });
+    }
+  }
+  seedRing(RINGS[0], sizeSpark()||8);
+  seedRing(RINGS[1], sizeShielded()||16);
+  seedRing(RINGS[2], sizeDecoys()||24);
+  seedRing(RINGS[3], sizeDeep()||12);
+
+  // Caption updater — live numeric sizes under the ring label.
   function updateCaption(){
     const lbl=document.getElementById('constellation-label');
     if(!lbl) return;
@@ -4153,40 +4197,51 @@ function initConstellation(){
     if(!fullscreen) spin += 0.004; // ~14°/s clockwise
     const totalSpin=spin+spinOffset;
     const {w,h}=dim;
+    const now=performance.now();
     // Clear with full transparency so body wallpaper / theme bg shows
     // through the panel naturally.
     ctx.clearRect(0,0,w,h);
 
-    // Project every particle, then sort back-to-front so closer dots
-    // overdraw farther ones. ~150 particles max → trivial cost.
-    const all=[];
-    for(const p of inner) all.push({p,kind:0});
-    for(const p of outer) all.push({p,kind:1});
-    const projected=all.map(({p,kind})=>{
-      const a=p.ang+totalSpin*(kind?0.6:1.0); // outer spins slower
-      const x=Math.cos(a)*p.r;
-      const z=Math.sin(a)*p.r;
-      const proj=project(x,p.y,z);
-      return {p,kind,proj};
-    });
-    projected.sort((a,b)=>a.proj.depth-b.proj.depth);
+    // Cull particles whose vanish animation has finished, then project
+    // every alive particle from every ring with its lifecycle modifier.
+    // ~280 particles max across all rings → still trivially cheap.
+    const proj=[];
+    for(const ring of RINGS){
+      ring.particles=ring.particles.filter(p=>!p.vanishAt || (now-p.vanishAt)<VANISH_MS);
+      for(const p of ring.particles){
+        const a=p.ang+totalSpin*ring.spin;
+        const x=Math.cos(a)*p.r;
+        const z=Math.sin(a)*p.r;
+        const pp=project(x,p.y,z);
+        // Lifecycle modulation — alpha + scale animate over BIRTH_MS /
+        // VANISH_MS. Vanishing particles "puff out": scale up while
+        // alpha drops to 0. Newly-born particles grow into existence.
+        let lifeA=1, lifeS=1;
+        if(p.vanishAt){
+          const t=(now-p.vanishAt)/VANISH_MS;
+          lifeA=Math.max(0,1-t);
+          lifeS=1+t*0.7;
+        } else if(p.born){
+          const t=Math.min(1,(now-p.born)/BIRTH_MS);
+          lifeA=t;
+          lifeS=0.4+0.6*t;
+        }
+        proj.push({p,ring,pp,lifeA,lifeS});
+      }
+    }
+    proj.sort((a,b)=>a.pp.depth-b.pp.depth);
 
-    // Render. Each dot is a radial gradient — bright core, soft glow.
-    // Centre coords sit a hair below midline so the perspective tilt
-    // doesn't push the rings toward the bottom edge.
     const cx=w*0.5, cy=h*0.55;
-    const baseUnits=Math.min(w,h)*0.22*zoom; // 1 ring-unit ≈ this many px
+    const baseUnits=Math.min(w,h)*0.20*zoom;
+    const {r,g,b}=accentRGB;
 
-    for(const {p,kind,proj} of projected){
-      const px=cx+proj.x*baseUnits;
-      const py=cy+proj.y*baseUnits;
-      // Dot size shrinks with depth so the back of the ring looks
-      // farther away. Outer particles are slightly smaller than
-      // inner so peers feel "central".
-      const baseR=(kind?2.0:2.6)*proj.scale*zoom*p.bright;
+    for(const {p,ring,pp,lifeA,lifeS} of proj){
+      if(lifeA<=0) continue;
+      const px=cx+pp.x*baseUnits;
+      const py=cy+pp.y*baseUnits;
+      const baseR=ring.size*pp.scale*zoom*p.bright*lifeS;
       const glowR=baseR*4.5;
-      const a=p.bright*(0.6+0.4*proj.scale); // far dots dimmer
-      const {r,g,b}=accentRGB;
+      const a=p.bright*(0.6+0.4*pp.scale)*lifeA;
       const grad=ctx.createRadialGradient(px,py,0,px,py,glowR);
       grad.addColorStop(0,`rgba(${r},${g},${b},${a})`);
       grad.addColorStop(0.35,`rgba(${r},${g},${b},${a*0.45})`);
@@ -4195,7 +4250,6 @@ function initConstellation(){
       ctx.beginPath();
       ctx.arc(px,py,glowR,0,Math.PI*2);
       ctx.fill();
-      // Bright core on top of the glow gradient.
       ctx.fillStyle=`rgba(${Math.min(255,r+40)},${Math.min(255,g+40)},${Math.min(255,b+40)},${Math.min(1,a+0.2)})`;
       ctx.beginPath();
       ctx.arc(px,py,baseR,0,Math.PI*2);
@@ -4218,18 +4272,39 @@ function initConstellation(){
   });
   themeObs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 
-  // Live data sync — every 2.5 s, re-read the anonymity-set sizes
-  // and rebuild rings if the dot count would change. Cheap: only
-  // rebuilds when the visualisation would actually look different.
-  // Caption updates every tick regardless so the numeric counts stay
-  // current even when sub-linear scaling absorbs the change.
-  let lastInnerN=inner.length;
-  let lastOuterN=outer.length;
+  // Live data sync — every 2.5 s. Two kinds of update:
+  //   1. New-block events: when blockList[0].height advances, simulate
+  //      "spent output" churn — vanish a couple particles from the
+  //      decoy + deep rings, then spawn fresh ones in the decoy ring
+  //      (the new block's outputs entering the active decoy pool).
+  //      This is what produces the visible vanish-with-puff animation
+  //      tied to actual chain progress.
+  //   2. Anonymity-set size drift: each ring gradually closes to its
+  //      target population via fillRingTo(), which itself spawns or
+  //      vanishes through the same lifecycle so all transitions are
+  //      smooth.
+  let lastTarget=[sizeSpark(),sizeShielded(),sizeDecoys(),sizeDeep()];
+  let lastTipHeight=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
   const dataPoll=setInterval(()=>{
-    const p=readSparkSize();
-    const b=readShieldedSize();
-    if(p && p!==lastInnerN){ lastInnerN=p; buildPeerRing(p); }
-    if(b && b!==lastOuterN){ lastOuterN=b; buildBlockRing(Math.min(b,BLOCK_MAX)); }
+    const tip=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
+    if(tip && tip!==lastTipHeight){
+      lastTipHeight=tip;
+      // Spent-output churn — 1-2 vanish from decoys, 1 from deep,
+      // then a couple of fresh decoy outputs spawn in. Net effect:
+      // visible "consumption" wave on every block.
+      vanishIn(RINGS[2], 1+Math.floor(Math.random()*2));
+      vanishIn(RINGS[3], 1);
+      spawnIn(RINGS[2], 1+Math.floor(Math.random()*2));
+    }
+    // Drift toward target sizes — covers anonymity-set growth as new
+    // private commitments and shielded notes are added to the pools.
+    const targets=[sizeSpark(),sizeShielded(),sizeDecoys(),sizeDeep()];
+    for(let i=0;i<RINGS.length;i++){
+      if(targets[i] && targets[i]!==lastTarget[i]){
+        lastTarget[i]=targets[i];
+        fillRingTo(RINGS[i], targets[i]);
+      }
+    }
     updateCaption();
   },2500);
 
