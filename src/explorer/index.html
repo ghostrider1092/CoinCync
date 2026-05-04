@@ -128,6 +128,18 @@ nav{background:var(--surface);border-bottom:1px solid var(--b);padding:0 40px;he
 .theme-btn:hover .theme-thumb.swap{animation:theme-icon-spin .42s cubic-bezier(.5,1.6,.4,1)}
 .theme-label{transition:opacity .15s}
 .theme-label.swap{opacity:0}
+/* ─── HOME CONSTELLATION (3D particle ring + wallpaper backdrop) ────
+   A 3D scene rendered into a transparent canvas. The selected wallpaper
+   SVG is rasterised onto a textured plane behind the particle ring; if
+   no wallpaper is selected the plane stays hidden and the page bg
+   shows through (canvas is alpha:true). Particle colour is the active
+   theme's --ac2; both update reactively when the user picks a new
+   theme/wallpaper. */
+.constellation-panel{position:relative;width:100%;height:360px;border:1px solid var(--b);border-radius:0;background:transparent;overflow:hidden;margin:0 0 24px 0}
+.constellation-panel canvas{display:block;width:100%;height:100%}
+.constellation-label{position:absolute;left:14px;bottom:10px;font-family:var(--mono);font-size:10px;color:var(--t3);letter-spacing:.18em;text-transform:uppercase;pointer-events:none;opacity:.85;mix-blend-mode:difference}
+.constellation-label::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ac2);margin-right:8px;vertical-align:middle;box-shadow:0 0 6px color-mix(in srgb,var(--ac2) 80%,transparent);animation:pulse 2.4s ease-in-out infinite}
+@media(max-width:700px){.constellation-panel{height:280px}}
 .theme-menu{display:none;position:absolute;top:calc(100% + 6px);right:0;background:var(--surface);border:1px solid var(--b);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);min-width:260px;max-height:70vh;overflow-y:auto;z-index:300;padding:6px;white-space:nowrap;scrollbar-width:thin}
 .theme-picker.open .theme-menu{display:block}
 .theme-opt{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:var(--r-md);font-size:12px;font-weight:400;color:var(--t2);cursor:pointer;border:none;background:none;font-family:var(--sans);width:100%;text-align:left;transition:background var(--transition-fast)}
@@ -823,6 +835,18 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     </div>
   </div></div>
   <div class="content">
+    <!-- ═══ NETWORK CONSTELLATION ═══ -->
+    <!-- 3D particle ring rendered with three.js (lazy-loaded by
+         ensureNetworkVizDeps). Inner ring + outer ring of glowing dots,
+         slow rotation. The user's chosen wallpaper SVG is textured onto
+         a backdrop plane inside the same scene, so the wallpaper
+         appears as part of the 3D depth (camera moves and the plane
+         parallaxes naturally). Both particle colour and backdrop swap
+         live when the user picks a new theme/wallpaper. -->
+    <div class="constellation-panel" id="constellation-panel">
+      <canvas id="constellation-canvas"></canvas>
+      <div class="constellation-label">Live network constellation</div>
+    </div>
     <!-- ═══ LIVE BLOCK FEED ═══ -->
     <div class="live-feed">
       <div class="live-feed-head">
@@ -1887,6 +1911,18 @@ document.addEventListener('DOMContentLoaded', function() {
   // Restore last visited page
   var savedPage = localStorage.getItem('cync-page');
   if (savedPage && PAGES.includes(savedPage)) go(savedPage);
+  // First-load init for the home-tab constellation. (go() handles
+  // re-navigation to home, but the page-home div starts active so the
+  // routing function is never called on initial paint.) Defer 300 ms so
+  // the rest of the boot sequence — RPC keys, network restore, layout —
+  // finishes before three.js starts allocating GPU buffers.
+  if (!savedPage || savedPage === 'home') {
+    setTimeout(function(){
+      if (typeof initConstellation === 'function') {
+        initConstellation().catch(function(){});
+      }
+    }, 300);
+  }
 });
 // _rpc: internal RPC endpoint for health queries. Never displayed to users.
 // proxy: nginx proxy path (production). _rpc: direct fallback (local dev / offline).
@@ -3927,6 +3963,149 @@ function _schedulePrivacyDemo() {
 }
 
 let _globe=null,_globeDone=false,_globeAuto=true;
+let _constellation=null;
+
+// 3D particle ring on the home tab. Two rings of glowing dots rotating
+// slowly on Z; a textured plane behind them carries whichever wallpaper
+// SVG the user picked. Particle colour reads var(--ac2) so it follows
+// the active theme. Reuses the THREE global that ensureNetworkVizDeps()
+// pulls in for the Globe page.
+async function initConstellation(){
+  if(_constellation) return;
+  const canvas=document.getElementById('constellation-canvas');
+  const wrap=document.getElementById('constellation-panel');
+  if(!canvas||!wrap) return;
+  try{ await ensureNetworkVizDeps(); }catch(_){ return; }
+  if(typeof THREE==='undefined') return;
+
+  const W=Math.max(320,wrap.clientWidth);
+  const H=wrap.clientHeight||360;
+  const scene=new THREE.Scene();
+  const camera=new THREE.PerspectiveCamera(45,W/H,0.1,200);
+  camera.position.set(0,5,15);
+  camera.lookAt(0,0,0);
+  const renderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});
+  renderer.setSize(W,H,false);
+  renderer.setPixelRatio(window.devicePixelRatio||1);
+  renderer.setClearColor(0x000000,0);
+
+  scene.add(new THREE.AmbientLight(0xffffff,0.35));
+  const dir=new THREE.DirectionalLight(0xffffff,0.55);
+  dir.position.set(8,10,8);
+  scene.add(dir);
+  // The point light's colour echoes the accent so particles bloom
+  // toward the user's theme even at extreme camera angles.
+  const accent0=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||'#d4a059';
+  const pointLt=new THREE.PointLight(new THREE.Color(accent0),1.2,40);
+  pointLt.position.set(-10,0,-8);
+  scene.add(pointLt);
+
+  // Backdrop plane — gets the active wallpaper as a texture. Sized
+  // larger than the camera frustum so panning never reveals an edge.
+  const bgGeom=new THREE.PlaneGeometry(28,18);
+  const bgMat=new THREE.MeshBasicMaterial({transparent:true,opacity:0.55,side:THREE.DoubleSide,color:0xffffff});
+  const bgPlane=new THREE.Mesh(bgGeom,bgMat);
+  bgPlane.position.set(0,0,-9);
+  bgPlane.visible=false;
+  scene.add(bgPlane);
+
+  function loadBackdrop(url){
+    if(!url){ bgPlane.visible=false; return; }
+    const loader=new THREE.TextureLoader();
+    loader.load(url,(tex)=>{
+      tex.colorSpace=THREE.SRGBColorSpace||tex.colorSpace;
+      bgMat.map=tex;
+      bgMat.needsUpdate=true;
+      bgPlane.visible=true;
+    },undefined,()=>{ bgPlane.visible=false; });
+  }
+
+  // Particle rings. Inner = denser, smaller radius; outer = wider, sparser.
+  // Random Y depth gives a sense of volume rather than a flat disk.
+  const group=new THREE.Group();
+  const sphereGeom=new THREE.SphereGeometry(0.09,10,10);
+  function makeRing(count,radius,depthVar){
+    const out=[];
+    for(let i=0;i<count;i++){
+      const ang=(i/count)*Math.PI*2+(Math.random()-0.5)*0.5;
+      const r=radius+(Math.random()-0.5)*0.6;
+      const y=(Math.random()-0.5)*depthVar;
+      const x=Math.cos(ang)*r;
+      const z=Math.sin(ang)*r;
+      const tint=Math.random()*0.4+0.6; // 60–100% of accent brightness
+      const c=new THREE.Color(accent0).multiplyScalar(tint);
+      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.55,roughness:0.45});
+      const m=new THREE.Mesh(sphereGeom,mat);
+      m.position.set(x,y,z);
+      group.add(m);
+      out.push(m);
+    }
+    return out;
+  }
+  const inner=makeRing(48,4,0.7);
+  const outer=makeRing(96,7,1.4);
+  scene.add(group);
+
+  // Initial backdrop based on stored wallpaper choice.
+  const wpId0=localStorage.getItem('cync-wallpaper');
+  if(wpId0 && WALLPAPERS && WALLPAPERS[wpId0] && WALLPAPERS[wpId0].url){
+    loadBackdrop(WALLPAPERS[wpId0].url);
+  }
+
+  // React to wallpaper changes — listen via an interval rather than
+  // patching the existing setWallpaper() so we don't need to touch its
+  // call sites. Cheap (one localStorage read every 800 ms).
+  let lastWp=wpId0||null;
+  const wpPoll=setInterval(()=>{
+    const cur=localStorage.getItem('cync-wallpaper')||null;
+    if(cur===lastWp) return;
+    lastWp=cur;
+    if(cur && WALLPAPERS[cur]) loadBackdrop(WALLPAPERS[cur].url);
+    else { bgPlane.visible=false; }
+  },800);
+
+  // React to theme changes — recolour every particle + the point light
+  // to match the new --ac2. Watching the <html> data-theme attr.
+  let lastTheme=document.documentElement.getAttribute('data-theme');
+  const themeObs=new MutationObserver(()=>{
+    const cur=document.documentElement.getAttribute('data-theme');
+    if(cur===lastTheme) return;
+    lastTheme=cur;
+    const accent=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||'#d4a059';
+    pointLt.color.set(accent);
+    [...inner,...outer].forEach(m=>{
+      const tint=Math.random()*0.4+0.6;
+      const c=new THREE.Color(accent).multiplyScalar(tint);
+      m.material.color.copy(c);
+      m.material.emissive.copy(c);
+      m.material.needsUpdate=true;
+    });
+  });
+  themeObs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+
+  // Resize: recompute aspect when the wrapper changes width (theme
+  // switcher dropdown can shift things; ResizeObserver catches all).
+  const ro=new ResizeObserver(()=>{
+    const w=Math.max(320,wrap.clientWidth);
+    const h=wrap.clientHeight||360;
+    renderer.setSize(w,h,false);
+    camera.aspect=w/h;
+    camera.updateProjectionMatrix();
+  });
+  ro.observe(wrap);
+
+  // Animation loop
+  const clock=new THREE.Clock();
+  function frame(){
+    const t=clock.getElapsedTime();
+    group.rotation.z=t*0.06;
+    group.rotation.y=t*0.025;
+    renderer.render(scene,camera);
+    _constellation.raf=requestAnimationFrame(frame);
+  }
+  _constellation={renderer,scene,camera,group,raf:0,wpPoll,themeObs,ro};
+  frame();
+}
 
 function globeGoHealth(){go("health");}
 
@@ -4285,6 +4464,7 @@ function go(id){
   if(id==='mempool'){loadMempool();}else{if(_mpAutoInterval){clearInterval(_mpAutoInterval);_mpAutoInterval=null;const cb=$('mp-auto-sync');if(cb)cb.checked=false;}}
   if(id==='network'){loadPeers();setTimeout(renderHrHistChart,300);}
   if(id==='globe'){setTimeout(()=>{initGlobe().catch(()=>{});},200);}
+  if(id==='home'){setTimeout(()=>{initConstellation().catch(()=>{});},200);}
   if(id==='health'){
     _updateHealthProbeMeta();
     loadHealth();
