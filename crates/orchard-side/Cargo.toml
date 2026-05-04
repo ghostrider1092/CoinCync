@@ -19,8 +19,18 @@ path = "src/lib.rs"
 orchard    = "0.12"
 rand       = "0.8"
 thiserror  = "1"
+zeroize    = { version = "1", features = ["derive"] }
 bridge     = { path = "../bridge" }
 
 [lints.rust]
 unsafe_code  = "forbid"
 missing_docs = "allow"
+
+# Isolation marker: this crate must NOT be a member of the parent
+# workspace (`/Cargo.toml`). The whole point of orchard-side is to
+# keep `orchard` (and its `pasta_curves`/`halo2` transitive graph)
+# off the main crate's build path so the tari↔orchard trait-solver
+# conflict described at the top of `src/lib.rs` doesn't poison the
+# default build. The empty `[workspace]` table below tells cargo
+# this directory is its own workspace root.
+[workspace]

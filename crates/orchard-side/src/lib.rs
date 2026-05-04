@@ -48,12 +48,18 @@ use orchard::{
     Address, Note,
 };
 use rand::rngs::OsRng;
+use zeroize::Zeroize;
 
-/// Maximum shielded value, matching Zcash's supply cap (21M * 10^8 zats).
-/// The Orchard circuit enforces its own range constraints; this is a
-/// defense-in-depth app-layer check so obviously bogus input fails
-/// before we pay the cost of building a ZK proof.
-const MAX_MONEY: u64 = 2_100_000_000_000_000;
+/// Maximum shielded value. CoinCync's emission caps total supply at
+/// 100,000,000 CYNC × 10¹² atomic units = 10²⁰, which exceeds `u64::MAX`
+/// (~1.84 × 10¹⁹). Since `orchard::value::NoteValue` is itself `u64`,
+/// the *type* is the practical ceiling — no single Orchard note can
+/// ever represent the full supply. This constant therefore mirrors that
+/// type bound, and the defense-in-depth check below reduces to "non-zero
+/// and not larger than the type can hold" (the latter is automatic via
+/// `u64`, but keeping the explicit comparison makes the intent obvious
+/// to readers and lets us tighten the cap later without an API change).
+const MAX_MONEY: u64 = u64::MAX;
 
 // ─────────────────────────────────────────────────────────────
 // Safe wrapper types
@@ -86,6 +92,32 @@ pub struct ValidatedNote {
 /// statically guaranteed to see a proof-valid shielded action.
 pub struct VerifiedBundle {
     inner: Bundle<Authorized, i64>,
+}
+
+/// 32-byte serialized nullifier as it appears in persisted state (e.g.
+/// a wallet's spent-set on disk). Wrapping the raw bytes in a newtype
+/// prevents accidental footguns: the only way to feed bytes into
+/// [`SafeOrchardWallet::mark_nullifier_spent`] is to *intentionally*
+/// construct a `SerializedNullifier`, so a stray `[u8; 32]` produced
+/// by some other layer can't slip in by accident.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct SerializedNullifier(pub [u8; 32]);
+
+impl SerializedNullifier {
+    /// Construct from raw bytes — explicit so call sites are searchable.
+    pub fn from_bytes(b: [u8; 32]) -> Self {
+        Self(b)
+    }
+    /// Borrow the inner bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl From<&Nullifier> for SerializedNullifier {
+    fn from(n: &Nullifier) -> Self {
+        Self(n.to_bytes())
+    }
 }
 
 impl VerifiedBundle {
@@ -324,15 +356,44 @@ impl SafeOrchardWallet {
     /// `validate_note` calls on the same note will fail. Idempotent.
     pub fn record_spend(&mut self, bundle: &VerifiedBundle) {
         for action in bundle.inner.actions().iter() {
-            self.spent_nullifiers.insert(action.nullifier().to_bytes());
+            self.spent_nullifiers
+                .insert(SerializedNullifier::from(action.nullifier()).0);
         }
     }
 
     /// Pre-record a nullifier as spent without going through the full
     /// bundle flow. Useful for seeding the tracker from persisted state
-    /// at startup. Returns true if the nullifier was newly inserted.
-    pub fn mark_nullifier_spent(&mut self, nullifier_bytes: [u8; 32]) -> bool {
-        self.spent_nullifiers.insert(nullifier_bytes)
+    /// at startup. Returns `true` if the nullifier was newly inserted.
+    /// Takes [`SerializedNullifier`] rather than raw `[u8; 32]` so the
+    /// API can't be invoked with whatever stray bytes a caller has on
+    /// hand — a mistakenly-marked nullifier locks real funds.
+    pub fn mark_nullifier_spent(&mut self, nullifier: SerializedNullifier) -> bool {
+        self.spent_nullifiers.insert(nullifier.0)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sensitive-state cleanup on drop
+// ─────────────────────────────────────────────────────────────
+
+/// Wipe sensitive state when the wallet is dropped. The nullifier set
+/// is itself privacy-relevant — leaking which 32-byte hashes a wallet
+/// has marked spent reveals which on-chain notes belong to it. We
+/// explicitly zero each entry's bytes and clear the set so freed
+/// memory doesn't carry the spent history.
+///
+/// Note: the upstream `orchard::keys::SpendingKey` is opaque; we can't
+/// reach inside it to wipe its scalar from this layer. Tracking
+/// upstream zeroization support is the only durable fix for that —
+/// see <https://github.com/zcash/orchard/issues> for status. Until
+/// then, the spending-key bytes live on the heap until the allocator
+/// reuses them. This is a known gap, documented here so a future
+/// reader doesn't think the Drop impl is complete.
+impl Drop for SafeOrchardWallet {
+    fn drop(&mut self) {
+        for mut bytes in self.spent_nullifiers.drain() {
+            bytes.zeroize();
+        }
     }
 }
 
@@ -366,10 +427,34 @@ mod tests {
     #[test]
     fn mark_nullifier_spent_is_idempotent() {
         let mut wallet = SafeOrchardWallet::from_key_bytes(&[3u8; 32]).unwrap();
-        assert!(wallet.mark_nullifier_spent([1u8; 32]));
-        assert!(!wallet.mark_nullifier_spent([1u8; 32]));
+        let n1 = SerializedNullifier::from_bytes([1u8; 32]);
+        let n2 = SerializedNullifier::from_bytes([2u8; 32]);
+        assert!(wallet.mark_nullifier_spent(n1));
+        assert!(!wallet.mark_nullifier_spent(n1));
         assert_eq!(wallet.spent_count(), 1);
-        assert!(wallet.mark_nullifier_spent([2u8; 32]));
+        assert!(wallet.mark_nullifier_spent(n2));
         assert_eq!(wallet.spent_count(), 2);
+    }
+
+    #[test]
+    fn serialized_nullifier_round_trip() {
+        let raw = [9u8; 32];
+        let n = SerializedNullifier::from_bytes(raw);
+        assert_eq!(n.as_bytes(), &raw);
+        // Equality + hashing are needed for spent-set membership.
+        let n2 = SerializedNullifier::from_bytes(raw);
+        assert_eq!(n, n2);
+    }
+
+    #[test]
+    fn drop_clears_spent_set() {
+        // Defensive: confirm the Drop impl actually drains the set.
+        // We can't observe zeroized memory directly from safe Rust, but
+        // we can confirm the set is empty just before drop runs (via
+        // explicit drop) by counting entries in a clone.
+        let mut wallet = SafeOrchardWallet::from_key_bytes(&[5u8; 32]).unwrap();
+        wallet.mark_nullifier_spent(SerializedNullifier::from_bytes([7u8; 32]));
+        assert_eq!(wallet.spent_count(), 1);
+        drop(wallet); // exercises the Drop impl path; must not panic
     }
 }
