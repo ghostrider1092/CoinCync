@@ -15,16 +15,30 @@
 //! The only consumer cost is one TCP accept per scrape. Default Prometheus
 //! scrape is 15s, so this is essentially free.
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+/// How many recent hashrate samples to keep for the TUI sparkline. One
+/// sample per second of mining = 60s of trend visible.
+pub const HASHRATE_RING_SIZE: usize = 60;
+
+/// How many recent block-found timestamps (Unix seconds) to keep for the
+/// TUI's 24-hour timeline strip. 24h × 3600s with a typical ~15-block-
+/// per-hour testnet rate is ~360 entries; 512 is a comfortable upper
+/// bound.
+pub const BLOCK_FINDS_RING_SIZE: usize = 512;
+
 /// Atomic counters/gauges shared between the orchestrator (writer) and
-/// the metrics HTTP server (reader). Cheap to clone (one Arc bump).
+/// the metrics HTTP server / TUI (readers). Cheap to clone (one Arc
+/// bump). Lock-protected fields are only the small VecDeques the TUI
+/// reads — the hot path stays atomic-only.
 pub struct MetricsState {
     pub started_unix_seconds: u64,
     pub hashes_total: AtomicU64,
@@ -36,6 +50,29 @@ pub struct MetricsState {
     /// it fits in an atomic. Updated on every iteration end.
     pub current_hashrate_hps: AtomicU64,
     pub threads: AtomicU64,
+
+    // ── TUI-facing live state ─────────────────────────────────────
+    /// Last-observed connected-node tip age in seconds. Used by the
+    /// TUI's stale-chain warning banner. 0 means "never sampled".
+    pub tip_age_secs: AtomicU64,
+    /// Last-observed daemon RPC roundtrip in milliseconds. Drives the
+    /// connection-quality dot in the header.
+    pub rpc_latency_ms: AtomicU64,
+    /// Total network hashrate as reported by the daemon's `get_info`.
+    /// 0 means "not yet observed" — the TUI suppresses the share % stat
+    /// until this is non-zero.
+    pub network_hashrate_hps: AtomicU64,
+    /// Operator-toggled pause flag. When `true`, the orchestrator sleeps
+    /// instead of fetching a new template — visible to the user as a
+    /// frozen hashrate + "PAUSED" status pill in the header.
+    pub paused: AtomicBool,
+    /// Most recent hashrate samples (one per second) for the sparkline.
+    /// Mutex is uncontested 99% of the time — TUI reads at ~4 fps,
+    /// orchestrator pushes at 1 Hz.
+    pub hashrate_ring: Mutex<VecDeque<u64>>,
+    /// Unix-seconds timestamps of recent block accepts for the 24-hour
+    /// timeline strip.
+    pub block_finds: Mutex<VecDeque<u64>>,
 }
 
 impl MetricsState {
@@ -53,7 +90,54 @@ impl MetricsState {
             current_template_height: AtomicU64::new(0),
             current_hashrate_hps: AtomicU64::new(0),
             threads: AtomicU64::new(threads as u64),
+            tip_age_secs: AtomicU64::new(0),
+            rpc_latency_ms: AtomicU64::new(0),
+            network_hashrate_hps: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
+            hashrate_ring: Mutex::new(VecDeque::with_capacity(HASHRATE_RING_SIZE)),
+            block_finds: Mutex::new(VecDeque::with_capacity(BLOCK_FINDS_RING_SIZE)),
         })
+    }
+
+    /// Push a hashrate sample into the sparkline ring, evicting the
+    /// oldest if we're at capacity. Cheap; called once per second by
+    /// the orchestrator (or whoever owns the sample cadence).
+    pub fn record_hashrate_sample(&self, hps: u64) {
+        if let Ok(mut ring) = self.hashrate_ring.lock() {
+            if ring.len() >= HASHRATE_RING_SIZE {
+                ring.pop_front();
+            }
+            ring.push_back(hps);
+        }
+    }
+
+    /// Record a successful block-find timestamp for the 24h timeline.
+    pub fn record_block_find(&self, unix_secs: u64) {
+        if let Ok(mut ring) = self.block_finds.lock() {
+            if ring.len() >= BLOCK_FINDS_RING_SIZE {
+                ring.pop_front();
+            }
+            ring.push_back(unix_secs);
+        }
+    }
+
+    /// Snapshot of the hashrate ring for the TUI sparkline. Returns a
+    /// fresh `Vec<u64>` so the TUI doesn't hold the mutex across its
+    /// render frame.
+    pub fn hashrate_samples(&self) -> Vec<u64> {
+        self.hashrate_ring
+            .lock()
+            .map(|r| r.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot of recent block-find timestamps within the last 24h.
+    pub fn recent_block_finds(&self, now_unix: u64) -> Vec<u64> {
+        let cutoff = now_unix.saturating_sub(24 * 3600);
+        self.block_finds
+            .lock()
+            .map(|r| r.iter().copied().filter(|&t| t >= cutoff).collect())
+            .unwrap_or_default()
     }
 
     /// Render the Prometheus text-format body for the current state.

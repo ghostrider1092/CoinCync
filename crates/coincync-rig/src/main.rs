@@ -31,6 +31,8 @@ mod metrics;
 mod orchestrator;
 mod stratum;
 mod tui;
+mod tui_blockfont;
+mod tui_theme;
 mod worker;
 
 use daemon::DaemonClient;

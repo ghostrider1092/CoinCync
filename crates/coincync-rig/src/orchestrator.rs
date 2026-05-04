@@ -91,11 +91,64 @@ pub async fn run_solo(
         "orchestrator: solo mining loop starting"
     );
 
+    let mut last_get_info: Option<Instant> = None;
+
     loop {
+        // 0. Honor TUI-driven pause flag — don't poll the daemon, don't
+        // mine. Wake every 250 ms to re-check (cheap, never hits the
+        // hot path).
+        if let Some(m) = metrics.as_ref() {
+            if m.paused.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        }
+
+        // 0.5. Periodic get_info to populate the TUI's tip-age + network
+        // hashrate stats. Runs every ~10s, asynchronously to the mining
+        // loop (we don't gate on its result). Latency of this call also
+        // doubles as our RPC-quality reading.
+        if let Some(m) = metrics.as_ref() {
+            let due = match last_get_info {
+                None => true,
+                Some(t) => t.elapsed() >= Duration::from_secs(10),
+            };
+            if due {
+                let started = Instant::now();
+                if let Ok(info) = daemon.get_info().await {
+                    let latency_ms = started.elapsed().as_millis() as u64;
+                    m.rpc_latency_ms
+                        .store(latency_ms, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(age) = info.get("tip_age_secs").and_then(|v| v.as_u64()) {
+                        m.tip_age_secs.store(age, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    // Network hashrate may show up under different keys
+                    // depending on daemon version — try both.
+                    let net = info
+                        .get("network_hashrate")
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| info.get("hashrate_hps").and_then(|v| v.as_u64()))
+                        .unwrap_or(0);
+                    if net > 0 {
+                        m.network_hashrate_hps
+                            .store(net, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                last_get_info = Some(Instant::now());
+            }
+        }
+
         // 1. Get current template (with backoff on failure)
+        let rpc_started = Instant::now();
         let template = match daemon.get_block_template().await {
             Ok(t) => {
                 backoff.reset();
+                if let Some(m) = metrics.as_ref() {
+                    m.rpc_latency_ms.store(
+                        rpc_started.elapsed().as_millis() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
                 t
             }
             Err(e) => {
@@ -155,6 +208,7 @@ pub async fn run_solo(
                 if let Some(m) = metrics.as_ref() {
                     m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
                     m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                    m.record_hashrate_sample(hps as u64);
                     m.blocks_found_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 info!(
@@ -170,6 +224,13 @@ pub async fn run_solo(
                         blocks_found = blocks_found.saturating_add(1);
                         if let Some(m) = metrics.as_ref() {
                             m.blocks_accepted_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // Record the find timestamp for the TUI's
+                            // 24h timeline strip + ETA-since-last anchor.
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            m.record_block_find(now);
                         }
                         info!(blocks_found, "orchestrator: block accepted");
                     }
@@ -187,6 +248,7 @@ pub async fn run_solo(
                 if let Some(m) = metrics.as_ref() {
                     m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
                     m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                    m.record_hashrate_sample(hps as u64);
                 }
                 info!(
                     height,
