@@ -4016,11 +4016,13 @@ async function initConstellation(){
   scene.add(pointLt);
 
   // Backdrop plane — gets the active wallpaper as a texture. Sized
-  // larger than the camera frustum so panning never reveals an edge.
-  const bgGeom=new THREE.PlaneGeometry(28,18);
-  const bgMat=new THREE.MeshBasicMaterial({transparent:true,opacity:0.55,side:THREE.DoubleSide,color:0xffffff});
+  // larger than the camera frustum so panning never reveals an edge,
+  // pushed deeper into Z so the particles dominate the foreground, and
+  // dimmed enough that gold particles read clearly against gold marks.
+  const bgGeom=new THREE.PlaneGeometry(22,14);
+  const bgMat=new THREE.MeshBasicMaterial({transparent:true,opacity:0.32,side:THREE.DoubleSide,color:0xffffff});
   const bgPlane=new THREE.Mesh(bgGeom,bgMat);
-  bgPlane.position.set(0,0,-9);
+  bgPlane.position.set(0,0,-14);
   bgPlane.visible=false;
   scene.add(bgPlane);
 
@@ -4042,7 +4044,10 @@ async function initConstellation(){
   // Counts are clamped to sensible visual maxes so a 500-peer node
   // doesn't turn the panel into an opaque ball.
   const group=new THREE.Group();
-  const sphereGeom=new THREE.SphereGeometry(0.09,10,10);
+  // Sphere geometry sized so individual particles read clearly against
+  // a wallpaper-textured backdrop. ~0.18 units = ~14 px on a 720-wide
+  // panel at the resting camera distance.
+  const sphereGeom=new THREE.SphereGeometry(0.16,12,12);
   let inner=[];
   let outer=[];
   const PEER_MAX=64;
@@ -4061,7 +4066,7 @@ async function initConstellation(){
       const y=(Math.random()-0.5)*0.7;
       const tint=Math.random()*0.3+0.7;
       const c=new THREE.Color(accent).multiplyScalar(tint);
-      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.6,roughness:0.4});
+      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.95,roughness:0.4});
       const m=new THREE.Mesh(sphereGeom,mat);
       m.position.set(Math.cos(ang)*r,y,Math.sin(ang)*r);
       group.add(m); inner.push(m);
@@ -4079,7 +4084,7 @@ async function initConstellation(){
       // 25% brightness at i=n-1. Visualises chain age around the ring.
       const ageT=1-(i/Math.max(1,n-1))*0.75;
       const c=new THREE.Color(accent).multiplyScalar(ageT);
-      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.5,roughness:0.45});
+      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.85,roughness:0.45});
       const m=new THREE.Mesh(sphereGeom,mat);
       m.position.set(Math.cos(ang)*r,y,Math.sin(ang)*r);
       group.add(m); outer.push(m);
