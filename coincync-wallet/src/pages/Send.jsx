@@ -1,7 +1,42 @@
-import { useState, useEffect, useContext } from "react";
+import { useState, useEffect, useContext, useRef } from "react";
 import { useTheme, Card, Badge, Btn, Lbl, Input, Ico, CoinLogo, ICONS } from "../components/ui";
 import { rpc } from "../utils/rpc";
 import { WalletCtx, NotifCtx } from "../appContexts";
+
+// Encrypt-style text scramble. Activated while `active` is true; each
+// character settles back to the target glyph progressively over
+// ~durationMs. Used on the Confirm Send button as a visual cue that the
+// transaction is being encrypted (CLSAG signed, Pedersen committed,
+// Bulletproofs+ wrapped) at the moment of the click — not just decoration,
+// it lines up with the actual delay before the RPC fires.
+const SCRAMBLE_CHARS = "!@#$%^&*():{};|,.<>/?";
+function useScrambledText(target, active, durationMs = 600) {
+  const [text, setText] = useState(target);
+  const intRef = useRef(null);
+  useEffect(() => {
+    if (intRef.current) { clearInterval(intRef.current); intRef.current = null; }
+    if (!active) { setText(target); return; }
+    const interval = 50;
+    const cyclesPerChar = 2;
+    let pos = 0;
+    intRef.current = setInterval(() => {
+      const out = target.split("").map((c, i) => {
+        if (pos / cyclesPerChar > i) return c;
+        return SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
+      }).join("");
+      setText(out);
+      pos++;
+      if (pos >= target.length * cyclesPerChar) {
+        clearInterval(intRef.current); intRef.current = null;
+        setText(target);
+      }
+    }, interval);
+    return () => {
+      if (intRef.current) { clearInterval(intRef.current); intRef.current = null; }
+    };
+  }, [active, target, durationMs]);
+  return text;
+}
 
 export default function Send() {
   const T = useTheme();
@@ -30,6 +65,21 @@ export default function Send() {
   }, [addr]);
 
   const [confirming, setConfirming] = useState(false);
+  const [scrambling, setScrambling] = useState(false);
+  const confirmText = useScrambledText("Confirm Send", scrambling, 600);
+
+  // Wraps confirmSend with a 600 ms button-text scramble before the RPC
+  // fires. Reads as "encrypting transaction now" — and the timing happens
+  // to line up with the round-trip to the daemon, so by the time the
+  // scramble settles the send is already on its way out.
+  function handleConfirmClick() {
+    if (scrambling || sending) return;
+    setScrambling(true);
+    setTimeout(() => {
+      setScrambling(false);
+      confirmSend();
+    }, 600);
+  }
 
   const feeMap = { slow:fees.slow, normal:fees.normal, fast:fees.fast, flash:fees.flash };
   const fee  = feeMap[priority] || "0.000005984000";
@@ -204,7 +254,7 @@ export default function Send() {
                 </div>
                 <div style={{ display:"flex", gap:8 }}>
                   <Btn variant="ghost" full onClick={()=>setConfirming(false)}>Cancel</Btn>
-                  <Btn full onClick={confirmSend}>Confirm Send</Btn>
+                  <Btn full onClick={handleConfirmClick} disabled={scrambling||sending}>{confirmText}</Btn>
                 </div>
               </Card>
             </div>
