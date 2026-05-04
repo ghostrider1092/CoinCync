@@ -3990,11 +3990,26 @@ async function initConstellation(){
   const canvas=document.getElementById('constellation-canvas');
   const wrap=document.getElementById('constellation-panel');
   if(!canvas||!wrap) return;
-  try{ await ensureNetworkVizDeps(); }catch(_){ return; }
-  if(typeof THREE==='undefined') return;
+  // Diagnostic overlay — visible without DevTools so we can see at a
+  // glance whether init progressed past each stage. Cleared on first
+  // successful render.
+  let diag=document.getElementById('constellation-diag');
+  if(!diag){
+    diag=document.createElement('div');
+    diag.id='constellation-diag';
+    diag.style.cssText='position:absolute;top:10px;left:14px;z-index:11;font-family:var(--mono);font-size:10px;color:#fff;background:rgba(0,0,0,.6);padding:4px 8px;border-radius:3px;letter-spacing:.05em;pointer-events:none;line-height:1.5';
+    diag.textContent='init…';
+    wrap.appendChild(diag);
+  }
+  const setDiag=(msg)=>{ if(diag) diag.textContent=msg; console.info('[const]',msg); };
+  setDiag('loading three.js…');
+  try{ await ensureNetworkVizDeps(); }catch(e){ setDiag('dep load FAILED: '+(e?.message||e)); return; }
+  if(typeof THREE==='undefined'){ setDiag('THREE undefined after dep load'); return; }
+  setDiag('THREE ok, sizing…');
 
   const W=Math.max(320,wrap.clientWidth);
   const H=wrap.clientHeight||360;
+  setDiag('canvas '+W+'x'+H+' — building scene');
   const scene=new THREE.Scene();
   const camera=new THREE.PerspectiveCamera(45,W/H,0.1,200);
   camera.position.set(0,5,15);
@@ -4255,8 +4270,12 @@ async function initConstellation(){
   document.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && fullscreen) setFullscreen(false); });
 
   // Animation loop. Auto-rotation pauses while the user is in
-  // fullscreen so manual orbit doesn't fight it.
+  // fullscreen so manual orbit doesn't fight it. Diag overlay clears
+  // after the 10th rendered frame so it doesn't sit on top of the
+  // finished scene; if init silently failed, it stays put with the
+  // last failure stage so the user can read it.
   const clock=new THREE.Clock();
+  let frameCount=0;
   function frame(){
     const t=clock.getElapsedTime();
     if(!fullscreen){
@@ -4264,9 +4283,14 @@ async function initConstellation(){
       group.rotation.y=t*0.025;
     }
     renderer.render(scene,camera);
+    if(++frameCount===10){
+      setDiag('OK — '+inner.length+' peers + '+outer.length+' blocks');
+      setTimeout(()=>{ const d=document.getElementById('constellation-diag'); if(d) d.remove(); },2500);
+    }
     _constellation.raf=requestAnimationFrame(frame);
   }
   _constellation={renderer,scene,camera,group,raf:0,wpPoll,themeObs,ro,dataPoll};
+  setDiag('rings built — peers='+inner.length+' blocks='+outer.length);
   frame();
 }
 
