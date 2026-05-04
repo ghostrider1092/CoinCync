@@ -80,6 +80,29 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:color-mix(in srgb
 .nav-links{display:flex;gap:32px;align-items:center}
 .nav-links a{font-size:13px;color:var(--t3);text-decoration:none;font-weight:400;transition:color .15s;letter-spacing:.02em}
 .nav-links a:hover{color:var(--ac)}
+
+/* ─── NAV FLYOUT (.nav-flyout) ──────────────────────────────────────
+   Single flyout in the nav grouping the external "tools" links so the
+   bar at large widths reads less like a phonebook. Shows on hover and
+   on focus-within; closes when the cursor leaves the wrapper or focus
+   moves out. The trigger underline echoes the FlyoutLink reference —
+   scaleX(0)→scaleX(1) on open. */
+.nav-flyout{position:relative;display:inline-flex;align-items:center}
+.nav-flyout-trigger{background:none;border:0;cursor:pointer;padding:0;font-family:var(--body);font-size:13px;color:var(--t3);font-weight:400;letter-spacing:.02em;display:inline-flex;align-items:center;gap:5px;position:relative;transition:color .15s}
+.nav-flyout-trigger::after{content:'';position:absolute;left:0;right:0;bottom:-6px;height:1px;background:var(--ac);transform:scaleX(0);transform-origin:left;transition:transform .25s ease}
+.nav-flyout:hover .nav-flyout-trigger,.nav-flyout:focus-within .nav-flyout-trigger{color:var(--ac)}
+.nav-flyout:hover .nav-flyout-trigger::after,.nav-flyout:focus-within .nav-flyout-trigger::after{transform:scaleX(1)}
+.nav-flyout-trigger .nav-flyout-caret{font-size:10px;line-height:1;transition:transform .25s ease}
+.nav-flyout:hover .nav-flyout-trigger .nav-flyout-caret,.nav-flyout:focus-within .nav-flyout-trigger .nav-flyout-caret{transform:rotate(180deg)}
+.nav-flyout-panel{position:absolute;top:100%;left:50%;transform:translate(-50%,8px);min-width:220px;margin-top:8px;background:var(--surface);border:1px solid var(--b);box-shadow:0 12px 32px rgba(0,0,0,.35);padding:6px;display:flex;flex-direction:column;opacity:0;pointer-events:none;transition:opacity .2s ease,transform .25s ease;z-index:200}
+.nav-flyout:hover .nav-flyout-panel,.nav-flyout:focus-within .nav-flyout-panel{opacity:1;pointer-events:auto;transform:translate(-50%,0)}
+/* Bridge fills the gap between trigger + panel so the cursor doesn't
+   accidentally close the flyout while travelling between them. */
+.nav-flyout-panel::before{content:'';position:absolute;top:-12px;left:0;right:0;height:12px}
+.nav-flyout-panel a{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 14px;font-size:13px;color:var(--t2)!important;text-decoration:none;border-radius:3px;transition:background .15s,color .15s}
+.nav-flyout-panel a:hover{background:var(--s2);color:var(--ac2)!important}
+.nav-flyout-panel a .nav-flyout-hint{font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.06em;text-transform:uppercase;flex-shrink:0;transition:color .15s}
+.nav-flyout-panel a:hover .nav-flyout-hint{color:var(--ac)}
 .nav-cta{background:var(--ac);color:var(--bg);font-size:12px;font-weight:600;padding:8px 20px;border-radius:0;border:none;cursor:pointer;text-decoration:none;letter-spacing:.04em;transition:background .15s}
 .nav-cta:hover{background:var(--ac2)}
 
@@ -477,11 +500,19 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <a href="#privacy">Privacy</a>
     <a href="#economics">Economics</a>
     <a href="#compare">Compare</a>
-    <a href="https://explorer.coincync.network" target="_blank">Explorer</a>
-    <a href="https://docs.coincync.network/introduction.html">Whitepaper</a>
-    <a href="https://docs.coincync.network/api/json-rpc.html">Developers</a>
+    <div class="nav-flyout">
+      <button class="nav-flyout-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
+        Tools
+        <span class="nav-flyout-caret" aria-hidden="true">&#9662;</span>
+      </button>
+      <div class="nav-flyout-panel" role="menu">
+        <a href="https://explorer.coincync.network" target="_blank" rel="noopener" role="menuitem">Explorer<span class="nav-flyout-hint">Live chain</span></a>
+        <a href="https://docs.coincync.network/introduction.html" role="menuitem">Whitepaper<span class="nav-flyout-hint">Read</span></a>
+        <a href="https://docs.coincync.network/api/json-rpc.html" role="menuitem">Developers<span class="nav-flyout-hint">JSON-RPC</span></a>
+        <a href="/brand.html" role="menuitem">Brand<span class="nav-flyout-hint">Marks</span></a>
+      </div>
+    </div>
     <a href="https://discord.gg/5tYNSCsqzy" target="_blank">Discord</a>
-    <a href="/brand.html">Brand</a>
     <div class="theme-picker" id="theme-picker">
       <button class="theme-btn" id="theme-btn" type="button" title="Theme &amp; wallpaper" aria-haspopup="menu" aria-expanded="false">
         <span class="theme-thumb" id="theme-thumb" aria-hidden="true"></span>
