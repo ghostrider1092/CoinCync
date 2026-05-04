@@ -108,6 +108,30 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:color-mix(in srgb
 .btn-ghost{background:none;color:var(--t2);font-size:14px;font-weight:400;padding:14px 36px;border:1px solid var(--b);cursor:pointer;text-decoration:none;letter-spacing:.03em;transition:all .15s}
 .btn-ghost:hover{border-color:var(--ac);color:var(--ac)}
 .hero-stats{display:flex;gap:48px;margin-top:80px;flex-wrap:wrap;justify-content:center}
+
+/* ─── LAUNCH COUNTDOWN (.lc-*) ──────────────────────────────────────
+   Counts down to public testnet launch (2026-05-09 00:00:00 UTC).
+   After the deadline passes, the JS swaps the wrapper to a "launched"
+   pill instead of leaving zeros sitting around. Class names are
+   prefixed lc- (launch-countdown) to not collide with the existing
+   mainnet-genesis countdown's .cd-* classes further down the page. */
+.lc-wrap{margin-top:48px;display:flex;flex-direction:column;align-items:center;gap:14px;max-width:640px;width:100%}
+.lc-heading{font-family:var(--mono);font-size:11px;color:var(--ac);letter-spacing:.18em;text-transform:uppercase;display:flex;align-items:center;gap:10px}
+.lc-heading::before,.lc-heading::after{content:'';display:block;width:36px;height:1px;background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--ac) 70%,transparent),transparent)}
+.lc-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:0;width:100%;max-width:480px;border:1px solid var(--b);background:color-mix(in srgb,var(--s1) 85%,transparent)}
+.lc-cell{position:relative;height:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;border-right:1px solid var(--b);overflow:hidden}
+.lc-cell:last-child{border-right:none}
+.lc-val{font-family:var(--display);font-weight:400;font-size:42px;line-height:1;color:var(--t);font-variant-numeric:tabular-nums;display:inline-block;will-change:transform,opacity}
+.lc-unit{font-family:var(--mono);font-size:10px;color:var(--t3);letter-spacing:.14em;text-transform:lowercase}
+.lc-val.lc-out{animation:lc-out .35s forwards ease-in}
+.lc-val.lc-in{animation:lc-in .35s forwards ease-out}
+@keyframes lc-out{0%{transform:translateY(0);opacity:1}100%{transform:translateY(-50%);opacity:0}}
+@keyframes lc-in{0%{transform:translateY(50%);opacity:0}100%{transform:translateY(0);opacity:1}}
+.lc-launched{display:none;font-family:var(--display);font-style:italic;font-size:18px;color:var(--ac);padding:14px 28px;border:1px solid color-mix(in srgb,var(--ac) 40%,transparent);background:color-mix(in srgb,var(--ac) 8%,transparent);border-radius:100px}
+.lc-wrap.is-launched .lc-grid,.lc-wrap.is-launched .lc-heading{display:none}
+.lc-wrap.is-launched .lc-launched{display:inline-block}
+.lc-wrap.is-hidden{display:none}
+@media(max-width:520px){.lc-grid{max-width:100%}.lc-cell{height:80px}.lc-val{font-size:32px}.lc-heading::before,.lc-heading::after{width:18px}}
 .hero-stat{text-align:center}
 .hero-stat .val{font-family:var(--display);font-size:32px;font-weight:400;color:var(--t);margin-bottom:4px}
 .hero-stat .label{font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.15em;text-transform:uppercase}
@@ -452,6 +476,17 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   <div class="hero-actions">
     <a href="#download" class="btn-primary">Download Wallet</a>
     <a href="https://explorer.coincync.network" class="btn-ghost" target="_blank">Explore the chain</a>
+  </div>
+  <!-- LAUNCH COUNTDOWN — 2026-05-09 00:00:00 UTC -->
+  <div class="lc-wrap" id="lc-wrap" data-target="2026-05-09T00:00:00Z" aria-live="polite">
+    <div class="lc-heading"><span>Public testnet launches in</span></div>
+    <div class="lc-grid" role="timer">
+      <div class="lc-cell"><span class="lc-val" id="lc-d">--</span><span class="lc-unit">days</span></div>
+      <div class="lc-cell"><span class="lc-val" id="lc-h">--</span><span class="lc-unit">hours</span></div>
+      <div class="lc-cell"><span class="lc-val" id="lc-m">--</span><span class="lc-unit">minutes</span></div>
+      <div class="lc-cell"><span class="lc-val" id="lc-s">--</span><span class="lc-unit">seconds</span></div>
+    </div>
+    <div class="lc-launched">Public testnet is <em>live</em>.</div>
   </div>
   <div class="hero-stats">
     <div class="hero-stat"><div class="val">22</div><div class="label">Privacy features</div></div>
@@ -1138,6 +1173,64 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     document.getElementById('cd-hours').textContent=h;
     document.getElementById('cd-mins').textContent=m;
     document.getElementById('cd-secs').textContent=s;
+  }
+  tick();
+  setInterval(tick,1000);
+})();
+
+// --- HERO LAUNCH COUNTDOWN (testnet 2026-05-09) ---
+// Animates each digit cell when its value changes: the old value
+// slides up + fades out, the new value slides in from below + fades in
+// (350 ms each side, so a full swap is 700 ms total — fast enough that
+// the seconds digit finishes its swap well before the next tick fires).
+(function(){
+  var wrap=document.getElementById('lc-wrap');
+  if(!wrap) return;
+  var target=Date.parse(wrap.getAttribute('data-target')||'');
+  if(!target||isNaN(target)){wrap.classList.add('is-hidden');return;}
+  var DAY=86400000,HOUR=3600000,MIN=60000;
+  var els={d:document.getElementById('lc-d'),h:document.getElementById('lc-h'),m:document.getElementById('lc-m'),s:document.getElementById('lc-s')};
+  var last={d:null,h:null,m:null,s:null};
+  function setCell(el,val){
+    if(!el) return;
+    var str=String(val).padStart(2,'0');
+    if(el.textContent===str) return;
+    el.classList.remove('lc-in');
+    el.classList.add('lc-out');
+    setTimeout(function(){
+      el.textContent=str;
+      el.classList.remove('lc-out');
+      el.classList.add('lc-in');
+      setTimeout(function(){el.classList.remove('lc-in');},350);
+    },350);
+  }
+  function tick(){
+    var now=Date.now();
+    var diff=target-now;
+    if(diff<=0){
+      wrap.classList.add('is-launched');
+      return;
+    }
+    var d=Math.floor(diff/DAY);
+    var h=Math.floor((diff%DAY)/HOUR);
+    var m=Math.floor((diff%HOUR)/MIN);
+    var s=Math.floor((diff%MIN)/1000);
+    // Sanity bound: if the computed days is wildly out (>365) the data
+    // attribute is probably wrong — hide rather than confuse visitors.
+    if(d>365){wrap.classList.add('is-hidden');return;}
+    if(last.d===null){
+      // First tick — set instantly, no animation.
+      els.d.textContent=String(d).padStart(2,'0');
+      els.h.textContent=String(h).padStart(2,'0');
+      els.m.textContent=String(m).padStart(2,'0');
+      els.s.textContent=String(s).padStart(2,'0');
+      last={d:d,h:h,m:m,s:s};
+      return;
+    }
+    if(d!==last.d){setCell(els.d,d);last.d=d;}
+    if(h!==last.h){setCell(els.h,h);last.h=h;}
+    if(m!==last.m){setCell(els.m,m);last.m=m;}
+    if(s!==last.s){setCell(els.s,s);last.s=s;}
   }
   tick();
   setInterval(tick,1000);
