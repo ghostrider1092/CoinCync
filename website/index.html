@@ -161,14 +161,28 @@ section{padding:120px 48px;max-width:1200px;margin:0 auto}
 
 /* PRIVACY LAYERS */
 .layers{display:grid;grid-template-columns:1fr 1fr;gap:24px}
-.layer-card{background:var(--s1);border:1px solid var(--b);padding:36px;transition:border-color .2s}
-.layer-card:hover{border-color:color-mix(in srgb,var(--ac2) 30%,transparent)}
-.layer-num{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;margin-bottom:12px;text-transform:uppercase}
-.layer-card h3{font-family:var(--display);font-size:20px;font-weight:400;margin-bottom:8px}
-.layer-card p{font-size:13px;color:var(--t3);line-height:1.6;margin-bottom:16px}
+.layer-card{position:relative;background:var(--s1);border:1px solid var(--b);padding:36px;transition:border-color .35s,transform .35s,background .35s;overflow:hidden;isolation:isolate}
+.layer-card:hover{border-color:color-mix(in srgb,var(--ac2) 30%,transparent);transform:translateY(-3px)}
+/* Big faded glyph in the bottom-right corner that responds to hover. The
+   SVG itself lives in the card markup (.layer-glyph); these rules just
+   position + animate it. The gradient ::before is a vertical wash that
+   slides up from below, drawing the eye toward the card without harming
+   text contrast. */
+.layer-card .layer-glyph{position:absolute;right:-22px;bottom:-22px;width:160px;height:160px;color:var(--ac);opacity:.06;pointer-events:none;transition:opacity .45s,transform .45s cubic-bezier(.4,1.4,.6,1);z-index:0}
+.layer-card:hover .layer-glyph{opacity:.13;color:var(--ac2);transform:rotate(8deg) scale(1.12)}
+.layer-card::before{content:'';position:absolute;inset:0;background:linear-gradient(to top,color-mix(in srgb,var(--ac2) 14%,transparent) 0%,transparent 65%);opacity:0;transition:opacity .45s ease;pointer-events:none;z-index:0}
+.layer-card:hover::before{opacity:1}
+.layer-card>*:not(.layer-glyph){position:relative;z-index:1}
+.layer-num{font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.15em;margin-bottom:12px;text-transform:uppercase;transition:color .35s}
+.layer-card:hover .layer-num{color:var(--ac2)}
+.layer-card h3{font-family:var(--display);font-size:20px;font-weight:400;margin-bottom:8px;transition:color .35s}
+.layer-card p{font-size:13px;color:var(--t3);line-height:1.6;margin-bottom:16px;transition:color .35s}
+.layer-card:hover p{color:var(--t2)}
 .layer-features{list-style:none;display:flex;flex-direction:column;gap:6px}
-.layer-features li{font-size:12px;color:var(--t3);display:flex;align-items:baseline;gap:8px}
-.layer-features li::before{content:"\203A";color:var(--ac);font-weight:600;font-size:14px;flex-shrink:0}
+.layer-features li{font-size:12px;color:var(--t3);display:flex;align-items:baseline;gap:8px;transition:color .35s}
+.layer-card:hover .layer-features li{color:var(--t2)}
+.layer-features li::before{content:"\203A";color:var(--ac);font-weight:600;font-size:14px;flex-shrink:0;transition:color .35s}
+.layer-card:hover .layer-features li::before{color:var(--ac2)}
 
 /* COMPARISON */
 .compare-table{width:100%;border-collapse:collapse;border:1px solid var(--b)}
@@ -549,6 +563,11 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
         <li>Key images &mdash; double-spend prevention without revealing source</li>
         <li>View tags &mdash; 90% faster wallet sync</li>
       </ul>
+      <svg class="layer-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <rect x="4" y="11" width="16" height="10" rx="1"/>
+        <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+        <circle cx="12" cy="16" r="1.2" fill="currentColor"/>
+      </svg>
     </div>
     <div class="layer-card">
       <div class="layer-num">Layer 2 &mdash; Network</div>
@@ -560,6 +579,15 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
         <li>Traffic shaping &mdash; 0&ndash;200ms random jitter</li>
         <li>Constant-rate padding &mdash; masks activity patterns</li>
       </ul>
+      <svg class="layer-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/>
+        <ellipse cx="12" cy="12" rx="3" ry="9"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <circle cx="6" cy="6" r="1.4" fill="currentColor"/>
+        <circle cx="18" cy="18" r="1.4" fill="currentColor"/>
+        <circle cx="6" cy="18" r="1.4" fill="currentColor"/>
+        <circle cx="18" cy="6" r="1.4" fill="currentColor"/>
+      </svg>
     </div>
     <div class="layer-card">
       <div class="layer-num">Layer 3 &mdash; Wallet</div>
@@ -574,6 +602,11 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
         <li>Uniform 2-in/2-out shape &mdash; defeats heuristic analysis</li>
         <li>FROST multi-sig &mdash; indistinguishable from single-sig</li>
       </ul>
+      <svg class="layer-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 7H3v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7Z"/>
+        <path d="M3 7V5a2 2 0 0 1 2-2h11l3 4"/>
+        <circle cx="17" cy="13" r="1.4" fill="currentColor"/>
+      </svg>
     </div>
     <div class="layer-card">
       <div class="layer-num">Layer 4 &mdash; Constitutional</div>
@@ -585,6 +618,12 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
         <li>No balance lookup &mdash; no RPC to query an address</li>
         <li>4th Amendment &mdash; financial records constitutionally protected</li>
       </ul>
+      <svg class="layer-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6 4h11a3 3 0 0 1 3 3v13H8a2 2 0 0 1-2-2V4Z"/>
+        <path d="M6 4a3 3 0 0 0-3 3v0a3 3 0 0 0 3 3"/>
+        <line x1="9" y1="10" x2="16" y2="10"/>
+        <line x1="9" y1="14" x2="16" y2="14"/>
+      </svg>
     </div>
   </div>
 </section>
