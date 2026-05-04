@@ -139,6 +139,29 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:color-mix(in srgb
 .lc-wrap.is-launched .lc-launched{display:inline-block}
 .lc-wrap.is-hidden{display:none}
 @media(max-width:520px){.lc-grid{max-width:100%}.lc-cell{height:80px}.lc-val{font-size:32px}.lc-heading::before,.lc-heading::after{width:18px}}
+
+/* ─── BUILT-ON PRIMITIVES GRID (.builtin-*) ─────────────────────────
+   Asymmetric 2/4/3 grid (mirrors the original ClipPathLinks layout)
+   crediting the named cryptographic + serialization primitives the
+   chain depends on. Each cell is a link; resting state shows the
+   primitive name in mono, hover slides up an inverted panel with a
+   one-line description. */
+.builtin-grid{margin:0 auto;max-width:880px;border:1px solid var(--b);background:var(--s1)}
+.builtin-row{display:grid;border-bottom:1px solid var(--b)}
+.builtin-row:last-child{border-bottom:none}
+.builtin-row.cols-2{grid-template-columns:repeat(2,1fr)}
+.builtin-row.cols-3{grid-template-columns:repeat(3,1fr)}
+.builtin-row.cols-4{grid-template-columns:repeat(4,1fr)}
+.builtin-cell{position:relative;height:120px;display:flex;align-items:center;justify-content:center;border-right:1px solid var(--b);overflow:hidden;cursor:pointer;color:var(--t2);text-decoration:none;transition:color .25s,background .25s}
+.builtin-cell:last-child{border-right:none}
+.builtin-cell:hover{color:var(--ac2);background:color-mix(in srgb,var(--ac2) 4%,transparent)}
+.builtin-name{font-family:var(--mono);font-size:14px;letter-spacing:.08em;text-transform:uppercase;font-weight:500;transition:transform .35s ease,opacity .25s}
+.builtin-cell:hover .builtin-name{transform:translateY(-130%);opacity:.4}
+.builtin-overlay{position:absolute;inset:0;background:var(--ac);color:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px 18px;text-align:center;transform:translateY(100%);transition:transform .4s cubic-bezier(.5,1.4,.4,1);font-family:var(--mono);font-size:11px;letter-spacing:.04em;line-height:1.45;pointer-events:none}
+.builtin-cell:hover .builtin-overlay{transform:translateY(0)}
+.builtin-overlay-name{font-size:13px;font-weight:600;letter-spacing:.08em;margin-bottom:6px;text-transform:uppercase}
+.builtin-overlay-desc{opacity:.85;max-width:240px}
+@media(max-width:700px){.builtin-row.cols-4{grid-template-columns:repeat(2,1fr)}.builtin-row.cols-4 .builtin-cell:nth-child(2){border-right:none}.builtin-row.cols-3{grid-template-columns:1fr}.builtin-row.cols-3 .builtin-cell{border-right:none;border-bottom:1px solid var(--b)}.builtin-row.cols-3 .builtin-cell:last-child{border-bottom:none}.builtin-cell{height:88px}}
 .hero-stat{text-align:center}
 .hero-stat .val{font-family:var(--display);font-size:32px;font-weight:400;color:var(--t);margin-bottom:4px}
 .hero-stat .label{font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.15em;text-transform:uppercase}
@@ -1071,6 +1094,86 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <div class="faq-item">
       <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">When does mainnet launch?</div>
       <div class="faq-a"><div class="faq-a-inner">October 1, 2026 at 00:00:00 UTC. The genesis message reads: "CoinCync Mainnet Genesis - Privacy You Can Audit - October 2026". Until then, the testnet is live with mining active. All testnet coins will be wiped at mainnet launch.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- BUILT ON — open-source primitives the chain depends on -->
+<section>
+  <div class="section-header">
+    <div class="section-num">&sect; 12</div>
+    <h2 class="section-title">Built on <em>well-known</em> primitives.</h2>
+    <p class="section-desc">No homemade crypto. Every primitive in CoinCync is published, peer-reviewed, and well-documented. We stand on these shoulders.</p>
+  </div>
+  <div class="builtin-grid reveal">
+    <div class="builtin-row cols-2">
+      <a href="https://github.com/tevador/RandomX" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">RandomX</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">RandomX</span>
+          <span class="builtin-overlay-desc">CPU-only proof-of-work &mdash; ASIC-resistant by construction</span>
+        </div>
+      </a>
+      <a href="https://github.com/BLAKE3-team/BLAKE3" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">BLAKE3</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">BLAKE3</span>
+          <span class="builtin-overlay-desc">Cryptographic hash &mdash; parallelizable, faster than SHA-3</span>
+        </div>
+      </a>
+    </div>
+    <div class="builtin-row cols-4">
+      <a href="https://eprint.iacr.org/2019/654" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">CLSAG</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">CLSAG</span>
+          <span class="builtin-overlay-desc">Compact ring signatures &mdash; hides the real signer among 16 decoys</span>
+        </div>
+      </a>
+      <a href="https://eprint.iacr.org/2020/735" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">Bulletproofs+</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">Bulletproofs+</span>
+          <span class="builtin-overlay-desc">Range proofs &mdash; proves amounts non-negative without revealing them</span>
+        </div>
+      </a>
+      <a href="https://en.wikipedia.org/wiki/Commitment_scheme#A_perfectly_binding_scheme_based_on_the_discrete_log_problem" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">Pedersen</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">Pedersen</span>
+          <span class="builtin-overlay-desc">Hiding + binding commitments &mdash; additively homomorphic, supply auditable</span>
+        </div>
+      </a>
+      <a href="https://ristretto.group/" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">Ristretto255</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">Ristretto255</span>
+          <span class="builtin-overlay-desc">Prime-order group on Ed25519 &mdash; no cofactor footguns</span>
+        </div>
+      </a>
+    </div>
+    <div class="builtin-row cols-3">
+      <a href="https://noiseprotocol.org/noise.html" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">Noise_XX</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">Noise_XX</span>
+          <span class="builtin-overlay-desc">P2P handshake &mdash; mutual auth + forward secrecy, Signal-grade</span>
+        </div>
+      </a>
+      <a href="https://www.rfc-editor.org/rfc/rfc8439" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">ChaCha20-Poly1305</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">ChaCha20-Poly1305</span>
+          <span class="builtin-overlay-desc">AEAD cipher &mdash; RFC 8439, used for memos + P2P payload encryption</span>
+        </div>
+      </a>
+      <a href="https://borsh.io/" target="_blank" rel="noopener noreferrer" class="builtin-cell">
+        <span class="builtin-name">Borsh</span>
+        <div class="builtin-overlay" aria-hidden="true">
+          <span class="builtin-overlay-name">Borsh</span>
+          <span class="builtin-overlay-desc">Deterministic binary serialization &mdash; one canonical encoding for every block</span>
+        </div>
+      </a>
     </div>
   </div>
 </section>
