@@ -111,9 +111,23 @@ nav{background:var(--surface);border-bottom:1px solid var(--b);padding:0 40px;he
 
 /* ── THEME PICKER ─────────────────────────────────────────────── */
 .theme-picker{position:relative;display:inline-flex;flex-shrink:0}
-.theme-btn{padding:5px 10px;border:1px solid var(--b);border-radius:var(--r-md);font-size:11px;font-weight:500;color:var(--t2);cursor:pointer;background:var(--s2);font-family:var(--mono);transition:all var(--transition-fast);display:flex;align-items:center;gap:6px;letter-spacing:.04em}
-.theme-btn:hover{border-color:var(--ac2);color:var(--ac2)}
-.theme-btn .theme-dot{width:8px;height:8px;border-radius:50%;border:1px solid var(--b)}
+.theme-btn{position:relative;padding:3px 14px 3px 3px;border:1px solid var(--b);border-radius:100px;font-size:11px;font-weight:500;color:var(--t2);cursor:pointer;background:linear-gradient(135deg,var(--s2),var(--s3));font-family:var(--mono);display:flex;align-items:center;gap:8px;letter-spacing:.04em;height:32px;min-width:112px;overflow:hidden;transition:border-color .18s,color .18s,box-shadow .25s,transform .2s ease-out}
+.theme-btn:hover{border-color:var(--ac2);color:var(--ac2);transform:scale(1.03);box-shadow:0 0 14px color-mix(in srgb,var(--ac2) 25%,transparent)}
+.theme-btn:active{transform:scale(.98)}
+/* Legacy plain dot — kept only for any pre-fancy callers; new pill uses .theme-thumb */
+.theme-btn .theme-dot{display:none}
+.theme-thumb{width:24px;height:24px;border-radius:50%;background:var(--ac-dim);background-size:cover;background-position:center;border:1px solid color-mix(in srgb,var(--ac2) 40%,transparent);display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ac2) 15%,transparent),0 0 6px color-mix(in srgb,var(--ac2) 30%,transparent);transition:transform .35s cubic-bezier(0.5,1.5,0.6,1),background .35s,box-shadow .35s;will-change:transform}
+.theme-btn:hover .theme-thumb{transform:rotate(-12deg) scale(1.08)}
+.theme-thumb svg{width:14px;height:14px;color:var(--ac2);filter:drop-shadow(0 0 2px color-mix(in srgb,var(--ac2) 60%,transparent));transition:opacity .2s,transform .35s ease-in-out}
+.theme-thumb.with-wp{background-color:transparent}
+.theme-thumb.with-wp svg{opacity:.92;filter:drop-shadow(0 0 3px var(--bg)) drop-shadow(0 0 1px var(--bg))}
+@keyframes theme-icon-fade{0%,100%{opacity:1}50%{opacity:0}}
+@keyframes theme-icon-spin{0%{transform:rotate(0) scale(1)}45%{transform:rotate(160deg) scale(.78)}100%{transform:rotate(360deg) scale(1)}}
+.theme-thumb.swap{animation:theme-icon-spin .42s cubic-bezier(.5,1.6,.4,1)}
+.theme-thumb.swap svg{animation:theme-icon-fade .42s ease-in-out}
+.theme-btn:hover .theme-thumb.swap{animation:theme-icon-spin .42s cubic-bezier(.5,1.6,.4,1)}
+.theme-label{transition:opacity .15s}
+.theme-label.swap{opacity:0}
 .theme-menu{display:none;position:absolute;top:calc(100% + 6px);right:0;background:var(--surface);border:1px solid var(--b);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);min-width:260px;max-height:70vh;overflow-y:auto;z-index:300;padding:6px;white-space:nowrap;scrollbar-width:thin}
 .theme-picker.open .theme-menu{display:block}
 .theme-opt{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:var(--r-md);font-size:12px;font-weight:400;color:var(--t2);cursor:pointer;border:none;background:none;font-family:var(--sans);width:100%;text-align:left;transition:background var(--transition-fast)}
@@ -607,8 +621,8 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   </div>
   <div class="theme-picker" id="theme-picker">
     <button class="theme-btn" onclick="if(window.innerWidth<=600){openAppearance()}else{document.getElementById('theme-picker').classList.toggle('open')}" title="Theme (t)">
-      <span class="theme-dot" id="theme-dot" style="background:var(--ac2)"></span>
-      <span id="theme-label">Paper</span>
+      <span class="theme-thumb" id="theme-thumb" aria-hidden="true"></span>
+      <span class="theme-label" id="theme-label">Paper</span>
     </button>
     <div class="theme-menu" id="theme-menu">
       <button class="theme-opt active" data-theme="paper" onclick="setTheme('paper')">
@@ -1877,12 +1891,11 @@ document.addEventListener('DOMContentLoaded', function() {
 // _rpc: internal RPC endpoint for health queries. Never displayed to users.
 // proxy: nginx proxy path (production). _rpc: direct fallback (local dev / offline).
 const NODES=[
-  {id:'b5e8',label:'NYC1',loc:'New York, USA',role:'Mempool + Relay',proxy:'/health/nyc1',_rpc:'http://192.34.59.42:28081'},
-  {id:'6d4a',label:'FRA',loc:'Frankfurt, Germany',role:'Mempool + Relay',proxy:'/health/fra',_rpc:'http://46.101.138.120:28081'},
-  {id:'e8b3',label:'TOR',loc:'Toronto, Canada',role:'Seed1 + Public API',proxy:'/health/tor',_rpc:'http://143.110.218.99:28081'},
-  {id:'9a07',label:'RIC',loc:'Richmond, USA',role:'Explorer + Relay',proxy:'/health/ric',_rpc:'http://165.245.161.62:28081'},
-  {id:'4c2d',label:'ATL',loc:'Atlanta, USA',role:'Miner + Relay',proxy:'/health/atl',_rpc:'http://165.245.140.113:28081'},
-  {id:'5f9e',label:'AMS',loc:'Amsterdam, Netherlands',role:'Seed3 + Relay',proxy:'/health/ams',_rpc:'http://164.92.153.24:28081'},
+  {id:'1a2b',label:'seed1',   loc:'New Jersey, USA',       role:'Seed (US-East)',      proxy:'/health/seed1',   _rpc:'http://66.135.23.193:28081'},
+  {id:'3c4d',label:'seed2',   loc:'Amsterdam, Netherlands',role:'Seed (Europe)',       proxy:'/health/seed2',   _rpc:'http://140.82.57.168:28081'},
+  {id:'5e6f',label:'seed3',   loc:'Tokyo, Japan',          role:'Seed (Asia-Pacific)', proxy:'/health/seed3',   _rpc:'http://207.148.111.76:28081'},
+  {id:'7a8b',label:'explorer',loc:'Dallas, USA',           role:'Explorer + Relay',    proxy:'/health/explorer',_rpc:'http://207.148.6.50:28081'},
+  {id:'9c0d',label:'api',     loc:'Frankfurt, Germany',    role:'Public API + Relay',  proxy:'/health/api',     _rpc:'http://95.179.165.225:28081'},
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
@@ -3473,16 +3486,11 @@ async function loadGithub(){
 
 // ── WORLD MAP (D3 - replaced by Globe.gl) ───────────────────
 const MNODES=[
-  {n:'LON',id:'a7f2',lat:51.51,lng:-0.13,  role:'RandomX Miner'},
-  {n:'SFO',id:'3c91',lat:37.77,lng:-122.42,role:'RandomX Miner'},
-  {n:'NYC1',id:'b5e8',lat:40.71,lng:-74.01,role:'Mempool Node'},
-  {n:'FRA',id:'6d4a',lat:50.11,lng:8.68,   role:'Mempool Node'},
-  {n:'NYC3',id:'2f1c',lat:40.73,lng:-73.99,role:'Seed · Archive'},
-  {n:'TOR',id:'e8b3',lat:43.70,lng:-79.42, role:'Seed'},
-  {n:'RIC',id:'9a07',lat:37.54,lng:-77.43, role:'Explorer · Monitor'},
-  {n:'ATL',id:'4c2d',lat:33.75,lng:-84.39, role:'Faucet · RPC'},
-  {n:'AMS',id:'5f9e',lat:52.37,lng:4.90,   role:'Seed · Backup'},
-  {n:'SYD',id:'8b14',lat:-33.87,lng:151.21,role:'RandomX Miner'},
+  {n:'seed1',   id:'1a2b',lat:40.74, lng:-74.17, role:'Seed (US-East)'},
+  {n:'seed2',   id:'3c4d',lat:52.37, lng:4.90,   role:'Seed (Europe)'},
+  {n:'seed3',   id:'5e6f',lat:35.68, lng:139.69, role:'Seed (Asia-Pacific)'},
+  {n:'explorer',id:'7a8b',lat:32.78, lng:-96.80, role:'Explorer · Monitor'},
+  {n:'api',     id:'9c0d',lat:50.11, lng:8.68,   role:'Public API · Relay'},
 ];
 let _mz=null,_ms=null,_md=false;
 function initMap(){
@@ -3585,12 +3593,11 @@ function mapReset(){
 // `height`    – last known block height (shown in tooltip)
 // `failCount` – consecutive poll failures before we mark offline
 const GNODES = [
-  {label:'NYC1',id:'b5e8', lat:40.71,  lng:-74.01,  role:'Mempool + Relay',    city:'New York, USA',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/nyc1',_rpc:'http://192.34.59.42:28081'},
-  {label:'FRA', id:'6d4a', lat:50.11,  lng:8.68,    role:'Mempool + Relay',    city:'Frankfurt, Germany',  online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/fra', _rpc:'http://46.101.138.120:28081'},
-  {label:'TOR', id:'e8b3', lat:43.70,  lng:-79.42,  role:'Seed1 + Public API', city:'Toronto, Canada',     online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/tor', _rpc:'http://143.110.218.99:28081'},
-  {label:'RIC', id:'9a07', lat:37.54,  lng:-77.43,  role:'Explorer + Relay',   city:'Richmond, USA',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/ric', _rpc:'http://165.245.161.62:28081'},
-  {label:'ATL', id:'4c2d', lat:33.75,  lng:-84.39,  role:'Miner + Relay',      city:'Atlanta, USA',        online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/atl', _rpc:'http://165.245.140.113:28081'},
-  {label:'AMS', id:'5f9e', lat:52.37,  lng:4.90,    role:'Seed3 + Relay',      city:'Amsterdam, NL',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/ams', _rpc:'http://164.92.153.24:28081'},
+  {label:'seed1',   id:'1a2b', lat:40.74, lng:-74.17, role:'Seed (US-East)',       city:'New Jersey, USA',     online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/seed1',   _rpc:'http://66.135.23.193:28081'},
+  {label:'seed2',   id:'3c4d', lat:52.37, lng:4.90,   role:'Seed (Europe)',        city:'Amsterdam, NL',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/seed2',   _rpc:'http://140.82.57.168:28081'},
+  {label:'seed3',   id:'5e6f', lat:35.68, lng:139.69, role:'Seed (Asia-Pacific)',  city:'Tokyo, Japan',        online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/seed3',   _rpc:'http://207.148.111.76:28081'},
+  {label:'explorer',id:'7a8b', lat:32.78, lng:-96.80, role:'Explorer + Relay',     city:'Dallas, USA',         online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/explorer',_rpc:'http://207.148.6.50:28081'},
+  {label:'api',     id:'9c0d', lat:50.11, lng:8.68,   role:'Public API + Relay',   city:'Frankfurt, Germany',  online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/api',     _rpc:'http://95.179.165.225:28081'},
 ];
 
 // How many consecutive failures before a node is considered offline
@@ -5184,19 +5191,65 @@ document.addEventListener('keydown', function(e) {
 const THEMES = ['paper','dark','brass','cream','midnight','forge','vault','mono','contrast'];
 const THEME_LABELS = {paper:'Paper',dark:'Dark',brass:'Brass',cream:'Cream',midnight:'Midnight',forge:'Forge',vault:'Vault',mono:'Mono',contrast:'Contrast'};
 const DARK_THEMES = ['dark','midnight','forge','vault','mono','contrast'];
+// Per-theme SVG icon for the pill thumb. Single-colour (currentColor)
+// so the theme's --ac2 paints them. Designed for 14×14 — keep paths
+// simple, avoid sub-pixel detail.
+const THEME_ICONS = {
+  paper:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19 L19 5 M14 4 L20 10 M11 8 L16 13"/><path d="M5 19 L8 16"/></svg>',
+  dark:     '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.5 13.4A8 8 0 0 1 10.6 4.5 8 8 0 1 0 19.5 13.4z"/></svg>',
+  brass:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4" fill="currentColor"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>',
+  cream:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>',
+  midnight: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 L13.5 9.5 L21 11 L13.5 12.5 L12 20 L10.5 12.5 L3 11 L10.5 9.5 Z"/></svg>',
+  forge:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c-4 0-7-2.7-7-6.5 0-2.5 2-4 3-5.5C9 9 9 7 9 4c1 1 5 4 6 8 0 0 1-1 1-3 1.5 1.5 4 4 4 7.5 0 3.8-3 5.5-8 5.5z"/></svg>',
+  vault:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.5 19.2 3c.6 4.5-1 12-9.2 16M2 22c1-4 5-8 9-9"/></svg>',
+  mono:     '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>',
+  contrast: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3 A9 9 0 0 1 12 21 Z" fill="currentColor"/></svg>'
+};
 
-function setTheme(name, keepOpen) {
+function renderThumbIcon(name) {
+  const thumb = document.getElementById('theme-thumb');
+  if (!thumb) return;
+  thumb.innerHTML = THEME_ICONS[name] || THEME_ICONS.paper;
+}
+
+// Spin/fade swap animation: thumb rotates 360° + scales down + the icon
+// cross-fades. JS swaps the SVG mid-fade so the user only ever sees the
+// new icon emerge. ~420 ms total.
+function animateThumbSwap(name) {
+  const thumb = document.getElementById('theme-thumb');
+  const label = document.getElementById('theme-label');
+  if (!thumb) return;
+  thumb.classList.remove('swap');
+  if (label) label.classList.remove('swap');
+  void thumb.offsetWidth; // force reflow so animation re-fires
+  thumb.classList.add('swap');
+  if (label) label.classList.add('swap');
+  setTimeout(() => {
+    renderThumbIcon(name);
+    if (label) label.textContent = THEME_LABELS[name] || name;
+  }, 180);
+  setTimeout(() => {
+    thumb.classList.remove('swap');
+    if (label) label.classList.remove('swap');
+  }, 440);
+}
+
+function setTheme(name, keepOpen, skipAnimation) {
   if (!THEMES.includes(name)) name = 'paper';
   const el = document.documentElement;
   el.classList.remove('dark');
   el.removeAttribute('data-theme');
   el.setAttribute('data-theme', name);
   if (DARK_THEMES.includes(name)) el.classList.add('dark');
-  // Update picker UI
-  const label = document.getElementById('theme-label');
-  const dot = document.getElementById('theme-dot');
-  if (label) label.textContent = THEME_LABELS[name] || name;
-  if (dot) dot.style.background = 'var(--ac2)';
+  // Update picker UI — animate unless caller asks for an instant swap
+  // (used at init so the page doesn't spin its own pill on every load).
+  if (skipAnimation) {
+    renderThumbIcon(name);
+    const label = document.getElementById('theme-label');
+    if (label) label.textContent = THEME_LABELS[name] || name;
+  } else {
+    animateThumbSwap(name);
+  }
   document.querySelectorAll('.theme-opt').forEach(b => {
     b.classList.toggle('active', b.getAttribute('data-theme') === name);
   });
@@ -5236,13 +5289,18 @@ function setWallpaper(id, userClick) {
   const wp = WALLPAPERS[id];
   if (!wp) return;
   const body = document.body;
+  const thumb = document.getElementById('theme-thumb');
   if (id === 'none' || !wp.url) {
     body.classList.remove('has-wallpaper');
     body.style.backgroundImage = '';
+    if (thumb) { thumb.classList.remove('with-wp'); thumb.style.backgroundImage = ''; }
     localStorage.removeItem('cync-wallpaper');
   } else {
     body.classList.add('has-wallpaper');
     body.style.backgroundImage = 'url(' + wp.url + ')';
+    // Tiny crop of the wallpaper SVG goes into the pill thumb so a
+    // glance shows both active theme (icon) and active wallpaper (bg).
+    if (thumb) { thumb.classList.add('with-wp'); thumb.style.backgroundImage = 'url(' + wp.url + ')'; }
     localStorage.setItem('cync-wallpaper', id);
     // Only auto-switch theme when user actively clicks a wallpaper,
     // not on page load restore (which would override their chosen theme)
@@ -5293,18 +5351,20 @@ function syncAppearanceState() {
   markApWall(w);
 }
 
-// Init: load saved theme or auto-detect
+// Init: load saved theme or auto-detect.
+// skipAnimation=true so the page doesn't spin its own pill on every
+// page load; the swap animation is reserved for active user clicks.
 (function() {
   const saved = localStorage.getItem('cync-theme');
   if (saved && THEMES.includes(saved)) {
-    setTheme(saved);
+    setTheme(saved, true, true);
   } else if (localStorage.getItem('cync-dark') === '1') {
     // Migration from old dark mode toggle
-    setTheme('dark');
+    setTheme('dark', true, true);
   } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-    setTheme('dark');
+    setTheme('dark', true, true);
   } else {
-    setTheme('paper');
+    setTheme('paper', true, true);
   }
 })();
 

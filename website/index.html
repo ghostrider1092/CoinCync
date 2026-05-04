@@ -325,13 +325,37 @@ footer{border-top:1px solid var(--b);padding:48px}
 }
 
 /* ─── THEME + WALLPAPER PICKER ──────────────────────────────────────
-   Compact pill in the nav (right of links, left of CTA) that opens a
-   dropdown listing all 9 themes + 12 wallpaper thumbnails. Same UX
-   pattern as the explorer for muscle-memory consistency. */
+   Fancy pill in the nav. The circular thumb on the left of the pill
+   shows a per-theme icon (moon for Dark, sun for Brass, quill for
+   Paper, etc. — see THEME_ICONS in JS). When a wallpaper is active,
+   that same thumb's background becomes a tiny crop of the wallpaper
+   SVG, so one glance tells you both the active theme AND wallpaper.
+   Click anywhere on the pill opens the dropdown with the full menu. */
 .theme-picker{position:relative;display:inline-flex;flex-shrink:0;margin-right:14px}
-.theme-btn{padding:6px 11px;border:1px solid var(--b);border-radius:4px;font-size:11px;font-weight:500;color:var(--t2);cursor:pointer;background:var(--s2);font-family:var(--mono);transition:border-color .15s,color .15s;display:flex;align-items:center;gap:7px;letter-spacing:.04em}
-.theme-btn:hover{border-color:var(--ac2);color:var(--ac2)}
-.theme-btn .theme-dot{width:8px;height:8px;border-radius:50%;border:1px solid var(--b);background:var(--ac2)}
+.theme-btn{position:relative;padding:3px 14px 3px 3px;border:1px solid var(--b);border-radius:100px;font-size:11px;font-weight:500;color:var(--t2);cursor:pointer;background:linear-gradient(135deg,var(--s2),var(--s3));font-family:var(--mono);display:flex;align-items:center;gap:8px;letter-spacing:.04em;height:32px;min-width:112px;overflow:hidden;transition:border-color .18s,color .18s,box-shadow .25s,transform .2s ease-out}
+.theme-btn:hover{border-color:var(--ac2);color:var(--ac2);transform:scale(1.03);box-shadow:0 0 14px color-mix(in srgb,var(--ac2) 25%,transparent)}
+.theme-btn:active{transform:scale(.98)}
+.theme-thumb{width:24px;height:24px;border-radius:50%;background:var(--ac-dim);background-size:cover;background-position:center;border:1px solid color-mix(in srgb,var(--ac2) 40%,transparent);display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ac2) 15%,transparent),0 0 6px color-mix(in srgb,var(--ac2) 30%,transparent);transition:transform .35s cubic-bezier(0.5,1.5,0.6,1),background .35s,box-shadow .35s;will-change:transform}
+.theme-btn:hover .theme-thumb{transform:rotate(-12deg) scale(1.08)}
+.theme-thumb svg{width:14px;height:14px;color:var(--ac2);filter:drop-shadow(0 0 2px color-mix(in srgb,var(--ac2) 60%,transparent));transition:opacity .2s,transform .35s ease-in-out}
+.theme-thumb.with-wp svg{opacity:.92;filter:drop-shadow(0 0 3px var(--bg)) drop-shadow(0 0 1px var(--bg))}
+.theme-thumb.with-wp{background-color:transparent}
+/* Switching motion: when JS adds the .swap class to the thumb, it rotates
+   180° + scales down + fades out the icon. JS swaps the SVG content
+   mid-animation, then removes .swap, so the thumb springs back with the
+   new icon visible. ~400ms total — fast enough to feel responsive,
+   slow enough to read as a transition. */
+@keyframes theme-icon-fade{0%,100%{opacity:1}50%{opacity:0}}
+.theme-thumb.swap{animation:theme-icon-spin .42s cubic-bezier(.5,1.6,.4,1)}
+.theme-thumb.swap svg{animation:theme-icon-fade .42s ease-in-out}
+@keyframes theme-icon-spin{
+  0%  {transform:rotate(0deg) scale(1)}
+  45% {transform:rotate(160deg) scale(.78)}
+  100%{transform:rotate(360deg) scale(1)}
+}
+.theme-btn:hover .theme-thumb.swap{animation:theme-icon-spin .42s cubic-bezier(.5,1.6,.4,1)}
+.theme-label{transition:opacity .15s}
+.theme-label.swap{opacity:0}
 .theme-menu{display:none;position:absolute;top:calc(100% + 8px);right:0;background:var(--surface);border:1px solid var(--b);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.4);min-width:260px;max-height:70vh;overflow-y:auto;z-index:300;padding:6px;scrollbar-width:thin}
 .theme-picker.open .theme-menu{display:block}
 .theme-opt{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:4px;font-size:12px;font-weight:400;color:var(--t2);cursor:pointer;border:none;background:none;font-family:var(--body);width:100%;text-align:left;transition:background .15s}
@@ -377,8 +401,8 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <a href="/brand.html">Brand</a>
     <div class="theme-picker" id="theme-picker">
       <button class="theme-btn" id="theme-btn" type="button" title="Theme &amp; wallpaper" aria-haspopup="menu" aria-expanded="false">
-        <span class="theme-dot" id="theme-dot"></span>
-        <span id="theme-label">Dark</span>
+        <span class="theme-thumb" id="theme-thumb" aria-hidden="true"></span>
+        <span class="theme-label" id="theme-label">Dark</span>
       </button>
       <div class="theme-menu" id="theme-menu" role="menu">
         <button class="theme-opt" data-theme="paper" type="button"><span class="t-swatch" style="background:#F5F3EE"><span class="t-dot" style="background:#D4A059"></span></span>Paper</button>
@@ -1141,12 +1165,27 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 // Same constants and behaviour as the explorer, so user preference
 // carries between coincync.network and explorer.coincync.network on
 // the same origin. Defaults to "dark" (the brand). All UI updates
-// (label, dot, active class) flow through setTheme() so calling it
-// from anywhere keeps the picker in sync.
+// (label, thumb icon, active class) flow through setTheme() so calling
+// it from anywhere keeps the picker in sync. Each setTheme call also
+// triggers a 420ms spin/fade swap animation on the thumb.
 (function(){
   var THEMES=['paper','dark','brass','cream','midnight','forge','vault','mono','contrast'];
   var DARK_THEMES=['dark','midnight','forge','vault','mono','contrast'];
   var THEME_LABELS={paper:'Paper',dark:'Dark',brass:'Brass',cream:'Cream',midnight:'Midnight',forge:'Forge',vault:'Vault',mono:'Mono',contrast:'Contrast'};
+  // Per-theme SVG icon shown in the pill's circular thumb. Single-colour
+  // (currentColor) so each picks up the active --ac2 via CSS. Designed
+  // for 14×14 display — keep paths simple, avoid sub-pixel detail.
+  var THEME_ICONS={
+    paper:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19 L19 5 M14 4 L20 10 M11 8 L16 13"/><path d="M5 19 L8 16"/></svg>',
+    dark:     '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.5 13.4A8 8 0 0 1 10.6 4.5 8 8 0 1 0 19.5 13.4z"/></svg>',
+    brass:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4" fill="currentColor"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>',
+    cream:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>',
+    midnight: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 L13.5 9.5 L21 11 L13.5 12.5 L12 20 L10.5 12.5 L3 11 L10.5 9.5 Z"/></svg>',
+    forge:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c-4 0-7-2.7-7-6.5 0-2.5 2-4 3-5.5C9 9 9 7 9 4c1 1 5 4 6 8 0 0 1-1 1-3 1.5 1.5 4 4 4 7.5 0 3.8-3 5.5-8 5.5z"/></svg>',
+    vault:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.5 19.2 3c.6 4.5-1 12-9.2 16M2 22c1-4 5-8 9-9"/></svg>',
+    mono:     '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>',
+    contrast: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3 A9 9 0 0 1 12 21 Z" fill="currentColor"/></svg>'
+  };
   var WALLPAPERS={
     'none':         {url:null,theme:null,label:'None'},
     '01-field':     {url:'/assets/wallpapers/wallpaper-01-commitment-field-landscape.svg',theme:'dark',label:'Commitment Field'},
@@ -1162,14 +1201,56 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     '06-construct': {url:'/assets/wallpapers/wallpaper-06-construction-landscape.svg',theme:'dark',label:'Construction'}
   };
 
-  function setTheme(name,keepOpen){
+  // Render the per-theme SVG icon into the pill's thumb. Called from
+  // setTheme on every change; uses innerHTML because the icons are
+  // small static SVG fragments (no event handlers, no XSS surface —
+  // strings come from THEME_ICONS, not user input).
+  function renderThumbIcon(name){
+    var thumb=document.getElementById('theme-thumb');
+    if(!thumb) return;
+    thumb.innerHTML=THEME_ICONS[name]||THEME_ICONS.dark;
+  }
+
+  // Trigger the spin/fade swap animation. The .swap class is removed at
+  // the end of the keyframe so the next call retriggers cleanly. We swap
+  // the icon mid-animation (at ~50% of duration, when the icon is faded
+  // out) so the user only sees the new icon emerge.
+  function animateThumbSwap(name){
+    var thumb=document.getElementById('theme-thumb');
+    var label=document.getElementById('theme-label');
+    if(!thumb) return;
+    thumb.classList.remove('swap');
+    if(label) label.classList.remove('swap');
+    // Force reflow so the next add re-fires the animation
+    void thumb.offsetWidth;
+    thumb.classList.add('swap');
+    if(label) label.classList.add('swap');
+    // Mid-animation: swap the SVG content + label text under the fade
+    setTimeout(function(){
+      renderThumbIcon(name);
+      if(label) label.textContent=THEME_LABELS[name]||name;
+    },180);
+    // Cleanup: remove .swap once the keyframe finishes so a hover
+    // rotation isn't blocked.
+    setTimeout(function(){
+      thumb.classList.remove('swap');
+      if(label) label.classList.remove('swap');
+    },440);
+  }
+
+  function setTheme(name,keepOpen,skipAnimation){
     if(THEMES.indexOf(name)===-1) name='dark';
     var el=document.documentElement;
     el.classList.remove('dark');
     el.setAttribute('data-theme',name);
     if(DARK_THEMES.indexOf(name)!==-1) el.classList.add('dark');
-    var label=document.getElementById('theme-label');
-    if(label) label.textContent=THEME_LABELS[name]||name;
+    if(skipAnimation){
+      renderThumbIcon(name);
+      var label=document.getElementById('theme-label');
+      if(label) label.textContent=THEME_LABELS[name]||name;
+    } else {
+      animateThumbSwap(name);
+    }
     var btn=document.getElementById('theme-btn');
     if(btn) btn.setAttribute('aria-expanded','false');
     document.querySelectorAll('.theme-opt').forEach(function(b){
@@ -1186,13 +1267,18 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     var wp=WALLPAPERS[id];
     if(!wp) return;
     var body=document.body;
+    var thumb=document.getElementById('theme-thumb');
     if(id==='none'||!wp.url){
       body.classList.remove('has-wallpaper');
       body.style.backgroundImage='';
+      if(thumb){thumb.classList.remove('with-wp');thumb.style.backgroundImage='';}
       try{localStorage.removeItem('cync-wallpaper');}catch(_){}
     } else {
       body.classList.add('has-wallpaper');
       body.style.backgroundImage='url('+wp.url+')';
+      // Tiny crop of the same SVG goes into the pill thumb so a glance
+      // tells you both active theme (icon) and active wallpaper (background).
+      if(thumb){thumb.classList.add('with-wp');thumb.style.backgroundImage='url('+wp.url+')';}
       try{localStorage.setItem('cync-wallpaper',id);}catch(_){}
       // Only auto-switch theme on an active click (not on page-load
       // restore — user's chosen theme wins on reload).
@@ -1230,11 +1316,13 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 
   // Init from localStorage. Inline head script already applied
   // data-theme + .dark before paint to prevent flash; here we sync the
-  // picker UI (label, active state) and restore the wallpaper if any.
+  // picker UI (label, icon, active state) and restore the wallpaper if
+  // any. Pass skipAnimation=true so the page doesn't spin its own pill
+  // on every load.
   (function init(){
     var t;try{t=localStorage.getItem('cync-theme');}catch(_){}
     if(!t||THEMES.indexOf(t)===-1) t='dark';
-    setTheme(t,true);
+    setTheme(t,true,true);
     var w;try{w=localStorage.getItem('cync-wallpaper');}catch(_){}
     if(w && WALLPAPERS[w]) setWallpaper(w);
   })();
