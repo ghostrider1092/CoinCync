@@ -101,6 +101,13 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:color-mix(in srgb
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .hero h1{font-family:var(--display);font-weight:200;font-size:clamp(48px,8vw,96px);line-height:.95;letter-spacing:-.04em;margin-bottom:28px;max-width:900px;font-variation-settings:"opsz" 144}
 .hero h1 em{font-style:italic;font-weight:400;color:var(--ac)}
+/* BubbleText effect on the italic "yours" word — each letter is its
+   own inline-block so cursor proximity can bloom them individually
+   (font-weight + glow + lift). The whole word stays readable as plain
+   text for screen readers because the spans are inline children. */
+.hero h1 em.bubble{display:inline-block}
+.hero h1 em.bubble .bubble-letter{display:inline-block;font-weight:400;color:var(--ac);transition:font-weight .35s,color .35s,text-shadow .4s,transform .35s cubic-bezier(.5,1.6,.4,1)}
+.hero h1 em.bubble .bubble-letter:hover{font-weight:700;color:var(--ac2);text-shadow:0 0 18px color-mix(in srgb,var(--ac2) 55%,transparent),0 0 36px color-mix(in srgb,var(--ac2) 25%,transparent);transform:translateY(-3px) scale(1.10)}
 .hero-sub{font-family:var(--display);font-style:italic;font-weight:300;font-size:clamp(18px,2.5vw,24px);color:var(--t3);max-width:600px;line-height:1.5;margin-bottom:48px}
 .hero-actions{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}
 .btn-primary{background:var(--ac);color:var(--bg);font-size:14px;font-weight:600;padding:14px 36px;border:none;cursor:pointer;text-decoration:none;letter-spacing:.03em;transition:all .15s}
@@ -485,7 +492,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <span class="dot"></span>
     <span>Testnet live &mdash; <span id="live-nodes">9</span> nodes &mdash; block <span id="live-height">&mdash;</span></span>
   </div>
-  <h1>Your money<br>is <em>yours</em>.</h1>
+  <h1>Your money<br>is <em class="bubble"><span class="bubble-letter">y</span><span class="bubble-letter">o</span><span class="bubble-letter">u</span><span class="bubble-letter">r</span><span class="bubble-letter">s</span></em>.</h1>
   <p class="hero-sub">A privacy-first cryptocurrency where every transaction is shielded by default, supply is cryptographically auditable, and no permission is required to participate.</p>
   <div class="hero-actions">
     <a href="#download" class="btn-primary">Download Wallet</a>
