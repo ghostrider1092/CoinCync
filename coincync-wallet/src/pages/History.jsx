@@ -1,16 +1,38 @@
-import { useState, useContext } from "react";
+import { useState, useContext, useEffect } from "react";
 import { useTheme, Card, Badge, Btn, Ico, ICONS, EmptyState } from "../components/ui";
 import TxModal from "../components/TxModal";
-import { WalletCtx } from "../appContexts";
+import { WalletCtx, NotifCtx } from "../appContexts";
 export default function History() {
   const T = useTheme();
   const { txs } = useContext(WalletCtx);
+  const { push } = useContext(NotifCtx);
   const [search, setSearch]   = useState("");
   const [filter, setFilter]   = useState("all");
   const [typeFilter, setType] = useState("all");
   const [selectedTx, setSelectedTx] = useState(null);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo]   = useState("");
+  // Right-click / long-press context menu — stays null until the user
+  // contextmenu's a row, then holds {x,y,tx}. Closed on next click /
+  // escape / scroll. Items animate in with a stagger.
+  const [ctxMenu, setCtxMenu] = useState(null);
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    const onKey = (e) => { if (e.key === "Escape") setCtxMenu(null); };
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [ctxMenu]);
+  function copy(text, label) {
+    try { navigator.clipboard.writeText(text); push(`${label} copied`, "success"); }
+    catch (_) { push("Copy failed", "error"); }
+  }
 
   const filtered = txs.filter(tx => {
     if (filter !== "all" && tx.type !== filter) return false;
@@ -57,7 +79,9 @@ export default function History() {
           title={txs.length===0?"No transactions yet":"No matching transactions"}
           subtitle={txs.length===0?"Mine CYNC or use the faucet to receive your first transaction.":"Try adjusting your search or filters."}/>}
         {filtered.map(tx=>(
-          <div key={tx.id} onClick={()=>setSelectedTx(tx)} style={{display:"grid",gridTemplateColumns:"2fr 150px 70px 75px",padding:"10px 16px",borderBottom:`1px solid ${T.b}`,alignItems:"center",cursor:"pointer",transition:"background .1s"}}
+          <div key={tx.id} onClick={()=>setSelectedTx(tx)}
+            onContextMenu={e=>{e.preventDefault();setCtxMenu({x:e.clientX,y:e.clientY,tx});}}
+            style={{display:"grid",gridTemplateColumns:"2fr 150px 70px 75px",padding:"10px 16px",borderBottom:`1px solid ${T.b}`,alignItems:"center",cursor:"pointer",transition:"background .1s"}}
             onMouseEnter={e=>e.currentTarget.style.background=T.bg} onMouseLeave={e=>e.currentTarget.style.background=""}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               <div style={{width:26,height:26,borderRadius:"50%",background:tx.type==="received"?`${T.green}18`:`${T.red}18`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
@@ -72,6 +96,46 @@ export default function History() {
         ))}
       </div>
       {selectedTx && <TxModal tx={selectedTx} onClose={()=>setSelectedTx(null)}/>}
+      {ctxMenu && (() => {
+        // Items animate in with a stagger via inline transitionDelay
+        // (so we don't have to load a CSS animation library). Each item
+        // closes the menu after running its action.
+        const items = [
+          { label: "Copy txid",       hint: "⌘C",       run: () => copy(ctxMenu.tx.id, "Tx ID") },
+          { label: "Copy amount",     hint: ctxMenu.tx.amount, run: () => copy(ctxMenu.tx.amount, "Amount") },
+          { label: "View on explorer", hint: "↗",       run: () => window.open(`https://explorer.coincync.network/tx/${ctxMenu.tx.id}`, "_blank", "noopener") },
+        ];
+        // Clamp position so the menu doesn't slip off the right/bottom edge.
+        const W = 220, H = items.length * 32 + 12;
+        const x = Math.min(ctxMenu.x, window.innerWidth - W - 8);
+        const y = Math.min(ctxMenu.y, window.innerHeight - H - 8);
+        return (
+          <div onClick={e => e.stopPropagation()}
+            style={{position:"fixed",left:x,top:y,zIndex:1000,minWidth:W,
+              background:T.s1||T.bg,border:`1px solid ${T.b}`,
+              boxShadow:"0 12px 32px rgba(0,0,0,.45)",borderRadius:6,padding:6,
+              transformOrigin:"top left",animation:"ctxOpen .2s ease-out forwards",
+              fontFamily:"'IBM Plex Sans',system-ui,sans-serif"}}>
+            <style>{`
+              @keyframes ctxOpen { from { opacity:0; transform:scale(.94) translateY(-4px); } to { opacity:1; transform:scale(1) translateY(0); } }
+              @keyframes ctxItemIn { from { opacity:0; transform:translateX(-6px); } to { opacity:1; transform:translateX(0); } }
+            `}</style>
+            {items.map((it, i) => (
+              <div key={it.label} onClick={() => { it.run(); setCtxMenu(null); }}
+                style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                  padding:"8px 12px",fontSize:12,color:T.t2,cursor:"pointer",borderRadius:4,
+                  opacity:0,animation:`ctxItemIn .25s ease-out forwards`,
+                  animationDelay:`${0.05 + i*0.06}s`,
+                  transition:"background .12s,color .12s"}}
+                onMouseEnter={e => { e.currentTarget.style.background = T.bg; e.currentTarget.style.color = T.ac2; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = T.t2; }}>
+                <span>{it.label}</span>
+                <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,color:T.t4,marginLeft:14,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.hint}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
