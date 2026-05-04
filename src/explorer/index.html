@@ -859,7 +859,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <canvas id="constellation-canvas"></canvas>
       <button class="constellation-btn constellation-expand" id="constellation-expand" type="button" title="Expand (drag to rotate, scroll to zoom)" aria-label="Expand constellation">&#9974;</button>
       <button class="constellation-btn constellation-close" id="constellation-close" type="button" title="Close (Esc)" aria-label="Close fullscreen">&times;</button>
-      <div class="constellation-label">Live network constellation</div>
+      <div class="constellation-label" id="constellation-label">Live anonymity set</div>
       <div class="constellation-hint">Drag to rotate &middot; scroll to zoom &middot; Esc to close</div>
     </div>
     <!-- ═══ LIVE BLOCK FEED ═══ -->
@@ -2285,9 +2285,12 @@ async function poll(){
   renderHrHistChart();
   updateStatusPage(info);
 
-  // Privacy stats (Spark + Shielded pool)
+  // Privacy stats (Spark + Shielded pool). Stash on window so the
+  // home-tab constellation can read the anonymity-set sizes without
+  // re-querying the RPC.
   const priv = await rpc('get_privacy_stats');
   if (priv) {
+    window._privStats = priv;
     const ss = $('spark-size'); if(ss) ss.textContent = num(priv.spark_accumulator_size || 0) + ' entries';
     const shs = $('shielded-size'); if(shs) shs.textContent = num(priv.shielded_tree_size || 0) + ' notes';
     const shr = $('shielded-root'); if(shr) shr.textContent = (priv.shielded_root || '—').slice(0, 24) + '...';
@@ -4076,16 +4079,50 @@ function initConstellation(){
       });
     }
   }
-  function readPeerCount(){
+  // ── ANONYMITY-SET DATA SOURCES ────────────────────────────────
+  // Inner ring  = Spark accumulator (one dot per √spark_size, capped 64)
+  //   — Spark is the post-Monero scalable-pool primitive; every entry is
+  //     a commitment that future spends can be cryptographically lost in.
+  // Outer ring  = Shielded note tree (one dot per √shielded_size, capped
+  //   128, age fade by index — newest entries near the chain tip glow
+  //   bright, oldest entries fade) — this is the cumulative shielded
+  //   anonymity pool (zero-knowledge note set).
+  // Sub-linear scaling (√) means small testnet pools still produce
+  // visible rings, while late-mainnet 100k+ pools saturate gracefully
+  // rather than turning the panel into an opaque ball.
+  // If the privacy RPC hasn't returned yet, fall back to peers/blocks
+  // so the panel still has something to render on first paint.
+  function readSparkSize(){
+    const v=(window._privStats?.spark_accumulator_size)|0;
+    if(v>0) return Math.min(64,Math.max(1,Math.round(Math.sqrt(v))));
     const t=document.getElementById('s-peers')?.textContent||'';
-    const n=parseInt(t,10); return isNaN(n)?0:n;
+    const n=parseInt(t,10);
+    return isNaN(n)?0:n;
   }
-  function readBlockCount(){
+  function readShieldedSize(){
+    const v=(window._privStats?.shielded_tree_size)|0;
+    if(v>0) return Math.min(128,Math.max(1,Math.round(Math.sqrt(v)*1.4)));
     if(typeof blockList!=='undefined' && blockList?.length) return blockList.length;
     return 0;
   }
-  buildPeerRing(readPeerCount()||8);
-  buildBlockRing(Math.min(readBlockCount()||32,BLOCK_MAX));
+  buildPeerRing(readSparkSize()||8);
+  buildBlockRing(Math.min(readShieldedSize()||32,BLOCK_MAX));
+
+  // Caption updater — shows the actual numeric sizes under the ring
+  // label so the visual is grounded in real data. Cheap; runs on the
+  // same poll as the data sync below.
+  function updateCaption(){
+    const lbl=document.getElementById('constellation-label');
+    if(!lbl) return;
+    const sp=(window._privStats?.spark_accumulator_size)|0;
+    const sh=(window._privStats?.shielded_tree_size)|0;
+    if(sp||sh){
+      lbl.textContent='Live anonymity set · Spark '+sp+' · Shielded '+sh;
+    } else {
+      lbl.textContent='Live anonymity set';
+    }
+  }
+  updateCaption();
 
   // Camera state — tilt is the rotation around the X axis (gives the
   // ring its perspective foreshortening), spin is the auto-rotation
@@ -4181,19 +4218,19 @@ function initConstellation(){
   });
   themeObs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 
-  // Live data sync — rebuild rings when peer count or block tip moves.
-  let lastPeers=inner.length;
-  let lastBlocks=outer.length;
-  let lastTipHeight=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
+  // Live data sync — every 2.5 s, re-read the anonymity-set sizes
+  // and rebuild rings if the dot count would change. Cheap: only
+  // rebuilds when the visualisation would actually look different.
+  // Caption updates every tick regardless so the numeric counts stay
+  // current even when sub-linear scaling absorbs the change.
+  let lastInnerN=inner.length;
+  let lastOuterN=outer.length;
   const dataPoll=setInterval(()=>{
-    const p=readPeerCount();
-    const b=readBlockCount();
-    const tip=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
-    if(p && p!==lastPeers){ lastPeers=p; buildPeerRing(p); }
-    if(b && (b!==lastBlocks || tip!==lastTipHeight)){
-      lastBlocks=b; lastTipHeight=tip;
-      buildBlockRing(Math.min(b,BLOCK_MAX));
-    }
+    const p=readSparkSize();
+    const b=readShieldedSize();
+    if(p && p!==lastInnerN){ lastInnerN=p; buildPeerRing(p); }
+    if(b && b!==lastOuterN){ lastOuterN=b; buildBlockRing(Math.min(b,BLOCK_MAX)); }
+    updateCaption();
   },2500);
 
   // Resize: recompute backing store when wrapper changes width.
