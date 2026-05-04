@@ -4020,30 +4020,67 @@ async function initConstellation(){
     },undefined,()=>{ bgPlane.visible=false; });
   }
 
-  // Particle rings. Inner = denser, smaller radius; outer = wider, sparser.
-  // Random Y depth gives a sense of volume rather than a flat disk.
+  // Particle rings, now data-driven:
+  //   inner = current peer count (one sphere per peer, all same accent)
+  //   outer = recent blocks (one sphere per block, age = colour fade —
+  //                          tip is bright accent, oldest is dim)
+  // Counts are clamped to sensible visual maxes so a 500-peer node
+  // doesn't turn the panel into an opaque ball.
   const group=new THREE.Group();
   const sphereGeom=new THREE.SphereGeometry(0.09,10,10);
-  function makeRing(count,radius,depthVar){
-    const out=[];
-    for(let i=0;i<count;i++){
-      const ang=(i/count)*Math.PI*2+(Math.random()-0.5)*0.5;
-      const r=radius+(Math.random()-0.5)*0.6;
-      const y=(Math.random()-0.5)*depthVar;
-      const x=Math.cos(ang)*r;
-      const z=Math.sin(ang)*r;
-      const tint=Math.random()*0.4+0.6; // 60–100% of accent brightness
-      const c=new THREE.Color(accent0).multiplyScalar(tint);
-      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.55,roughness:0.45});
-      const m=new THREE.Mesh(sphereGeom,mat);
-      m.position.set(x,y,z);
-      group.add(m);
-      out.push(m);
-    }
-    return out;
+  let inner=[];
+  let outer=[];
+  const PEER_MAX=64;
+  const BLOCK_MAX=128;
+  function disposeRing(arr){
+    arr.forEach(m=>{ group.remove(m); m.material.dispose(); });
+    arr.length=0;
   }
-  const inner=makeRing(48,4,0.7);
-  const outer=makeRing(96,7,1.4);
+  function buildPeerRing(count){
+    disposeRing(inner);
+    const n=Math.min(Math.max(count,1),PEER_MAX);
+    const accent=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||accent0;
+    for(let i=0;i<n;i++){
+      const ang=(i/n)*Math.PI*2+(Math.random()-0.5)*0.4;
+      const r=4+(Math.random()-0.5)*0.5;
+      const y=(Math.random()-0.5)*0.7;
+      const tint=Math.random()*0.3+0.7;
+      const c=new THREE.Color(accent).multiplyScalar(tint);
+      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.6,roughness:0.4});
+      const m=new THREE.Mesh(sphereGeom,mat);
+      m.position.set(Math.cos(ang)*r,y,Math.sin(ang)*r);
+      group.add(m); inner.push(m);
+    }
+  }
+  function buildBlockRing(count){
+    disposeRing(outer);
+    const n=Math.min(Math.max(count,1),BLOCK_MAX);
+    const accent=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||accent0;
+    for(let i=0;i<n;i++){
+      const ang=(i/n)*Math.PI*2;
+      const r=7+(Math.random()-0.5)*0.6;
+      const y=(Math.random()-0.5)*1.3;
+      // Age fade: i=0 is the tip (newest, brightest). Linear fade to
+      // 25% brightness at i=n-1. Visualises chain age around the ring.
+      const ageT=1-(i/Math.max(1,n-1))*0.75;
+      const c=new THREE.Color(accent).multiplyScalar(ageT);
+      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.5,roughness:0.45});
+      const m=new THREE.Mesh(sphereGeom,mat);
+      m.position.set(Math.cos(ang)*r,y,Math.sin(ang)*r);
+      group.add(m); outer.push(m);
+    }
+  }
+  // Initial: read current values from existing globals if present.
+  function readPeerCount(){
+    const t=document.getElementById('s-peers')?.textContent||'';
+    const n=parseInt(t,10); return isNaN(n)?0:n;
+  }
+  function readBlockCount(){
+    if(typeof blockList!=='undefined' && blockList?.length) return blockList.length;
+    return 0;
+  }
+  buildPeerRing(readPeerCount()||8);
+  buildBlockRing(Math.min(readBlockCount()||32,BLOCK_MAX));
   scene.add(group);
 
   // Initial backdrop based on stored wallpaper choice.
@@ -4064,8 +4101,10 @@ async function initConstellation(){
     else { bgPlane.visible=false; }
   },800);
 
-  // React to theme changes — recolour every particle + the point light
-  // to match the new --ac2. Watching the <html> data-theme attr.
+  // React to theme changes — recolour the point light + rebuild the
+  // rings so the new accent applies cleanly (cheaper than walking
+  // every existing material; ring rebuild is ~150 spheres). Watching
+  // the <html> data-theme attr.
   let lastTheme=document.documentElement.getAttribute('data-theme');
   const themeObs=new MutationObserver(()=>{
     const cur=document.documentElement.getAttribute('data-theme');
@@ -4073,15 +4112,30 @@ async function initConstellation(){
     lastTheme=cur;
     const accent=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||'#d4a059';
     pointLt.color.set(accent);
-    [...inner,...outer].forEach(m=>{
-      const tint=Math.random()*0.4+0.6;
-      const c=new THREE.Color(accent).multiplyScalar(tint);
-      m.material.color.copy(c);
-      m.material.emissive.copy(c);
-      m.material.needsUpdate=true;
-    });
+    buildPeerRing(readPeerCount()||inner.length);
+    buildBlockRing(readBlockCount()||outer.length);
   });
   themeObs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+
+  // Live data sync — every 2.5 s, read the current peer count + block
+  // count from existing globals (s-peers element and blockList) and
+  // rebuild the rings if the values changed. Cheap: only rebuilds when
+  // the visualisation would actually look different.
+  let lastPeers=inner.length;
+  let lastBlocks=outer.length;
+  let lastTipHeight = (typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
+  const dataPoll=setInterval(()=>{
+    const p=readPeerCount();
+    const b=readBlockCount();
+    const tip=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
+    // Rebuild peers if count changed; rebuild blocks if count OR tip
+    // changed (a new block at the tip = the colour-fade order shifts).
+    if(p && p!==lastPeers){ lastPeers=p; buildPeerRing(p); }
+    if(b && (b!==lastBlocks || tip!==lastTipHeight)){
+      lastBlocks=b; lastTipHeight=tip;
+      buildBlockRing(Math.min(b,BLOCK_MAX));
+    }
+  },2500);
 
   // Resize: recompute aspect when the wrapper changes width (theme
   // switcher dropdown can shift things; ResizeObserver catches all).
@@ -4103,7 +4157,7 @@ async function initConstellation(){
     renderer.render(scene,camera);
     _constellation.raf=requestAnimationFrame(frame);
   }
-  _constellation={renderer,scene,camera,group,raf:0,wpPoll,themeObs,ro};
+  _constellation={renderer,scene,camera,group,raf:0,wpPoll,themeObs,ro,dataPoll};
   frame();
 }
 
