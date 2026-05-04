@@ -162,6 +162,21 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:color-mix(in srgb
 .builtin-overlay-name{font-size:13px;font-weight:600;letter-spacing:.08em;margin-bottom:6px;text-transform:uppercase}
 .builtin-overlay-desc{opacity:.85;max-width:240px}
 @media(max-width:700px){.builtin-row.cols-4{grid-template-columns:repeat(2,1fr)}.builtin-row.cols-4 .builtin-cell:nth-child(2){border-right:none}.builtin-row.cols-3{grid-template-columns:1fr}.builtin-row.cols-3 .builtin-cell{border-right:none;border-bottom:1px solid var(--b)}.builtin-row.cols-3 .builtin-cell:last-child{border-bottom:none}.builtin-cell{height:88px}}
+
+/* ─── MARK ROLODEX ──────────────────────────────────────────────────
+   Cycles the four existing brand-mark variants (gold-dark, cream-dark,
+   ink-brass, ink-cream) above the Constitution articles in §06. Every
+   ~3 s the card flips around its X axis, swapping the visible mark.
+   Tiny visual accent — meant to read as "the seal of the Constitution
+   in its different forms," not as a feature. */
+.mark-rolodex{display:flex;justify-content:center;margin-bottom:48px}
+.mark-card{position:relative;width:140px;height:140px;perspective:600px;cursor:default}
+.mark-card-face{position:absolute;inset:0;backface-visibility:hidden;display:flex;align-items:center;justify-content:center;background:var(--s1);border:1px solid var(--b);transition:transform .9s cubic-bezier(.5,1.2,.5,1),opacity .45s}
+.mark-card-face img{width:80%;height:80%;object-fit:contain;display:block}
+.mark-card-face.is-front{transform:rotateY(0)}
+.mark-card-face.is-back{transform:rotateY(180deg)}
+.mark-card.flipping .mark-card-face.is-front{transform:rotateY(-180deg)}
+.mark-card.flipping .mark-card-face.is-back{transform:rotateY(0)}
 .hero-stat{text-align:center}
 .hero-stat .val{font-family:var(--display);font-size:32px;font-weight:400;color:var(--t);margin-bottom:4px}
 .hero-stat .label{font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.15em;text-transform:uppercase}
@@ -893,6 +908,12 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <h2 class="section-title">Written in <em>stone</em>.</h2>
     <p class="section-desc">The CoinCync Constitution is permanent. It cannot be amended, repealed, or superseded. These are not promises &mdash; they are protocol rules.</p>
   </div>
+  <div class="mark-rolodex reveal" aria-hidden="true">
+    <div class="mark-card" id="mark-rolodex">
+      <div class="mark-card-face is-front"><img src="/assets/logo-gold-dark.svg" alt=""></div>
+      <div class="mark-card-face is-back"><img src="/assets/logo-cream-dark.svg" alt=""></div>
+    </div>
+  </div>
   <div class="const-grid reveal-stagger">
     <div class="const-card">
       <div class="const-art">Article I &mdash; Fixed Supply</div>
@@ -1325,6 +1346,39 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   }
   tick();
   setInterval(tick,1000);
+})();
+
+// --- MARK ROLODEX (cycles 4 brand-mark variants in §06) ---
+// Two faces, four marks: every ~3 s we flip the card and swap whichever
+// face is now hidden to the next variant in sequence. So the user
+// always sees a fresh face after the flip animation completes.
+(function(){
+  var card=document.getElementById('mark-rolodex');
+  if(!card) return;
+  var marks=[
+    '/assets/logo-gold-dark.svg',
+    '/assets/logo-cream-dark.svg',
+    '/assets/logo-ink-brass.svg',
+    '/assets/logo-ink-cream.svg'
+  ];
+  var idx=1;
+  var front=card.querySelector('.is-front img');
+  var back=card.querySelector('.is-back img');
+  setInterval(function(){
+    var flipping=card.classList.toggle('flipping');
+    // Mid-flip (after the 0.9s animation midpoint): swap the now-hidden
+    // face's src to the *next-next* mark, so by the time it rotates
+    // back into view it has the right image.
+    setTimeout(function(){
+      idx=(idx+1)%marks.length;
+      if(flipping){
+        // Front is now hidden; queue its next image.
+        front.src=marks[idx];
+      } else {
+        back.src=marks[idx];
+      }
+    },900);
+  },3000);
 })();
 
 // --- HERO LAUNCH COUNTDOWN (testnet 2026-05-09) ---
