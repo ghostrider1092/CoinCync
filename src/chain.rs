@@ -795,18 +795,47 @@ impl Blockchain {
         }
     }
 
-    /// Check if chain is synced (updated by P2P layer via set_sync_info)
+    /// Check if chain is synced (updated by P2P layer via set_sync_info).
+    ///
+    /// Three conditions, any one of which is sufficient:
+    ///   1. The P2P layer flagged us synced explicitly.
+    ///   2. We're at or above the highest peer-advertised height.
+    ///   3. We're within 2 blocks of that target AND the tip itself is
+    ///      recent (younger than 3× the target block time = 6 min).
+    ///
+    /// Condition 3 covers the steady-state case where a peer announces
+    /// a new block (bumping `peer_target_height` by 1) a beat before
+    /// we've ingested it. Without this, a chain producing blocks at the
+    /// target rate is reported as "syncing" forever — which is what
+    /// users of the explorer kept reporting as "the chain stalled".
+    /// A fresh tip + tiny overshoot is the textbook "essentially synced"
+    /// state; reporting it as such matches user reality.
     pub fn is_synced(&self) -> bool {
-        // Consider synced if: (a) P2P says so, OR (b) our height is
-        // non-zero and at or above the peer-reported target. The P2P
-        // layer can lag behind in reporting target_height (peers
-        // advertise stale heights), making the flag stuck at false
-        // even when we're the chain leader.
         let flag = self.synced.load(std::sync::atomic::Ordering::Relaxed);
         if flag { return true; }
         let h = self.height();
+        if h == 0 { return false; }
         let target = self.peer_target_height.load(std::sync::atomic::Ordering::Relaxed);
-        h > 0 && h >= target
+        if h >= target { return true; }
+        // Tolerance for in-flight peer advertisements: ≤2 blocks behind
+        // the peer-advertised target, AND tip is fresh enough that the
+        // chain is clearly producing blocks (not actually stalled).
+        if target.saturating_sub(h) <= 2 {
+            let tip_timestamp = self.inner.read().tip.timestamp;
+            if let Ok(d) = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+            {
+                let now_secs = d.as_secs();
+                let age = now_secs.saturating_sub(tip_timestamp);
+                // 3× testnet target block time. Same threshold is fine
+                // for mainnet (also 120s target).
+                const FRESH_TIP_SECS: u64 = 3 * crate::constants::TARGET_BLOCK_TIME;
+                if age <= FRESH_TIP_SECS {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Get chain statistics
