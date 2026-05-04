@@ -1934,7 +1934,7 @@ document.addEventListener('DOMContentLoaded', function() {
   if (!savedPage || savedPage === 'home') {
     setTimeout(function(){
       if (typeof initConstellation === 'function') {
-        initConstellation().catch(function(){});
+        try { initConstellation(); } catch(_){}
       }
     }, 300);
   }
@@ -3980,132 +3980,102 @@ function _schedulePrivacyDemo() {
 let _globe=null,_globeDone=false,_globeAuto=true;
 let _constellation=null;
 
-// 3D particle ring on the home tab. Two rings of glowing dots rotating
-// slowly on Z; a textured plane behind them carries whichever wallpaper
-// SVG the user picked. Particle colour reads var(--ac2) so it follows
-// the active theme. Reuses the THREE global that ensureNetworkVizDeps()
-// pulls in for the Globe page.
-async function initConstellation(){
+// Two rings of glowing dots rendered with plain Canvas2D — no
+// three.js, no external deps. The rings are projected with a tilt +
+// perspective so the panel reads as "3D-ish" without the half-meg
+// of WebGL machinery (and works regardless of whether dep loaders
+// succeed). Particle colour reads var(--ac2) so the dots follow the
+// user's theme. Inner ring = peer count, outer ring = recent blocks
+// with an age-based fade (newest brightest, oldest dimmest).
+function initConstellation(){
   if(_constellation) return;
   const canvas=document.getElementById('constellation-canvas');
   const wrap=document.getElementById('constellation-panel');
   if(!canvas||!wrap) return;
-  // Diagnostic overlay — visible without DevTools so we can see at a
-  // glance whether init progressed past each stage. Cleared on first
-  // successful render.
-  let diag=document.getElementById('constellation-diag');
-  if(!diag){
-    diag=document.createElement('div');
-    diag.id='constellation-diag';
-    diag.style.cssText='position:absolute;top:10px;left:14px;z-index:11;font-family:var(--mono);font-size:10px;color:#fff;background:rgba(0,0,0,.6);padding:4px 8px;border-radius:3px;letter-spacing:.05em;pointer-events:none;line-height:1.5';
-    diag.textContent='init…';
-    wrap.appendChild(diag);
+  const ctx=canvas.getContext('2d');
+  if(!ctx) return;
+
+  // Stale diagnostic overlay from previous WebGL implementation —
+  // remove if it survived a hot reload.
+  const oldDiag=document.getElementById('constellation-diag');
+  if(oldDiag) oldDiag.remove();
+
+  // Backing-store DPR scaling — keeps dots crisp on high-DPI displays
+  // without pushing the canvas style size off the layout.
+  const dpr=window.devicePixelRatio||1;
+  function sizeCanvas(){
+    const w=Math.max(320,wrap.clientWidth);
+    const h=wrap.clientHeight||360;
+    canvas.style.width=w+'px';
+    canvas.style.height=h+'px';
+    canvas.width=Math.round(w*dpr);
+    canvas.height=Math.round(h*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    return {w,h};
   }
-  const setDiag=(msg)=>{ if(diag) diag.textContent=msg; console.info('[const]',msg); };
-  setDiag('loading three.js…');
-  try{ await ensureNetworkVizDeps(); }catch(e){ setDiag('dep load FAILED: '+(e?.message||e)); return; }
-  if(typeof THREE==='undefined'){ setDiag('THREE undefined after dep load'); return; }
-  setDiag('THREE ok, sizing…');
+  let dim=sizeCanvas();
 
-  const W=Math.max(320,wrap.clientWidth);
-  const H=wrap.clientHeight||360;
-  setDiag('canvas '+W+'x'+H+' — building scene');
-  const scene=new THREE.Scene();
-  const camera=new THREE.PerspectiveCamera(45,W/H,0.1,200);
-  camera.position.set(0,5,15);
-  camera.lookAt(0,0,0);
-  const renderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});
-  renderer.setSize(W,H,false);
-  renderer.setPixelRatio(window.devicePixelRatio||1);
-  renderer.setClearColor(0x000000,0);
-
-  scene.add(new THREE.AmbientLight(0xffffff,0.35));
-  const dir=new THREE.DirectionalLight(0xffffff,0.55);
-  dir.position.set(8,10,8);
-  scene.add(dir);
-  // The point light's colour echoes the accent so particles bloom
-  // toward the user's theme even at extreme camera angles.
-  const accent0=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||'#d4a059';
-  const pointLt=new THREE.PointLight(new THREE.Color(accent0),1.2,40);
-  pointLt.position.set(-10,0,-8);
-  scene.add(pointLt);
-
-  // Backdrop plane — gets the active wallpaper as a texture. Sized
-  // larger than the camera frustum so panning never reveals an edge,
-  // pushed deeper into Z so the particles dominate the foreground, and
-  // dimmed enough that gold particles read clearly against gold marks.
-  const bgGeom=new THREE.PlaneGeometry(22,14);
-  const bgMat=new THREE.MeshBasicMaterial({transparent:true,opacity:0.32,side:THREE.DoubleSide,color:0xffffff});
-  const bgPlane=new THREE.Mesh(bgGeom,bgMat);
-  bgPlane.position.set(0,0,-14);
-  bgPlane.visible=false;
-  scene.add(bgPlane);
-
-  function loadBackdrop(url){
-    if(!url){ bgPlane.visible=false; return; }
-    const loader=new THREE.TextureLoader();
-    loader.load(url,(tex)=>{
-      tex.colorSpace=THREE.SRGBColorSpace||tex.colorSpace;
-      bgMat.map=tex;
-      bgMat.needsUpdate=true;
-      bgPlane.visible=true;
-    },undefined,()=>{ bgPlane.visible=false; });
+  function readAccent(){
+    return getComputedStyle(document.body).getPropertyValue('--ac2').trim()||'#d4a059';
   }
+  // Parse #rgb / #rrggbb / rgb(...) once per accent-change so the
+  // hot path can mix alpha into rgba() strings without re-parsing.
+  function parseAccent(c){
+    c=c.trim();
+    if(c.startsWith('#')){
+      let h=c.slice(1);
+      if(h.length===3) h=h.split('').map(x=>x+x).join('');
+      const n=parseInt(h,16);
+      return {r:(n>>16)&255,g:(n>>8)&255,b:n&255};
+    }
+    const m=c.match(/rgba?\(([^)]+)\)/);
+    if(m){
+      const p=m[1].split(',').map(s=>parseFloat(s));
+      return {r:p[0]||0,g:p[1]||0,b:p[2]||0};
+    }
+    return {r:212,g:160,b:89};
+  }
+  let accent=readAccent();
+  let accentRGB=parseAccent(accent);
 
-  // Particle rings, now data-driven:
-  //   inner = current peer count (one sphere per peer, all same accent)
-  //   outer = recent blocks (one sphere per block, age = colour fade —
-  //                          tip is bright accent, oldest is dim)
-  // Counts are clamped to sensible visual maxes so a 500-peer node
-  // doesn't turn the panel into an opaque ball.
-  const group=new THREE.Group();
-  // Sphere geometry sized so individual particles read clearly against
-  // a wallpaper-textured backdrop. ~0.18 units = ~14 px on a 720-wide
-  // panel at the resting camera distance.
-  const sphereGeom=new THREE.SphereGeometry(0.16,12,12);
-  let inner=[];
-  let outer=[];
+  // Particle definitions — generated once and recycled. Each particle
+  // owns its angle (stable position around the ring), radius (with
+  // small jitter for organic feel), y offset (vertical scatter), and
+  // a brightness multiplier. The animation loop adds a global rotation
+  // to every particle's angle, so we don't have to rebuild on each
+  // frame.
+  let inner=[];   // peers
+  let outer=[];   // blocks
   const PEER_MAX=64;
   const BLOCK_MAX=128;
-  function disposeRing(arr){
-    arr.forEach(m=>{ group.remove(m); m.material.dispose(); });
-    arr.length=0;
-  }
   function buildPeerRing(count){
-    disposeRing(inner);
     const n=Math.min(Math.max(count,1),PEER_MAX);
-    const accent=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||accent0;
+    inner=[];
     for(let i=0;i<n;i++){
-      const ang=(i/n)*Math.PI*2+(Math.random()-0.5)*0.4;
-      const r=4+(Math.random()-0.5)*0.5;
-      const y=(Math.random()-0.5)*0.7;
-      const tint=Math.random()*0.3+0.7;
-      const c=new THREE.Color(accent).multiplyScalar(tint);
-      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.95,roughness:0.4});
-      const m=new THREE.Mesh(sphereGeom,mat);
-      m.position.set(Math.cos(ang)*r,y,Math.sin(ang)*r);
-      group.add(m); inner.push(m);
+      inner.push({
+        ang:(i/n)*Math.PI*2+(Math.random()-0.5)*0.25,
+        r:1.0+(Math.random()-0.5)*0.08,
+        y:(Math.random()-0.5)*0.18,
+        bright:0.75+Math.random()*0.25,
+      });
     }
   }
   function buildBlockRing(count){
-    disposeRing(outer);
     const n=Math.min(Math.max(count,1),BLOCK_MAX);
-    const accent=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||accent0;
+    outer=[];
     for(let i=0;i<n;i++){
-      const ang=(i/n)*Math.PI*2;
-      const r=7+(Math.random()-0.5)*0.6;
-      const y=(Math.random()-0.5)*1.3;
-      // Age fade: i=0 is the tip (newest, brightest). Linear fade to
-      // 25% brightness at i=n-1. Visualises chain age around the ring.
+      // Age fade: i=0 is the chain tip (newest, brightest). Linear
+      // taper to 25% at the oldest. Visualises chain age around the
+      // outer ring.
       const ageT=1-(i/Math.max(1,n-1))*0.75;
-      const c=new THREE.Color(accent).multiplyScalar(ageT);
-      const mat=new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:0.85,roughness:0.45});
-      const m=new THREE.Mesh(sphereGeom,mat);
-      m.position.set(Math.cos(ang)*r,y,Math.sin(ang)*r);
-      group.add(m); outer.push(m);
+      outer.push({
+        ang:(i/n)*Math.PI*2,
+        r:1.7+(Math.random()-0.5)*0.1,
+        y:(Math.random()-0.5)*0.32,
+        bright:ageT,
+      });
     }
   }
-  // Initial: read current values from existing globals if present.
   function readPeerCount(){
     const t=document.getElementById('s-peers')?.textContent||'';
     const n=parseInt(t,10); return isNaN(n)?0:n;
@@ -4116,55 +4086,109 @@ async function initConstellation(){
   }
   buildPeerRing(readPeerCount()||8);
   buildBlockRing(Math.min(readBlockCount()||32,BLOCK_MAX));
-  scene.add(group);
 
-  // Initial backdrop based on stored wallpaper choice.
-  const wpId0=localStorage.getItem('cync-wallpaper');
-  if(wpId0 && WALLPAPERS && WALLPAPERS[wpId0] && WALLPAPERS[wpId0].url){
-    loadBackdrop(WALLPAPERS[wpId0].url);
+  // Camera state — tilt is the rotation around the X axis (gives the
+  // ring its perspective foreshortening), spin is the auto-rotation
+  // around Y, scale is the zoom factor. Drag updates tilt + spinOffset
+  // when fullscreen; wheel adjusts scale.
+  let tilt=0.55;        // ~32° looking down on the rings
+  let spin=0;           // running rotation
+  let spinOffset=0;     // user-drag offset added to spin
+  let zoom=1.0;         // 1.0 = panel size; clamp 0.6..2.4 in fullscreen
+  let fullscreen=false;
+  let dragStart=null;
+
+  // Project a 3D point (x,y,z) into 2D panel coords. Tilt rotates the
+  // unit ring around X, then a simple perspective divide pulls far
+  // dots inward + scales their radius.
+  function project(x,y,z){
+    const cy=Math.cos(tilt), sy=Math.sin(tilt);
+    const y2=y*cy - z*sy;
+    const z2=y*sy + z*cy;
+    // Camera distance — larger = less perspective distortion. 4.0 is
+    // a comfortable middle ground at our radii (1..2 unit rings).
+    const FL=4.0;
+    const persp=FL/(FL+z2);
+    return {x:x*persp, y:y2*persp, depth:z2, scale:persp};
   }
 
-  // React to wallpaper changes — listen via an interval rather than
-  // patching the existing setWallpaper() so we don't need to touch its
-  // call sites. Cheap (one localStorage read every 800 ms).
-  let lastWp=wpId0||null;
-  const wpPoll=setInterval(()=>{
-    const cur=localStorage.getItem('cync-wallpaper')||null;
-    if(cur===lastWp) return;
-    lastWp=cur;
-    if(cur && WALLPAPERS[cur]) loadBackdrop(WALLPAPERS[cur].url);
-    else { bgPlane.visible=false; }
-  },800);
+  function frame(){
+    if(!fullscreen) spin += 0.004; // ~14°/s clockwise
+    const totalSpin=spin+spinOffset;
+    const {w,h}=dim;
+    // Clear with full transparency so body wallpaper / theme bg shows
+    // through the panel naturally.
+    ctx.clearRect(0,0,w,h);
 
-  // React to theme changes — recolour the point light + rebuild the
-  // rings so the new accent applies cleanly (cheaper than walking
-  // every existing material; ring rebuild is ~150 spheres). Watching
-  // the <html> data-theme attr.
+    // Project every particle, then sort back-to-front so closer dots
+    // overdraw farther ones. ~150 particles max → trivial cost.
+    const all=[];
+    for(const p of inner) all.push({p,kind:0});
+    for(const p of outer) all.push({p,kind:1});
+    const projected=all.map(({p,kind})=>{
+      const a=p.ang+totalSpin*(kind?0.6:1.0); // outer spins slower
+      const x=Math.cos(a)*p.r;
+      const z=Math.sin(a)*p.r;
+      const proj=project(x,p.y,z);
+      return {p,kind,proj};
+    });
+    projected.sort((a,b)=>a.proj.depth-b.proj.depth);
+
+    // Render. Each dot is a radial gradient — bright core, soft glow.
+    // Centre coords sit a hair below midline so the perspective tilt
+    // doesn't push the rings toward the bottom edge.
+    const cx=w*0.5, cy=h*0.55;
+    const baseUnits=Math.min(w,h)*0.22*zoom; // 1 ring-unit ≈ this many px
+
+    for(const {p,kind,proj} of projected){
+      const px=cx+proj.x*baseUnits;
+      const py=cy+proj.y*baseUnits;
+      // Dot size shrinks with depth so the back of the ring looks
+      // farther away. Outer particles are slightly smaller than
+      // inner so peers feel "central".
+      const baseR=(kind?2.0:2.6)*proj.scale*zoom*p.bright;
+      const glowR=baseR*4.5;
+      const a=p.bright*(0.6+0.4*proj.scale); // far dots dimmer
+      const {r,g,b}=accentRGB;
+      const grad=ctx.createRadialGradient(px,py,0,px,py,glowR);
+      grad.addColorStop(0,`rgba(${r},${g},${b},${a})`);
+      grad.addColorStop(0.35,`rgba(${r},${g},${b},${a*0.45})`);
+      grad.addColorStop(1,`rgba(${r},${g},${b},0)`);
+      ctx.fillStyle=grad;
+      ctx.beginPath();
+      ctx.arc(px,py,glowR,0,Math.PI*2);
+      ctx.fill();
+      // Bright core on top of the glow gradient.
+      ctx.fillStyle=`rgba(${Math.min(255,r+40)},${Math.min(255,g+40)},${Math.min(255,b+40)},${Math.min(1,a+0.2)})`;
+      ctx.beginPath();
+      ctx.arc(px,py,baseR,0,Math.PI*2);
+      ctx.fill();
+    }
+
+    _constellation.raf=requestAnimationFrame(frame);
+  }
+
+  // ── theme + data reactivity ─────────────────────────────────────
+  // Watch <html data-theme> for theme switches and re-read --ac2 on
+  // change. Cheap because the read happens at most once per swap.
   let lastTheme=document.documentElement.getAttribute('data-theme');
   const themeObs=new MutationObserver(()=>{
     const cur=document.documentElement.getAttribute('data-theme');
     if(cur===lastTheme) return;
     lastTheme=cur;
-    const accent=getComputedStyle(document.body).getPropertyValue('--ac2').trim()||'#d4a059';
-    pointLt.color.set(accent);
-    buildPeerRing(readPeerCount()||inner.length);
-    buildBlockRing(readBlockCount()||outer.length);
+    accent=readAccent();
+    accentRGB=parseAccent(accent);
   });
   themeObs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 
-  // Live data sync — every 2.5 s, read the current peer count + block
-  // count from existing globals (s-peers element and blockList) and
-  // rebuild the rings if the values changed. Cheap: only rebuilds when
-  // the visualisation would actually look different.
+  // Live data sync — rebuild rings when peer count or block tip moves.
   let lastPeers=inner.length;
   let lastBlocks=outer.length;
-  let lastTipHeight = (typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
+  let lastTipHeight=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
   const dataPoll=setInterval(()=>{
     const p=readPeerCount();
     const b=readBlockCount();
     const tip=(typeof blockList!=='undefined' && blockList?.[0]?.height)||0;
-    // Rebuild peers if count changed; rebuild blocks if count OR tip
-    // changed (a new block at the tip = the colour-fade order shifts).
     if(p && p!==lastPeers){ lastPeers=p; buildPeerRing(p); }
     if(b && (b!==lastBlocks || tip!==lastTipHeight)){
       lastBlocks=b; lastTipHeight=tip;
@@ -4172,50 +4196,27 @@ async function initConstellation(){
     }
   },2500);
 
-  // Resize: recompute aspect when the wrapper changes width (theme
-  // switcher dropdown can shift things; ResizeObserver catches all).
-  const ro=new ResizeObserver(()=>{
-    const w=Math.max(320,wrap.clientWidth);
-    const h=wrap.clientHeight||360;
-    renderer.setSize(w,h,false);
-    camera.aspect=w/h;
-    camera.updateProjectionMatrix();
-  });
+  // Resize: recompute backing store when wrapper changes width.
+  const ro=new ResizeObserver(()=>{ dim=sizeCanvas(); });
   ro.observe(wrap);
 
-  // ── FULLSCREEN + ORBIT CONTROLS ─────────────────────────────────
-  // Click ⛶ to expand the panel to fill the viewport. Once fullscreen:
-  //  - mouse drag rotates the camera around the scene origin (spherical
-  //    orbit; phi clamped so the camera never inverts overhead);
-  //  - mouse wheel zooms the camera in/out (radius clamped 8..32);
-  //  - Esc / × button exits.
-  // Auto-rotation pauses while fullscreen so the user's drag isn't
-  // fighting it. Exiting restores the resting camera + auto-spin.
-  let fullscreen=false;
-  let dragStart=null;
-  let orbit=null; // {radius, theta, phi}
-  function applyOrbit(){
-    if(!orbit) return;
-    const r=orbit.radius, t=orbit.theta, p=orbit.phi;
-    camera.position.x=r*Math.sin(p)*Math.sin(t);
-    camera.position.y=r*Math.cos(p);
-    camera.position.z=r*Math.sin(p)*Math.cos(t);
-    camera.lookAt(0,0,0);
-  }
+  // ── fullscreen + drag/zoom ──────────────────────────────────────
+  // Fullscreen lets the user drag to tilt the rings (mouse vertical
+  // = X-axis tilt; horizontal = manual spin offset) and scroll to
+  // zoom. Auto-rotation continues so the rings still feel alive.
   function onPointerDown(e){
-    if(!fullscreen||!orbit) return;
+    if(!fullscreen) return;
     e.preventDefault();
-    dragStart={x:e.clientX,y:e.clientY,theta:orbit.theta,phi:orbit.phi};
+    dragStart={x:e.clientX,y:e.clientY,tilt,spin:spinOffset};
     window.addEventListener('pointermove',onPointerMove);
     window.addEventListener('pointerup',onPointerUp);
   }
   function onPointerMove(e){
-    if(!dragStart||!orbit) return;
+    if(!dragStart) return;
     const dx=e.clientX-dragStart.x;
     const dy=e.clientY-dragStart.y;
-    orbit.theta=dragStart.theta-dx*0.008;
-    orbit.phi=Math.max(0.2,Math.min(Math.PI-0.2,dragStart.phi-dy*0.008));
-    applyOrbit();
+    spinOffset=dragStart.spin-dx*0.005;
+    tilt=Math.max(-0.05,Math.min(1.4,dragStart.tilt+dy*0.005));
   }
   function onPointerUp(){
     dragStart=null;
@@ -4223,11 +4224,10 @@ async function initConstellation(){
     window.removeEventListener('pointerup',onPointerUp);
   }
   function onWheel(e){
-    if(!fullscreen||!orbit) return;
+    if(!fullscreen) return;
     e.preventDefault();
-    orbit.radius*=1+e.deltaY*0.001;
-    orbit.radius=Math.max(8,Math.min(32,orbit.radius));
-    applyOrbit();
+    zoom*=1-e.deltaY*0.001;
+    zoom=Math.max(0.6,Math.min(2.4,zoom));
   }
   function setFullscreen(on){
     if(on===fullscreen) return;
@@ -4235,62 +4235,23 @@ async function initConstellation(){
     if(on){
       wrap.classList.add('is-fullscreen');
       document.body.style.overflow='hidden';
-      // Initialise orbit from the current camera pose so the first
-      // drag doesn't snap the view.
-      const px=camera.position.x, py=camera.position.y, pz=camera.position.z;
-      const radius=Math.max(8,Math.min(32,Math.sqrt(px*px+py*py+pz*pz)));
-      orbit={
-        radius,
-        theta:Math.atan2(px,pz),
-        phi:Math.acos(Math.max(-1,Math.min(1,py/radius)))
-      };
       canvas.addEventListener('pointerdown',onPointerDown);
       canvas.addEventListener('wheel',onWheel,{passive:false});
     } else {
       wrap.classList.remove('is-fullscreen');
       document.body.style.overflow='';
-      orbit=null;
+      // Reset camera so resuming auto-spin starts from a sane pose.
+      tilt=0.55; spinOffset=0; zoom=1.0;
       canvas.removeEventListener('pointerdown',onPointerDown);
       canvas.removeEventListener('wheel',onWheel);
-      // Restore resting camera so auto-rotation resumes from a sane pose.
-      camera.position.set(0,5,15);
-      camera.lookAt(0,0,0);
     }
-    // Resize after layout settles.
-    setTimeout(()=>{
-      const w=Math.max(320,wrap.clientWidth);
-      const h=wrap.clientHeight||360;
-      renderer.setSize(w,h,false);
-      camera.aspect=w/h;
-      camera.updateProjectionMatrix();
-    },50);
+    setTimeout(()=>{ dim=sizeCanvas(); },50);
   }
   document.getElementById('constellation-expand')?.addEventListener('click',()=>setFullscreen(true));
   document.getElementById('constellation-close')?.addEventListener('click',()=>setFullscreen(false));
   document.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && fullscreen) setFullscreen(false); });
 
-  // Animation loop. Auto-rotation pauses while the user is in
-  // fullscreen so manual orbit doesn't fight it. Diag overlay clears
-  // after the 10th rendered frame so it doesn't sit on top of the
-  // finished scene; if init silently failed, it stays put with the
-  // last failure stage so the user can read it.
-  const clock=new THREE.Clock();
-  let frameCount=0;
-  function frame(){
-    const t=clock.getElapsedTime();
-    if(!fullscreen){
-      group.rotation.z=t*0.06;
-      group.rotation.y=t*0.025;
-    }
-    renderer.render(scene,camera);
-    if(++frameCount===10){
-      setDiag('OK — '+inner.length+' peers + '+outer.length+' blocks');
-      setTimeout(()=>{ const d=document.getElementById('constellation-diag'); if(d) d.remove(); },2500);
-    }
-    _constellation.raf=requestAnimationFrame(frame);
-  }
-  _constellation={renderer,scene,camera,group,raf:0,wpPoll,themeObs,ro,dataPoll};
-  setDiag('rings built — peers='+inner.length+' blocks='+outer.length);
+  _constellation={raf:0,themeObs,ro,dataPoll};
   frame();
 }
 
@@ -4651,7 +4612,7 @@ function go(id){
   if(id==='mempool'){loadMempool();}else{if(_mpAutoInterval){clearInterval(_mpAutoInterval);_mpAutoInterval=null;const cb=$('mp-auto-sync');if(cb)cb.checked=false;}}
   if(id==='network'){loadPeers();setTimeout(renderHrHistChart,300);}
   if(id==='globe'){setTimeout(()=>{initGlobe().catch(()=>{});},200);}
-  if(id==='home'){setTimeout(()=>{initConstellation().catch(()=>{});},200);}
+  if(id==='home'){setTimeout(()=>{try{initConstellation();}catch(_){}}, 200);}
   if(id==='health'){
     _updateHealthProbeMeta();
     loadHealth();
