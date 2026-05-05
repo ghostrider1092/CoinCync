@@ -127,6 +127,16 @@ Fee changes may be proposed through the CIP process but may never be implemented
 
 **Enforcement:** Protocol-enforced. Deterministic fee calculation with no central extraction.
 
+## Right X -- The Right Against Censorship
+
+The CoinCync protocol shall never implement transaction blacklists, address blocking, output freezing, or any mechanism that allows the censorship of valid transactions based on origin, destination, amount, or any other characteristic.
+
+A valid transaction -- one that satisfies all cryptographic proofs and consensus rules -- shall always be eligible for inclusion in a block. No miner, node, developer, or governance body shall have the ability to prevent a valid transaction from ever being mined.
+
+This right exists because financial censorship and financial surveillance are two sides of the same coin. A network that can block transactions can control its users. CoinCync shall never control its users.
+
+**Enforcement:** Protocol-enforced. No blacklist or censorship mechanism exists in the protocol.
+
 ## Right XI -- The Right Against Algorithmic Capture
 
 Your CYNC will never be tied to a stablecoin's solvency, a yield product's APY, or any external token's price. The protocol's value rests on the chain's own security, scarcity, and privacy -- not on circular tokenomics that depend on continued issuance to redeem. No mechanism may be added that makes your CYNC depend on the continued operation of another system to retain its meaning.
@@ -144,16 +154,6 @@ You will never wake to a chain that changed its rules overnight. Protocol change
 The binary you run can be rebuilt from public source by anyone who chooses to verify it. Releases are signed by multiple independent maintainers; no single key can ship software that runs on the network. Supply-chain attacks against the binary distribution are infeasible by construction, not by trust.
 
 **Enforcement:** Build pipeline. Multi-signature release gating. Open-source license guarantees the right to verify.
-
-## Right X -- The Right Against Censorship
-
-The CoinCync protocol shall never implement transaction blacklists, address blocking, output freezing, or any mechanism that allows the censorship of valid transactions based on origin, destination, amount, or any other characteristic.
-
-A valid transaction -- one that satisfies all cryptographic proofs and consensus rules -- shall always be eligible for inclusion in a block. No miner, node, developer, or governance body shall have the ability to prevent a valid transaction from ever being mined.
-
-This right exists because financial censorship and financial surveillance are two sides of the same coin. A network that can block transactions can control its users. CoinCync shall never control its users.
-
-**Enforcement:** Protocol-enforced. No blacklist or censorship mechanism exists in the protocol.
 
 ---
 
