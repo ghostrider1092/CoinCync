@@ -1,7 +1,7 @@
 //! Premium ratatui dashboard for `run-solo` (`--tui`).
 //!
 //! Layered visual design:
-//!   1. Branded header bar — `𝗖𝗢𝗜𝗡𝗖𝗬𝗡𝗖`-style mark in Unicode bold,
+//!   1. Branded header bar — `COINCYNC` in bold,
 //!      mining-status pill, network/height context, RPC quality dot.
 //!   2. Optional stale-chain warning (>5 min tip age).
 //!   3. Hero hashrate — 5-row block-letter digits dominating upper third,
@@ -398,7 +398,7 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
             Style::default().fg(theme.accent_dim).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled("𝗖𝗢𝗜𝗡𝗖𝗬𝗡𝗖", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled("COINCYNC", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
         Span::styled(" rig", Style::default().fg(theme.muted)),
         Span::raw("    "),
         Span::styled(pill_glyph, pill_style),
@@ -912,7 +912,7 @@ fn draw_splash(f: &mut Frame, ui: &UiState) {
 
     // Typewriter the brand mark. 9 chars of `COINCYNC `; reveal one
     // char per ~250ms.
-    let chars: Vec<char> = "𝗖𝗢𝗜𝗡𝗖𝗬𝗡𝗖".chars().collect();
+    let chars: Vec<char> = "COINCYNC".chars().collect();
     let visible = ((progress * chars.len() as f32) as usize).min(chars.len());
     let revealed: String = chars.iter().take(visible).collect();
     let pending: String = chars.iter().skip(visible).map(|_| ' ').collect();
