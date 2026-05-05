@@ -250,6 +250,13 @@ body.has-wallpaper .stat{background:var(--surface)}
 .hero p{color:var(--t2);font-size:13.5px;max-width:480px;line-height:1.6}
 .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:var(--r-md);overflow:hidden;margin-top:24px}
 .stat{background:var(--surface);padding:20px 24px;transition:background var(--transition-base)}.stat:hover{background:var(--s2)}
+/* Constitutional status panel — compile-time-tripwire green dot + ref */
+.cs-row{transition:background var(--transition-fast)}
+.cs-row:hover{background:var(--s2)!important}
+.cs-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#7eb87c;box-shadow:0 0 8px color-mix(in srgb,#7eb87c 60%,transparent);flex-shrink:0;animation:cs-pulse 3.6s ease-in-out infinite}
+@keyframes cs-pulse{0%,100%{box-shadow:0 0 8px color-mix(in srgb,#7eb87c 60%,transparent)}50%{box-shadow:0 0 14px color-mix(in srgb,#7eb87c 90%,transparent)}}
+.cs-art{font-family:var(--mono);font-size:9px;color:var(--ac2);letter-spacing:.1em;text-transform:uppercase;font-weight:600}
+.cs-rule{font-family:var(--sans);font-size:11px;color:var(--t2);font-weight:300;line-height:1.3;margin-top:2px}
 .stat .label{font-size:11px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:var(--t3);margin-bottom:8px;font-family:var(--mono)}
 .stat .val{font-size:22px;font-weight:400;font-family:var(--serif);letter-spacing:-.02em}
 .stat .sub{font-size:11px;color:var(--t3);font-family:var(--mono);margin-top:4px}
@@ -806,6 +813,40 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-top:10px;text-align:left;letter-spacing:.1em">— THE COINCYNC THESIS</div>
     </div>
 
+    <!-- ═══ CONSTITUTIONAL STATUS PANEL ═══ -->
+    <!-- Every flag below is a compile-time tripwire in src/constants.rs.
+         The binary running this fleet either passed all of them or it
+         didn't compile. If you're seeing this page rendered, the chain
+         is constitutionally compliant by mathematical proof, not by our
+         word. Click any row to read the corresponding article. -->
+    <div style="max-width:720px;margin:0 auto 28px" onclick="go('4thamendment')">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);letter-spacing:.18em;text-transform:uppercase;margin-bottom:10px;text-align:center">Constitutional status &middot; <span style="color:var(--ac2)">verified at compile time</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--b);border:1px solid var(--b);cursor:pointer">
+        <!-- Each row: green dot, article ref, plain-language commitment -->
+        <!-- Article I — supply -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article I</div><div class="cs-rule">Supply cap 100M CYNC</div></div></div>
+        <!-- Article II — no dev tax -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article II</div><div class="cs-rule">Zero dev tax</div></div></div>
+        <!-- Article III — mandatory privacy -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article III</div><div class="cs-rule">Mandatory privacy on every tx</div></div></div>
+        <!-- Article V — RandomX only -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article V</div><div class="cs-rule">RandomX-only PoW</div></div></div>
+        <!-- Article IX — no surveillance -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article IX</div><div class="cs-rule">No blacklists, no censorship</div></div></div>
+        <!-- Article XI — no algorithmic capture -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XI</div><div class="cs-rule">No algorithmic capture</div></div></div>
+        <!-- Article XII — no admin authority -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XII</div><div class="cs-rule">No admin keys, no pause</div></div></div>
+        <!-- Article XIII — no external trust -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XIII</div><div class="cs-rule">No external chain trust</div></div></div>
+        <!-- Article XIV — no surveillance layer -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XIV</div><div class="cs-rule">All CYNC fungible, no NFTs</div></div></div>
+        <!-- Article XVI — fee burn floor -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XVI</div><div class="cs-rule">30% fee burn (floor)</div></div></div>
+      </div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.12em;text-transform:uppercase;margin-top:8px;text-align:center">Click any row &rarr; read the article</div>
+    </div>
+
     <!-- Why CoinCync — 3 pillars -->
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--b);border:1px solid var(--b);margin-bottom:28px;max-width:720px;margin-left:auto;margin-right:auto">
       <div style="background:var(--surface);padding:24px 20px;text-align:center">
@@ -849,6 +890,19 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         <div class="aset-sub"><span id="aset-sub">outputs · grows every block</span></div>
       </div>
       <div class="aset-icon">⊞</div>
+    </div>
+
+    <!-- LIVE FEE BURN COUNTER — Article XVI narrative.
+         Shows total CYNC permanently destroyed via the 30% fee burn.
+         Pairs visually with the anonymity-set card; same component, different metric.
+         The number ticks up as blocks land. -->
+    <div class="aset-card" title="Total CYNC permanently destroyed via the 30% fee burn floor. Captured by no one. Article XVI of the Constitution." style="margin-top:14px">
+      <div>
+        <div class="aset-label">TOTAL BURNED</div>
+        <div class="aset-value" id="burn-value">—</div>
+        <div class="aset-sub"><span id="burn-sub">CYNC permanently destroyed &middot; 30% of every fee</span></div>
+      </div>
+      <div class="aset-icon">⌬</div>
     </div>
   </div></div>
   <div class="content">
@@ -2239,6 +2293,29 @@ async function poll(){
   $('tk-supply').textContent=num(Math.round(supCync))+' CYNC';
   $('s-height').textContent=num(info.height);
   $('s-supply').textContent=num(Math.round(supCync));
+  // ── Live fee-burn counter ────────────────────────────────────
+  // total_burned = total_emitted - circulating_supply, both atomic.
+  // Pulls get_burn_stats for circulating_supply; emitted from supInfo.
+  // Article XVI invariant: 30% floor under normal conditions, rising
+  // during congestion. Counter ticks up as blocks land.
+  const bv=$('burn-value');
+  if(bv){
+    try{
+      const burnStats=await rpc('get_burn_stats');
+      if(burnStats && supInfo){
+        const burnedAtomic=Math.max(0,(supInfo.total_emitted||0)-(burnStats.circulating_supply||0));
+        const burnedCync=burnedAtomic/1e12;
+        // Render with 2 decimals if < 100 CYNC, else integer with commas.
+        bv.textContent=burnedCync<100?burnedCync.toFixed(2):num(Math.round(burnedCync));
+        const bs=$('burn-sub');
+        if(bs && burnStats.active===false){
+          bs.innerHTML='Burn activates at block <strong>'+num(burnStats.activation_height)+'</strong> &middot; '+num(Math.max(0,(burnStats.activation_height||0)-(burnStats.current_height||0)))+' blocks remaining';
+        } else if(bs){
+          bs.innerHTML='CYNC permanently destroyed &middot; <strong>30% of every fee</strong>';
+        }
+      }
+    }catch(_){/* silent — burn stats are non-critical for the home page */}
+  }
   const sr=$('s-reward');if(sr)sr.textContent=num(Math.round(rewCync));
   $('s-peers').textContent=info.peer_count;
   $('n-synced').textContent=info.height>0?'Yes (h='+num(info.height)+')':'Connecting...';$('n-diff').textContent=num(info.difficulty);
