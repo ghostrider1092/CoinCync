@@ -1706,72 +1706,61 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div style="font-family:var(--mono);font-size:11px;color:var(--ac2);margin-top:14px;text-align:right;letter-spacing:1px">— THE COINCYNC MANIFESTO</div>
     </div>
 
-    <!-- Why the 4th Amendment -->
+    <!-- Why a manifesto -->
     <div style="max-width:680px;margin:0 auto 36px">
       <div style="font-family:var(--serif);font-size:22px;font-weight:300;color:var(--t);margin-bottom:16px">Why a manifesto?</div>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px;font-weight:300">Laws change. Courts reinterpret. Governments expand surveillance. The 4th Amendment was supposed to protect financial privacy — but the third-party doctrine gutted it. CoinCync doesn't rely on legal protection alone. It enforces privacy with mathematics that no court can override.</p>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">The words <strong style="color:var(--ac2)">"papers and effects"</strong> are the key. Courts and privacy advocates argue that financial records — bank statements, transaction histories, account balances — are papers and effects. They are yours. Searching them without a warrant is an unreasonable search.</p>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8">Mass surveillance of financial transactions — monitoring every payment, flagging every transfer, building profiles from spending patterns — is the definition of <strong style="color:var(--ac2)">unreasonable search</strong>. The 4th Amendment was written to prevent exactly this.</p>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px;font-weight:300">Most cryptocurrencies ship a whitepaper. We shipped a manifesto, then a Constitution, then code that enforces both. The reason is simple: privacy in money has always been a <em>request</em> &mdash; you ask a bank not to freeze your account, you ask a payment processor not to deplatform you, you ask a chain-analytics firm not to sell your transaction history. Every piece of financial freedom you currently have, you have because nobody got around to taking it yet.</p>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8">CoinCync is built on the opposite premise: privacy is a <strong style="color:var(--ac2)">property of the system</strong>, not a request you make of it. There is nothing to ask, no permission to grant, no policy to lobby for. The math runs whether anyone wants it to or not.</p>
     </div>
 
-    <!-- The two landmark cases -->
+    <!-- The two failure modes -->
     <div style="max-width:680px;margin:0 auto 36px">
-      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:20px">Two cases that define the fight</div>
+      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:20px">The two failure modes we eliminated</div>
 
       <div style="display:grid;gap:20px">
-        <!-- Miller -->
+        <!-- Custody capture -->
         <div style="padding:24px;background:var(--s2);border:1px solid var(--b);border-radius:12px">
-          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
-            <div style="font-family:var(--serif);font-size:18px;color:var(--t)">United States v. Miller</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--t3)">1976</div>
-          </div>
-          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">The Supreme Court ruled that bank records held by a bank are <strong style="color:#EF4444">not protected</strong> by the 4th Amendment. The reasoning: you "voluntarily" gave your financial information to a third party (the bank), so you have no reasonable expectation of privacy in it.</div>
-          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">This created the <strong style="color:#EF4444">"third-party doctrine"</strong> — the idea that sharing information with any intermediary forfeits your constitutional protection over it.</div>
-          <div style="padding:14px 16px;background:rgba(239,68,68,.06);border-left:3px solid #EF4444;border-radius:0 8px 8px 0;font-size:13px;color:var(--t2);line-height:1.6;font-style:italic">The third-party doctrine means that every bank customer, every credit card holder, every Venmo user has already "voluntarily" surrendered their 4th Amendment rights over their financial records — simply by using the system.</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:12px">1. Custody capture</div>
+          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">When somebody else holds your money, they can freeze it, monitor it, report it, restrict where it goes. This is not theory: bank accounts get closed for political donations, payment processors deplatform customers without notice, exchange withdrawals get suspended overnight. The custodian becomes the choke point.</div>
+          <div style="padding:14px 16px;background:rgba(239,68,68,.06);border-left:3px solid #EF4444;border-radius:0 8px 8px 0;font-size:13px;color:var(--t2);line-height:1.6;font-style:italic">CoinCync answer: there is no custodian. The wallet runs on your machine, the keys live on your disk, the network has no operator to call. You own the coin in the literal sense &mdash; you hold the only thing that can spend it.</div>
         </div>
 
-        <!-- Carpenter -->
+        <!-- Ledger surveillance -->
         <div style="padding:24px;background:var(--s2);border:1px solid var(--b);border-radius:12px">
-          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
-            <div style="font-family:var(--serif);font-size:18px;color:var(--t)">Carpenter v. United States</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--t3)">2018</div>
-          </div>
-          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">42 years later, the Supreme Court began to push back. In <em>Carpenter</em>, the Court ruled that cell-site location data <strong style="color:var(--ac2)">is</strong> protected by the 4th Amendment — even though it's held by a third party (the phone company).</div>
-          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">Chief Justice Roberts wrote that the third-party doctrine cannot be applied mechanically to every type of data. Digital records reveal an "intimate window into a person's life" that the Founders could not have anticipated.</div>
-          <div style="padding:14px 16px;background:rgba(212,160,89,.06);border-left:3px solid var(--ac2);border-radius:0 8px 8px 0;font-size:13px;color:var(--t2);line-height:1.6;font-style:italic">Carpenter cracked the door open. The Court acknowledged that digital-age surveillance is fundamentally different from anything the third-party doctrine was designed to address. But it didn't extend this protection to financial records — yet.</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:12px">2. Ledger surveillance</div>
+          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">A blockchain anyone can read is a blockchain anyone can surveil. Bitcoin's transparent ledger is its most-marketed feature and its biggest privacy hole &mdash; an entire industry exists to re-identify wallets, cluster addresses, and sell transaction histories to governments and corporations. "Permissionless" did not mean "private."</div>
+          <div style="padding:14px 16px;background:rgba(212,160,89,.06);border-left:3px solid var(--ac2);border-radius:0 8px 8px 0;font-size:13px;color:var(--t2);line-height:1.6;font-style:italic">CoinCync answer: the chain itself encrypts every input, output, amount, and signing key. Even with full read access to every block ever produced, an observer sees ring members instead of senders, stealth outputs instead of receivers, Pedersen commitments instead of amounts. There is nothing to read.</div>
         </div>
       </div>
     </div>
 
-    <!-- CoinCync's answer -->
+    <!-- How it adds up -->
     <div style="max-width:680px;margin:0 auto 36px">
-      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:16px">CoinCync's answer</div>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">The third-party doctrine has a fatal assumption: that you must use a third party. That you must have a bank. That someone else must hold your records.</p>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px"><strong style="color:var(--ac2)">CoinCync eliminates the third party entirely.</strong></p>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">Your keys. Your coins. No bank. No intermediary. No one to subpoena. No records to seize. The Miller doctrine doesn't apply because there is no third party to invoke it against.</p>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8">And then CoinCync goes further — even if someone gains access to the blockchain itself, they see nothing. Ring signatures hide the sender. Stealth addresses hide the receiver. Pedersen commitments hide the amount. Dandelion++ hides the IP. Traffic shaping hides the activity. There is nothing to search, nothing to seize, nothing to surveil.</p>
+      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:16px">How it adds up</div>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">Custody capture is solved by self-custody &mdash; your keys, your coins, no operator in the loop. Ledger surveillance is solved by encrypting every field that matters &mdash; sender, receiver, amount, IP. Combined, the result is a financial network with <strong style="color:var(--ac2)">nothing to seize and nothing to surveil</strong>.</p>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8">No subpoena reaches a custodian (there isn't one). No chain-analysis firm reconstructs your spending pattern (the chain is encrypted). No payment processor freezes your account (you don't have one). The privacy isn't a promise we made &mdash; it's a property of how the system was built.</p>
     </div>
 
-    <!-- The technical enforcement -->
+    <!-- Math beats policy -->
     <div style="max-width:680px;margin:0 auto 36px">
-      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:20px">Law fades. Math doesn't.</div>
-      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:20px">The 4th Amendment is a piece of paper. Governments can reinterpret it, courts can carve exceptions, legislatures can pass new laws. <em>Miller</em> proved that. CoinCync doesn't rely on legal protection alone — it enforces privacy with mathematics that no court can override.</p>
+      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:20px">Math beats policy.</div>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:20px">Policies can be reinterpreted overnight. Code that has been audited, signed, and merge-mined into the chain at block height N cannot be reinterpreted at all &mdash; it can only be hard-forked, and only if every node operator agrees to upgrade. That is the difference between a privacy <em>promise</em> and a privacy <em>property</em>. Four primitives carry the weight:</p>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
         <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
           <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">CLSAG</div>
-          <div style="font-size:11px;color:var(--t3);margin-top:4px">Ring signatures — sender hidden</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">Ring signatures &mdash; sender hidden</div>
         </div>
         <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
           <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">Stealth</div>
-          <div style="font-size:11px;color:var(--t3);margin-top:4px">One-time addresses — receiver hidden</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">One-time addresses &mdash; receiver hidden</div>
         </div>
         <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
           <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">BP+</div>
-          <div style="font-size:11px;color:var(--t3);margin-top:4px">Bulletproofs+ — amount hidden</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">Bulletproofs+ &mdash; amount hidden</div>
         </div>
         <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
           <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">D++</div>
-          <div style="font-size:11px;color:var(--t3);margin-top:4px">Dandelion++ — IP hidden</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">Dandelion++ &mdash; IP hidden</div>
         </div>
       </div>
       <p style="font-size:14px;color:var(--t2);line-height:1.8">These aren't features. They aren't options. They are mandatory on every transaction, enforced by consensus, written into the Constitution at Block 0. No governance vote can remove them. No fork can disable them without breaking the chain.</p>
@@ -1779,8 +1768,8 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
 
     <!-- Closing -->
     <div style="max-width:680px;margin:0 auto 48px;text-align:center;padding:32px;background:linear-gradient(135deg,rgba(158,122,62,.08),rgba(158,122,62,.02));border:1px solid rgba(158,122,62,.15);border-radius:16px">
-      <div style="font-family:var(--serif);font-size:26px;color:var(--ac2);margin-bottom:12px">Private by law. Private by math.</div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.7;font-weight:300">The EFF, the ACLU, and every serious privacy advocate cites the 4th Amendment. CoinCync doesn't just cite it — CoinCync enforces it. With ring signatures that hide the sender. Stealth addresses that hide the receiver. Pedersen commitments that hide the amount. And a constitution that makes all of this mandatory, not optional.</div>
+      <div style="font-family:var(--serif);font-size:26px;color:var(--ac2);margin-bottom:12px">Private by design. Private by math.</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.7;font-weight:300">CoinCync's privacy isn't a feature flag, a premium tier, or an opt-in. It's the only mode the network knows how to run in. Ring signatures hide the sender. Stealth addresses hide the receiver. Pedersen commitments hide the amount. Dandelion++ hides the IP. And a Constitution that makes all of this mandatory &mdash; permanently.</div>
       <div style="margin-top:20px;display:flex;gap:12px;justify-content:center">
         <button onclick="go('home')" class="btn btn-outline">Back to home</button>
         <button onclick="go('supply')" class="btn btn-outline">Supply</button>
@@ -5086,9 +5075,9 @@ async function viewTx(txHash){
       </div>
     </div>`:''}
 
-    <!-- 4th Amendment footer -->
+    <!-- Manifesto footer -->
     <div style="text-align:center;padding:20px 0;font-size:11px;color:var(--t3);font-family:var(--mono)">
-      Private by law. Private by math. — <a onclick="go('4thamendment')" style="color:var(--ac2);cursor:pointer">The CoinCync Manifesto</a>
+      Private by design. Private by math. &mdash; <a onclick="go('4thamendment')" style="color:var(--ac2);cursor:pointer">The CoinCync Manifesto</a>
     </div>
   `;
 }
