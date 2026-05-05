@@ -2282,6 +2282,11 @@ async function poll(){
   }
 
   $('status').textContent=info.height>0?'Connected':'Starting...';$('live-dot').classList.remove('off');
+  // Block-propagation viz on the globe — fires arcs + ring pulse from a
+  // randomly-chosen online fleet node every time the chain advances.
+  // Cheap (just height comparison + one arcsData/ringsData refresh).
+  // Safe to call when globe isn't initialized — function is a no-op then.
+  try { maybeFireBlockPropagation(info.height); } catch(_){/* never block poll on viz */}
   chainHeight=info.height;chainDiff=parseInt(info.difficulty);
   const hr=chainDiff/120;
   // Animate height counter + trigger block pulse
@@ -3781,6 +3786,78 @@ function _fireReconnectPulse(node) {
   }));
   _globe.arcsData(buildLiveArcs(pulses));
   setTimeout(() => { if (_globe) _globe.arcsData(buildLiveArcs()); }, PULSE_DURATION);
+}
+
+// ── Block-propagation viz ──────────────────────────────────────────
+//
+// Every time the chain advances, fire arcs from a randomly-chosen online
+// fleet node (the presumed "miner") to all other online nodes, plus a
+// ring pulse from that origin node. Visualizes block propagation across
+// the network in near-real-time. Uses the same pulse-arc style the
+// reconnect path already uses.
+//
+// We can't know which fleet box actually mined the block without daemon-
+// side telemetry plumbing — so the origin is randomized per-block. The
+// visual effect is "a block landed and propagated", which is exactly what
+// happened, even if the specific origin node is symbolic. Better than
+// nothing; honestly framed.
+let _lastBlockHeight = null;
+
+function _fireBlockPropagation() {
+  if (!_globe) return;
+  const live = GNODES.filter(n => n.online);
+  if (live.length < 2) return;
+
+  // Pick a random online node as the symbolic origin.
+  const origin = live[Math.floor(Math.random() * live.length)];
+  const peers = live.filter(n => n.label !== origin.label);
+
+  // Bright pulse arcs from origin → all peers.
+  const arcs = peers.map(n => ({
+    startLat: origin.lat, startLng: origin.lng,
+    endLat:   n.lat,      endLng:   n.lng,
+    pulse: true,
+  }));
+  _globe.arcsData(buildLiveArcs(arcs));
+
+  // Ring pulse from the origin node — single intense ring that fades out.
+  // Append to the existing rings (online-node radar halos) without
+  // disrupting them. The ring auto-fades after one period.
+  const baseRings = GNODES.filter(n => n.online);
+  const blockRing = {
+    lat: origin.lat,
+    lng: origin.lng,
+    color: t => `rgba(180, 255, 220, ${(1 - t) * 1.0})`,  // bright mint, like the pulse arc colour
+    maxRadius: 8,
+    speed:     6,
+    period:    1500,
+    _isBlockPulse: true,
+  };
+  _globe.ringsData([...baseRings, blockRing]);
+
+  // After the pulse window, restore arcs + rings to their resting state.
+  setTimeout(() => {
+    if (!_globe) return;
+    _globe.arcsData(buildLiveArcs());
+    _globe.ringsData(GNODES.filter(n => n.online));
+  }, PULSE_DURATION);
+}
+
+// Hook for the main poll() loop: call with the current chain height.
+// Triggers a propagation pulse on every height advance (one per block).
+// First call (when _lastBlockHeight is null) seeds the height without
+// firing a pulse — otherwise we'd fire on every page refresh, which
+// would be visually noisy and incorrect.
+function maybeFireBlockPropagation(currentHeight) {
+  if (typeof currentHeight !== 'number' || currentHeight <= 0) return;
+  if (_lastBlockHeight === null) {
+    _lastBlockHeight = currentHeight;
+    return;
+  }
+  if (currentHeight > _lastBlockHeight) {
+    _lastBlockHeight = currentHeight;
+    _fireBlockPropagation();
+  }
 }
 
 // ── NODE HEALTH POLL ─────────────────────────────────────────────────────────
