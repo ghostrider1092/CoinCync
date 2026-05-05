@@ -1484,6 +1484,13 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     </div>
 
     <div class="info-box green">Every transaction in the mempool is fully private: CLSAG ring-11 signatures, Bulletproofs+ range proofs, stealth one-time addresses, Pedersen commitments, uniform 2-in/2-out shape, Dandelion++ propagation.</div>
+    <!-- Fee histogram: pending tx count by fee-rate bucket. Lights up when
+         mempool has activity; otherwise stays empty. Helps wallet builders
+         decide what fee multiplier to use for given confirmation latency. -->
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">Fee distribution <span style="font-size:10px;color:var(--t3);margin-left:8px;font-weight:300">pending txs by fee rate (atomic units / byte)</span></div>
+      <div style="padding:14px 16px"><canvas id="mp-fee-histogram" width="800" height="160"></canvas></div>
+    </div>
     <div class="panel">
       <div class="panel-head">Pending transactions <span id="mp-count" class="badge" style="margin-left:8px">0</span></div>
       <div id="mp-body"><div class="loading">Loading mempool...</div></div>
@@ -2797,6 +2804,9 @@ async function loadMempool(){
   el.innerHTML='<div class="loading" style="padding:12px">Loading '+count+' transactions...</div>';
   // Fetch individual txs
   const txData=await rpc('get_mempool_transactions');
+  // Fee histogram — bucket pending txs by fee-per-byte rate. Empty mempool
+  // = empty chart (still draws the axes so the panel doesn't look broken).
+  _renderMempoolFeeHistogram(txData);
   if(txData&&txData.transactions&&txData.transactions.length>0){
     const rows=txData.transactions.map((tx,i)=>{
       const ring=tx.ring_size||11;
@@ -5118,11 +5128,26 @@ function connectWebSocket(){
   }
 }
 
-// Attempt WebSocket connection (non-blocking, falls back to polling)
-setTimeout(connectWebSocket, 2000);
+// Attempt WebSocket connection — DISABLED.
+//
+// The previous design pointed `wss://explorer.coincync.network:444` because
+// the REST WebSocket lives on `rpc_port + 2` of the daemon. That port isn't
+// exposed through Cloudflare's standard proxy, so the connection always
+// failed and produced console-error noise on every page load.
+//
+// Tightening the polling cadence below to ~3-5s gives near-real-time UX
+// without requiring port 444. If/when the REST WS is exposed properly via
+// CF (Enterprise tier or a dedicated Spectrum rule), this can be re-enabled
+// — the connectWebSocket() function is still present and will work the
+// moment the port is reachable.
+//
+// setTimeout(connectWebSocket, 2000);  // re-enable when port 444 is proxied
 
 // ── INIT ──────────────────────────────────────────────────────
-poll();setInterval(poll,10000);
+// 4-second polling cadence — fast enough to feel real-time on a 120s
+// block target, slow enough not to hammer the public RPC. The home page's
+// stat cards, anonymity-set counter, and live-feed all read from this poll.
+poll();setInterval(poll,4000);
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MEMPOOL FEE CHART (#24)
@@ -5703,6 +5728,53 @@ async function renderPrivacyMetrics(){
       options: { responsive:true, plugins:{ legend:{ display:false } } }
     });
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MEMPOOL FEE HISTOGRAM — pending txs bucketed by fee-per-byte rate. Lights
+// up only when the mempool has activity. Helps wallet builders pick a fee
+// multiplier; helps users see whether the network is congested.
+// ══════════════════════════════════════════════════════════════════════════════
+let _mpFeeChart = null;
+
+function _renderMempoolFeeHistogram(txData){
+  const ctx = document.getElementById('mp-fee-histogram')?.getContext('2d');
+  if(!ctx || typeof Chart === 'undefined') return;
+
+  // Build buckets. Use atomic-units-per-byte to keep numbers manageable.
+  // Buckets: 0-100, 100-500, 500-1k, 1k-5k, 5k-10k, 10k+ (atomic/byte).
+  const labels = ['0-100', '100-500', '500-1k', '1k-5k', '5k-10k', '10k+'];
+  const buckets = new Array(6).fill(0);
+
+  if(txData && txData.transactions){
+    for(const tx of txData.transactions){
+      const fee = tx.fee || 0;
+      const sz = tx.size || 1;
+      const rate = sz > 0 ? fee / sz : 0;
+      let b = 5;
+      if(rate < 100) b = 0;
+      else if(rate < 500) b = 1;
+      else if(rate < 1000) b = 2;
+      else if(rate < 5000) b = 3;
+      else if(rate < 10000) b = 4;
+      buckets[b] += 1;
+    }
+  }
+
+  if(_mpFeeChart) _mpFeeChart.destroy();
+  _mpFeeChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ label: 'pending txs', data: buckets, backgroundColor: 'rgba(212,160,89,0.55)', borderColor: 'rgba(212,160,89,1)', borderWidth: 1 }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+    }
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
