@@ -185,6 +185,21 @@ const SPLASH_SECS: f32 = 2.5;
 /// Braille spinner frames for the ETA gauge "searching..." indicator.
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Mark-rolodex glyphs in the header — four geometrically-related
+/// diamond variants that read as a slow rotation rather than random.
+/// One frame per ~6 seconds (see `mark_rolodex_glyph`); ambient brand
+/// presence without competing with the rest of the dashboard for the
+/// user's attention.
+const MARK_ROLODEX: &[char] = &['◆', '◈', '❖', '◇'];
+
+/// Pick the current mark-rolodex glyph based on elapsed session time.
+/// Each glyph is shown for `MARK_ROLODEX_PERIOD_MS`; cycles forever.
+fn mark_rolodex_glyph(elapsed: Duration) -> char {
+    const PERIOD_MS: u128 = 6_000;
+    let idx = (elapsed.as_millis() / PERIOD_MS) as usize % MARK_ROLODEX.len();
+    MARK_ROLODEX[idx]
+}
+
 // ─── Render loop ─────────────────────────────────────────────────────
 
 /// Block on the dashboard render loop. Returns when the user presses q
@@ -294,6 +309,12 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
         constraints.push(Constraint::Length(3)); // stale-chain banner
     }
     constraints.push(Constraint::Length(9));    // hero hashrate (5 rows + label + sparkline)
+    // Worker heatmap row — only renders if we actually have per-thread
+    // samples (the metric is empty until the first iteration completes).
+    let has_worker_samples = !metrics.per_thread_hashrate_samples().is_empty();
+    if has_worker_samples {
+        constraints.push(Constraint::Length(1));
+    }
     constraints.push(Constraint::Length(4));    // stat cards
     constraints.push(Constraint::Length(3));    // ETA gauge
     if ui.show_log {
@@ -315,6 +336,9 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
         draw_stale_banner(f, chunks[idx], metrics, theme); idx += 1;
     }
     draw_hero(f, chunks[idx], metrics, theme, ui); idx += 1;
+    if has_worker_samples {
+        draw_worker_heatmap(f, chunks[idx], metrics, theme); idx += 1;
+    }
     draw_stat_cards(f, chunks[idx], metrics, theme); idx += 1;
     draw_eta_gauge(f, chunks[idx], metrics, theme, ui); idx += 1;
     if ui.show_log {
@@ -365,7 +389,14 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
         ('●', Style::default().fg(theme.danger))
     };
 
+    let rolodex = mark_rolodex_glyph(ui.started.elapsed());
+
     let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            rolodex.to_string(),
+            Style::default().fg(theme.accent_dim).add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" "),
         Span::styled("𝗖𝗢𝗜𝗡𝗖𝗬𝗡𝗖", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
         Span::styled(" rig", Style::default().fg(theme.muted)),
@@ -616,6 +647,56 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Th
             .split(inner);
         f.render_widget(p, centered[1]);
     }
+}
+
+// ─── Worker-thread heatmap ───────────────────────────────────────────
+
+/// Render a one-line heatmap strip showing each worker thread's current
+/// hashrate as a colored block. Cool blue cells = thread is throttled
+/// (lower H/s than its peers); hot accent cells = thread is running at
+/// full speed. Surfaces single-core thermal throttling at a glance —
+/// without this, an 8-thread miner whose core 3 is downclocking looks
+/// the same as a healthy miner from the aggregate hashrate alone.
+fn draw_worker_heatmap(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme) {
+    let samples = metrics.per_thread_hashrate_samples();
+    if samples.is_empty() {
+        return;
+    }
+    let max_hps = *samples.iter().max().unwrap_or(&1).max(&1);
+
+    // Each thread takes one cell. Cell width scales to fit the row.
+    // We use the unicode "full block" character to draw the cell,
+    // colored by relative hashrate. The label "WORKERS" sits left of
+    // the strip for visual anchoring.
+    let n_threads = samples.len();
+    let label_text = format!(" WORKERS×{} ", n_threads);
+
+    // Approximate cell width: divide the remaining row width by the
+    // thread count, floored at 2 chars and capped at 4.
+    let avail = (area.width as usize).saturating_sub(label_text.chars().count() + 2);
+    let per_cell = (avail / n_threads).clamp(2, 4);
+
+    let mut spans: Vec<Span> = Vec::with_capacity(n_threads + 2);
+    spans.push(Span::styled(label_text, Style::default().fg(theme.muted)));
+    for &hps in &samples {
+        // Map hashrate to a discrete intensity 0..=4. Bottom 20% =
+        // throttled (cool), top 20% = full-speed (hot accent), middle
+        // graded between.
+        let ratio = hps as f64 / max_hps as f64;
+        let intensity = (ratio * 4.0).round() as u8;
+        let color = match intensity {
+            0 => theme.danger,    // throttled or stuck
+            1 => theme.warn,      // below average
+            2 => theme.muted,     // average
+            3 => theme.accent_dim,// above average
+            _ => theme.accent,    // full speed
+        };
+        let cell: String = std::iter::repeat_n('▆', per_cell).collect();
+        spans.push(Span::styled(cell, Style::default().fg(color).add_modifier(Modifier::BOLD)));
+        spans.push(Span::raw(" "));
+    }
+    let p = Paragraph::new(Line::from(spans));
+    f.render_widget(p, area);
 }
 
 // ─── Next-block ETA gauge ────────────────────────────────────────────

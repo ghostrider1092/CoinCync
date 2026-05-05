@@ -73,6 +73,12 @@ pub struct MetricsState {
     /// Unix-seconds timestamps of recent block accepts for the 24-hour
     /// timeline strip.
     pub block_finds: Mutex<VecDeque<u64>>,
+    /// Per-thread hashrate (H/s) from the most recent mining iteration,
+    /// indexed by thread id. Length equals the active thread count.
+    /// Empty until the first iteration completes. The TUI's worker
+    /// heatmap reads this; thermal throttling on a single core surfaces
+    /// here as a cool cell while siblings run hot.
+    pub per_thread_hashrate_hps: Mutex<Vec<u64>>,
 }
 
 impl MetricsState {
@@ -96,7 +102,26 @@ impl MetricsState {
             paused: AtomicBool::new(false),
             hashrate_ring: Mutex::new(VecDeque::with_capacity(HASHRATE_RING_SIZE)),
             block_finds: Mutex::new(VecDeque::with_capacity(BLOCK_FINDS_RING_SIZE)),
+            per_thread_hashrate_hps: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Replace the per-thread hashrate snapshot with a fresh reading.
+    /// Called by the orchestrator at the end of every mining iteration.
+    pub fn record_per_thread_hashrate(&self, samples: Vec<u64>) {
+        if let Ok(mut v) = self.per_thread_hashrate_hps.lock() {
+            *v = samples;
+        }
+    }
+
+    /// Snapshot of the current per-thread hashrate samples for the TUI
+    /// heatmap. Returns a fresh `Vec<u64>` so the TUI doesn't hold the
+    /// mutex across its render frame.
+    pub fn per_thread_hashrate_samples(&self) -> Vec<u64> {
+        self.per_thread_hashrate_hps
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 
     /// Push a hashrate sample into the sparkline ring, evicting the

@@ -198,7 +198,7 @@ pub async fn run_solo(
 
         // 5. Submit if found
         match result {
-            MineResult::Found { nonce: n, total_attempts } => {
+            MineResult::Found { nonce: n, total_attempts, per_thread_hps } => {
                 header.nonce = n;
                 let block = Block { header, transactions: txs };
                 let block_bytes = borsh::to_vec(&block).context("serializing found block")?;
@@ -209,6 +209,7 @@ pub async fn run_solo(
                     m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
                     m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
                     m.record_hashrate_sample(hps as u64);
+                    m.record_per_thread_hashrate(per_thread_hps);
                     m.blocks_found_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 info!(
@@ -242,13 +243,14 @@ pub async fn run_solo(
                     }
                 }
             }
-            MineResult::Timeout { total_attempts } => {
+            MineResult::Timeout { total_attempts, per_thread_hps } => {
                 let elapsed = started.elapsed().as_secs_f64();
                 let hps = if elapsed > 0.0 { total_attempts as f64 / elapsed } else { 0.0 };
                 if let Some(m) = metrics.as_ref() {
                     m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
                     m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
                     m.record_hashrate_sample(hps as u64);
+                    m.record_per_thread_hashrate(per_thread_hps);
                 }
                 info!(
                     height,
@@ -263,8 +265,17 @@ pub async fn run_solo(
 
 /// Result of one nonce-search round.
 enum MineResult {
-    Found { nonce: u64, total_attempts: u64 },
-    Timeout { total_attempts: u64 },
+    Found {
+        nonce: u64,
+        total_attempts: u64,
+        /// Per-thread hashrate (H/s) for the iteration, indexed by
+        /// thread id. Length equals the active thread count.
+        per_thread_hps: Vec<u64>,
+    },
+    Timeout {
+        total_attempts: u64,
+        per_thread_hps: Vec<u64>,
+    },
 }
 
 /// Multi-threaded nonce search. Each thread owns a slice of the u64
@@ -290,16 +301,21 @@ async fn mine_parallel(
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     let stop = Arc::new(AtomicBool::new(false));
-    let attempts = Arc::new(AtomicU64::new(0));
+    // Per-thread attempt counters. Each thread owns one Arc<AtomicU64>
+    // and updates only its own — no contention. The aggregate is
+    // computed at the end. The TUI's worker heatmap reads from these
+    // (via metrics) to surface thermal throttling on individual cores.
+    let n_threads = threads.max(1);
+    let per_thread_attempts: Vec<Arc<AtomicU64>> =
+        (0..n_threads).map(|_| Arc::new(AtomicU64::new(0))).collect();
     let (found_tx, mut found_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
 
-    let n_threads = threads.max(1);
     let slice = u64::MAX / n_threads as u64;
 
     let mut handles = Vec::with_capacity(n_threads);
     for tid in 0..n_threads {
         let stop = stop.clone();
-        let attempts = attempts.clone();
+        let my_attempts = per_thread_attempts[tid].clone();
         let found_tx = found_tx.clone();
         let target = target.clone();
         let input = input.clone();
@@ -321,21 +337,23 @@ async fn mine_parallel(
                 }
                 nonce = nonce.saturating_add(1);
                 local = local.saturating_add(1);
-                // Flush our local counter to the shared counter every
-                // 1024 hashes — too often = atomic contention; never =
-                // stats lag behind reality on cancel.
+                // Flush our local counter to our per-thread atomic
+                // every 1024 hashes — same trade-off as before, but
+                // now there's no contention because each thread owns
+                // a separate atomic.
                 if local.is_multiple_of(1024) {
-                    attempts.fetch_add(1024, Ordering::Relaxed);
+                    my_attempts.fetch_add(1024, Ordering::Relaxed);
                     local = 0;
                 }
             }
-            attempts.fetch_add(local, Ordering::Relaxed);
+            my_attempts.fetch_add(local, Ordering::Relaxed);
         }));
     }
     // Drop our extra sender so the channel closes when all workers stop.
     drop(found_tx);
 
     // Race: a worker finds a nonce, or the deadline fires.
+    let started = Instant::now();
     let timeout = deadline.saturating_duration_since(Instant::now());
     let outcome = tokio::time::timeout(timeout, found_rx.recv()).await;
 
@@ -346,10 +364,21 @@ async fn mine_parallel(
         let _ = h.join();
     }
 
-    let total = attempts.load(Ordering::Relaxed);
+    let elapsed_secs = started.elapsed().as_secs_f64().max(0.001);
+    let per_thread: Vec<u64> = per_thread_attempts
+        .iter()
+        .map(|a| a.load(Ordering::Relaxed))
+        .collect();
+    let total: u64 = per_thread.iter().sum();
+    // Per-thread hashrate (H/s) = thread_attempts / wall_elapsed.
+    let per_thread_hps: Vec<u64> = per_thread
+        .iter()
+        .map(|&a| (a as f64 / elapsed_secs) as u64)
+        .collect();
+
     match outcome {
-        Ok(Some(n)) => MineResult::Found { nonce: n, total_attempts: total },
-        _ => MineResult::Timeout { total_attempts: total },
+        Ok(Some(n)) => MineResult::Found { nonce: n, total_attempts: total, per_thread_hps },
+        _ => MineResult::Timeout { total_attempts: total, per_thread_hps },
     }
 }
 
