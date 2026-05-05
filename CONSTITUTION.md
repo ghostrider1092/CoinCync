@@ -225,6 +225,12 @@ This Constitution is read in the most user-protective, privacy-preserving constr
 
 **Enforcement:** Community-enforced. Maintainers, reviewers, and node operators are bound to apply this construction when evaluating any change.
 
+## Article XVI — Permanent Scarcity Through Burn
+
+A floor of thirty percent of every transaction fee shall be permanently destroyed under normal network conditions, with the rate rising during congestion. The burn floors are protocol invariants, not tunable parameters. No mechanism may redirect, reduce, or exempt any portion of the burn to any address, fund, validator, or entity. Fees not burned are paid to miners as proof-of-work reward; no third destination is permitted.
+
+**Enforcement:** Protocol-enforced. Compile-time guards on `FEE_BURN_NORMAL_PERCENT` and `FEE_BURN_CONGESTED_PERCENT` in `src/constants.rs` ensure both the 30% normal-condition floor and the congested-rate-not-below-normal invariant.
+
 ## Article X — Immutability
 
 This Constitution is permanent.

@@ -76,6 +76,22 @@ The US Bill of Rights is ten amendments, most one to three sentences long, writt
 
 ---
 
+## On Article XVI — Permanent Scarcity Through Burn
+
+**The failure mode.** Many altcoins introduced fee-redirect mechanisms post-launch — a percentage routed to a "treasury", a "foundation fund", a "validator boost", or a "burn-and-redistribute" scheme that turned out to redistribute more than it burned. Each redirect is presented as small and well-intentioned. Each one redistributes a slice of *every user's* fees to a counterparty they didn't choose. The aggregate effect over years is a slow erosion of the original fixed-cap promise.
+
+**Why this article exists.** The fee-burn split is one of the strongest narrative differentiators CoinCync has: every transaction permanently destroys 30% of its fee, and no one captures the destroyed value. That commitment loses meaning the moment it becomes negotiable. Article XVI makes it categorically non-negotiable: not the percentage, not the destination, not the conditions under which the burn could be exempted. The compile-time guards in `src/constants.rs` mean that any future PR proposing to weaken the burn must visibly flip a constitutional flag — a glaring diff that no review process should let through.
+
+**The congestion strengthening.** Under congested conditions, the burn rate rises (currently to 50%). This is intentional: spam attacks become self-destructive when half their fee is permanently destroyed. Article XVI codifies this as a one-way invariant — congestion may *strengthen* the burn, never weaken it. The compile-time guard `FEE_BURN_CONGESTED_PERCENT >= FEE_BURN_NORMAL_PERCENT` catches any future regression.
+
+**The "only two destinations" rule.** Every fee paid on CoinCync goes to exactly one of two places: the burn (destroyed) or the miner who produced the block (proof-of-work reward). No third destination — no foundation, no developer fund, no validator pool, no "ecosystem grants address". This is a stronger commitment than Article II's no-dev-tax language because it forecloses the entire category of "but what about a small percentage routed to..." discussions.
+
+**What this article does not constrain.** Wallets that calculate fees, exchanges that pay their users' fees, off-chain fee markets that trade fee-prediction signals — none of these touch protocol-level fee distribution. Article XVI applies only to the consensus rule that splits fees between burn and miner.
+
+**What this article does forbid.** Any change to `FEE_BURN_NORMAL_PERCENT`, `FEE_BURN_CONGESTED_PERCENT`, or the introduction of any non-zero `FEE_PROTOCOL_*_PERCENT` value. Any new fee-distribution mechanism, regardless of name. Any "burn-but-redistribute" mechanism that destroys some value while redirecting other value to a counterparty.
+
+---
+
 ## On Article XV — Spirit and Construction
 
 **The failure mode.** Constitutional documents fail in two opposite directions: too short and too long. Too short, and every novel situation forces an interpretation question without a guide. Too long, and the document grows brittle and lawyerable.

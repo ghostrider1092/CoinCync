@@ -711,6 +711,29 @@ pub const NO_SURVEILLANCE_LAYER: bool = true;
 const _: () = assert!(NO_SURVEILLANCE_LAYER,
     "UNCONSTITUTIONAL: Article XIV — No surveillance layer; all CYNC is fungible at the protocol level");
 
+// ── Article XVI / Right XIV — Permanent Scarcity Through Burn ───────
+//
+// The fee-burn floors are constitutional invariants. Any reduction of
+// either floor would redirect supply away from the burn — a category
+// forbidden by Article XVI ("no portion may be redirected ...") and
+// Right XIV. The asserts below ensure:
+//   1. The normal-condition floor stays at 30%.
+//   2. The congested-condition rate is never lower than the normal
+//      rate (congestion may strengthen the burn, never weaken it).
+//   3. The protocol fee in both modes remains zero (no third
+//      destination beyond miner + burn).
+
+const _: () = assert!(FEE_BURN_NORMAL_PERCENT == 30,
+    "UNCONSTITUTIONAL: Article XVI / Right XIV — fee burn floor must remain at 30% under normal conditions");
+
+const _: () = assert!(FEE_BURN_CONGESTED_PERCENT >= FEE_BURN_NORMAL_PERCENT,
+    "UNCONSTITUTIONAL: Article XVI — congested burn rate must not fall below the normal-condition floor");
+
+const _: () = assert!(
+    FEE_PROTOCOL_NORMAL_PERCENT == 0 && FEE_PROTOCOL_CONGESTED_PERCENT == 0,
+    "UNCONSTITUTIONAL: Article II / Article XVI / Right XIV — no third fee destination; only miner + burn permitted"
+);
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Lelantus Spark (Phase 2)
 // ═══════════════════════════════════════════════════════════════════════════

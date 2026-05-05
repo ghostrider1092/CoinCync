@@ -155,6 +155,12 @@ The binary you run can be rebuilt from public source by anyone who chooses to ve
 
 **Enforcement:** Build pipeline. Multi-signature release gating. Open-source license guarantees the right to verify.
 
+## Right XIV -- The Right to Permanent Scarcity
+
+A floor of thirty percent of every transaction fee is burned -- removed from circulation forever, captured by no one. This rate rises during network congestion and may never fall below the protocol's stated minimums. Combined with the asymptotic emission cap, this makes CYNC structurally deflationary at any sustained level of network usage. Fees not burned are paid to miners as proof-of-work reward; no fraction of any fee may ever be redirected to a developer fund, foundation, validator pool, or any other party.
+
+**Enforcement:** Protocol-enforced. Article XVI of the Constitution; fee-burn floors are constants with compile-time guards in `src/constants.rs`.
+
 ---
 
 ## Closing Seal
