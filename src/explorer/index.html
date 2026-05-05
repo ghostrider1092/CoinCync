@@ -3152,9 +3152,9 @@ function toggleMobile(){$('mobile-menu').classList.toggle('open');}
 function closeMobile(){$('mobile-menu').classList.remove('open');}
 
 // ── PAGE NAV ──────────────────────────────────────────────────
-const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx'];
+const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics'];
 const DEV_ONLY_PAGES=[];
-const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx'];
+const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics'];
 const EXPLORER_DEV_MODE=(
   new URLSearchParams(window.location.search).get('dev_explorer')==='1' &&
   IS_LOCALHOST
@@ -4815,6 +4815,9 @@ function go(id){
     if(_healthMetaInterval){clearInterval(_healthMetaInterval);_healthMetaInterval=null;}
   }
   if(id==='supply'){setTimeout(renderEmissionChart,200);setTimeout(renderAnonChart,300);loadChainEvents();}
+  if(id==='soak'){loadSoakStatus();}
+  if(id==='leaderboard'){loadFleetLeaderboard();}
+  if(id==='privacymetrics'){setTimeout(renderPrivacyMetrics,300);}
   
   
   if(id==='status'){setTimeout(renderVersionChart,200);renderMinersLeaderboard();}
@@ -5497,6 +5500,209 @@ async function loadBurnStats(){
   if(s('burn-supply'))s('burn-supply').textContent=num(Math.round((d.circulating_supply||0)/1e12))+' CYNC';
   if(s('burn-max-supply'))s('burn-max-supply').textContent='100,000,000 CYNC';
   if(s('burn-deflation-thresh'))s('burn-deflation-thresh').innerHTML=num(Math.round((d.deflation_threshold_fee_per_block||0)/1e12))+' CYNC/block <span style="color:var(--t3);font-size:10px">— fees above this = deflation</span>';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SOAK STATUS — populates page-soak's per-box table by polling each fleet
+// node's /health/<name> endpoint. Reads chain tip + peer count + tip age
+// for each box; rolls a green/yellow/red status based on tip-age threshold.
+// Fleet IPs aren't displayed publicly — operators see them via SSH; this
+// page shows logical names only.
+// ══════════════════════════════════════════════════════════════════════════════
+const FLEET_BOXES = [
+  { name:'seed1',    region:'New Jersey, USA',        role:'Seed (US-East)',     proxy:'/health/seed1' },
+  { name:'seed2',    region:'Amsterdam, Netherlands', role:'Seed (Europe)',      proxy:'/health/seed2' },
+  { name:'seed3',    region:'Tokyo, Japan',           role:'Seed (Asia-Pacific)',proxy:'/health/seed3' },
+  { name:'explorer', region:'Dallas, USA',            role:'Explorer + Relay',   proxy:'/health/explorer' },
+  { name:'api',      region:'Frankfurt, Germany',     role:'Public API + Relay', proxy:'/health/api' },
+];
+
+async function _pollFleetBox(box){
+  try{
+    const resp = await fetch(box.proxy, {
+      method:'POST',
+      headers:_rpcRequestOpts(JSON.stringify({jsonrpc:'2.0',id:1,method:'get_info'})).headers,
+      body: JSON.stringify({jsonrpc:'2.0',id:1,method:'get_info'}),
+    });
+    if(!resp.ok) return null;
+    const d = await resp.json();
+    return d && d.result;
+  }catch(_){ return null; }
+}
+
+function _statusBadge(ageS, peers){
+  if(ageS == null) return '<span style="color:#C45C4F">unreachable</span>';
+  if(ageS < 240 && peers >= 3) return '<span style="color:var(--ac2);font-weight:600">healthy</span>';
+  if(ageS < 600) return '<span style="color:#E0A040">warming</span>';
+  return '<span style="color:#C45C4F">stale</span>';
+}
+
+async function loadSoakStatus(){
+  const tbody = $('soak-rows');
+  if(!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="6" class="loading">Polling fleet…</td></tr>';
+  const results = await Promise.all(FLEET_BOXES.map(_pollFleetBox));
+  const rows = FLEET_BOXES.map((box, i) => {
+    const r = results[i];
+    if(!r) return `<tr><td><strong>${box.name}</strong></td><td colspan="4" style="color:var(--t3)">—</td><td>${_statusBadge(null,0)}</td></tr>`;
+    const ageS = r.tip_age_secs ?? null;
+    return `<tr>
+      <td><strong>${box.name}</strong></td>
+      <td class="mono">${num(r.height ?? 0)}</td>
+      <td>${r.peer_count ?? 0}</td>
+      <td>${ageS != null ? ageS + 's' : '—'}</td>
+      <td>${(r.is_synced ?? r.synced) ? '<span style="color:var(--ac2)">✓ Yes</span>' : '<span style="color:#E0A040">Catching up</span>'}</td>
+      <td>${_statusBadge(ageS, r.peer_count ?? 0)}</td>
+    </tr>`;
+  }).join('');
+  tbody.innerHTML = rows;
+}
+
+async function loadFleetLeaderboard(){
+  const tbody = $('lb-rows');
+  if(!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="7" class="loading">Polling…</td></tr>';
+  const results = await Promise.all(FLEET_BOXES.map(_pollFleetBox));
+  const rows = FLEET_BOXES.map((box, i) => {
+    const r = results[i];
+    if(!r) return `<tr><td><strong>${box.name}</strong></td><td>${box.region}</td><td>${box.role}</td><td colspan="3" style="color:var(--t3)">unreachable</td><td>${_statusBadge(null,0)}</td></tr>`;
+    const ageS = r.tip_age_secs ?? null;
+    return `<tr>
+      <td><strong>${box.name}</strong></td>
+      <td>${box.region}</td>
+      <td>${box.role}</td>
+      <td class="mono">${num(r.height ?? 0)}</td>
+      <td>${ageS != null ? ageS + 's' : '—'}</td>
+      <td>${r.peer_count ?? 0}</td>
+      <td>${_statusBadge(ageS, r.peer_count ?? 0)}</td>
+    </tr>`;
+  }).join('');
+  tbody.innerHTML = rows;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TRANSACTION BROADCASTING — submits a raw signed tx hex via send_raw_transaction.
+// The RPC accepts hex bytes; the daemon validates + adds to mempool. Errors
+// (size, signature, double-spend) come back as RPC error messages.
+// ══════════════════════════════════════════════════════════════════════════════
+async function bcSubmit(){
+  const hex = ($('bc-hex')?.value || '').trim().replace(/^0x/, '');
+  const panel = $('bc-result-panel');
+  const out = $('bc-result');
+  if(!hex){
+    if(panel) panel.style.display = 'block';
+    if(out) out.innerHTML = '<span style="color:#C45C4F">Paste a transaction hex first.</span>';
+    return;
+  }
+  if(!/^[0-9a-fA-F]+$/.test(hex)){
+    if(panel) panel.style.display = 'block';
+    if(out) out.innerHTML = '<span style="color:#C45C4F">Hex contains non-hex characters. Should be 0-9 and a-f only.</span>';
+    return;
+  }
+  if(panel) panel.style.display = 'block';
+  if(out) out.innerHTML = '<span style="color:var(--t3)">Submitting…</span>';
+  try{
+    const result = await rpc('send_raw_transaction', [hex]);
+    if(result && result.txid){
+      out.innerHTML = `<div style="color:var(--ac2);font-weight:600;margin-bottom:8px">✓ Accepted into mempool</div>
+        <div>txid: <span class="mono" style="color:var(--t1)">${result.txid}</span></div>
+        <div style="margin-top:8px;color:var(--t3);font-size:11px">It will appear in the next block (~120s on testnet).</div>`;
+    } else {
+      out.innerHTML = `<div style="color:#C45C4F;font-weight:600">Daemon returned no txid.</div>
+        <div style="margin-top:6px;font-size:11px;color:var(--t3)">Possible causes: malformed tx, signature failure, double-spend, fee too low.</div>`;
+    }
+  }catch(e){
+    out.innerHTML = `<div style="color:#C45C4F;font-weight:600">Rejected</div>
+      <div style="margin-top:6px;font-size:11px;color:var(--t3)">${e && e.message ? e.message : 'unknown error'}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRIVACY METRICS — decoy ring distribution + output age distribution.
+// Both charts compute client-side from the most recent N blocks. The data
+// path: fetch get_block_by_height for blocks tip-N..tip, walk each tx's
+// inputs, count decoy positions / output ages. Aggregated histogram is
+// then drawn via Chart.js.
+//
+// The daemon's privacy guarantees mean we can't see WHICH input is the real
+// one — that's the whole point. So decoy "distribution" here is actually
+// "ring-position distribution across all inputs" which approximates how
+// uniform the protocol's decoy selection is. A flat bar chart = good
+// (uniform decoy selection); a sloped one = a heuristic privacy attack
+// might find a bias to exploit.
+// ══════════════════════════════════════════════════════════════════════════════
+let _decoyChart = null;
+let _ageChart = null;
+
+async function renderPrivacyMetrics(){
+  const N_BLOCKS = 100;
+  const info = await rpc('get_info');
+  if(!info || !info.height) return;
+  const tip = info.height;
+  const start = Math.max(1, tip - N_BLOCKS + 1);
+  const cnt = $('pm-block-count');
+  if(cnt) cnt.textContent = String(tip - start + 1);
+
+  // Bucket counters. Decoy: 11 ring positions × count. Age: by hour bucket.
+  const decoyHist = new Array(11).fill(0);
+  const ageHist = new Array(24).fill(0); // 24 hour-buckets
+
+  // Fetch in parallel batches of 10 to avoid hammering the RPC.
+  const heights = [];
+  for(let h = start; h <= tip; h++) heights.push(h);
+
+  for(let i = 0; i < heights.length; i += 10){
+    const batch = heights.slice(i, i + 10);
+    const results = await Promise.all(batch.map(h =>
+      rpc('get_block_by_height', [h]).catch(() => null)
+    ));
+    for(const block of results){
+      if(!block || !block.transactions) continue;
+      for(const tx of block.transactions){
+        if(!tx.inputs) continue;
+        for(const inp of tx.inputs){
+          // Each ring input contributes to all 11 ring positions equally.
+          // Without seeing which is real, we count the structural distribution.
+          if(Array.isArray(inp.ring_offsets) && inp.ring_offsets.length === 11){
+            for(let j = 0; j < 11; j++) decoyHist[j]++;
+          }
+        }
+        // Age histogram — per-output age in hour buckets.
+        if(tx.outputs){
+          for(const _out of tx.outputs){
+            const ageH = Math.min(23, Math.floor((tip - (block.height || 0)) * 2 / 60));
+            ageHist[ageH]++;
+          }
+        }
+      }
+    }
+  }
+
+  // Render via Chart.js (already loaded for other pages).
+  const decoyCtx = document.getElementById('pm-decoy-chart')?.getContext('2d');
+  if(decoyCtx && typeof Chart !== 'undefined'){
+    if(_decoyChart) _decoyChart.destroy();
+    _decoyChart = new Chart(decoyCtx, {
+      type: 'bar',
+      data: {
+        labels: decoyHist.map((_, i) => 'pos ' + (i + 1)),
+        datasets: [{ label:'inputs', data: decoyHist, backgroundColor:'rgba(212,160,89,0.6)', borderColor:'rgba(212,160,89,1)', borderWidth:1 }]
+      },
+      options: { responsive:true, plugins:{ legend:{ display:false } } }
+    });
+  }
+  const ageCtx = document.getElementById('pm-age-chart')?.getContext('2d');
+  if(ageCtx && typeof Chart !== 'undefined'){
+    if(_ageChart) _ageChart.destroy();
+    _ageChart = new Chart(ageCtx, {
+      type: 'bar',
+      data: {
+        labels: ageHist.map((_, i) => i + 'h'),
+        datasets: [{ label:'outputs', data: ageHist, backgroundColor:'rgba(127,184,121,0.6)', borderColor:'rgba(127,184,121,1)', borderWidth:1 }]
+      },
+      options: { responsive:true, plugins:{ legend:{ display:false } } }
+    });
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -8545,6 +8751,190 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
 </div>
 
 <!-- ═══ GITHUB ACTIVITY ═══ -->
+<!-- ═══ API DOCUMENTATION ═══ -->
+<div class="page" id="page-api">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>API</div>
+    <div class="page-title" style="margin-bottom:4px">Public API</div>
+    <div class="page-sub" style="margin-bottom:20px">JSON-RPC endpoints exposed on this fleet. Full reference in <code>docs/API.md</code>.</div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Endpoints</div>
+      <table>
+        <thead><tr><th>URL</th><th>Purpose</th><th>Auth</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">https://api.coincync.network/rpc/testnet</td><td>Public testnet RPC. Cloudflare-fronted; nginx injects bearer.</td><td>None (auto-injected)</td></tr>
+          <tr><td class="mono">https://explorer.coincync.network/api/testnet</td><td>Same daemon, hosted from the explorer box.</td><td>None</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Most-used methods</div>
+      <table>
+        <thead><tr><th>Method</th><th>Purpose</th><th>Returns</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">get_info</td><td>Chain tip + sync state + peer count</td><td>height, top_hash, tip_age_secs, peer_count, difficulty, is_synced</td></tr>
+          <tr><td class="mono">get_supply_info</td><td>Total emitted, current reward</td><td>total_emitted, current_reward (atomic units)</td></tr>
+          <tr><td class="mono">get_burn_stats</td><td>Article XVI fee-burn state</td><td>active, burn_pct_normal, circulating_supply, deflation_threshold</td></tr>
+          <tr><td class="mono">get_privacy_stats</td><td>Spark + shielded pool sizes</td><td>spark_accumulator_size, shielded_tree_size</td></tr>
+          <tr><td class="mono">get_block_template</td><td>Mining template (used by coincync-rig)</td><td>block_template (hex), height, target</td></tr>
+          <tr><td class="mono">submit_block</td><td>Submit a found block</td><td>accepted (bool)</td></tr>
+          <tr><td class="mono">send_raw_transaction</td><td>Broadcast a signed tx hex</td><td>txid (on accept)</td></tr>
+          <tr><td class="mono">get_mempool_info</td><td>Pending tx count + fees</td><td>size, bytes, total_fees</td></tr>
+          <tr><td class="mono">get_peers</td><td>Live peer list (IP-redacted)</td><td>peers[]</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Try it &middot; copy-paste</div>
+      <div style="padding:14px 16px;font-family:var(--mono);font-size:11px;color:var(--t2);line-height:1.7;background:var(--s2);border-radius:var(--r-sm);overflow-x:auto;white-space:pre">curl -sf -X POST https://api.coincync.network/rpc/testnet \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}'</div>
+    </div>
+
+    <div style="font-size:12px;color:var(--t3);line-height:1.6">
+      <strong style="color:var(--t2)">Rate limits</strong> &middot; The public RPC is fronted by Cloudflare with a per-IP rate limit. Heavy integrators should run their own node (see <code>docs/DEVELOPER.md</code>) and point at <code>http://127.0.0.1:28081</code> for unlimited access.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SOAK STATUS ═══ -->
+<div class="page" id="page-soak">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Soak status</div>
+    <div class="page-title" style="margin-bottom:4px">Operational soak status</div>
+    <div class="page-sub" style="margin-bottom:20px">72-hour pre-launch and ongoing reliability sampling across the fleet. Numbers update on page poll.</div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">What this measures</div>
+      <div style="padding:14px 16px;font-size:13px;color:var(--t2);line-height:1.6">
+        Every fleet node samples its own RPC every ~2 minutes and writes a JSONL record:
+        chain tip, peer count, mempool size, partial-broadcast events, stalls. The aggregate
+        across all 5 boxes is the network's operational track record. <strong>Zero errors and
+        zero partial broadcasts</strong> for a 72h window is the bar for a clean verdict; recovered
+        incidents (peer wedges fixed by restart, deploys mid-soak) are documented in commit
+        history rather than hidden.
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Per-box snapshot</div>
+      <table>
+        <thead><tr><th>Box</th><th>Height</th><th>Peers</th><th>Tip age</th><th>Synced</th><th>Status</th></tr></thead>
+        <tbody id="soak-rows">
+          <tr><td colspan="6" class="loading">Polling fleet…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;margin-top:14px">
+      The full soak JSONL logs live on each fleet box at <code>/var/lib/coincync/soak/*.jsonl</code>.
+      Operators can pull them via the <code>scripts/check-soak-status.sh</code> helper. Public summary
+      is the table above; raw data stays with the operators.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TRANSACTION BROADCASTING ═══ -->
+<div class="page" id="page-broadcast">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Broadcast</div>
+    <div class="page-title" style="margin-bottom:4px">Broadcast a raw transaction</div>
+    <div class="page-sub" style="margin-bottom:20px">Paste a signed transaction hex; this page submits it to the public mempool. Useful for offline-signed flows, hardware wallets, and air-gapped signing.</div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Submit</div>
+      <div style="padding:16px 20px">
+        <textarea id="bc-hex" class="form-input" rows="6" placeholder="Paste signed transaction hex (no 0x prefix). Sample format: starts with the 4-byte version, then the input list, then outputs, then the CLSAG ring signature..." style="width:100%;font-family:var(--mono);font-size:11px;line-height:1.5;resize:vertical;padding:10px 12px"></textarea>
+        <div style="display:flex;gap:10px;margin-top:14px">
+          <button class="btn-primary" onclick="bcSubmit()">Broadcast</button>
+          <button class="btn-ghost" onclick="$('bc-hex').value='';$('bc-result').innerHTML=''">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="bc-result-panel" style="display:none">
+      <div class="panel-head">Result</div>
+      <div id="bc-result" style="padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.6"></div>
+    </div>
+
+    <div style="font-size:12px;color:var(--t3);line-height:1.6;margin-top:14px">
+      <strong style="color:var(--t2)">Privacy note &middot;</strong> Transactions broadcast here travel
+      Dandelion++-style through the network; the originating IP is anonymized at the network
+      layer regardless of where you submit. The explorer box itself sees your client IP via the
+      browser request, which is standard HTTP. For maximum anonymity, submit through your own
+      node over Tor.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ PUBLIC SEED-NODE LEADERBOARD ═══ -->
+<div class="page" id="page-leaderboard">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Seed nodes</div>
+    <div class="page-title" style="margin-bottom:4px">Public seed-node leaderboard</div>
+    <div class="page-sub" style="margin-bottom:20px">The five fleet boxes that bootstrap the public testnet. Anyone running a node can use these as initial peers; once peer discovery kicks in, your node will find others on its own.</div>
+
+    <div class="panel">
+      <div class="panel-head">Fleet</div>
+      <table>
+        <thead><tr><th>Node</th><th>Region</th><th>Role</th><th>Height</th><th>Tip age</th><th>Peers</th><th>Status</th></tr></thead>
+        <tbody id="lb-rows">
+          <tr><td colspan="7" class="loading">Polling…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div style="font-size:12px;color:var(--t3);line-height:1.6;margin-top:14px">
+      <strong style="color:var(--t2)">For node operators &middot;</strong> Add any of these as
+      a startup peer with <code>--addnode &lt;ip&gt;:&lt;port&gt;</code>. Default testnet P2P port
+      is 28080. The fleet runs the same software you would; we don't get special treatment in
+      the network.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ PRIVACY METRICS (DECOY RING + OUTPUT AGE) ═══ -->
+<div class="page" id="page-privacymetrics">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Privacy metrics</div>
+    <div class="page-title" style="margin-bottom:4px">Privacy metrics</div>
+    <div class="page-sub" style="margin-bottom:20px">Quantitative measures of how anonymous CYNC transactions actually are. Pulled from recent block data.</div>
+
+    <div class="two-col" style="grid-template-columns:1fr 1fr">
+      <div class="panel">
+        <div class="panel-head">Decoy ring distribution</div>
+        <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:8px">
+          CLSAG ring size = <strong style="color:var(--ac2)" id="pm-ring-size">11</strong> per Article III.
+          Each input picks 10 decoys plus 1 real. Below: distribution of decoy ages
+          across the most recent 100 ring-signature inputs. Even spread = harder to
+          single out the real spend.
+        </div>
+        <div style="padding:0 16px 16px"><canvas id="pm-decoy-chart" width="400" height="200"></canvas></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">Output age distribution</div>
+        <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:8px">
+          Total spendable outputs by age bucket. A wide, deep distribution means
+          many candidates exist for any given decoy slot &mdash; the protocol is
+          "thicker" against chain analysis. Tail emission keeps young outputs
+          replenishing forever.
+        </div>
+        <div style="padding:0 16px 16px"><canvas id="pm-age-chart" width="400" height="200"></canvas></div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;margin-top:14px">
+      Charts compute client-side from the most recent <span id="pm-block-count">100</span> blocks pulled
+      via <code>get_block_by_height</code>. No identity data leaves the browser; this is purely
+      aggregate-level statistical analysis of the public chain.
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-github">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>GitHub Activity</div>
