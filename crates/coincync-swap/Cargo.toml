@@ -1,0 +1,42 @@
+[package]
+name         = "coincync-swap"
+version      = "0.0.1"
+edition      = "2021"
+rust-version = "1.75"
+authors      = ["CoinCync 1.0 Contributors"]
+description  = "CYNC↔BTC atomic swap (skeleton — see CIP-001 for protocol design)."
+license      = "MIT"
+publish      = false
+
+# Status: SKELETON. No working swap is shipped yet. This crate exists
+# to provide the module structure, type signatures, and CLI surface
+# that the eventual implementation will fill in. See CIP-001 in the
+# docs/ tree for the protocol spec, and the "Status" section of
+# src/lib.rs for current implementation state.
+#
+# Mainnet launch blocker per project memory
+# `project_atomic_swap_mainnet_blocker.md`. Testnet ships without it.
+
+[lib]
+name = "coincync_swap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cyncswap"
+path = "src/bin/cyncswap.rs"
+
+[dependencies]
+# Stdlib only for the skeleton — no crypto deps yet. The day the
+# protocol implementation begins, the natural additions will be:
+#   bitcoin     — for BTC-side HTLC + adaptor-signature handling
+#   secp256k1   — adaptor signature primitives (BTC side)
+#   curve25519-dalek — Ed25519 adaptor signatures (CYNC side)
+#   tokio       — async P2P swap-coordination loop
+# Holding off until those decisions are made formally in CIP-001.
+clap      = { version = "4", features = ["derive"] }
+thiserror = "1"
+serde     = { version = "1", features = ["derive"] }
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "allow"

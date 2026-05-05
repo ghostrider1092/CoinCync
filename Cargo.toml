@@ -1,5 +1,5 @@
 [workspace]
-members  = [".", "crates/bridge", "crates/coincync-rig"]
+members  = [".", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap"]
 # orchard-side removed: depends on yanked orchard v0.12 (Phase 2/3)
 exclude  = ["coincync-wallet/src-tauri"]
 resolver = "2"
