@@ -671,6 +671,46 @@ pub const SURVEILLANCE_HOOKS_ENABLED: bool = false;
 const _: () = assert!(!SURVEILLANCE_HOOKS_ENABLED,
     "UNCONSTITUTIONAL: Article IX — Surveillance infrastructure is permanently prohibited");
 
+// ── Articles XI–XIV — Category-level tripwires ──────────────────────
+//
+// These four flags do not enforce the corresponding articles by
+// themselves — Articles XI, XII, XIII, and XIV are principles enforced
+// by the absence of forbidden mechanisms across the codebase. The
+// flags exist as visible compile-time anchors: any future PR that
+// tries to introduce a forbidden mechanism must either flip a flag
+// (which is then a glaring diff in review) or build a parallel
+// mechanism alongside dead-code that pretends nothing changed (also
+// a glaring diff). Either way, review catches the violation. See
+// CONSTITUTIONAL_COMMENTARY.md for the rationale behind each article.
+
+/// Article XI — No Algorithmic Capture. CYNC is created only by the
+/// Article I emission. No mint/burn rebalancing tied to external
+/// price, no protocol-level subsidy, no reflexive supply mechanism.
+pub const NO_ALGORITHMIC_PEG: bool = true;
+const _: () = assert!(NO_ALGORITHMIC_PEG,
+    "UNCONSTITUTIONAL: Article XI — No algorithmic capture; mint pathways outside Article I forbidden");
+
+/// Article XII — No Admin Authority. No address, multisig, or off-
+/// chain entity holds protocol-level power to mint, freeze, seize,
+/// or redirect funds. No emergency override exists.
+pub const NO_ADMIN_KEYS: bool = true;
+const _: () = assert!(NO_ADMIN_KEYS,
+    "UNCONSTITUTIONAL: Article XII — No admin authority; no key controls user funds at the protocol layer");
+
+/// Article XIII — No External Trust. Consensus depends only on state
+/// derivable from the CoinCync chain. No bridges, oracles, wrapped
+/// assets, IOUs, or off-chain attestations enter block validity.
+pub const NO_EXTERNAL_BRIDGES: bool = true;
+const _: () = assert!(NO_EXTERNAL_BRIDGES,
+    "UNCONSTITUTIONAL: Article XIII — No external trust; consensus is sovereign over local state only");
+
+/// Article XIV — No Surveillance Layer. All CYNC is fungible. No
+/// metadata layer, identity attestation, NFT primitive, name service,
+/// or coin-distinguishing mechanism exists at the protocol level.
+pub const NO_SURVEILLANCE_LAYER: bool = true;
+const _: () = assert!(NO_SURVEILLANCE_LAYER,
+    "UNCONSTITUTIONAL: Article XIV — No surveillance layer; all CYNC is fungible at the protocol level");
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Lelantus Spark (Phase 2)
 // ═══════════════════════════════════════════════════════════════════════════

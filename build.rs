@@ -30,6 +30,7 @@ use std::process::Command;
 /// `CRITICAL_FILES` in `src/bin/update_critical_hashes.rs`.
 const CRITICAL_FILES: &[&str] = &[
     "CONSTITUTION.md",
+    "docs/BILL_OF_RIGHTS.md",
     "src/testnet.rs",
     "src/constants.rs",
     "src/consensus/difficulty.rs",

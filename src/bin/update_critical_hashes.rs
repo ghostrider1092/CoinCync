@@ -24,6 +24,7 @@ use std::path::Path;
 /// one, add it to the other or the build will let changes slip through.
 const CRITICAL_FILES: &[&str] = &[
     "CONSTITUTION.md",
+    "docs/BILL_OF_RIGHTS.md",
     "src/testnet.rs",
     "src/constants.rs",
     "src/consensus/difficulty.rs",

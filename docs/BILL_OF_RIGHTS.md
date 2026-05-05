@@ -1,6 +1,6 @@
 # CoinCync Bill of Rights
 
-**The Ten Guaranteed Rights of Every CoinCync User**
+**The Guaranteed Rights of Every CoinCync User**
 
 **Version:** 1.0
 **Ratified:** Block 0 (Genesis)
@@ -127,6 +127,24 @@ Fee changes may be proposed through the CIP process but may never be implemented
 
 **Enforcement:** Protocol-enforced. Deterministic fee calculation with no central extraction.
 
+## Right XI -- The Right Against Algorithmic Capture
+
+Your CYNC will never be tied to a stablecoin's solvency, a yield product's APY, or any external token's price. The protocol's value rests on the chain's own security, scarcity, and privacy -- not on circular tokenomics that depend on continued issuance to redeem. No mechanism may be added that makes your CYNC depend on the continued operation of another system to retain its meaning.
+
+**Enforcement:** Protocol-enforced. Article XI of the Constitution; no mint pathway exists outside the Article I emission.
+
+## Right XII -- The Right Against Surprise Forks
+
+You will never wake to a chain that changed its rules overnight. Protocol changes require a public proposal, a discussion period measured in months, and active opt-in by the node operators you choose to peer with. A fork that fails to reach community consensus is aborted, never forced through.
+
+**Enforcement:** Community-enforced. Article VIII CIP discipline; node-operator adoption is the only valid activation path.
+
+## Right XIII -- The Right to Reproducible Software
+
+The binary you run can be rebuilt from public source by anyone who chooses to verify it. Releases are signed by multiple independent maintainers; no single key can ship software that runs on the network. Supply-chain attacks against the binary distribution are infeasible by construction, not by trust.
+
+**Enforcement:** Build pipeline. Multi-signature release gating. Open-source license guarantees the right to verify.
+
 ## Right X -- The Right Against Censorship
 
 The CoinCync protocol shall never implement transaction blacklists, address blocking, output freezing, or any mechanism that allows the censorship of valid transactions based on origin, destination, amount, or any other characteristic.
@@ -141,7 +159,7 @@ This right exists because financial censorship and financial surveillance are tw
 
 ## Closing Seal
 
-These ten rights are final. They are not subject to amendment, revision, or repeal by any person, body, or process -- now or at any point in the future.
+These rights are final. They are not subject to amendment, revision, or repeal by any person, body, or process -- now or at any point in the future.
 
 They may only be strengthened by technical improvement. They may never be weakened by any means.
 

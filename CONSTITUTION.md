@@ -16,7 +16,7 @@ Any protocol change that violates this Constitution is invalid, regardless of ho
 
 This Constitution was written once. It will not be rewritten. It exists not because we distrust the people building CoinCync today — but because we cannot know who will be building it tomorrow. These principles protect users from every possible future, including futures we cannot predict.
 
-Ten articles follow. Each one is a wall. None of them have doors.
+The articles that follow are the operative law. Each one is a wall. None of them have doors. Future articles may be added only when they strengthen these foundations and never to weaken them, in accordance with Article XV.
 
 ---
 
@@ -194,6 +194,36 @@ Encrypted peer-to-peer communication and Dandelion++ transaction routing are bui
 The distinction between lawful monitoring and surveillance infrastructure is not recognized at the protocol level. The protocol does not know who is asking. It protects everyone equally or it protects no one reliably.
 
 **Enforcement:** Protocol-enforced. No surveillance mechanism exists in the protocol. Dandelion++ and encrypted P2P are mandatory.
+
+## Article XI — No Algorithmic Capture
+
+CYNC shall be created only by the Article I emission, and only by miners who present valid proof-of-work. No mechanism shall mint, redistribute, or subsidize CYNC in response to the price of any asset, the supply of any token, the demand for any product, or the holdings of any account. The mining reward is the only reward; the emission curve is the only schedule. Any mechanism that makes CYNC's value depend on the continued operation of another token system is forbidden.
+
+**Enforcement:** Protocol-enforced. No mint pathway exists outside Article I. Compile-time guard `NO_ALGORITHMIC_PEG = true` in `src/constants.rs`.
+
+## Article XII — No Admin Authority
+
+No address, multisig, contract, off-chain entity, or maintainer shall hold protocol-level authority to mint, freeze, seize, redirect, or invalidate any user's funds. No emergency override, pause mechanism, kill switch, or upgrade gate shall ever exist. Protocol changes occur exclusively through the Article VIII CIP process and node-operator opt-in. The protocol has participants and the math; it has no admins.
+
+**Enforcement:** Protocol-enforced. No `admin`, `pauser`, `freezer`, or chain-controlling-multisig concept exists in the codebase. Compile-time guard `NO_ADMIN_KEYS = true` in `src/constants.rs`.
+
+## Article XIII — No External Trust
+
+Consensus shall depend exclusively on state proven within CoinCync itself. No external chain proof, oracle input, wrapped asset, IOU, or off-chain attestation shall ever be admitted into block validity. CoinCync is sovereign over its own state; any mechanism that imports trust from another system, by any name, is forbidden. CYNC is real because the chain says so, and the chain says so without asking anyone else.
+
+**Enforcement:** Protocol-enforced. Validation operates only on locally-derivable state. Compile-time guard `NO_EXTERNAL_BRIDGES = true` in `src/constants.rs`.
+
+## Article XIV — No Surveillance Layer
+
+All CYNC is fungible. No protocol mechanism shall distinguish one CYNC from another by origin, history, age, ownership, or any external attribute. No layer that identifies, classifies, attests to, or labels participants in any transaction shall exist within the protocol, except as required by the Article VI voluntary disclosure mechanism chosen by the user. Privacy and fungibility are inseparable; weakening either weakens both.
+
+**Enforcement:** Protocol-enforced. All outputs are uniform commitments; no metadata layer exists. Compile-time guard `NO_SURVEILLANCE_LAYER = true` in `src/constants.rs`.
+
+## Article XV — Spirit and Construction
+
+This Constitution is read in the most user-protective, privacy-preserving construction available. Where the text is silent, any proposed protocol change must answer "is this consistent with the rights enumerated and the principles established?" — default-deny applies, and the burden falls on the proposer. A protocol change must demonstrate that it strengthens — not merely "does not weaken" — user privacy, self-custody, and chain sovereignty. Where two articles appear to conflict, the article more protective of the user prevails; the literal text and the underlying intent are construed together, and either alone is sufficient grounds to reject a change. This article governs how the Constitution is read; the Constitution itself remains permanent under Article X.
+
+**Enforcement:** Community-enforced. Maintainers, reviewers, and node operators are bound to apply this construction when evaluating any change.
 
 ## Article X — Immutability
 
