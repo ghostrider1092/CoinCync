@@ -2,6 +2,8 @@
 
 A privacy-first cryptocurrency with mandatory shielding, auditable supply, and constitutional protections.
 
+> **We're not just shipping a privacy coin. We're shipping the model for how privacy coins eventually plug into the open market without compromising — and we did it before anyone else in the space.**
+
 **Status:** Public Testnet  
 **Network:** Active public testnet fleet across North America and Europe  
 **Launch:** Mainnet October 2026  
