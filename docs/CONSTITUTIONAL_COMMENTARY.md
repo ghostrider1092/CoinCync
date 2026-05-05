@@ -140,6 +140,20 @@ The US Bill of Rights is ten amendments, most one to three sentences long, writt
 
 ---
 
+## On Right XV — Cryptographic Modernization
+
+**The failure mode.** Right I, ratified at Block 0, names specific primitives by name: ring signatures, stealth addresses, Pedersen commitments, Bulletproofs. This is a brittle pattern. CoinCync today already uses **Bulletproofs+** (a successor scheme), not the original Bulletproofs. A literal-text reading of Right I would say the protocol violates its own Bill of Rights. Worse: any future cryptographic improvement — Bulletproofs++, post-quantum range proofs, a successor ring-signature scheme stronger than CLSAG — would face the same literal-text objection. The Constitution we just locked could become a barrier to the very protections it exists to provide.
+
+**Why this article exists.** Article X forbids amending Right I as originally written. We cannot edit "Bulletproofs" to "Bulletproofs+ or successor" — that's exactly the textual modification Article X protects against. Right XV resolves this through the strengthening-only mechanism Article XVII establishes: the names in Right I refer to the named primitives *and* any future scheme that strictly strengthens the protection. A successor must demonstrably strengthen — under Article XVII's burden — without weakening any other guarantee.
+
+**Why this is not a loophole.** Right XV does not authorize swapping out primitives at maintainer discretion. It does the opposite: it makes the path to upgrading a primitive *narrower* than a casual Article XV reading might allow. The successor must be *strictly stronger*, not "equivalent" or "alternative". A regression — even a small one — is forbidden. Right XV is the explicit, audit-friendly version of what Article XV would imply anyway; making it explicit removes the lawyering surface around "is this scheme really stronger?"
+
+**The "abandon without replacement" prohibition.** A protocol that simply removes a privacy primitive (e.g. drops Pedersen commitments without replacement) is not CoinCync. Right XV makes this explicit so that no future "let's drop this primitive because it's slow" argument can succeed without naming a strictly stronger replacement.
+
+**Why this lives in the Bill of Rights, not the Constitution.** Right XV is the user-facing version: *"the privacy you signed up for can get stronger, but cannot get weaker."* The corresponding Constitutional behavior is already implied by Articles XV and XVII; Right XV makes it visible to users without requiring them to reason from operator-facing principles.
+
+---
+
 ## On Rights XI–XIII
 
 The Bill of Rights is the user-facing translation of the operator-facing Articles. Each of Rights XI, XII, and XIII corresponds to a Tier-1 protection category from the Articles, restated in plain language about what the user is guaranteed:

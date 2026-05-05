@@ -161,6 +161,12 @@ A floor of thirty percent of every transaction fee is burned -- removed from cir
 
 **Enforcement:** Protocol-enforced. Article XVI of the Constitution; fee-burn floors are constants with compile-time guards in `src/constants.rs`.
 
+## Right XV -- The Right to Cryptographic Modernization
+
+Where Right I names specific cryptographic primitives -- ring signatures, stealth addresses, Pedersen commitments, Bulletproofs -- those names refer to both those primitives and any future successor scheme that strictly strengthens the privacy guarantee they provide. The protocol may upgrade a primitive only via Article XVII's security-strengthening exception, and only when the successor demonstrably strengthens the corresponding protection without weakening any other. A protocol that abandons a privacy primitive without replacing it with a strictly stronger successor is not CoinCync.
+
+**Enforcement:** Constitutional. Any successor must satisfy Article XVII's burden of strengthening; regressions remain forbidden by Article X and the original text of Right I.
+
 ---
 
 ## Note on Properties, Not Promises
