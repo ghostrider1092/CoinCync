@@ -1,109 +1,324 @@
 /* ─────────────────────────────────────────────────────────────────
-   CoinCync mdBook theme overrides
+   CoinCync mdBook theme — match docs.coincync.network to the brand
    ─────────────────────────────────────────────────────────────────
 
-   Layered on top of the stock `navy` theme (declared in book.toml).
-   Goals:
-     - Match the project's accent color (#4fd4e0) used by the
-       embedded explorer and the landing page
-     - Tighter monospace blocks (the docs are full of code)
-     - Larger reading column for long-form prose
-     - Keep things working with JavaScript disabled (Tor Browser
-       hardened mode)
+   Loaded via [output.html] additional-css = ["theme/coincync.css"]
+   on top of the stock `navy` theme (default-theme = "navy" in
+   book.toml). We aggressively override the navy variables so the
+   docs look and feel like the rest of CoinCync — warm dark
+   background, gold accent, Fraunces display / IBM Plex body /
+   JetBrains Mono.
 
-   The cascade order is:
-     1. mdBook's stock CSS (navy)
+   Cascade:
+     1. mdBook stock CSS (navy)
      2. This file
    ───────────────────────────────────────────────────────────────── */
 
-:root {
-    --coincync-accent: #4fd4e0;
-    --coincync-accent-2: #b0e0a0;
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;1,9..144,400;1,9..144,500&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ── CoinCync palette + typography (mirrors website/index.html) ── */
+:root,
+.navy,
+html.navy,
+html.coincync,
+.coincync {
+    --bg: #0a0a09;
+    --fg: #f5f0e8;
+    --fg-muted: #b8b4ac;
+    --fg-dim: #8a857d;
+
+    --sidebar-bg: #0e0e0c;
+    --sidebar-fg: #b8b4ac;
+    --sidebar-non-existant: #5d5953;
+    --sidebar-active: #d4a059;
+    --sidebar-spacer: #25241f;
+
+    --scrollbar: #34332c;
+
+    --icons: #8a857d;
+    --icons-hover: #d4a059;
+
+    --links: #d4a059;
+    --links-hover: #e8b86d;
+
+    --inline-code-color: #e8b86d;
+    --theme-popup-bg: #141412;
+    --theme-popup-border: #25241f;
+    --theme-hover: #1a1a17;
+
+    --quote-bg: #14140f;
+    --quote-border: #d4a059;
+    --warning-border: #d4a059;
+
+    --table-border-color: #25241f;
+    --table-header-bg: #141412;
+    --table-alternate-bg: #0e0e0c;
+
+    --searchbar-border-color: #25241f;
+    --searchbar-bg: #141412;
+    --searchbar-fg: #f5f0e8;
+    --searchbar-shadow-color: rgba(212, 160, 89, 0.10);
+    --searchresults-header-fg: #d4a059;
+    --searchresults-border-color: #25241f;
+    --searchresults-li-bg: #141412;
+    --search-mark-bg: rgba(212, 160, 89, 0.30);
+
+    --color-scheme: dark;
+    --hljs-bg: #0e0e0c;
+
+    --cc-ac: #d4a059;
+    --cc-ac-bright: #e8b86d;
+    --cc-ac-dim: #1f1a10;
+    --cc-border: #25241f;
+    --cc-border-2: #34332c;
+    --cc-surface-1: #141412;
+    --cc-surface-2: #1a1a17;
 }
 
-/* Reading column: stock mdBook is 750px which is fine for prose
-   but feels cramped for tables and code blocks. Bump it. */
-.content {
-    max-width: 880px;
+/* ── Typography ─────────────────────────────────────────────────── */
+html, body {
+    font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    font-weight: 300;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.7;
+    background: var(--bg);
+    color: var(--fg);
 }
 
-/* Heading anchors picked up the project accent. */
+.content h1, .content h2, .content h3, .content h4, .content h5, .content h6,
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    color: var(--fg);
+}
+
 .content h1 {
-    color: var(--coincync-accent);
-    border-bottom: 1px solid rgba(79, 212, 224, 0.18);
-    padding-bottom: 0.3em;
+    font-size: 2.2rem;
+    font-weight: 300;
+    color: var(--fg);
+    border-bottom: 1px solid var(--cc-border);
+    padding-bottom: 0.4em;
+    margin-top: 0.4em;
+    margin-bottom: 0.8em;
 }
+.content h1 em { color: var(--cc-ac); font-style: italic; }
+
 .content h2 {
-    color: var(--coincync-accent);
+    font-size: 1.5rem;
+    color: var(--cc-ac);
+    margin-top: 2em;
+    margin-bottom: 0.6em;
+    font-weight: 400;
+}
+
+.content h3 {
+    font-size: 1.2rem;
+    color: var(--cc-ac-bright);
+    font-weight: 400;
     margin-top: 1.6em;
 }
-.content h3 {
-    color: var(--coincync-accent-2);
+
+.content h4, .content h5, .content h6 {
+    color: var(--fg-muted);
+    font-weight: 500;
 }
 
-/* Code blocks: tighter, monospace size up slightly so it's readable
-   against prose at 16px. */
-.content pre,
-.content code {
-    font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-    font-size: 0.92em;
+.content { max-width: 880px; overflow-wrap: break-word; }
+
+.content p { color: var(--fg-muted); line-height: 1.8; }
+.content strong { color: var(--fg); font-weight: 500; }
+.content em { color: var(--fg); font-style: italic; }
+
+/* ── Code blocks ────────────────────────────────────────────────── */
+.content pre, .content code, pre, code {
+    font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
 }
+
 .content pre {
-    border-radius: 6px;
-    padding: 14px 16px;
+    background: var(--cc-surface-1);
+    border: 1px solid var(--cc-border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    line-height: 1.55;
+}
+.content pre code { background: transparent; color: var(--fg); padding: 0; }
+
+.content :not(pre) > code, :not(pre) > code {
+    background: var(--cc-ac-dim);
+    color: var(--cc-ac-bright);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(212, 160, 89, 0.18);
+    font-weight: 400;
 }
 
-/* Inline code highlight: the stock theme uses a very pale background.
-   A faint accent tint reads better. */
-.content :not(pre) > code {
-    background: rgba(79, 212, 224, 0.10);
-    color: var(--coincync-accent-2);
-    padding: 1px 6px;
-    border-radius: 3px;
+/* ── Links ──────────────────────────────────────────────────────── */
+.content a:link, .content a:visited, a:link, a:visited {
+    color: var(--cc-ac);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(212, 160, 89, 0.30);
+}
+.content a:hover, a:hover {
+    color: var(--cc-ac-bright);
+    border-bottom-color: var(--cc-ac-bright);
 }
 
-/* Tables: stock mdBook tables look fine but the borders feel heavy. */
+/* ── Tables ─────────────────────────────────────────────────────── */
 .content table {
     border-collapse: collapse;
+    border: 1px solid var(--cc-border);
+    background: var(--cc-surface-1);
 }
 .content table th {
-    color: var(--coincync-accent);
-    text-transform: none;
-    font-weight: 600;
-    border-bottom: 2px solid rgba(79, 212, 224, 0.25);
+    color: var(--cc-ac);
+    background: var(--cc-surface-2);
+    text-transform: uppercase;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.10em;
+    font-weight: 500;
+    border-bottom: 1px solid var(--cc-border);
+    padding: 12px 16px;
+    text-align: left;
 }
 .content table td {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--cc-border);
+    padding: 10px 16px;
+    color: var(--fg-muted);
+}
+.content table tr:hover td { background: rgba(212, 160, 89, 0.04); }
+
+/* ── Blockquotes ────────────────────────────────────────────────── */
+.content blockquote {
+    border-left: 2px solid var(--cc-ac);
+    background: rgba(212, 160, 89, 0.04);
+    color: var(--fg-muted);
+    padding: 12px 18px;
+    margin: 1.4em 0;
+    font-style: italic;
+    border-radius: 0 4px 4px 0;
+}
+.content blockquote p { color: var(--fg-muted); }
+
+/* ── Top menu bar ───────────────────────────────────────────────── */
+#menu-bar, .menu-bar {
+    background: rgba(10, 10, 9, 0.92) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--cc-border);
 }
 
-/* Links — reuse the explorer accent for internal consistency */
-.content a:link,
-.content a:visited {
-    color: var(--coincync-accent);
-}
-.content a:hover {
-    color: var(--coincync-accent-2);
+.menu-title {
+    font-family: 'Fraunces', Georgia, serif;
+    font-weight: 400;
+    color: var(--fg);
+    letter-spacing: -0.01em;
 }
 
-/* Sidebar tweaks — mdBook's nav is fine but the active-chapter
-   highlight could pop more. */
-.chapter li.chapter-item.expanded > a.active,
+.icon-button, .menu-bar .icon-button { color: var(--fg-dim); }
+.icon-button:hover, .menu-bar .icon-button:hover { color: var(--cc-ac); }
+
+/* ── Sidebar ────────────────────────────────────────────────────── */
+.sidebar {
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--cc-border);
+}
+
+.sidebar .sidebar-scrollbox { padding: 16px 12px; }
+
+.chapter li.chapter-item { color: var(--sidebar-fg); font-size: 0.92rem; }
+
+.chapter li.chapter-item > a {
+    color: var(--sidebar-fg);
+    border-bottom: none;
+    padding: 4px 12px;
+    border-radius: 4px;
+    transition: all .15s;
+}
+.chapter li.chapter-item > a:hover {
+    color: var(--cc-ac);
+    background: rgba(212, 160, 89, 0.05);
+}
 .chapter li.chapter-item > a.active {
-    color: var(--coincync-accent) !important;
-    font-weight: 600;
+    color: var(--cc-ac) !important;
+    background: rgba(212, 160, 89, 0.08);
+    font-weight: 500;
+    border-left: 2px solid var(--cc-ac);
+    padding-left: 10px;
 }
 
-/* Print stylesheet — page breaks before each h1, smaller headers,
-   no sidebar. mdBook's print mode handles most of this; just tighten
-   the margins. */
+.chapter li.part-title {
+    color: var(--cc-ac);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-top: 1.4em;
+    margin-bottom: 0.4em;
+    padding-left: 12px;
+    font-weight: 500;
+}
+
+.spacer { background: var(--cc-border); height: 1px; margin: 8px 12px; }
+.chapter .section li.chapter-item { font-size: 0.86rem; }
+
+/* ── Search ─────────────────────────────────────────────────────── */
+#searchbar, .searchbar {
+    background: var(--searchbar-bg);
+    border: 1px solid var(--cc-border);
+    color: var(--fg);
+    border-radius: 6px;
+    font-family: 'IBM Plex Sans', sans-serif;
+}
+#searchbar:focus {
+    border-color: var(--cc-ac);
+    box-shadow: 0 0 0 2px rgba(212, 160, 89, 0.12);
+}
+mark { background: rgba(212, 160, 89, 0.30); color: var(--cc-ac-bright); }
+
+/* ── Theme popup ────────────────────────────────────────────────── */
+.theme-popup {
+    background: var(--theme-popup-bg);
+    border: 1px solid var(--cc-border);
+    color: var(--fg);
+    border-radius: 8px;
+}
+.theme-popup .theme:hover { background: var(--theme-hover); color: var(--cc-ac); }
+
+/* ── Page nav arrows ────────────────────────────────────────────── */
+.nav-chapters .nav-chapter-link { color: var(--fg-dim); }
+.nav-chapters .nav-chapter-link:hover { color: var(--cc-ac); }
+
+/* ── Horizontal rule ────────────────────────────────────────────── */
+.content hr {
+    border: none;
+    border-top: 1px solid var(--cc-border);
+    margin: 2.4em 0;
+}
+
+/* ── Lists ──────────────────────────────────────────────────────── */
+.content ul, .content ol { color: var(--fg-muted); line-height: 1.8; }
+.content li { margin-bottom: 0.3em; }
+.content li > strong { color: var(--cc-ac); font-weight: 500; }
+
+/* ── Footnotes ──────────────────────────────────────────────────── */
+.footnote-definition {
+    color: var(--fg-dim);
+    font-size: 0.88em;
+    border-top: 1px solid var(--cc-border);
+    padding-top: 8px;
+    margin-top: 1.4em;
+}
+
+/* ── Print ──────────────────────────────────────────────────────── */
 @media print {
-    .content {
-        max-width: none;
-    }
-    .content h1 {
-        page-break-before: always;
-    }
-    .content h1:first-of-type {
-        page-break-before: auto;
-    }
+    body { background: white; color: black; }
+    .content { max-width: none; }
+    .content h1 { page-break-before: always; color: black; border-color: #ccc; }
+    .content h1:first-of-type { page-break-before: auto; }
+    .content h2, .content h3 { color: #555; }
+    .content a { color: black; border-bottom: 1px dotted #888; }
+    .sidebar, #menu-bar { display: none; }
 }

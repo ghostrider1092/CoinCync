@@ -19,7 +19,6 @@ title       = "CoinCync Documentation"
 authors     = ["CoinCync 1.0 Contributors"]
 description = "The privacy cryptocurrency with CPU-only proof of work — protocol, deployment, and API reference."
 language    = "en"
-multilingual = false
 src         = "src"
 
 [build]
@@ -29,9 +28,7 @@ create-missing  = false   # never silently create empty files for missing SUMMAR
 [output.html]
 default-theme       = "navy"
 preferred-dark-theme = "navy"
-copy-fonts          = true        # bundle the fonts so the docs work offline / on Tor
 git-repository-url  = "https://github.com/CoinCync/Coincync-Testnet-"
-git-repository-icon = "fa-github"
 edit-url-template   = "https://github.com/CoinCync/Coincync-Testnet-/edit/main/docs/{path}"
 no-section-label    = false
 mathjax-support     = false       # we don't render math in the docs (yet)
