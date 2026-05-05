@@ -12,8 +12,8 @@
 # NEVER refresh these hashes without a thorough review of the changes.
 # Accidental modifications to these files can cause chain forks.
 
-CONSTITUTION.md=6c47c3b2dc59f04898d20edb70d9d49ee440765148e4551b7bd0df399a0f91b0
-docs/BILL_OF_RIGHTS.md=92f3a7e581190fa5120810df28bd983fc6e102ee7f5cd84be2e891bf0866c4fa
+CONSTITUTION.md=66e0737b1aa54c196aae5c7651c8805143750c7e5a8ea5ba1370b2de0581d431
+docs/BILL_OF_RIGHTS.md=7cb934123f5a93e5532b63a5f4367b1da2bfc8cd15e5c1e90c8769bfbdaba158
 src/testnet.rs=32c9795b54519d1de15a43f72dcc3c599309ddd434805d9735088a0d447abc5b
 src/constants.rs=195e7354dba6d51412d8a7ff24f51464cfc1981af09e0de77e5b069d1cecfeea
 src/consensus/difficulty.rs=079bacc1b32cf0b3768ca2ff6a996425ed7b63ba32609ba84544c6cfc7281477

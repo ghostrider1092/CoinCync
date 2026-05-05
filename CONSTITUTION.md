@@ -231,6 +231,24 @@ A floor of thirty percent of every transaction fee shall be permanently destroye
 
 **Enforcement:** Protocol-enforced. Compile-time guards on `FEE_BURN_NORMAL_PERCENT` and `FEE_BURN_CONGESTED_PERCENT` in `src/constants.rs` ensure both the 30% normal-condition floor and the congested-rate-not-below-normal invariant.
 
+## Article XVII — Security Strengthening Exception
+
+A protocol change that strictly strengthens user privacy, self-custody, supply integrity, or chain sovereignty in response to a discovered cryptographic flaw, consensus bug, or security vulnerability is not an amendment within the meaning of Article X — it is maintenance of the protections this Constitution exists to provide. Such a change must measurably strengthen at least one user protection without weakening any other, follow Article VIII CIP discipline, and obtain node-operator consensus through the hard-fork process. The bar is high; the path exists.
+
+**Enforcement:** Community-enforced. Each invocation must show, in the proposing CIP, exactly which protection strengthens and that no other weakens.
+
+## Article XVIII — Interpretive Authority
+
+No maintainer, contributor, foundation, or other entity holds authoritative interpretive power over this Constitution. Where a question of interpretation arises, the answer is settled by node operator consensus through fork-acceptance — the same mechanism that decides any protocol change. The Constitutional Commentary records reasoning but does not bind interpretation; it is documentation, not law.
+
+**Enforcement:** Community-enforced. Node operators may reject any change whose constitutional interpretation they disagree with by refusing to upgrade.
+
+## Article XIX — Properties, Not Promises
+
+This Constitution describes the technical properties of the CoinCync protocol — what the code does, and what it will never do. It is not a contract, warranty, or commercial promise made to any user, holder, or third party. The protocol's properties are enforced by the code and by the network of node operators who choose to run it; no individual or entity warrants any specific outcome from interacting with the network. Any person using CoinCync does so under the MIT license's express disclaimer of warranty.
+
+**Enforcement:** Legal framing. The MIT license under which all CoinCync code is released disclaims warranty in all jurisdictions where such disclaimers are recognized.
+
 ## Article X — Immutability
 
 This Constitution is permanent.

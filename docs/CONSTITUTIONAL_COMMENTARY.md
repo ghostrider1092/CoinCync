@@ -104,6 +104,42 @@ The US Bill of Rights is ten amendments, most one to three sentences long, writt
 
 ---
 
+## On Article XVII — Security Strengthening Exception
+
+**The failure mode.** Article X makes the Constitution permanent. Article XV says strengthening additions are allowed, but the line between "amendment" and "strengthening" is fuzzy — and the fuzziest case is a security flaw. A protocol exists that turns out to violate Article III's privacy guarantee due to an unforeseen cryptographic weakness; fixing it requires a hard fork that *technically* changes consensus rules. Is that an amendment (forbidden by Article X) or a strengthening (allowed by Article XV)? Without an explicit rule, this becomes a community-paralysis fight at exactly the moment the chain needs decisive action.
+
+**Why this article exists.** Article XVII names the case explicitly. A fix that strictly strengthens at least one user protection without weakening any other is, by definition, *strengthening* — not amendment. This forecloses the "we found a bug but the Constitution forbids us from fixing it" trap. The bar is high: the proposing CIP must show exactly which protection strengthens, and prove no other weakens. The path exists, but it requires real proof.
+
+**What this article does not permit.** Convenience patches. Performance optimizations. Feature additions. Anything that doesn't strictly strengthen a user protection. The exception is narrow by design — it covers genuine security maintenance and nothing else.
+
+**The asymmetry to Article X.** Article X forbids removal, repeal, weakening, suspension. Article XVII says nothing about those. Strengthening fixes are not the kind of change Article X was meant to forbid; Article X exists to stop dilution of user protections, not to lock in vulnerabilities.
+
+---
+
+## On Article XVIII — Interpretive Authority
+
+**The failure mode.** Constitutional documents in other domains have died when interpretive power was captured by a small group — a court, a council, a single influential figure. The text becomes whatever the interpreter says it means. For a maintainer-driven open-source project, the analogous capture is "the lead maintainer's reading of the Constitution becomes the Constitution," which converges to "whatever the lead maintainer wants."
+
+**Why this article exists.** No one holds authoritative interpretive power over the CoinCync Constitution. Where interpretation matters, it is settled by node operator consensus — the same mechanism that decides any protocol change. A maintainer who insists Article XII permits some new mechanism cannot make that interpretation stick if node operators refuse to upgrade. Conversely, a maintainer who insists Article XII forbids a mechanism cannot block it if node operators choose to upgrade anyway. The chain is the verdict.
+
+**The Commentary's role.** This Commentary records reasoning, historical context, and the failure modes each article forecloses. It is documentation, not law. A future reader may find the reasoning persuasive or unpersuasive; in either case, the binding interpretation is whatever node operators ratify by upgrading or not. We write here to inform, never to bind.
+
+**Why this matters more for CoinCync than for most projects.** Privacy-coin user bases skew ideological. They came for the principles. A document whose interpretation drifts under maintainer pressure betrays exactly the trust that brought them in the first place. Distributing interpretive authority to node operators is the only credible defense against that drift.
+
+---
+
+## On Article XIX — Properties, Not Promises
+
+**The failure mode.** Strong commitments in writing have, in some jurisdictions, been construed as commercial warranties — making the maker liable when the warranted outcome doesn't materialize. Most crypto projects deliberately avoid making strong commitments for exactly this reason. CoinCync makes strong commitments by design; if those commitments expose the project to warranty liability, the project becomes legally precarious.
+
+**Why this article exists.** Article XIX clarifies the legal nature of the Constitution: it describes the technical properties of the protocol (what the code does), not contractual promises to any user. The distinction matters in court. A property is a feature of the artifact; a promise is an obligation of the promisor. The MIT license already disclaims warranty; Article XIX makes the framing explicit so a future legal challenge can't argue the Constitution accidentally created an implied warranty the MIT license didn't disclaim.
+
+**Bitcoin's precedent.** Bitcoin's whitepaper and code make similarly strong claims — fixed supply, peer-to-peer, no central authority — and the project has survived legally for sixteen years across many jurisdictions. The defense is the same as ours: these are claims about how the code behaves, not commitments by a person. Article XIX writes the same defense into our document explicitly.
+
+**What this article does not weaken.** The protections are still real. The math still enforces them. Article XIX doesn't say "we don't really mean any of this"; it says "we mean this technically, not commercially." The protocol does what the protocol does. No party warrants any user's specific outcome from using it.
+
+---
+
 ## On Rights XI–XIII
 
 The Bill of Rights is the user-facing translation of the operator-facing Articles. Each of Rights XI, XII, and XIII corresponds to a Tier-1 protection category from the Articles, restated in plain language about what the user is guaranteed:

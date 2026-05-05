@@ -163,6 +163,16 @@ A floor of thirty percent of every transaction fee is burned -- removed from cir
 
 ---
 
+## Note on Properties, Not Promises
+
+These Rights describe the protections the CoinCync protocol provides to its users by design. They are properties of the technology, enforced by the code and by the network of node operators who choose to run it. They are not contractual obligations of any developer, foundation, contributor, or other entity. No party warrants that any specific outcome will be achieved by interacting with the network.
+
+Each user of CoinCync assumes responsibility for verifying that the protocol's properties match their needs and for using the network in a manner consistent with applicable laws in their jurisdiction. The MIT license under which all CoinCync code is released expressly disclaims warranty in all jurisdictions where such disclaimers are recognized.
+
+This note does not weaken any Right above. The protections remain real and built into the protocol. It only clarifies the legal nature of the document: technical commitment, not commercial guarantee.
+
+---
+
 ## Closing Seal
 
 These rights are final. They are not subject to amendment, revision, or repeal by any person, body, or process -- now or at any point in the future.
