@@ -40,6 +40,11 @@ pub enum MisbehaviorType {
     InvalidAnchorStamp,
     /// Per-message-type flood (e.g. 100 GetBlocks/sec)
     MessageFlood,
+    /// Peer's outbound channel was chronically full — they couldn't keep
+    /// up with broadcasts and were disconnected by `broadcast_raw` after
+    /// `STALL_THRESHOLD` consecutive `Full` errors. Penalty scored so the
+    /// same peer can't immediately reconnect and resume the same pattern.
+    ChronicSendQueueFull,
 }
 
 impl MisbehaviorType {
@@ -72,6 +77,10 @@ impl MisbehaviorType {
             MisbehaviorType::InvalidAnchorStamp => 50,
             // Message flood — moderate (10 offenses → ban)
             MisbehaviorType::MessageFlood => 5,
+            // Chronic send-queue full — severe. We've already disconnected
+            // them; this penalty (2 strikes -> ban) ensures they don't
+            // immediately reconnect and re-occupy a peer slot.
+            MisbehaviorType::ChronicSendQueueFull => 25,
         }
     }
 }
@@ -107,6 +116,22 @@ pub struct PeerScore {
     pub uptime_secs: u64,
     /// Number of reconnection attempts
     pub reconnects: u32,
+    /// Number of consecutive `Blocks` responses where the peer returned 0
+    /// blocks. Reset to 0 on any successful (non-empty) `Blocks` reply.
+    /// Drives the temporary GetBlocks ban below.
+    ///
+    /// This catches the "stall pathology" failure mode observed twice on the
+    /// public testnet (peer 15.1.193.74 on 2026-05-04, peer 75.82.181.240 on
+    /// 2026-05-05): the peer accepts `GetBlocks`, replies with an empty
+    /// `Blocks` message, and the IBD orphan-loop fix re-queues the request
+    /// against the same peer forever. Tracking consecutive empties lets us
+    /// demote unhelpful peers without banning peers that are simply on a
+    /// different fork (a single empty reply is normal).
+    pub consecutive_empty_blocks: u32,
+    /// If `Some`, this peer is banned from `GetBlocks` selection until the
+    /// instant in the variant. Auto-expires (cleared by `is_get_blocks_banned`)
+    /// so peers that recover from their own resync get another shot.
+    pub get_blocks_banned_until: Option<Instant>,
 }
 
 impl Default for PeerScore {
@@ -126,9 +151,23 @@ impl Default for PeerScore {
             validated: false,
             uptime_secs: 0,
             reconnects: 0,
+            consecutive_empty_blocks: 0,
+            get_blocks_banned_until: None,
         }
     }
 }
+
+/// After this many consecutive empty `Blocks` responses, ban the peer from
+/// GetBlocks selection. 5 is enough to distinguish "peer is on a different
+/// fork" (typically 1-2 empties) from "peer is unhelpful" (the wedge pattern,
+/// which produces dozens to thousands of consecutive empties).
+pub const EMPTY_BLOCKS_BAN_THRESHOLD: u32 = 5;
+
+/// How long a peer stays banned from GetBlocks after triggering the threshold.
+/// 1 hour is long enough to give the peer time to fix its own state (often
+/// they're in the middle of their own resync) without permanently locking
+/// them out. Auto-expires; no manual unban needed.
+pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
 
 /// Per-peer, per-message-type rate tracker.
 ///
@@ -239,6 +278,7 @@ impl PeerScore {
         self.blocks_delivered += 1;
         self.last_success = Some(Instant::now());
         self.validated = true; // H-15 FIX: delivering valid block = validated
+        self.consecutive_empty_blocks = 0; // a real delivery clears the wedge counter
         self.update_latency(latency);
         self.update_validity_rate();
         self.adjust_reputation(2);
@@ -250,6 +290,49 @@ impl PeerScore {
         self.last_failure = Some(Instant::now());
         self.update_validity_rate();
         self.adjust_reputation(-10);
+    }
+
+    /// Record that the peer responded to a `GetBlocks` request with an empty
+    /// `Blocks` message. Different from [`record_block_failure`] because no
+    /// invalid data was sent — the peer simply isn't delivering. After
+    /// [`EMPTY_BLOCKS_BAN_THRESHOLD`] consecutive empties the peer is banned
+    /// from `GetBlocks` selection for [`EMPTY_BLOCKS_BAN_DURATION_SECS`].
+    /// Auto-expires; the peer gets another chance once its own state is
+    /// presumed fixed.
+    ///
+    /// This closes the "stall pathology" recurrence pattern documented in
+    /// `project_explorer_peer_wedge.md` (memory): on 2026-05-04 + 2026-05-05
+    /// the explorer node wedged on misbehaving peers responding with empty
+    /// `Blocks` messages indefinitely, requiring manual `systemctl restart`.
+    pub fn record_empty_blocks_response(&mut self) {
+        self.consecutive_empty_blocks = self.consecutive_empty_blocks.saturating_add(1);
+        self.last_failure = Some(Instant::now());
+        // Modest reputation hit per empty reply; the harder consequence is
+        // the GetBlocks-selection ban below. -15 each so a normal "different
+        // fork" empty (1-2 of them) doesn't permanently demote a peer.
+        self.adjust_reputation(-15);
+        if self.consecutive_empty_blocks >= EMPTY_BLOCKS_BAN_THRESHOLD {
+            self.get_blocks_banned_until = Some(
+                Instant::now() + Duration::from_secs(EMPTY_BLOCKS_BAN_DURATION_SECS),
+            );
+        }
+    }
+
+    /// Check whether this peer is currently banned from `GetBlocks` selection.
+    /// Auto-expires the ban if the duration has elapsed; on expiry the
+    /// `consecutive_empty_blocks` counter is also reset so the peer starts
+    /// from a clean slate. Returns `true` only if the ban is still active.
+    pub fn is_get_blocks_banned(&mut self) -> bool {
+        match self.get_blocks_banned_until {
+            Some(until) if Instant::now() < until => true,
+            Some(_) => {
+                // Ban expired — give the peer another chance.
+                self.get_blocks_banned_until = None;
+                self.consecutive_empty_blocks = 0;
+                false
+            }
+            None => false,
+        }
     }
 
     /// Record a successful transaction relay
@@ -592,6 +675,64 @@ mod tests {
         assert!(scorer.is_banned(&addr));
         scorer.unban(&addr);
         assert!(!scorer.is_banned(&addr));
+    }
+
+    #[test]
+    fn empty_blocks_ban_triggers_at_threshold() {
+        // Closes the wedge-pattern recurrence: peer keeps replying to
+        // GetBlocks with empty Blocks messages → after THRESHOLD consecutive
+        // empties, peer is banned from GetBlocks selection.
+        let mut score = PeerScore::default();
+        assert!(!score.is_get_blocks_banned(), "fresh peer not banned");
+        assert_eq!(score.consecutive_empty_blocks, 0);
+
+        // One empty reply: no ban yet (could just be different fork).
+        score.record_empty_blocks_response();
+        assert_eq!(score.consecutive_empty_blocks, 1);
+        assert!(!score.is_get_blocks_banned());
+
+        // Drive up to (but not past) the threshold.
+        for _ in 1..EMPTY_BLOCKS_BAN_THRESHOLD {
+            score.record_empty_blocks_response();
+        }
+        assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD);
+        assert!(score.is_get_blocks_banned(), "ban triggered at threshold");
+    }
+
+    #[test]
+    fn empty_blocks_ban_resets_on_real_block_delivery() {
+        // A peer that recovers (sends an actual block) should clear the
+        // consecutive-empty counter so a fresh streak can build up. This
+        // prevents permanent demotion of peers that had one bad window.
+        let mut score = PeerScore::default();
+        for _ in 0..(EMPTY_BLOCKS_BAN_THRESHOLD - 1) {
+            score.record_empty_blocks_response();
+        }
+        assert!(!score.is_get_blocks_banned(), "below threshold = not banned");
+        assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD - 1);
+
+        // Successful delivery resets the counter.
+        score.record_block_success(Duration::from_millis(100));
+        assert_eq!(score.consecutive_empty_blocks, 0, "real delivery clears the wedge counter");
+        assert!(!score.is_get_blocks_banned());
+    }
+
+    #[test]
+    fn empty_blocks_ban_auto_expires() {
+        // Manually set get_blocks_banned_until in the past — the next
+        // is_get_blocks_banned() call should observe expiry, clear the ban,
+        // and reset the counter so the peer gets a fresh start.
+        let mut score = PeerScore::default();
+        for _ in 0..EMPTY_BLOCKS_BAN_THRESHOLD {
+            score.record_empty_blocks_response();
+        }
+        assert!(score.is_get_blocks_banned());
+
+        // Force expiry by overwriting with a past instant.
+        score.get_blocks_banned_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!score.is_get_blocks_banned(), "expired ban auto-clears");
+        assert_eq!(score.consecutive_empty_blocks, 0, "counter reset on expiry");
+        assert!(score.get_blocks_banned_until.is_none(), "ban field cleared on expiry");
     }
 
     #[test]

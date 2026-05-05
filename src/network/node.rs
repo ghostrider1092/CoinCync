@@ -1130,11 +1130,28 @@ impl P2PNode {
                             // Split block hashes across ALL connected peers simultaneously.
                             // Each peer gets a different span (chunk) of hashes.
                             // This is how Monero achieves 720+ blocks/sec during IBD.
-                            let mut live_peers: Vec<(PeerId, u64)> = sync_peers.iter()
-                                .filter(|p| p.state == PeerState::Connected)
-                                .filter(|p| sync_senders.get(&p.id).map(|s| !s.is_closed()).unwrap_or(false))
-                                .map(|p| (p.id, p.height))
-                                .collect();
+                            //
+                            // Filter peers temporarily banned from GetBlocks selection
+                            // (consecutive empty-Blocks replies above threshold). This
+                            // is what stops the wedge pattern: a misbehaving peer that
+                            // keeps returning 0-block replies is now skipped here so
+                            // the next GetBlocks goes to a healthier peer.
+                            let mut live_peers: Vec<(PeerId, u64)> = {
+                                let mut s = sync_scorer.write().await;
+                                sync_peers.iter()
+                                    .filter(|p| p.state == PeerState::Connected)
+                                    .filter(|p| sync_senders.get(&p.id).map(|sd| !sd.is_closed()).unwrap_or(false))
+                                    .filter(|p| {
+                                        // Skip peers currently banned from GetBlocks.
+                                        // Look up their socket addr; if missing, allow
+                                        // (no addr means we can't have scored them).
+                                        match p.addr {
+                                            addr => !s.get_or_create(addr).is_get_blocks_banned(),
+                                        }
+                                    })
+                                    .map(|p| (p.id, p.height))
+                                    .collect()
+                            };
                             live_peers.sort_by(|a, b| b.1.cmp(&a.1));
 
                             // Clean up dead senders
@@ -1451,15 +1468,103 @@ impl P2PNode {
     /// Broadcast raw message to all peers (with traffic shaping for
     /// network fingerprint resistance — 4th Amendment protection).
     ///
+    /// Uses `try_send` (non-blocking) rather than `.send().await` so a
+    /// single slow peer can't stall the broadcast to everyone else.
+    /// Per-peer channels are bounded (peer.rs:175 — capacity 100); when
+    /// a channel is full we drop the message for that peer rather than
+    /// wait. Slow peers still catch up via the IBD `GetBlocks` path.
+    ///
+    /// This is the Bitcoin-style best-effort gossip pattern. The previous
+    /// implementation used `send().await` which serialised all sends
+    /// and let one congested peer stall propagation across the fleet —
+    /// matched the "25% block reach" symptom captured in
+    /// project_public_testnet_launch.md before the 2026-05-02 fix.
+    ///
     /// Applies timing jitter to defeat traffic correlation analysis.
     /// Packet size normalization is done at the transport layer (noise
     /// bridge) rather than here, because the connection loop expects
     /// raw protocol message format (header + payload).
     async fn broadcast_raw(&self, data: Vec<u8>) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        use tokio::sync::mpsc::error::TrySendError;
+
+        /// Disconnect a peer after this many consecutive `try_send` failures
+        /// with `Full`. At ~10 broadcasts/min average load this is roughly
+        /// 3 minutes of total radio silence — enough to be confident the
+        /// peer is genuinely stuck, not just briefly slow.
+        const STALL_THRESHOLD: u32 = 30;
+
         self.traffic_shaper.apply_jitter().await;
-        for sender in self.peer_senders.iter() {
-            let _ = sender.send(data.clone()).await;
+        let mut sent: usize = 0;
+        let mut full: usize = 0;
+        let mut closed: usize = 0;
+        // Hot path is lock-free; we collect victims and process them after.
+        let mut to_disconnect: Vec<(PeerId, u32)> = Vec::new();
+
+        for entry in self.peer_senders.iter() {
+            let peer_id = *entry.key();
+            match entry.value().try_send(data.clone()) {
+                Ok(()) => {
+                    sent += 1;
+                    // Reset stall counter on every successful send so a peer
+                    // that briefly fell behind and recovered isn't carrying
+                    // old credits toward a future disconnect.
+                    if let Some(p) = self.peers.get(&peer_id) {
+                        p.consecutive_full.store(0, Ordering::Relaxed);
+                    }
+                }
+                Err(TrySendError::Full(_)) => {
+                    full += 1;
+                    let count = if let Some(p) = self.peers.get(&peer_id) {
+                        p.consecutive_full.fetch_add(1, Ordering::Relaxed) + 1
+                    } else {
+                        0 // peer was removed mid-iteration; nothing to track
+                    };
+                    if count >= STALL_THRESHOLD {
+                        to_disconnect.push((peer_id, count));
+                    }
+                    tracing::trace!(
+                        peer_id = ?peer_id,
+                        consecutive_full = count,
+                        "broadcast_raw: peer channel full, dropping (peer will catch up via IBD)"
+                    );
+                }
+                Err(TrySendError::Closed(_)) => {
+                    closed += 1;
+                    tracing::trace!(
+                        peer_id = ?peer_id,
+                        "broadcast_raw: peer channel closed (peer disconnected)"
+                    );
+                }
+            }
         }
+
+        if full > 0 || closed > 0 {
+            tracing::warn!(sent, full, closed, "broadcast_raw partial delivery");
+        }
+
+        // Disconnect chronic-slow peers OFF the hot path (after the loop)
+        // so we don't acquire the dandelion write lock while iterating
+        // peer_senders.
+        for (peer_id, count) in to_disconnect {
+            tracing::warn!(
+                peer_id = %hex::encode(&peer_id[..8]),
+                consecutive_full = count,
+                "broadcast_raw: disconnecting chronic-slow peer (channel full {count} consecutive sends)"
+            );
+            // Score the peer down so they don't immediately reconnect
+            // and resume eating broadcast slots.
+            if let Some(p) = self.peers.get(&peer_id) {
+                let addr = p.addr;
+                drop(p);
+                let mut scorer = self.peer_scorer.write().await;
+                scorer.get_or_create(addr).record_misbehavior(
+                    super::scoring::MisbehaviorType::ChronicSendQueueFull,
+                );
+            }
+            self.ban_peer(&peer_id).await;
+        }
+
         Ok(())
     }
 
@@ -2548,10 +2653,13 @@ async fn process_message(
                 // that destroys all progress. Instead, mark this peer as
                 // incompatible and continue with other peers.
                 if blocks_msg.blocks.is_empty() {
-                    debug!("[IBD] Got 0 blocks from peer {:?} — different fork, skipping peer", &peer_id[..4]);
-                    // Record a sync failure for this peer so the scorer deprioritizes it
+                    debug!("[IBD] Got 0 blocks from peer {:?} — empty Blocks reply, demoting", &peer_id[..4]);
+                    // Record an empty-Blocks response so the scorer can ban
+                    // this peer from `GetBlocks` selection after N consecutive
+                    // empties. Closes the "stall pathology" wedge pattern
+                    // (peer accepts requests but never delivers).
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_block_failure();
+                        scorer.write().await.get_or_create(addr).record_empty_blocks_response();
                     }
                     return Ok(());
                 }
