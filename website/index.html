@@ -499,7 +499,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   <div class="nav-links">
     <a href="#privacy">Privacy</a>
     <a href="#economics">Economics</a>
-    <a href="#compare">Compare</a>
+    <a href="#roadmap">Roadmap</a>
     <div class="nav-flyout">
       <button class="nav-flyout-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
         Tools
@@ -844,117 +844,11 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   </div>
 </section>
 
-<!-- COMPARE -->
-<section id="compare">
-  <div class="section-header">
-    <div class="section-num">&sect; 05</div>
-    <h2 class="section-title">What we <em>inherit</em>, what we <em>add</em>.</h2>
-    <p class="section-desc">CoinCync stands on Monero's shoulders. The privacy primitives that work &mdash; CLSAG, Bulletproofs+, RandomX, mandatory shielding &mdash; we kept. The pieces that were missing &mdash; hidden multi-sig, fee burn, a written constitution, atomic swaps as a launch commitment &mdash; we added. This is not a fork or a rebrand; it's the next iteration.</p>
-  </div>
-
-  <div class="reveal" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px;margin-bottom:36px">
-    <div style="border:1px solid var(--b);padding:22px 24px;background:var(--s1)">
-      <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px">Inherited from Monero</div>
-      <div style="font-size:13px;color:var(--t2);line-height:1.7">
-        Mandatory privacy &middot; CLSAG ring signatures &middot; Bulletproofs+ range proofs &middot; RandomX CPU PoW &middot; Stealth addresses &middot; Pedersen commitments &middot; No trusted setup
-      </div>
-    </div>
-    <div style="border:1px solid var(--ac-dim);padding:22px 24px;background:linear-gradient(135deg,rgba(212,160,89,.04),transparent)">
-      <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px">Net-new in CoinCync</div>
-      <div style="font-size:13px;color:var(--t2);line-height:1.7">
-        FROST hidden multi-sig (indistinguishable from single-sig) &middot; 30/50% fee burn &middot; Encrypted memos &middot; Scoped view keys &middot; Deniable wallets &middot; Traffic shaping &middot; Dead-man's switch &middot; Auto-churn &middot; Written Constitution + Bill of Rights enforced at compile time &middot; CIP-001 atomic swaps as mainnet blocker
-      </div>
-    </div>
-  </div>
-
-  <table class="compare-table reveal">
-    <thead><tr><th>Feature</th><th>CoinCync</th><th>Monero</th><th>Zcash</th><th>Bitcoin</th></tr></thead>
-    <tbody>
-      <tr><td>Privacy</td><td>Mandatory</td><td>Mandatory</td><td style="color:var(--t4-a)">Optional</td><td style="color:var(--red)">None</td></tr>
-      <tr><td>Ring signatures</td><td title="Ring size ramps from 11 (bootstrap, blocks 0&ndash;9,999) to 16 (steady state, block 10,000+)">CLSAG-16<sup style="color:var(--t4);font-size:9px">&dagger;</sup></td><td>CLSAG-16</td><td style="color:var(--t4-a)">&mdash;</td><td style="color:var(--t4-a)">&mdash;</td></tr>
-      <tr><td>Range proofs</td><td>Bulletproofs+</td><td>Bulletproofs+</td><td style="color:var(--t4-a)">Halo2</td><td style="color:var(--t4-a)">&mdash;</td></tr>
-      <tr><td>Trusted setup</td><td>None</td><td>None</td><td style="color:var(--red)">Was required</td><td style="color:var(--t4-a)">N/A</td></tr>
-      <tr><td>Supply auditable</td><td>Pedersen</td><td>Pedersen</td><td>Yes</td><td>Transparent</td></tr>
-      <tr><td>Mining</td><td>RandomX (CPU)</td><td style="color:var(--t3)">RandomX (CPU)</td><td style="color:var(--t3)">Equihash (GPU)</td><td style="color:var(--t3)">SHA-256 (ASIC)</td></tr>
-      <tr><td>Dev tax</td><td>0%</td><td>0%</td><td style="color:var(--red)">20% (ended)</td><td>0%</td></tr>
-      <tr><td>Fee burn</td><td>30%</td><td style="color:var(--t4-a)">0%</td><td style="color:var(--t4-a)">0%</td><td style="color:var(--t4-a)">0%</td></tr>
-      <tr><td>Multi-sig privacy</td><td>FROST (hidden)</td><td style="color:var(--t4-a)">Visible</td><td style="color:var(--t4-a)">Visible</td><td style="color:var(--t4-a)">Visible</td></tr>
-      <tr><td>Constitution</td><td>Enforced</td><td style="color:var(--t4-a)">&mdash;</td><td style="color:var(--t4-a)">&mdash;</td><td style="color:var(--t4-a)">&mdash;</td></tr>
-    </tbody>
-  </table>
-  <div style="font-size:11px;color:var(--t4);font-family:var(--mono);margin-top:10px;line-height:1.6">&dagger; Ring size ramps from 11 (bootstrap, blocks 0&ndash;9,999) to 16 (steady state, block 10,000+). The Monero ramp pattern.</div>
-  <!-- MOBILE COMPARISON CARDS -->
-  <div class="compare-cards">
-    <div class="compare-card">
-      <div class="compare-card-feature">Privacy</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">Mandatory</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">Mandatory</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Optional</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value negative">None</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Ring signatures</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">CLSAG-16<span style="color:var(--t4);font-size:9px;margin-left:2px">(11&rarr;16 ramp)</span></span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">CLSAG-16</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">&mdash;</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">&mdash;</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Range proofs</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">Bulletproofs+</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">Bulletproofs+</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Halo2</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">&mdash;</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Trusted setup</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">None</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">None</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value negative">Was required</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">N/A</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Mining</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">RandomX (CPU)</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">RandomX (CPU)</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Equihash (GPU)</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">SHA-256 (ASIC)</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Dev tax</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">0%</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">0%</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value negative">20% (ended)</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">0%</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Fee burn</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">30%</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">0%</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">0%</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">0%</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Multi-sig privacy</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">FROST (hidden)</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">Visible</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">Visible</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">Visible</span></div>
-    </div>
-    <div class="compare-card">
-      <div class="compare-card-feature">Constitution</div>
-      <div class="compare-card-row"><span class="compare-card-coin">CoinCync</span><span class="compare-card-value highlight">Enforced</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Monero</span><span class="compare-card-value">&mdash;</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Zcash</span><span class="compare-card-value">&mdash;</span></div>
-      <div class="compare-card-row"><span class="compare-card-coin">Bitcoin</span><span class="compare-card-value">&mdash;</span></div>
-    </div>
-  </div>
-</section>
 
 <!-- CONSTITUTION QUOTES -->
 <section>
   <div class="section-header">
-    <div class="section-num">&sect; 06</div>
+    <div class="section-num">&sect; 05</div>
     <h2 class="section-title">Written in <em>stone</em>.</h2>
     <p class="section-desc">The CoinCync Constitution is permanent. It cannot be amended, repealed, or superseded. These are not promises &mdash; they are protocol rules.</p>
   </div>
@@ -987,7 +881,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 <!-- QUICK START -->
 <section>
   <div class="section-header">
-    <div class="section-num">&sect; 07</div>
+    <div class="section-num">&sect; 06</div>
     <h2 class="section-title">Three commands to <em>mine</em>.</h2>
     <p class="section-desc">Build from source and mine your first block. Any CPU. No GPU required. No pool required.</p>
   </div>
@@ -1021,7 +915,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 <!-- DOWNLOAD / GET STARTED -->
 <section id="download">
   <div class="section-header">
-    <div class="section-num">&sect; 08</div>
+    <div class="section-num">&sect; 07</div>
     <h2 class="section-title">Get <em>started</em>.</h2>
     <p class="section-desc">Two paths in. Pick the one that matches what you're trying to do.</p>
   </div>
@@ -1084,7 +978,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 <!-- ROADMAP -->
 <section id="roadmap">
   <div class="section-header">
-    <div class="section-num">&sect; 09</div>
+    <div class="section-num">&sect; 08</div>
     <h2 class="section-title">What's <em>next</em>.</h2>
     <p class="section-desc">A transparent roadmap for CoinCync development.</p>
   </div>
@@ -1153,7 +1047,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 <!-- SECURITY -->
 <section>
   <div class="section-header">
-    <div class="section-num">&sect; 10</div>
+    <div class="section-num">&sect; 09</div>
     <h2 class="section-title">Security &amp; <em>bug bounty</em>.</h2>
     <p class="section-desc">We pay for vulnerabilities. Responsible disclosure protects everyone.</p>
   </div>
@@ -1187,7 +1081,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 <!-- FAQ -->
 <section>
   <div class="section-header">
-    <div class="section-num">&sect; 11</div>
+    <div class="section-num">&sect; 10</div>
     <h2 class="section-title">Frequently <em>asked</em>.</h2>
   </div>
   <div class="faq-list reveal">
@@ -1225,7 +1119,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 <!-- BUILT ON — open-source primitives the chain depends on -->
 <section>
   <div class="section-header">
-    <div class="section-num">&sect; 12</div>
+    <div class="section-num">&sect; 11</div>
     <h2 class="section-title">Built on <em>well-known</em> primitives.</h2>
     <p class="section-desc">No homemade crypto. Every primitive in CoinCync is published, peer-reviewed, and well-documented. We stand on these shoulders.</p>
   </div>
