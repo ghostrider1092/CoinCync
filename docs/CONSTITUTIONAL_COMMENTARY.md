@@ -164,4 +164,34 @@ Keeping the principle in the Constitution and the rationale in the Commentary is
 
 ---
 
+## On Upholding the Constitution in Practice
+
+The articles work only when honored under pressure. Each failure mode they foreclose has been a real event for a real coin — the question for any future maintainer or community member is not whether the rules exist (they do, in code and in this document) but whether they hold when invoking them is inconvenient.
+
+Four scenarios serve as worked examples. They are illustrative, not exhaustive.
+
+**1. The funding-for-fee-redirect offer.** A VC, foundation, or grant program offers substantial development funding in exchange for a small redirect of transaction fees — perhaps one percent, perhaps "only during the first year", perhaps "only on transactions above a certain size". Articles II and XVI categorically forbid this. The compile-time guards on `FEE_PROTOCOL_NORMAL_PERCENT` and `FEE_BURN_NORMAL_PERCENT` make the change visible in any PR that attempts it. The correct answer is no, and the correct response to "but the development fund is well-intentioned and small" is the same answer.
+
+**2. The exchange-compliance demand.** A major exchange demands a "compliance feature" — a transaction blacklist, an address filter, a Travel Rule attestation hook — as a condition of listing. Articles VI, IX, and XIV plus Right X categorically forbid this. The exchange may delist. The correct answer is still no. Privacy coins that capitulate to this kind of demand stop being privacy coins.
+
+**3. The hashrate-incentive proposal.** Network hashrate remains low for an extended period. Well-meaning community members propose a "small staking reward", a "node-operation subsidy", or a "treasury-funded mining incentive" to bootstrap participation. Articles V, XI, and XII categorically forbid this. The path to higher hashrate is RandomX adoption among CPU miners, not paid incentives.
+
+**4. The security-vs-Constitution dilemma.** A critical vulnerability is discovered that requires a protocol change. The change appears to violate the literal text of an article. Article XVII resolves this: a change that strictly strengthens at least one user protection without weakening any other is not an amendment within Article X's meaning — it is maintenance of the protections this Constitution exists to provide. The proposing CIP must show exactly which protection strengthens and prove no other weakens. The bar is high; the path exists.
+
+Many more pressures will arise. The pattern that distinguishes a real defense from theater is the willingness to say no when saying yes would be easier — when the funding would help, when the exchange would matter, when the incentive would solve a real problem. The Constitution's articles exist to give every "no" the same answer: *the chain promised this, the math enforces it, no person and no offer can override it.*
+
+---
+
+## On Avoiding Bureaucracy and Brand-Drift
+
+Two failure modes are not document-fixable but are worth naming for future maintainers reading this.
+
+**Bureaucracy theater.** Constitutional documents can become cargo cult — projects that produce elaborate text and ship nothing. The cure is shipping consensus code at a faster cadence than constitutional changes. If any two-month window contains more constitutional work than protocol work, that is the warning sign. The documents are a foundation, not the building.
+
+**Brand-drift.** This Constitution permanently commits CoinCync to a niche: payments, privacy, fungibility, no smart contracts, no bridges, no governance tokens, no stablecoins. The cure is to not change your mind. Refuse the cross-chain bridge ask. Refuse the smart-contract layer ask. Refuse the stablecoin-driven-adoption ask. The articles already make "no" the structural default; the remaining work is human discipline — never apologetic, never tentative, always specific about which article forecloses the request.
+
+The chains that survive the longest are not the chains that say yes the most. They are the chains whose communities take pride in saying no to exactly the things their Constitution was written to refuse.
+
+---
+
 *This Commentary is not ratified at any block. It has no consensus weight. It is documentation, not law.*
