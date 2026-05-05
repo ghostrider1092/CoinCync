@@ -3167,9 +3167,9 @@ function toggleMobile(){$('mobile-menu').classList.toggle('open');}
 function closeMobile(){$('mobile-menu').classList.remove('open');}
 
 // ── PAGE NAV ──────────────────────────────────────────────────
-const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics'];
+const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals'];
 const DEV_ONLY_PAGES=[];
-const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics'];
+const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals'];
 const EXPLORER_DEV_MODE=(
   new URLSearchParams(window.location.search).get('dev_explorer')==='1' &&
   IS_LOCALHOST
@@ -9080,6 +9080,106 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
       Charts compute client-side from the most recent <span id="pm-block-count">100</span> blocks pulled
       via <code>get_block_by_height</code>. No identity data leaves the browser; this is purely
       aggregate-level statistical analysis of the public chain.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ COINCYNC IMPROVEMENT PROPOSALS (CIPs) ═══
+     Public list of every CIP in the repo's docs/cip/ directory. Status,
+     summary, link to the full doc on GitHub. Read-only — discussion happens
+     on the linked Matrix/Discord/GitHub channels, not here. The Constitution's
+     Article XVIII is explicit: interpretation belongs to node operators via
+     fork-acceptance, not to a centralized vote tally on this page. So this
+     page shows transparency, not authority. -->
+<div class="page" id="page-proposals">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Proposals</div>
+    <div class="page-title" style="margin-bottom:4px">CoinCync Improvement Proposals</div>
+    <div class="page-sub" style="margin-bottom:20px">Every protocol change goes through a public CIP. Anyone can submit one. The list below is the live state of every proposal in the repo.</div>
+
+    <div class="info-box" style="margin-bottom:18px;background:rgba(212,160,89,.04);border:1px solid rgba(212,160,89,.25);padding:14px 18px;color:var(--t2);font-size:12px;line-height:1.65">
+      <strong style="color:var(--ac2)">How decisions actually get made:</strong>
+      Discussion happens publicly on Discord / Matrix / GitHub. Maintainers review for
+      cryptographic and constitutional fit. Activation requires <strong>95% miner version-bit
+      signaling</strong> at the fork height (Article XIV). <strong>Node operators have the final
+      say</strong> by choosing whether to upgrade. There is no token-weighted vote, no foundation
+      override, no admin authority. Article XVIII of the Constitution.
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Active proposals</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:90px">CIP</th>
+            <th style="width:90px">Status</th>
+            <th>Title</th>
+            <th style="width:140px">Type</th>
+            <th style="width:120px">Created</th>
+            <th style="width:80px">Read</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono"><strong>CIP-001</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>CYNC↔BTC Atomic Swap</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Trustless cross-chain atomic swap modeled on the Comit / Farcaster XMR↔BTC design. Adaptor signatures over CLSAG keep the swap invisible on the privacy chain. <strong style="color:var(--ac2)">Mainnet launch blocker.</strong></div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-04</td>
+            <td><a href="https://github.com/CoinCync/Coincync-Testnet-/blob/main/docs/cip/CIP-001-atomic-swap.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-002</strong></td>
+            <td><span class="badge" style="background:rgba(140,140,140,.15);color:var(--t2);border:1px solid rgba(140,140,140,.4)">Sketch</span></td>
+            <td>
+              <strong>cynchub — Merge-Mined Liquidity Layer</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Auxiliary PoW chain merge-mined with CoinCync, hosting an on-chain order book for trustless CYNC↔BTC↔stablecoin trading. Miners coordinate; HTLCs settle. The PoW alternative to PoS bridges. <strong>18-24 months post-mainnet.</strong></div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-05</td>
+            <td><a href="https://github.com/CoinCync/Coincync-Testnet-/blob/main/docs/cip/CIP-002-cynchub-merge-mined-liquidity-layer.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">CIP status legend</div>
+        <table>
+          <tbody>
+            <tr><td><span class="badge" style="background:rgba(140,140,140,.15);color:var(--t2);border:1px solid rgba(140,140,140,.4)">Sketch</span></td><td style="font-size:12px">Idea captured; specifics pending. No implementation commitment.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td><td style="font-size:12px">Specifics resolved. Open for public discussion.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(228,175,78,.15);color:#E4AF4E;border:1px solid rgba(228,175,78,.4)">Discussion</span></td><td style="font-size:12px">60-day public review window in progress.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">Accepted</span></td><td style="font-size:12px">Reviewed; reference implementation underway.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(127,184,121,.25);color:#7FB879;border:1px solid rgba(127,184,121,.5)">Active</span></td><td style="font-size:12px">Hard-fork activation in progress; miners signaling.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(127,184,121,.4);color:#7FB879;border:1px solid rgba(127,184,121,.7)">Final</span></td><td style="font-size:12px">Activated by node-operator consensus. Now part of the protocol.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(216,99,99,.15);color:#D86363;border:1px solid rgba(216,99,99,.4)">Rejected</span></td><td style="font-size:12px">Failed review (e.g. constitutional incompatibility) or community consensus.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">Submit a proposal</div>
+        <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+          <p>Anyone can submit a CIP. No fee. No minimum holdings. No identity required.</p>
+          <ol style="padding-left:18px;margin:10px 0">
+            <li>Fork the repo, add a markdown file at <code>docs/cip/CIP-NNN-short-name.md</code>.</li>
+            <li>Use CIP-001 or CIP-002 as a template. Required sections: Abstract, Motivation, Status, Mechanism, Security Considerations, Open Questions.</li>
+            <li>Open a pull request. Maintainers will assign a CIP number.</li>
+            <li>Discuss in <a href="https://discord.gg/5tYNSCsqzy" target="_blank" style="color:var(--ac2)">Discord</a> or on the PR thread.</li>
+            <li>Standards-Track CIPs require 60+ days of public discussion before reaching the activation phase.</li>
+          </ol>
+          <p style="margin-top:14px;font-size:11px;color:var(--t3);font-style:italic">Read <a href="CONTRIBUTING.md" target="_blank" style="color:var(--ac2)">CONTRIBUTING.md</a> for the full process and what's structurally out-of-scope (stablecoins, smart contracts, bridges, admin keys, governance tokens — see Article XV "Spirit and Construction").</p>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;margin-top:14px;text-align:center;font-style:italic">
+      No token-weighted votes. No foundation override. No admin authority. Just public proposals, public discussion, and node-operator opt-in. <span style="color:var(--ac2)">Article XVIII of the Constitution.</span>
     </div>
   </div>
 </div>
