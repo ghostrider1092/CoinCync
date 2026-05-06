@@ -119,7 +119,7 @@ Then visit `http://127.0.0.1:28083/` in your browser. Localhost-only by default 
 
 ## Operating a public seed (operators)
 
-If you run infrastructure that should accept inbound peers: open **TCP 28080** in your **cloud** firewall (not only the host), install `coincync-node` under systemd, and verify DNS/TCP health. Broader deployment notes are in [Deploying a node](../operations/deployment.md). In the source tree, scripts live under `deploy/ops/` ([README](https://github.com/CoinCync/Coincync-Testnet-/blob/main/deploy/ops/README.md)): `install-testnet-node.sh`, `verify-community-bootstrap.sh`, plus [`scripts/verify-community-join-readiness.ps1`](https://github.com/CoinCync/Coincync-Testnet-/blob/main/scripts/verify-community-join-readiness.ps1) on Windows.
+If you run infrastructure that should accept inbound peers: open **TCP 28080** in your **cloud** firewall (not only the host), install `coincync-node` under systemd, and verify DNS/TCP health. Broader deployment notes are in [Deploying a node](../operations/deployment.md). In the source tree, scripts live under `deploy/ops/` ([README](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/deploy/ops/README.md)): `install-testnet-node.sh`, `verify-community-bootstrap.sh`, plus [`scripts/verify-community-join-readiness.ps1`](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/scripts/verify-community-join-readiness.ps1) on Windows.
 
 ## Next steps
 

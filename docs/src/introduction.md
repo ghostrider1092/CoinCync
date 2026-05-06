@@ -38,7 +38,7 @@ Mining is **RandomX only** by [Constitution Article V](./governance/constitution
 
 - **Block explorer** — [explorer.coincync.network](https://explorer.coincync.network)
 - **Public RPC API** — [api.coincync.network](https://api.coincync.network)
-- **Source code** — [github.com/CoinCync/Coincync-Testnet-](https://github.com/CoinCync/Coincync-Testnet-)
+- **Source code** — [github.com/CyncDevelopment/Cync-Protocol](https://github.com/CyncDevelopment/Cync-Protocol)
 - **Network status (testnet)** — see the explorer
 
 ## Status

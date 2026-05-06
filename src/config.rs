@@ -1194,7 +1194,7 @@ impl NodeConfig {
     /// Create example config file with comments
     pub fn example_toml() -> String {
         r#"# CoinCync 2.0 Configuration
-# https://github.com/coincync/coincync
+# https://github.com/CyncDevelopment/Cync-Protocol
 
 # Network: mainnet, testnet, or regtest
 network = "mainnet"

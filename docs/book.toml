@@ -28,8 +28,8 @@ create-missing  = false   # never silently create empty files for missing SUMMAR
 [output.html]
 default-theme       = "navy"
 preferred-dark-theme = "navy"
-git-repository-url  = "https://github.com/CoinCync/Coincync-Testnet-"
-edit-url-template   = "https://github.com/CoinCync/Coincync-Testnet-/edit/main/docs/{path}"
+git-repository-url  = "https://github.com/CyncDevelopment/Cync-Protocol"
+edit-url-template   = "https://github.com/CyncDevelopment/Cync-Protocol/edit/main/docs/{path}"
 no-section-label    = false
 mathjax-support     = false       # we don't render math in the docs (yet)
 additional-css      = ["theme/coincync.css"]

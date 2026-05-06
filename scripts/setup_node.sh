@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-REPO="https://github.com/CoinCync/Coincync-Testnet-.git"
+REPO="https://github.com/CyncDevelopment/Cync-Protocol.git"
 INSTALL_DIR="/opt/coincync"
 
 echo "Setting up CoinCync 1.0 node..."

@@ -84,7 +84,7 @@ MINING:
 
 SUPPORT:
   Explorer:  https://explorer.coincync.network
-  GitHub:    https://github.com/CoinCync/Coincync-Testnet-
+  GitHub:    https://github.com/CyncDevelopment/Cync-Protocol
 
 22 privacy features. 0% dev tax. 100M CYNC cap. CPU-only RandomX.
 EOF

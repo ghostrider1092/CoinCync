@@ -1,6 +1,6 @@
 # Public RPC API host
 
-How to run the public JSON-RPC + REST API at `https://api.coincync.network`. Lives in [`/deploy/api/`](https://github.com/CoinCync/Coincync-Testnet-/tree/main/deploy/api).
+How to run the public JSON-RPC + REST API at `https://api.coincync.network`. Lives in [`/deploy/api/`](https://github.com/CyncDevelopment/Cync-Protocol/tree/main/deploy/api).
 
 Architecturally identical to [`/deploy/explorer/`](./explorer.md), with three differences calibrated for an API audience instead of a human-browser audience:
 

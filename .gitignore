@@ -131,6 +131,10 @@ deploy/ops/template-check.sh
 /tmp-testnet-snapshot/
 /fuzz/target/
 
+# Cloudflare wrangler local state (contains OAuth token + project cache)
+.wrangler/
+*.wrangler-account.json
+
 # ── Jarvis / Autman assistant (NEVER push to github) ──
 # Keep all assistant-related code, voice models, and the parked
 # Tauri shell strictly local. None of this should appear on the
