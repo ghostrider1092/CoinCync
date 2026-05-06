@@ -63,7 +63,14 @@ jobs:
         run: npm install
 
       - name: Build CoinCync chain binaries (bundled with wallet)
-        run: cargo build --release --target ${{ matrix.target }} --features "randomx testnet" --bin coincync-node --bin coincync-wallet --bin coincync-tui-miner
+        # Two cargo invocations: the workspace root crate (coincync-node,
+        # coincync-wallet) is built with the testnet feature, then the
+        # separate coincync-rig crate (canonical retail miner) is built
+        # via -p. Matches the pattern documented in
+        # coincync-wallet/scripts/bundle-sidecars.js.
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features "randomx testnet" --bin coincync-node --bin coincync-wallet
+          cargo build --release --target ${{ matrix.target }} -p coincync-rig
 
       - name: Stage wallet sidecars
         working-directory: coincync-wallet
