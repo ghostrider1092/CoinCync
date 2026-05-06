@@ -3583,8 +3583,8 @@ async function loadGithub(){
   }
   try{
     const [cRes,rRes]=await Promise.all([
-      fetch('https://api.github.com/repos/CoinCync/Coincync-Testnet-/commits?per_page=15'),
-      fetch('https://api.github.com/repos/CoinCync/Coincync-Testnet-')
+      fetch('https://api.github.com/repos/CyncDevelopment/Cync-Protocol/commits?per_page=15'),
+      fetch('https://api.github.com/repos/CyncDevelopment/Cync-Protocol')
     ]);
     const cData=await cRes.json();const rData=await rRes.json();
 
@@ -6364,7 +6364,7 @@ source ~/.cargo/env
 
 # Clone and build
 git clone https://github.com/CyncDevelopment/Cync-Protocol.git
-cd Coincync-Testnet-
+cd Cync-Protocol
 
 # Testnet build (recommended for now)
 cargo build --release --features "testnet randomx randomx-rs" -j 1
@@ -9176,7 +9176,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>GitHub Activity</div>
     <div class="page-title" style="margin-bottom:4px">GitHub activity</div>
-    <div class="page-sub" style="margin-bottom:20px">Recent commits to Coincync-Testnet-</div>
+    <div class="page-sub" style="margin-bottom:20px">Recent commits to Cync-Protocol</div>
     <div class="two-col">
       <div class="panel">
         <div class="panel-head">Recent commits <span class="panel-action"><a href="https://github.com/CyncDevelopment/Cync-Protocol" target="_blank" style="color:var(--ac2)">View on GitHub →</a></span></div>
