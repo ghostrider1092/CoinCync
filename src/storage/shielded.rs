@@ -24,11 +24,12 @@
 //!
 //! ## What this module does NOT do
 //!
-//! - **Zero-knowledge spend proofs.** The Halo2 action circuit that
-//!   proves in ZK "I know a note in the tree whose nullifier is `nf`"
-//!   lives in `crate::crypto::halo2_circuit`. That's a multi-session
-//!   port from `zcash/orchard` and remains a structural stub. Until
-//!   it's real, the shielded pool can mint but not privately spend.
+//! - **Zero-knowledge spend proofs.** A Halo2 action circuit proving
+//!   in ZK "I know a note in the tree whose nullifier is `nf`" is not
+//!   implemented. The shielded pool can mint and track commitments,
+//!   but private spends are out of scope for v1.0.x. When the circuit
+//!   lands it will live in a dedicated crate; the previous structural
+//!   stub was removed pre-launch to keep audit scope tight.
 //!
 //! ## Persistence
 //!

@@ -23,9 +23,8 @@ pub mod node;
 pub mod connection_tracker;
 
 pub mod traffic_shaping;
-pub mod hardening;
 
-pub mod iron;
+pub mod hardening;
 
 pub use bootstrap::initial_peers;
 pub use dns_seeds::resolve_seeds;

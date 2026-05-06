@@ -3,6 +3,8 @@
 //! P2P peer connection handling.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -74,6 +76,12 @@ pub struct PeerInfo {
     /// Zero until a Flare message is received. Unknown bits are ignored.
     /// Use `firework::has_cap(peer.capabilities, CAP_*)` to test a feature.
     pub capabilities: u64,
+    /// Consecutive `try_send(Full)` count for this peer's broadcast
+    /// channel. Reset on any successful send. When it crosses the
+    /// stall threshold (see `node.rs::STALL_THRESHOLD`) the peer is
+    /// disconnected. Atomic so the lock-free broadcast hot path can
+    /// update it without taking a write lock on the peer table.
+    pub consecutive_full: Arc<AtomicU32>,
 }
 
 impl PeerInfo {
@@ -94,6 +102,7 @@ impl PeerInfo {
             encrypted: false,
             remote_static_key: None,
             capabilities: 0,
+            consecutive_full: Arc::new(AtomicU32::new(0)),
         }
     }
 

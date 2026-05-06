@@ -2140,12 +2140,6 @@ async fn process_message(
 
     trace!("Received {:?} from peer {:?}", msg_type, &peer_id[..4]);
 
-    // 1.0 no-op: IronConsensus is still in the tree but the P2P node no
-    // longer feeds live peer events into it. `send_iron` exists so the
-    // 2.0 message processing body below can stay unchanged; the events
-    // it emits are discarded. Re-wiring IronConsensus is a follow-up
-    // pass after testnet is healthy.
-    let send_iron = |_input: super::iron::IronInput| { /* no-op in 1.0 */ };
 
     // Update peer activity
     if let Some(mut peer) = peers.get_mut(&peer_id) {
@@ -2185,7 +2179,6 @@ async fn process_message(
                 peers.remove(&peer_id);
                 senders.remove(&peer_id);
                 let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
-                send_iron(super::iron::IronInput::PeerGone(peer_id));
                 return Ok(());
             }
             // Parse version and validate before accepting
@@ -2196,7 +2189,6 @@ async fn process_message(
                     peers.remove(&peer_id);
                     senders.remove(&peer_id);
                     let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
-                    send_iron(super::iron::IronInput::PeerBadBlock(peer_id));
                     return Ok(());
                 }
             };
@@ -2267,14 +2259,6 @@ async fn process_message(
                         true_best,
                     );
                 }
-
-                // Feed peer tip into IronConsensus
-                send_iron(super::iron::IronInput::PeerHandshake {
-                    peer: peer_id,
-                    height: version.start_height,
-                    tip: version.best_hash,
-                    total_diff: 0,
-                });
             }
         }
 
@@ -2679,7 +2663,6 @@ async fn process_message(
                             scorer.write().await.get_or_create(addr)
                                 .record_misbehavior(super::scoring::MisbehaviorType::WrongNetwork);
                         }
-                        send_iron(super::iron::IronInput::PeerBadBlock(peer_id));
                         continue;
                     }
 
@@ -2694,7 +2677,6 @@ async fn process_message(
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                             scorer.write().await.get_or_create(addr).record_block_failure();
                         }
-                        send_iron(super::iron::IronInput::PeerBadBlock(peer_id));
                         continue;
                     }
                     if block.transactions.len() > crate::constants::MAX_TXS_PER_BLOCK {
@@ -2703,7 +2685,6 @@ async fn process_message(
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                             scorer.write().await.get_or_create(addr).record_block_failure();
                         }
-                        send_iron(super::iron::IronInput::PeerBadBlock(peer_id));
                         continue;
                     }
                     // Verify PoW hash meets the claimed target (cheap check — no
@@ -2723,7 +2704,6 @@ async fn process_message(
                             if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                                 scorer.write().await.get_or_create(addr).record_block_failure();
                             }
-                            send_iron(super::iron::IronInput::PeerBadBlock(peer_id));
                             continue;
                         }
                     };
@@ -2733,7 +2713,6 @@ async fn process_message(
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                             scorer.write().await.get_or_create(addr).record_block_failure();
                         }
-                        send_iron(super::iron::IronInput::PeerBadBlock(peer_id));
                         continue;
                     }
                     let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));

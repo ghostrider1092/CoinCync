@@ -37,7 +37,7 @@ The "Roll a new node binary across all 5 boxes" snippet inlines the actual fleet
 | `tests/` | 53 | Integration + adversarial test suites (14 tiers) |
 | `deploy/` | 52 | Caddy / nginx configs for explorer + landing + API |
 | `docs/` | 38 | Bill of Rights, Commentary, COMMANDS, DEVELOPER, CIPs, mdbook source |
-| `crates/` | 24 | `bridge`, `coincync-rig` (miner), `coincync-swap` (skeleton), `orchard-side` |
+| `crates/` | 22 | `bridge`, `coincync-rig` (miner), `coincync-swap` (skeleton) |
 | `scripts/` | 21 | Public ops scripts (smoke-test, soak, fleet-check, faucet) |
 | `fuzz/` | 7 | Fuzz harness (cargo-fuzz targets) |
 | `.github/` | 7 | CI workflows (release, integration-tests, critical-lock, hardening, etc.) |
@@ -84,7 +84,6 @@ The "Roll a new node binary across all 5 boxes" snippet inlines the actual fleet
 ```text
   11  crates/coincync-rig/   # CPU miner with premium TUI dashboard
    9  crates/coincync-swap/  # CYNC↔BTC atomic swap (skeleton; CIP-001)
-   2  crates/orchard-side/   # Halo2 wrapper (workspace-excluded; pending upstream)
    2  crates/bridge/         # Bytes-only Tari↔Orchard isolation crate
 ```
 

@@ -1,6 +1,5 @@
 [workspace]
 members  = [".", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap"]
-# orchard-side removed: depends on yanked orchard v0.12 (Phase 2/3)
 exclude  = ["coincync-wallet/src-tauri"]
 resolver = "2"
 
@@ -40,13 +39,6 @@ metrics = []
 # Test/diagnostic knobs. Opt-in, off by default.
 test-vdf        = []
 test-utilities  = []
-# Future consensus knob (demand-responsive emission). Gated off until activation.
-demand-responsive = []
-# Phase 2 modules (Halo2 circuit stubs, etc.). Off by default.
-phase2 = []
-# Experimental IronConsensus engine — fork recovery + peer reputation.
-# Not wired up yet; enable only after completing IronEngine::spawn().
-iron-consensus = []
 
 [dependencies]
 # ── Elliptic curves ───────────────────────────────────────────

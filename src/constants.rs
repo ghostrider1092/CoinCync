@@ -545,16 +545,6 @@ pub const ACTIVITY_WINDOW: u64 = 1000;
 /// Miner split percentage of fees (0-100)
 pub const MINER_SPLIT_PERCENT: u64 = 60;
 
-/// Hard-fork height at which demand-responsive emission activates.
-/// Before this height, block rewards are purely deterministic from height.
-/// After this height (when feature = "demand-responsive"), rewards adjust
-/// based on difficulty, fees, and block fullness.
-///
-/// Set to u64::MAX to effectively disable until a governance decision sets a real height.
-/// SECURITY: Changing this after testnet launch requires a coordinated hard fork.
-#[cfg(feature = "demand-responsive")]
-pub const DEMAND_RESPONSIVE_ACTIVATION_HEIGHT: u64 = u64::MAX; // TBD by governance
-
 /// Total supply target: 100 million CYNC (in whole units, not atomic).
 /// The asymptotic emission curve approaches but never reaches this cap.
 /// With tail emission + 30% fee burn, circulating supply stabilizes

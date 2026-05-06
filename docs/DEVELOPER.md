@@ -399,8 +399,7 @@ You're building on Windows + the fleet is Linux. Cross-compile via WSL (see [`Cr
 ├── crates/
 │   ├── bridge/                          # Bytes-only Tari↔Orchard isolation
 │   ├── coincync-rig/                    # CPU miner + TUI
-│   ├── coincync-swap/                   # CYNC↔BTC atomic swap (skeleton)
-│   └── orchard-side/                    # Halo2 wrapper (excluded; pending upstream)
+│   └── coincync-swap/                   # CYNC↔BTC atomic swap (skeleton)
 ├── deploy/
 │   ├── explorer/                        # Caddy + nginx for explorer.coincync.network
 │   └── ops/                             # Hard-fork rollout scripts

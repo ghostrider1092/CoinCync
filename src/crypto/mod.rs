@@ -1,8 +1,5 @@
 //! # Cryptographic Operations for CoinCync 1.0
 
-#[cfg(feature = "phase2")]
-pub mod halo2_circuit;
-
 // The cross-stack byte-level interface lives in the `bridge`
 // workspace member at crates/bridge/. Re-export it here so existing
 // consumers can keep writing `crate::crypto::bridge::*` without
@@ -10,13 +7,6 @@ pub mod halo2_circuit;
 pub mod bridge {
     pub use ::bridge::*;
 }
-
-// The `orchard` crate lives in the `orchard-side` workspace member
-// at crates/orchard-side/. It is NOT exported from this module
-// because it must not appear in coincync's compile graph —
-// pulling `orchard-side` in from here would reintroduce the
-// tari_bulletproofs_plus trait-solver conflict. Callers who need
-// shielded-pool operations use the `orchard-side` crate directly.
 
 mod bulletproofs;
 mod stealth;
