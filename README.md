@@ -47,7 +47,7 @@ See [Getting started docs](docs/src/getting-started/build.md) for full instructi
 
 ## Testnet
 
-Nodes across 6 continents: London, San Francisco, Sydney, New York, Frankfurt, Toronto, Richmond, Atlanta, Amsterdam.
+Three seed nodes across three continents &mdash; New Jersey (US-East), Amsterdam (Europe), Tokyo (Asia-Pacific). Resolved via DNS at `seed1/2/3.coincync.network`. Community-run seeds welcome &mdash; open a PR to add yours.
 
 ```bash
 # Auto-discovers peers via DNS seeds
