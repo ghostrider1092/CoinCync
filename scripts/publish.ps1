@@ -53,7 +53,10 @@ function Publish-Docs {
   $prevPref = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
-    & wsl --distribution Ubuntu bash -c 'source $HOME/.cargo/env && cd "/mnt/c/Users/unkno/OneDrive/coincync 1.0/docs" && rm -rf $HOME/coincync-docs-book && mdbook build --dest-dir $HOME/coincync-docs-book'
+    # Pipe stderr to stdout inside bash so PowerShell sees the
+    # mdbook INFO/ERROR lines as normal stream output (callers can
+    # then see the build log instead of a silent gap).
+    & wsl --distribution Ubuntu bash -c 'source $HOME/.cargo/env && cd "/mnt/c/Users/unkno/OneDrive/coincync 1.0/docs" && rm -rf $HOME/coincync-docs-book && mdbook build --dest-dir $HOME/coincync-docs-book 2>&1'
     if ($LASTEXITCODE -ne 0) { throw "mdbook build failed: exit $LASTEXITCODE" }
   } finally {
     $ErrorActionPreference = $prevPref

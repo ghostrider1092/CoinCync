@@ -124,7 +124,18 @@ h1, h2, h3, h4, h5, h6 {
     font-weight: 500;
 }
 
-.content { max-width: 880px; overflow-wrap: break-word; }
+/* mdbook centers .content main (the text column) using
+   margin-inline-start/end:auto + max-width: var(--content-max-width).
+   Bump the max width via the variable, and target main directly for
+   alignment — overriding .content itself fights the stock centering. */
+:root, .navy { --content-max-width: 880px; }
+.content { overflow-wrap: break-word; }
+.content main {
+    margin-inline-start: auto;
+    margin-inline-end: auto;
+    max-width: var(--content-max-width);
+    padding: 0 16px;
+}
 
 .content p { color: var(--fg-muted); line-height: 1.8; }
 .content strong { color: var(--fg); font-weight: 500; }
