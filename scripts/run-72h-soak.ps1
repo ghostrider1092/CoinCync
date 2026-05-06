@@ -1,5 +1,8 @@
 ﻿param([string]$OutFile)
-$headers=@{ Authorization='Bearer 6430f9425dcd29549017499686852edb504f20ba1ee8a97c8a14eff8a62f0a48' }
+# RPC bearer comes from env. Set with:
+#   $env:CYNC_RPC_BEARER = (Get-Content "$env:USERPROFILE\.coincync\rpc_token" -Raw).Trim()
+if (-not $env:CYNC_RPC_BEARER) { throw "CYNC_RPC_BEARER env var is required (local node RPC token)." }
+$headers=@{ Authorization="Bearer $($env:CYNC_RPC_BEARER)" }
 $body='{"jsonrpc":"2.0","id":1,"method":"get_info","params":[]}'
 $end=(Get-Date).AddHours(72)
 "{""event"":""start"",""utc"":""$([DateTime]::UtcNow.ToString('o'))""}" | Out-File -FilePath $OutFile -Encoding utf8 -Append
