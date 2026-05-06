@@ -13,7 +13,7 @@ const RELEASES = [
         name: "Network",
         icon: ICONS.globe,
         items: [
-          { type: "new", text: "9-node testnet: 2 miners (LON, SFO), 2 mempool nodes (NYC1, FRA), 3 seeds (NYC3, TOR, AMS), 1 explorer (RIC), 1 faucet (ATL)" },
+          { type: "new", text: "3-seed bootstrap fleet across 3 continents: NJ (US-East), AMS (Europe), Tokyo (Asia-Pacific). Migrated from DigitalOcean to Vultr 2026-05-02." },
           { type: "new", text: "Dedicated mempool nodes for clean fee estimation and Dandelion++ observation" },
           { type: "improve", text: "Peer discovery: MAX_OUTBOUND 8→16, MAX_OUTBOUND_PER_SUBNET 2→4" },
           { type: "improve", text: "IBD sync 4x faster: 500ms tick, 5s base timeout, 2s/peer scaling" },
@@ -44,7 +44,7 @@ const RELEASES = [
         name: "Explorer",
         icon: ICONS.globe,
         items: [
-          { type: "new", text: "Node health dashboard queries all 9 nodes via nginx proxy" },
+          { type: "new", text: "Node health dashboard queries the live seed fleet via nginx proxy" },
           { type: "fix", text: "IronConsensus metrics: Prometheus detection rejects HTML responses" },
           { type: "fix", text: "Network hashrate chart renders on first data point" },
           { type: "new", text: "Mempool page: sync button, auto-refresh, privacy feature badges per transaction" },
