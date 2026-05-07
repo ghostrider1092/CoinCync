@@ -24,12 +24,18 @@ mod disclosure;
 pub mod memo;
 
 // ── Phase 2 additions (yourcoin_combined) ───────────────────────
-pub mod lelantus_spark;
+// `mw_cutthrough` exposes the cut-through engine and `MwKernel`
+// type. The engine is constructed but inert in v1.0.x — see CIP-003.
 pub mod mw_cutthrough;
 
-// ── Sketch / future-CIP stubs (gated, off by default) ───────────
+// ── Sketch / future-CIP modules (gated, off by default) ─────────
+// These are real implementations behind feature flags. They do not
+// appear in the production audit perimeter unless their feature is
+// explicitly enabled. See docs/cip/ for activation paths.
 #[cfg(feature = "sketch-kernel-offsets")]
-pub mod kernel_offset;
+pub mod kernel_offset;        // CIP-004
+#[cfg(feature = "sketch-lelantus-spark")]
+pub mod lelantus_spark;       // CIP-005
 
 pub use bulletproofs::{
     RangeProof, PedersenCommitment, BlindingFactor,

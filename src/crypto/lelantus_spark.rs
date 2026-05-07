@@ -1,5 +1,16 @@
 //! # Lelantus Spark — large-anonymity-set private transactions
 //!
+//! Reserved implementation for [CIP-005 — Lelantus Spark][cip].
+//!
+//! ## Status
+//!
+//! Gated behind the `sketch-lelantus-spark` cargo feature, OFF by
+//! default. Default builds do NOT compile this module; the
+//! production audit perimeter is unchanged. Activation requires the
+//! standard CIP process — see CIP-005 for the activation path.
+//!
+//! [cip]: ../../docs/cip/CIP-005-lelantus-spark.md
+//!
 //! Firo's Lelantus Spark protocol gives each spend a large anonymity
 //! set — up to 16,384 coins — via a one-out-of-many proof. This is
 //! roughly 1000× the anonymity set of a Monero CLSAG ring.
