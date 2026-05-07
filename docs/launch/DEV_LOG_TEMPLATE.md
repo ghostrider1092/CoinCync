@@ -5,6 +5,7 @@
 **Cadence:** every Sunday or Monday morning. Hit it consistently.
 **Automation:** `scripts/post-to-discord.ps1 -WebhookUrl <url> -File <this rendered md>`.
 **Tone:** factual, no marketing, failures included.
+**Before posting:** every dev log goes through the opsec review in [DISCORD_OPSEC.md](DISCORD_OPSEC.md). Assume Discord channel history can be scraped at any time. Anything that wouldn't be safe to publish on the website doesn't go in `#dev-log`.
 
 The single most important thing about this format is that it survives if you skip a week — but **don't skip a week**. Inconsistent cadence is worse than no cadence; the perception of "the project is dying" sets in fast. If a week is rough, post a short version that says so. The "tried, didn't work" section makes that easier than it sounds.
 
