@@ -24,7 +24,7 @@ Centralized exchanges solve the price-discovery problem with order books, but th
 
 `cynchub` fills this gap. The merge-mining foundation gives it Bitcoin-grade security from block 1, no cold-start vulnerability. The HTLC settlement model means no party — including miners — ever takes custody of user funds. The constitutional discipline that protects CoinCync proper extends naturally to cynchub: no admin keys, no governance tokens, no fee redirects.
 
-The narrative that lands publicly: *"We're not just shipping a privacy coin. We're shipping the model for how privacy coins plug into the open market without compromising what makes them private."*
+The narrative that lands publicly: *"Privacy money that doesn't depend on permission to participate. CYNC↔BTC atomic swaps are a constitutional mainnet-launch commitment, not a roadmap item to be deferred. Whether this combination works is what testnet and mainnet are for."*
 
 ---
 

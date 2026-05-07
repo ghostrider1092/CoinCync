@@ -2,7 +2,7 @@
 
 A privacy-first cryptocurrency with mandatory shielding, auditable supply, and constitutional protections.
 
-> **We're not just shipping a privacy coin. We're shipping the model for how privacy coins eventually plug into the open market without compromising — and we did it before anyone else in the space.**
+> **Privacy money that doesn't depend on permission to participate. CYNC↔BTC atomic swaps are a constitutional mainnet-launch commitment, not a roadmap item to be deferred. Whether this combination works is what testnet and mainnet are for.**
 
 **Status:** Public Testnet  
 **Network:** Active public testnet fleet across North America and Europe  
