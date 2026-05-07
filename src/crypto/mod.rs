@@ -27,6 +27,10 @@ pub mod memo;
 pub mod lelantus_spark;
 pub mod mw_cutthrough;
 
+// ── Sketch / future-CIP stubs (gated, off by default) ───────────
+#[cfg(feature = "sketch-kernel-offsets")]
+pub mod kernel_offset;
+
 pub use bulletproofs::{
     RangeProof, PedersenCommitment, BlindingFactor,
     commit, verify_commitment,

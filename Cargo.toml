@@ -39,6 +39,12 @@ metrics = []
 # Test/diagnostic knobs. Opt-in, off by default.
 test-vdf        = []
 test-utilities  = []
+# Sketch features — interface stubs reserving the compile graph for
+# post-mainnet CIPs. All bodies are `unimplemented!()`; never enable
+# in production builds. See docs/cip/.
+sketch-cut-through        = []   # CIP-003 (also see existing src/crypto/mw_cutthrough.rs)
+sketch-block-aggregation  = []   # CIP-003 (pairs with cut-through)
+sketch-kernel-offsets     = []   # CIP-004
 
 [dependencies]
 # ── Elliptic curves ───────────────────────────────────────────

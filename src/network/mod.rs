@@ -26,6 +26,10 @@ pub mod traffic_shaping;
 
 pub mod hardening;
 
+// ── Sketch / future-CIP stubs (gated, off by default) ───────────
+#[cfg(feature = "sketch-block-aggregation")]
+pub mod block_aggregation;
+
 pub use bootstrap::initial_peers;
 pub use dns_seeds::resolve_seeds;
 pub use node::P2PNode;
