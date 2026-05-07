@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD036 -->
 # CoinCync Public Testnet Launch — Announcement Drafts
 
-**Status:** drafts. Ready to ship the week of 2026-05-09 once the soak verdict lands and the GitHub repo is public.
+**Status:** drafts. Soak verdict landed on 2026-05-07 — chain stable across all 5 boxes, GO for launch (see [v1.0.2-testnet-soak-summary.md](v1.0.2-testnet-soak-summary.md)). Canonical source repo lives at `git.coincync.network/coincync/cync-protocol` (self-hosted Forgejo; replaces the now-suspended GitHub mirror).
 
 This file holds three formats for the same announcement:
 
@@ -25,9 +25,9 @@ Pick one or use all three depending on where you're posting. Edit freely; the go
 
 CoinCync's public testnet is live. Anyone can now connect a node, mine blocks with their CPU, send and receive private transactions, run an explorer, or build wallets and infrastructure on top of the network. Testnet coins have zero monetary value — this is a working network for testing, not a market.
 
-The fleet that hosts the public testnet has been running continuously for weeks. Five nodes (three seeds, one explorer, one public API) producing blocks every two minutes on the testnet target. As of this announcement: block height 2900+, network hashrate ~250 H/s, all five nodes synced.
+The fleet that hosts the public testnet has been running continuously for weeks. Five nodes (three seeds, one explorer, one public API) producing blocks every two minutes on the testnet target. As of this announcement: block height 4275+, network hashrate ~250 H/s, all five nodes synced.
 
-A 72-hour pre-launch soak completed cleanly: zero errors and zero partial broadcasts across nearly 600 sample-points per box. Two operational incidents were captured and recovered during the window — a peer wedge on the explorer node and a status-reporter rollout — both diagnosed, fixed, and verified live. The soak data tells a real story rather than a clean-room one.
+A 72-hour pre-launch soak completed cleanly: 864 sample-points per box across the full window, all five boxes converging at heights `4273-4275`. One operational incident was captured and recovered during the window — a peer wedge on the explorer node — diagnosed, fixed mid-soak, and verified live (no recurrence in the post-fix observation window). The soak data tells a real story rather than a clean-room one.
 
 ### What CoinCync is
 
@@ -75,12 +75,13 @@ The Constitution's commitments do not depend on audit completion — they are re
 
 ### Get involved
 
-- **Mine:** see the website's `/mine` page for setup instructions matched to your platform.
-- **Run a node:** clone the repo, build, point at a seed, sync. Documentation in the repo's mdbook.
-- **Read the Constitution:** [CONSTITUTION.md](../../CONSTITUTION.md) — ten minutes. The articles are short by design.
-- **Read the Bill of Rights:** [BILL_OF_RIGHTS.md](../BILL_OF_RIGHTS.md).
-- **Discord:** `discord.gg/5tYNSCsqzy`.
-- **Block explorer:** `explorer.coincync.network`.
+- **Get a wallet + first tCYNC:** [coincync.network](https://coincync.network) — download the desktop wallet, then claim 10 tCYNC from the public faucet at [coincync.network/faucet.html](https://coincync.network/faucet.html). One drip per address per hour.
+- **Mine:** [coincync.network](https://coincync.network) Get-Started section. RandomX, CPU only, runs on any machine.
+- **Run a node:** clone `git.coincync.network/coincync/cync-protocol`, build, point at a seed, sync. Build instructions: [docs.coincync.network/getting-started/build](https://docs.coincync.network/getting-started/build).
+- **Read the Constitution:** [docs.coincync.network/governance/constitution](https://docs.coincync.network/governance/constitution) — ten minutes. The articles are short by design.
+- **Read the Bill of Rights:** [docs.coincync.network/governance/bill-of-rights](https://docs.coincync.network/governance/bill-of-rights).
+- **Discord:** [discord.gg/5tYNSCsqzy](https://discord.gg/5tYNSCsqzy).
+- **Block explorer:** [explorer.coincync.network](https://explorer.coincync.network).
 
 CoinCync is what privacy-first money looks like when nobody is selling you anything. Welcome.
 
@@ -91,12 +92,16 @@ CoinCync is what privacy-first money looks like when nobody is selling you anyth
 ```
 🚀 CoinCync Public Testnet Is Live
 
-Five nodes running. Block height 2900+. ~250 H/s of hashrate.
-72h pre-launch soak passed: 0 errors, 0 partial broadcasts.
+Five nodes running. Block height 4275+. ~250 H/s of hashrate.
+72h pre-launch soak passed: chain stable, all 5 boxes converged
+within ±2 blocks. One known peer-wedge incident, fixed mid-soak.
 
 WHAT YOU CAN DO RIGHT NOW
-• Connect a node and mine — RandomX, CPU only, no GPU/ASIC advantage
-• Send and receive testnet CYNC — every tx uses ring signatures + stealth addresses
+• Get a wallet + free tCYNC — coincync.network → Download Wallet,
+  then coincync.network/faucet.html for 10 tCYNC (1 drip / hour)
+• Mine — RandomX, CPU only, no GPU/ASIC advantage
+• Send and receive private transactions — every tx uses ring
+  signatures + stealth addresses
 • Run an explorer / build a wallet / break things on purpose
 
 WHAT TESTNET IS NOT
@@ -115,9 +120,11 @@ THE 30-SECOND VERSION
   enforced
 
 START HERE
-🔧 Mine: <website>/mine
+💧 Faucet: coincync.network/faucet.html
+🔧 Mine + wallet: coincync.network
 🌐 Explorer: explorer.coincync.network
-📜 Constitution: <repo>/CONSTITUTION.md
+📜 Constitution: docs.coincync.network/governance/constitution
+🛠️  Source: git.coincync.network/coincync/cync-protocol
 🐛 Bugs: this channel #bugs (or security@coincync.network for vulns)
 
 This is what privacy-first money looks like when nobody is selling

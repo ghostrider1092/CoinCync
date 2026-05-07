@@ -25,7 +25,7 @@ export default function About() {
         <div style={{ fontSize:10, fontWeight:600, color:T.t3, letterSpacing:.8, textTransform:"uppercase", marginBottom:10 }}>Links</div>
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
           {link("https://explorer.coincync.network", "Block Explorer")}
-          {link("https://github.com/CyncDevelopment/Cync-Protocol", "GitHub Repository")}
+          {link("https://git.coincync.network/coincync/cync-protocol", "GitHub Repository")}
           {link("https://explorer.coincync.network/#page-4thamendment", "The 4th Amendment")}
           {link("https://explorer.coincync.network/#page-constitution", "Constitution")}
         </div>

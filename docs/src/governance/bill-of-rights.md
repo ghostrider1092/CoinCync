@@ -6,7 +6,7 @@
 **Ratified:** Block 0 (Genesis)
 **Network:** CoinCync Mainnet
 
-The authoritative source is [`docs/BILL_OF_RIGHTS.md`](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/docs/BILL_OF_RIGHTS.md) at the repository root. This page reproduces it in full for the published docs site. **If this page ever drifts from the repository file, trust the repository file.**
+The authoritative source is [`docs/BILL_OF_RIGHTS.md`](https://git.coincync.network/coincync/cync-protocol/blob/main/docs/BILL_OF_RIGHTS.md) at the repository root. This page reproduces it in full for the published docs site. **If this page ever drifts from the repository file, trust the repository file.**
 
 The Bill of Rights is the user-facing complement to the operator-facing [Constitution](./constitution.md). The Constitution tells node operators and developers what invariants they cannot break; the Bill of Rights tells every user of CoinCync what they are guaranteed, regardless of who is running the network.
 
@@ -159,7 +159,7 @@ Any version of the CoinCync software that removes or weakens any of these rights
 
 ## See also
 
-- [`docs/BILL_OF_RIGHTS.md`](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/docs/BILL_OF_RIGHTS.md) — the authoritative source
+- [`docs/BILL_OF_RIGHTS.md`](https://git.coincync.network/coincync/cync-protocol/blob/main/docs/BILL_OF_RIGHTS.md) — the authoritative source
 - [Constitution](./constitution.md) — the operator-facing invariants that implement these rights in code
 - [Disclaimer](./disclaimer.md) — what the project does and doesn't promise
 - [Privacy model](../protocol/privacy-model.md) — the cryptographic primitives cited in Rights I and IV

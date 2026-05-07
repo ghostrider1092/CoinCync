@@ -26,7 +26,7 @@ The canonical production deployment for a single-node host.
 On your build host (could be the deployment target itself, or a dev machine):
 
 ```bash
-git clone https://github.com/CyncDevelopment/Cync-Protocol.git /opt/coincync
+git clone https://git.coincync.network/coincync/cync-protocol.git /opt/coincync
 cd /opt/coincync
 cargo build --release --features "randomx testnet"
 ```
@@ -52,7 +52,7 @@ sudo chmod 0700 /var/lib/coincync
 
 ### 4. Install the systemd unit
 
-The unit file lives at [`/deploy/coincync-node.service`](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/deploy/coincync-node.service):
+The unit file lives at [`/deploy/coincync-node.service`](https://git.coincync.network/coincync/cync-protocol/blob/main/deploy/coincync-node.service):
 
 ```bash
 sudo install -m 0644 deploy/coincync-node.service /etc/systemd/system/coincync-node.service
@@ -84,10 +84,10 @@ If `get_info` returns the chain tip, the node is live.
 
 ## Pattern B: docker compose
 
-Easier to reproduce, easier to roll back, easier to run multiple variants on the same host. The docker compose file lives at [`/deploy/docker-compose.yml`](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/deploy/docker-compose.yml).
+Easier to reproduce, easier to roll back, easier to run multiple variants on the same host. The docker compose file lives at [`/deploy/docker-compose.yml`](https://git.coincync.network/coincync/cync-protocol/blob/main/deploy/docker-compose.yml).
 
 ```bash
-git clone https://github.com/CyncDevelopment/Cync-Protocol.git /opt/coincync
+git clone https://git.coincync.network/coincync/cync-protocol.git /opt/coincync
 cd /opt/coincync
 docker compose pull
 docker compose up -d

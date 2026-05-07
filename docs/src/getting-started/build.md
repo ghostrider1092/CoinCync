@@ -31,7 +31,7 @@ Windows: use [WSL2](https://learn.microsoft.com/windows/wsl/install) running Ubu
 ## Clone and build
 
 ```bash
-git clone https://github.com/CyncDevelopment/Cync-Protocol.git
+git clone https://git.coincync.network/coincync/cync-protocol.git
 cd Coincync-Testnet-
 cargo build --release --features "randomx testnet"
 ```

@@ -18,7 +18,7 @@
 - Public CIP register at `explorer.coincync.network/?p=proposals`.
 
 **Public surfaces:**
-- Source code public at <https://github.com/CyncDevelopment/Cync-Protocol>
+- Source code public at <https://git.coincync.network/coincync/cync-protocol>
 - Docs site rebranded to match the rest of CoinCync (Fraunces / IBM Plex / JetBrains Mono / gold accent on warm-dark).
 - Landing site overhauled: removed competitive "Compare" section, added Get-Started two-path split (users vs developers), added 7-phase roadmap, updated faucet flow.
 - Explorer: constitutional-status panel, live fee-burn counter, mempool fee histogram, globe block-propagation visualization, /api /soak /broadcast /leaderboard /privacymetrics /proposals pages.

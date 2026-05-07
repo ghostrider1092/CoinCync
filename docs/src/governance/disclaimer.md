@@ -52,7 +52,7 @@ By running the binary, holding CYNC, or transacting on the network, you accept t
 
 ## What you should do
 
-- **Read the source.** It's MIT licensed and available at [github.com/CyncDevelopment/Cync-Protocol](https://github.com/CyncDevelopment/Cync-Protocol). Don't run cryptocurrency software you haven't reviewed.
+- **Read the source.** It's MIT licensed and available at [git.coincync.network/coincync/cync-protocol](https://git.coincync.network/coincync/cync-protocol). Don't run cryptocurrency software you haven't reviewed.
 - **Run your own node.** Don't trust public infrastructure for anything you can't lose. Public explorers, public APIs, and public faucets are conveniences — they are not the source of truth.
 - **Back up your seed phrase on paper.** Two copies, two locations, at least one fireproof. The seed phrase is the only thing that can recover funds; the encrypted wallet file alone is not enough if you forget the password.
 - **Use a password long enough that an offline attacker can't brute-force it** even if they get the encrypted wallet file. The Argon2id KDF makes guessing expensive but not impossible — pick a password you wouldn't be embarrassed to write on paper.
@@ -80,7 +80,7 @@ The maintainers explicitly do NOT commit to:
 
 ## License
 
-CoinCync is licensed under the MIT License. The full text is in [`LICENSE`](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/LICENSE) at the repository root. The relevant clause:
+CoinCync is licensed under the MIT License. The full text is in [`LICENSE`](https://git.coincync.network/coincync/cync-protocol/blob/main/LICENSE) at the repository root. The relevant clause:
 
 > THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
@@ -89,4 +89,4 @@ That's the legal version. The plain-English version: **you're using this at your
 ## See also
 
 - [Constitution](./constitution.md) — the rules the maintainers commit to never breaking
-- [`SECURITY.md`](https://github.com/CyncDevelopment/Cync-Protocol/blob/main/SECURITY.md) at the repository root — the responsible-disclosure process for security issues
+- [`SECURITY.md`](https://git.coincync.network/coincync/cync-protocol/blob/main/SECURITY.md) at the repository root — the responsible-disclosure process for security issues

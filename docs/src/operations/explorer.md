@@ -1,6 +1,6 @@
 # Block explorer
 
-How to run the public block explorer at `https://explorer.coincync.network`. Lives in [`/deploy/explorer/`](https://github.com/CyncDevelopment/Cync-Protocol/tree/main/deploy/explorer).
+How to run the public block explorer at `https://explorer.coincync.network`. Lives in [`/deploy/explorer/`](https://git.coincync.network/coincync/cync-protocol/tree/main/deploy/explorer).
 
 ## Architecture (one-line)
 

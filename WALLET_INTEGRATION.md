@@ -277,4 +277,4 @@ Curve: Ristretto255 (prime-order group on Curve25519)
 
 ## Contact
 
-- GitHub: https://github.com/CyncDevelopment/Cync-Protocol
+- GitHub: https://git.coincync.network/coincync/cync-protocol
