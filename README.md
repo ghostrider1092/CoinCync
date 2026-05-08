@@ -18,7 +18,9 @@ A privacy-first cryptocurrency with mandatory shielding, auditable supply, and c
 
 ## Privacy Features (22 total, all mandatory)
 
-**Cryptographic (Layer 1):** CLSAG Ring-16 signatures, stealth addresses, Pedersen commitments, Bulletproofs+ range proofs, encrypted memos, key images, view tags
+**Cryptographic (Layer 1):** CLSAG Ring-16 signatures¹, stealth addresses, Pedersen commitments, Bulletproofs+ range proofs, encrypted memos, key images, view tags
+
+¹ During the first 10,000 blocks of any network (mainnet or testnet), the ring size is 11 (the constitutional `BOOTSTRAP_MIN_RING_SIZE`). A young chain doesn't have enough on-chain outputs to form a 16-member anonymity set without decoy reuse, so the protocol relaxes the minimum during bootstrap and snaps to Ring-16 at block 10,000. The script `scripts/verify-privacy.ps1` is height-aware and reports which ring is expected for any given tx.
 
 **Network (Layer 2):** Dandelion++ relay, Noise_XX P2P encryption, traffic shaping, constant-rate padding
 
