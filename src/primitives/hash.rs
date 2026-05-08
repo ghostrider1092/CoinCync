@@ -1,6 +1,6 @@
 //! # Hash Types
 //!
-//! Cryptographic hash types and functions for CoinCync 2.0.
+//! Cryptographic hash types and functions for CoinCync 1.0.
 //!
 //! ## Security Notes:
 //! - Use `Hash::ct_eq()` for security-sensitive comparisons (authentication, MAC verification)

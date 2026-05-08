@@ -1,4 +1,4 @@
-//! Transaction validation for CoinCync 2.0
+//! Transaction validation for CoinCync 1.0
 //!
 //! Comprehensive transaction validation including structural checks,
 //! ring signature verification, and balance verification.

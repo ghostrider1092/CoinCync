@@ -1,4 +1,4 @@
-//! # Transaction Creation for CoinCync 2.0
+//! # Transaction Creation for CoinCync 1.0
 //!
 //! High-level transaction creation with:
 //! - UTXO selection (coin control)

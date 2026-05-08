@@ -1,4 +1,4 @@
-//! Stealth addresses for CoinCync 2.0
+//! Stealth addresses for CoinCync 1.0
 //!
 //! Implements one-time stealth addresses using ECDH (Elliptic Curve Diffie-Hellman).
 //!

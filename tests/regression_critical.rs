@@ -1,4 +1,4 @@
-//! Regression tests for critical bugs fixed in CoinCync 2.0.
+//! Regression tests for critical bugs fixed in CoinCync 1.0.
 //!
 //! Each test verifies that a specific historical bug remains fixed.
 //! If any of these tests fail, the corresponding bug has been reintroduced.

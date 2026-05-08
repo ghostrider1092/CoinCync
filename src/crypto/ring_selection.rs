@@ -1,4 +1,4 @@
-//! # Ring Member Selection for CoinCync 2.0
+//! # Ring Member Selection for CoinCync 1.0
 //!
 //! Decoy selection using UNIFORM distribution for maximum privacy.
 //!

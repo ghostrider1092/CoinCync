@@ -1,4 +1,4 @@
-//! # Amount Type for CoinCync 2.0
+//! # Amount Type for CoinCync 1.0
 //!
 //! ## Denomination System
 //!

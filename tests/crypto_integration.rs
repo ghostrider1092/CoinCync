@@ -1,4 +1,4 @@
-//! End-to-end cryptographic integration tests for CoinCync 2.0
+//! End-to-end cryptographic integration tests for CoinCync 1.0
 //!
 //! These tests verify the full transaction lifecycle:
 //! - Keypair generation → transaction building → CLSAG signing → verification

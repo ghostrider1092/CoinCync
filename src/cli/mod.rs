@@ -1,4 +1,4 @@
-//! # CLI Utilities for CoinCync 2.0
+//! # CLI Utilities for CoinCync 1.0
 //!
 //! Modern CLI experience with:
 //! - Colored output

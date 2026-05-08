@@ -1,4 +1,4 @@
-//! # Address Types for CoinCync 2.0
+//! # Address Types for CoinCync 1.0
 //!
 //! ## Security Notes:
 //! - `from_bytes_checked` validates that public keys are valid curve points

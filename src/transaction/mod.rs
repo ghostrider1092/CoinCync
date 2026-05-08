@@ -1,4 +1,4 @@
-//! # Transaction Module for CoinCync 2.0
+//! # Transaction Module for CoinCync 1.0
 //!
 //! Privacy-preserving transactions with:
 //! - Ring signatures (CLSAG) for sender privacy

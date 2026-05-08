@@ -1,4 +1,4 @@
-//! # Transaction Builder for CoinCync 2.0
+//! # Transaction Builder for CoinCync 1.0
 //!
 //! Complete transaction builder with:
 //! - Stealth address generation for outputs

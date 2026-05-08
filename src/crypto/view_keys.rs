@@ -1,4 +1,4 @@
-//! Forward-secret view keys for CoinCync 2.0
+//! Forward-secret view keys for CoinCync 1.0
 
 use crate::primitives::{SecretKey, hash_domain};
 use serde::{Serialize, Deserialize};

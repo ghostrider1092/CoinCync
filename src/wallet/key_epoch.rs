@@ -1,5 +1,5 @@
 //! Shim `KeyEpoch` type used by `crypto::stealth` for ECDH-based output
-//! detection. This is the CoinCync 2.0 shape, kept as its own file so the
+//! detection. This is the CoinCync 1.0 shape, kept as its own file so the
 //! Zcash-style FVK/IVK/OVK code in `wallet::keys` is not disturbed.
 
 use crate::primitives::{PublicKey, SecretKey};

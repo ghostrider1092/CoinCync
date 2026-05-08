@@ -1,4 +1,4 @@
-//! # Subaddress Implementation for CoinCync 2.0
+//! # Subaddress Implementation for CoinCync 1.0
 //!
 //! Subaddresses allow generating unlimited receiving addresses from a single wallet.
 //! Each subaddress has:

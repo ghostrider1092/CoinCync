@@ -1,4 +1,4 @@
-//! # Blockchain Auditing for CoinCync 2.0
+//! # Blockchain Auditing for CoinCync 1.0
 //!
 //! "The privacy coin you can audit"
 //! Verify supply, fees, and ring quality without seeing private data.

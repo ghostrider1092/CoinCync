@@ -1,6 +1,6 @@
 //! # Protocol Constants
 //!
-//! Core protocol constants for CoinCync 2.0.
+//! Core protocol constants for CoinCync 1.0.
 
 // SECURITY (HIGH-10): Prevent test-vdf feature from being used in release builds.
 // The test-vdf feature reduces VDF iterations to near-zero, which would make

@@ -1,4 +1,4 @@
-//! # Key Types for CoinCync 2.0
+//! # Key Types for CoinCync 1.0
 //!
 //! ## Security Notes:
 //! - `SecretKey` is securely zeroized on drop using the `zeroize` crate

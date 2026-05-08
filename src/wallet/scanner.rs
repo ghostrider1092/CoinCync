@@ -1,4 +1,4 @@
-//! # Wallet Output Scanner for CoinCync 2.0
+//! # Wallet Output Scanner for CoinCync 1.0
 //!
 //! Scans blockchain outputs to detect which belong to our wallet.
 //! Uses view tags for fast filtering and proper amount decryption.

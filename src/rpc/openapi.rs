@@ -10,7 +10,7 @@ pub fn rpc_methods_doc() -> serde_json::Value {
     json!({
         "jsonrpc": "2.0",
         "info": {
-            "title": "CoinCync 2.0 JSON-RPC API",
+            "title": "CoinCync 1.0 JSON-RPC API",
             "version": env!("CARGO_PKG_VERSION"),
             "description": "Privacy-focused cryptocurrency node and wallet RPC interface"
         },
