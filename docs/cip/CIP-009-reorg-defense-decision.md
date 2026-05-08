@@ -1,11 +1,16 @@
 <!-- markdownlint-disable MD036 -->
 # CIP-009 — Reorg Defense: decision document
 
-**Status:** Decision pending — user picks one of A / B / C below.
+**Status:** Path B SHIPPED (2026-05-08, commit `45e621d`).
+Path A (MESS) REJECTED as too risky. A successor for live-tip
+defense is specified in **CIP-009.D — Miner-signed rolling
+checkpoints** (`docs/cip/CIP-009-D-miner-signed-rolling-checkpoints.md`),
+queued for post-launch activation.
 **Type:** Standards Track (consensus rule)
 **Created:** 2026-05-08
 **Layer:** Consensus
 **Depends on:** CIP-007 (activation policy)
+**See also:** CIP-009.D (better-than-MESS replacement)
 
 ---
 
