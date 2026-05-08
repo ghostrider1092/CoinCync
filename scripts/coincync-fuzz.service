@@ -1,0 +1,42 @@
+[Unit]
+Description=CoinCync continuous fuzzing loop (cargo-fuzz / libFuzzer)
+Documentation=file:///opt/coincync-source/docs/operations/CONTINUOUS_FUZZING.md
+After=network-online.target
+# We do NOT depend on coincync-node — fuzzing is independent of the chain.
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/coincync/coincync.env
+EnvironmentFile=-/etc/coincync/fuzz.env
+EnvironmentFile=-/etc/coincync/discord.env
+
+ExecStart=/usr/local/bin/coincync-fuzz.sh
+
+# CPU lower priority — fuzzing is CPU-hungry and shouldn't compete
+# with rig/node when both are on the same box. nice=10 is a soft
+# yield: fuzz keeps running, rig/node always wins contention.
+Nice=10
+IOSchedulingClass=idle
+
+# Memory cap. Each libFuzzer process can balloon to 2GB+ on
+# pathological inputs; cap so an OOM doesn't kill colocated services.
+MemoryMax=4G
+MemoryHigh=3G
+
+# Restart on failure. Sleep 60 seconds before restart so a build
+# break doesn't generate a crash-loop log flood.
+Restart=on-failure
+RestartSec=60
+TimeoutStopSec=30
+
+# Sandboxing — same posture as the other fleet services.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/coincync/fuzz
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
