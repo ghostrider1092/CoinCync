@@ -23,14 +23,75 @@ use crate::error::{Error, Result};
 /// Wallet file magic bytes
 const WALLET_MAGIC: &[u8; 4] = b"CYWL";
 
-/// Wallet file version (bumped to 2 for new encryption format)
-const WALLET_VERSION: u8 = 2;
+/// Wallet file version.
+///
+/// History:
+/// - v1: pre-2026-04 layout (replaced).
+/// - v2: 2026-04 → 2026-05-08. Single hardcoded set of Argon2id params
+///   compiled into the binary; no per-wallet params in the header.
+///   Bumping the params required either a breaking migration or
+///   leaving wallets stuck at the original params forever.
+/// - v3: 2026-05-08+. Argon2id params (`kdf_m_cost`, `kdf_t_cost`,
+///   `kdf_p_cost`) are stored IN the wallet header, so each wallet
+///   remembers what it was encrypted with. `derive_key` takes the
+///   params explicitly. Bumping the binary's default params is no
+///   longer a breaking change: existing v2 wallets keep loading with
+///   their original params, and any save (which always writes v3)
+///   auto-upgrades the on-disk file with whatever the binary's
+///   current default is.
+const WALLET_VERSION: u8 = 3;
 
-/// Argon2id parameters for memory-hard KDF
-/// These are tuned for security while remaining usable on modest hardware
-const ARGON2_M_COST: u32 = 65536;    // 64 MiB memory
+/// Argon2id parameters for memory-hard KDF — current default.
+///
+/// Rationale (Item 22 audit, 2026-05-08):
+///
+/// RFC 9106 §4 specifies two recommended profiles for Argon2id:
+///   - "First recommended": m=2 GiB, t=1, p=4. Best for systems
+///     with abundant memory (servers, modern desktops).
+///   - "Second recommended": m=64 MiB, t=3, p=4. Fallback for
+///     memory-constrained systems (mobile, embedded). This is
+///     where v2 was — at the floor of what's still defensible.
+///
+/// CoinCync's wallet runs on real-user hardware: laptops with
+/// 8-64 GiB RAM. Using the second-recommended profile leaves
+/// significant headroom on the table. We pick the midpoint —
+/// m=256 MiB — which:
+///   - Stays well under any modern user's RAM (256 MiB ≈ 3% of
+///     a 8 GiB laptop, ≈ 0.4% of a 64 GiB workstation).
+///   - Is 4x more memory-hard than v2's 64 MiB → 4x the cost
+///     to a GPU/ASIC attacker per password guess.
+///   - Adds ~600-800 ms to wallet unlock on commodity CPUs (was
+///     ~150-250 ms in v2). Tolerable for a privacy-coin wallet
+///     where the unlock is a deliberate, occasional action.
+///
+/// `t_cost` stays at 3 (RFC 9106 second-recommended). Beyond 3
+/// the marginal attacker work increases linearly while honest
+/// unlock cost increases linearly too, no ratio gain.
+///
+/// `p_cost` stays at 4 (RFC 9106 second-recommended). All modern
+/// CPUs have ≥4 hardware threads; raising it doesn't help honest
+/// users and gains nothing against attackers (who can also
+/// parallelize).
+///
+/// These constants are written into the WalletHeader v3 on every
+/// save, so the loader uses what the file was created with — never
+/// the binary's current default. Bumping these values affects ONLY
+/// new wallets and re-saved old wallets; pre-existing v2 wallets
+/// keep loading at their original v2 params (see LEGACY_* below).
+const ARGON2_M_COST: u32 = 262_144;  // 256 MiB memory
 const ARGON2_T_COST: u32 = 3;        // 3 iterations
 const ARGON2_P_COST: u32 = 4;        // 4 parallel lanes
+
+/// Argon2id parameters from wallet format v2. Used ONLY when
+/// loading a v2 wallet file that doesn't carry its own params in
+/// the header. Kept here (rather than removed) because the chain
+/// of pre-2026-05-08 wallet files in the wild needs to keep
+/// loading; on first save after upgrade those wallets are rewritten
+/// as v3 with the current default ARGON2_* params, so v2 is a
+/// transient backward-compat shim, not a permanent compromise.
+const LEGACY_V2_ARGON2_M_COST: u32 = 65_536;  // 64 MiB
+const LEGACY_V2_ARGON2_T_COST: u32 = 3;
+const LEGACY_V2_ARGON2_P_COST: u32 = 4;
 
 fn harden_secret_file_permissions(path: &Path) {
     #[cfg(unix)]
@@ -55,9 +116,14 @@ fn harden_secret_file_permissions(path: &Path) {
     }
 }
 
-/// Wallet file header
+/// Wallet file header v2 (legacy).
+///
+/// Kept to deserialize wallet files created before 2026-05-08. The
+/// loader detects v2 by inspecting the version byte and dispatches
+/// here; v2 has no in-header KDF params, so it inherits
+/// `LEGACY_V2_ARGON2_*` constants.
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
-pub struct WalletHeader {
+pub struct WalletHeaderV2 {
     pub magic: [u8; 4],
     pub version: u8,
     pub encrypted: bool,
@@ -66,8 +132,33 @@ pub struct WalletHeader {
     pub checksum: [u8; 4],
 }
 
+/// Wallet file header v3 (current).
+///
+/// Same layout as v2 with three appended u32 fields carrying the
+/// Argon2id parameters used for THIS wallet's KDF. Storing per-wallet
+/// means changing the binary's defaults (Item 22) doesn't break old
+/// wallets — each wallet remembers what it was encrypted with.
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct WalletHeader {
+    pub magic: [u8; 4],
+    pub version: u8,
+    pub encrypted: bool,
+    pub kdf_salt: [u8; 32],
+    pub nonce: [u8; 24],
+    pub checksum: [u8; 4],
+    /// Argon2id memory cost (KiB). New wallets use ARGON2_M_COST.
+    /// Old wallets carry their original value here so re-loading
+    /// after a binary param-bump still derives the right key.
+    pub kdf_m_cost: u32,
+    /// Argon2id time cost (iterations).
+    pub kdf_t_cost: u32,
+    /// Argon2id parallelism (lanes).
+    pub kdf_p_cost: u32,
+}
+
 impl WalletHeader {
-    /// Create a new wallet header with fresh random salt and nonce
+    /// Create a new wallet header with fresh random salt and nonce,
+    /// stamped with the binary's current default KDF parameters.
     ///
     /// SECURITY: Uses OsRng (OS entropy source) for cryptographic randomness.
     /// Uses a single RNG instance for both salt and nonce to avoid potential
@@ -89,6 +180,9 @@ impl WalletHeader {
             kdf_salt: salt,
             nonce,
             checksum: [0u8; 4],
+            kdf_m_cost: ARGON2_M_COST,
+            kdf_t_cost: ARGON2_T_COST,
+            kdf_p_cost: ARGON2_P_COST,
         }
     }
 
@@ -100,6 +194,26 @@ impl WalletHeader {
             return Err(Error::WalletNotFound("unsupported wallet version".into()));
         }
         Ok(())
+    }
+}
+
+impl WalletHeaderV2 {
+    /// Promote a legacy v2 header to a v3 in-memory representation
+    /// by attaching the LEGACY_V2_* params. Used by the loader after
+    /// it dispatches on version. Note: this does NOT re-write the on-
+    /// disk file; that happens on next save.
+    fn into_v3(self) -> WalletHeader {
+        WalletHeader {
+            magic: self.magic,
+            version: self.version,
+            encrypted: self.encrypted,
+            kdf_salt: self.kdf_salt,
+            nonce: self.nonce,
+            checksum: self.checksum,
+            kdf_m_cost: LEGACY_V2_ARGON2_M_COST,
+            kdf_t_cost: LEGACY_V2_ARGON2_T_COST,
+            kdf_p_cost: LEGACY_V2_ARGON2_P_COST,
+        }
     }
 }
 
@@ -176,29 +290,89 @@ impl WalletData {
     }
 }
 
-/// Derive encryption key from password using Argon2id (memory-hard KDF)
+/// Derive encryption key from password using Argon2id (memory-hard KDF).
 ///
 /// Argon2id is resistant to both GPU/ASIC attacks (memory-hard) and
 /// side-channel attacks (hybrid of Argon2i and Argon2d).
-pub fn derive_key(password: &str, salt: &[u8; 32]) -> [u8; 32] {
+///
+/// As of WALLET_VERSION 3, the params are passed in (rather than read
+/// from compile-time constants) because each wallet stores its own
+/// params in its header. Callers in this crate use:
+///   - `derive_key_default(pw, salt)` for code that wants the binary's
+///     CURRENT default params (i.e., creating a new key for a new
+///     wallet, or re-encrypting on save).
+///   - `derive_key(pw, salt, m, t, p)` for code that's loading an
+///     existing wallet and must use whatever params that wallet was
+///     created with (read from its header).
+pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_cost: u32) -> [u8; 32] {
     use argon2::{Algorithm, Version, Params};
 
-    // Create Argon2id instance with secure parameters
     let params = Params::new(
-        ARGON2_M_COST,
-        ARGON2_T_COST,
-        ARGON2_P_COST,
+        m_cost,
+        t_cost,
+        p_cost,
         Some(32),  // Output 32-byte key
     ).expect("valid Argon2 params");
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-    // Derive key
     let mut key = [0u8; 32];
     argon2.hash_password_into(password.as_bytes(), salt, &mut key)
         .expect("Argon2 key derivation failed");
 
     key
+}
+
+/// Derive a key using the binary's CURRENT default Argon2id params.
+/// Use only when creating fresh keys (not when loading an existing
+/// wallet — for that, use the params stored in the wallet's header).
+pub fn derive_key_default(password: &str, salt: &[u8; 32]) -> [u8; 32] {
+    derive_key(password, salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)
+}
+
+/// Decrypt a sidecar (utxos / history / reservations) ciphertext, trying
+/// the binary's current default KDF params first and falling back to the
+/// v2 legacy params if that fails.
+///
+/// Why try-then-fallback: the wallet header carries its own KDF params
+/// and gets auto-upgraded on save (Item 22), but sidecar files have no
+/// header — they're just `salt(32) || nonce(24) || ciphertext`. After
+/// the binary upgrade and one save() cycle every sidecar is re-encrypted
+/// with v3 params, so the fallback path runs only on first-load-after-
+/// upgrade. Cost: one extra Argon2id derivation per sidecar during that
+/// transient window. Benefit: zero migration ceremony from the user's
+/// side.
+///
+/// Returns Err if neither the v3 nor the v2 derivation produces a valid
+/// authenticated decryption — that's the genuine "wrong password or
+/// corrupted file" case.
+pub fn decrypt_sidecar_with_fallback(
+    salt: &[u8; 32],
+    nonce: &[u8; 24],
+    ciphertext: &[u8],
+    password: &str,
+) -> Result<Vec<u8>> {
+    // Try v3 (current default) first — the common case after the user
+    // has saved at least once with the new binary.
+    let mut key_v3 = derive_key_default(password, salt);
+    let v3_result = decrypt(ciphertext, &key_v3, nonce);
+    key_v3.zeroize();
+    if let Ok(plain) = v3_result {
+        return Ok(plain);
+    }
+
+    // Fall back to v2 legacy params — sidecars saved by pre-upgrade
+    // binaries. After the next save() these get rewritten as v3 and
+    // this branch stops firing for the wallet.
+    let mut key_v2 = derive_key(
+        password, salt,
+        LEGACY_V2_ARGON2_M_COST,
+        LEGACY_V2_ARGON2_T_COST,
+        LEGACY_V2_ARGON2_P_COST,
+    );
+    let v2_result = decrypt(ciphertext, &key_v2, nonce);
+    key_v2.zeroize();
+    v2_result
 }
 
 /// Encrypt data using XChaCha20-Poly1305 (authenticated encryption)
@@ -254,8 +428,15 @@ pub fn save_wallet(
 
     // Encrypt if password provided (authenticated encryption)
     // SECURITY (M-5): Zeroize plaintext serialized data after encryption
+    //
+    // (Item 22) Use the params already stamped into `header` (which were
+    // set to ARGON2_M_COST/T_COST/P_COST in WalletHeader::new). On every
+    // save we write a fresh v3 header with the binary's CURRENT defaults,
+    // so old v2 wallets get auto-upgraded to stronger params on first
+    // save after the binary is upgraded.
     let final_data = if let Some(pwd) = password {
-        let mut key = derive_key(pwd, &header.kdf_salt);
+        let mut key = derive_key(pwd, &header.kdf_salt,
+            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost);
         let result = encrypt(&serialized, &key, &header.nonce);
         key.zeroize(); // SECURITY: Clear key material from memory immediately
         let mut serialized_mut = serialized;
@@ -344,8 +525,26 @@ pub fn load_wallet(
     let mut header_bytes = vec![0u8; header_len];
     file.read_exact(&mut header_bytes)?;
 
-    let header: WalletHeader = borsh::from_slice(&header_bytes)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    // (Item 22) Dispatch on version. The `version` byte sits at offset 4
+    // (right after the 4-byte magic) in both v2 and v3 layouts. Inspect
+    // it before attempting Borsh deserialization, since the v3 struct
+    // expects 12 more bytes than v2 — a v2 file fed to v3's borsh::
+    // from_slice would fail with a confusing length error.
+    if header_bytes.len() < 5 {
+        return Err(Error::SerializationError("wallet header too short".into()));
+    }
+    let header: WalletHeader = match header_bytes[4] {
+        2 => {
+            let v2: WalletHeaderV2 = borsh::from_slice(&header_bytes)
+                .map_err(|e| Error::SerializationError(format!("v2 header: {}", e)))?;
+            v2.into_v3()
+        }
+        3 => {
+            borsh::from_slice(&header_bytes)
+                .map_err(|e| Error::SerializationError(format!("v3 header: {}", e)))?
+        }
+        v => return Err(Error::WalletNotFound(format!("unsupported wallet version {}", v))),
+    };
 
     header.validate()?;
 
@@ -375,9 +574,16 @@ pub fn load_wallet(
     }
 
     // Decrypt if needed (authenticated decryption will fail on tampering)
+    //
+    // (Item 22) Use the params from the header that the file was actually
+    // saved with — NOT the binary's current defaults. For v2 files the
+    // loader has stamped LEGACY_V2_ARGON2_* into `header` (via
+    // `into_v3`) so the correct historical params get used. For v3
+    // files the params are read directly from the on-disk header.
     let decrypted = if header.encrypted {
         let pwd = password.ok_or(Error::InvalidSecretKey("password required".into()))?;
-        let mut key = derive_key(pwd, &header.kdf_salt);
+        let mut key = derive_key(pwd, &header.kdf_salt,
+            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost);
         let result = decrypt(&encrypted_data, &key, &header.nonce);
         key.zeroize(); // SECURITY: Clear key material from memory immediately
         result?
@@ -431,8 +637,10 @@ pub fn change_password(
                 let mut nonce = [0u8; 24];
                 nonce.copy_from_slice(&bytes[32..56]);
                 let ciphertext = &bytes[56..];
-                let key = derive_key(old_password, &salt);
-                match decrypt(ciphertext, &key, &nonce) {
+                // (Item 22) Use the params-fallback decryptor: sidecars
+                // saved by pre-2026-05-08 binaries used the v2 KDF
+                // params; the new helper tries v3-default first then v2.
+                match decrypt_sidecar_with_fallback(&salt, &nonce, ciphertext, old_password) {
                     Ok(pt) => pt,
                     Err(_) => bytes.clone(), // Unencrypted fallback
                 }
@@ -440,10 +648,12 @@ pub fn change_password(
                 bytes.clone()
             };
 
-            // Re-encrypt with new password
+            // Re-encrypt with new password using current default params.
+            // After change_password, the sidecar is rewritten with v3
+            // params just like a normal save() does.
             let mut new_salt = [0u8; 32];
             OsRng.fill_bytes(&mut new_salt);
-            let new_key = derive_key(new_password, &new_salt);
+            let new_key = derive_key_default(new_password, &new_salt);
             let mut new_nonce = [0u8; 24];
             OsRng.fill_bytes(&mut new_nonce);
             let encrypted = encrypt(&plaintext, &new_key, &new_nonce)?;
@@ -588,13 +798,13 @@ mod tests {
         let salt = [0u8; 32];
 
         // Same password and salt should produce same key
-        let key1 = derive_key(password, &salt);
-        let key2 = derive_key(password, &salt);
+        let key1 = derive_key_default(password, &salt);
+        let key2 = derive_key_default(password, &salt);
         assert_eq!(key1, key2);
 
         // Different salt should produce different key
         let salt2 = [1u8; 32];
-        let key3 = derive_key(password, &salt2);
+        let key3 = derive_key_default(password, &salt2);
         assert_ne!(key1, key3);
     }
 

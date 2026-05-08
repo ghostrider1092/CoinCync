@@ -40,7 +40,8 @@ pub use persistence::{
     WalletData, WalletHeader,
     save_wallet, load_wallet, wallet_exists, change_password,
     generate_mnemonic, mnemonic_to_seed,
-    derive_key, encrypt, decrypt,
+    derive_key, derive_key_default, decrypt_sidecar_with_fallback,
+    encrypt, decrypt,
 };
 // Re-export subaddress types at the `wallet::` level so `persistence.rs`
 // can reach `super::SubaddressData` and other modules don't need the

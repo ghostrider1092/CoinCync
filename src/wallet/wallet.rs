@@ -678,7 +678,7 @@ impl Wallet {
             let bytes_to_write = if let Some(pw) = password {
                 let mut salt = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut salt);
-                let mut key = super::derive_key(pw, &salt);
+                let mut key = super::derive_key_default(pw, &salt);
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
@@ -710,7 +710,7 @@ impl Wallet {
             let bytes_to_write = if let Some(pw) = password {
                 let mut salt = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut salt);
-                let mut key = super::derive_key(pw, &salt);
+                let mut key = super::derive_key_default(pw, &salt);
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
@@ -739,7 +739,7 @@ impl Wallet {
             let bytes_to_write = if let Some(pw) = password {
                 let mut salt = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut salt);
-                let mut key = super::derive_key(pw, &salt);
+                let mut key = super::derive_key_default(pw, &salt);
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
@@ -779,9 +779,15 @@ impl Wallet {
         Ok(())
     }
 
-    /// Try to decrypt a sidecar file. If the data starts with a 32-byte salt +
-    /// 24-byte nonce and the password can decrypt it, returns the plaintext.
-    /// Falls back to treating the bytes as unencrypted JSON for backward compat.
+    /// Try to decrypt a sidecar file. If the data starts with a 32-byte
+    /// salt + 24-byte nonce and the password can decrypt it, returns the
+    /// plaintext. Falls back to treating the bytes as unencrypted JSON
+    /// for backward compat with very early plaintext sidecars.
+    ///
+    /// (Item 22) Decryption tries the binary's current default Argon2id
+    /// params first, then falls back to the v2 legacy params for
+    /// sidecars saved by pre-2026-05-08 binaries — handled inside
+    /// `persistence::decrypt_sidecar_with_fallback`.
     fn decrypt_sidecar(bytes: &[u8], password: &str) -> Vec<u8> {
         // Encrypted format: salt(32) || nonce(24) || ciphertext(...)
         if bytes.len() > 56 {
@@ -790,12 +796,14 @@ impl Wallet {
             let mut nonce = [0u8; 24];
             nonce.copy_from_slice(&bytes[32..56]);
             let ciphertext = &bytes[56..];
-            let key = super::derive_key(password, &salt);
-            if let Ok(plaintext) = super::decrypt(ciphertext, &key, &nonce) {
+            if let Ok(plaintext) = super::decrypt_sidecar_with_fallback(
+                &salt, &nonce, ciphertext, password,
+            ) {
                 return plaintext;
             }
         }
-        // Fallback: assume unencrypted (backward compatibility)
+        // Fallback: assume unencrypted (backward compatibility for the
+        // very early wallet format that stored sidecars in plaintext).
         bytes.to_vec()
     }
 
