@@ -665,7 +665,19 @@ async fn cmd_scan(
     let mut scanner = WalletScanner::new();
     scanner.add_keys(epoch.view_secret.clone(), epoch.spend_public, epoch.epoch);
 
-    let start = from.unwrap_or_else(|| wallet.scanned_height());
+    // Defensive backstop (Bug #5 mitigation): when --from isn't passed,
+    // resume from a few blocks BEFORE the persisted scanned_height. The
+    // save() ordering fix in commit-following ensures sidecars are written
+    // before scanned_height advances on disk, which is the primary fix.
+    // The backstop covers other state-divergence paths (forced kill mid-
+    // save, filesystem issues, hand-edited wallet files, parallel scans).
+    // Re-scanning is idempotent: add_utxo and mark_spent_by_key_image are
+    // both keyed by stable identifiers (tx_hash + output_index, key_image),
+    // so the only cost of overlap is a few extra block-fetches over RPC.
+    const SCAN_BACKSTOP_BLOCKS: u64 = 20;
+    let start = from.unwrap_or_else(|| {
+        wallet.scanned_height().saturating_sub(SCAN_BACKSTOP_BLOCKS)
+    });
     let end = start + max_blocks;
 
     println!("Scanning blocks {}..{} via {}", start, end, node);

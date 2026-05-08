@@ -591,31 +591,41 @@ impl Wallet {
         self.subaddress_data = Some(data);
     }
 
-    /// Save wallet state
+    /// Save wallet state.
+    ///
+    /// # Persistence ordering (Bug #5 fix)
+    ///
+    /// Three files are involved:
+    ///   - `<wallet>` (the encrypted seed + scanned_height + metadata)
+    ///   - `<wallet>.utxos` (UTXO sidecar)
+    ///   - `<wallet>.history` (transaction history sidecar)
+    ///
+    /// Each file write is atomic (temp + rename), but the writes are NOT
+    /// transactional across files. If the process dies between file writes
+    /// we want the failure mode to be "we re-scan some blocks" rather than
+    /// "we lost owned outputs".
+    ///
+    /// The previous order was wallet -> utxos -> history. That meant a
+    /// crash between steps 1 and 2 left `scanned_height` advanced on disk
+    /// while the UTXOs from those scanned blocks were still in volatile
+    /// memory. The next scan started from the new `scanned_height`,
+    /// skipped the just-found-but-not-persisted blocks, and the wallet
+    /// looked like it had 0 balance forever -- exactly the symptom we
+    /// observed during 2026-05-07 testnet bring-up.
+    ///
+    /// New order: utxos first, then history, then wallet+scanned_height
+    /// last. If a crash happens before the wallet file is written:
+    ///   - sidecars contain the new UTXOs (preserved)
+    ///   - scanned_height is still the OLD value
+    ///   - next scan re-processes the same range, re-detects the outputs,
+    ///     replaces the sidecar entries (idempotent: keyed by (tx_hash,
+    ///     output_index)). No data loss; some redundant work.
     pub fn save(&self, password: Option<&str>) -> Result<()> {
         let keys = self.keys.as_ref()
             .ok_or(Error::InvalidState("wallet locked".into()))?;
 
-        // CRITICAL FIX: Use master_seed, NOT derived spend_secret!
-        // Using spend_secret would cause wallet restore to produce wrong keys
-        // since the derived key would be treated as a master seed.
-        // Using master_seed_for_backup() which is the secure API for this purpose.
-        let seed = *keys.master_seed_for_backup();
-
-        let data = WalletData {
-            seed,
-            current_epoch: keys.current().map(|e| e.epoch).unwrap_or(0),
-            scanned_height: self.scanned_height,
-            label: self.label.clone(),
-            created_at: self.created_at,
-            network: self.network.clone(),
-            subaddresses: self.subaddress_data.clone(),
-            mnemonic_phrase: None,
-        };
-
-        save_wallet(&self.path, &data, password)?;
-
-        // Save UTXOs to sidecar file (encrypted if password is set)
+        // === Step 1: UTXO sidecar ===
+        // (was step 2 before; now first so a crash leaves no stale state.)
         let utxo_path = self.path.with_extension("utxos");
         let utxos = self.balance.all_utxos();
         if !utxos.is_empty() {
@@ -628,26 +638,22 @@ impl Wallet {
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
-                // SECURITY: Zeroize derived key and plaintext JSON after use
                 key.zeroize();
                 json.zeroize();
                 [salt.as_slice(), nonce.as_slice(), encrypted.as_slice()].concat()
             } else {
                 json
             };
-            // SECURITY: Write to a temp file first, then atomically rename to
-            // prevent data corruption if the process is interrupted mid-write.
             let utxo_tmp_path = self.path.with_extension("utxos.tmp");
             std::fs::write(&utxo_tmp_path, &bytes_to_write)
                 .map_err(|e| Error::InvalidState(format!("failed to write UTXO temp file: {}", e)))?;
             std::fs::rename(&utxo_tmp_path, &utxo_path)
                 .map_err(|e| Error::InvalidState(format!("failed to rename UTXO file: {}", e)))?;
         } else if utxo_path.exists() {
-            // Clean up stale sidecar file when no UTXOs remain
             let _ = std::fs::remove_file(&utxo_path);
         }
 
-        // Save transaction history to sidecar file (encrypted if password is set)
+        // === Step 2: history sidecar ===
         let history_path = self.path.with_extension("history");
         let history_records = self.history.all();
         if !history_records.is_empty() {
@@ -661,15 +667,12 @@ impl Wallet {
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
-                // SECURITY: Zeroize derived key and plaintext JSON after use
                 key.zeroize();
                 json.zeroize();
                 [salt.as_slice(), nonce.as_slice(), encrypted.as_slice()].concat()
             } else {
                 json
             };
-            // SECURITY: Write to a temp file first, then atomically rename to
-            // prevent data corruption if the process is interrupted mid-write.
             let history_tmp_path = self.path.with_extension("history.tmp");
             std::fs::write(&history_tmp_path, &bytes_to_write)
                 .map_err(|e| Error::InvalidState(format!("failed to write history temp file: {}", e)))?;
@@ -678,6 +681,24 @@ impl Wallet {
         } else if history_path.exists() {
             let _ = std::fs::remove_file(&history_path);
         }
+
+        // === Step 3: wallet file (with scanned_height) -- LAST ===
+        // CRITICAL FIX (commit f8daaea): Use master_seed, NOT derived
+        // spend_secret. Using spend_secret would cause restore to produce
+        // wrong keys since the derived key would be treated as a master
+        // seed. Using master_seed_for_backup() which is the secure API.
+        let seed = *keys.master_seed_for_backup();
+        let data = WalletData {
+            seed,
+            current_epoch: keys.current().map(|e| e.epoch).unwrap_or(0),
+            scanned_height: self.scanned_height,
+            label: self.label.clone(),
+            created_at: self.created_at,
+            network: self.network.clone(),
+            subaddresses: self.subaddress_data.clone(),
+            mnemonic_phrase: None,
+        };
+        save_wallet(&self.path, &data, password)?;
 
         Ok(())
     }

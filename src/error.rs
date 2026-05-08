@@ -182,6 +182,25 @@ pub enum Error {
     #[error("Insufficient balance: have {have}, need {need}")]
     InsufficientBalance { have: u64, need: u64 },
 
+    /// The wallet has UTXOs that together cover the requested send, but they
+    /// haven't reached MIN_OUTPUT_AGE yet. Distinct from `InsufficientBalance`
+    /// (genuinely no funds): the user just needs to wait. Reporting "have 0"
+    /// when the wallet actually has the money is misleading and was a real
+    /// pain point during 2026-05-07 testnet onboarding.
+    #[error(
+        "Balance pending maturity: {pending_atomic} atomic in {pending_utxos} UTXO(s) confirmed but \
+         not yet spendable (spendable now: {spendable_atomic}; need: {need_atomic}). \
+         Wait ~{blocks_to_wait} more block(s) (about {seconds_to_wait}s at 120s blocks)."
+    )]
+    BalancePendingMaturity {
+        spendable_atomic: u64,
+        pending_atomic: u64,
+        pending_utxos: usize,
+        need_atomic: u64,
+        blocks_to_wait: u64,
+        seconds_to_wait: u64,
+    },
+
     #[error("No outputs available for spending")]
     NoOutputsAvailable,
 

@@ -236,6 +236,46 @@ pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
     let initial_needed = total_send.saturating_add(initial_fee);
 
     if available < initial_needed {
+        // Distinguish "no funds" from "funds present but not yet mature":
+        //   - If total balance covers `need`, the user has the money but
+        //     some UTXOs haven't reached MIN_OUTPUT_AGE yet. Tell them how
+        //     long to wait instead of "have 0", which sent users into a
+        //     panic loop during 2026-05-07 testnet onboarding.
+        //   - If total balance is also short, return InsufficientBalance.
+        let total = balance.total();
+        if total >= initial_needed {
+            // We have it; it's just not mature. Find the youngest unspent
+            // UTXO that's currently below MIN_OUTPUT_AGE — its
+            // earliest-spendable height is the upper bound on how long the
+            // user has to wait. (More precise would be "the youngest UTXO
+            // whose maturation tips us over the threshold", but this
+            // bound is correct and simple.)
+            let pending_utxos: Vec<&UTXO> = balance.unspent_utxos()
+                .into_iter()
+                .filter(|u| current_height < u.height.saturating_add(MIN_OUTPUT_AGE))
+                .collect();
+            let pending_atomic: u64 = pending_utxos.iter().map(|u| u.amount.as_atomic()).sum();
+            // Latest pending UTXO height = the most-recently-confirmed pending one.
+            // earliest_full_maturity = max(pending heights) + MIN_OUTPUT_AGE.
+            // blocks_to_wait = earliest_full_maturity - current_height.
+            // (Subset coverage might mature earlier, but reporting the
+            // pessimistic full-maturity bound never under-promises.)
+            let latest_pending_height = pending_utxos.iter()
+                .map(|u| u.height)
+                .max()
+                .unwrap_or(current_height);
+            let earliest_full_maturity = latest_pending_height.saturating_add(MIN_OUTPUT_AGE);
+            let blocks_to_wait = earliest_full_maturity.saturating_sub(current_height);
+            let seconds_to_wait = blocks_to_wait.saturating_mul(crate::constants::TARGET_BLOCK_TIME);
+            return Err(Error::BalancePendingMaturity {
+                spendable_atomic: available.as_atomic(),
+                pending_atomic,
+                pending_utxos: pending_utxos.len(),
+                need_atomic: initial_needed.as_atomic(),
+                blocks_to_wait,
+                seconds_to_wait,
+            });
+        }
         return Err(Error::InsufficientBalance {
             have: available.as_atomic(),
             need: initial_needed.as_atomic(),
