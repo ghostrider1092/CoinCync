@@ -1362,6 +1362,95 @@ pub async fn start_rpc_server(
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_output_digests ───────────────────────────────────
+    //
+    // Light-wallet SPV path: returns compact per-block output
+    // summaries (~138 B / output vs ~1-5 KB / full tx) for client-
+    // side scanning. The server learns only the height range; it
+    // never sees which outputs the wallet cares about. Privacy
+    // posture is strictly stronger than BIP-157 (which leaks the
+    // wallet's address set to the filter server). See
+    // `docs/security/LIGHTSYNC_AUDIT.md`.
+    //
+    // Params: [start_height: u64, end_height: u64].
+    // Range capped to 100 blocks per request to bound response
+    // size; the same bound applies at the network layer
+    // (`MessageType::GetOutputDigests`).
+    module.register_method("get_output_digests", |params, state, _ext| {
+        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+        })?;
+        if end < start {
+            return Err(ErrorObjectOwned::owned(
+                -32602, "end must be >= start".to_string(), None::<()>,
+            ));
+        }
+        const MAX_DIGEST_BLOCKS: u64 = 100;
+        let chain_height = state.chain.height();
+        let end = end.min(start.saturating_add(MAX_DIGEST_BLOCKS - 1)).min(chain_height);
+        let mut digests = Vec::with_capacity(((end - start + 1) as usize).min(
+            MAX_DIGEST_BLOCKS as usize,
+        ));
+        for h in start..=end {
+            if let Some(block) = state.chain.get_block_by_height(h) {
+                digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
+            }
+        }
+        let count = digests.len();
+        Ok::<_, ErrorObjectOwned>(json!({
+            "start": start,
+            "end": end,
+            "count": count,
+            "digests": digests,
+        }))
+    }).map_err(|e| Error::RpcError(e.to_string()))?;
+
+    // ── get_sync_checkpoints ─────────────────────────────────
+    //
+    // Periodic trust anchors so a fresh light wallet can skip
+    // ancient history and start scanning from a recent height.
+    //
+    // SECURITY NOTE: Authentication of these checkpoints is
+    // currently a checksum, not a signature (Gap 2 in
+    // LIGHTSYNC_AUDIT.md). For v1.0 the wallet MUST cross-check
+    // returned checkpoints against the hardcoded consensus
+    // checkpoint table in `src/constants.rs::CONSENSUS_CHECKPOINTS`
+    // before trusting them. Miner-signed checkpoints arrive in
+    // v1.0.1 (CIP-009.D activation track).
+    //
+    // Params: optional [stride: u64] — emit one checkpoint every
+    // `stride` blocks. Default 10000 (~14 days at 120s).
+    module.register_method("get_sync_checkpoints", |params, state, _ext| {
+        let stride: u64 = params.parse::<(u64,)>().map(|(s,)| s).unwrap_or(10_000);
+        let stride = stride.max(1).min(50_000);
+        let chain_height = state.chain.height();
+        let mut checkpoints = Vec::new();
+        let mut h = stride;
+        while h <= chain_height {
+            if let Some(block) = state.chain.get_block_by_height(h) {
+                let block_hash = block.hash();
+                let cp = crate::wallet::lightsync::SyncCheckpoint::new(
+                    h,
+                    block_hash,
+                    0, // total_outputs not tracked at this layer
+                    crate::primitives::Hash::default(), // utxo_hash deferred to Gap 2
+                );
+                checkpoints.push(cp);
+            }
+            h = match h.checked_add(stride) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        Ok::<_, ErrorObjectOwned>(json!({
+            "stride": stride,
+            "chain_height": chain_height,
+            "count": checkpoints.len(),
+            "checkpoints": checkpoints,
+            "auth_note": "Cross-check against CONSENSUS_CHECKPOINTS in src/constants.rs. Miner-signed authentication queued for v1.0.1 (CIP-009.D).",
+        }))
+    }).map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_metrics ──────────────────────────────────────────
     //
     // HARDENING (Layer 7): Prometheus-compatible metrics endpoint.

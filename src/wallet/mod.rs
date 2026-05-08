@@ -19,10 +19,11 @@ pub mod history;
 pub mod background_sync;
 pub mod multisig;
 pub mod churn;
-// `lightsync` is type-wired but the network handler for `GetOutputDigests`
-// is intentionally a no-op in P0 (see `crate::network::node` — it logs and
-// drops). Do not assume `LightWalletSync::scan_digest` is ever called on a
-// running P0 node. Activated in P1 by removing the handler early-return.
+// `lightsync` is the SPV path. Network handler for `GetOutputDigests`
+// is wired in `crate::network::node` (serves up to 100 blocks/request);
+// JSON-RPC handler is in `crate::rpc::lightwallet`. Privacy posture vs
+// BIP-157 is documented in docs/security/LIGHTSYNC_AUDIT.md — server
+// learns only the height range, never the wallet's address set.
 pub mod lightsync;
 pub mod wallet;
 

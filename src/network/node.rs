@@ -2999,14 +2999,56 @@ async fn process_message(
         }
 
         MessageType::GetOutputDigests => {
-            // 1.0: `wallet::lightsync::BlockDigest` is part of the wallet
-            // SPV path that is not wired yet (P1 work). The GetOutputDigests
-            // responder is stubbed to log and drop — peers will time out
-            // and fall back to a full sync until P1 re-enables lightsync.
+            // Personal nodes request compact per-block output digests so
+            // their light-wallet can detect ownership without downloading
+            // full blocks. Wire format mirrors GetFilters: 16-byte payload
+            // (start_height, end_height) u64-LE. Range is capped to keep
+            // any single response well under MAX_MESSAGE_SIZE (16 MiB).
+            //
+            // Privacy property: the server learns only the height range,
+            // never which outputs are interesting to the wallet. Stronger
+            // than BIP-157, where the address-set is leaked. See
+            // docs/security/LIGHTSYNC_AUDIT.md.
+            const MAX_DIGEST_BLOCKS_PER_REQ: u64 = 100;
+
+            if payload.len() < 16 {
+                warn!("GetOutputDigests from {:?}: payload too short", &peer_id[..4]);
+                return Ok(());
+            }
+            let start = u64::from_le_bytes(payload[0..8].try_into().unwrap_or([0u8; 8]));
+            let end = u64::from_le_bytes(payload[8..16].try_into().unwrap_or([0u8; 8]));
+            if start > end {
+                warn!(
+                    "GetOutputDigests: start {} > end {} from peer {:?}",
+                    start, end, &peer_id[..4]
+                );
+                return Ok(());
+            }
+            let end = end.min(start.saturating_add(MAX_DIGEST_BLOCKS_PER_REQ - 1));
+            let chain_height = chain.height();
+            let end = end.min(chain_height);
+
             tracing::debug!(
-                "GetOutputDigests from {:?} ignored (lightsync disabled in P0)",
-                &peer_id[..4]
+                "GetOutputDigests from {:?}: heights {}..={}",
+                &peer_id[..4], start, end
             );
+
+            let mut digests = Vec::with_capacity(((end - start + 1) as usize).min(
+                MAX_DIGEST_BLOCKS_PER_REQ as usize,
+            ));
+            for h in start..=end {
+                if let Some(block) = chain.get_block_by_height(h) {
+                    digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
+                }
+            }
+
+            if let Some(sender) = senders.get(&peer_id) {
+                let mut resp_data = vec![MessageType::OutputDigests as u8];
+                if let Ok(encoded) = borsh::to_vec(&digests) {
+                    resp_data.extend_from_slice(&encoded);
+                    let _ = sender.send(resp_data).await;
+                }
+            }
         }
 
         MessageType::GetFilterCheckpoints => {

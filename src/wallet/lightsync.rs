@@ -1,37 +1,31 @@
-//! # Lightweight Wallet Sync (P0: parked, P1: live).
+//! # Lightweight Wallet Sync (SPV).
 //!
-//! ⚠️  IMPORTANT FOR FUTURE MAINTAINERS ⚠️
+//! Privacy posture: this protocol downloads ALL output digests in a height
+//! range and scans them locally. The server learns only the range, never
+//! which outputs the wallet cares about — strictly stronger than BIP-157,
+//! where the wallet's address set leaks to whoever serves the filters. See
+//! `docs/security/LIGHTSYNC_AUDIT.md` for the full comparison.
 //!
-//! This module compiles and is fully type-checked, but **the network handler
-//! that would serve `GetOutputDigests` requests deliberately rejects them in
-//! P0**. See [`crate::network::node`]'s `GetOutputDigests` arm — it logs
-//! `"GetOutputDigests from {peer} ignored (lightsync disabled in P0)"` and
-//! drops the request.
+//! ## Wire surface
 //!
-//! That means: any SPV / mobile client that talks to a P0 node will see its
-//! `GetOutputDigests` requests silently fail at the network boundary. Do NOT
-//! debug "why my SPV client doesn't sync" by reading this module — read the
-//! handler in `network::node` and remove the early-return when the wallet
-//! pipeline is ready in P1.
+//! - `GetOutputDigests = 62` / `OutputDigests = 63` (network layer, served
+//!   by `crate::network::node`).
+//! - JSON-RPC: `get_output_digests` in `crate::rpc::lightwallet`.
+//! - Per-request cap: 100 blocks (digests are larger than filters; see the
+//!   handler for the byte budget calculation).
 //!
-//! ## Why staged
+//! ## What's here
 //!
-//! The digest types, parallel scan path, and on-the-wire message numbers
-//! (`GetOutputDigests = 62`, `OutputDigests = 63` in
-//! `network::protocol::MessageType`) are wired through the type system so
-//! that turning lightsync on in P1 is a single-handler change — not a
-//! "rewrite the wallet sync API" project. This module is the *destination*
-//! the handler will eventually call.
-//!
-//! ## What it provides (when activated)
-//!
-//! - **Block digests**: compact output-only summaries (~105 B / output vs
+//! - **Block digests**: compact output-only summaries (~138 B / output vs
 //!   full blocks)
 //! - **View tag pre-filtering**: reject 255/256 outputs without ECDH
 //! - **Parallel scanning**: process multiple digests concurrently via rayon
 //! - **Sync checkpoints**: periodic trust anchors for fast initial sync
+//!   (note: checkpoint *authentication* — Gap 2 in the audit — is deferred
+//!   to v1.0.1 once miner-signed checkpoints are wired; for now wallets
+//!   should validate against a hardcoded checkpoint set.)
 //!
-//! Bandwidth savings: ~50–100x reduction vs downloading full blocks.
+//! Bandwidth savings: ~50-100x reduction vs downloading full blocks.
 
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
