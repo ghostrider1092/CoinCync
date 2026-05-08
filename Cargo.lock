@@ -1008,6 +1008,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "coincync-frost-coordinator"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "coincync-rig"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "borsh",
+ "clap",
+ "coincync",
+ "crossterm 0.27.0",
+ "hex",
+ "rand 0.8.6",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "coincync-swap"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
