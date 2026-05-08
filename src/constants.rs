@@ -525,6 +525,62 @@ pub fn effective_ring_size(height: u64, available_outputs: usize) -> usize {
 }
 
 // =============================================================================
+// Hard-fork activation registry (CIP-007)
+// =============================================================================
+
+/// Hard-fork / soft-fork activation table per CIP-007.
+///
+/// Each named activation maps to the block height at which the new
+/// rule takes effect. Validator code consults `is_activated(name,
+/// height)` to gate consensus rules; wallet code consults it to
+/// build txs that conform to the active set.
+///
+/// As of 2026-05-08 the table is intentionally empty: no Mode A
+/// activations have been scheduled yet. The infrastructure is
+/// in place so the first activation (likely
+/// `BOOTSTRAP_MIN_RING_SIZE_V2` per the queued list in CIP-007) is a
+/// table entry + validator branch, not a new file + helper + wiring.
+///
+/// Adding an activation:
+///   1. Pick a stable name (snake_case, e.g. "ring_bump_v2").
+///   2. Append `(name, testnet_height, mainnet_height)` to this
+///      function.
+///   3. Validator/wallet code uses `is_activated(name, h)` to gate
+///      the new rule.
+///   4. Document in the corresponding CIP.
+fn activation_height(name: &str) -> Option<u64> {
+    // Per CIP-007 Mode A: the testnet vs mainnet activation heights
+    // can differ. We pick at compile time via the `testnet` feature.
+    #[cfg(feature = "testnet")]
+    let entries: &[(&str, u64)] = &[
+        // Format: (activation_name, testnet_height)
+        // Empty as of 2026-05-08 — first activation queued: ring_bump_v2.
+    ];
+    #[cfg(not(feature = "testnet"))]
+    let entries: &[(&str, u64)] = &[
+        // Format: (activation_name, mainnet_height)
+        // Empty as of 2026-05-08.
+    ];
+    entries.iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, h)| *h)
+}
+
+/// Returns true if the named activation is in effect at `height`.
+///
+/// Returns false when the activation isn't registered (silent —
+/// callers SHOULD pass only known names; an unknown-name false
+/// means "this rule never activates," which is the correct
+/// fail-safe for a forward-compat code path that hasn't been
+/// scheduled yet).
+pub fn is_activated(name: &str, height: u64) -> bool {
+    match activation_height(name) {
+        Some(activation_h) => height >= activation_h,
+        None => false,
+    }
+}
+
+// =============================================================================
 // Emission Schedule
 // =============================================================================
 

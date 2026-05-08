@@ -138,6 +138,43 @@ This is a coordinated upgrade. Schedule it for a planned hard fork
 (post-launch — testnet activation height ~10000, mainnet activation
 height set at mainnet launch). Don't ship as a hotfix.
 
+## OPEN — testnet operational cost, no mainnet impact
+
+### Operational #1 — Faucet drip-pair fee fingerprint
+
+Each faucet drip uses `--split-output` (the Bug #6 fix from
+`9b83772`) to produce 2 outputs to the recipient in one tx, so a
+first-time user gets 2 UTXOs and can immediately spend. The cost:
+input excess goes to fee. With the faucet's current ~30 CYNC UTXOs
+and a 10 CYNC drip, fee = ~89.7 CYNC per drip. Chain analysts can
+flag every drip-pair tx by anomalous fee size.
+
+**Why it's not fixed in this round:** the proper fix is two
+sequential normal-shape sends per drip (each 2-in/2-out, normal
+fee). That requires the faucet to have ≥4 mature UTXOs at all
+times — but uniform 2-in/2-out tx shape *preserves* UTXO count
+across every tx. The faucet has no way to split a single 30 CYNC
+UTXO into multiple smaller ones without breaking uniform shape, so
+inventory has to be built up by repeatedly funding from a source
+wallet that ALSO has small UTXOs. That cascades back to the user's
+local wallet, the mining rig's coinbase outputs, etc. — a deep
+ecosystem refactor.
+
+**Why it's acceptable for now:** testnet only. The fee is paid by
+the testnet operator (whose miner is on the same fleet, so most
+of the burned fee comes back as block reward). No mainnet faucet
+is planned; mainstream wallets will receive funds from real users,
+not from a single fee-leaky service. The privacy fingerprint
+matters chain-wide only if many wallets receive their first
+funds from the testnet faucet, and even then only on testnet.
+
+**What WOULD fix it:** see Item 3 in the senior-review plan. Either
+(a) maintain a right-sized UTXO pool throughout the funding chain
+(user wallet → faucet wallet → recipient wallet), or (b) wait for
+a constitutional change loosening uniform shape for service-tier
+txs (similar to coinbase carve-outs). Option (a) needs ~1 day of
+work; option (b) needs a CIP and hard fork.
+
 ## OPEN — UX issues, not launch-blocking
 
 ### Bug #4 — `Insufficient balance: have 0` when balance exists but isn't mature
@@ -164,6 +201,7 @@ them). Workaround: always pass `--from N` for some `N` a few blocks
 behind the actual cursor.
 
 This isn't fully understood. Possibilities:
+
 1. Scanner re-uses a stale view-secret derivation across calls.
 2. `last_scanned_height` is advanced past a block the scanner exited
    early on.
