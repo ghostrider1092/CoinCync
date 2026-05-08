@@ -146,7 +146,7 @@ mod tests {
         let html = explorer_html(28081);
         let known_external_origins: &[&str] = &[
             "https://api.github.com",              // recent commits feed (optional, degrades gracefully)
-            "cdn.jsdelivr.net",                    // Chart.js, D3, Three.js for visualizations
+            // cdn.jsdelivr.net REMOVED — Chart.js, D3, Three.js vendored under /static/vendor/
             // fonts.googleapis.com REMOVED — self-hosted at /assets/fonts/ (privacy fix)
         ];
         for origin in known_external_origins {

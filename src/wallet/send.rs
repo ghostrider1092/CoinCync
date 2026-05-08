@@ -176,11 +176,31 @@ pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
     let available = balance.spendable(current_height, MIN_OUTPUT_AGE);
 
     // Uniform 2-in/2-out: post-activation, Transfer txs must have exactly 2 inputs
-    // and 2 outputs. Multi-recipient transfers must be split into separate txs.
+    // and 2 outputs. There are TWO valid shapes that satisfy this:
+    //
+    //   (a) Standard: 1 recipient + 1 change output (the common case).
+    //   (b) Drip-pair: 2 outputs to the SAME recipient address, no change. Used
+    //       by the testnet faucet to give a first-time recipient two UTXOs in
+    //       a single tx (otherwise they'd hold one UTXO and the uniform
+    //       2-input rule would lock them out from spending until they receive
+    //       a second payment).
+    //
+    // Anything else (truly multi-recipient) must be split into separate txs.
     let uniform = current_height >= UNIFORM_TX_SHAPE_HEIGHT;
-    if uniform && recipients.len() > 1 {
+    let drip_pair = uniform && recipients.len() == STANDARD_OUTPUT_COUNT && {
+        // All entries point to the same (spend, view) destination.
+        recipients.windows(2).all(|w| {
+            w[0].0.as_bytes() == w[1].0.as_bytes()
+                && w[0].1.as_bytes() == w[1].1.as_bytes()
+        })
+    };
+    if uniform && recipients.len() > 1 && !drip_pair {
         return Err(Error::InvalidState(
-            "Post-activation: Transfer must have exactly 1 recipient (2-in/2-out). Split into multiple transactions.".into()
+            "Post-activation: Transfer must have exactly 1 recipient (2-in/2-out). \
+             Multi-recipient must be split into separate txs. To send a drip-pair \
+             (two outputs to the same address in one tx, used by the faucet for \
+             first-time recipients), pass the recipient twice with amounts that \
+             together cover the desired drip total — change becomes fee.".into()
         ));
     }
 
@@ -324,9 +344,14 @@ pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
     // Add change output and dummy outputs
     let final_fee = if uniform {
         // Uniform 2-in/2-out: always exactly 2 outputs total.
-        // Output 0 is the recipient (added above).
-        // Output 1 is either change (if above dust) or a dummy (zero-value to self).
-        if change_amount >= MIN_OUTPUT_AMOUNT {
+        if drip_pair {
+            // Drip-pair shape: both outputs ARE the recipient outputs (already added).
+            // No change, no dummy. Any input excess goes to fee. This is constitutional
+            // because the tx still presents as a normal 2-in/2-out — chain analysts
+            // can't distinguish a drip-pair tx from a standard "recipient + change" tx.
+            Amount::from_atomic(estimated_fee.as_atomic().saturating_add(change_amount))
+        } else if change_amount >= MIN_OUTPUT_AMOUNT {
+            // Standard: output[0] = recipient (already added), output[1] = change.
             builder.add_change(
                 &keys.spend_public,
                 &keys.view_public,
@@ -719,10 +744,25 @@ fn select_utxos<'a, R: RngCore + CryptoRng>(
 /// Select exactly 2 UTXOs whose combined value covers `target`.
 ///
 /// Required for uniform 2-in/2-out transaction shape post-activation.
-/// Strategy: sort descending, find all valid pairs via two-pointer sweep,
-/// then randomly select among the best candidates for privacy.
-/// Complexity: O(n log n) instead of the naive O(n²).
-/// Returns `InsufficientInputs` if no valid pair exists.
+///
+/// # Algorithm
+/// 1. Sort UTXOs descending by amount.
+/// 2. **Full two-pointer sweep**: for each `lo` index, advance `hi` from the
+///    end inward, recording every (lo, hi) pair where `lo + hi >= target`,
+///    then advance `lo` and reset `hi`. This finds all O(n²) candidate pairs
+///    in O(n²) worst case but typically O(n) when amounts vary, **without
+///    missing pairs that don't include the largest UTXO** (the prior
+///    single-pass sweep collapsed `hi` permanently and missed these).
+/// 3. Tighten to candidates with excess within 20% of the best excess
+///    (privacy: avoids deterministic fingerprinting on excess size).
+/// 4. Randomly choose among the tightened candidates with the caller-supplied
+///    RNG.
+///
+/// # Errors
+/// - `InsufficientInputs` when fewer than 2 UTXOs exist (count problem).
+/// - `NoUtxoPairCovers` when 2+ UTXOs exist but no pair covers the target
+///   (amount problem). Includes diagnostics so the user knows the largest
+///   safe send and what to do next.
 fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
     utxos: &[&'a UTXO],
     target: Amount,
@@ -739,40 +779,79 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
 
     let target_val = target.as_atomic();
 
-    // Sort indices by amount descending for efficient two-pointer sweep
+    // Sort indices by amount descending. Sorted view enables both the candidate
+    // sweep and the trivial "largest pair" calculation for diagnostics.
     let mut indices: Vec<usize> = (0..utxos.len()).collect();
     indices.sort_by(|a, b| utxos[*b].amount.as_atomic().cmp(&utxos[*a].amount.as_atomic()));
 
-    // Two-pointer: find all valid pairs, collect candidates with reasonable excess
+    // Largest pair = top two UTXOs (sorted descending). Used for both the
+    // "covers target?" early bailout and the diagnostic error if no pair
+    // covers — the user can always fall back to "send <= largest_pair - fee".
+    let largest_pair_sum = utxos[indices[0]].amount.as_atomic()
+        .saturating_add(utxos[indices[1]].amount.as_atomic());
+
+    if largest_pair_sum < target_val {
+        let total: u64 = utxos.iter().map(|u| u.amount.as_atomic()).sum();
+        // `max_safe` reports the largest target the user could send right now
+        // and have it succeed. Subtracts a generous fee bound; the actual fee
+        // depends on output count and ring size but a conservative bound here
+        // keeps the suggestion safe.
+        let conservative_fee_bound = 50_000_000u64; // 0.05 CYNC (well above typical ~7e-6)
+        let max_safe = largest_pair_sum.saturating_sub(conservative_fee_bound);
+        return Err(Error::NoUtxoPairCovers {
+            target_atomic: target_val,
+            utxo_count: utxos.len(),
+            total_atomic: total,
+            largest_pair_atomic: largest_pair_sum,
+            max_safe_atomic: max_safe,
+        });
+    }
+
+    // Full pair sweep: O(n²) worst case but typically O(n log n) when most
+    // UTXOs are similar size. The previous implementation used a single-pass
+    // two-pointer that locked `lo` at the largest UTXO and missed valid pairs
+    // not containing it (e.g. with [100, 80, 60, 40], target=90, the previous
+    // pass found only (100, 20-equiv) variants and missed the optimal (60,40)
+    // and (80, 40) pairs which have lower excess). Correctness > microseconds.
     let mut candidates: Vec<(usize, usize, u64)> = Vec::new();
     let mut best_excess = u64::MAX;
 
-    let mut lo = 0usize;
-    let mut hi = indices.len() - 1;
-    while lo < hi {
-        let sum = utxos[indices[lo]].amount.as_atomic()
-            .saturating_add(utxos[indices[hi]].amount.as_atomic());
-        if sum >= target_val {
-            let excess = sum - target_val;
-            if excess < best_excess {
-                best_excess = excess;
+    for i in 0..indices.len() {
+        for j in (i + 1)..indices.len() {
+            let sum = utxos[indices[i]].amount.as_atomic()
+                .saturating_add(utxos[indices[j]].amount.as_atomic());
+            if sum >= target_val {
+                let excess = sum - target_val;
+                if excess < best_excess {
+                    best_excess = excess;
+                }
+                candidates.push((indices[i], indices[j], excess));
             }
-            candidates.push((indices[lo], indices[hi], excess));
-            hi -= 1;
-        } else {
-            lo += 1;
+            // No early termination on `sum < target` because the OUTER index
+            // i is the larger UTXO; for fixed i, smaller j's give smaller sums.
+            // But across DIFFERENT i values, more pairs may exist, so we keep
+            // sweeping. (Outer-loop early-exit is safe only if we'd already
+            // failed to cover with the largest UTXO + smallest, which is
+            // exactly what the largest_pair_sum check above already rejects.)
         }
     }
 
+    // Defensive: largest_pair_sum >= target_val should guarantee non-empty.
+    // Keeping the check rather than .expect() so a future regression in the
+    // bound calculation surfaces as a clean error instead of a panic.
     if candidates.is_empty() {
-        return Err(Error::InsufficientInputs {
-            have: utxos.len(),
-            need: STANDARD_INPUT_COUNT,
+        let total: u64 = utxos.iter().map(|u| u.amount.as_atomic()).sum();
+        return Err(Error::NoUtxoPairCovers {
+            target_atomic: target_val,
+            utxo_count: utxos.len(),
+            total_atomic: total,
+            largest_pair_atomic: largest_pair_sum,
+            max_safe_atomic: largest_pair_sum.saturating_sub(50_000_000),
         });
     }
 
     // PRIVACY: randomly select among candidates within 20% of the best excess
-    // to prevent deterministic fingerprinting of UTXO selection
+    // to prevent deterministic fingerprinting of UTXO selection.
     let threshold = best_excess.saturating_add(best_excess / 5).max(best_excess.saturating_add(1));
     let good_candidates: Vec<_> = candidates.iter()
         .filter(|(_, _, e)| *e <= threshold)
@@ -781,9 +860,6 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
     // SECURITY: UTXO-pair selection is a privacy signal (bigger pair vs smaller,
     // age profile). Use the caller-supplied rng — every public callsite in
     // the wallet binary already passes `OsRng` (verified at audit time).
-    // The previous code constructed a fresh `thread_rng()` here, which both
-    // (a) ignored the caller's intent and (b) downgraded the entropy source
-    // for the privacy boundary. Both are now fixed.
     let &&(i, j, _) = good_candidates.choose(rng).unwrap_or(&&candidates[0]);
     Ok(vec![utxos[i], utxos[j]])
 }
@@ -963,5 +1039,120 @@ mod tests {
         let ok = enforce_wallet_privacy_policy(2, 1);
         std::env::remove_var("COINCYNC_WALLET_ALLOW_WEAK_PRIVACY");
         assert!(ok.is_ok());
+    }
+
+    // --- helpers + tests for select_utxos_uniform (Bug #1 + Bug #2 fixes) ---
+
+    fn make_utxo(amount: u64, idx: u8) -> UTXO {
+        UTXO {
+            tx_hash: crate::primitives::Hash::from_bytes([idx; 32]),
+            output_index: idx,
+            amount: Amount::from_atomic(amount),
+            height: 100,
+            key_image: crate::primitives::KeyImage::from_bytes([idx; 32]),
+            spent: false,
+            amount_blinding_bytes: [0u8; 32],
+            tx_public_key: crate::primitives::PublicKey::from_bytes([0u8; 32]),
+            lock_height: None,
+        }
+    }
+
+    /// Bug #1 regression: when the target cannot be covered by the sum of the
+    /// largest two UTXOs, `select_utxos_uniform` must return the diagnostic
+    /// `NoUtxoPairCovers` (with largest_pair_atomic, total, etc.) rather than
+    /// the misleading old `InsufficientInputs { have: 4, need: 2 }`. The
+    /// real-world hit was 4 ~50-CYNC UTXOs and a 100-CYNC target with fee:
+    /// no pair covers (50+50 == 100 < 100+fee), but the wallet has 200 CYNC
+    /// total and 4 UTXOs — neither count nor balance is the actual problem.
+    #[test]
+    fn test_uniform_select_no_pair_covers_returns_diagnostic_error() {
+        let utxos: Vec<UTXO> = (0..4).map(|i| make_utxo(50, i)).collect();
+        let refs: Vec<&UTXO> = utxos.iter().collect();
+        // Target slightly above what any pair can cover (50 + 50 = 100; ask 101).
+        let target = Amount::from_atomic(101);
+        let mut rng = rand::rngs::OsRng;
+        let err = select_utxos_uniform(&refs, target, &mut rng).unwrap_err();
+        match err {
+            Error::NoUtxoPairCovers {
+                target_atomic,
+                utxo_count,
+                total_atomic,
+                largest_pair_atomic,
+                max_safe_atomic: _,
+            } => {
+                assert_eq!(target_atomic, 101);
+                assert_eq!(utxo_count, 4);
+                assert_eq!(total_atomic, 200);
+                assert_eq!(largest_pair_atomic, 100);
+            }
+            other => panic!("expected NoUtxoPairCovers, got {:?}", other),
+        }
+    }
+
+    /// `InsufficientInputs` is now ONLY for the count-based failure (fewer
+    /// than 2 UTXOs total). It must not fire when the count is fine but no
+    /// pair sums high enough — that path now returns `NoUtxoPairCovers`.
+    #[test]
+    fn test_uniform_select_insufficient_inputs_only_when_too_few_utxos() {
+        let single = vec![make_utxo(1_000_000, 0)];
+        let refs: Vec<&UTXO> = single.iter().collect();
+        let mut rng = rand::rngs::OsRng;
+        let err = select_utxos_uniform(&refs, Amount::from_atomic(100), &mut rng).unwrap_err();
+        match err {
+            Error::InsufficientInputs { have, need } => {
+                assert_eq!(have, 1);
+                assert_eq!(need, STANDARD_INPUT_COUNT);
+            }
+            other => panic!("expected InsufficientInputs, got {:?}", other),
+        }
+    }
+
+    /// Bug #2 regression: the prior single-pass two-pointer sweep collapsed
+    /// `hi` whenever `lo+hi >= target`, locking `lo` at the largest UTXO and
+    /// missing valid pairs that don't include it. With UTXOs [100, 80, 60, 40]
+    /// and target=90, the optimal (lowest-excess) pair is (60, 40) summing to
+    /// exactly 100 — excess 10 — which the prior sweep never considered.
+    /// The new full sweep MUST find it. Privacy-side, the random choice
+    /// within the 20%-of-best-excess threshold prevents fingerprinting; the
+    /// 60/40 pair is the only one within that threshold here so the choice
+    /// is deterministic.
+    #[test]
+    fn test_uniform_select_finds_optimal_non_largest_pair() {
+        let utxos = vec![
+            make_utxo(100, 0),
+            make_utxo(80, 1),
+            make_utxo(60, 2),
+            make_utxo(40, 3),
+        ];
+        let refs: Vec<&UTXO> = utxos.iter().collect();
+        let target = Amount::from_atomic(90);
+        let mut rng = rand::rngs::OsRng;
+        let chosen = select_utxos_uniform(&refs, target, &mut rng).unwrap();
+        assert_eq!(chosen.len(), 2);
+        let sum: u64 = chosen.iter().map(|u| u.amount.as_atomic()).sum();
+        // Best (lowest-excess) pair is 60+40 = 100. The 20%-threshold widens
+        // to include excess up to 12 (10 + best/5=2, max with best+1=11),
+        // which still only admits the (60, 40) pair (next-best is (80,40)
+        // = 120, excess 30).
+        assert_eq!(sum, 100, "selector should pick the optimal (60, 40) pair");
+    }
+
+    /// Sanity: when the target is comfortably below largest_pair, selection
+    /// succeeds and returns exactly 2 UTXOs whose sum >= target. (No
+    /// regression in the happy path.)
+    #[test]
+    fn test_uniform_select_happy_path() {
+        let utxos = vec![
+            make_utxo(1_000_000, 0),
+            make_utxo(2_000_000, 1),
+            make_utxo(3_000_000, 2),
+        ];
+        let refs: Vec<&UTXO> = utxos.iter().collect();
+        let target = Amount::from_atomic(2_500_000);
+        let mut rng = rand::rngs::OsRng;
+        let chosen = select_utxos_uniform(&refs, target, &mut rng).unwrap();
+        assert_eq!(chosen.len(), 2);
+        let sum: u64 = chosen.iter().map(|u| u.amount.as_atomic()).sum();
+        assert!(sum >= 2_500_000);
     }
 }

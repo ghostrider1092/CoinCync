@@ -45,6 +45,12 @@ const AUDIT_LOG_CAPACITY: usize = 4096;
 pub enum EvictReason {
     /// Included in a confirmed block.
     Confirmed,
+    /// Spends a UTXO that was just claimed by a confirmed block tx.
+    /// The mempool tx is now permanently invalid; eviction prevents
+    /// it from poisoning future block templates ("duplicate key image"
+    /// rejection at consensus time would otherwise stall block
+    /// production until expiry).
+    DoubleSpend,
     /// Replaced by a higher-fee transaction (RBF).
     ReplacedByFee,
     /// Evicted to free space for a higher-fee transaction.
@@ -566,9 +572,36 @@ impl Mempool {
         }
     }
 
-    /// Remove transactions that are now in a block
+    /// Remove transactions that are now in a block, AND evict any mempool
+    /// transactions that conflict with them on key images (double-spend
+    /// shadows of confirmed txs).
+    ///
+    /// # Why both removals matter
+    ///
+    /// 1. **Confirmed txs**: a tx that mined was already in our mempool;
+    ///    we drop it because it's no longer pending.
+    /// 2. **Shadow conflicts**: another mempool tx can spend the same UTXO
+    ///    as a confirmed tx (different tx, same key image). The mempool
+    ///    invariant `no two mempool txs share a key image` prevents this
+    ///    *internally*, but it can still happen when:
+    ///      - A peer had tx_A in their mempool, mined it, propagated the
+    ///        block to us; we never saw tx_A but our mempool has tx_B
+    ///        that re-spends the same UTXO. After block_accepted, tx_B
+    ///        is permanently invalid (UTXO is now spent on chain) — every
+    ///        subsequent block template that includes tx_B will be
+    ///        rejected for "duplicate key image", stalling block
+    ///        production until tx_B is manually evicted or expires.
+    ///
+    /// Without this eviction, a single shadow-conflict tx would stall the
+    /// chain indefinitely (until the 288-block expiry timer fires, ~9.6
+    /// hours). This caused two chain stalls during 2026-05-07 testing.
+    /// Bitcoin Core (`CTxMemPool::removeForBlock`) and Monero (`tx_pool::
+    /// on_blockchain_inc`) both do the same shadow-eviction; CoinCync
+    /// missed it on the initial port.
     pub fn remove_confirmed(&mut self, txs: &[Transaction]) {
         let now = unix_now();
+
+        // Pass 1: drop the txs that just confirmed.
         for tx in txs {
             let hash = tx.hash();
             self.audit(AuditEvent::TxRemoved {
@@ -577,6 +610,49 @@ impl Mempool {
                 timestamp: now,
             });
             self.remove(&hash);
+        }
+
+        // Pass 2: evict shadow conflicts. For each key image used by the
+        // confirmed block, find any mempool tx that ALSO uses it and drop
+        // it — that mempool tx is now permanently invalid, and keeping it
+        // would poison every subsequent block template.
+        //
+        // Two-pass collect-then-remove pattern: we cannot mutate
+        // `self.transactions` while iterating it, so we first collect the
+        // hashes to evict, then call `self.remove(&hash)` on each. The
+        // self.remove() call cleans up by_fee, key_images, and
+        // current_size atomically (its existing contract).
+        let mut conflicting_hashes: Vec<Hash> = Vec::new();
+        for confirmed_tx in txs {
+            for ki in confirmed_tx.key_images() {
+                // Find any MEMPOOL tx (other than ones we just removed in
+                // pass 1, which are no longer present) using this key
+                // image. Multiple mempool txs cannot share a key image
+                // (mempool invariant enforced in add()), so this find()
+                // returns at most one match per key image.
+                let conflicting = self.transactions.iter()
+                    .find(|(_, entry)| entry.tx.key_images().iter().any(|k| k == &ki))
+                    .map(|(hash, _)| *hash);
+                if let Some(h) = conflicting {
+                    if !conflicting_hashes.contains(&h) {
+                        conflicting_hashes.push(h);
+                    }
+                }
+            }
+        }
+        for hash in &conflicting_hashes {
+            self.audit(AuditEvent::TxRemoved {
+                hash: *hash,
+                reason: EvictReason::DoubleSpend,
+                timestamp: now,
+            });
+            self.remove(hash);
+        }
+        if !conflicting_hashes.is_empty() {
+            tracing::info!(
+                "Evicted {} shadow-conflict mempool tx(s) after block apply",
+                conflicting_hashes.len()
+            );
         }
     }
 

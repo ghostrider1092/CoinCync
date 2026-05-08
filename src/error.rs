@@ -185,8 +185,26 @@ pub enum Error {
     #[error("No outputs available for spending")]
     NoOutputsAvailable,
 
-    #[error("Need {need} UTXOs covering the amount, but only have {have} (try churning or splitting first)")]
+    #[error("Wallet has only {have} eligible UTXO(s); uniform 2-in tx shape needs at least {need}. Wait for more outputs to confirm.")]
     InsufficientInputs { have: usize, need: usize },
+
+    /// No two-UTXO pair in the wallet sums to >= target+fee.
+    /// Distinct from `InsufficientInputs` (count problem) and `InsufficientBalance`
+    /// (total problem): the wallet has enough total balance and enough UTXO count,
+    /// but post-activation uniform tx shape requires exactly 2 inputs and no
+    /// pair of UTXOs together covers the requested amount.
+    #[error(
+        "Cannot find 2 UTXOs whose sum covers {target_atomic} atomic ({utxo_count} UTXOs in wallet, total {total_atomic} atomic; \
+         largest pair sums to {largest_pair_atomic} atomic). \
+         Either send no more than {max_safe_atomic} atomic per tx, or run `auto-churn` to redistribute UTXO sizes into a larger one."
+    )]
+    NoUtxoPairCovers {
+        target_atomic: u64,
+        utxo_count: usize,
+        total_atomic: u64,
+        largest_pair_atomic: u64,
+        max_safe_atomic: u64,
+    },
 
     #[error("Invalid mnemonic: {0}")]
     InvalidMnemonic(String),

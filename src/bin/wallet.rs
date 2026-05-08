@@ -124,6 +124,14 @@ enum Command {
         /// Fee multiplier (1.0 = normal, 2.0 = double fee for priority).
         #[arg(long, default_value = "1.0")]
         fee_multiplier: f64,
+        /// Drip-pair: split the amount into 2 outputs to the same recipient
+        /// (no change). Lets a first-time recipient receive 2 UTXOs in a single
+        /// uniform 2-in/2-out tx so they can immediately spend (since spending
+        /// also requires 2 UTXOs). Excess input value goes to fee — use this
+        /// only when input UTXOs are sized close to the drip amount, otherwise
+        /// you'll pay a large fee. Used by the testnet faucet's onboarding flow.
+        #[arg(long, default_value = "false")]
+        split_output: bool,
     },
 
     /// Generate M-of-N multi-sig key shares using FROST.
@@ -287,8 +295,8 @@ async fn main() {
             cmd_scan(&wallet_path, password, from, max_blocks, &cli.node).await
         }
         Command::PrivacyStats => cmd_privacy_stats(&cli.node).await,
-        Command::Send { password, to_spend, to_view, amount, fee_multiplier } => {
-            cmd_send(&wallet_path, password, to_spend, to_view, amount, fee_multiplier, &cli.node).await
+        Command::Send { password, to_spend, to_view, amount, fee_multiplier, split_output } => {
+            cmd_send(&wallet_path, password, to_spend, to_view, amount, fee_multiplier, split_output, &cli.node).await
         }
         Command::MultisigGen { threshold, total, output_dir } => {
             cmd_multisig_gen(threshold, total, &output_dir, network).await
@@ -698,6 +706,31 @@ async fn cmd_scan(
                         wallet.add_utxo(utxo);
                     }
                     found_outputs += outs.len();
+
+                    // SPENT-DETECTION (Bug #3 fix):
+                    // The scan also has to mark our UTXOs as spent when they
+                    // appear as INPUTS in confirmed txs (any wallet, not just
+                    // ours — the chain says "this UTXO is spent" regardless of
+                    // who spent it). Without this, a UTXO that's spent on chain
+                    // (e.g. by a previous wallet invocation that submitted but
+                    // didn't save state, by another wallet sharing seeds, or
+                    // simply by a tx that confirmed AFTER the wallet's local
+                    // mark_spent failed to persist) stays "available" forever
+                    // until manually pruned. The wallet then re-selects it as
+                    // an input, and the new tx is rejected at consensus time
+                    // for "duplicate key image" — exactly what stalled the
+                    // testnet at 4885 → 4887 on 2026-05-07.
+                    //
+                    // Input key_images are public (in tx.inputs[i].key_image),
+                    // so this requires no decryption — just iterate, look up
+                    // by key_image in the wallet's UTXO set, mark spent.
+                    // mark_spent_by_key_image is a no-op if the key image
+                    // isn't ours, so iterating every block tx is cheap.
+                    for tx in &block.transactions {
+                        for ki in tx.key_images() {
+                            wallet.mark_spent_by_key_image(&ki);
+                        }
+                    }
                     scanned_blocks += 1;
                     last_height = height;
                 }
@@ -732,6 +765,7 @@ async fn cmd_send(
     to_view_hex: String,
     amount: u64,
     fee_multiplier: f64,
+    split_output: bool,
     node: &str,
 ) -> Result<(), String> {
     use coincync::primitives::{Amount, PublicKey};
@@ -812,7 +846,23 @@ async fn cmd_send(
     println!("  Decoy pool:      {}", decoy_pool.len());
     println!("  Fee multiplier:  {}", fee_multiplier);
 
-    let recipients = vec![(to_spend, to_view, Amount::from_atomic(amount))];
+    // Build recipients list. Default: single recipient + change. With --split-output:
+    // two outputs to the SAME recipient (drip-pair), no change. The lib's
+    // create_privacy_transaction_with_fee detects all-same-destination
+    // recipients.len() == 2 and emits the 2-recipient-no-change shape, with
+    // any input excess flowing to fee. Splitting amount as evenly as possible
+    // (with remainder on the first half) so total == requested.
+    let recipients = if split_output {
+        let half_a = amount / 2 + (amount % 2);
+        let half_b = amount / 2;
+        println!("  Drip-pair:       split {} -> {} + {} (both to recipient)", amount, half_a, half_b);
+        vec![
+            (to_spend, to_view, Amount::from_atomic(half_a)),
+            (to_spend, to_view, Amount::from_atomic(half_b)),
+        ]
+    } else {
+        vec![(to_spend, to_view, Amount::from_atomic(amount))]
+    };
 
     let balance_snapshot = wallet.balance();
     let mut rng = rand::rngs::OsRng;
