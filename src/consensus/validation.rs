@@ -157,6 +157,41 @@ pub fn validate_block_with_checkpoint_for_network(
         }
     }
 
+    // CONSENSUS CHECKPOINT (CIP-009 Path B) — hard reorg defense.
+    //
+    // The `CONSENSUS_CHECKPOINTS` table in `constants.rs` carries
+    // hardcoded (height, block_hash) pairs that ALL honest nodes
+    // refuse to contradict. If a block at one of those heights
+    // proposes a different hash, reject the whole block here, before
+    // any expensive cryptographic verification — the attacker has
+    // already failed.
+    //
+    // Distinct from the "fast-sync" `checkpoint_height` parameter
+    // below, which controls whether to SKIP crypto for blocks under
+    // a known-good ancestor. Consensus checkpoints REJECT chains
+    // that rewrite past them; fast-sync checkpoints just speed up
+    // verification of blocks below them. Both can be active
+    // simultaneously and they don't interfere.
+    //
+    // Genesis (height 0) is exempt by construction: the table can
+    // include height 0 if desired, but a chain whose genesis differs
+    // from a recorded checkpoint would never have produced a block
+    // we'd be validating in the first place.
+    if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(block.height()) {
+        let actual_hash = block.hash();
+        if actual_hash.as_bytes() != expected_hash {
+            result.add_error(format!(
+                "consensus checkpoint mismatch at height {}: \
+                 expected {} but got {} — refusing to accept reorg \
+                 chain that contradicts a hardcoded checkpoint",
+                block.height(),
+                hex::encode(expected_hash),
+                hex::encode(actual_hash.as_bytes()),
+            ));
+            return Ok(result);
+        }
+    }
+
     // Determine if we're in fast-sync mode (below checkpoint)
     let fast_sync_requested = checkpoint_height
         .map(|cp| block.height() <= cp)
