@@ -1,13 +1,17 @@
 # Known issues — testnet 2026-05-07
 
 Issues surfaced during the smoke-testing run that built up to the public
-testnet launch on 2026-05-11. The ones marked **FIXED** shipped in
-commit `9b83772` and were end-to-end verified on the live testnet at
-heights 4880–4906. The ones marked **OPEN** are minor UX bugs that do
-not block launch but are worth tracking.
+testnet launch on 2026-05-11. Most have been fixed across two rounds of
+triage; what remains is a single planned hard-fork (ring bump, scheduled
+post-launch) and one operational tradeoff (faucet drip-pair fee
+fingerprint, testnet-only).
+
+- Round 1 — commit `9b83772` — bugs #1, #2, #3, #6, #8, ops #1, test #1.
+  End-to-end verified on the live testnet at heights 4880-4906.
+- Round 2 — commit `fd5a444` — bugs #4, #5, #7, ops #2.
 
 For the architectural reasoning on each fix, see the long-form commit
-message on `9b83772`. This file is a quick triage view.
+message on the corresponding hash. This file is a quick triage view.
 
 ---
 
@@ -111,6 +115,84 @@ entry.
 
 ---
 
+## FIXED in commit fd5a444
+
+### Bug #4 — `Insufficient balance: have 0` when balance exists but isn't mature
+
+The wallet returned `InsufficientBalance` whenever the SPENDABLE
+balance (UTXOs past `MIN_OUTPUT_AGE`) was below the target — even when
+the wallet's TOTAL balance covered the target but some UTXOs weren't
+mature yet. Users saw "have 0" and panicked.
+
+Fix: new `Error::BalancePendingMaturity { spendable_atomic,
+pending_atomic, pending_utxos, need_atomic, blocks_to_wait,
+seconds_to_wait }` variant. The send path
+(`create_privacy_transaction_with_fee`, used by both the CLI and
+`SharedWallet::create_transfer`) now checks `balance.total() >= need`
+before falling through to `InsufficientBalance`: if the wallet has it
+but it's not mature, the error surfaces that explicitly with a wait
+estimate. Bound is the youngest-pending-UTXO height plus
+`MIN_OUTPUT_AGE` — pessimistic; partial coverage might mature earlier.
+
+### Bug #5 — Wallet's auto-resume scan can miss outputs
+
+Root cause: `Wallet::save()` was writing the wallet header (which
+carries `scanned_height`) BEFORE the UTXO sidecar. A crash or kill
+between those two writes left the wallet thinking it had scanned
+through height N while the UTXOs found in those blocks were never
+persisted — they'd be silently absent on next launch.
+
+Fix part 1: reorder `save()` to write `utxos -> history -> wallet`.
+Worst-case failure mode now: `scanned_height` stays old, UTXOs found in
+the partial scan are preserved, next scan re-detects them and replaces
+them in the sidecar (idempotent, keyed by `(tx_hash, output_index)`).
+
+Fix part 2 (defensive backstop): `cmd_scan` resumes from
+`scanned_height.saturating_sub(SCAN_BACKSTOP_BLOCKS)` (= 20) when no
+explicit `--from` is provided. Re-scanning is idempotent; cost is a
+few RPC calls. Catches state divergence from any other path (parallel
+scans, hand-edited wallet files, OS crashes, FS hiccups), not just the
+save-ordering case.
+
+Verified live on the api box: auto-resume now starts at
+`scanned_height - 20` and re-detects outputs correctly.
+
+### Bug #7 — `scripts/test-tx-propagation.ps1` PowerShell parser error
+
+Root cause was non-ASCII characters (em-dashes on lines 3/143/148, a
+UTF-8 checkmark on line 90) without a UTF-8 BOM. PowerShell 5.1 reads
+BOM-less files as the system code page (Windows-1252 on Windows), so
+multi-byte UTF-8 sequences were tokenized as garbage and the parser
+reported errors at lines that looked syntactically fine — pointing
+several lines away from the real cause.
+
+Fix: ASCII-ify the script (em-dash -> "--", checkmark -> "OK"), and
+extract the ssh target host into a `$sshHost` variable so the parser
+doesn't trip on inline `$($n.IP)` interpolation inside an
+already-quoted argument. Plus a docstring note documenting the
+PS5.1-vs-UTF8 trap so the next maintainer doesn't burn an hour on it.
+
+### Bug ops #2 — Discord webhook URL leaked in `/etc/coincync/coincync.env`
+
+`coincync.env` was mode 0640 (group-readable) on the fleet boxes.
+Webhook URLs are credentials — anyone with read access to the file
+owns the channel post permission until the webhook is rotated. Not
+exploitable across the network today (file is local to root-owned
+services) but a backup or accidental share would leak it.
+
+Fix: separate file `/etc/coincync/discord.env` (mode 0600, root-only).
+The three fleet scripts that need the webhook (`coincync-selfcheck.sh`,
+`coincync-soak.sh`, `coincync-weekly-review.sh`) source `coincync.env`
+first then `discord.env`, so values in `discord.env` override.
+
+**Operator action still required:** rotate the webhook URL in the
+Discord UI (delete + recreate). The rotation is the one part of the
+operation only the operator can do; the file-permission fix is
+shipped, but the existing URL was at 0640 for a few days and should
+be treated as compromised until rotated.
+
+---
+
 ## OPEN — needs proper activation, not a one-line change
 
 ### Bump #1 — `BOOTSTRAP_MIN_RING_SIZE` should rise from 11 to 13
@@ -174,67 +256,6 @@ funds from the testnet faucet, and even then only on testnet.
 a constitutional change loosening uniform shape for service-tier
 txs (similar to coinbase carve-outs). Option (a) needs ~1 day of
 work; option (b) needs a CIP and hard fork.
-
-## OPEN — UX issues, not launch-blocking
-
-### Bug #4 — `Insufficient balance: have 0` when balance exists but isn't mature
-
-The wallet's send path reports `Insufficient balance: have 0, need X`
-when the wallet has UTXOs but they haven't reached
-`MIN_OUTPUT_AGE` (10 confirmations) yet. The user reads "have 0" and
-panics; the real situation is "balance not yet spendable, wait N
-blocks".
-
-Fix sketch (post-launch): make the `InsufficientBalance` error
-distinguish *unconfirmed/immature balance* from *no balance*. If the
-wallet has UTXOs that exist but are too young, report something like
-"Balance pending maturity: X atomic across Y UTXOs, earliest spendable
-in Z blocks" instead.
-
-### Bug #5 — Wallet's auto-resume scan can miss outputs
-
-Observed during testnet bring-up: a scan invocation without an
-explicit `--from` would advance `last_scanned_height` to the chain tip
-but report `Found outputs: 0` for ranges where outputs definitely
-existed (verified by re-scanning with `--from <earlier>` and finding
-them). Workaround: always pass `--from N` for some `N` a few blocks
-behind the actual cursor.
-
-This isn't fully understood. Possibilities:
-
-1. Scanner re-uses a stale view-secret derivation across calls.
-2. `last_scanned_height` is advanced past a block the scanner exited
-   early on.
-3. A race between `set_scanned_height` and persistence.
-
-Need to reproduce with verbose tracing and a known good test wallet,
-then track down. Workaround makes this non-blocking for launch.
-
-### Bug #7 — `scripts/test-tx-propagation.ps1` has a PowerShell parser error
-
-The script throws `Unexpected token 'root@$($n.IP)" "bash'` on lines
-that try to do `& ssh -i $KeyPath ... "root@$($n.IP)" "bash
-/tmp/probe.sh"`. The interpolation form is being parsed as multiple
-broken expressions. Either the file has a stray quote that doesn't
-show in plain reads, or PS 5.1 needs the call wrapped differently.
-
-Workaround for launch: confirm tx propagation by querying each fleet
-box's `get_info` for `mempool_size` directly, which is what the script
-does internally but cleaner. Real fix: rewrite the script using
-`Start-ThreadJob` per host instead of inline interpolation in the
-ssh command line.
-
-### Bug ops #2 — Discord webhook leaked in plaintext on the api box
-
-`/etc/coincync/coincync.env` on the api box contains the Discord
-webhook URL in plaintext at file mode 0640. If that file is ever
-backed up, snapshotted, or accidentally committed, the webhook is
-owned and an attacker can post arbitrary content to the channel. Not
-exploitable today, but a real risk worth eliminating.
-
-Fix: rotate the webhook URL, move the URL into a separately-permissioned
-file (e.g. `/etc/coincync/discord.env`, root-only mode 0600) sourced
-only by the services that actually post to Discord.
 
 ---
 
