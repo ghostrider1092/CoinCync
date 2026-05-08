@@ -1,4 +1,4 @@
-//! # Selective Disclosure Proofs for CoinCync 2.0
+//! # Selective Disclosure Proofs for CoinCync 1.0
 //!
 //! Allows wallet holders to prove specific facts about their transactions
 //! and balances WITHOUT revealing private data. Enables:
