@@ -916,7 +916,36 @@ pub fn decrypted_to_utxo(
     height: u64,
 ) -> Result<crate::wallet::balance::UTXO> {
     use crate::crypto::KeyImage as CurveKeyImage;
+    use crate::crypto::PedersenCommitment;
     use crate::primitives::{Amount, KeyImage};
+
+    // ITEM 12 (defence in depth): the wallet decrypted `amount` and
+    // `blinding_factor` for this output via ECDH with our view key. Before
+    // we trust those values and persist a UTXO worth `amount` CYNC, verify
+    // they actually commit to the on-chain output.commitment. A malicious
+    // tx-builder could send us a stealth address derivable from our keys
+    // but with an `encrypted_amount` blob that decrypts to whatever they
+    // want — if the wallet trusted the decrypted amount blindly, it would
+    // believe it owned more (or less) than the chain says, and spending
+    // such an output would fail consensus at submission time with a
+    // confusing error. We catch the mismatch HERE so the wallet never
+    // adds the bogus UTXO to its balance in the first place.
+    //
+    // Math: Pedersen commitment is C = amount * H + blinding * G. If
+    // someone forged the encrypted_amount, the recomputed C from their
+    // (lying) amount and blinding will not equal the on-chain
+    // output.commitment. Constant-time comparison via slice equality is
+    // adequate — these are public on-chain values, no timing leak.
+    let expected = PedersenCommitment::commit(decrypted.amount, &decrypted.blinding_factor);
+    let expected_bytes = expected.to_bytes();
+    if expected_bytes != decrypted.output.commitment {
+        return Err(crate::error::Error::InvalidState(format!(
+            "decrypted output {}:{} fails commitment check (amount/blinding don't \
+             match on-chain commitment); refusing to add to wallet balance",
+            hex::encode(decrypted.tx_hash.as_bytes()),
+            decrypted.output_index,
+        )));
+    }
 
     // Compute the one-time spend secret for this output.
     let stealth = StealthAddress {

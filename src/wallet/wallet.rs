@@ -333,6 +333,23 @@ impl Wallet {
             }
         }
 
+        // Restore in-flight UTXO reservations from sidecar (Item 1).
+        // `restore_reservations` skips entries already past expiry, so a
+        // wallet that's been closed for hours/days won't resurrect stale
+        // claims. `scanned_height` is the best available "current height"
+        // proxy at unlock time — wallets that refresh more aggressively
+        // can call `release_expired_reservations(true_current_height)` on
+        // open with a fresh chain query.
+        let reservations_path = self.path.with_extension("reservations");
+        if reservations_path.exists() {
+            if let Ok(bytes) = std::fs::read(&reservations_path) {
+                let json_bytes = Self::decrypt_sidecar(&bytes, password);
+                if let Ok(entries) = serde_json::from_slice::<Vec<((Hash, u8), super::balance::Reservation)>>(&json_bytes) {
+                    self.balance.restore_reservations(entries, self.scanned_height);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -467,15 +484,42 @@ impl Wallet {
         self.balance.all_utxos()
     }
 
-    /// Mark a UTXO as spent by its key image
+    /// Mark a UTXO as spent by its key image. O(1) via the
+    /// `Balance::key_image_index` reverse-lookup added in Item 8;
+    /// previously this iterated `all_utxos()` per call.
     pub fn mark_spent_by_key_image(&mut self, key_image: &KeyImage) {
-        let utxos = self.balance.all_utxos();
-        for utxo in &utxos {
-            if &utxo.key_image == key_image && !utxo.spent {
-                self.balance.mark_spent(utxo.tx_hash, utxo.output_index);
-                return;
-            }
+        if let Some((tx_hash, output_index)) = self.balance.lookup_by_key_image(key_image) {
+            self.balance.mark_spent(tx_hash, output_index);
         }
+    }
+
+    // === Reservation API (Item 1: in-flight UTXO tracking) =============
+    //
+    // Wrappers over Balance::reserve_utxos / release_*. Callers (cmd_send,
+    // cmd_scan) talk to the Wallet, not Balance directly; these wrappers
+    // keep the surface uniform.
+
+    /// Reserve UTXOs for a tx that's about to be submitted. See
+    /// `Balance::reserve_utxos` for atomicity guarantees.
+    pub fn reserve_utxos(
+        &mut self,
+        keys: &[(Hash, u8)],
+        by_tx: Hash,
+        current_height: u64,
+    ) -> std::result::Result<(), super::balance::ReservationConflict> {
+        self.balance.reserve_utxos(keys, by_tx, current_height)
+    }
+
+    /// Release every reservation held by `by_tx`. Returns the count
+    /// released. Use this when a submission is rejected by mempool.
+    pub fn release_reservations_by_tx(&mut self, by_tx: Hash) -> usize {
+        self.balance.release_reservations_by_tx(by_tx)
+    }
+
+    /// Sweep expired reservations. Cheap to call periodically (during
+    /// scan, every wallet open, etc.).
+    pub fn release_expired_reservations(&mut self, current_height: u64) -> usize {
+        self.balance.release_expired_reservations(current_height)
     }
 
     // === Transaction History Methods ===
@@ -651,6 +695,38 @@ impl Wallet {
                 .map_err(|e| Error::InvalidState(format!("failed to rename UTXO file: {}", e)))?;
         } else if utxo_path.exists() {
             let _ = std::fs::remove_file(&utxo_path);
+        }
+
+        // === Step 1.5: reservations sidecar (Item 1) ===
+        // Persisted alongside UTXOs because a reservation is meaningless
+        // without the UTXO it claims. Same atomic-rename pattern.
+        // Empty reservations -> remove the sidecar to avoid stale residue
+        // (matches utxos behavior on the empty path).
+        let reservations_path = self.path.with_extension("reservations");
+        let reservations = self.balance.all_reservations();
+        if !reservations.is_empty() {
+            let mut json = serde_json::to_vec(&reservations)
+                .map_err(|e| Error::InvalidState(format!("failed to serialize reservations: {}", e)))?;
+            let bytes_to_write = if let Some(pw) = password {
+                let mut salt = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut salt);
+                let mut key = super::derive_key(pw, &salt);
+                let mut nonce = [0u8; 24];
+                rand::rngs::OsRng.fill_bytes(&mut nonce);
+                let encrypted = super::encrypt(&json, &key, &nonce)?;
+                key.zeroize();
+                json.zeroize();
+                [salt.as_slice(), nonce.as_slice(), encrypted.as_slice()].concat()
+            } else {
+                json
+            };
+            let reservations_tmp_path = self.path.with_extension("reservations.tmp");
+            std::fs::write(&reservations_tmp_path, &bytes_to_write)
+                .map_err(|e| Error::InvalidState(format!("failed to write reservations temp file: {}", e)))?;
+            std::fs::rename(&reservations_tmp_path, &reservations_path)
+                .map_err(|e| Error::InvalidState(format!("failed to rename reservations file: {}", e)))?;
+        } else if reservations_path.exists() {
+            let _ = std::fs::remove_file(&reservations_path);
         }
 
         // === Step 2: history sidecar ===

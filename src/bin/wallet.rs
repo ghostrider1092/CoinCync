@@ -756,6 +756,20 @@ async fn cmd_scan(
 
     // Update scanned_height and persist
     wallet.set_scanned_height(last_height);
+
+    // Sweep abandoned reservations (Item 1: in-flight UTXO tracking).
+    // Any reservation older than RESERVATION_EXPIRY_BLOCKS at the current
+    // scan tip has either:
+    //   (a) been consumed by an actual chain spend and was already cleared
+    //       by mark_spent during the input-key_image pass above, or
+    //   (b) been abandoned (the tx fell out of mempool, never confirmed).
+    // Either way the entry is no longer useful — sweeping keeps the
+    // sidecar small and avoids pinning UTXOs that should be selectable.
+    let released = wallet.release_expired_reservations(last_height);
+    if released > 0 {
+        println!("  Released {} abandoned reservation(s).", released);
+    }
+
     wallet
         .save(Some(&password))
         .map_err(|e| format!("save wallet: {}", e))?;
@@ -903,6 +917,54 @@ async fn cmd_send(
     println!("  Size:    {} bytes", tx_bytes.len());
     println!("  Fee:     {} atomic", tx.fee.as_atomic());
     println!();
+
+    // RESERVE INPUTS (Item 1: in-flight UTXO tracking).
+    //
+    // Before sending bytes over the wire, mark the inputs of this tx as
+    // reserved by `tx_hash` in the wallet's local state and persist that
+    // mark. Two reasons to do it BEFORE the RPC call rather than after:
+    //
+    //   1. If the network call hangs / our process is killed mid-submit,
+    //      the tx may still have reached the mempool. On the next wallet
+    //      invocation we'd re-select the same UTXOs (the reservation
+    //      wasn't persisted yet) and produce a conflicting tx. Reserving
+    //      first makes the second invocation see them as in-flight.
+    //
+    //   2. The cost of reserving and then NOT submitting (because submit
+    //      fails) is one explicit `release_reservations_by_tx` call, which
+    //      we do in the error branch below. Symmetric.
+    //
+    // We map tx.key_images() back to (tx_hash, output_index) by walking
+    // the wallet's UTXO set. This is O(inputs * utxos) but inputs is
+    // small (2 in uniform) and utxo count is bounded — Item 8 will index
+    // it later if needed.
+    let mut input_keys: Vec<(coincync::primitives::Hash, u8)> = Vec::with_capacity(tx.inputs.len());
+    for ki in tx.key_images() {
+        for utxo in &wallet.all_utxos() {
+            if utxo.key_image == ki && !utxo.spent {
+                input_keys.push((utxo.tx_hash, utxo.output_index));
+                break;
+            }
+        }
+    }
+    if input_keys.len() != tx.inputs.len() {
+        return Err(format!(
+            "internal: failed to map all tx inputs back to UTXO keys (mapped {}/{}). \
+             Refusing to submit without an in-flight reservation; rescan and retry.",
+            input_keys.len(), tx.inputs.len()
+        ));
+    }
+    if let Err(conflict) = wallet.reserve_utxos(&input_keys, tx_hash, current_height) {
+        return Err(format!("reservation conflict: {} (try `wallet scan` and retry)", conflict));
+    }
+    // Persist reservation before broadcasting. If save() fails we abort
+    // BEFORE the network call so the wallet's view stays consistent.
+    if let Err(e) = wallet.save(Some(&password)) {
+        // Roll back the in-memory reservation since it never persisted.
+        wallet.release_reservations_by_tx(tx_hash);
+        return Err(format!("save reservation: {}", e));
+    }
+
     println!("Submitting to {}...", node);
 
     match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
@@ -913,17 +975,38 @@ async fn cmd_send(
                 .unwrap_or(false);
             if accepted {
                 println!("  OK: tx accepted by mempool.");
-                // Mark selected UTXOs as spent in wallet so we don't double-spend
+                // Mark selected UTXOs as spent in wallet so we don't double-spend.
+                // mark_spent also clears the in-flight reservation for each UTXO
+                // (see Balance::mark_spent), so the reservation count drops to 0
+                // without an explicit release call.
                 for ki in tx.key_images() {
                     wallet.mark_spent_by_key_image(&ki);
                 }
                 wallet.save(Some(&password)).map_err(|e| format!("save wallet: {}", e))?;
                 Ok(())
             } else {
-                Err(format!("rpc rejected: {}", result))
+                // Mempool said no. Release the reservation so a retry (with
+                // different decoys / fee) can re-select these UTXOs.
+                let released = wallet.release_reservations_by_tx(tx_hash);
+                let _ = wallet.save(Some(&password));
+                Err(format!("rpc rejected: {} (released {} reservation(s))", result, released))
             }
         }
-        Err(e) => Err(format!("rpc send_raw_transaction: {}", e)),
+        Err(e) => {
+            // Network error or other transport failure. We do NOT release
+            // the reservation here: the tx might have actually reached
+            // some peer before the connection broke, in which case
+            // releasing locally would let us double-spend. The reservation
+            // will auto-expire after RESERVATION_EXPIRY_BLOCKS if the tx
+            // truly never landed; until then the user can either run
+            // `wallet scan` (which will mark_spent if the tx confirmed) or
+            // wait. This is the conservative choice and matches Bitcoin
+            // Core's `walletbroadcast=false` behavior.
+            Err(format!(
+                "rpc send_raw_transaction: {} (kept reservation; auto-expires after {} blocks if tx truly didn't land)",
+                e, coincync::wallet::balance::RESERVATION_EXPIRY_BLOCKS
+            ))
+        }
     }
 }
 

@@ -111,6 +111,33 @@ entry.
 
 ---
 
+## OPEN — needs proper activation, not a one-line change
+
+### Bump #1 — `BOOTSTRAP_MIN_RING_SIZE` should rise from 11 to 13
+
+The 2026-05-07 senior-review pass flagged ring=11 during bootstrap as
+a measurable privacy reduction (1/11 ≈ 9% per-input traceability vs
+1/16 = 6.25% post-bootstrap). The chain has had >100 unique outputs
+since block ~30; ring=13 is comfortable from then on. Marketing
+language and the `verify-privacy.ps1` heuristic both expect this.
+
+**Why it isn't a one-line change:** `BOOTSTRAP_MIN_RING_SIZE` is
+referenced in `src/consensus/validation.rs:1582` as a CONSENSUS RULE,
+not a wallet preference. Raising the constant today would invalidate
+every existing testnet tx with ring=11, fork the chain, and break
+sync for every connected node. Doing it correctly requires a proper
+activation:
+
+- `BOOTSTRAP_MIN_RING_SIZE_V2: usize = 13`
+- `RING_BUMP_ACTIVATION_HEIGHT: u64 = <future_height>`
+- `validate_transaction` checks ring >= V1 before activation, ring >= V2 at and after.
+- Wallets after activation build with ring >= 13.
+- Pre-activation txs remain valid forever.
+
+This is a coordinated upgrade. Schedule it for a planned hard fork
+(post-launch — testnet activation height ~10000, mainnet activation
+height set at mainnet launch). Don't ship as a hotfix.
+
 ## OPEN — UX issues, not launch-blocking
 
 ### Bug #4 — `Insufficient balance: have 0` when balance exists but isn't mature

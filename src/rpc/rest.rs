@@ -272,11 +272,51 @@ async fn rpc_proxy(
             tracing::error!("REST /rpc backend error: {}", e);
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Service temporarily unavailable"})))
         })?;
-    let json: Value = resp.json().await
+    let mut json: Value = resp.json().await
         .map_err(|e| {
             tracing::error!("REST /rpc parse error: {}", e);
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Service temporarily unavailable"})))
         })?;
+
+    // ITEM 5 (privacy): Strip anonymity-set / network-state stats from
+    // get_info responses on the public proxy. These are useful for the
+    // node operator on the local 127.0.0.1 endpoint, but exposing them
+    // through the public REST gives chain analysts a cheap correlator
+    // (e.g., "this tx with ring 11 was built when available_outputs was
+    // exactly N") that they would otherwise have to compute themselves.
+    // Local node RPC keeps the full payload; only the externally-fronted
+    // public proxy redacts.
+    if method == "get_info" {
+        if let Some(result) = json.get_mut("result").and_then(Value::as_object_mut) {
+            for redacted in &[
+                "available_outputs",     // anonymity-set size; correlator for ring sizes
+                "anonymity_set",         // alias of the same metric
+                "effective_ring_size",   // tells analyst what ring the wallet is actually using
+                "mempool_size",          // useful for spam fingerprinting
+                "tx_pool_size",          // alias
+                "peer_count",            // network-state snapshot, not user-relevant
+                "process_count",         // operator-only stat
+                "process_count_available",
+                "build_commit",          // version fingerprinting
+                "build_dirty",
+                "build_profile",
+                "metadata_minimized",
+                "rpc_auth_enabled",      // tells whether the node has auth at all
+                "stratum_native_tls_enabled",
+                "stratum_public_bind_ack",
+                "stratum_public_bind_requested",
+                "stratum_tls_proxy_ack",
+                "stratum_transport_hardened",
+                "has_zombies",
+                "health_score",
+                "clock_available",
+                "total_difficulty",
+            ] {
+                result.remove(*redacted);
+            }
+        }
+    }
+
     Ok(Json(json))
 }
 

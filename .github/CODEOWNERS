@@ -1,0 +1,60 @@
+# CoinCync — code ownership for review-gated paths.
+#
+# Right now this is a solo-dev project, so every line below resolves to
+# the same person. The point isn't to enforce a workflow today — it's to
+# put the policy in place BEFORE contributors arrive, so an inflation /
+# privacy / consensus bug never lands without a second pair of eyes
+# review-gated by code-owner association.
+#
+# When git.coincync.network goes live, this file becomes the single
+# source of truth Forgejo's branch protection reads.
+
+# Default owner (catches everything not matched below).
+*                                   @ghostrider1092
+
+# ── Consensus paths: any change here can fork the chain ─────────────
+# Block validation, tx validation, supply emission curve, reorg policy,
+# difficulty adjustment, the constants file. A bug in any of these is
+# usually unrecoverable without coordinated rollback.
+/src/consensus/                     @ghostrider1092
+/src/transaction/validator.rs       @ghostrider1092
+/src/chain.rs                       @ghostrider1092
+/src/emission.rs                    @ghostrider1092
+/src/constants.rs                   @ghostrider1092
+
+# ── Cryptographic primitives: any change here can break privacy ─────
+# CLSAG, Bulletproofs+, stealth-address derivation, key-image
+# computation, Pedersen commitments. Bugs here are silent: a tx looks
+# valid but leaks linkage to chain analysts, or worse, allows
+# inflation via crafted range proofs.
+/src/crypto/                        @ghostrider1092
+
+# ── Wallet send + scan: any change here can lose user funds ─────────
+# Tx-build path: ring selection, decoy logic, fee math, change
+# computation, in-flight reservation tracking. Scan path: spent
+# detection, output decryption, balance updates. Bugs here can
+# produce silent double-spends or stuck UTXOs.
+/src/wallet/send.rs                 @ghostrider1092
+/src/wallet/scanner.rs              @ghostrider1092
+/src/wallet/balance.rs              @ghostrider1092
+/src/bin/wallet.rs                  @ghostrider1092
+
+# ── Mempool + network admit paths: chain-stall vectors ──────────────
+# A bug in tx-admit that lets invalid txs persist will stall block
+# production (the 2026-05-07 "shadow conflict" stalls are the
+# canonical example).
+/src/mempool.rs                     @ghostrider1092
+/src/network/                       @ghostrider1092
+
+# ── RPC surface: anything user-facing or attack-surface ─────────────
+# REST proxy, JSON-RPC server, allowlist gating. Mistakes here can
+# expose write methods publicly or leak privacy-relevant stats
+# (Item 5 in the 2026-05-07 review).
+/src/rpc/                           @ghostrider1092
+
+# ── Constitution + threat model + KNOWN_ISSUES ──────────────────────
+# These are the contract with users. Edits should be deliberate.
+/CONSTITUTION.md                    @ghostrider1092
+/docs/THREAT_MODEL.md               @ghostrider1092
+/docs/launch/KNOWN_ISSUES.md        @ghostrider1092
+/critical_files.lock                @ghostrider1092

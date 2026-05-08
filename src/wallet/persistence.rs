@@ -412,10 +412,10 @@ pub fn change_password(
     // Re-save with new password (generates fresh salt + nonce)
     save_wallet(path, &data, Some(new_password))?;
 
-    // SECURITY: Re-encrypt sidecar files (.utxos, .history) with the new password.
+    // SECURITY: Re-encrypt sidecar files (.utxos, .history, .reservations) with the new password.
     // Without this, sidecars remain encrypted with the old password and become
     // inaccessible after password change, causing data loss.
-    let sidecar_extensions = ["utxos", "history"];
+    let sidecar_extensions = ["utxos", "history", "reservations"];
     for ext in &sidecar_extensions {
         let sidecar_path = path.with_extension(ext);
         if sidecar_path.exists() {
