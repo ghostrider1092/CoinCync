@@ -26,6 +26,7 @@
 //!   at 10 000 to prevent unbounded growth under DoS.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
@@ -41,8 +42,10 @@ use super::node::MAX_CONNECTIONS_PER_IP;
 /// HARDENING (Layer 4): Maximum outbound connections per /16 subnet.
 /// Prevents eclipse attacks where an attacker fills all outbound slots
 /// from the same network range. Bitcoin Core uses 1; we use 2 to allow
-/// one backup peer in the same datacenter.
-pub const MAX_OUTBOUND_PER_SUBNET: usize = 4;
+/// one backup peer in the same datacenter (the CoinCync fleet has
+/// 207.148.6.50 and 207.148.111.76 in the same /16, so a hard cap of
+/// 1 would force one of them out of the outbound set).
+pub const MAX_OUTBOUND_PER_SUBNET: usize = 2;
 
 #[allow(dead_code)]
 pub struct ConnectionTracker {
@@ -85,27 +88,14 @@ impl ConnectionTracker {
         }
     }
 
-    /// HARDENING (Layer 4): Check if we can add an outbound connection
-    /// to this subnet without exceeding diversity limits.
-    ///
-    /// Non-atomic — for admission decisions use `try_track_outbound_subnet`
-    /// instead. This entry point is kept for read-only inspection (logs,
-    /// metrics, "would this be allowed" UI).
-    pub fn can_add_outbound_subnet(&self, addr: &SocketAddr) -> bool {
-        let subnet = Self::subnet_key(&addr.ip());
-        let count = self.outbound_per_subnet.get(&subnet).map(|c| *c).unwrap_or(0);
-        count < MAX_OUTBOUND_PER_SUBNET
-    }
-
     /// HARDENING (Layer 4): Atomically check-and-increment the per-/16
     /// outbound counter. Returns `true` if the connection was admitted
     /// (and the counter incremented), `false` if the subnet cap was hit.
     ///
-    /// This is the only admission path that's safe against two concurrent
-    /// dialers racing each other — a plain `can_add_outbound_subnet` +
-    /// `track_outbound_subnet` pair would let both pass the check and
-    /// then both increment, exceeding the limit. Mirrors the per-IP
-    /// pattern in `try_track_connection`.
+    /// Production code should use `try_track_outbound_subnet_owned`
+    /// instead — it returns an RAII Drop-guard that decrements
+    /// automatically. This bare boolean variant is kept for the test
+    /// suite, where direct counter inspection is the test predicate.
     pub fn try_track_outbound_subnet(&self, addr: &SocketAddr) -> bool {
         let subnet = Self::subnet_key(&addr.ip());
         let mut accepted = false;
@@ -124,19 +114,12 @@ impl ConnectionTracker {
         accepted
     }
 
-    /// HARDENING (Layer 4): Track an outbound connection's subnet
-    /// (unconditional increment). Prefer `try_track_outbound_subnet`
-    /// for admission paths; this exists for callers that have already
-    /// committed to the connection by other means.
-    pub fn track_outbound_subnet(&self, addr: &SocketAddr) {
-        let subnet = Self::subnet_key(&addr.ip());
-        self.outbound_per_subnet
-            .entry(subnet)
-            .and_modify(|c| *c += 1)
-            .or_insert(1);
-    }
-
     /// HARDENING (Layer 4): Untrack an outbound connection's subnet.
+    ///
+    /// Prefer `try_track_outbound_subnet_owned` over manual `try_track`
+    /// + `untrack` pairing — the owned variant returns a Drop-guard
+    /// that decrements automatically on every exit path including
+    /// panics, making slot leaks structurally impossible.
     pub fn untrack_outbound_subnet(&self, addr: &SocketAddr) {
         let subnet = Self::subnet_key(&addr.ip());
         if let Some(mut entry) = self.outbound_per_subnet.get_mut(&subnet) {
@@ -146,6 +129,52 @@ impl ConnectionTracker {
                 self.outbound_per_subnet.remove(&subnet);
             }
         }
+    }
+
+    /// HARDENING (Layer 4): Atomic admission with RAII Drop-guard semantics.
+    ///
+    /// Returns `Some(OutboundSubnetSlot)` if the per-/16 counter was
+    /// successfully incremented, `None` if the cap was hit. The returned
+    /// slot decrements the counter on Drop — including panics, early
+    /// returns, and tokio task termination — so an outbound spawn that
+    /// holds the slot can never leak it.
+    ///
+    /// This is the **preferred** admission path for outbound dialers.
+    /// The bare `try_track_outbound_subnet` + manual
+    /// `untrack_outbound_subnet` pairing is kept for the test suite
+    /// and for callers that intentionally want fire-and-forget tracking.
+    ///
+    /// In production, the connector loop holds the slot for the lifetime
+    /// of the spawned tokio task; when handle_connection returns (cleanly
+    /// or with error) the spawn body ends, the slot drops, the counter
+    /// decrements. That eliminates the entire class of "forgot to call
+    /// untrack on this error path" bugs.
+    pub fn try_track_outbound_subnet_owned(
+        self: &Arc<Self>,
+        addr: &SocketAddr,
+    ) -> Option<OutboundSubnetSlot> {
+        if self.try_track_outbound_subnet(addr) {
+            Some(OutboundSubnetSlot {
+                tracker: self.clone(),
+                addr: *addr,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Snapshot of the per-/16 outbound counter map. Used by the periodic
+    /// observability log so operators can see the eclipse-defense state
+    /// without needing a debugger. Cheap — DashMap iteration is O(n) over
+    /// at most a few dozen entries in practice.
+    pub fn outbound_subnet_snapshot(&self) -> Vec<(u16, usize)> {
+        let mut snap: Vec<(u16, usize)> = self
+            .outbound_per_subnet
+            .iter()
+            .map(|e| (*e.key(), *e.value()))
+            .collect();
+        snap.sort_by_key(|(k, _)| *k);
+        snap
     }
 
     /// Check if we can accept a connection from this IP without
@@ -290,6 +319,53 @@ impl ConnectionTracker {
     }
 }
 
+/// RAII guard that holds an outbound /16 subnet slot in
+/// `ConnectionTracker::outbound_per_subnet`. Created by
+/// `ConnectionTracker::try_track_outbound_subnet_owned`. On Drop the
+/// slot is released — the per-/16 counter decrements automatically,
+/// regardless of whether the holder exits cleanly, panics, or is
+/// cancelled (in tokio task termination, the captured slot is dropped
+/// during stack unwinding).
+///
+/// **The slot must outlive the connection it represents.** Move the
+/// slot into the `tokio::spawn` body that owns the connection lifetime
+/// (handle_connection); when that body exits — for any reason — the
+/// slot drops and the counter decrements.
+///
+/// `mem::forget(slot)` will permanently leak the counter — the slot
+/// must drop normally for the decrement to fire. This is by design:
+/// matches std's RAII guard semantics (e.g. `MutexGuard`).
+pub struct OutboundSubnetSlot {
+    tracker: Arc<ConnectionTracker>,
+    addr: SocketAddr,
+}
+
+impl std::fmt::Debug for OutboundSubnetSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Don't try to Debug the inner Arc<ConnectionTracker> — it
+        // would expose DashMap state via auto-derive. Just the addr
+        // is enough for log-line context.
+        f.debug_struct("OutboundSubnetSlot")
+            .field("addr", &self.addr)
+            .finish()
+    }
+}
+
+impl Drop for OutboundSubnetSlot {
+    fn drop(&mut self) {
+        self.tracker.untrack_outbound_subnet(&self.addr);
+        // Trace-level so we get a per-Drop event in dense debugging
+        // sessions but it doesn't pollute production logs at default
+        // levels. Pair this with the maintenance-loop snapshot log to
+        // observe acquire/release symmetry over time.
+        tracing::trace!(
+            target: "eclipse-defense",
+            "OutboundSubnetSlot dropped: addr={}",
+            self.addr
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +502,137 @@ mod tests {
             admitted, MAX_OUTBOUND_PER_SUBNET,
             "exactly MAX_OUTBOUND_PER_SUBNET admissions should win the race"
         );
+    }
+
+    // ── OutboundSubnetSlot RAII semantics ─────────────────────────────
+
+    #[test]
+    fn slot_increments_on_construct_and_decrements_on_drop() {
+        let t = Arc::new(ConnectionTracker::new(1024));
+        let a = addr_in(10, 0, 1);
+        {
+            let _slot = t.try_track_outbound_subnet_owned(&a)
+                .expect("under cap, must admit");
+            // Inside scope: counter incremented.
+            assert_eq!(t.outbound_subnet_snapshot(), vec![(0x0a00, 1)]);
+        }
+        // After drop: counter back to zero, entry removed.
+        assert!(t.outbound_subnet_snapshot().is_empty());
+    }
+
+    #[test]
+    fn slot_returns_none_when_cap_hit_and_does_not_increment() {
+        let t = Arc::new(ConnectionTracker::new(1024));
+        let mut held = Vec::new();
+        for i in 0..MAX_OUTBOUND_PER_SUBNET {
+            let s = t.try_track_outbound_subnet_owned(&addr_in(10, 0, i as u8))
+                .expect("under cap");
+            held.push(s);
+        }
+        // Cap hit — next attempt returns None.
+        assert!(t.try_track_outbound_subnet_owned(&addr_in(10, 0, 99)).is_none());
+        // And the failed attempt did NOT increment.
+        let snap = t.outbound_subnet_snapshot();
+        assert_eq!(snap, vec![(0x0a00, MAX_OUTBOUND_PER_SUBNET)]);
+        // Drop everything: counter goes back to 0.
+        drop(held);
+        assert!(t.outbound_subnet_snapshot().is_empty());
+    }
+
+    #[test]
+    fn slot_decrements_through_panic_unwind() {
+        let t = Arc::new(ConnectionTracker::new(1024));
+        let a = addr_in(10, 0, 1);
+        let t2 = t.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = t2.try_track_outbound_subnet_owned(&a)
+                .expect("under cap");
+            // counter is 1 at this point
+            panic!("simulated task crash");
+        }));
+        assert!(result.is_err(), "panic should propagate");
+        // Despite panic, slot's Drop ran during unwind → counter back to 0.
+        assert!(t.outbound_subnet_snapshot().is_empty());
+    }
+
+    #[test]
+    fn slot_mem_forget_leaks_counter_intentionally() {
+        // Documented behavior: mem::forget skips Drop, so the counter
+        // stays incremented forever. Matches std MutexGuard semantics.
+        // Test exists to pin this contract — if a future change moves
+        // the decrement out of Drop, this test will silently start
+        // passing for the wrong reason, which is why it asserts the
+        // exact expected leak.
+        let t = Arc::new(ConnectionTracker::new(1024));
+        let a = addr_in(10, 0, 1);
+        let slot = t.try_track_outbound_subnet_owned(&a).expect("under cap");
+        std::mem::forget(slot);
+        assert_eq!(t.outbound_subnet_snapshot(), vec![(0x0a00, 1)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slot_drops_on_tokio_task_cancel() {
+        // The most important production scenario: connector spawns a
+        // task that holds an outbound slot; later that task is
+        // cancelled (graceful shutdown, peer ban during handshake,
+        // tokio runtime drop). The slot must Drop during cancellation
+        // unwind, decrementing the counter. If this regressed, the
+        // refactor's whole "no manual untrack ever" guarantee falls
+        // apart.
+        let t = Arc::new(ConnectionTracker::new(1024));
+        let t_for_task = t.clone();
+        let handle = tokio::spawn(async move {
+            let _slot = t_for_task
+                .try_track_outbound_subnet_owned(&addr_in(10, 0, 1))
+                .expect("under cap");
+            // Hold the slot effectively forever so we can cancel.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        // Yield until the spawn has had a chance to acquire the slot.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if !t.outbound_subnet_snapshot().is_empty() { break; }
+        }
+        assert_eq!(
+            t.outbound_subnet_snapshot(),
+            vec![(0x0a00, 1)],
+            "slot should be visible while task holds it"
+        );
+        handle.abort();
+        let _ = handle.await; // drains the JoinError
+        // Drop runs during unwind; give the runtime a moment to finalize.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if t.outbound_subnet_snapshot().is_empty() { break; }
+        }
+        assert!(
+            t.outbound_subnet_snapshot().is_empty(),
+            "slot must drop on tokio task abort"
+        );
+    }
+
+    #[test]
+    fn slot_stacking_for_same_subnet_increments_each() {
+        // Cap-agnostic: stack exactly MAX, verify count, drop middle,
+        // verify count drops by 1, then drain — exercises both stacking
+        // and out-of-order drop without depending on the cap value.
+        let t = Arc::new(ConnectionTracker::new(1024));
+        let mut slots: Vec<OutboundSubnetSlot> = (0..MAX_OUTBOUND_PER_SUBNET as u8)
+            .map(|i| t.try_track_outbound_subnet_owned(&addr_in(10, 0, i)).unwrap())
+            .collect();
+        assert_eq!(
+            t.outbound_subnet_snapshot(),
+            vec![(0x0a00, MAX_OUTBOUND_PER_SUBNET)]
+        );
+        // Drop a middle slot, verify count drops by 1.
+        if slots.len() >= 2 {
+            slots.remove(slots.len() / 2);
+            assert_eq!(
+                t.outbound_subnet_snapshot(),
+                vec![(0x0a00, MAX_OUTBOUND_PER_SUBNET - 1)]
+            );
+        }
+        drop(slots);
+        assert!(t.outbound_subnet_snapshot().is_empty());
     }
 }

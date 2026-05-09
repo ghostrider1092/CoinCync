@@ -625,6 +625,7 @@ impl P2PNode {
                                 stream, peer_id, false, magic, our_nonce, height, tip,
                                 peers, senders, event_tx, msg_tx,
                                 conn_identity, conn_encryption,
+                                None, // inbound — no per-/16 slot to track
                             ).await;
 
                             // Untrack connection when done
@@ -656,6 +657,7 @@ impl P2PNode {
         let connector_identity = identity.clone();
         let connector_encryption = encryption_config.clone();
         let connector_listen_port = self.config.listen_addr.port();
+        let connector_tracker = self.conn_tracker.clone();
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(10));
@@ -699,45 +701,44 @@ impl P2PNode {
                         total_peers, outbound_count, addr_count);
                 }
 
-                if outbound_count >= max_outbound {
-                    // SECURITY: Eclipse attack protection — verify outbound connections
-                    // span at least 2 different /16 subnets. If all outbound peers are
-                    // in the same /16, an attacker controlling that subnet can isolate us.
-                    // H13: Check both IPv4 /16 and IPv6 /48 prefix diversity.
-                    // IPv4 uses the first 2 octets (/16), IPv6 uses the first 6 bytes (/48).
-                    // An attacker controlling a single /16 or /48 could eclipse us.
-                    let outbound_subnets: std::collections::HashSet<[u8; 2]> = connector_peers.iter()
-                        .filter(|p| p.outbound)
-                        .filter_map(|p| match p.addr.ip() {
-                            std::net::IpAddr::V4(ip) => {
-                                let octets = ip.octets();
-                                Some([octets[0], octets[1]])
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let outbound_v6_prefixes: std::collections::HashSet<[u8; 6]> = connector_peers.iter()
-                        .filter(|p| p.outbound)
-                        .filter_map(|p| match p.addr.ip() {
-                            std::net::IpAddr::V6(ip) => {
-                                let octets = ip.octets();
-                                let mut prefix = [0u8; 6];
-                                prefix.copy_from_slice(&octets[..6]);
-                                Some(prefix)
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let total_subnet_diversity = outbound_subnets.len() + outbound_v6_prefixes.len();
-                    if total_subnet_diversity < 2 && outbound_count >= 2 {
-                        debug!(
-                            "Eclipse protection: only {} IPv4 /16 + {} IPv6 /48 subnets among {} outbound peers, seeking diversity",
-                            outbound_subnets.len(), outbound_v6_prefixes.len(), outbound_count
+                // Eclipse-defense observability: every maintenance tick log
+                // the per-/16 outbound counter map at debug level. Drops to
+                // a one-line summary when the map is empty so log volume
+                // stays low. Format: "[subnet=count, ...] (sum=N)" — sum
+                // should equal `outbound_count` if track/untrack symmetry
+                // is intact; a drift indicates a leaked slot.
+                let snap = connector_tracker.outbound_subnet_snapshot();
+                let snap_sum: usize = snap.iter().map(|(_, c)| *c).sum();
+                if snap.is_empty() {
+                    debug!("eclipse-defense: outbound_per_subnet empty (outbound_count={})",
+                        outbound_count);
+                } else {
+                    let pretty: Vec<String> = snap.iter().map(|(k, v)| {
+                        let hi = (*k >> 8) as u8;
+                        let lo = (*k & 0xff) as u8;
+                        format!("{}.{}/16={}", hi, lo, v)
+                    }).collect();
+                    if snap_sum != outbound_count {
+                        warn!(
+                            "eclipse-defense: drift detected — subnet_sum={} but outbound_count={} :: {}",
+                            snap_sum, outbound_count, pretty.join(", ")
                         );
-                        // Don't skip — allow one more connection attempt to diversify
                     } else {
-                        continue;
+                        debug!("eclipse-defense: subnets={} sum={} :: {}",
+                            snap.len(), snap_sum, pretty.join(", "));
                     }
+                }
+
+                // Enforce the global outbound peer ceiling.
+                // Eclipse protection (per-/16 diversity) is now handled
+                // atomically by ConnectionTracker::try_track_outbound_subnet_owned
+                // below; the ad-hoc HashSet diversity check that used to
+                // live here was deleted in favor of the hard-cap
+                // primitive — single source of truth, no TOCTOU window,
+                // and a Drop-guard that releases the slot on every exit
+                // path.
+                if outbound_count >= max_outbound {
+                    continue;
                 }
 
                 // Get next address to try
@@ -781,31 +782,33 @@ impl P2PNode {
                         }
                     }
 
-                    // SECURITY: Eclipse protection — prefer addresses from different
-                    // /16 subnets than our existing outbound connections.
-                    if outbound_count >= max_outbound {
-                        let outbound_subnets: std::collections::HashSet<[u8; 2]> = connector_peers.iter()
-                            .filter(|p| p.outbound)
-                            .filter_map(|p| match p.addr.ip() {
-                                std::net::IpAddr::V4(ip) => {
-                                    let octets = ip.octets();
-                                    Some([octets[0], octets[1]])
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        if let std::net::IpAddr::V4(ip) = addr.ip() {
-                            let subnet = [ip.octets()[0], ip.octets()[1]];
-                            if outbound_subnets.contains(&subnet) {
-                                debug!("Eclipse protection: skipping {} (same /16 subnet)", addr);
-                                continue;
-                            }
-                        }
-                    }
-
                     // Check if peer is banned by scorer
                     if connector_scorer.read().await.is_banned(&addr) {
                         debug!("Skipping banned peer {}", addr);
+                        continue;
+                    }
+
+                    // Skip if we already have an active peer at this exact
+                    // address. The connector previously dialed the same
+                    // address whenever MIN_RECONNECT_DELAY had elapsed,
+                    // even when the prior connection was still alive —
+                    // surfaced as eclipse-defense drift "sum=2 but
+                    // outbound_count=1" in 2026-05-09 sandbox testing.
+                    //
+                    // We ALSO mark the address as `tried` so get_next
+                    // rotates to a different address on the next tick.
+                    // Without this, mark_success on a freshly-connected
+                    // peer keeps that address at the top of the
+                    // last_seen-sorted list, get_next returns it again,
+                    // we skip it again, and the connector loops forever
+                    // on a single peer (regression caught when cap=1
+                    // testing showed "0 cap fires" instead of one — the
+                    // node never tried the 2nd 207.148/16 address). The
+                    // tried set self-clears once all addresses have
+                    // been tried, so this isn't permanent exclusion.
+                    if connector_peers.iter().any(|p| p.addr == addr) {
+                        trace!("Skipping {} — already have an active peer at this address", addr);
+                        connector_addresses.write().await.mark_tried(addr);
                         continue;
                     }
 
@@ -830,6 +833,38 @@ impl P2PNode {
                             }
                         }
                     }
+
+                    // HARDENING (Layer 4): Atomic per-/16 outbound cap with
+                    // RAII Drop-guard semantics. The owned slot is moved
+                    // into the spawned task; whenever the task exits — clean
+                    // return, error path, panic, tokio cancellation — the
+                    // slot drops and the counter decrements. There is no
+                    // explicit untrack call to forget. Hard cap: an attacker
+                    // controlling a /16 cannot saturate beyond
+                    // MAX_OUTBOUND_PER_SUBNET regardless of address-book
+                    // ordering or race timing.
+                    let outbound_slot = match connector_tracker
+                        .try_track_outbound_subnet_owned(&addr)
+                    {
+                        Some(slot) => Arc::new(slot),
+                        None => {
+                            debug!(
+                                "Eclipse cap: /16 of {} is at MAX_OUTBOUND_PER_SUBNET, skipping",
+                                addr
+                            );
+                            // Mark as tried so the connector rotates to a
+                            // different /16 next tick, instead of burning
+                            // ticks repeatedly hitting the cap on the same
+                            // address. Symmetric with the dup-dial skip
+                            // above. The tried set self-clears once all
+                            // addresses are exhausted, so this isn't a
+                            // permanent block — if the cap clears later
+                            // (peer drops), the address becomes eligible
+                            // again on the next round.
+                            connector_addresses.write().await.mark_tried(addr);
+                            continue;
+                        }
+                    };
 
                     debug!("Attempting outbound connection to {}", addr);
 
@@ -866,6 +901,7 @@ impl P2PNode {
                                     stream, peer_id, true, magic, our_nonce, height, tip,
                                     peers, senders, event_tx, msg_tx,
                                     conn_identity, conn_encryption,
+                                    Some(outbound_slot.clone()),
                                 ).await {
                                     warn!("Outbound connection error: {}", e);
                                     addresses.write().await.mark_tried(addr);
@@ -886,6 +922,13 @@ impl P2PNode {
                                 debug!("Backoff for {}: next retry in {:?}", addr, delay);
                             }
                         }
+                        // outbound_slot's Arc drops here. If we made it past
+                        // peers.insert in handle_connection, the PeerInfo
+                        // entry holds a clone, so the slot stays alive until
+                        // the entry is removed/overwritten. If we did NOT
+                        // make it past peers.insert (handshake failed,
+                        // connect refused), this drop is the LAST Arc and
+                        // the slot is released cleanly.
                     });
                 }
             }
@@ -1790,6 +1833,15 @@ async fn handle_connection(
     msg_tx: mpsc::Sender<PeerMessage>,
     identity: Arc<super::noise::NodeIdentity>,
     encryption_config: crate::config::P2PEncryptionConfig,
+    // Per-/16 outbound slot for eclipse defense. Some for outbound
+    // dials (acquired by the connector before spawn), None for
+    // inbound accepts. We move it into the PeerInfo entry below
+    // so the slot's lifetime tracks the entry's lifetime — when
+    // the peers DashMap drops or overwrites this entry, the slot
+    // drops with it, releasing the /16 counter cleanly even in
+    // the skip-cleanup branch (where peers.remove is intentionally
+    // not called to preserve a concurrent reconnection).
+    eclipse_slot: Option<Arc<super::connection_tracker::OutboundSubnetSlot>>,
 ) -> Result<()> {
     let addr = stream.peer_addr()
         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
@@ -1802,6 +1854,7 @@ async fn handle_connection(
     }
 
     let mut info = PeerInfo::new(peer_id, addr, outbound);
+    info.eclipse_slot = eclipse_slot;
 
     // ─── Noise_XX Encryption ────────────────────────────────────────────
     //
