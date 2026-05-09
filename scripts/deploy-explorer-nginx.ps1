@@ -137,6 +137,18 @@ server {
         proxy_set_header Authorization "Bearer $coincync_rpc_key";
     }
 
+    # Per-box health probes hit by the explorer's Node Health dashboard.
+    # Each route proxies the JSON-RPC call to the matching fleet member's
+    # RPC port (28081) with the Bearer key added server-side, so the
+    # browser never sees the API key. Each box's UFW restricts source to
+    # the explorer's IP only — Bearer + IP allowlist is two layers.
+    # NODE_POLL_MS in the dashboard JS controls poll cadence (~12 s).
+    location = /health/seed1    { rewrite ^ / break; proxy_pass http://66.135.23.193:28081;  proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/seed2    { rewrite ^ / break; proxy_pass http://140.82.57.168:28081;  proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/seed3    { rewrite ^ / break; proxy_pass http://207.148.111.76:28081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/explorer { rewrite ^ / break; proxy_pass http://127.0.0.1:28081;      proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/api      { rewrite ^ / break; proxy_pass http://95.179.165.225:28081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+
     # Static files for everything else.
     location / {
         try_files $uri $uri/ /index.html;
