@@ -57,8 +57,10 @@ pub mod coordinator;
 pub mod cync;
 pub mod error;
 pub mod protocol;
+pub mod state;
 
 pub use error::Error;
+pub use state::{SwapStore, StateError, STATE_VERSION};
 
 /// Result alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;

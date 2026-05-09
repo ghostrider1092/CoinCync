@@ -33,9 +33,18 @@ path = "src/bin/cyncswap.rs"
 #   curve25519-dalek — Ed25519 adaptor signatures (CYNC side)
 #   tokio       — async P2P swap-coordination loop
 # Holding off until those decisions are made formally in CIP-001.
-clap      = { version = "4", features = ["derive"] }
-thiserror = "1"
-serde     = { version = "1", features = ["derive"] }
+clap       = { version = "4", features = ["derive"] }
+thiserror  = "1"
+serde      = { version = "1", features = ["derive"] }
+# JSON serialization for the on-disk swap-state file. Phase 2's
+# coordinator handshake lives in memory; phase 2's state
+# persister (this commit) saves it to disk so the cyncswap CLI
+# can resume across invocations.
+serde_json = "1"
+
+[dev-dependencies]
+# Filesystem fixtures for the state-persistence tests.
+tempfile   = "3"
 
 [lints.rust]
 unsafe_code  = "forbid"
