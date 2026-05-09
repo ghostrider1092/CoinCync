@@ -3055,11 +3055,22 @@ async fn process_message(
             // Serve filter chain checkpoints for integrity verification.
             tracing::debug!("GetFilterCheckpoints from {:?}", &peer_id[..4]);
 
-            // Build checkpoints from chain (every 1000 blocks)
+            // Build checkpoints from chain (every 1000 blocks).
+            //
+            // Bounded: at most MAX_CHECKPOINTS entries per response.
+            // Each iteration does a disk-backed get_block_by_height +
+            // filter recomputation, so an unbounded loop lets any peer
+            // amplify their request into per-request O(chain_height)
+            // disk + CPU. 1000 entries = 1M blocks of coverage at
+            // 1000-block spacing, which is ~30 years of mainnet at
+            // 120s block time. Plenty of headroom; well past any
+            // legitimate peer's needs.
+            const MAX_CHECKPOINTS: usize = 1000;
+            const SPACING: u64 = 1000;
             let chain_height = chain.height();
-            let mut checkpoints = Vec::new();
+            let mut checkpoints = Vec::with_capacity(MAX_CHECKPOINTS);
             let mut h = 0u64;
-            while h <= chain_height {
+            while h <= chain_height && checkpoints.len() < MAX_CHECKPOINTS {
                 if let Some(block) = chain.get_block_by_height(h) {
                     let filter = crate::network::block_filter::BlockFilter::from_block(
                         &block, crate::primitives::Hash::default()
@@ -3070,10 +3081,16 @@ async fn process_message(
                         filter_hash: filter.filter_hash(),
                     });
                 }
-                h = match h.checked_add(1000) {
+                h = match h.checked_add(SPACING) {
                     Some(next) => next,
                     None => break,
                 };
+            }
+            if checkpoints.len() == MAX_CHECKPOINTS {
+                tracing::warn!(
+                    "GetFilterCheckpoints from {:?}: hit MAX_CHECKPOINTS={} cap (chain_height={})",
+                    &peer_id[..4], MAX_CHECKPOINTS, chain_height
+                );
             }
 
             if let Some(sender) = senders.get(&peer_id) {
