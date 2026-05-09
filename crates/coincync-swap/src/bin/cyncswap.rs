@@ -399,10 +399,18 @@ fn cancel_cmd(state_path: PathBuf) -> Result<(), String> {
         ));
     }
 
+    // Apply on a clone first, persist, then commit to in-memory only
+    // on save success. Reverse order would leave memory ahead of disk
+    // if save fails — fine for a one-shot CLI that exits, but the
+    // pattern is reused by the upcoming daemon and the safety is free.
     let prior_state = swap.state;
-    swap.apply(Transition::Abort)
+    let mut next = swap.clone();
+    next.apply(Transition::Abort)
         .map_err(|e| format!("abort transition rejected: {e}"))?;
-    store.save(&swap).map_err(|e| format!("save failed: {e}"))?;
+    store
+        .save(&next)
+        .map_err(|e| format!("save failed: {e}"))?;
+    swap = next;
 
     println!("Swap cancelled.");
     println!("  prior state: {}", state_string(prior_state));
