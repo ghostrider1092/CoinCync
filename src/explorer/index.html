@@ -1442,6 +1442,184 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
           </svg>
         </div>
       </div>
+
+      <!-- FROST M-of-N Multi-sig (CIP-008) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">🔐</span> FROST M-of-N Multi-sig
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="fg"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- 3 participants -->
+            <circle cx="40" cy="40" r="14" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#fg)"/>
+            <text x="40" y="44" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">A</text>
+            <circle cx="140" cy="20" r="14" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#fg)"/>
+            <text x="140" y="24" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">B</text>
+            <circle cx="240" cy="40" r="14" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#fg)"/>
+            <text x="240" y="44" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">C</text>
+            <!-- Coordinator (centered) -->
+            <rect x="100" y="68" width="80" height="22" rx="11" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="1" filter="url(#fg)"><animate attributeName="stroke-opacity" values="0.4;1;0.4" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="82" text-anchor="middle" font-family="monospace" font-size="7" fill="#A855F7" font-weight="600">coord (untrusted)</text>
+            <!-- Lines from participants to coord -->
+            <line x1="50" y1="50" x2="105" y2="74" stroke="#D4A059" stroke-width="0.6" stroke-opacity="0.4"/>
+            <line x1="140" y1="34" x2="140" y2="68" stroke="#D4A059" stroke-width="0.6" stroke-opacity="0.4"/>
+            <line x1="230" y1="50" x2="175" y2="74" stroke="#D4A059" stroke-width="0.6" stroke-opacity="0.4"/>
+            <!-- Animated round-1 commitments traveling to coord -->
+            <circle r="3" fill="#D4A059" filter="url(#fg)"><animateMotion dur="2.5s" repeatCount="indefinite" path="M50,50 L140,79"/></circle>
+            <circle r="3" fill="#D4A059" filter="url(#fg)"><animateMotion dur="2.5s" begin="0.4s" repeatCount="indefinite" path="M140,34 L140,79"/></circle>
+            <circle r="3" fill="#D4A059" filter="url(#fg)"><animateMotion dur="2.5s" begin="0.8s" repeatCount="indefinite" path="M230,50 L140,79"/></circle>
+            <!-- Aggregate signature out -->
+            <text x="140" y="115" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">2-of-3 · single-sig indistinguishable</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#D4A059">CIP-008 · zero key material at coord</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Atomic Swap (CIP-001) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">⚛️</span> CYNC↔BTC Atomic Swap
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="ag"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- CYNC chain (left) -->
+            <rect x="20" y="35" width="80" height="50" rx="6" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1" filter="url(#ag)"/>
+            <text x="60" y="52" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">CYNC</text>
+            <text x="60" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">CLSAG ring sig</text>
+            <text x="60" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">stealth output</text>
+            <!-- BTC chain (right) -->
+            <rect x="180" y="35" width="80" height="50" rx="6" fill="rgba(245,158,11,.06)" stroke="#F59E0B" stroke-width="1" filter="url(#ag)"/>
+            <text x="220" y="52" text-anchor="middle" font-family="monospace" font-size="9" fill="#F59E0B" font-weight="700">BTC</text>
+            <text x="220" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">Schnorr sig</text>
+            <text x="220" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">P2WPKH</text>
+            <!-- Adaptor binding (center) -->
+            <line x1="100" y1="60" x2="180" y2="60" stroke="#A855F7" stroke-width="1" stroke-dasharray="4,3"><animate attributeName="stroke-dashoffset" values="0;-7" dur="1s" repeatCount="indefinite"/></line>
+            <!-- Adaptor secret (animated) -->
+            <circle r="4" fill="#A855F7" filter="url(#ag)"><animateMotion dur="3s" repeatCount="indefinite" path="M100,60 L180,60 L180,60 L100,60"/></circle>
+            <text x="140" y="50" text-anchor="middle" font-family="monospace" font-size="6" fill="#A855F7">adaptor secret</text>
+            <text x="140" y="76" text-anchor="middle" font-family="monospace" font-size="5" fill="#888">cross-curve DL proof</text>
+            <!-- "Invisible on chain" -->
+            <text x="140" y="105" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">looks like a normal CYNC tx</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#A855F7">CIP-001 · trustless · either-party refund</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Light-wallet SPV (lightsync) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">📡</span> Light-wallet SPV
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="lg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Wallet (left) -->
+            <rect x="20" y="40" width="60" height="40" rx="6" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.2" filter="url(#lg)"/>
+            <text x="50" y="56" text-anchor="middle" font-family="monospace" font-size="8" fill="#D4A059" font-weight="700">wallet</text>
+            <text x="50" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">view key local</text>
+            <!-- Server (right) -->
+            <rect x="200" y="40" width="60" height="40" rx="6" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="1.2" filter="url(#lg)"/>
+            <text x="230" y="56" text-anchor="middle" font-family="monospace" font-size="8" fill="#A855F7" font-weight="700">server</text>
+            <text x="230" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">blind to addrs</text>
+            <!-- Request: just height range -->
+            <line x1="80" y1="55" x2="200" y2="55" stroke="#D4A059" stroke-width="0.8" stroke-opacity="0.4"/>
+            <text x="140" y="48" text-anchor="middle" font-family="monospace" font-size="6" fill="#D4A059">"blocks N..M"</text>
+            <circle r="3" fill="#D4A059" filter="url(#lg)"><animateMotion dur="2.5s" repeatCount="indefinite" path="M80,55 L200,55"/></circle>
+            <!-- Response: digests -->
+            <line x1="200" y1="65" x2="80" y2="65" stroke="#A855F7" stroke-width="0.8" stroke-opacity="0.4"/>
+            <text x="140" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#A855F7">digests (~138 B/output)</text>
+            <circle r="3" fill="#A855F7" filter="url(#lg)"><animateMotion dur="2.5s" begin="1.2s" repeatCount="indefinite" path="M200,65 L80,65"/></circle>
+            <!-- Local scan label -->
+            <text x="140" y="105" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">view-tag scan local · server learns 0 addrs</text>
+            <!-- Bottom label -->
+            <rect x="40" y="125" width="200" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">stronger privacy than BIP-157</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Rolling soft-finality (CIP-009.D) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">⛓️</span> Rolling Soft-Finality
+          <span class="badge badge-grey" style="margin-left:auto" title="CIP-009.D library shipped, validate_block integration queued for activation">QUEUED</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="rg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Chain of blocks -->
+            <rect x="20"  y="50" width="36" height="36" rx="4" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="62"  y="50" width="36" height="36" rx="4" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="104" y="50" width="36" height="36" rx="4" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="146" y="50" width="36" height="36" rx="4" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="188" y="50" width="36" height="36" rx="4" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="230" y="50" width="32" height="36" rx="4" fill="rgba(212,160,89,.04)" stroke="#D4A059" stroke-width="0.8" stroke-dasharray="3,2"><animate attributeName="stroke-dashoffset" values="0;-5" dur="1s" repeatCount="indefinite"/></rect>
+            <!-- Lock icons on finalized -->
+            <text x="38"  y="74" text-anchor="middle" font-family="monospace" font-size="13" fill="#7FB879">🔒</text>
+            <text x="80"  y="74" text-anchor="middle" font-family="monospace" font-size="13" fill="#7FB879">🔒</text>
+            <text x="122" y="74" text-anchor="middle" font-family="monospace" font-size="13" fill="#7FB879">🔒</text>
+            <!-- Soft-final boundary line -->
+            <line x1="142" y1="36" x2="142" y2="100" stroke="#7FB879" stroke-width="0.6" stroke-dasharray="2,2"/>
+            <text x="142" y="32" text-anchor="middle" font-family="monospace" font-size="6" fill="#7FB879">soft-final</text>
+            <!-- 2/3 attestation badge -->
+            <text x="200" y="45" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">tip-LAG</text>
+            <text x="245" y="45" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">tip</text>
+            <!-- Stats -->
+            <text x="140" y="110" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">⌈2/3⌉ active miners attest · ed25519</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">CIP-009.D · time-warp immune</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Multi-node Dandelion++ Verification -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">🧪</span> Dandelion++ Graph Verification
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="vg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Origin -->
+            <circle cx="30" cy="80" r="11" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#vg)"/>
+            <text x="30" y="84" text-anchor="middle" font-family="monospace" font-size="7" fill="#D4A059" font-weight="700">Y</text>
+            <!-- Two outbound peers (graph: stem fan-out exactly 1) -->
+            <circle cx="100" cy="40" r="9" fill="rgba(255,255,255,.04)" stroke="#555" stroke-width="1"/>
+            <text x="100" y="43" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">P1</text>
+            <circle cx="100" cy="120" r="9" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#vg)"/>
+            <text x="100" y="123" text-anchor="middle" font-family="monospace" font-size="6" fill="#7FB879">P2</text>
+            <!-- Stem chosen: only ONE relay per epoch -->
+            <line x1="40" y1="80" x2="93" y2="42" stroke="#444" stroke-width="0.5" stroke-dasharray="1,2" stroke-opacity="0.3"/>
+            <line x1="40" y1="80" x2="93" y2="118" stroke="#7FB879" stroke-width="1.2" stroke-opacity="0.7"/>
+            <!-- Animated packet on stem path -->
+            <circle r="3" fill="#7FB879" filter="url(#vg)"><animateMotion dur="2s" repeatCount="indefinite" path="M40,80 L93,118"/></circle>
+            <!-- Fluff phase from P2 -->
+            <line x1="109" y1="120" x2="160" y2="80" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.4"/>
+            <line x1="109" y1="120" x2="180" y2="120" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.4"/>
+            <line x1="109" y1="120" x2="170" y2="140" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.4"/>
+            <circle cx="160" cy="80" r="5" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.4s" repeatCount="indefinite"/></circle>
+            <circle cx="180" cy="120" r="5" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.6s" repeatCount="indefinite"/></circle>
+            <circle cx="170" cy="140" r="5" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.8s" repeatCount="indefinite"/></circle>
+            <!-- Verified badge -->
+            <text x="220" y="85" text-anchor="middle" font-family="monospace" font-size="20" fill="#7FB879">✓</text>
+            <text x="220" y="100" text-anchor="middle" font-family="monospace" font-size="6" fill="#7FB879">stem fan-out = 1</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">multi-node test verifies the privacy invariant</text>
+          </svg>
+        </div>
+      </div>
     </div>
 
   </div>
