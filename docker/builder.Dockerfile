@@ -32,12 +32,18 @@
 # Pin the Rust base image to a specific minor.
 # Use --build-arg RUST_VERSION=<x.y.z> to override.
 #
-# Effective minimum is 1.85.0 — the workspace's `rust-version` field
-# says 1.75 but transitive dependencies (cpufeatures 0.3.0+) now require
-# Rust 1.85's stabilized `edition2024` feature, so 1.75 won't actually
-# build a fresh tree. We pin to 1.85.0 here as the baseline that
-# successfully resolves the current Cargo.lock.
-ARG RUST_VERSION=1.85.0
+# Effective minimum is 1.88.0 — the workspace's `rust-version` field
+# says 1.75 but transitive dependencies (cpufeatures 0.3.0 needs
+# edition2024 = 1.85+, time 0.3.47 / time-core / time-macros need
+# 1.88+) drag the actual floor up. We pin to 1.88.0 here as the
+# baseline that resolves the current Cargo.lock end-to-end.
+#
+# When you next bump deps, `cargo build` errors will tell you the new
+# minimum; bump RUST_VERSION accordingly. The workspace's stated
+# `rust-version = "1.75"` in Cargo.toml is a SOURCE-LEVEL promise
+# (CoinCync's own code stays compatible with 1.75), not a guarantee
+# any given Cargo.lock resolution will compile on 1.75.
+ARG RUST_VERSION=1.88.0
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
@@ -51,6 +57,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     libclang-dev \
     clang \
     cmake \
+    make \
     lld \
     git \
     ca-certificates \
