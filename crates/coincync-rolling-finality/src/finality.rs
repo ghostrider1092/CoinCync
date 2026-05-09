@@ -171,11 +171,32 @@ impl FinalityTracker {
     /// Notify the tracker that the canonical chain has extended to
     /// `block_height`, mined by `miner`. Updates the active set and
     /// the chain tip. Idempotent for the same (miner, height) pair.
+    ///
+    /// Also prunes attestations older than `stale_horizon` from the
+    /// new tip — those entries can no longer affect any future
+    /// soft-finality decision (apply_attestation rejects them at the
+    /// stale-horizon check), so retaining them is pure memory bloat
+    /// over a long-running node.
     pub fn record_block(&mut self, miner: MinerPubkey, block_height: u64) {
         self.active_set.record_block(miner, block_height);
         if block_height > self.chain_tip {
             self.chain_tip = block_height;
+            self.prune_stale_attestations();
         }
+    }
+
+    /// Drop attestation entries below `chain_tip - stale_horizon`.
+    /// Cheap because the map is keyed by height; we use `split_off`
+    /// to retain only the modern half.
+    fn prune_stale_attestations(&mut self) {
+        let earliest_keep = self.chain_tip.saturating_sub(self.stale_horizon);
+        // BTreeMap::split_off(k) keeps [k..) in self and returns
+        // [0..k); we want to discard [0..earliest_keep) so we keep
+        // the suffix.
+        let keep = self.attestations.split_off(&earliest_keep);
+        // The dropped half (now in `self.attestations`) is freed
+        // when we replace the field below.
+        self.attestations = keep;
     }
 
     /// Apply an attestation. Returns:
@@ -450,6 +471,54 @@ mod tests {
             .apply_attestation(&att(5, 55, 0xAA), &NoopVerifier)
             .unwrap();
         assert_eq!(r, ApplyOutcome::Accepted);
+    }
+
+    #[test]
+    fn record_block_prunes_stale_attestations() {
+        // Regression: attestations BTreeMap grew unboundedly. After
+        // accepting attestations at low heights, advancing the chain
+        // tip past stale_horizon should drop those entries to keep
+        // memory bounded over a long-running node.
+        let mut t = five_miner_tracker(); // window=100, lag=10, quorum=5, stale=50
+
+        // Accept attestations for height 55 (currently in-window;
+        // chain_tip=60, earliest_accepted=10).
+        for i in 1..=3u8 {
+            t.apply_attestation(&att(i, 55, 0xAA), &NoopVerifier)
+                .unwrap();
+        }
+        assert_eq!(t.signer_count(55, &hash(0xAA)), 3);
+        assert_eq!(t.attestations.len(), 1, "1 height entry");
+
+        // Advance chain_tip to 200. earliest_accepted becomes 150.
+        // Height 55 is now below the horizon and should be pruned.
+        t.record_block(pk(50), 200);
+        assert_eq!(
+            t.signer_count(55, &hash(0xAA)),
+            0,
+            "stale attestations dropped"
+        );
+        assert!(
+            t.attestations.is_empty(),
+            "no entries above stale_horizon yet"
+        );
+
+        // Total recorded counter is intentionally NOT decremented —
+        // it's a lifetime counter, not a "current size" counter.
+        assert_eq!(t.total_recorded, 3);
+    }
+
+    #[test]
+    fn record_block_does_not_prune_in_window_attestations() {
+        let mut t = five_miner_tracker();
+        for i in 1..=3u8 {
+            t.apply_attestation(&att(i, 55, 0xAA), &NoopVerifier)
+                .unwrap();
+        }
+        // Advance chain_tip to 100. earliest_accepted = 50. Height 55
+        // is still in-window and must be retained.
+        t.record_block(pk(50), 100);
+        assert_eq!(t.signer_count(55, &hash(0xAA)), 3);
     }
 
     #[test]
