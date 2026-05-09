@@ -287,18 +287,4 @@ CoinCync exists because that difference matters. This Constitution exists to mak
 
 ---
 
-## Constitutional Foundation — The Fourth Amendment
-
-> *"The right of the people to be secure in their persons, houses, papers, and effects, against unreasonable searches and seizures, shall not be violated, and no Warrants shall issue, but upon probable cause, supported by Oath or affirmation, and particularly describing the place to be searched, and the persons or things to be seized."*
->
-> — Fourth Amendment to the United States Constitution (1791)
-
-CoinCync recognizes financial records as "papers and effects" protected by this fundamental right. Every technical decision in this protocol — mandatory stealth addresses, ring signatures, Pedersen commitments, Bulletproofs+ range proofs, Dandelion++ propagation, encrypted memos, and uniform decoy selection — is an engineering implementation of this constitutional protection.
-
-Statistical deanonymization of ring signatures, chain analysis of transaction graphs, and network traffic fingerprinting are modern forms of unreasonable search. CoinCync's privacy features are not obstacles to law enforcement — they are the default state of financial privacy that existed before the digital age made mass surveillance trivial.
-
-Users retain the right to voluntarily disclose their financial activity via time-scoped view keys — transparency by consent, not by design flaw.
-
----
-
 *Companion document: [Bill of Rights](docs/BILL_OF_RIGHTS.md) — the user-facing rights guarantee that complements these operator-facing articles.*
