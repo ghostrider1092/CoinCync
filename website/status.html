@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoinCync — Network Status</title>
+<meta name="description" content="Live operational status of the CoinCync public testnet — fleet sync, block height, faucet capacity, recent incidents.">
+<meta name="robots" content="index, follow">
+<link rel="icon" href="/banner.svg" type="image/svg+xml">
+
+<style>
+:root {
+  --bg:#0a0a0a; --s1:#111; --b:#1f1f1f; --t:#eee; --t2:#bbb; --t3:#888; --t4:#555;
+  --ac:#D4A059; --ac-dim:rgba(212,160,89,.3); --acb:rgba(212,160,89,.06);
+  --ok:#7FB879; --warn:#E5B85C; --err:#D85C5C;
+  --display:'Fraunces',Georgia,serif; --mono:'IBM Plex Mono',Consolas,monospace;
+}
+* { box-sizing:border-box; margin:0; padding:0 }
+html,body { background:var(--bg); color:var(--t); font-family:system-ui,-apple-system,sans-serif; line-height:1.5 }
+.container { max-width:980px; margin:0 auto; padding:48px 24px }
+header { border-bottom:1px solid var(--b); padding-bottom:32px; margin-bottom:32px }
+h1 { font-family:var(--display); font-weight:300; font-size:42px; letter-spacing:-.5px }
+h1 em { color:var(--ac); font-style:italic }
+.lead { color:var(--t3); font-size:14px; margin-top:8px }
+.dot { display:inline-block; width:10px; height:10px; border-radius:50%; vertical-align:middle; margin-right:8px }
+.dot.ok { background:var(--ok); box-shadow:0 0 0 4px rgba(127,184,121,.15) }
+.dot.warn { background:var(--warn); box-shadow:0 0 0 4px rgba(229,184,92,.15) }
+.dot.err { background:var(--err); box-shadow:0 0 0 4px rgba(216,92,92,.15) }
+.dot.unknown { background:var(--t4); box-shadow:0 0 0 4px rgba(85,85,85,.15) }
+.card { background:var(--s1); border:1px solid var(--b); padding:20px 24px; margin-bottom:16px; border-radius:6px }
+.card h2 { font-family:var(--display); font-weight:400; font-size:20px; margin-bottom:12px; display:flex; align-items:center }
+.summary { font-size:32px; font-family:var(--display); font-weight:300; margin-top:6px }
+.summary .ok-text { color:var(--ok) }
+.summary .warn-text { color:var(--warn) }
+.summary .err-text { color:var(--err) }
+.kv { display:grid; grid-template-columns:max-content 1fr; gap:6px 16px; font-size:13px; margin-top:12px }
+.kv .k { color:var(--t3) }
+.kv .v { color:var(--t); font-family:var(--mono) }
+.fleet-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-top:12px }
+.node { background:#161616; padding:14px; border-radius:6px; border:1px solid var(--b) }
+.node-name { font-family:var(--mono); font-size:13px; font-weight:600; margin-bottom:8px }
+.node-loc { font-size:11px; color:var(--t3); margin-bottom:10px }
+.node-stat { font-family:var(--mono); font-size:11px; color:var(--t2); line-height:1.7 }
+.node-stat .label { color:var(--t3) }
+.refresh-info { font-size:11px; color:var(--t3); text-align:center; margin-top:32px; font-family:var(--mono) }
+a { color:var(--ac); text-decoration:none; border-bottom:1px solid var(--ac-dim) }
+a:hover { color:#fff; border-color:#fff }
+.nav-back { display:inline-block; margin-bottom:8px; font-size:13px; color:var(--t3) }
+@media (max-width:640px) {
+  .container { padding:24px 16px }
+  h1 { font-size:28px }
+  .summary { font-size:22px }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <a href="https://coincync.network" class="nav-back">← back to coincync.network</a>
+  <h1>Network <em>status</em>.</h1>
+  <p class="lead">Live operational state of the CoinCync public testnet. Auto-refreshes every 30 seconds.</p>
+</header>
+
+<div class="card" id="overall">
+  <h2><span class="dot unknown" id="overall-dot"></span>Overall</h2>
+  <div class="summary"><span id="overall-text" class="">Loading…</span></div>
+  <div class="kv" id="overall-kv"></div>
+</div>
+
+<div class="card">
+  <h2><span class="dot unknown" id="chain-dot"></span>Chain</h2>
+  <div class="kv" id="chain-kv">
+    <div class="k">height</div><div class="v" id="chain-height">—</div>
+    <div class="k">tip age</div><div class="v" id="chain-tip-age">—</div>
+    <div class="k">tip hash</div><div class="v" id="chain-tip-hash">—</div>
+    <div class="k">difficulty</div><div class="v" id="chain-difficulty">—</div>
+    <div class="k">mempool</div><div class="v" id="chain-mempool">—</div>
+    <div class="k">network</div><div class="v" id="chain-network">testnet</div>
+    <div class="k">build</div><div class="v" id="chain-build">—</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2><span class="dot unknown" id="fleet-dot"></span>Fleet — 5 nodes across 3 continents</h2>
+  <div class="fleet-grid" id="fleet-grid">
+    <!-- populated by JS -->
+  </div>
+</div>
+
+<div class="card">
+  <h2><span class="dot unknown" id="faucet-dot"></span>Faucet</h2>
+  <div class="kv" id="faucet-kv">
+    <div class="k">total drips</div><div class="v" id="faucet-drips">—</div>
+    <div class="k">total atomic</div><div class="v" id="faucet-atomic">—</div>
+    <div class="k">last drip</div><div class="v" id="faucet-last">—</div>
+    <div class="k">drip amount</div><div class="v" id="faucet-amt">—</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Public endpoints</h2>
+  <div class="kv">
+    <div class="k">explorer</div>     <div class="v"><a href="https://explorer.coincync.network">explorer.coincync.network</a></div>
+    <div class="k">api</div>          <div class="v"><a href="https://api.coincync.network">api.coincync.network</a></div>
+    <div class="k">faucet</div>       <div class="v"><a href="https://coincync.network/faucet">coincync.network/faucet</a></div>
+    <div class="k">docs</div>         <div class="v"><a href="https://docs.coincync.network">docs.coincync.network</a></div>
+    <div class="k">source</div>       <div class="v"><a href="https://github.com/ghostrider1092/Coincync-Testnet-">github.com/ghostrider1092/Coincync-Testnet-</a></div>
+  </div>
+</div>
+
+<p class="refresh-info">
+  last refresh: <span id="last-refresh">—</span>
+  &nbsp;·&nbsp;
+  next refresh in <span id="next-refresh">—</span> s
+</p>
+
+</div>
+
+<script>
+const NODES = [
+  {key:'seed1',    name:'seed1',    loc:'New Jersey, USA'},
+  {key:'seed2',    name:'seed2',    loc:'Amsterdam, NL'},
+  {key:'seed3',    name:'seed3',    loc:'Tokyo, JP'},
+  {key:'explorer', name:'explorer', loc:'Dallas, USA'},
+  {key:'api',      name:'api',      loc:'Frankfurt, DE'},
+];
+const REFRESH_MS = 30000;
+const RPC_BODY = JSON.stringify({jsonrpc:'2.0', id:1, method:'get_info'});
+const RPC_OPTS = { method:'POST', headers:{'Content-Type':'application/json'}, body:RPC_BODY };
+
+let refreshTimer = null;
+let nextRefreshTs = 0;
+
+const $ = (id) => document.getElementById(id);
+const setDot = (id, state) => { const el=$(id); if(el) el.className='dot '+state };
+const fmtAge = (s) => {
+  if (s == null) return '—';
+  if (s < 60)  return s + ' s';
+  if (s < 3600) return Math.floor(s/60) + ' m';
+  return Math.floor(s/3600) + ' h ' + (Math.floor((s%3600)/60)) + ' m';
+};
+const fmtTime = (ts) => {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toUTCString().replace('GMT','UTC');
+};
+const fmtNum = (n) => n == null ? '—' : Number(n).toLocaleString('en-US');
+const fmtCync = (atomic) => {
+  if (atomic == null) return '—';
+  return (atomic / 1e12).toFixed(4) + ' tCYNC';
+};
+
+async function probeNode(key) {
+  try {
+    const r = await fetch(`https://explorer.coincync.network/health/${key}`, RPC_OPTS);
+    if (!r.ok) return { ok:false, status:r.status };
+    const j = await r.json();
+    return { ok:true, ...(j.result || {}) };
+  } catch (e) {
+    return { ok:false, err:String(e) };
+  }
+}
+
+async function probeFaucet() {
+  try {
+    const r = await fetch('https://api.coincync.network/faucet/stats');
+    if (!r.ok) return { ok:false, status:r.status };
+    return { ok:true, ...(await r.json()) };
+  } catch (e) {
+    return { ok:false, err:String(e) };
+  }
+}
+
+function summarize(perNode) {
+  // Overall = worst-of (any err) > (any node lag >= 3 from median) > ok
+  const reachable = perNode.filter(n => n.ok);
+  if (reachable.length === 0) return { state:'err', text:'All nodes unreachable' };
+
+  const heights = reachable.map(n => Number(n.height || 0));
+  const sorted = [...heights].sort((a,b) => a-b);
+  const median = sorted[Math.floor(sorted.length/2)];
+
+  let warn = false, err = false;
+  perNode.forEach(n => {
+    if (!n.ok) err = true;
+    else {
+      const lag = median - Number(n.height || 0);
+      if (lag >= 3)              warn = true;
+      if ((n.tip_age_secs||0) > 1800) warn = true;
+      if ((n.peer_count||0)   < 3)    warn = true;
+    }
+  });
+
+  if (err)  return { state:'err',  text:'Degraded — node unreachable', median };
+  if (warn) return { state:'warn', text:'Degraded — see per-node',     median };
+  return { state:'ok', text:'All systems operational',                  median };
+}
+
+function renderFleet(perNode) {
+  const grid = $('fleet-grid');
+  grid.innerHTML = '';
+  perNode.forEach((n, i) => {
+    const meta = NODES[i];
+    const div = document.createElement('div');
+    div.className = 'node';
+    let dot = '<span class="dot unknown"></span>';
+    if (n.ok) {
+      const ok = (n.is_synced && (n.tip_age_secs||0) <= 1800 && (n.peer_count||0) >= 3);
+      dot = ok ? '<span class="dot ok"></span>' : '<span class="dot warn"></span>';
+    } else {
+      dot = '<span class="dot err"></span>';
+    }
+    div.innerHTML = `
+      <div class="node-name">${dot}${meta.name}</div>
+      <div class="node-loc">${meta.loc}</div>
+      <div class="node-stat">
+        <span class="label">height:</span> ${fmtNum(n.height)}<br>
+        <span class="label">tip age:</span> ${fmtAge(n.tip_age_secs)}<br>
+        <span class="label">peers:</span> ${n.peer_count ?? '—'}<br>
+        <span class="label">synced:</span> ${n.is_synced != null ? n.is_synced : '—'}
+      </div>
+    `;
+    grid.appendChild(div);
+  });
+}
+
+function renderChain(reachable) {
+  if (reachable.length === 0) {
+    setDot('chain-dot', 'err');
+    return;
+  }
+  // Pick the node with highest height as the "consensus tip" view
+  reachable.sort((a,b) => Number(b.height||0) - Number(a.height||0));
+  const top = reachable[0];
+
+  $('chain-height').textContent     = fmtNum(top.height);
+  $('chain-tip-age').textContent    = fmtAge(top.tip_age_secs);
+  $('chain-tip-hash').textContent   = top.tip_hash ? top.tip_hash.substring(0,16) + '…' : '—';
+  $('chain-difficulty').textContent = fmtNum(top.difficulty);
+  $('chain-mempool').textContent    = fmtNum(top.mempool_size);
+  $('chain-network').textContent    = top.network || 'testnet';
+  $('chain-build').textContent      = top.build_commit || '—';
+
+  if ((top.tip_age_secs||0) > 1800) setDot('chain-dot', 'warn');
+  else                              setDot('chain-dot', 'ok');
+}
+
+function renderFaucet(f) {
+  if (!f.ok) {
+    setDot('faucet-dot', 'err');
+    return;
+  }
+  $('faucet-drips').textContent  = fmtNum(f.total_drips);
+  $('faucet-atomic').textContent = fmtCync(f.total_atomic);
+  $('faucet-last').textContent   = f.last_drip_ts ? fmtTime(f.last_drip_ts) : '—';
+  $('faucet-amt').textContent    = fmtCync(f.drip_amount_atomic);
+  setDot('faucet-dot', 'ok');
+}
+
+function renderOverall(s, faucet) {
+  setDot('overall-dot', s.state);
+  const el = $('overall-text');
+  el.textContent = s.text;
+  el.className = s.state + '-text';
+  const kv = $('overall-kv');
+  kv.innerHTML = `
+    <div class="k">consensus tip</div><div class="v">${fmtNum(s.median)}</div>
+    <div class="k">faucet</div><div class="v">${faucet.ok ? 'available' : 'unreachable'}</div>
+    <div class="k">last update</div><div class="v">${new Date().toUTCString().replace('GMT','UTC')}</div>
+  `;
+  setDot('fleet-dot', s.state);
+}
+
+async function refresh() {
+  const [perNode, faucet] = await Promise.all([
+    Promise.all(NODES.map(n => probeNode(n.key))),
+    probeFaucet()
+  ]);
+  const reachable = perNode.filter(n => n.ok);
+  const summary = summarize(perNode);
+  renderOverall(summary, faucet);
+  renderChain(reachable);
+  renderFleet(perNode);
+  renderFaucet(faucet);
+  $('last-refresh').textContent = new Date().toUTCString().replace('GMT','UTC');
+  nextRefreshTs = Date.now() + REFRESH_MS;
+}
+
+function tickCountdown() {
+  const remain = Math.max(0, Math.round((nextRefreshTs - Date.now()) / 1000));
+  $('next-refresh').textContent = remain;
+}
+
+refresh();
+refreshTimer = setInterval(refresh, REFRESH_MS);
+setInterval(tickCountdown, 1000);
+</script>
+</body>
+</html>
