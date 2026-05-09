@@ -998,19 +998,19 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <div class="roadmap-item completed">
       <div class="roadmap-phase">Phase 3 &mdash; Constitutional Foundation</div>
       <div class="roadmap-title">19 Articles &amp; 15 Rights, Compile-Time Locked</div>
-      <div class="roadmap-desc">Constitution + Bill of Rights with critical-files lockfile (SHA-256-protected) and 8 compile-time tripwire constants. Articles forbid the Terra-class failure modes (no algorithmic capture, no admin keys, no external trust, no surveillance layer, no fee redirects). CIP process documented; CIP-001 (atomic swap) and CIP-002 (cynchub) drafts published.</div>
+      <div class="roadmap-desc">Constitution + Bill of Rights with critical-files lockfile (SHA-256-protected) and 8 compile-time tripwire constants. Articles forbid the Terra-class failure modes (no algorithmic capture, no admin keys, no external trust, no surveillance layer, no fee redirects). CIP process documented; 9 CIPs published &mdash; CIP-001 (atomic swap), CIP-002 (cynchub), CIP-007 (hard-fork activation policy), CIP-008 (FROST coordinator), CIP-009 + CIP-009.D (reorg defense + miner-signed rolling checkpoints), CIP-010 (testnet hard-fork rehearsal), CIP-011 (rolling-finality activation), CIP-012 (FROST coordinator deployment).</div>
       <div class="roadmap-tag done">Complete</div>
     </div>
     <div class="roadmap-item current">
       <div class="roadmap-phase">Phase 4 &mdash; Public Testnet</div>
       <div class="roadmap-title">Open Network &amp; Hardening</div>
-      <div class="roadmap-desc">Public testnet launching week of 2026-05-09. Anyone can run a node, mine, transact, build wallets. 72-hour pre-launch soak, peer-quality scoring, smoke-test transaction flow. Third-party audit kickoff. Real-world reliability data feeds the mainnet decision.</div>
+      <div class="roadmap-desc">Public testnet launching week of 2026-05-09. Anyone can run a node, mine, transact, build wallets. 72-hour pre-launch soak, peer-quality scoring, smoke-test transaction flow. Third-party audit kickoff. Real-world reliability data feeds the mainnet decision. Three new infrastructure crates shipped this phase: <code>coincync-frost-coordinator</code> (M-of-N signing relay, including <code>coord</code> WSS server with rate-limit + idle-timeout + Prometheus metrics, plus <code>coord-cli</code> operator binary), <code>coincync-rolling-finality</code> (pure-state library + real ed25519 verifier + borsh wire codec for CIP-009.D), and <code>coincync-swap</code> (atomic-swap protocol + handshake state machines + state persistence + <code>cyncswap</code> CLI). 165+ new tests covering composition + adversarial cases.</div>
       <div class="roadmap-tag active">In Progress</div>
     </div>
     <div class="roadmap-item">
       <div class="roadmap-phase">Phase 5 &mdash; Mainnet Prep</div>
       <div class="roadmap-title">Atomic Swaps &amp; Signed Releases</div>
-      <div class="roadmap-desc">CIP-001 working CYNC&harr;BTC atomic swap implementation (mainnet launch blocker). Cryptographic review + bug-bounty round. Multi-maintainer signed-release infrastructure (M-of-N). Reproducible builds verified.</div>
+      <div class="roadmap-desc">CIP-001 working CYNC&harr;BTC atomic swap &mdash; protocol state machine, handshake state machine, state persistence, and operator CLI all shipped during phase 4; what remains for mainnet is the cryptographic core (adaptor signatures over CLSAG and secp256k1, cross-curve DL-equality proof, Tor/Noise transport) plus an external audit. Mainnet launch blocker per Article XV. Multi-maintainer signed-release infrastructure (M-of-N via FROST coordinator). Reproducible builds verified.</div>
       <div class="roadmap-tag">Planned</div>
     </div>
     <div class="roadmap-item">

@@ -9130,6 +9130,83 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
             <td class="mono" style="color:var(--t3)">2026-05-05</td>
             <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-002-cynchub-merge-mined-liquidity-layer.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
           </tr>
+          <tr>
+            <td class="mono"><strong>CIP-007</strong></td>
+            <td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">Accepted</span></td>
+            <td>
+              <strong>Hard-Fork Activation Policy</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Defines Mode A (static-height) and Mode B (BIP8-style version-bit signaling) activation procedures for any future consensus rule change. The procedural backbone every other consensus CIP rides on top of.</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-007-hard-fork-activation-policy.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-008</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>FROST M-of-N Signing Coordinator</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Untrusted message-relay service that lets multisig participants exchange round-1 commitments and round-2 sig-shares without manual copy-paste. Holds zero key material — even a malicious coordinator cannot forge signatures or steal funds. Worst case: session fails to complete. State machine, invitation tokens, persistence, WSS server, operator CLI all shipped (<code>coord</code> + <code>coord-cli</code> binaries).</div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-008-frost-coordinator.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-009</strong></td>
+            <td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">Path B Active</span></td>
+            <td>
+              <strong>Reorg Defense Decision</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Three paths considered for live-tip reorg defense: A (MESS, rejected as too tunable), B (consensus checkpoints, <strong>shipped</strong>), C (PoW only). Successor for the live tip is CIP-009.D, which replaces MESS with discrete miner-signed soft-finality. Layered with B for both cold-horizon + live-tip coverage.</div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-009-reorg-defense-decision.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-009.D</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>Miner-Signed Rolling Checkpoints</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Replaces MESS with explicit miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners have signed. No clock readings (immune to time-warp), no tuning knobs that decide security, observable on-chain. Pure-state library + ed25519 verifier + wire codec all shipped (<code>crates/coincync-rolling-finality</code>); validate_block integration queued post-launch.</div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-009-D-miner-signed-rolling-checkpoints.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-010</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>Testnet Hard-Fork Rehearsal</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Concrete activation playbook for the <code>BOOTSTRAP_MIN_RING_SIZE</code> 11→13 bump as a planned CIP-007 Mode A exercise. Ships the activation pipeline end-to-end before mainnet — better to discover bugs in the activation procedure on testnet than at launch.</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-010-testnet-hardfork-rehearsal.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-011</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>Rolling-Finality Activation Rehearsal</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Two-phase activation playbook for CIP-009.D: ENABLE phase (collect attestations, no enforcement) followed by ENFORCE phase (reorg rule fires). 35-day gap between phases lets the active miner set fully populate before the rule has consensus weight. Five recovery scenarios documented.</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-011-rolling-finality-activation.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-012</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>FROST Coordinator Deployment Rehearsal</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Operations plan for CIP-008. Single-instance pre-mainnet deployment; two-instance multi-region (Frankfurt + Singapore) at mainnet, with DNS round-robin. Six failure-mode runbooks. Per-IP rate limiting, idle timeouts, and Prometheus metrics endpoint already shipped (<code>coord</code> phase 6).</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-012-frost-coordinator-deployment.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
         </tbody>
       </table>
     </div>
