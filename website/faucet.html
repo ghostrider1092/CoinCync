@@ -109,8 +109,16 @@ nav{background:rgba(10,10,9,.85);backdrop-filter:blur(20px);border-bottom:1px so
             <div class="info-label">CYNC per drip</div>
         </div>
         <div class="info-cell">
-            <div class="info-val" id="total-sent">0</div>
-            <div class="info-label">Total sent</div>
+            <div class="info-val" id="total-sent">—</div>
+            <div class="info-label">Drips sent</div>
+        </div>
+        <div class="info-cell">
+            <div class="info-val" id="total-cync">—</div>
+            <div class="info-label">Total tCYNC</div>
+        </div>
+        <div class="info-cell">
+            <div class="info-val" id="last-drip">—</div>
+            <div class="info-label">Last drip</div>
         </div>
         <div class="info-cell">
             <div class="info-val" id="chain-height">—</div>
@@ -142,8 +150,9 @@ nav{background:rgba(10,10,9,.85);backdrop-filter:blur(20px);border-bottom:1px so
 </footer>
 
 <script>
-const FAUCET_API = '/api/faucet';
-const RPC_API = '/api/';
+const FAUCET_API = 'https://api.coincync.network/faucet';
+const FAUCET_STATS_API = 'https://api.coincync.network/faucet/stats';
+const RPC_API = 'https://api.coincync.network/';
 
 async function claim() {
     const addr = document.getElementById('addr').value.trim();
@@ -201,11 +210,26 @@ async function loadStats() {
     } catch(e) {}
 
     try {
-        // Faucet stats
-        const r = await fetch(FAUCET_API);
+        // Faucet stats — uses dedicated GET endpoint so a stats fetch
+        // doesn't bump the per-IP rate limit on the POST endpoint.
+        const r = await fetch(FAUCET_STATS_API);
         const d = await r.json();
-        if (d.total_sent !== undefined) {
-            document.getElementById('total-sent').textContent = d.total_sent.toLocaleString();
+        if (d.total_drips !== undefined) {
+            document.getElementById('total-sent').textContent = d.total_drips.toLocaleString();
+        }
+        if (d.total_atomic !== undefined) {
+            const cync = (d.total_atomic / 1e12);
+            const fmt = cync >= 1000 ? cync.toFixed(0) : cync.toFixed(1);
+            document.getElementById('total-cync').textContent = fmt;
+        }
+        if (d.last_drip_ts) {
+            const ageSecs = Math.floor(Date.now()/1000) - Number(d.last_drip_ts);
+            const ago =
+                ageSecs <  60      ? ageSecs + ' s' :
+                ageSecs <  3600    ? Math.floor(ageSecs / 60) + ' m' :
+                ageSecs <  86400   ? Math.floor(ageSecs / 3600) + ' h' :
+                                     Math.floor(ageSecs / 86400) + ' d';
+            document.getElementById('last-drip').textContent = ago;
         }
     } catch(e) {}
 }
