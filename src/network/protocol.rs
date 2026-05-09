@@ -218,7 +218,15 @@ impl MessageType {
             MessageType::GetAddr => 256,             // 256 bytes
 
             // Data messages: large
-            MessageType::Headers => 512 * 1024,      // 512 KB (up to 2000 headers)
+            // 1 MB headroom for MAX_HEADERS_RESPONSE=2000. CoinCync's
+            // BlockHeader serializes to ~287 bytes (prev_hash + tx_root +
+            // anchor + target + signature + nonce + height + timestamp +
+            // version + algo + magic), so 2000 of them is ~574 KB pre-
+            // framing — the prior 512 KB cap rejected every full IBD
+            // Headers response and broke fresh-node sync. Sandbox node
+            // hit this immediately on 2026-05-09. Receiver-side fix only;
+            // existing senders happily emit 574 KB and now we accept it.
+            MessageType::Headers => 1024 * 1024,     // 1 MB (up to 2000 headers @ ~287B each)
             MessageType::Blocks => MAX_MESSAGE_SIZE,  // 16 MB (block data)
             MessageType::BlockData => 4 * 1024 * 1024, // 4 MB (single block)
             MessageType::Txs => 4 * 1024 * 1024,    // 4 MB (transaction batch)
