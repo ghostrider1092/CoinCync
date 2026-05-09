@@ -80,7 +80,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 ## Faucet help
 
 **Q: Where's the faucet?**
-> https://coincync.network/faucet.html — paste your tCYNC address, get 10 tCYNC. Drip rate: 1 per address per hour. No signup. Coins arrive in <2 min on the explorer.
+> https://coincync.network/faucet — paste your tCYNC address, get 10 tCYNC. Drip rate: 1 per address per hour. No signup. Coins arrive in <2 min on the explorer.
 
 **Q: Faucet didn't send me anything / says I already claimed.**
 > Wait an hour from your last drip and try again. The rate-limit is per-address. If your address never claimed and you're still blocked, post the (PARTIAL — first 10 chars) address in #wallet-help with the timestamp you tried.

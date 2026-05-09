@@ -46,6 +46,6 @@ coincync-miner --address YOUR_tCYNC_ADDRESS --threads 4 --node 127.0.0.1:28081
 - PoW: RandomX (CPU-only)
 - Ring size: 11 minimum
 - Ports: P2P 28080, RPC 28081
-- Faucet: <https://explorer.coincync.network/faucet.html>
+- Faucet: <https://explorer.coincync.network/faucet>
 
 Testnet coins have zero monetary value.

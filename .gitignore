@@ -158,3 +158,8 @@ deploy/ops/template-check.sh
 # Wallet — Jarvis-only dev/launch scripts
 /coincync-wallet/scripts/dev-jarvis.ps1
 /coincync-wallet/scripts/dev-jarvis.sh
+
+# Built release artifacts inside the website/ deploy tree.
+# Wrangler uploads them directly to Pages from the filesystem;
+# they don't need to be committed to git.
+website/release/

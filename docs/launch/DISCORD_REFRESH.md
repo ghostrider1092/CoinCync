@@ -44,7 +44,7 @@ Welcome to CoinCync — privacy-first proof-of-work, constitutionally locked.
 
 🚀  IN 5 MINUTES
    1. Download wallet → coincync.network
-   2. Faucet → coincync.network/faucet.html (10 tCYNC, 1/hour, no signup)
+   2. Faucet → coincync.network/faucet (10 tCYNC, 1/hour, no signup)
    3. Send your first private transaction
 
 📜  WHAT MAKES THIS DIFFERENT
@@ -113,7 +113,7 @@ Recent operational events:
 Public endpoints (verified reachable now):
 • Explorer: https://explorer.coincync.network
 • API:      https://api.coincync.network
-• Faucet:   https://coincync.network/faucet.html
+• Faucet:   https://coincync.network/faucet
 • P2P:      seed1/2/3.coincync.network:28080  (TCP-reachable from external)
 
 Latest changes:
@@ -222,7 +222,7 @@ DESKTOP (Windows / macOS / Linux)
 2. Run the installer
 3. Choose "Create New Wallet" → write down your 25-word seed phrase
    ON PAPER, NOT IN A FILE. Lose this and you lose your funds.
-4. Get tCYNC: faucet at coincync.network/faucet.html
+4. Get tCYNC: faucet at coincync.network/faucet
 5. Send / receive normally — every tx is private by default
 
 CLI (advanced)

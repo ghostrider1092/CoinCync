@@ -75,7 +75,7 @@ The Constitution's commitments do not depend on audit completion — they are re
 
 ### Get involved
 
-- **Get a wallet + first tCYNC:** [coincync.network](https://coincync.network) — download the desktop wallet, then claim 10 tCYNC from the public faucet at [coincync.network/faucet.html](https://coincync.network/faucet.html). One drip per address per hour.
+- **Get a wallet + first tCYNC:** [coincync.network](https://coincync.network) — download the desktop wallet, then claim 10 tCYNC from the public faucet at [coincync.network/faucet](https://coincync.network/faucet). One drip per address per hour.
 - **Mine:** [coincync.network](https://coincync.network) Get-Started section. RandomX, CPU only, runs on any machine.
 - **Run a node:** clone `git.coincync.network/coincync/cync-protocol`, build, point at a seed, sync. Build instructions: [docs.coincync.network/getting-started/build](https://docs.coincync.network/getting-started/build).
 - **Read the Constitution:** [docs.coincync.network/governance/constitution](https://docs.coincync.network/governance/constitution) — ten minutes. The articles are short by design.
@@ -98,7 +98,7 @@ within ±2 blocks. One known peer-wedge incident, fixed mid-soak.
 
 WHAT YOU CAN DO RIGHT NOW
 • Get a wallet + free tCYNC — coincync.network → Download Wallet,
-  then coincync.network/faucet.html for 10 tCYNC (1 drip / hour)
+  then coincync.network/faucet for 10 tCYNC (1 drip / hour)
 • Mine — RandomX, CPU only, no GPU/ASIC advantage
 • Send and receive private transactions — every tx uses ring
   signatures + stealth addresses
@@ -120,7 +120,7 @@ THE 30-SECOND VERSION
   enforced
 
 START HERE
-💧 Faucet: coincync.network/faucet.html
+💧 Faucet: coincync.network/faucet
 🔧 Mine + wallet: coincync.network
 🌐 Explorer: explorer.coincync.network
 📜 Constitution: docs.coincync.network/governance/constitution
@@ -287,7 +287,7 @@ Tested on Linux x86_64, macOS arm64/x86_64, Windows MSVC. Rust 1.75+.
 [li][b]Source code:[/b] [url=https://git.coincync.network/coincync/cync-protocol]git.coincync.network/coincync/cync-protocol[/url][/li]
 [li][b]Whitepaper / docs:[/b] [url=https://docs.coincync.network/introduction]docs.coincync.network[/url][/li]
 [li][b]Block explorer:[/b] [url=https://explorer.coincync.network]explorer.coincync.network[/url][/li]
-[li][b]Faucet (10 tCYNC, free):[/b] [url=https://coincync.network/faucet.html]coincync.network/faucet.html[/url][/li]
+[li][b]Faucet (10 tCYNC, free):[/b] [url=https://coincync.network/faucet]coincync.network/faucet[/url][/li]
 [li][b]Wallet download:[/b] [url=https://coincync.network/]coincync.network[/url][/li]
 [li][b]Constitution:[/b] [url=https://docs.coincync.network/governance/constitution]docs.coincync.network/governance/constitution[/url][/li]
 [li][b]Bill of Rights:[/b] [url=https://docs.coincync.network/governance/bill-of-rights]docs.coincync.network/governance/bill-of-rights[/url][/li]
@@ -351,7 +351,7 @@ The rest of the privacy stack is the Monero family standard: CLSAG-16 ring signa
 2. Click "Faucet" → paste your address → 10 tCYNC arrives in ~30s
 3. Send your first private transaction
 
-The faucet is at [coincync.network/faucet.html](https://coincync.network/faucet.html), 10 tCYNC per address per hour. No signup. Code is live, no marketing wrapper.
+The faucet is at [coincync.network/faucet](https://coincync.network/faucet), 10 tCYNC per address per hour. No signup. Code is live, no marketing wrapper.
 
 ## Status
 
@@ -420,7 +420,7 @@ Monero deliberately doesn't bind itself with constitutional commitments. Its val
 
 - Source: git.coincync.network/coincync/cync-protocol (MIT)
 - Soak summary: docs.coincync.network (search v1.0.2-testnet)
-- Faucet: coincync.network/faucet.html (10 tCYNC, no signup, 30 seconds)
+- Faucet: coincync.network/faucet (10 tCYNC, no signup, 30 seconds)
 - Constitution: docs.coincync.network/governance/constitution
 - CIP-001 (atomic swap spec): docs.coincync.network/cip/CIP-001-atomic-swap
 - Discord: discord.gg/5tYNSCsqzy
@@ -482,7 +482,7 @@ Happy to answer anything about the cryptography, the constitution model, or why 
 **First comment from author:**
 
 ```
-Author here. CoinCync is a Rust implementation of a privacy-first PoW cryptocurrency. Submitting the link to the Constitution rather than the homepage because the Constitution is the actually-novel piece — most of the rest of the privacy stack (CLSAG-16, Bulletproofs+, stealth addresses, RandomX) is well-trodden ground from the Monero family. The interesting question is whether *codifying* a privacy coin's values at the protocol level — with file-hash tripwires + compile-time-enforced invariants — changes the audit and credibility math. Other tactical commitments worth noting: atomic-swap-to-BTC as a mainnet-launch blocker (CIP-001), FROST signature aggregation so multi-sig is on-chain-indistinguishable from single-sig, hash-locked critical files protected from silent edits. Working faucet at coincync.network/faucet.html if you want to send a private transaction in 30 seconds. Solo developer, MIT licensed, no premine, no dev tax, no foundation. Source at git.coincync.network/coincync/cync-protocol. Critique welcome.
+Author here. CoinCync is a Rust implementation of a privacy-first PoW cryptocurrency. Submitting the link to the Constitution rather than the homepage because the Constitution is the actually-novel piece — most of the rest of the privacy stack (CLSAG-16, Bulletproofs+, stealth addresses, RandomX) is well-trodden ground from the Monero family. The interesting question is whether *codifying* a privacy coin's values at the protocol level — with file-hash tripwires + compile-time-enforced invariants — changes the audit and credibility math. Other tactical commitments worth noting: atomic-swap-to-BTC as a mainnet-launch blocker (CIP-001), FROST signature aggregation so multi-sig is on-chain-indistinguishable from single-sig, hash-locked critical files protected from silent edits. Working faucet at coincync.network/faucet if you want to send a private transaction in 30 seconds. Solo developer, MIT licensed, no premine, no dev tax, no foundation. Source at git.coincync.network/coincync/cync-protocol. Critique welcome.
 ```
 
 ---
