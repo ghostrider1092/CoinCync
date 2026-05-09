@@ -57,6 +57,9 @@ pub mod session;
 #[cfg(feature = "invitations")]
 pub mod invitations;
 
+#[cfg(feature = "persistence")]
+pub mod persistence;
+
 pub use error::{CoordinatorError, Result};
 pub use session::{
     Session, SessionId, SessionState, ParticipantId, ParticipantState,
@@ -68,4 +71,9 @@ pub use session::{
 pub use invitations::{
     InvitationToken, InvitationError, MAC_LEN, SESSION_SECRET_LEN,
     mint_token, verify_token,
+};
+
+#[cfg(feature = "persistence")]
+pub use persistence::{
+    SessionStore, PersistError, PERSISTENCE_VERSION,
 };

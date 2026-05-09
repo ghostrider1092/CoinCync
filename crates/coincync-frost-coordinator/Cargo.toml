@@ -21,6 +21,12 @@ default = []
 # that exercise just the state machine don't need it.
 invitations = ["dep:hmac", "dep:sha2", "dep:subtle"]
 
+# JSON-file persistence for active sessions. Off by default so
+# the core state-machine library has no I/O surface. Production
+# binaries enable this feature so a coordinator can survive
+# process restarts without losing in-flight sessions.
+persistence = []
+
 [dependencies]
 # Phase 1 is a pure state-machine library. It deliberately does NOT
 # depend on the `coincync` crate — the coordinator never sees signing
@@ -51,3 +57,6 @@ subtle      = { version = "2",    optional = true }
 # state-machine invariants hold across arbitrary transition sequences.
 # Catches edge cases unit tests miss; CIP-008 explicitly calls this out.
 proptest    = "1"
+
+# Filesystem fixtures for the persistence tests.
+tempfile    = "3"
