@@ -87,13 +87,47 @@ impl ConnectionTracker {
 
     /// HARDENING (Layer 4): Check if we can add an outbound connection
     /// to this subnet without exceeding diversity limits.
+    ///
+    /// Non-atomic — for admission decisions use `try_track_outbound_subnet`
+    /// instead. This entry point is kept for read-only inspection (logs,
+    /// metrics, "would this be allowed" UI).
     pub fn can_add_outbound_subnet(&self, addr: &SocketAddr) -> bool {
         let subnet = Self::subnet_key(&addr.ip());
         let count = self.outbound_per_subnet.get(&subnet).map(|c| *c).unwrap_or(0);
         count < MAX_OUTBOUND_PER_SUBNET
     }
 
-    /// HARDENING (Layer 4): Track an outbound connection's subnet.
+    /// HARDENING (Layer 4): Atomically check-and-increment the per-/16
+    /// outbound counter. Returns `true` if the connection was admitted
+    /// (and the counter incremented), `false` if the subnet cap was hit.
+    ///
+    /// This is the only admission path that's safe against two concurrent
+    /// dialers racing each other — a plain `can_add_outbound_subnet` +
+    /// `track_outbound_subnet` pair would let both pass the check and
+    /// then both increment, exceeding the limit. Mirrors the per-IP
+    /// pattern in `try_track_connection`.
+    pub fn try_track_outbound_subnet(&self, addr: &SocketAddr) -> bool {
+        let subnet = Self::subnet_key(&addr.ip());
+        let mut accepted = false;
+        self.outbound_per_subnet
+            .entry(subnet)
+            .and_modify(|c| {
+                if *c < MAX_OUTBOUND_PER_SUBNET {
+                    *c += 1;
+                    accepted = true;
+                }
+            })
+            .or_insert_with(|| {
+                accepted = true;
+                1
+            });
+        accepted
+    }
+
+    /// HARDENING (Layer 4): Track an outbound connection's subnet
+    /// (unconditional increment). Prefer `try_track_outbound_subnet`
+    /// for admission paths; this exists for callers that have already
+    /// committed to the connection by other means.
     pub fn track_outbound_subnet(&self, addr: &SocketAddr) {
         let subnet = Self::subnet_key(&addr.ip());
         self.outbound_per_subnet
@@ -318,5 +352,79 @@ mod tests {
         // `cleanup_stale_entries` must be idempotent in that case.
         t.cleanup_stale_entries(&[]);
         assert_eq!(t.tracked_ip_count(), 0);
+    }
+
+    fn addr_in(a: u8, b: u8, c: u8) -> SocketAddr {
+        format!("{}.{}.{}.1:1234", a, b, c).parse().unwrap()
+    }
+
+    #[test]
+    fn outbound_subnet_cap_admits_up_to_max_then_rejects() {
+        let t = ConnectionTracker::new(1024);
+        // All in the same /16 (10.0.x.1).
+        for i in 0..MAX_OUTBOUND_PER_SUBNET {
+            assert!(
+                t.try_track_outbound_subnet(&addr_in(10, 0, i as u8)),
+                "should admit slot {} (under cap)", i
+            );
+        }
+        // The next one must be rejected.
+        assert!(
+            !t.try_track_outbound_subnet(&addr_in(10, 0, 99)),
+            "should reject beyond cap"
+        );
+    }
+
+    #[test]
+    fn outbound_subnet_cap_is_per_subnet() {
+        let t = ConnectionTracker::new(1024);
+        // Fill /16 = 10.0.0.0
+        for i in 0..MAX_OUTBOUND_PER_SUBNET {
+            assert!(t.try_track_outbound_subnet(&addr_in(10, 0, i as u8)));
+        }
+        // A different /16 (10.1.x.1) must still admit normally.
+        assert!(t.try_track_outbound_subnet(&addr_in(10, 1, 0)));
+    }
+
+    #[test]
+    fn untrack_outbound_subnet_releases_slot() {
+        let t = ConnectionTracker::new(1024);
+        let peers: Vec<SocketAddr> =
+            (0..MAX_OUTBOUND_PER_SUBNET as u8).map(|i| addr_in(10, 0, i)).collect();
+        for p in &peers {
+            assert!(t.try_track_outbound_subnet(p));
+        }
+        // Cap reached, new dial rejected.
+        assert!(!t.try_track_outbound_subnet(&addr_in(10, 0, 99)));
+        // Drop one peer; slot must free up.
+        t.untrack_outbound_subnet(&peers[0]);
+        assert!(t.try_track_outbound_subnet(&addr_in(10, 0, 99)));
+    }
+
+    #[test]
+    fn outbound_subnet_concurrent_admission_does_not_exceed_cap() {
+        // TOCTOU regression test: spawn many threads that all race
+        // to dial peers in the same /16. Total admitted must be
+        // exactly MAX_OUTBOUND_PER_SUBNET, not more.
+        use std::sync::Arc;
+        use std::thread;
+        let t = Arc::new(ConnectionTracker::new(1024));
+        let total_attempts: usize = 64;
+        let mut handles = Vec::with_capacity(total_attempts);
+        for i in 0..total_attempts {
+            let t = t.clone();
+            handles.push(thread::spawn(move || {
+                let a = addr_in(10, 0, (i % 250) as u8);
+                t.try_track_outbound_subnet(&a)
+            }));
+        }
+        let admitted: usize = handles
+            .into_iter()
+            .map(|h| if h.join().unwrap() { 1 } else { 0 })
+            .sum();
+        assert_eq!(
+            admitted, MAX_OUTBOUND_PER_SUBNET,
+            "exactly MAX_OUTBOUND_PER_SUBNET admissions should win the race"
+        );
     }
 }
