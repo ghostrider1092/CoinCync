@@ -63,3 +63,10 @@ proptest    = "1"
 rand        = "0.8"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 borsh       = { version = "1", features = ["derive"] }
+
+# Phase 5 integration test: full composition with real ed25519
+# signing + wire codec. Requires both features to compile.
+[[test]]
+name = "integration_full_flow"
+path = "tests/integration_full_flow.rs"
+required-features = ["ed25519", "wire-codec"]
