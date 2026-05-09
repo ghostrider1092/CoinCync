@@ -30,9 +30,61 @@ A comprehensive adversarial test suite for privacy-focused blockchains. Original
 | — | `security_critical.rs` | 25 | Security — double-spend, subaddresses, wallet, emission |
 | — | `crypto_integration.rs` | 6 | Crypto integration — keypair roundtrip, signing hash |
 | — | `wallet_roundtrip.rs` | 6 | Wallet — persistence, mnemonic, CLSAG formula |
+| — | `dandelion_multi_node.rs` | 6 | Dandelion++ propagation — multi-node graph behavior (stem fan-out, embargo timeout, fluff completion) |
 | — | Supporting tests | ~580+ | Unit tests in src/ modules |
 
-**Total: 947 tests**
+### Total in main crate: 953 tests
+
+### Workspace-member integration tests
+
+Each multi-phase workspace crate has its own integration test exercising the entire layered stack (state machine, persistence, runtime / crypto) as a unit. These compose the lib's public surface in realistic flows and adversarial cases.
+
+| Crate | File | Tests | What It Covers |
+| --- | --- | --- | --- |
+| `coincync-frost-coordinator` | `tests/integration_full_flow.rs` | 8 | Full 2-of-3 FROST signing flow with invitation tokens and persistence: cross-session token replay, expired tokens, unattached-participant rejection, double-submit rejection, terminal stickiness through reload, crash recovery, MAC binds all fields |
+| `coincync-rolling-finality` | `tests/integration_full_flow.rs` | 11 | Real ed25519 signing throughout — end-to-end: sign → encode → decode → verify → apply → finalize. Adversarial: cross-signed forgery, tampered fields, malformed wire bytes, below-quorum, fork double-voting, inactive miners, verifier substitution |
+| `coincync-swap` | `tests/integration_full_flow.rs` | 10 | Full atomic-swap composition: protocol state machine, handshake, and state persistence. Refund safety from every lock state, crash recovery, terminal stickiness, unsafe-timeout rejection at both layers |
+
+### Total in workspace-member crates: 29 integration tests + 158 unit / property tests = 187
+
+### Workspace-member crate test totals
+
+| Crate | Lib | Bins | Integration | Total |
+| --- | --- | --- | --- | --- |
+| `coincync-frost-coordinator` | 38 | 13 | 8 | 59 |
+| `coincync-rolling-finality` | 36 | 0 | 11 | 47 |
+| `coincync-swap` | 42 | 0 | 10 | 52 |
+| `coincync-rig` | n/a | n/a | n/a | (project miner; not adversarial) |
+| `bridge` | n/a | n/a | n/a | (cross-stack types; lib-only) |
+| `coincync-faucet` | n/a | n/a | n/a | (deployment service) |
+| `coincync-status-probe` | n/a | n/a | n/a | (post-launch — not yet authored) |
+
+### Workspace grand total: 1140+ tests (953 main + 187 workspace-member)
+
+### Running the test suite
+
+```bash
+# Main crate (releases use this for the regression baseline)
+cargo test --release
+
+# Multi-node Dandelion++ harness (needs a real Tokio runtime)
+cargo test --release --test dandelion_multi_node
+
+# FROST coordinator (default features = state machine only)
+cargo test --release -p coincync-frost-coordinator
+
+# FROST coordinator with all features (server + cli + invitations + persistence)
+cargo test --release -p coincync-frost-coordinator --all-features
+
+# Rolling finality (default = state machine; needs ed25519+wire-codec for integration)
+cargo test --release -p coincync-rolling-finality --features ed25519,wire-codec
+
+# Atomic swap (default features cover everything)
+cargo test --release -p coincync-swap
+
+# Everything across the workspace
+cargo test --release --workspace --all-features
+```
 
 ## Historical Attack Tests
 
