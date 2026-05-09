@@ -1,0 +1,32 @@
+# Issue template config — controls the picker users see when they
+# click "New issue" on the GitHub repo.
+#
+# blank_issues_enabled: false forces every report through one of the
+# templates above. This isn't bureaucracy — it ensures bug reports
+# include logs and feature requests pass the constitutional check.
+# Pure-text "I think the network is broken" issues with no
+# environment info are nearly impossible to act on.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability (consensus, privacy, wallet integrity)
+    url: mailto:security@coincync.network
+    about: |
+      Do NOT open a public issue. Email security@coincync.network with
+      a description of the vulnerability. PGP fingerprint 2CAA 920F 8B96 1772.
+      See SECURITY.md for disclosure policy and bounty status.
+
+  - name: General question or discussion
+    url: https://discord.gg/5tYNSCsqzy
+    about: |
+      Questions, ideas, network ops, mining help — Discord is faster than
+      filing an issue and gets you community feedback. The #faq channel
+      already has answers to most repeated questions.
+
+  - name: Operational status / incident
+    url: https://explorer.coincync.network
+    about: |
+      Network up? Check the explorer first. The fleet auto-publishes
+      incident notices to the #status / #network-health Discord channels
+      before they appear in tickets.
