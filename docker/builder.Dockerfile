@@ -30,9 +30,14 @@
 #     docs/operations/REPRODUCIBLE_BUILDS.md.
 
 # Pin the Rust base image to a specific minor.
-# Use --build-arg RUST_VERSION=<x.y.z> to override (must be >= 1.75 per
-# the workspace's rust-version field). 1.83 is the post-launch baseline.
-ARG RUST_VERSION=1.83.0
+# Use --build-arg RUST_VERSION=<x.y.z> to override.
+#
+# Effective minimum is 1.85.0 — the workspace's `rust-version` field
+# says 1.75 but transitive dependencies (cpufeatures 0.3.0+) now require
+# Rust 1.85's stabilized `edition2024` feature, so 1.75 won't actually
+# build a fresh tree. We pin to 1.85.0 here as the baseline that
+# successfully resolves the current Cargo.lock.
+ARG RUST_VERSION=1.85.0
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
