@@ -1,0 +1,35 @@
+[package]
+name         = "coincync-rolling-finality"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+description  = "Miner-signed rolling-checkpoint soft-finality state machine — specified in CIP-009.D"
+license      = "MIT"
+
+# Library crate (the state machine). Phase 2+ adds:
+#   - real ed25519 verification (currently behind a trait so the
+#     consensus layer plugs it in)
+#   - integration with `validate_block` for the reorg rule
+#   - a `wallet-codec` feature for the on-wire attestation format
+[lib]
+name = "coincync_rolling_finality"
+path = "src/lib.rs"
+
+[dependencies]
+# Phase 1 is a pure state-machine library, intentionally without a
+# dependency on the `coincync` crate. The verification surface is a
+# trait (`AttestationVerifier`), so the real ed25519 plug-in lives
+# at the consensus boundary, not here.
+
+# State + serialization
+serde       = { version = "1", features = ["derive"] }
+
+# Errors
+thiserror   = "1"
+
+[dev-dependencies]
+# Property-based testing — generates thousands of inputs to verify
+# state-machine invariants hold across arbitrary attestation
+# sequences. Same justification as the FROST coordinator phase 1
+# crate.
+proptest    = "1"
