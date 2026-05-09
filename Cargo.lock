@@ -1011,6 +1011,7 @@ dependencies = [
 name = "coincync-frost-coordinator"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "hmac",
  "proptest",
  "serde",
@@ -1019,6 +1020,10 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

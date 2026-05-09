@@ -27,6 +27,24 @@ invitations = ["dep:hmac", "dep:sha2", "dep:subtle"]
 # process restarts without losing in-flight sessions.
 persistence = []
 
+# WSS server binary (phase 4). Pulls in tokio + tokio-tungstenite
+# + futures + tracing for the async networking layer. Off by
+# default so library consumers don't pay the async runtime cost.
+server = [
+    "invitations",
+    "persistence",
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+
+[[bin]]
+name = "coord"
+path = "src/bin/coord.rs"
+required-features = ["server"]
+
 [dependencies]
 # Phase 1 is a pure state-machine library. It deliberately does NOT
 # depend on the `coincync` crate — the coordinator never sees signing
@@ -51,6 +69,14 @@ uuid        = { version = "1", features = ["v7", "serde"] }
 hmac        = { version = "0.12", optional = true }
 sha2        = { version = "0.10", optional = true }
 subtle      = { version = "2",    optional = true }
+
+# Server binary deps (phase 4, opt-in via `server` feature). The
+# async runtime is gated so library consumers don't pay for it.
+tokio              = { version = "1", features = ["full", "signal"], optional = true }
+tokio-tungstenite  = { version = "0.21", optional = true }
+futures-util       = { version = "0.3", optional = true }
+tracing            = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
 # Property-based testing — generates thousands of inputs to verify
