@@ -561,6 +561,7 @@ fn transition_hint(t: Transition) -> &'static str {
         Transition::AliceRefunds => "  (Alice broadcasts CYNC refund)",
         Transition::BobRefunds => "  (Bob broadcasts BTC refund)",
         Transition::ObserveBobLocked => "  (auto on Bob's BTC lock confirming)",
+        Transition::ObserveAliceLocked => "  (auto on Alice's CYNC lock confirming)",
         Transition::ObserveSecretRevealed => "  (auto on Alice's BTC claim confirming)",
         Transition::ObserveCompleted => "  (auto on Bob's CYNC claim confirming)",
         Transition::Abort => "  (`cyncswap cancel`)",

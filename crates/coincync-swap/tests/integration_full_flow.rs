@@ -126,7 +126,9 @@ fn full_composition_completes_swap() {
     // AliceLocked).
     alice_swap.apply(Transition::AliceLocksCync).unwrap();
     alice_store.save(&alice_swap).unwrap();
-    bob_swap.state = State::AliceLocked;
+    // Bob's chain watcher confirms Alice's lock and applies the
+    // observation transition (no more direct state mutation).
+    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
     bob_store.save(&bob_swap).unwrap();
 
     // Bob broadcasts BTC lock; Alice's chain watcher catches it.
@@ -200,7 +202,7 @@ fn both_parties_refund_from_bob_locked() {
 
     // Bob
     let mut bob_swap = Swap::negotiate("b".into(), Role::Bob, safe_params()).unwrap();
-    bob_swap.state = State::AliceLocked;
+    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
     bob_swap.apply(Transition::BobLocksBtc).unwrap();
     bob_store.save(&bob_swap).unwrap();
 
@@ -283,7 +285,7 @@ fn completed_swap_rejects_all_transitions_after_reload() {
 
     // Drive Bob through to Completed
     let mut bob_swap = Swap::negotiate("b".into(), Role::Bob, safe_params()).unwrap();
-    bob_swap.state = State::AliceLocked;
+    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
     bob_swap.apply(Transition::BobLocksBtc).unwrap();
     bob_swap.apply(Transition::ObserveSecretRevealed).unwrap();
     bob_swap.apply(Transition::BobClaimsCync).unwrap();

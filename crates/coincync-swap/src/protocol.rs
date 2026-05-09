@@ -158,6 +158,12 @@ pub enum Transition {
     /// `AliceLocked` -> `BobLocked`. Local-state-only transition.
     ObserveBobLocked,
 
+    /// Bob OBSERVES Alice's CYNC lock arriving on-chain.
+    /// `Negotiated` -> `AliceLocked`. Local-state-only transition.
+    /// Bob's chain watcher applies this when it sees Alice's lock
+    /// confirmed on-chain; until then, Bob just waits.
+    ObserveAliceLocked,
+
     /// Bob OBSERVES Alice's BTC claim arriving on-chain.
     /// `BobLocked` -> `SecretRevealed`. Local-state-only.
     ObserveSecretRevealed,
@@ -336,6 +342,7 @@ impl Swap {
             (Transition::BobRefunds, Role::Bob, State::BobLocked) => State::Refunded,
 
             // Bob's observations
+            (Transition::ObserveAliceLocked, Role::Bob, State::Negotiated) => State::AliceLocked,
             (Transition::ObserveSecretRevealed, Role::Bob, State::BobLocked) => {
                 State::SecretRevealed
             }
@@ -403,25 +410,10 @@ impl Swap {
                 // claims, the swap is done regardless).
             }
             (Role::Bob, State::Negotiated) => {
-                // Bob just waits. ObserveAliceLocked is implicit;
-                // when his chain watcher delivers it, the
-                // coordinator calls apply with no explicit
-                // transition (the state advances when AliceLocked
-                // is observed via its OWN flag — modeled by Alice
-                // applying AliceLocksCync; Bob's local state
-                // tracks the same chain).
-                //
-                // For Bob's local state machine, observing
-                // Alice's lock confirmed advances his state to
-                // AliceLocked, but that observation isn't
-                // role-gated — it's just a chain event. We model
-                // it by saying Bob's state machine starts at
-                // Negotiated and the chain watcher applies
-                // AliceLocksCync from Bob's machine when it sees
-                // the lock. This is a small abstraction leak; the
-                // alternative would be a separate
-                // ObserveAliceLocked transition, which is fine
-                // but adds more types. Keep the current design.
+                // Bob waits for his chain watcher to confirm Alice's
+                // CYNC lock; ObserveAliceLocked advances him to
+                // AliceLocked.
+                out.push(Transition::ObserveAliceLocked);
             }
             (Role::Bob, State::AliceLocked) => {
                 out.push(Transition::BobLocksBtc);
@@ -657,6 +649,29 @@ mod tests {
         assert!(legal.contains(&Transition::AliceLocksCync));
         assert!(legal.contains(&Transition::Abort));
         assert!(!legal.contains(&Transition::BobLocksBtc));
+    }
+
+    #[test]
+    fn legal_transitions_bob_negotiated() {
+        // Regression: Bob in Negotiated previously had no legal
+        // transitions besides Abort. ObserveAliceLocked is the
+        // observation his chain watcher applies to advance him.
+        let s = bob_swap();
+        let legal = s.legal_transitions();
+        assert!(legal.contains(&Transition::ObserveAliceLocked));
+        assert!(legal.contains(&Transition::Abort));
+        assert!(!legal.contains(&Transition::AliceLocksCync));
+        assert!(!legal.contains(&Transition::BobLocksBtc));
+    }
+
+    #[test]
+    fn bob_can_observe_alice_locked_via_apply() {
+        let mut s = bob_swap();
+        s.apply(Transition::ObserveAliceLocked).unwrap();
+        assert_eq!(s.state, State::AliceLocked);
+        // From AliceLocked, Bob can now lock his BTC.
+        s.apply(Transition::BobLocksBtc).unwrap();
+        assert_eq!(s.state, State::BobLocked);
     }
 
     #[test]
