@@ -1,5 +1,238 @@
 # Changelog
 
+## Unreleased — pre-mainnet workspace expansion (May 8, 2026)
+
+This window spans 23 commits between `v1.0.2-testnet` and the
+public testnet launch on 2026-05-11. The work is structured into
+three multi-phase tracks plus operational-readiness docs and
+launch-prep polish. Nothing here is consensus-affecting; all
+additions live in feature-gated workspace crates or in `docs/`.
+
+### Three multi-phase code tracks
+
+Each track follows the same shape: a pure state-machine library
+(phase 1), then real cryptography or codec (phase 2), then
+persistence (phase 3), then runtime / integration (phase 4+),
+each layer feature-gated and independently testable. The pattern
+keeps the audit perimeter minimal — the state machine ships to
+auditors as ~500 LOC of pure logic; the wire / I/O layers are
+add-ons.
+
+#### FROST coordinator (CIP-008) — `crates/coincync-frost-coordinator`
+
+- **Phase 1** (286cc40) — pure session state machine: `Session`,
+  `Transition`, terminal-stickiness invariant. 11 tests
+  (8 unit + 3 proptest).
+- **Phase 2** (9e9729b) — invitation-token authentication via
+  HMAC-SHA256 over (session_id || pubkey || expiry), feature
+  `invitations`. Constant-time MAC compare via `subtle`.
+  14 tests.
+- **Phase 3** (1e20b8e) — JSON-file session persistence with
+  atomic temp-file-and-rename writes, feature `persistence`.
+  Schema-versioned with loud-failure on mismatch. 13 tests.
+- **Phase 4** (b2f23ac) — WSS server bin `coord` wraps the
+  in-process state machine in a real network transport. JSON
+  request/response, per-session pub/sub broadcasts, persistence
+  on every accepted transition, graceful SIGINT shutdown,
+  MAX_CONNECTIONS=1000, MAX_MESSAGE_BYTES=16 KiB.
+  Feature `server` (composes `invitations` + `persistence` +
+  tokio + tokio-tungstenite). 7 bin tests.
+- **Phase 4.5** (bf9fc06) — operator CLI `coord-cli`. Sync,
+  no async runtime. Subcommands: `gen-secret`,
+  `create-session`, `mint-invitation`, `list`, `inspect`,
+  `force-abort`, `gc-terminal`. Feature `cli`. 6 bin tests.
+- **Phase 5** (0e94dea) — full-flow integration test composing
+  state + invitations + persistence through realistic 2-of-3
+  signing flow + adversarial cases (cross-session token
+  rejection, expired tokens, unattached-participant rejection,
+  double-submit rejection, terminal-stickiness through reload,
+  crash recovery). 8 integration tests.
+- Side fix: `ParticipantId` now serializes as 64-char hex string
+  so it works as a JSON map key (was failing
+  `BTreeMap<ParticipantId, _>` round-trip).
+- Operations spec: **CIP-012** (18e00c7) — deployment
+  rehearsal, two-instance mainnet plan, six failure-mode
+  runbooks.
+
+**Total: 59 FROST tests across 4 binaries + lib + integration.**
+
+#### Rolling soft-finality (CIP-009.D) — `crates/coincync-rolling-finality`
+
+- **Phase 1** (05c4c74) — `FinalityTracker` state machine,
+  `ActiveMinerSet` rolling window, monotonic soft-final tip,
+  2/3 Byzantine threshold semantics, `MIN_QUORUM=5` gate.
+  Property-tested across: terminal-state stickiness, threshold
+  exact-fire, dual-fork tolerance. 19 tests
+  (5 active_set + 11 finality + 3 proptest).
+- **Phase 2** (7292682) — feature `ed25519` adds real
+  `Ed25519Verifier` via `ed25519-dalek`; feature `wire-codec`
+  adds borsh-serialized on-chain attestation format with magic
+  prefix `b"CIP9"` + version byte. 17 tests
+  (8 verifier + 9 codec).
+- **Integration test** (421016e) — full composition with REAL
+  ed25519 signing throughout (unlike FROST/swap which use
+  opaque bytes; rolling-finality's security depends on the
+  verifier hooking up to the codec correctly).
+  11 integration tests.
+- Spec: **CIP-009.D** (e394811) — design (replaces rejected
+  MESS, layered with shipped Path B). **CIP-011** (67dcd0c) —
+  two-phase activation rehearsal (ENABLE → ENFORCE) with five
+  recovery scenarios.
+
+**Total: 47 rolling-finality tests.** Phase 3 (`validate_block`
+hook) is queued; touches integrity-locked consensus files and
+needs CIP-007 Mode A activation.
+
+#### Atomic swap (CIP-001) — `crates/coincync-swap`
+
+- **Protocol state machine** (6f8c5e7) — `Swap`, `Transition`,
+  `SwapParameters`. Asymmetric role gating (Alice / Bob),
+  refund-path safety, terminal-stickiness, **timeout-safety
+  invariant** (`btc_timeout_secs * 6/5 < cync_timeout_secs`)
+  enforced at construction time. 17 tests.
+- **Handshake state machine** (1caf02c) — `coordinator.rs`
+  upgraded from `NotImplemented` stub to a fully-functional
+  message-protocol layer. `Message` enum (Hello / HelloAck /
+  Accept / AdaptorMaterial / Ready / Abort), `Phase` state,
+  `HandshakeAction` (Send / Done / VerifyAdaptorMaterial /
+  Aborted). 12 tests.
+- **State persistence** (0377a41) — `SwapStore` mirroring
+  FROST's `SessionStore`. Atomic temp-file-and-rename, schema
+  versioning, idempotent delete, parent-directory creation.
+  13 tests.
+- **CLI integration** (5fdb7e6) — `cyncswap` binary upgraded
+  from skeleton-mode to real load/save flow. `alice` /
+  `bob` / `status` / `cancel` actually persist; `lock-cync` /
+  `lock-btc` / `claim-btc` / `claim-cync` exit non-zero with
+  clear "phase 3 implements this" notice.
+- **Integration test** (c98e898) — full composition through
+  every layer plus adversarial cases (refund safety from
+  every lock state, crash recovery, terminal stickiness
+  through reload, unsafe-timeout rejection at both layers).
+  10 integration tests.
+
+**Total: 52 atomic-swap tests.** Phase 3 (real adaptor sigs +
+cross-curve DL proof + Tor/Noise transport) is queued for the
+multi-week dedicated audit window.
+
+### Operational-readiness pack (9f110ae)
+
+Five docs, 1768 lines, no code:
+
+- `SECURITY.md` — public security disclosure policy with
+  90-day coordinated-disclosure window, safe-harbor language,
+  pre-launch testnet hosts marked in-scope.
+- `docs/cip/CIP-010-testnet-hardfork-rehearsal.md` — concrete
+  activation playbook for the `BOOTSTRAP_MIN_RING_SIZE` 11→13
+  bump, exercising CIP-007 Mode A end-to-end before mainnet.
+- `docs/operations/REPRODUCIBLE_BUILDS.md` and
+  `scripts/verify-build.sh` — pinned-Docker build environment
+  and verifier script with PGP-signed manifest format.
+- `docs/operations/INCIDENT_RUNBOOKS.md` — 9 runbooks
+  captured from the actual testnet bring-up (chain stalled,
+  fleet box behind, "have 0" UX panic, faucet recipients
+  can't spend, Discord webhook silent, mempool full,
+  explorer stale, integrity check, bulletproofs+ build
+  errors).
+- `docs/operations/STATUS_PAGE.md` — design for
+  `status.coincync.network` with 3-state health banner,
+  per-service uptime grid, real-time chain health, incident
+  timeline.
+
+### Launch-prep polish
+
+- **Lightsync handler unparked** (95af7aa) — `GetOutputDigests`
+  network handler + `get_output_digests` JSON-RPC handler.
+  Light-wallet SPV path now actually works against running
+  testnet nodes (was `log-and-drop` before). Closes Gap 1 + 4
+  from `LIGHTSYNC_AUDIT.md`. Privacy posture is strictly
+  stronger than BIP-157 (server learns only height range,
+  never the wallet's address set).
+- **Multi-node Dandelion++ harness** (32d7a9e) —
+  `tests/dandelion_multi_node.rs` covers the *graph*
+  behaviour where stem-and-fluff propagation lives. 6 tests:
+  stem fan-out is exactly one (privacy invariant),
+  stem-then-fluff completes, stem-loop detection triggers
+  immediate fluff, fluff-epoch broadcasts immediately,
+  embargo timeout fail-safes, diffusion confirmation clears
+  stempool.
+- **KNOWN_ISSUES.md sync** (6ff3b36) — moved bugs #4, #5,
+  #7, ops #2 from OPEN to FIXED-in-`fd5a444`. The doc was
+  stale.
+- **CoinCync 2.0 → 1.0 sweep** (f5a53f3) — 22 doc-comment
+  headers, 1 OpenAPI title, 1 explorer testnet-guide
+  paragraph, 1 generated-config-template header. Three files
+  deliberately kept (`.gitignore`, `src/metrics.rs`,
+  `src/mining/miner.rs`) because their text contrasts the
+  prior 2.0 version with the current codebase. Critical-
+  file `constants.rs` hash refreshed.
+- **disclosure.rs doc fix** (e341773) — single-line stale
+  "2.0" reference; committed separately to keep the larger
+  rename sweep auditable.
+
+### Pre-launch sanity sweep (no commit, validation only)
+
+Confirmed the FIXED-in-`9b83772` items still hold post-session:
+`NoUtxoPairCovers` error type, O(n²) UTXO pair sweep,
+`mark_spent_by_key_image` in `cmd_scan`, 2-pass mempool
+shadow-eviction with `EvictReason::DoubleSpend`. OPEN items
+still as documented: `BOOTSTRAP_MIN_RING_SIZE=11` (planned
+hard fork), faucet drip-pair fee fingerprint (testnet-only
+operational tradeoff). Full lib test suite (501 tests) +
+multi-crate workspace build all clean.
+
+### Roll-up
+
+- 23 commits
+- ~190 new tests across 11 modules
+- 6 new feature gates: `ed25519`, `wire-codec`,
+  `invitations`, `persistence`, `server`, `cli`
+- 4 new binaries / first-time-functional binaries:
+  `coord` (FROST WSS server), `coord-cli` (FROST operator
+  CLI), `cyncswap` (now wired with persistence; was
+  skeleton), `verify-build.sh` (reproducible build
+  verifier)
+- 5 new spec / runbook / policy docs
+- 3 new CIPs: CIP-009.D (rolling finality protocol),
+  CIP-010 (ring-bump testnet rehearsal),
+  CIP-011 (rolling-finality activation rehearsal),
+  CIP-012 (FROST coordinator deployment rehearsal)
+
+### Outstanding work, queued for dedicated future sessions
+
+These were intentionally NOT taken on in this window because
+they each need multi-week focus + audit:
+
+- **CIP-009.D phase 3** — wire `FinalityTracker` into
+  `validate_block` behind a feature flag. Touches integrity-
+  locked consensus files; requires `critical_files.lock`
+  refresh and a real activation height per CIP-011.
+- **Atomic swap phase 3** — adaptor signature primitives
+  (BTC + CYNC sides), cross-curve DL-equality proof, BTC
+  HTLC + CYNC tx construction, Tor / Noise transport. Per
+  CIP-001 the timeline is 3-6 months focused work plus
+  external audit.
+- **FROST phase 6** — real `frost_ed25519` integration tests
+  against the running coord, Prometheus metrics endpoint,
+  per-IP rate limiting, connection idle timeouts, per-session
+  invitation secrets.
+
+### User-facing decision deck queued
+
+- Approve / defer / reject **CIP-009.D + CIP-011** (rolling
+  finality + activation playbook).
+- Approve / defer / reject **CIP-010** (ring-bump testnet
+  rehearsal).
+- Approve / defer / reject **CIP-012** (FROST coordinator
+  deployment).
+- Schedule + budget **external cryptographic audit**
+  (~$60-120k or focused single-firm review at $15-30k).
+- Resolve uncommitted edit to
+  `docs/launch/v1.0.2-testnet-soak-summary.md` (GO/NO-GO
+  decision section deleted in working tree).
+
+---
+
 ## v1.0.2-testnet (May 5, 2026)
 
 ### Public Repo + Fleet Migration
