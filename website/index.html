@@ -1045,36 +1045,32 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 </div>
 
 <!-- SECURITY -->
+<!--
+  FUNDING-GATED: bug-bounty payout cards are removed until the project
+  has funding to back the offers. Original 4-card grid (Critical / High
+  / Medium / Low with USD ranges) lives in git history; restore that
+  block when funding lands. For now, responsible-disclosure contact only,
+  no payout claims.
+-->
 <section>
   <div class="section-header">
     <div class="section-num">&sect; 09</div>
-    <h2 class="section-title">Security &amp; <em>bug bounty</em>.</h2>
-    <p class="section-desc">We pay for vulnerabilities. Responsible disclosure protects everyone.</p>
+    <h2 class="section-title">Responsible <em>disclosure</em>.</h2>
+    <p class="section-desc">Found a bug that could affect users? Reach out before posting publicly.</p>
   </div>
-  <div class="bounty-grid reveal-stagger">
-    <div class="bounty-card">
-      <div class="bounty-tier" style="color:var(--red)">Critical</div>
-      <div class="bounty-range">$5K&ndash;$50K</div>
-      <div class="bounty-desc">Supply inflation, chain split, privacy break, key extraction</div>
-    </div>
-    <div class="bounty-card">
-      <div class="bounty-tier" style="color:var(--ac)">High</div>
-      <div class="bounty-range">$1K&ndash;$5K</div>
-      <div class="bounty-desc">Node crash, double-spend, key image bypass, consensus bypass</div>
-    </div>
-    <div class="bounty-card">
-      <div class="bounty-tier" style="color:var(--t2)">Medium</div>
-      <div class="bounty-range">$100&ndash;$1K</div>
-      <div class="bounty-desc">Mempool manipulation, DoS vectors, privacy leak for specific users</div>
-    </div>
-    <div class="bounty-card">
-      <div class="bounty-tier" style="color:var(--t3)">Low</div>
-      <div class="bounty-range">$50&ndash;$100</div>
-      <div class="bounty-desc">Minor info leak, non-consensus crash, documentation errors</div>
-    </div>
-  </div>
-  <div style="text-align:center;margin-top:24px;font-size:12px;color:var(--t3)">
-    Report to <a href="mailto:security@coincync.org" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">security@coincync.org</a> &mdash; PGP: <span style="font-family:var(--mono);font-size:11px;color:var(--t4)">2CAA 920F 8B96 1772</span> &mdash; 520+ tests in CI
+  <div class="reveal" style="max-width:760px;margin:0 auto;padding:32px 28px;background:var(--s1);border:1px solid var(--b)">
+    <p style="font-size:14px;color:var(--t2);line-height:1.7;margin:0 0 18px">
+      CoinCync is a solo-developer, MIT-licensed project at testnet stage. We don't currently have funding to back a paid bug-bounty program, and we'd rather say so plainly than promise payouts we can't honor. A funded program will launch alongside the third-party audit before mainnet.
+    </p>
+    <p style="font-size:14px;color:var(--t2);line-height:1.7;margin:0 0 18px">
+      In the meantime, please report security issues responsibly. Public credit on disclosure (with your consent), and a coordinated fix-and-publish timeline that protects users.
+    </p>
+    <p style="font-size:13px;color:var(--t3);line-height:1.7;margin:0;font-family:var(--mono)">
+      Email:&nbsp; <a href="mailto:security@coincync.org" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">security@coincync.org</a><br>
+      PGP:&nbsp;&nbsp;&nbsp; <span style="color:var(--t4)">2CAA 920F 8B96 1772</span><br>
+      Scope:&nbsp; consensus, privacy, wallet integrity, key handling, network<br>
+      CI:&nbsp;&nbsp;&nbsp;&nbsp; 520+ tests, fmt + clippy + audit on every PR
+    </p>
   </div>
 </section>
 
