@@ -70,7 +70,25 @@ real_ip_header CF-Connecting-IP;
 server {
     listen 80;
     listen [::]:80;
+    listen 443 ssl;
+    listen [::]:443 ssl;
     server_name explorer.coincync.network explorer.coincync.org;
+
+    # Cloudflare Origin Certificates (CF-only trust, selected by SNI).
+    # Two certs because each was generated for a single zone and the
+    # auto-append in the CF dashboard added the wrong SAN entries when
+    # crossing zones. Working hostnames: *.coincync.network on .network.crt,
+    # *.coincync.org on .crt. Regenerate cleanly when convenient.
+    # Files must exist on the box BEFORE running this script — see scripts/install-origin-cert.ps1.
+    ssl_certificate     /etc/nginx/ssl/origin.network.crt;
+    ssl_certificate_key /etc/nginx/ssl/origin.network.key;
+    ssl_certificate     /etc/nginx/ssl/origin.crt;
+    ssl_certificate_key /etc/nginx/ssl/origin.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
 
     root /var/www/explorer;
     index index.html;
@@ -138,6 +156,18 @@ if ! command -v nginx >/dev/null 2>&1; then
   apt-get update -qq
   apt-get install -yqq nginx
 fi
+
+# Pre-check: SSL certs must already be installed. If they're missing the new
+# nginx config (with listen 443 ssl;) won't validate. Fail before touching
+# any state so the running nginx keeps serving the prior config.
+for f in /etc/nginx/ssl/origin.network.crt /etc/nginx/ssl/origin.network.key /etc/nginx/ssl/origin.crt /etc/nginx/ssl/origin.key; do
+  if [ ! -f "`$f" ]; then
+    echo "ERROR: required cert/key missing: `$f"
+    echo "Install certs first (CF dashboard -> Origin Server -> Create Certificate),"
+    echo "scp them to /etc/nginx/ssl/, chmod 0644 the .crt and 0600 the .key, then re-run."
+    exit 1
+  fi
+done
 
 # Layout the static tree
 install -d -m 0755 -o www-data -g www-data /var/www/explorer
