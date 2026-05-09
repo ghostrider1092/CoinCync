@@ -656,6 +656,7 @@ impl P2PNode {
         let connector_identity = identity.clone();
         let connector_encryption = encryption_config.clone();
         let connector_listen_port = self.config.listen_addr.port();
+        let connector_tracker = self.conn_tracker.clone();
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(10));
@@ -831,6 +832,24 @@ impl P2PNode {
                         }
                     }
 
+                    // HARDENING (Layer 4): Atomic per-/16 outbound cap.
+                    // Reserves the slot before we commit a tokio task to
+                    // dialing — try_track is the TOCTOU-safe version that
+                    // can_add_outbound_subnet is not. The slot is released
+                    // at the end of the spawned task whether the dial
+                    // succeeds or fails. Stronger than the soft "prefer
+                    // diverse" policy in the maintenance loop above: a
+                    // hard cap so an attacker controlling a /16 cannot
+                    // saturate beyond MAX_OUTBOUND_PER_SUBNET regardless
+                    // of address-book ordering.
+                    if !connector_tracker.try_track_outbound_subnet(&addr) {
+                        debug!(
+                            "Eclipse cap: /16 of {} is at MAX_OUTBOUND_PER_SUBNET, skipping",
+                            addr
+                        );
+                        continue;
+                    }
+
                     debug!("Attempting outbound connection to {}", addr);
 
                     // CHANGE 3: Record attempt timestamp before spawning
@@ -847,6 +866,7 @@ impl P2PNode {
                     let backoffs = backoffs.clone();
                     let conn_identity = connector_identity.clone();
                     let conn_encryption = connector_encryption.clone();
+                    let spawn_tracker = connector_tracker.clone();
 
                     tokio::spawn(async move {
                         // Use proxy if configured, otherwise direct connection
@@ -886,6 +906,13 @@ impl P2PNode {
                                 debug!("Backoff for {}: next retry in {:?}", addr, delay);
                             }
                         }
+
+                        // HARDENING (Layer 4): Release the /16 slot whether
+                        // the dial succeeded, the handshake failed, or the
+                        // peer disconnected — symmetric with the inbound
+                        // tracker.untrack_connection at the end of the
+                        // accept-side spawn above.
+                        spawn_tracker.untrack_outbound_subnet(&addr);
                     });
                 }
             }
