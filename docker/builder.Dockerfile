@@ -60,6 +60,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     make \
     lld \
     git \
+    curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
@@ -107,10 +108,9 @@ RUN find target/release -maxdepth 1 -type f -executable \
 # into a slim layer that can be exported via `docker run -v`.
 FROM debian:bookworm-slim AS artifacts
 
-COPY --from=builder /src/target/release/coincync \
+COPY --from=builder /src/target/release/coincync-node \
                     /src/target/release/coincync-wallet \
                     /src/target/release/coincync-rig \
-                    /src/target/release/coincync-tui-miner \
                     /artifacts/
 
 # Compute checksums of the binaries inside the image so they're
