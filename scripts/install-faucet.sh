@@ -89,7 +89,11 @@ FAUCET_LISTEN_ADDR=127.0.0.1:$LISTEN_PORT
 FAUCET_DB_PATH=$DATA_DIR/drips.db
 FAUCET_WALLET_PATH=$WALLET_FILE
 FAUCET_WALLET_BIN=$WALLET_BIN_DST
-FAUCET_NODE_RPC=http://127.0.0.1:28081
+# Local nginx adds the Bearer auth header server-side (the wallet
+# binary doesn't have a --rpc-key flag). DO NOT change this to a
+# direct port-28081 URL without first patching the wallet to send
+# the Bearer token, otherwise every send fails with 401 Unauthorized.
+FAUCET_NODE_RPC=http://127.0.0.1/rpc/testnet
 FAUCET_NETWORK=$NETWORK
 FAUCET_DRIP_AMOUNT_ATOMIC=10000000000000
 FAUCET_RATE_LIMIT_ADDRESS_SECS=3600
