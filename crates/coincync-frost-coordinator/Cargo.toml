@@ -40,10 +40,25 @@ server = [
     "dep:tracing-subscriber",
 ]
 
+# Operator CLI binary (phase 4.5). Sync; no async runtime.
+cli = [
+    "invitations",
+    "persistence",
+    "dep:clap",
+    "dep:hex",
+]
+
 [[bin]]
 name = "coord"
 path = "src/bin/coord.rs"
 required-features = ["server"]
+
+# Operator CLI: session creation, invitation minting, admin tasks
+# (list / inspect / force-abort / gc-terminal). Sync — no tokio.
+[[bin]]
+name = "coord-cli"
+path = "src/bin/coord_cli.rs"
+required-features = ["cli"]
 
 [dependencies]
 # Phase 1 is a pure state-machine library. It deliberately does NOT
@@ -77,6 +92,10 @@ tokio-tungstenite  = { version = "0.21", optional = true }
 futures-util       = { version = "0.3", optional = true }
 tracing            = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# CLI binary deps (phase 4.5, opt-in via `cli` feature).
+clap               = { version = "4", features = ["derive"], optional = true }
+hex                = { version = "0.4", optional = true }
 
 [dev-dependencies]
 # Property-based testing — generates thousands of inputs to verify

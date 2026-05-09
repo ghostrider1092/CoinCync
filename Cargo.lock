@@ -1011,7 +1011,9 @@ dependencies = [
 name = "coincync-frost-coordinator"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "futures-util",
+ "hex",
  "hmac",
  "proptest",
  "serde",
