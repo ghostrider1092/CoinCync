@@ -1019,7 +1019,16 @@ impl P2PNode {
                     // Tier 2: Only after 120s of no progress, try rotating
                     if stall_count >= 24 { // 24 * 5s tick = 120s
                         warn!("Sync stalled for 2+ minutes, rotating peers");
-                        sync_sync.write().await.increase_timeout();
+                        let now = chrono::Utc::now().timestamp() as u64;
+                        {
+                            let mut s = sync_sync.write().await;
+                            s.increase_timeout();
+                            // Drop expired orphans before recovery — accumulated
+                            // orphans from the stall period would otherwise sit
+                            // around competing with freshly-downloaded blocks
+                            // on the next IBD pass, causing avoidable rework.
+                            s.cleanup_expired_orphans(now);
+                        }
                         sync_addresses.write().await.clear_tried();
                         stall_count = 0;
                     }

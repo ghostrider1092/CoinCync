@@ -1542,6 +1542,22 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                                 // batch_disconnect_block now includes key_image_removals.
                                 let disconnect_batch = UtxoSet::batch_disconnect_block(&txs);
                                 inner.utxos.apply_batch(disconnect_batch);
+                                // Phase 2 store rewind. checkpoint_at_height is taken
+                                // per-block on the forward path (see ~line 1407); each
+                                // rewind() pops the most recent checkpoint, undoing one
+                                // block of shielded-tree state. Inert today (the store
+                                // is wired as Option=None for the testnet build) but
+                                // forward-compatible for the day Phase 2 stores light
+                                // up — without this, the shielded tree would diverge
+                                // from the UTXO set on every reorg.
+                                if let Some(ref s) = self.shielded_store {
+                                    if !s.rewind() {
+                                        tracing::warn!(
+                                            "shielded_store.rewind() returned false at h={} — state may be inconsistent",
+                                            h
+                                        );
+                                    }
+                                }
                                 // Collect for output index removal
                                 disconnected_tx_lists.push(txs);
                                 // Subtract this block's emission from supply
