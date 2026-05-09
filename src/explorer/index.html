@@ -3155,9 +3155,9 @@ function toggleMobile(){$('mobile-menu').classList.toggle('open');}
 function closeMobile(){$('mobile-menu').classList.remove('open');}
 
 // ── PAGE NAV ──────────────────────────────────────────────────
-const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals'];
+const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy'];
 const DEV_ONLY_PAGES=[];
-const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals'];
+const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy'];
 const EXPLORER_DEV_MODE=(
   new URLSearchParams(window.location.search).get('dev_explorer')==='1' &&
   IS_LOCALHOST
@@ -9079,6 +9079,122 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
      Article XVIII is explicit: interpretation belongs to node operators via
      fork-acceptance, not to a centralized vote tally on this page. So this
      page shows transparency, not authority. -->
+<div class="page" id="page-privacy">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>&rsaquo;</span>Privacy Features</div>
+    <div class="page-title" style="margin-bottom:4px">Privacy &amp; trust-minimization stack</div>
+    <div class="page-sub" style="margin-bottom:20px">Every layer is mandatory by design — no opt-in privacy mode, no transparent class. The features below cover what every CYNC transaction gets and what wallet integrations can plug into.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 1 &mdash; Cryptographic (every transaction)</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>CLSAG-16 ring signatures</strong></td><td>Sender (which input is real)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Stealth addresses</strong></td><td>Receiver (one-time addresses, no on-chain reuse)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Pedersen commitments</strong></td><td>Amount (homomorphic, zero-revealing)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Bulletproofs+ range proofs</strong></td><td>Validity (no negative-amount inflation)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Encrypted memos</strong></td><td>Payment metadata (ChaCha20+ECDH, recipient-only)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>View tags</strong></td><td>Recipient scan efficiency (1-byte hint, no privacy loss)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Key images</strong></td><td>Double-spend prevention (single-use, unlinkable)</td><td><span class="badge">shipped</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 2 &mdash; Network</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Dandelion++ stem-then-fluff</strong></td><td>Originator IP (per-epoch random relay)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Multi-node propagation harness</strong></td><td>Verifies stem fan-out is exactly one (privacy invariant), embargo timeout fail-safe, fluff completion across the graph</td><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">new this phase</span></td></tr>
+          <tr><td><strong>Noise_XX P2P encryption</strong></td><td>Traffic content (peer-to-peer)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Traffic shaping + constant-rate padding</strong></td><td>Timing-correlation defense</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Tor / SOCKS5 transport</strong></td><td>Node IP (operator-side)</td><td><span class="badge">shipped</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 3 &mdash; Wallet</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Subaddresses</strong></td><td>Linking payments to a single wallet</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Uniform 2-in/2-out tx shape</strong></td><td>Tx-graph fingerprinting (every tx looks identical)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Decoy defense (gamma-distributed selection)</strong></td><td>Statistical-analysis attacks on ring selection</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Time-scoped view keys</strong></td><td>Forward secrecy on auditor-shared view keys</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Plausible-deniability wallets</strong></td><td>Coercion resistance (multiple credible wallet states)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Auto-churn</strong></td><td>UTXO age correlation across user activity</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Dead man's switch</strong></td><td>Recovery path that keeps the original key out of the recovery transaction</td><td><span class="badge">shipped</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 3+ &mdash; M-of-N multisig (CIP-008, new this phase)</div>
+      <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+        <p><strong>FROST signing coordinator.</strong> Untrusted message-relay service that lets multisig participants exchange round-1 commitments and round-2 sig-shares without manual copy-paste. The coordinator holds <strong>zero key material</strong> &mdash; even a malicious or compromised coordinator cannot forge signatures or steal funds. Worst case: a session fails to complete and participants retry.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Shipped as the <code>coord</code> WSS server + <code>coord-cli</code> operator binary. State machine, HMAC invitation tokens, JSON file persistence, per-IP rate limit, idle-connection timeout, and Prometheus metrics endpoint all live. The signing protocol is <a href="https://www.rfc-editor.org/rfc/rfc9591" target="_blank" style="color:var(--ac2)">RFC 9591 FROST</a> over Ed25519 via <code>frost_ed25519</code>; the coordinator is the off-chain message relay.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Status: <span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">CIP-008 Draft</span> &middot; <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-008-frost-coordinator.md" target="_blank" style="color:var(--ac2)">spec &rarr;</a> &middot; <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-012-frost-coordinator-deployment.md" target="_blank" style="color:var(--ac2)">CIP-012 deployment plan &rarr;</a></p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 4 &mdash; Cross-chain (CIP-001, new this phase)</div>
+      <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+        <p><strong>CYNC&harr;BTC atomic swap.</strong> Trustless cross-chain swap modeled on the Comit / Farcaster XMR&harr;BTC design. Adaptor signatures over CLSAG keep the swap <strong>invisible on the privacy chain</strong> &mdash; an observer sees a normal CoinCync transaction, not a swap. Bitcoin side uses Schnorr/ECDSA adaptor signatures over secp256k1; the two adaptors are bound by a cross-curve discrete-log-equality proof. Either party can refund unilaterally if the counterparty disappears (asymmetric timeouts).</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Shipped this phase: protocol state machine (Negotiated &rarr; AliceLocked &rarr; BobLocked &rarr; SecretRevealed &rarr; Completed, with refund + abort terminal states), handshake state machine + wire-format messages, <code>SwapStore</code> JSON state persistence with atomic writes, and the <code>cyncswap</code> CLI driving all of them. Hard mainnet-launch blocker per Article XV. The cryptographic core (real adaptor sigs + Tor/Noise transport) and the audit are queued for the post-testnet window.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Status: <span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">CIP-001 Draft (mainnet blocker)</span> &middot; <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-001-atomic-swap.md" target="_blank" style="color:var(--ac2)">spec &rarr;</a></p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 4 &mdash; Light-wallet SPV (lightsync, new this phase)</div>
+      <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+        <p><strong>Server-blind compact-block sync.</strong> Wallets that don't run a full node download per-block <code>OutputDigest</code> bundles (~138 B / output) and scan locally with view-tag filtering. The server learns <strong>only the height range</strong> the wallet asked for &mdash; never which outputs the wallet cares about, never the wallet's address set. <strong>Strictly stronger privacy than BIP-157</strong>, where the wallet's filter elements leak its address set to the filter server.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Shipped this phase as the <code>get_output_digests</code> + <code>get_sync_checkpoints</code> JSON-RPC methods and the <code>GetOutputDigests</code> P2P message handler. Pull-protected (max 100 blocks per request). Wallet-side scanning uses the existing CLSAG ECDH + view-tag fast-path.</p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 5 &mdash; Reorg defense (CIP-009 family)</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Path B &mdash; consensus checkpoints</strong></td><td>Reorgs past project-cut checkpoints (cold horizon)</td><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">shipped</span></td></tr>
+          <tr><td><strong>Path D &mdash; miner-signed rolling checkpoints (CIP-009.D)</strong></td><td>Reorgs past the live tip (~100 blocks deep) once 2/3 of active miners attest</td><td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">library shipped, activation queued</span></td></tr>
+        </tbody>
+      </table></div>
+      <div style="padding:0 18px 14px;font-size:11px;color:var(--t3);line-height:1.6">
+        <p>Path D replaces the rejected MESS approach with discrete miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners (with at least one block in the last ~14 days) have signed it. No clock readings, no decay-tuning knobs, observable on-chain. Pure-state library, real ed25519 verifier, and borsh wire codec all shipped (<code>crates/coincync-rolling-finality</code>); validate_block integration follows the activation playbook in <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-011-rolling-finality-activation.md" target="_blank" style="color:var(--ac2)">CIP-011</a>.</p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 6 &mdash; Constitutional</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Article</th><th>Forbids</th></tr></thead>
+        <tbody>
+          <tr><td>Article VI &mdash; <strong>Mandatory privacy</strong></td><td>Optional / opt-in privacy modes; transparent transaction class</td></tr>
+          <tr><td>Article IX &mdash; <strong>No surveillance hooks</strong></td><td>Travel Rule attestation, address blacklists, balance-lookup APIs</td></tr>
+          <tr><td>Article XII &mdash; <strong>No admin authority</strong></td><td>Pause/freeze/seize functions, emergency overrides</td></tr>
+          <tr><td>Article XIII &mdash; <strong>No external trust</strong></td><td>Bridges that admit external state into consensus</td></tr>
+          <tr><td>Article XIV &mdash; <strong>No surveillance layer</strong></td><td>Smart-contract identity attestation, name services, NFT primitives</td></tr>
+          <tr><td>Right X &mdash; <strong>No address blacklists</strong></td><td>Compliance-driven transaction-set filtering</td></tr>
+        </tbody>
+      </table></div>
+      <div style="padding:0 18px 14px;font-size:11px;color:var(--t3);line-height:1.6;font-style:italic">
+        These are compile-time enforced where possible: any change that violates them by silently flipping a constant fails the build with an UNCONSTITUTIONAL: Article X error. The full Constitution lives at <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/CONSTITUTION.md" target="_blank" style="color:var(--ac2)">CONSTITUTION.md</a>.
+      </div>
+    </div>
+
+    <div style="text-align:center;padding:20px 0;font-size:11px;color:var(--t3);font-family:var(--mono)">
+      Private by design. Private by math. &mdash; <a onclick="go('4thamendment')" style="color:var(--ac2);cursor:pointer">The CoinCync Manifesto</a>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-proposals">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Proposals</div>
