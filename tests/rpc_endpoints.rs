@@ -10,8 +10,8 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
-use std::sync::{Mutex, OnceLock};
 
 use coincync::chain::{Blockchain, SharedBlockchain};
 use coincync::config::NetworkType;
@@ -21,11 +21,16 @@ use coincync::network::node::NodeConfig;
 use coincync::network::peer::{PeerInfo, generate_peer_id};
 use coincync::rpc::{start_rpc_server, RpcConfig};
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::sleep;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+/// Serialise tests that mutate process env vars. Tokio's async Mutex
+/// (not std::sync::Mutex) — holding a std MutexGuard across .await is
+/// unsound because the guard is !Send and the future may be moved
+/// across threads mid-await. tokio::sync::Mutex is designed for this.
+fn env_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 /// Helper: call a JSON-RPC method and return the full response.
@@ -759,7 +764,7 @@ async fn rpc_loopback_exposes_peer_fixture_fields_when_not_minimized() {
 
 #[tokio::test]
 async fn rpc_loopback_env_override_forces_metadata_minimization() {
-    let _guard = env_lock().lock().expect("env lock");
+    let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_RPC_MINIMIZE_METADATA", "1");
     let config = RpcConfig {
         auth_enabled: false,
@@ -792,7 +797,7 @@ async fn rpc_loopback_env_override_forces_metadata_minimization() {
 
 #[tokio::test]
 async fn rpc_info_reports_stratum_posture_hardened_when_not_public() {
-    let _guard = env_lock().lock().expect("env lock");
+    let _guard = env_lock().lock().await;
     std::env::remove_var("COINCYNC_STRATUM_PUBLIC_BIND");
     std::env::remove_var("COINCYNC_STRATUM_PUBLIC_BIND_ACK");
     std::env::remove_var("COINCYNC_STRATUM_TLS_ENABLED");
@@ -808,7 +813,7 @@ async fn rpc_info_reports_stratum_posture_hardened_when_not_public() {
 
 #[tokio::test]
 async fn rpc_info_reports_stratum_posture_unhardened_when_public_without_tls() {
-    let _guard = env_lock().lock().expect("env lock");
+    let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND", "1");
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND_ACK", "1");
     std::env::remove_var("COINCYNC_STRATUM_TLS_ENABLED");
@@ -831,7 +836,7 @@ async fn rpc_info_reports_stratum_posture_unhardened_when_public_without_tls() {
 
 #[tokio::test]
 async fn rpc_info_reports_stratum_posture_hardened_with_native_tls() {
-    let _guard = env_lock().lock().expect("env lock");
+    let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND", "1");
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND_ACK", "1");
     std::env::set_var("COINCYNC_STRATUM_TLS_ENABLED", "1");
@@ -854,7 +859,7 @@ async fn rpc_info_reports_stratum_posture_hardened_with_native_tls() {
 
 #[tokio::test]
 async fn rpc_blockchain_info_reports_stratum_posture_fields() {
-    let _guard = env_lock().lock().expect("env lock");
+    let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND", "1");
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND_ACK", "1");
     std::env::set_var("COINCYNC_STRATUM_TLS_ENABLED", "1");
