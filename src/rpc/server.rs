@@ -759,6 +759,16 @@ pub async fn start_rpc_server(
         // Clone for broadcast (process_block consumes the original); the
         // clone cost is O(tx count), negligible for testnet.
         let block_for_broadcast = block.clone();
+        // Snapshot tx list before process_block consumes the original.
+        // Used below to keep the mempool aligned with chain state — drop
+        // confirmed txs and shadow-evict any mempool tx whose key image
+        // collides with one just spent in this block. Without this sync
+        // (the wire-side equivalent runs in bin/node.rs after a
+        // BlockReceived event), a locally-mined block leaves stale txs
+        // in the mempool that poison every subsequent block template
+        // with "duplicate key image". Caused the 2026-05-08 chain stall
+        // at h=6001; see docs/launch/MONDAY_PRELAUNCH.md incident playbook.
+        let block_txs = block_for_broadcast.transactions.clone();
         // process_block returns Ok(BlockStatus::...) even for Invalid/Orphan
         // outcomes, so we must inspect the status and surface a failure
         // when the block was not actually accepted. Without this, the
@@ -767,6 +777,14 @@ pub async fn start_rpc_server(
             Ok(crate::chain::BlockStatus::Accepted)
             | Ok(crate::chain::BlockStatus::AcceptedFork)
             | Ok(crate::chain::BlockStatus::AcceptedReorg { .. }) => {
+                // Mempool sync — same calls as the wire-side handler in
+                // bin/node.rs after BlockReceived. remove_confirmed drops
+                // mined txs AND shadow-evicts any mempool tx that shares
+                // a key image with a confirmed tx (the poison-tx scenario
+                // that stalled the chain at h=6001 on 2026-05-08).
+                state.mempool.remove_confirmed(&block_txs);
+                state.mempool.set_height(state.chain.height());
+
                 // Fire-and-forget P2P announcement so the block reaches
                 // other nodes; without this, locally-mined blocks stay
                 // local and the chain forks between the miner and its

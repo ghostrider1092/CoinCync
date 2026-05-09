@@ -247,3 +247,77 @@ If `drips_today` climbs past 80, top up the wallet with
 - Don't change DNS / Cloudflare config during the announcement
   window. Caching means the change won't propagate to all visitors
   cleanly anyway.
+
+---
+
+## 🚨 Incident playbook — chain-stall
+
+**Symptom:** explorer shows "Chain data is N minutes old — node is
+syncing"; `tip_age_secs` exceeds 30 min on the public API; the
+fleet-health-watch.sh Discord alert fires.
+
+**First check — is it just slow mining at low hashrate?**
+
+```powershell
+# Mempool size + tip-age + peers
+$tip = (Invoke-WebRequest -Uri "https://api.coincync.network/rpc/testnet" `
+  -Method POST -Body '{"jsonrpc":"2.0","id":1,"method":"get_info"}' `
+  -ContentType 'application/json' -TimeoutSec 8 -UseBasicParsing).Content `
+  | ConvertFrom-Json
+"  height={0}  tip_age={1}s  mempool={2}  peers={3}" -f `
+  $tip.result.height, $tip.result.tip_age_secs, `
+  $tip.result.mempool_size, $tip.result.peer_count
+```
+
+**If `mempool == 0`:** it's variance. Fire up local CPU mining for
+5 minutes (`coincync-rig run-solo --node ... --address tCYNC... --tui`)
+to push the chain forward, then stop.
+
+**If `mempool > 0` AND tip-age keeps climbing:** **MEMPOOL POISON.**
+A bad tx (duplicate key image — see post-launch backlog) is sitting
+in the mempool and poisoning every block template. Symptom in the
+miner log:
+
+```text
+WARN orchestrator: block submit rejected (likely lost race) error=
+  submit_block returned error: ... "block rejected: Invalid transaction 1:
+  Duplicate key image: duplicate key image detected"
+```
+
+**Recovery — 60 seconds, fleet-wide node restart:**
+
+```bash
+# Run this from any machine with the SSH key to the fleet
+for box in 66.135.23.193 140.82.57.168 207.148.111.76 207.148.6.50 95.179.165.225; do
+  ssh -i ~/.ssh/coincync_fleet root@$box \
+    "systemctl restart coincync-node && sleep 2 && systemctl is-active coincync-node"
+done
+```
+
+That clears every node's mempool. The poisoned tx can't re-broadcast
+(it's chain-rejectable, so peers drop it). Within 30-90 seconds the
+api-box's solo miner finds the next block and the chain resumes.
+
+**Verify recovery:**
+
+```powershell
+# Wait 90 seconds, then re-poll the chain. Height should advance.
+$tip = (Invoke-WebRequest -Uri "https://api.coincync.network/rpc/testnet" `
+  -Method POST -Body '{"jsonrpc":"2.0","id":1,"method":"get_info"}' `
+  -ContentType 'application/json' -TimeoutSec 8 -UseBasicParsing).Content `
+  | ConvertFrom-Json
+"  height={0}  tip_age={1}s  mempool={2}" -f `
+  $tip.result.height, $tip.result.tip_age_secs, $tip.result.mempool_size
+```
+
+**Permanent fix shipped 2026-05-08:** The wire-side path in
+`bin/node.rs` already called `mempool.remove_confirmed(&block_txs)`
+after every accepted block, which shadow-evicts any mempool tx whose
+key image was just spent. The **locally-mined** path through the
+`submit_block` RPC was missing the same call, so a locally-mined
+block left the (now permanently invalid) shadow-conflict tx sitting
+in the mempool poisoning every subsequent block template. Fixed in
+`src/rpc/server.rs` — `submit_block` now mirrors the wire-side
+mempool sync. After fleet redeploy of this commit, the fleet-wide
+restart above is no longer needed; if the symptom recurs it's a
+different bug.
