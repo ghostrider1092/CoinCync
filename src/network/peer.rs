@@ -82,6 +82,17 @@ pub struct PeerInfo {
     /// disconnected. Atomic so the lock-free broadcast hot path can
     /// update it without taking a write lock on the peer table.
     pub consecutive_full: Arc<AtomicU32>,
+    /// Eclipse-defense per-/16 outbound slot. Some(slot) for outbound
+    /// peers, None for inbound. The slot's lifetime is tied to this
+    /// PeerInfo entry: when the entry is removed from the peers map
+    /// or overwritten by a reconnection, the Arc decrements and (if
+    /// last) drops, releasing the per-/16 counter slot. This binding
+    /// is what makes the eclipse defense leak-free under the
+    /// skip-cleanup branch in handle_connection — without it, the
+    /// slot's lifetime would be tied to the spawn task, which can
+    /// end while the peers entry stays. See ConnectionTracker for
+    /// the slot's RAII semantics.
+    pub eclipse_slot: Option<Arc<crate::network::connection_tracker::OutboundSubnetSlot>>,
 }
 
 impl PeerInfo {
@@ -103,6 +114,7 @@ impl PeerInfo {
             remote_static_key: None,
             capabilities: 0,
             consecutive_full: Arc::new(AtomicU32::new(0)),
+            eclipse_slot: None,
         }
     }
 

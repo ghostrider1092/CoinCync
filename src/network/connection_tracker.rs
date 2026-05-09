@@ -340,6 +340,17 @@ pub struct OutboundSubnetSlot {
     addr: SocketAddr,
 }
 
+impl std::fmt::Debug for OutboundSubnetSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Don't try to Debug the inner Arc<ConnectionTracker> — it
+        // would expose DashMap state via auto-derive. Just the addr
+        // is enough for log-line context.
+        f.debug_struct("OutboundSubnetSlot")
+            .field("addr", &self.addr)
+            .finish()
+    }
+}
+
 impl Drop for OutboundSubnetSlot {
     fn drop(&mut self) {
         self.tracker.untrack_outbound_subnet(&self.addr);

@@ -625,6 +625,7 @@ impl P2PNode {
                                 stream, peer_id, false, magic, our_nonce, height, tip,
                                 peers, senders, event_tx, msg_tx,
                                 conn_identity, conn_encryption,
+                                None, // inbound — no per-/16 slot to track
                             ).await;
 
                             // Untrack connection when done
@@ -845,7 +846,7 @@ impl P2PNode {
                     let outbound_slot = match connector_tracker
                         .try_track_outbound_subnet_owned(&addr)
                     {
-                        Some(slot) => slot,
+                        Some(slot) => Arc::new(slot),
                         None => {
                             debug!(
                                 "Eclipse cap: /16 of {} is at MAX_OUTBOUND_PER_SUBNET, skipping",
@@ -883,12 +884,6 @@ impl P2PNode {
                     let conn_encryption = connector_encryption.clone();
 
                     tokio::spawn(async move {
-                        // Move the /16 slot into the task — its Drop is what
-                        // releases the counter. No explicit untrack call
-                        // needed; works through every exit path including
-                        // panics.
-                        let _outbound_slot = outbound_slot;
-
                         // Use proxy if configured, otherwise direct connection
                         let connect_result = super::proxy::connect_peer(
                             addr,
@@ -906,6 +901,7 @@ impl P2PNode {
                                     stream, peer_id, true, magic, our_nonce, height, tip,
                                     peers, senders, event_tx, msg_tx,
                                     conn_identity, conn_encryption,
+                                    Some(outbound_slot.clone()),
                                 ).await {
                                     warn!("Outbound connection error: {}", e);
                                     addresses.write().await.mark_tried(addr);
@@ -926,7 +922,13 @@ impl P2PNode {
                                 debug!("Backoff for {}: next retry in {:?}", addr, delay);
                             }
                         }
-                        // _outbound_slot drops here, decrementing the per-/16 counter.
+                        // outbound_slot's Arc drops here. If we made it past
+                        // peers.insert in handle_connection, the PeerInfo
+                        // entry holds a clone, so the slot stays alive until
+                        // the entry is removed/overwritten. If we did NOT
+                        // make it past peers.insert (handshake failed,
+                        // connect refused), this drop is the LAST Arc and
+                        // the slot is released cleanly.
                     });
                 }
             }
@@ -1831,6 +1833,15 @@ async fn handle_connection(
     msg_tx: mpsc::Sender<PeerMessage>,
     identity: Arc<super::noise::NodeIdentity>,
     encryption_config: crate::config::P2PEncryptionConfig,
+    // Per-/16 outbound slot for eclipse defense. Some for outbound
+    // dials (acquired by the connector before spawn), None for
+    // inbound accepts. We move it into the PeerInfo entry below
+    // so the slot's lifetime tracks the entry's lifetime — when
+    // the peers DashMap drops or overwrites this entry, the slot
+    // drops with it, releasing the /16 counter cleanly even in
+    // the skip-cleanup branch (where peers.remove is intentionally
+    // not called to preserve a concurrent reconnection).
+    eclipse_slot: Option<Arc<super::connection_tracker::OutboundSubnetSlot>>,
 ) -> Result<()> {
     let addr = stream.peer_addr()
         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
@@ -1843,6 +1854,7 @@ async fn handle_connection(
     }
 
     let mut info = PeerInfo::new(peer_id, addr, outbound);
+    info.eclipse_slot = eclipse_slot;
 
     // ─── Noise_XX Encryption ────────────────────────────────────────────
     //
