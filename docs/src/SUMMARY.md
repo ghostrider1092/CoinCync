@@ -39,5 +39,6 @@
 
 ---
 
+[Troubleshooting](./troubleshooting.md)
 [Glossary](./glossary.md)
 [Hostname reference](./hostnames.md)
