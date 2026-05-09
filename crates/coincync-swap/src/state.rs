@@ -173,6 +173,18 @@ impl SwapStore {
             tmp.sync_all()?;
         }
         rename(&tmp_path, &self.path)?;
+        // fsync the parent directory so the rename itself is
+        // durable. Without this, a crash after rename(2) but
+        // before the dir's dentry is flushed can lose the rename
+        // and leave the old file (or no file) in place — undoing
+        // the atomic-write guarantee. No-op on Windows but harmless.
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Ok(dir) = File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+        }
         Ok(())
     }
 
