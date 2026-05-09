@@ -337,6 +337,13 @@ struct Worker {
     invalid_streak: u32,
     /// Last activity timestamp
     last_activity: u64,
+    /// Job id of the most recent submit accepted from this worker.
+    /// When a fresh submit's job_id differs, `submitted_shares` is
+    /// cleared — old job's share space no longer applies.
+    current_job_id: String,
+    /// Per-job submitted (nonce, extranonce2) pairs. Used to reject
+    /// duplicates within a single job. Bounded by job rotation cadence.
+    submitted_shares: std::collections::HashSet<(u32, Vec<u8>)>,
     /// Message sender
     tx: mpsc::Sender<String>,
 }
@@ -576,6 +583,8 @@ impl StratumServer {
                 last_submit_ms: 0,
                 invalid_streak: 0,
                 last_activity: timestamp_now(),
+                current_job_id: String::new(),
+                submitted_shares: std::collections::HashSet::new(),
                 tx: tx.clone(),
             };
 
@@ -824,12 +833,25 @@ async fn handle_stratum_message(
                 }
             };
 
-            // Get worker's extranonce1
-            let extranonce1 = {
-                let workers_read = workers.read().await;
-                workers_read.get(&worker_id)
-                    .map(|w| w.extranonce1.clone())
-                    .unwrap_or_default()
+            // Get worker's extranonce1 + duplicate-share check.
+            // A repeated (job_id, nonce, extranonce2) tuple is a no-op
+            // for the chain (no double-counted reward) but corrupts
+            // pool-mode share accounting. Reject before verify so the
+            // attempted PoW work isn't wasted recomputing the hash.
+            let (extranonce1, is_duplicate) = {
+                let mut workers_write = workers.write().await;
+                if let Some(w) = workers_write.get_mut(&worker_id) {
+                    // New job → wipe the per-job dedup set. Old shares
+                    // are stale (they'd return Stale on verify anyway).
+                    if w.current_job_id != job_id {
+                        w.submitted_shares.clear();
+                        w.current_job_id = job_id.to_string();
+                    }
+                    let dup = !w.submitted_shares.insert((nonce, extranonce2.clone()));
+                    (w.extranonce1.clone(), dup)
+                } else {
+                    (Vec::new(), false)
+                }
             };
 
             // Build share struct
@@ -841,9 +863,13 @@ async fn handle_stratum_message(
                 nonce,
             };
 
-            // Verify share against current job
+            // Verify share against current job.
+            // The duplicate gate runs first — a duplicate is rejected
+            // before paying for PoW recomputation in verify().
             let current = current_job.read().await;
-            let share_result = if let Some(job) = current.as_ref() {
+            let share_result = if is_duplicate {
+                ShareResult::Duplicate
+            } else if let Some(job) = current.as_ref() {
                 if job.job_id != job_id {
                     ShareResult::Stale
                 } else {
@@ -1273,6 +1299,8 @@ mod tests {
             last_submit_ms: timestamp_now_ms(),
             invalid_streak: MAX_INVALID_STREAK - 1,
             last_activity: timestamp_now(),
+            current_job_id: String::new(),
+            submitted_shares: std::collections::HashSet::new(),
             tx,
         };
 

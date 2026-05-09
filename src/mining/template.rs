@@ -67,7 +67,32 @@ pub fn build_template_json(
     // txs up to the byte budget.
     const COINBASE_HEADROOM: usize = 10 * 1024;
     let budget = crate::constants::MAX_BLOCK_SIZE.saturating_sub(COINBASE_HEADROOM);
-    let mempool_txs = mempool.get_block_transactions(budget, 4096);
+    let candidate_txs = mempool.get_block_transactions(budget, 4096);
+
+    // Re-validate each mempool tx against current chain state before
+    // including in the template. Mempool admission only runs structural
+    // + crypto checks (no UTXO context); a tx whose ring members reference
+    // time-locked or immature-coinbase outputs lands in the mempool fine
+    // but gets rejected at block-validation time. Without this filter
+    // every block template that picks such a tx fails submission, and
+    // the chain stalls until the tx expires (288 blocks ~ 9.6h). Same
+    // poison-template shape as the duplicate-key-image incident on
+    // 2026-05-08; this filter is the belt-and-suspenders fix at the
+    // miner layer (the matching admission-side fix would shadow-evict
+    // on chain.set_height when a mempool tx becomes invalid — TBD).
+    let mempool_txs: Vec<crate::transaction::Transaction> = candidate_txs
+        .into_iter()
+        .filter(|tx| match chain.validate_transaction(tx) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!(
+                    "Template: skipping mempool tx {} (chain-invalid): {}",
+                    tx.hash(), e
+                );
+                false
+            }
+        })
+        .collect();
 
     let tx_hex: Vec<String> = mempool_txs
         .iter()
