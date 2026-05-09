@@ -114,6 +114,15 @@ enum Request {
         request_id: String,
         token: InvitationToken,
     },
+    /// Declare the message being signed. Only the session creator
+    /// should send this; CIP-008 doesn't enforce authorship at the
+    /// state-machine level, so phase 6 may add an authorship check
+    /// here. Phase 4 accepts from any attached participant.
+    DeclareMessage {
+        request_id: String,
+        session_id: SessionId,
+        message: Vec<u8>,
+    },
     SubmitRound1 {
         request_id: String,
         session_id: SessionId,
@@ -450,6 +459,19 @@ async fn handle_request(
     match req {
         Request::Attach { request_id, token } => {
             handle_attach(coord, request_id, token, attached).await
+        }
+        Request::DeclareMessage {
+            request_id,
+            session_id,
+            message,
+        } => {
+            apply_helper(
+                coord,
+                &request_id,
+                session_id,
+                Transition::DeclareMessage { message },
+            )
+            .await
         }
         Request::SubmitRound1 {
             request_id,

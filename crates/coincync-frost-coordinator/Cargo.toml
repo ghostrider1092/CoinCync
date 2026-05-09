@@ -60,6 +60,14 @@ name = "coord-cli"
 path = "src/bin/coord_cli.rs"
 required-features = ["cli"]
 
+# Phase 5 integration test: full 2-of-3 signing flow + adversarial
+# cases. Requires invitations + persistence to compile, since it
+# exercises both layers in concert.
+[[test]]
+name = "integration_full_flow"
+path = "tests/integration_full_flow.rs"
+required-features = ["invitations", "persistence"]
+
 [dependencies]
 # Phase 1 is a pure state-machine library. It deliberately does NOT
 # depend on the `coincync` crate — the coordinator never sees signing

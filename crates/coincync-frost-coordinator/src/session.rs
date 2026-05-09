@@ -120,8 +120,61 @@ impl Default for SessionId {
 ///
 /// Pubkey is the canonical identifier across the protocol — the
 /// coordinator never sees signing material, only verifying material.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// Serialized as a 64-char lower-hex string so JSON object keys
+/// (e.g., `BTreeMap<ParticipantId, ParticipantState>` in `Session`)
+/// work — JSON requires string keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParticipantId(pub [u8; 32]);
+
+impl Serialize for ParticipantId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&encode_hex32(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for ParticipantId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let s = String::deserialize(deserializer)?;
+        decode_hex32(&s).map(ParticipantId).map_err(D::Error::custom)
+    }
+}
+
+fn encode_hex32(bytes: &[u8; 32]) -> String {
+    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        out.push(HEX_CHARS[(b >> 4) as usize] as char);
+        out.push(HEX_CHARS[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+fn decode_hex32(s: &str) -> std::result::Result<[u8; 32], String> {
+    if s.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", s.len()));
+    }
+    let bytes = s.as_bytes();
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let hi = decode_hex_nibble(bytes[i * 2])
+            .ok_or_else(|| format!("non-hex char at offset {}", i * 2))?;
+        let lo = decode_hex_nibble(bytes[i * 2 + 1])
+            .ok_or_else(|| format!("non-hex char at offset {}", i * 2 + 1))?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn decode_hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
 
 // ────────────────────────────────────────────────────────────────
 // Per-participant state inside a session
