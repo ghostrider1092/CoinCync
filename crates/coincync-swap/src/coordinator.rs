@@ -182,6 +182,18 @@ pub struct HandshakeSession {
 pub enum HandshakeAction {
     /// Send this message to the counterparty.
     Send(Message),
+    /// The state machine has advanced internally but cannot produce
+    /// the next outbound message itself — the application layer must
+    /// call a specific session method (named in `next_call`) to
+    /// supply the locally-held data (pubkeys, parameters, adaptor
+    /// material). Transport layers MUST NOT transmit anything in
+    /// response to this action.
+    ///
+    /// Earlier code returned a placeholder `Send(Message::Abort{..})`
+    /// here, which a naïve "loop and forward" transport would have
+    /// turned into a real abort. Splitting it into a distinct variant
+    /// makes the contract type-checked.
+    WaitForCaller { next_call: &'static str },
     /// The handshake is complete and successful. Negotiated
     /// parameters + counterparty pubkeys are accessible via the
     /// session struct; the caller can move into the on-chain
@@ -393,25 +405,12 @@ impl HandshakeSession {
                 self.counterparty_btc_pubkey = Some(bob_btc_pubkey);
                 self.counterparty_cync_pubkey = Some(bob_cync_pubkey);
                 self.phase = Phase::AwaitingAck;
-                // Alice now needs to send HelloAck. She gets it
-                // from our side via a separate `send_hello_ack`
-                // call (next).
-                Ok(HandshakeAction::Send(Message::Abort {
-                    // We don't know Alice's pubkeys + parameters
-                    // here yet — the caller plugs those in via
-                    // `respond_with_hello_ack`. To keep the API
-                    // simple, this branch returns a placeholder
-                    // and the caller is expected to invoke
-                    // `respond_with_hello_ack` immediately.
-                    //
-                    // Alternative design considered: have
-                    // `handle_inbound` take callbacks for
-                    // pubkey-providing. Rejected because callbacks
-                    // make the state machine harder to test in
-                    // isolation. The placeholder approach keeps
-                    // pure inputs->pure outputs cleaner.
-                    reason: "placeholder; caller must invoke respond_with_hello_ack".into(),
-                }))
+                // Alice's HelloAck depends on locally-held data
+                // (her pubkeys + the parameters she'll propose).
+                // The caller drives that via respond_with_hello_ack.
+                Ok(HandshakeAction::WaitForCaller {
+                    next_call: "respond_with_hello_ack",
+                })
             }
 
             // ── Bob receives HelloAck from Alice ──
@@ -427,32 +426,23 @@ impl HandshakeSession {
                 self.counterparty_btc_pubkey = Some(alice_btc_pubkey);
                 self.counterparty_cync_pubkey = Some(alice_cync_pubkey);
                 self.parameters = Some(parameters);
-                // Bob needs to decide accept or abort. We don't
-                // auto-accept here — the caller decides based on
-                // whether the parameters are satisfactory and
-                // calls `accept` or `send_abort` next.
+                // Bob needs to decide accept or abort based on
+                // whether the parameters are satisfactory.
                 self.phase = Phase::AwaitingAck;
-                Ok(HandshakeAction::Send(Message::Abort {
-                    reason: "placeholder; caller must call accept() or send_abort()".into(),
-                }))
+                Ok(HandshakeAction::WaitForCaller {
+                    next_call: "accept_or_send_abort",
+                })
             }
 
             // ── Alice receives Accept from Bob ──
             (Message::Accept, Role::Alice, Phase::AwaitingAck) => {
-                // Negotiation moves into adaptor exchange. Alice
-                // hasn't sent her adaptors yet; the caller drives
-                // that via `send_adaptors`.
+                // Negotiation moves into adaptor exchange. Alice's
+                // adaptors are produced by her wallet; the caller
+                // drives that via send_adaptors().
                 self.phase = Phase::ExchangingAdaptors;
-                // Suggest Alice send her adaptors next; the
-                // caller's transport will do that via
-                // `send_adaptors` and transmit the returned msg.
-                // No outbound message from `handle_inbound` itself
-                // here — there's nothing to immediately respond
-                // with until the caller produces the adaptor
-                // material.
-                Ok(HandshakeAction::Send(Message::Abort {
-                    reason: "placeholder; caller must call send_adaptors()".into(),
-                }))
+                Ok(HandshakeAction::WaitForCaller {
+                    next_call: "send_adaptors",
+                })
             }
 
             // ── AdaptorMaterial inbound (either role) ──
@@ -701,6 +691,51 @@ mod tests {
         assert!(bob.counterparty_btc_pubkey.is_some());
         assert!(bob.counterparty_cync_pubkey.is_some());
         assert!(bob.parameters.is_some());
+    }
+
+    #[test]
+    fn handle_inbound_returns_wait_for_caller_at_pubkey_supply_points() {
+        // Regression: earlier code returned Send(Message::Abort{..}) as
+        // a placeholder at three points where the caller has to supply
+        // locally-held data. A naive transport would have transmitted
+        // the placeholder Abort and broken the handshake. These three
+        // points must return WaitForCaller, never Send.
+
+        // 1. Alice receives Hello -> needs respond_with_hello_ack
+        let mut alice = HandshakeSession::new_alice("s".into());
+        let hello = Message::Hello {
+            swap_id: "s".into(),
+            bob_btc_pubkey: dummy_pub(0xB1),
+            bob_cync_pubkey: dummy_pub(0xB2),
+        };
+        match alice.handle_inbound(hello).unwrap() {
+            HandshakeAction::WaitForCaller { next_call } => {
+                assert_eq!(next_call, "respond_with_hello_ack")
+            }
+            other => panic!("expected WaitForCaller, got {:?}", other),
+        }
+
+        // 2. Bob receives HelloAck -> needs accept_or_send_abort
+        let mut alice2 = HandshakeSession::new_alice("s".into());
+        let mut bob = HandshakeSession::new_bob("s".into());
+        let h = bob.start_bob(dummy_pub(0xB1), dummy_pub(0xB2)).unwrap();
+        alice2.handle_inbound(h).unwrap();
+        let ack = alice2
+            .respond_with_hello_ack(dummy_pub(0xA1), dummy_pub(0xA2), safe_params())
+            .unwrap();
+        match bob.handle_inbound(ack).unwrap() {
+            HandshakeAction::WaitForCaller { next_call } => {
+                assert_eq!(next_call, "accept_or_send_abort")
+            }
+            other => panic!("expected WaitForCaller, got {:?}", other),
+        }
+
+        // 3. Alice receives Accept -> needs send_adaptors
+        let accept = bob.accept().unwrap();
+        match alice2.handle_inbound(accept).unwrap() {
+            HandshakeAction::WaitForCaller { next_call } => assert_eq!(next_call, "send_adaptors"),
+            other => panic!("expected WaitForCaller, got {:?}", other),
+        }
     }
 
     #[test]
