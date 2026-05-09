@@ -185,7 +185,7 @@ pub enum Transition {
 /// commitments, refund signatures) lives in separate types in
 /// `adaptor.rs` / `btc.rs` / `cync.rs` and is referenced by the
 /// `Swap` once the cryptographic skeleton is filled in.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwapParameters {
     /// Amount of CYNC Alice will lock, in atomic units.
     pub cync_amount: u64,
