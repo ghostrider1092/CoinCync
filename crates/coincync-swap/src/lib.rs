@@ -60,7 +60,7 @@ pub mod protocol;
 pub mod state;
 
 pub use error::Error;
-pub use state::{SwapStore, StateError, STATE_VERSION};
+pub use state::{StateError, SwapStore, STATE_VERSION};
 
 /// Result alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -80,7 +80,9 @@ mod tests {
 
     #[test]
     fn skeleton_advertises_unimplemented_status() {
-        assert!(!is_implemented(),
-            "is_implemented() must remain false until CIP-001 is fully shipped + audited");
+        assert!(
+            !is_implemented(),
+            "is_implemented() must remain false until CIP-001 is fully shipped + audited"
+        );
     }
 }

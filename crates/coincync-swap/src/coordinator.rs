@@ -375,8 +375,15 @@ impl HandshakeSession {
             }
 
             // ── Alice receives Hello from Bob ──
-            (Message::Hello { swap_id, bob_btc_pubkey, bob_cync_pubkey },
-             Role::Alice, Phase::Initial) => {
+            (
+                Message::Hello {
+                    swap_id,
+                    bob_btc_pubkey,
+                    bob_cync_pubkey,
+                },
+                Role::Alice,
+                Phase::Initial,
+            ) => {
                 if swap_id != self.swap_id {
                     return Err(HandshakeError::SwapIdMismatch {
                         session_swap_id: self.swap_id.clone(),
@@ -408,8 +415,15 @@ impl HandshakeSession {
             }
 
             // ── Bob receives HelloAck from Alice ──
-            (Message::HelloAck { alice_btc_pubkey, alice_cync_pubkey, parameters },
-             Role::Bob, Phase::AwaitingAck) => {
+            (
+                Message::HelloAck {
+                    alice_btc_pubkey,
+                    alice_cync_pubkey,
+                    parameters,
+                },
+                Role::Bob,
+                Phase::AwaitingAck,
+            ) => {
                 self.counterparty_btc_pubkey = Some(alice_btc_pubkey);
                 self.counterparty_cync_pubkey = Some(alice_cync_pubkey);
                 self.parameters = Some(parameters);
@@ -442,8 +456,16 @@ impl HandshakeSession {
             }
 
             // ── AdaptorMaterial inbound (either role) ──
-            (Message::AdaptorMaterial { btc_adaptor, cync_adaptor, dl_proof, refund_tx },
-             _, Phase::ExchangingAdaptors) => {
+            (
+                Message::AdaptorMaterial {
+                    btc_adaptor,
+                    cync_adaptor,
+                    dl_proof,
+                    refund_tx,
+                },
+                _,
+                Phase::ExchangingAdaptors,
+            ) => {
                 if self.received_adaptors {
                     return Err(HandshakeError::Duplicate {
                         kind: "AdaptorMaterial",
@@ -466,12 +488,10 @@ impl HandshakeSession {
             }
 
             // ── Anything else is out of order ──
-            (msg, _, phase) => {
-                Err(HandshakeError::OutOfOrder {
-                    message_kind: message_kind(&msg),
-                    phase,
-                })
-            }
+            (msg, _, phase) => Err(HandshakeError::OutOfOrder {
+                message_kind: message_kind(&msg),
+                phase,
+            }),
         }
     }
 
@@ -629,20 +649,30 @@ mod tests {
         let hello = bob.start_bob(dummy_pub(0xB1), dummy_pub(0xB2)).unwrap();
         let _action = alice.handle_inbound(hello).unwrap();
         // Alice -> Bob: HelloAck
-        let ack = alice.respond_with_hello_ack(
-            dummy_pub(0xA1), dummy_pub(0xA2), safe_params()
-        ).unwrap();
+        let ack = alice
+            .respond_with_hello_ack(dummy_pub(0xA1), dummy_pub(0xA2), safe_params())
+            .unwrap();
         let _action = bob.handle_inbound(ack).unwrap();
         // Bob -> Alice: Accept
         let accept = bob.accept().unwrap();
         let _action = alice.handle_inbound(accept).unwrap();
         // Both: send AdaptorMaterial
-        let alice_adapt = alice.send_adaptors(
-            dummy_blob(0xA3), dummy_blob(0xA4), dummy_blob(0xA5), dummy_blob(0xA6)
-        ).unwrap();
-        let bob_adapt = bob.send_adaptors(
-            dummy_blob(0xB3), dummy_blob(0xB4), dummy_blob(0xB5), dummy_blob(0xB6)
-        ).unwrap();
+        let alice_adapt = alice
+            .send_adaptors(
+                dummy_blob(0xA3),
+                dummy_blob(0xA4),
+                dummy_blob(0xA5),
+                dummy_blob(0xA6),
+            )
+            .unwrap();
+        let bob_adapt = bob
+            .send_adaptors(
+                dummy_blob(0xB3),
+                dummy_blob(0xB4),
+                dummy_blob(0xB5),
+                dummy_blob(0xB6),
+            )
+            .unwrap();
         let _action_a = alice.handle_inbound(bob_adapt).unwrap();
         let _action_b = bob.handle_inbound(alice_adapt).unwrap();
         // Both should now be in AwaitingReady
@@ -683,9 +713,7 @@ mod tests {
     #[test]
     fn role_gating_bob_cannot_send_hello_ack() {
         let mut bob = HandshakeSession::new_bob("s".into());
-        let result = bob.respond_with_hello_ack(
-            dummy_pub(1), dummy_pub(2), safe_params()
-        );
+        let result = bob.respond_with_hello_ack(dummy_pub(1), dummy_pub(2), safe_params());
         assert!(matches!(result, Err(HandshakeError::OutOfOrder { .. })));
     }
 
@@ -699,7 +727,11 @@ mod tests {
         };
         let result = alice.handle_inbound(bad_hello);
         assert!(matches!(result, Err(HandshakeError::SwapIdMismatch { .. })));
-        assert_eq!(alice.phase, Phase::Initial, "session unchanged after rejection");
+        assert_eq!(
+            alice.phase,
+            Phase::Initial,
+            "session unchanged after rejection"
+        );
     }
 
     #[test]
@@ -720,16 +752,16 @@ mod tests {
         let mut bob = HandshakeSession::new_bob("s".into());
         let h = bob.start_bob(dummy_pub(1), dummy_pub(2)).unwrap();
         alice.handle_inbound(h).unwrap();
-        let a = alice.respond_with_hello_ack(
-            dummy_pub(3), dummy_pub(4), safe_params()
-        ).unwrap();
+        let a = alice
+            .respond_with_hello_ack(dummy_pub(3), dummy_pub(4), safe_params())
+            .unwrap();
         bob.handle_inbound(a).unwrap();
         let acc = bob.accept().unwrap();
         alice.handle_inbound(acc).unwrap();
         // Bob sends his adaptors twice — second one is a peer bug
-        let bob_adapt = bob.send_adaptors(
-            dummy_blob(1), dummy_blob(2), dummy_blob(3), dummy_blob(4)
-        ).unwrap();
+        let bob_adapt = bob
+            .send_adaptors(dummy_blob(1), dummy_blob(2), dummy_blob(3), dummy_blob(4))
+            .unwrap();
         let _ = alice.handle_inbound(bob_adapt.clone()).unwrap();
         let result = alice.handle_inbound(bob_adapt);
         assert!(matches!(result, Err(HandshakeError::Duplicate { .. })));
@@ -738,15 +770,19 @@ mod tests {
     #[test]
     fn abort_from_any_phase_terminates() {
         let phases_to_test = [
-            Phase::Initial, Phase::AwaitingAck, Phase::ExchangingAdaptors,
+            Phase::Initial,
+            Phase::AwaitingAck,
+            Phase::ExchangingAdaptors,
             Phase::AwaitingReady,
         ];
         for phase in phases_to_test {
             let mut s = HandshakeSession::new_alice("s".into());
             s.phase = phase;
-            let action = s.handle_inbound(Message::Abort {
-                reason: "test".into(),
-            }).unwrap();
+            let action = s
+                .handle_inbound(Message::Abort {
+                    reason: "test".into(),
+                })
+                .unwrap();
             assert!(matches!(action, HandshakeAction::Aborted { .. }));
             assert_eq!(s.phase, Phase::Aborted);
         }
@@ -775,9 +811,7 @@ mod tests {
         let mut bad_params = safe_params();
         bad_params.btc_timeout_blocks = 1000;
         bad_params.cync_timeout_blocks = 100;
-        let result = alice.respond_with_hello_ack(
-            dummy_pub(3), dummy_pub(4), bad_params
-        );
+        let result = alice.respond_with_hello_ack(dummy_pub(3), dummy_pub(4), bad_params);
         assert!(matches!(result, Err(HandshakeError::OutOfOrder { .. })));
     }
 
@@ -785,12 +819,10 @@ mod tests {
     fn double_send_adaptors_rejected() {
         let mut s = HandshakeSession::new_alice("s".into());
         s.phase = Phase::ExchangingAdaptors;
-        let _ = s.send_adaptors(
-            dummy_blob(1), dummy_blob(2), dummy_blob(3), dummy_blob(4)
-        ).unwrap();
-        let result = s.send_adaptors(
-            dummy_blob(5), dummy_blob(6), dummy_blob(7), dummy_blob(8)
-        );
+        let _ = s
+            .send_adaptors(dummy_blob(1), dummy_blob(2), dummy_blob(3), dummy_blob(4))
+            .unwrap();
+        let result = s.send_adaptors(dummy_blob(5), dummy_blob(6), dummy_blob(7), dummy_blob(8));
         assert!(matches!(result, Err(HandshakeError::Duplicate { .. })));
     }
 
@@ -801,21 +833,23 @@ mod tests {
         // Step into ExchangingAdaptors
         let h = bob.start_bob(dummy_pub(1), dummy_pub(2)).unwrap();
         alice.handle_inbound(h).unwrap();
-        let a = alice.respond_with_hello_ack(
-            dummy_pub(3), dummy_pub(4), safe_params()
-        ).unwrap();
+        let a = alice
+            .respond_with_hello_ack(dummy_pub(3), dummy_pub(4), safe_params())
+            .unwrap();
         bob.handle_inbound(a).unwrap();
         let acc = bob.accept().unwrap();
         alice.handle_inbound(acc).unwrap();
         assert_eq!(alice.phase, Phase::ExchangingAdaptors);
         assert_eq!(bob.phase, Phase::ExchangingAdaptors);
         // Alice sends but hasn't received -> still ExchangingAdaptors
-        let _ = alice.send_adaptors(dummy_blob(1), dummy_blob(2), dummy_blob(3), dummy_blob(4)).unwrap();
+        let _ = alice
+            .send_adaptors(dummy_blob(1), dummy_blob(2), dummy_blob(3), dummy_blob(4))
+            .unwrap();
         assert_eq!(alice.phase, Phase::ExchangingAdaptors);
         // Bob sends + Alice receives -> Alice advances to AwaitingReady
-        let bob_adapt = bob.send_adaptors(
-            dummy_blob(5), dummy_blob(6), dummy_blob(7), dummy_blob(8)
-        ).unwrap();
+        let bob_adapt = bob
+            .send_adaptors(dummy_blob(5), dummy_blob(6), dummy_blob(7), dummy_blob(8))
+            .unwrap();
         let _ = alice.handle_inbound(bob_adapt).unwrap();
         assert_eq!(alice.phase, Phase::AwaitingReady);
     }

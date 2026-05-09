@@ -69,10 +69,13 @@ impl ActiveMinerSet {
                 // first_seen_height is immutable; we never lower it.
             }
             None => {
-                self.miners.insert(miner, MinerRecord {
-                    first_seen_height: height,
-                    last_seen_height: height,
-                });
+                self.miners.insert(
+                    miner,
+                    MinerRecord {
+                        first_seen_height: height,
+                        last_seen_height: height,
+                    },
+                );
             }
         }
     }
@@ -189,8 +192,8 @@ mod tests {
         let mut set = ActiveMinerSet::new(100);
         set.record_block(pk(1), 10); // mined long ago
         set.record_block(pk(2), 90); // mined recently
-        // At height 200, miner 1 lapsed (200 - 10 = 190 >= window 100)
-        // but miner 2 is still active (200 - 90 = 110 >= window 100, also lapsed)
+                                     // At height 200, miner 1 lapsed (200 - 10 = 190 >= window 100)
+                                     // but miner 2 is still active (200 - 90 = 110 >= window 100, also lapsed)
         assert_eq!(set.active_count(200), 0);
         // At height 100, miner 2 is active (100 - 90 = 10 < 100)
         // miner 1 lapsed (100 - 10 = 90 < 100, so still active actually)

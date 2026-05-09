@@ -1,9 +1,10 @@
 //! Phase 2.5 integration tests — full atomic-swap composition.
 //!
-//! Exercises the entire ready-today stack (protocol state machine
-//! + handshake state machine + state persistence) through end-to-
-//! end flows from both Alice's and Bob's perspectives, plus the
-//! adversarial cases that matter for refund safety.
+//! Exercises the entire ready-today stack — protocol state
+//! machine, handshake state machine, and state persistence —
+//! through end-to-end flows from both Alice's and Bob's
+//! perspectives, plus the adversarial cases that matter for
+//! refund safety.
 //!
 //! Phase 3 will add real cryptography (adaptor signatures + DL-
 //! equality proof + on-chain tx construction). These tests use
@@ -30,7 +31,9 @@
 //!    btc_timeout < cync_timeout invariant are rejected at
 //!    negotiation time AND in the handshake's HelloAck handler.
 
-use coincync_swap::coordinator::{HandshakeAction, HandshakeError, HandshakeSession, Message, Phase};
+use coincync_swap::coordinator::{
+    HandshakeAction, HandshakeError, HandshakeSession, Message, Phase,
+};
 use coincync_swap::protocol::{Role, State, Swap, SwapParameters, Transition};
 use coincync_swap::SwapStore;
 use tempfile::tempdir;
@@ -303,11 +306,7 @@ fn completed_swap_rejects_all_transitions_after_reload() {
     ];
     for t in attempts {
         let result = reloaded.apply(t);
-        assert!(
-            result.is_err(),
-            "Completed swap must reject {:?}",
-            t
-        );
+        assert!(result.is_err(), "Completed swap must reject {:?}", t);
         assert_eq!(reloaded.state, State::Completed, "state must not change");
     }
 }

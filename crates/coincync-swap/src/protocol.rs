@@ -65,12 +65,11 @@ impl Role {
 /// State of an in-progress swap. The transitions form a directed
 /// graph with three terminal states:
 ///
-/// - `Completed`  — both parties claimed; the swap succeeded
-/// - `Refunded`   — at least one timeout fired; both parties got
-///                  their original funds back
-/// - `Aborted`    — explicit abort (manual, network failure, or
-///                  cryptographic-verification failure during
-///                  negotiation)
+/// - `Completed` — both parties claimed; the swap succeeded
+/// - `Refunded` — at least one timeout fired; both parties got
+///   their original funds back
+/// - `Aborted` — explicit abort (manual, network failure, or
+///   cryptographic-verification failure during negotiation)
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum State {
     /// Both parties have agreed to swap parameters but no on-chain
@@ -248,8 +247,7 @@ impl SwapParameters {
     pub fn is_timeout_safe(&self) -> bool {
         // The CYNC timeout must outlast the BTC timeout * margin.
         let btc_secs = self.btc_timeout_secs();
-        let margin_secs = btc_secs
-            .saturating_mul(Self::SAFETY_MARGIN_NUMERATOR)
+        let margin_secs = btc_secs.saturating_mul(Self::SAFETY_MARGIN_NUMERATOR)
             / Self::SAFETY_MARGIN_DENOMINATOR;
         self.cync_timeout_secs() > margin_secs
     }
@@ -287,7 +285,7 @@ impl Swap {
     pub fn negotiate(id: String, role: Role, params: SwapParameters) -> Result<Self> {
         if !params.is_timeout_safe() {
             return Err(Error::InvalidState(
-                "swap parameters violate timeout-safety: BTC timeout * margin >= CYNC timeout"
+                "swap parameters violate timeout-safety: BTC timeout * margin >= CYNC timeout",
             ));
         }
         Ok(Swap {
@@ -310,8 +308,8 @@ impl Swap {
         if self.state.is_terminal() {
             return Err(Error::InvalidState(match self.state {
                 State::Completed => "swap is Completed; no further transitions",
-                State::Refunded  => "swap is Refunded; no further transitions",
-                State::Aborted   => "swap is Aborted; no further transitions",
+                State::Refunded => "swap is Refunded; no further transitions",
+                State::Aborted => "swap is Aborted; no further transitions",
                 _ => unreachable!("non-terminal state matched terminal arm"),
             }));
         }
@@ -338,25 +336,33 @@ impl Swap {
             (Transition::BobRefunds, Role::Bob, State::BobLocked) => State::Refunded,
 
             // Bob's observations
-            (Transition::ObserveSecretRevealed, Role::Bob, State::BobLocked) => State::SecretRevealed,
+            (Transition::ObserveSecretRevealed, Role::Bob, State::BobLocked) => {
+                State::SecretRevealed
+            }
             (Transition::ObserveCompleted, Role::Bob, State::SecretRevealed) => State::Completed,
 
             // Anything else is illegal.
             (t, r, s) => {
                 return Err(Error::InvalidState(match (r, s, t) {
                     // Common operator mistakes — give a clearer error.
-                    (Role::Alice, _, Transition::BobLocksBtc) =>
-                        "BobLocksBtc is Bob's transition; Alice cannot apply it",
-                    (Role::Bob, _, Transition::AliceLocksCync) =>
-                        "AliceLocksCync is Alice's transition; Bob cannot apply it",
-                    (Role::Bob, _, Transition::AliceClaimsBtc) =>
-                        "AliceClaimsBtc is Alice's transition; Bob cannot apply it",
-                    (Role::Alice, _, Transition::BobClaimsCync) =>
-                        "BobClaimsCync is Bob's transition; Alice cannot apply it",
-                    (Role::Alice, _, Transition::BobRefunds) =>
-                        "BobRefunds is Bob's transition; Alice cannot apply it",
-                    (Role::Bob, _, Transition::AliceRefunds) =>
-                        "AliceRefunds is Alice's transition; Bob cannot apply it",
+                    (Role::Alice, _, Transition::BobLocksBtc) => {
+                        "BobLocksBtc is Bob's transition; Alice cannot apply it"
+                    }
+                    (Role::Bob, _, Transition::AliceLocksCync) => {
+                        "AliceLocksCync is Alice's transition; Bob cannot apply it"
+                    }
+                    (Role::Bob, _, Transition::AliceClaimsBtc) => {
+                        "AliceClaimsBtc is Alice's transition; Bob cannot apply it"
+                    }
+                    (Role::Alice, _, Transition::BobClaimsCync) => {
+                        "BobClaimsCync is Bob's transition; Alice cannot apply it"
+                    }
+                    (Role::Alice, _, Transition::BobRefunds) => {
+                        "BobRefunds is Bob's transition; Alice cannot apply it"
+                    }
+                    (Role::Bob, _, Transition::AliceRefunds) => {
+                        "AliceRefunds is Alice's transition; Bob cannot apply it"
+                    }
                     // Generic out-of-order error for everything else.
                     _ => transition_error_message(transition, self.role, self.state),
                 }));
@@ -558,7 +564,11 @@ mod tests {
         let mut s = alice_swap();
         let result = s.apply(Transition::BobLocksBtc);
         assert!(matches!(result, Err(Error::InvalidState(_))));
-        assert_eq!(s.state, State::Negotiated, "state must be unchanged on error");
+        assert_eq!(
+            s.state,
+            State::Negotiated,
+            "state must be unchanged on error"
+        );
     }
 
     #[test]
@@ -619,8 +629,11 @@ mod tests {
             Transition::Abort,
         ] {
             let result = s.apply(t);
-            assert!(matches!(result, Err(Error::InvalidState(_))),
-                "transition {:?} must be rejected from Aborted", t);
+            assert!(
+                matches!(result, Err(Error::InvalidState(_))),
+                "transition {:?} must be rejected from Aborted",
+                t
+            );
         }
         assert_eq!(s.state, State::Aborted);
     }
@@ -678,11 +691,18 @@ mod tests {
                 s.state = terminal;
                 for &t in &attempts {
                     let result = s.apply(t);
-                    assert!(result.is_err(),
+                    assert!(
+                        result.is_err(),
                         "{:?} role={:?} terminal={:?} must reject {:?}",
-                        s.state, role, terminal, t);
-                    assert_eq!(s.state, terminal,
-                        "state must not change after rejected transition from terminal");
+                        s.state,
+                        role,
+                        terminal,
+                        t
+                    );
+                    assert_eq!(
+                        s.state, terminal,
+                        "state must not change after rejected transition from terminal"
+                    );
                 }
             }
         }
@@ -699,22 +719,32 @@ mod tests {
         for btc_blocks in [1u32, 100, 144, 1000, 10_000] {
             let btc_secs = u64::from(btc_blocks) * 600;
             let threshold_secs = btc_secs * 6 / 5; // BTC * margin
-            // Required cync_secs > threshold_secs strictly
-            // CYNC block time = 120s
+                                                   // Required cync_secs > threshold_secs strictly
+                                                   // CYNC block time = 120s
             let cync_blocks_just_under: u32 = (threshold_secs / 120) as u32;
             let cync_blocks_just_over: u32 = cync_blocks_just_under.saturating_add(1);
 
             let mut p = SwapParameters {
-                cync_amount: 1, btc_amount_sats: 1,
+                cync_amount: 1,
+                btc_amount_sats: 1,
                 cync_timeout_blocks: cync_blocks_just_under,
                 btc_timeout_blocks: btc_blocks,
-                alice_cync_address: "a".into(), bob_btc_address: "b".into(),
+                alice_cync_address: "a".into(),
+                bob_btc_address: "b".into(),
             };
-            assert!(!p.is_timeout_safe(),
-                "btc={} cync={} should be UNsafe", btc_blocks, cync_blocks_just_under);
+            assert!(
+                !p.is_timeout_safe(),
+                "btc={} cync={} should be UNsafe",
+                btc_blocks,
+                cync_blocks_just_under
+            );
             p.cync_timeout_blocks = cync_blocks_just_over;
-            assert!(p.is_timeout_safe(),
-                "btc={} cync={} should be SAFE", btc_blocks, cync_blocks_just_over);
+            assert!(
+                p.is_timeout_safe(),
+                "btc={} cync={} should be SAFE",
+                btc_blocks,
+                cync_blocks_just_over
+            );
         }
     }
 
@@ -737,8 +767,12 @@ mod tests {
         ];
         for role in [Role::Alice, Role::Bob] {
             for start in [
-                State::Negotiated, State::AliceLocked, State::BobLocked,
-                State::SecretRevealed, State::Completed, State::Refunded,
+                State::Negotiated,
+                State::AliceLocked,
+                State::BobLocked,
+                State::SecretRevealed,
+                State::Completed,
+                State::Refunded,
                 State::Aborted,
             ] {
                 for &t in &attempts {
@@ -747,14 +781,18 @@ mod tests {
                     let pre = s.state;
                     let result = s.apply(t);
                     if result.is_err() {
-                        assert_eq!(s.state, pre,
+                        assert_eq!(
+                            s.state, pre,
                             "rejected ({:?},{:?},{:?}) must leave state unchanged",
-                            role, start, t);
+                            role, start, t
+                        );
                     } else {
                         // Successful transition: state advanced.
-                        assert_ne!(s.state, pre,
+                        assert_ne!(
+                            s.state, pre,
                             "accepted ({:?},{:?},{:?}) must advance state",
-                            role, start, t);
+                            role, start, t
+                        );
                     }
                 }
             }

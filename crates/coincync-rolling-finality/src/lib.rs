@@ -63,10 +63,10 @@
 //!
 //! That stuff arrives in phase 2-N per the CIP.
 
-pub mod error;
-pub mod types;
 pub mod active_set;
+pub mod error;
 pub mod finality;
+pub mod types;
 
 #[cfg(feature = "ed25519")]
 pub mod verifier_ed25519;
@@ -74,19 +74,18 @@ pub mod verifier_ed25519;
 #[cfg(feature = "wire-codec")]
 pub mod codec;
 
-pub use error::{FinalityError, Result};
-pub use types::{
-    FinalityAttestation, MinerPubkey, BlockHash, AttestationVerifier,
-    NoopVerifier, RecordedAttestation,
-};
 pub use active_set::{ActiveMinerSet, MinerRecord};
+pub use error::{FinalityError, Result};
 pub use finality::{
-    FinalityTracker, ApplyOutcome, FinalityStats,
-    DEFAULT_WINDOW, DEFAULT_LAG, DEFAULT_MIN_QUORUM,
+    ApplyOutcome, FinalityStats, FinalityTracker, DEFAULT_LAG, DEFAULT_MIN_QUORUM, DEFAULT_WINDOW,
+};
+pub use types::{
+    AttestationVerifier, BlockHash, FinalityAttestation, MinerPubkey, NoopVerifier,
+    RecordedAttestation,
 };
 
 #[cfg(feature = "ed25519")]
 pub use verifier_ed25519::{Ed25519Verifier, Ed25519VerifyError};
 
 #[cfg(feature = "wire-codec")]
-pub use codec::{WireAttestation, WireError, WIRE_MAGIC, WIRE_VERSION, encode, decode};
+pub use codec::{decode, encode, WireAttestation, WireError, WIRE_MAGIC, WIRE_VERSION};

@@ -33,8 +33,8 @@
 //!
 //! Request kinds:
 //!   - `attach` — present an invitation token; on success the
-//!                connection becomes "subscribed" to the session
-//!                and receives broadcasts of every transition.
+//!     connection becomes "subscribed" to the session and
+//!     receives broadcasts of every transition.
 //!   - `submit_round1` — submit your round-1 commitment bytes
 //!   - `submit_round2` — submit your round-2 sig-share bytes
 //!   - `submit_aggregate` — submit the aggregate signature
@@ -294,7 +294,10 @@ impl Coord {
             }
             // If we just became Aborted or Expired, broadcast.
             if matches!(
-                (prior_state.is_terminal(), new_state_for_broadcast.is_terminal()),
+                (
+                    prior_state.is_terminal(),
+                    new_state_for_broadcast.is_terminal()
+                ),
                 (false, true)
             ) && new_state_for_broadcast != SessionState::Aggregated
             {
@@ -804,12 +807,8 @@ mod tests {
                 state: "y".into(),
             }),
             coordinator_error_code(&CoordinatorError::UnauthorizedParticipant),
-            coordinator_error_code(&CoordinatorError::SessionTerminal {
-                state: "z".into(),
-            }),
-            coordinator_error_code(&CoordinatorError::SessionExpired {
-                state: "z".into(),
-            }),
+            coordinator_error_code(&CoordinatorError::SessionTerminal { state: "z".into() }),
+            coordinator_error_code(&CoordinatorError::SessionExpired { state: "z".into() }),
             coordinator_error_code(&CoordinatorError::ThresholdViolation { what: "x".into() }),
             coordinator_error_code(&CoordinatorError::DuplicateAction { what: "x".into() }),
             coordinator_error_code(&CoordinatorError::Internal("x".into())),

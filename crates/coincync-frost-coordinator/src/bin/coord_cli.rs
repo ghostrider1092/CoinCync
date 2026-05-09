@@ -18,7 +18,7 @@
 //! - `inspect`        — print full details of a single session
 //! - `force-abort`    — admin: walk a session to Aborted
 //! - `gc-terminal`    — purge sessions in terminal states past
-//!                       retention
+//!   retention
 //!
 //! ## Workflow
 //!
@@ -246,20 +246,23 @@ fn create_session(
     group_pubkey_hex: &str,
     creator_hex: &str,
 ) -> Result<(), String> {
-    let group_pubkey = parse_32byte_hex(group_pubkey_hex)
-        .map_err(|e| format!("group_pubkey: {e}"))?;
-    let creator_bytes = parse_32byte_hex(creator_hex)
-        .map_err(|e| format!("creator: {e}"))?;
+    let group_pubkey =
+        parse_32byte_hex(group_pubkey_hex).map_err(|e| format!("group_pubkey: {e}"))?;
+    let creator_bytes = parse_32byte_hex(creator_hex).map_err(|e| format!("creator: {e}"))?;
     let now = unix_now();
 
-    let session = Session::new(threshold, total, group_pubkey, ParticipantId(creator_bytes), now)
-        .map_err(|e| format!("session construction: {e}"))?;
+    let session = Session::new(
+        threshold,
+        total,
+        group_pubkey,
+        ParticipantId(creator_bytes),
+        now,
+    )
+    .map_err(|e| format!("session construction: {e}"))?;
     let session_id = session.id;
 
     let store = SessionStore::new(&state_path);
-    let mut existing = store
-        .load()
-        .map_err(|e| format!("load existing: {e}"))?;
+    let mut existing = store.load().map_err(|e| format!("load existing: {e}"))?;
     existing.push(session);
     store.save(&existing).map_err(|e| format!("save: {e}"))?;
 
@@ -287,20 +290,21 @@ fn mint_invitation(
 ) -> Result<(), String> {
     let secret = read_secret_file(&secret_path)?;
     let session_id = parse_session_id(session_hex)?;
-    let participant_bytes = parse_32byte_hex(participant_hex)
-        .map_err(|e| format!("participant: {e}"))?;
+    let participant_bytes =
+        parse_32byte_hex(participant_hex).map_err(|e| format!("participant: {e}"))?;
     let participant = ParticipantId(participant_bytes);
 
     let expires_at = unix_now()
-        .checked_add(expires_in_hours.checked_mul(3600).ok_or_else(|| {
-            "expires_in_hours too large".to_string()
-        })?)
+        .checked_add(
+            expires_in_hours
+                .checked_mul(3600)
+                .ok_or_else(|| "expires_in_hours too large".to_string())?,
+        )
         .ok_or_else(|| "expiry timestamp overflow".to_string())?;
 
     let token = mint_token(&secret, session_id, participant, expires_at)
         .map_err(|e| format!("mint failed: {e}"))?;
-    let json = serde_json::to_string_pretty(&token)
-        .map_err(|e| format!("encode token: {e}"))?;
+    let json = serde_json::to_string_pretty(&token).map_err(|e| format!("encode token: {e}"))?;
     println!("{json}");
     eprintln!();
     eprintln!("# Invitation token for participant {}", participant_hex);
@@ -316,7 +320,10 @@ fn list_sessions(state_path: PathBuf) -> Result<(), String> {
         println!("(no sessions in {})", state_path.display());
         return Ok(());
     }
-    println!("{:<38}  {:<11}  {:>5}  {:>5}  {:>11}", "session_id", "state", "thld", "total", "age (s)");
+    println!(
+        "{:<38}  {:<11}  {:>5}  {:>5}  {:>11}",
+        "session_id", "state", "thld", "total", "age (s)"
+    );
     println!("{}", "-".repeat(80));
     let now = unix_now();
     for s in &sessions {
@@ -350,28 +357,48 @@ fn inspect_session(state_path: PathBuf, session_hex: &str) -> Result<(), String>
     println!("  total:        {}", session.total);
     println!("  group_pubkey: {}", hex::encode(session.group_pubkey));
     println!("  creator:      {}", hex::encode(session.creator.0));
-    println!("  created_at:   {} ({}s ago)", session.created_at, now.saturating_sub(session.created_at));
-    println!("  state_entered: {} ({}s ago)", session.state_entered_at, now.saturating_sub(session.state_entered_at));
-    println!("  message:      {}",
+    println!(
+        "  created_at:   {} ({}s ago)",
+        session.created_at,
+        now.saturating_sub(session.created_at)
+    );
+    println!(
+        "  state_entered: {} ({}s ago)",
+        session.state_entered_at,
+        now.saturating_sub(session.state_entered_at)
+    );
+    println!(
+        "  message:      {}",
         match &session.message {
             Some(m) => format!("{} bytes", m.len()),
             None => "(not yet declared)".into(),
-        });
+        }
+    );
     println!("  participants ({}):", session.participants.len());
     for (pubkey, p_state) in &session.participants {
         println!(
             "    {} (attached={}, commitment={}, sig_share={})",
             hex::encode(pubkey.0),
             p_state.attached,
-            if p_state.commitment.is_some() { "yes" } else { "no" },
-            if p_state.sig_share.is_some() { "yes" } else { "no" },
+            if p_state.commitment.is_some() {
+                "yes"
+            } else {
+                "no"
+            },
+            if p_state.sig_share.is_some() {
+                "yes"
+            } else {
+                "no"
+            },
         );
     }
-    println!("  aggregate_signature: {}",
+    println!(
+        "  aggregate_signature: {}",
         match &session.aggregate_signature {
             Some(s) => format!("{} bytes ({})", s.len(), hex::encode(&s[..s.len().min(8)])),
             None => "(not yet)".into(),
-        });
+        }
+    );
     Ok(())
 }
 
@@ -382,8 +409,8 @@ fn force_abort(
     reason: &str,
 ) -> Result<(), String> {
     let target_id = parse_session_id(session_hex)?;
-    let participant_bytes = parse_32byte_hex(participant_hex)
-        .map_err(|e| format!("participant: {e}"))?;
+    let participant_bytes =
+        parse_32byte_hex(participant_hex).map_err(|e| format!("participant: {e}"))?;
     let store = SessionStore::new(&state_path);
     let mut sessions = store.load().map_err(|e| format!("load: {e}"))?;
     let session = sessions
@@ -435,7 +462,10 @@ fn gc_terminal(state_path: PathBuf, dry_run: bool) -> Result<(), String> {
     }
 
     if purged.is_empty() {
-        println!("Nothing to purge ({} sessions, all within retention or non-terminal).", keep.len());
+        println!(
+            "Nothing to purge ({} sessions, all within retention or non-terminal).",
+            keep.len()
+        );
         return Ok(());
     }
 
@@ -472,7 +502,10 @@ fn unix_now() -> u64 {
 fn parse_32byte_hex(s: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(s).map_err(|e| format!("not valid hex: {e}"))?;
     if bytes.len() != 32 {
-        return Err(format!("expected 32 bytes (64 hex chars), got {}", bytes.len()));
+        return Err(format!(
+            "expected 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
@@ -532,7 +565,9 @@ fn read_random(buf: &mut [u8]) -> std::io::Result<()> {
     let pid = std::process::id() as u128;
     let mut seed = now.wrapping_mul(pid.wrapping_add(1));
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = ((seed >> 64) & 0xff) as u8;
     }
     eprintln!("warning: /dev/urandom unavailable; using time+pid PRNG. For");

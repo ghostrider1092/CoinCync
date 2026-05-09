@@ -144,7 +144,7 @@ pub fn decode(bytes: &[u8]) -> std::result::Result<FinalityAttestation, WireErro
     if bytes.len() < WIRE_MAGIC.len() + 1 {
         return Err(WireError::TooShort);
     }
-    if &bytes[..WIRE_MAGIC.len()] != WIRE_MAGIC {
+    if bytes[..WIRE_MAGIC.len()] != WIRE_MAGIC {
         return Err(WireError::BadMagic);
     }
     let version = bytes[WIRE_MAGIC.len()];
@@ -201,8 +201,16 @@ mod tests {
         // the CIP. Exact bytes don't matter; the order of magnitude
         // does.
         let bytes = encode(&sample_attestation());
-        assert!(bytes.len() <= 160, "encoded size {} exceeds reasonable bound", bytes.len());
-        assert!(bytes.len() >= 140, "encoded size {} is suspiciously small", bytes.len());
+        assert!(
+            bytes.len() <= 160,
+            "encoded size {} exceeds reasonable bound",
+            bytes.len()
+        );
+        assert!(
+            bytes.len() >= 140,
+            "encoded size {} is suspiciously small",
+            bytes.len()
+        );
     }
 
     #[test]
@@ -212,7 +220,7 @@ mod tests {
 
     #[test]
     fn truncated_header_rejected() {
-        assert_eq!(decode(&[b'C', b'I']), Err(WireError::TooShort));
+        assert_eq!(decode(b"CI"), Err(WireError::TooShort));
     }
 
     #[test]
@@ -253,7 +261,10 @@ mod tests {
         buf.extend_from_slice(&body);
         assert!(matches!(
             decode(&buf),
-            Err(WireError::WrongSignatureLength { expected: 64, actual: 32 })
+            Err(WireError::WrongSignatureLength {
+                expected: 64,
+                actual: 32
+            })
         ));
     }
 

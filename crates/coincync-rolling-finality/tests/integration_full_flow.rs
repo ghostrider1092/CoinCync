@@ -25,8 +25,8 @@ use coincync_rolling_finality::{
     decode, encode,
     finality::{ApplyOutcome, DEFAULT_LAG, DEFAULT_MIN_QUORUM, DEFAULT_WINDOW},
     types::{RejectAllVerifier, SIGNATURE_LEN},
-    AttestationVerifier, BlockHash, Ed25519Verifier, FinalityAttestation,
-    FinalityError, FinalityTracker, MinerPubkey, NoopVerifier, WireError,
+    AttestationVerifier, BlockHash, Ed25519Verifier, FinalityAttestation, FinalityError,
+    FinalityTracker, MinerPubkey, NoopVerifier, WireError,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
@@ -70,9 +70,7 @@ fn signed_attestation(
 /// active at the test's target heights.
 fn tracker_with_n_miners(n: usize) -> (FinalityTracker, Vec<(SigningKey, MinerPubkey)>) {
     let mut tracker = FinalityTracker::with_params(
-        /* window */ 100,
-        /* lag */ 10,
-        /* min_quorum */ 5,
+        /* window */ 100, /* lag */ 10, /* min_quorum */ 5,
         /* stale_horizon */ 50,
     );
     let miners: Vec<_> = (0..n).map(|_| fresh_miner()).collect();
@@ -112,7 +110,7 @@ fn full_composition_finalizes_at_threshold_with_real_crypto() {
         active
     );
     // Threshold = ceil(2/3 * active). For 5: 4. For 6: 4.
-    let threshold = (active * 2 + 2) / 3;
+    let threshold = (active * 2).div_ceil(3);
     let verifier = Ed25519Verifier::new();
 
     for (i, (signing, pubkey)) in miners.iter().enumerate() {

@@ -62,18 +62,14 @@ pub mod persistence;
 
 pub use error::{CoordinatorError, Result};
 pub use session::{
-    Session, SessionId, SessionState, ParticipantId, ParticipantState,
-    Transition, ROUND_1_TIMEOUT_SECS, ROUND_2_TIMEOUT_SECS,
-    INVITED_TIMEOUT_SECS, AGGREGATED_RETENTION_SECS,
+    ParticipantId, ParticipantState, Session, SessionId, SessionState, Transition,
+    AGGREGATED_RETENTION_SECS, INVITED_TIMEOUT_SECS, ROUND_1_TIMEOUT_SECS, ROUND_2_TIMEOUT_SECS,
 };
 
 #[cfg(feature = "invitations")]
 pub use invitations::{
-    InvitationToken, InvitationError, MAC_LEN, SESSION_SECRET_LEN,
-    mint_token, verify_token,
+    mint_token, verify_token, InvitationError, InvitationToken, MAC_LEN, SESSION_SECRET_LEN,
 };
 
 #[cfg(feature = "persistence")]
-pub use persistence::{
-    SessionStore, PersistError, PERSISTENCE_VERSION,
-};
+pub use persistence::{PersistError, SessionStore, PERSISTENCE_VERSION};

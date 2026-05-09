@@ -6,7 +6,7 @@
 //! that accepts every attestation regardless of signature bytes;
 //! phase 2 swaps in a real `Ed25519Verifier`.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// 32-byte ed25519 public key identifying a miner. Aliased rather
 /// than newtyped so the consensus integration can accept whatever
@@ -74,10 +74,10 @@ impl FinalityAttestation {
     }
 }
 
-/// What we record once an attestation has been accepted: the miner
-/// + height + hash triple, without the signature (the signature
-/// served its purpose at acceptance time and isn't needed for
-/// quorum counting).
+/// What we record once an attestation has been accepted: the
+/// (miner, height, hash) triple, without the signature (the
+/// signature served its purpose at acceptance time and isn't
+/// needed for quorum counting).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RecordedAttestation {
     pub miner_pubkey: MinerPubkey,

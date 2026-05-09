@@ -27,9 +27,7 @@
 
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 
-use crate::types::{
-    AttestationVerifier, FinalityAttestation, MinerPubkey, SIGNATURE_LEN,
-};
+use crate::types::{AttestationVerifier, FinalityAttestation, MinerPubkey, SIGNATURE_LEN};
 
 /// Production ed25519 verifier. Stateless; cheap to construct.
 ///
@@ -58,18 +56,16 @@ impl Ed25519Verifier {
             });
         }
 
-        let pubkey = decode_pubkey(&attestation.miner_pubkey)
-            .ok_or(Ed25519VerifyError::InvalidPubkey)?;
+        let pubkey =
+            decode_pubkey(&attestation.miner_pubkey).ok_or(Ed25519VerifyError::InvalidPubkey)?;
 
         // SAFE unwrap: we just verified `signature.len() == 64`.
-        let sig_bytes: [u8; 64] = attestation
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| Ed25519VerifyError::WrongSignatureLength {
+        let sig_bytes: [u8; 64] = attestation.signature.as_slice().try_into().map_err(|_| {
+            Ed25519VerifyError::WrongSignatureLength {
                 expected: SIGNATURE_LEN,
                 actual: attestation.signature.len(),
-            })?;
+            }
+        })?;
         let signature = Signature::from_bytes(&sig_bytes);
 
         let signing_bytes = attestation.signing_bytes();
@@ -111,8 +107,12 @@ impl std::fmt::Display for Ed25519VerifyError {
             Self::WrongSignatureLength { expected, actual } => {
                 write!(f, "signature length: expected {expected}, got {actual}")
             }
-            Self::InvalidPubkey => f.write_str("miner pubkey did not decode to a valid ed25519 key"),
-            Self::SignatureMismatch => f.write_str("signature did not verify against pubkey + payload"),
+            Self::InvalidPubkey => {
+                f.write_str("miner pubkey did not decode to a valid ed25519 key")
+            }
+            Self::SignatureMismatch => {
+                f.write_str("signature did not verify against pubkey + payload")
+            }
         }
     }
 }
@@ -129,9 +129,10 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
-    fn make_signed_attestation(target_height: u64, target_hash_byte: u8)
-        -> (SigningKey, FinalityAttestation)
-    {
+    fn make_signed_attestation(
+        target_height: u64,
+        target_hash_byte: u8,
+    ) -> (SigningKey, FinalityAttestation) {
         let signing = SigningKey::generate(&mut OsRng);
         let pubkey_bytes = signing.verifying_key().to_bytes();
 
@@ -198,7 +199,10 @@ mod tests {
         let v = Ed25519Verifier::new();
         assert!(!v.verify(&att));
         let detailed = v.verify_detailed(&att).unwrap_err();
-        assert!(matches!(detailed, Ed25519VerifyError::WrongSignatureLength { .. }));
+        assert!(matches!(
+            detailed,
+            Ed25519VerifyError::WrongSignatureLength { .. }
+        ));
     }
 
     #[test]

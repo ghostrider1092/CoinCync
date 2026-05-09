@@ -21,8 +21,10 @@ pub enum FinalityError {
     InvalidSignature,
 
     /// The miner's pubkey is not in the active miner set. Could mean:
-    ///   - the miner has been inactive for >WINDOW blocks
-    ///   - the miner has never produced a block (so was never seen)
+    ///
+    /// - the miner has been inactive for >WINDOW blocks
+    /// - the miner has never produced a block (so was never seen)
+    ///
     /// In either case, their attestation does NOT count toward the
     /// 2/3 threshold.
     #[error("miner not in active set at height {height}")]
@@ -33,7 +35,10 @@ pub enum FinalityError {
     /// late-flooding of attestations for ancient heights to disrupt
     /// pruning.
     #[error("attestation target_height {target_height} is too old (earliest accepted: {earliest_accepted})")]
-    StaleTarget { target_height: u64, earliest_accepted: u64 },
+    StaleTarget {
+        target_height: u64,
+        earliest_accepted: u64,
+    },
 
     /// The attestation's `target_height` is in the future (ahead of
     /// the current chain tip the tracker knows about). Possibly
@@ -41,7 +46,10 @@ pub enum FinalityError {
     /// future heights because we have no canonical hash to compare
     /// against.
     #[error("attestation target_height {target_height} is ahead of tracker tip {tracker_tip}")]
-    FutureTarget { target_height: u64, tracker_tip: u64 },
+    FutureTarget {
+        target_height: u64,
+        tracker_tip: u64,
+    },
 
     /// This (miner, target_height, target_hash) triple was already
     /// recorded. Idempotent: the previous record stands; the

@@ -42,9 +42,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::active_set::ActiveMinerSet;
 use crate::error::{FinalityError, Result};
-use crate::types::{
-    AttestationVerifier, BlockHash, FinalityAttestation, MinerPubkey,
-};
+use crate::types::{AttestationVerifier, BlockHash, FinalityAttestation, MinerPubkey};
 
 // ────────────────────────────────────────────────────────────────
 // Defaults
@@ -98,10 +96,7 @@ pub enum ApplyOutcome {
     /// Attestation recorded AND the soft-final tip advanced to
     /// `height` with hash `hash`. This is the consensus layer's
     /// signal to lock in finality at that height.
-    NewlyFinalized {
-        height: u64,
-        hash: BlockHash,
-    },
+    NewlyFinalized { height: u64, hash: BlockHash },
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -160,12 +155,7 @@ impl FinalityTracker {
 
     /// Construct with explicit parameters. For tests and any
     /// future tuning.
-    pub fn with_params(
-        window: u64,
-        lag: u64,
-        min_quorum: usize,
-        stale_horizon: u64,
-    ) -> Self {
+    pub fn with_params(window: u64, lag: u64, min_quorum: usize, stale_horizon: u64) -> Self {
         FinalityTracker {
             min_quorum,
             lag,
@@ -229,7 +219,10 @@ impl FinalityTracker {
         //    submitted late by a miner who has since lapsed still
         //    counts — what matters is that they were active when the
         //    block being attested to was canonical.
-        if !self.active_set.is_active(&attestation.miner_pubkey, attestation.target_height) {
+        if !self
+            .active_set
+            .is_active(&attestation.miner_pubkey, attestation.target_height)
+        {
             return Err(FinalityError::MinerNotActive {
                 height: attestation.target_height,
             });
@@ -237,12 +230,11 @@ impl FinalityTracker {
 
         // 4. Record. Idempotent on (miner, height, hash); duplicate
         //    is rejected.
-        let height_entry = self.attestations
+        let height_entry = self
+            .attestations
             .entry(attestation.target_height)
             .or_default();
-        let hash_entry = height_entry
-            .entry(attestation.target_hash)
-            .or_default();
+        let hash_entry = height_entry.entry(attestation.target_hash).or_default();
         if !hash_entry.insert(attestation.miner_pubkey) {
             return Err(FinalityError::DuplicateAttestation {
                 target_height: attestation.target_height,
@@ -372,7 +364,9 @@ mod tests {
     /// Build a tracker with 5 active miners (= MIN_QUORUM exactly)
     /// who have all mined recently. Use small WINDOW for fast tests.
     fn five_miner_tracker() -> FinalityTracker {
-        let mut t = FinalityTracker::with_params(/* window */ 100, /* lag */ 10, /* min_quorum */ 5, /* stale */ 50);
+        let mut t = FinalityTracker::with_params(
+            /* window */ 100, /* lag */ 10, /* min_quorum */ 5, /* stale */ 50,
+        );
         // Each miner mines a block at heights 50..55. Then we set the
         // chain tip to 60 (so all 5 are active at height 60).
         for i in 0..5u8 {
@@ -385,13 +379,13 @@ mod tests {
     #[test]
     fn ceil_two_thirds_correctness() {
         assert_eq!(ceil_two_thirds(0), 0);
-        assert_eq!(ceil_two_thirds(1), 1);  // ceil(0.67) = 1
-        assert_eq!(ceil_two_thirds(2), 2);  // ceil(1.33) = 2
-        assert_eq!(ceil_two_thirds(3), 2);  // ceil(2.00) = 2
-        assert_eq!(ceil_two_thirds(4), 3);  // ceil(2.67) = 3
-        assert_eq!(ceil_two_thirds(5), 4);  // ceil(3.33) = 4
-        assert_eq!(ceil_two_thirds(6), 4);  // ceil(4.00) = 4
-        assert_eq!(ceil_two_thirds(9), 6);  // ceil(6.00) = 6
+        assert_eq!(ceil_two_thirds(1), 1); // ceil(0.67) = 1
+        assert_eq!(ceil_two_thirds(2), 2); // ceil(1.33) = 2
+        assert_eq!(ceil_two_thirds(3), 2); // ceil(2.00) = 2
+        assert_eq!(ceil_two_thirds(4), 3); // ceil(2.67) = 3
+        assert_eq!(ceil_two_thirds(5), 4); // ceil(3.33) = 4
+        assert_eq!(ceil_two_thirds(6), 4); // ceil(4.00) = 4
+        assert_eq!(ceil_two_thirds(9), 6); // ceil(6.00) = 6
         assert_eq!(ceil_two_thirds(10), 7); // ceil(6.67) = 7
         assert_eq!(ceil_two_thirds(100), 67);
     }
@@ -433,11 +427,15 @@ mod tests {
         // 5 active miners -> threshold = ceil(2/3 * 5) = 4
         // First 3 attestations: still below threshold
         for i in 1..=3u8 {
-            let r = t.apply_attestation(&att(i, 55, 0xAA), &NoopVerifier).unwrap();
+            let r = t
+                .apply_attestation(&att(i, 55, 0xAA), &NoopVerifier)
+                .unwrap();
             assert_eq!(r, ApplyOutcome::Accepted);
         }
         // 4th attestation: hits threshold, finalizes
-        let r = t.apply_attestation(&att(4, 55, 0xAA), &NoopVerifier).unwrap();
+        let r = t
+            .apply_attestation(&att(4, 55, 0xAA), &NoopVerifier)
+            .unwrap();
         match r {
             ApplyOutcome::NewlyFinalized { height, hash: h } => {
                 assert_eq!(height, 55);
@@ -448,14 +446,17 @@ mod tests {
         assert_eq!(t.soft_final_height(), Some(55));
         // 5th attestation: already past threshold, but height is
         // ALREADY soft-final, so this is just Accepted (no advance)
-        let r = t.apply_attestation(&att(5, 55, 0xAA), &NoopVerifier).unwrap();
+        let r = t
+            .apply_attestation(&att(5, 55, 0xAA), &NoopVerifier)
+            .unwrap();
         assert_eq!(r, ApplyOutcome::Accepted);
     }
 
     #[test]
     fn duplicate_attestation_rejected() {
         let mut t = five_miner_tracker();
-        t.apply_attestation(&att(1, 55, 0xAA), &NoopVerifier).unwrap();
+        t.apply_attestation(&att(1, 55, 0xAA), &NoopVerifier)
+            .unwrap();
         let r = t.apply_attestation(&att(1, 55, 0xAA), &NoopVerifier);
         assert!(matches!(r, Err(FinalityError::DuplicateAttestation { .. })));
     }
@@ -467,8 +468,10 @@ mod tests {
         // vote to each, NOT 2 to either.
         let mut t = five_miner_tracker();
         // Miner 1 signs both (55, 0xAA) and (55, 0xBB).
-        t.apply_attestation(&att(1, 55, 0xAA), &NoopVerifier).unwrap();
-        t.apply_attestation(&att(1, 55, 0xBB), &NoopVerifier).unwrap();
+        t.apply_attestation(&att(1, 55, 0xAA), &NoopVerifier)
+            .unwrap();
+        t.apply_attestation(&att(1, 55, 0xBB), &NoopVerifier)
+            .unwrap();
         assert_eq!(t.signer_count(55, &hash(0xAA)), 1);
         assert_eq!(t.signer_count(55, &hash(0xBB)), 1);
         // Miners 2, 3, 4 sign 0xAA only. Now 0xAA has 4 signers ->
@@ -502,7 +505,8 @@ mod tests {
         assert!(!t.would_reorg_violate_finality(0));
         // Finalize height 55
         for i in 1..=4u8 {
-            t.apply_attestation(&att(i, 55, 0xAA), &NoopVerifier).unwrap();
+            t.apply_attestation(&att(i, 55, 0xAA), &NoopVerifier)
+                .unwrap();
         }
         // Reorg with fork point AT 55 = violates (== soft_final)
         assert!(t.would_reorg_violate_finality(55));

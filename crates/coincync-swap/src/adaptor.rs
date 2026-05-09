@@ -73,10 +73,7 @@ pub fn verify_cross_curve_proof(
 /// Decrypt a Bitcoin adaptor signature into a complete signature
 /// using the revealed secret. This is the operation Alice performs
 /// to claim the BTC after Bob has locked it.
-pub fn decrypt_btc_adaptor(
-    _adaptor: &BtcAdaptorSig,
-    _secret: &AdaptorSecret,
-) -> Result<Vec<u8>> {
+pub fn decrypt_btc_adaptor(_adaptor: &BtcAdaptorSig, _secret: &AdaptorSecret) -> Result<Vec<u8>> {
     Err(Error::not_implemented("adaptor.decrypt_btc_adaptor"))
 }
 
@@ -88,5 +85,7 @@ pub fn recover_secret_from_btc_sig(
     _adaptor: &BtcAdaptorSig,
     _final_sig: &[u8],
 ) -> Result<AdaptorSecret> {
-    Err(Error::not_implemented("adaptor.recover_secret_from_btc_sig"))
+    Err(Error::not_implemented(
+        "adaptor.recover_secret_from_btc_sig",
+    ))
 }

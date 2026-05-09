@@ -103,10 +103,7 @@ pub enum StateError {
     /// understand. Almost always means the file was written by a
     /// newer binary. Loud failure rather than silent best-effort.
     #[error("unsupported state-file version: file is v{file_version}, this binary handles v1..={supported}")]
-    UnsupportedVersion {
-        file_version: u32,
-        supported: u32,
-    },
+    UnsupportedVersion { file_version: u32, supported: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;
@@ -366,7 +363,13 @@ mod tests {
 
         let store = SwapStore::new(&path);
         let err = store.load().unwrap_err();
-        assert!(matches!(err, StateError::UnsupportedVersion { file_version: 999, .. }));
+        assert!(matches!(
+            err,
+            StateError::UnsupportedVersion {
+                file_version: 999,
+                ..
+            }
+        ));
     }
 
     #[test]

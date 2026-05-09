@@ -64,7 +64,7 @@
 //!    non-decreasing in the per-session view. `tick()` calls
 //!    must pass a `now` >= the last `now`.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -128,16 +128,23 @@ impl Default for SessionId {
 pub struct ParticipantId(pub [u8; 32]);
 
 impl Serialize for ParticipantId {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(&encode_hex32(&self.0))
     }
 }
 
 impl<'de> Deserialize<'de> for ParticipantId {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         use serde::de::Error as _;
         let s = String::deserialize(deserializer)?;
-        decode_hex32(&s).map(ParticipantId).map_err(D::Error::custom)
+        decode_hex32(&s)
+            .map(ParticipantId)
+            .map_err(D::Error::custom)
     }
 }
 
@@ -198,7 +205,11 @@ pub struct ParticipantState {
 
 impl ParticipantState {
     fn invited() -> Self {
-        ParticipantState { attached: false, commitment: None, sig_share: None }
+        ParticipantState {
+            attached: false,
+            commitment: None,
+            sig_share: None,
+        }
     }
 }
 
@@ -245,7 +256,10 @@ impl SessionState {
     /// than itself. Used to short-circuit `apply()` and to make
     /// the terminal-stickiness invariant testable.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, SessionState::Aggregated | SessionState::Aborted | SessionState::Expired)
+        matches!(
+            self,
+            SessionState::Aggregated | SessionState::Aborted | SessionState::Expired
+        )
     }
 
     /// Per-state deadline relative to the time the session entered
@@ -379,21 +393,17 @@ impl Session {
         // for error messages; the actual mutation happens inside.
         let state_name = self.state.name();
         match transition {
-            Transition::AttachParticipant { participant } => {
-                self.handle_attach(participant, now)
-            }
-            Transition::DeclareMessage { message } => {
-                self.handle_declare_message(message, now)
-            }
-            Transition::SubmitRound1 { participant, commitment } => {
-                self.handle_round1(participant, commitment, now)
-            }
-            Transition::SubmitRound2 { participant, sig_share } => {
-                self.handle_round2(participant, sig_share, now)
-            }
-            Transition::SubmitAggregate { signature } => {
-                self.handle_aggregate(signature, now)
-            }
+            Transition::AttachParticipant { participant } => self.handle_attach(participant, now),
+            Transition::DeclareMessage { message } => self.handle_declare_message(message, now),
+            Transition::SubmitRound1 {
+                participant,
+                commitment,
+            } => self.handle_round1(participant, commitment, now),
+            Transition::SubmitRound2 {
+                participant,
+                sig_share,
+            } => self.handle_round2(participant, sig_share, now),
+            Transition::SubmitAggregate { signature } => self.handle_aggregate(signature, now),
             Transition::Abort { participant: _ } => {
                 self.transition_to(SessionState::Aborted, now);
                 Ok(())
@@ -439,7 +449,8 @@ impl Session {
         // Real-world reason: a participant whose connection drops
         // mid-round reconnects with the same pubkey; we should
         // recognize them, not reject them.
-        let entry = self.participants
+        let entry = self
+            .participants
             .entry(participant)
             .or_insert_with(ParticipantState::invited);
         entry.attached = true;
@@ -490,7 +501,8 @@ impl Session {
                 state: self.state.name().into(),
             });
         }
-        let entry = self.participants
+        let entry = self
+            .participants
             .get_mut(&participant)
             .ok_or(CoordinatorError::UnauthorizedParticipant)?;
         if !entry.attached {
@@ -504,7 +516,9 @@ impl Session {
         entry.commitment = Some(commitment);
 
         // If we now have `threshold` commitments, advance to Round 2.
-        let collected = self.participants.values()
+        let collected = self
+            .participants
+            .values()
             .filter(|p| p.commitment.is_some())
             .count();
         if collected >= self.threshold as usize {
@@ -525,7 +539,8 @@ impl Session {
                 state: self.state.name().into(),
             });
         }
-        let entry = self.participants
+        let entry = self
+            .participants
             .get_mut(&participant)
             .ok_or(CoordinatorError::UnauthorizedParticipant)?;
         // Round 2 share is only valid from a participant who
@@ -557,7 +572,9 @@ impl Session {
                 state: self.state.name().into(),
             });
         }
-        let collected = self.participants.values()
+        let collected = self
+            .participants
+            .values()
             .filter(|p| p.sig_share.is_some())
             .count();
         if collected < self.threshold as usize {
@@ -581,12 +598,18 @@ impl Session {
     /// Number of participants who have submitted a round-1
     /// commitment. Used by the coordinator's progress reporting.
     pub fn round1_count(&self) -> usize {
-        self.participants.values().filter(|p| p.commitment.is_some()).count()
+        self.participants
+            .values()
+            .filter(|p| p.commitment.is_some())
+            .count()
     }
 
     /// Number of participants who have submitted a round-2 share.
     pub fn round2_count(&self) -> usize {
-        self.participants.values().filter(|p| p.sig_share.is_some()).count()
+        self.participants
+            .values()
+            .filter(|p| p.sig_share.is_some())
+            .count()
     }
 }
 
@@ -608,10 +631,16 @@ pub enum Transition {
     DeclareMessage { message: Vec<u8> },
 
     /// A participant submits their round-1 commitment.
-    SubmitRound1 { participant: ParticipantId, commitment: Vec<u8> },
+    SubmitRound1 {
+        participant: ParticipantId,
+        commitment: Vec<u8>,
+    },
 
     /// A participant submits their round-2 signature share.
-    SubmitRound2 { participant: ParticipantId, sig_share: Vec<u8> },
+    SubmitRound2 {
+        participant: ParticipantId,
+        sig_share: Vec<u8>,
+    },
 
     /// The aggregate signature is computed externally and
     /// submitted. Advances `Round2` -> `Aggregated`. NOT signed
@@ -666,26 +695,68 @@ mod tests {
         let p2 = pid(0xBB);
 
         // Attach 2 participants (threshold = 2)
-        s.apply(Transition::AttachParticipant { participant: p1 }, 1001).unwrap();
-        s.apply(Transition::AttachParticipant { participant: p2 }, 1002).unwrap();
+        s.apply(Transition::AttachParticipant { participant: p1 }, 1001)
+            .unwrap();
+        s.apply(Transition::AttachParticipant { participant: p2 }, 1002)
+            .unwrap();
         assert_eq!(s.state, SessionState::Invited);
 
         // Declare message → Round1
-        s.apply(Transition::DeclareMessage { message: vec![1,2,3] }, 1003).unwrap();
+        s.apply(
+            Transition::DeclareMessage {
+                message: vec![1, 2, 3],
+            },
+            1003,
+        )
+        .unwrap();
         assert_eq!(s.state, SessionState::Round1);
 
         // Both submit round-1 → Round2
-        s.apply(Transition::SubmitRound1 { participant: p1, commitment: vec![1] }, 1004).unwrap();
-        s.apply(Transition::SubmitRound1 { participant: p2, commitment: vec![2] }, 1005).unwrap();
+        s.apply(
+            Transition::SubmitRound1 {
+                participant: p1,
+                commitment: vec![1],
+            },
+            1004,
+        )
+        .unwrap();
+        s.apply(
+            Transition::SubmitRound1 {
+                participant: p2,
+                commitment: vec![2],
+            },
+            1005,
+        )
+        .unwrap();
         assert_eq!(s.state, SessionState::Round2);
 
         // Both submit round-2 — state stays in Round2
-        s.apply(Transition::SubmitRound2 { participant: p1, sig_share: vec![3] }, 1006).unwrap();
-        s.apply(Transition::SubmitRound2 { participant: p2, sig_share: vec![4] }, 1007).unwrap();
+        s.apply(
+            Transition::SubmitRound2 {
+                participant: p1,
+                sig_share: vec![3],
+            },
+            1006,
+        )
+        .unwrap();
+        s.apply(
+            Transition::SubmitRound2 {
+                participant: p2,
+                sig_share: vec![4],
+            },
+            1007,
+        )
+        .unwrap();
         assert_eq!(s.state, SessionState::Round2);
 
         // Submit aggregate → Aggregated
-        s.apply(Transition::SubmitAggregate { signature: vec![0xAA; 64] }, 1008).unwrap();
+        s.apply(
+            Transition::SubmitAggregate {
+                signature: vec![0xAA; 64],
+            },
+            1008,
+        )
+        .unwrap();
         assert_eq!(s.state, SessionState::Aggregated);
         assert_eq!(s.aggregate_signature, Some(vec![0xAA; 64]));
     }
@@ -694,13 +765,30 @@ mod tests {
     fn test_terminal_states_reject_everything() {
         let mut s = fresh_session();
         // Force into Aborted
-        s.apply(Transition::Abort { participant: pid(0xAA) }, 1001).unwrap();
+        s.apply(
+            Transition::Abort {
+                participant: pid(0xAA),
+            },
+            1001,
+        )
+        .unwrap();
         assert_eq!(s.state, SessionState::Aborted);
         // Now every transition is rejected
-        let result = s.apply(Transition::AttachParticipant { participant: pid(0xBB) }, 1002);
-        assert!(matches!(result, Err(CoordinatorError::SessionTerminal { .. })));
+        let result = s.apply(
+            Transition::AttachParticipant {
+                participant: pid(0xBB),
+            },
+            1002,
+        );
+        assert!(matches!(
+            result,
+            Err(CoordinatorError::SessionTerminal { .. })
+        ));
         let result = s.apply(Transition::Tick, 1003);
-        assert!(matches!(result, Err(CoordinatorError::SessionTerminal { .. })));
+        assert!(matches!(
+            result,
+            Err(CoordinatorError::SessionTerminal { .. })
+        ));
     }
 
     #[test]
@@ -709,15 +797,24 @@ mod tests {
         let p1 = pid(0xAA);
         let p2 = pid(0xBB);
         let stranger = pid(0xCC);
-        s.apply(Transition::AttachParticipant { participant: p1 }, 1001).unwrap();
-        s.apply(Transition::AttachParticipant { participant: p2 }, 1002).unwrap();
-        s.apply(Transition::DeclareMessage { message: vec![] }, 1003).unwrap();
+        s.apply(Transition::AttachParticipant { participant: p1 }, 1001)
+            .unwrap();
+        s.apply(Transition::AttachParticipant { participant: p2 }, 1002)
+            .unwrap();
+        s.apply(Transition::DeclareMessage { message: vec![] }, 1003)
+            .unwrap();
         // Stranger pubkey not in session → unauthorized
         let result = s.apply(
-            Transition::SubmitRound1 { participant: stranger, commitment: vec![] },
+            Transition::SubmitRound1 {
+                participant: stranger,
+                commitment: vec![],
+            },
             1004,
         );
-        assert!(matches!(result, Err(CoordinatorError::UnauthorizedParticipant)));
+        assert!(matches!(
+            result,
+            Err(CoordinatorError::UnauthorizedParticipant)
+        ));
     }
 
     #[test]
@@ -725,26 +822,46 @@ mod tests {
         let mut s = fresh_session();
         let p1 = pid(0xAA);
         let p2 = pid(0xBB);
-        s.apply(Transition::AttachParticipant { participant: p1 }, 1001).unwrap();
-        s.apply(Transition::AttachParticipant { participant: p2 }, 1002).unwrap();
-        s.apply(Transition::DeclareMessage { message: vec![] }, 1003).unwrap();
-        s.apply(Transition::SubmitRound1 { participant: p1, commitment: vec![1] }, 1004).unwrap();
+        s.apply(Transition::AttachParticipant { participant: p1 }, 1001)
+            .unwrap();
+        s.apply(Transition::AttachParticipant { participant: p2 }, 1002)
+            .unwrap();
+        s.apply(Transition::DeclareMessage { message: vec![] }, 1003)
+            .unwrap();
+        s.apply(
+            Transition::SubmitRound1 {
+                participant: p1,
+                commitment: vec![1],
+            },
+            1004,
+        )
+        .unwrap();
         // Same participant tries to resubmit
         let result = s.apply(
-            Transition::SubmitRound1 { participant: p1, commitment: vec![2] },
+            Transition::SubmitRound1 {
+                participant: p1,
+                commitment: vec![2],
+            },
             1005,
         );
-        assert!(matches!(result, Err(CoordinatorError::DuplicateAction { .. })));
+        assert!(matches!(
+            result,
+            Err(CoordinatorError::DuplicateAction { .. })
+        ));
     }
 
     #[test]
     fn test_declare_message_blocked_below_threshold() {
         let mut s = fresh_session();
         let p1 = pid(0xAA);
-        s.apply(Transition::AttachParticipant { participant: p1 }, 1001).unwrap();
+        s.apply(Transition::AttachParticipant { participant: p1 }, 1001)
+            .unwrap();
         // Only 1 attached, threshold=2 → DeclareMessage fails
         let result = s.apply(Transition::DeclareMessage { message: vec![] }, 1002);
-        assert!(matches!(result, Err(CoordinatorError::ThresholdViolation { .. })));
+        assert!(matches!(
+            result,
+            Err(CoordinatorError::ThresholdViolation { .. })
+        ));
     }
 
     #[test]
@@ -752,16 +869,43 @@ mod tests {
         let mut s = fresh_session();
         let p1 = pid(0xAA);
         let p2 = pid(0xBB);
-        s.apply(Transition::AttachParticipant { participant: p1 }, 1001).unwrap();
-        s.apply(Transition::AttachParticipant { participant: p2 }, 1002).unwrap();
-        s.apply(Transition::DeclareMessage { message: vec![] }, 1003).unwrap();
-        s.apply(Transition::SubmitRound1 { participant: p1, commitment: vec![1] }, 1004).unwrap();
-        s.apply(Transition::SubmitRound1 { participant: p2, commitment: vec![2] }, 1005).unwrap();
+        s.apply(Transition::AttachParticipant { participant: p1 }, 1001)
+            .unwrap();
+        s.apply(Transition::AttachParticipant { participant: p2 }, 1002)
+            .unwrap();
+        s.apply(Transition::DeclareMessage { message: vec![] }, 1003)
+            .unwrap();
+        s.apply(
+            Transition::SubmitRound1 {
+                participant: p1,
+                commitment: vec![1],
+            },
+            1004,
+        )
+        .unwrap();
+        s.apply(
+            Transition::SubmitRound1 {
+                participant: p2,
+                commitment: vec![2],
+            },
+            1005,
+        )
+        .unwrap();
         // Only p1 submits round 2
-        s.apply(Transition::SubmitRound2 { participant: p1, sig_share: vec![3] }, 1006).unwrap();
+        s.apply(
+            Transition::SubmitRound2 {
+                participant: p1,
+                sig_share: vec![3],
+            },
+            1006,
+        )
+        .unwrap();
         // Aggregate fails — only 1 of 2 shares
         let result = s.apply(Transition::SubmitAggregate { signature: vec![] }, 1007);
-        assert!(matches!(result, Err(CoordinatorError::ThresholdViolation { .. })));
+        assert!(matches!(
+            result,
+            Err(CoordinatorError::ThresholdViolation { .. })
+        ));
     }
 
     #[test]
@@ -769,16 +913,25 @@ mod tests {
         let mut s = fresh_session();
         let p1 = pid(0xAA);
         let p2 = pid(0xBB);
-        s.apply(Transition::AttachParticipant { participant: p1 }, 1001).unwrap();
-        s.apply(Transition::AttachParticipant { participant: p2 }, 1002).unwrap();
-        s.apply(Transition::DeclareMessage { message: vec![] }, 1003).unwrap();
+        s.apply(Transition::AttachParticipant { participant: p1 }, 1001)
+            .unwrap();
+        s.apply(Transition::AttachParticipant { participant: p2 }, 1002)
+            .unwrap();
+        s.apply(Transition::DeclareMessage { message: vec![] }, 1003)
+            .unwrap();
         // Wait past Round1 timeout (1 hour = 3600s)
         let too_late = 1003 + ROUND_1_TIMEOUT_SECS + 1;
         let result = s.apply(
-            Transition::SubmitRound1 { participant: p1, commitment: vec![1] },
+            Transition::SubmitRound1 {
+                participant: p1,
+                commitment: vec![1],
+            },
             too_late,
         );
-        assert!(matches!(result, Err(CoordinatorError::SessionExpired { .. })));
+        assert!(matches!(
+            result,
+            Err(CoordinatorError::SessionExpired { .. })
+        ));
         assert_eq!(s.state, SessionState::Expired);
     }
 

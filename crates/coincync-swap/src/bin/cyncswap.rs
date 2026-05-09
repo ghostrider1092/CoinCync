@@ -42,9 +42,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use coincync_swap::protocol::{
-    Role, State, Swap, SwapParameters, Transition,
-};
+use coincync_swap::protocol::{Role, State, Swap, SwapParameters, Transition};
 use coincync_swap::SwapStore;
 
 /// Default swap timeouts. Match the CIP-001 §"Timeout Safety"
@@ -57,7 +55,9 @@ const DEFAULT_BTC_TIMEOUT_BLOCKS: u32 = 100;
 #[derive(Parser)]
 #[command(name = "cyncswap")]
 #[command(version)]
-#[command(about = "CYNC↔BTC atomic swap CLI. State machine real; on-chain crypto skeleton. See CIP-001.")]
+#[command(
+    about = "CYNC↔BTC atomic swap CLI. State machine real; on-chain crypto skeleton. See CIP-001."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -186,43 +186,59 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Alice {
-            listen, cync_amount, btc_amount_sats,
-            alice_cync_address, bob_btc_address, state_file,
+            listen,
+            cync_amount,
+            btc_amount_sats,
+            alice_cync_address,
+            bob_btc_address,
+            state_file,
         } => alice_cmd(
-            &listen, cync_amount, btc_amount_sats,
-            alice_cync_address, bob_btc_address,
+            &listen,
+            cync_amount,
+            btc_amount_sats,
+            alice_cync_address,
+            bob_btc_address,
             resolve_state_path(state_file)?,
         ),
         Command::Bob {
-            connect, swap_id, cync_amount, btc_amount_sats,
-            alice_cync_address, bob_btc_address, state_file,
+            connect,
+            swap_id,
+            cync_amount,
+            btc_amount_sats,
+            alice_cync_address,
+            bob_btc_address,
+            state_file,
         } => bob_cmd(
-            &connect, swap_id, cync_amount, btc_amount_sats,
-            alice_cync_address, bob_btc_address,
+            &connect,
+            swap_id,
+            cync_amount,
+            btc_amount_sats,
+            alice_cync_address,
+            bob_btc_address,
             resolve_state_path(state_file)?,
         ),
-        Command::Status { state_file } => {
-            status_cmd(resolve_state_path(state_file)?)
-        }
-        Command::Cancel { state_file } => {
-            cancel_cmd(resolve_state_path(state_file)?)
-        }
-        Command::LockCync { state_file } => {
-            on_chain_skeleton("LockCync (Alice)", "broadcast Alice's CYNC lock tx",
-                              resolve_state_path(state_file)?)
-        }
-        Command::LockBtc { state_file } => {
-            on_chain_skeleton("LockBtc (Bob)", "broadcast Bob's BTC lock tx",
-                              resolve_state_path(state_file)?)
-        }
-        Command::ClaimBtc { state_file } => {
-            on_chain_skeleton("ClaimBtc (Alice)", "broadcast Alice's BTC claim",
-                              resolve_state_path(state_file)?)
-        }
-        Command::ClaimCync { state_file } => {
-            on_chain_skeleton("ClaimCync (Bob)", "broadcast Bob's CYNC claim",
-                              resolve_state_path(state_file)?)
-        }
+        Command::Status { state_file } => status_cmd(resolve_state_path(state_file)?),
+        Command::Cancel { state_file } => cancel_cmd(resolve_state_path(state_file)?),
+        Command::LockCync { state_file } => on_chain_skeleton(
+            "LockCync (Alice)",
+            "broadcast Alice's CYNC lock tx",
+            resolve_state_path(state_file)?,
+        ),
+        Command::LockBtc { state_file } => on_chain_skeleton(
+            "LockBtc (Bob)",
+            "broadcast Bob's BTC lock tx",
+            resolve_state_path(state_file)?,
+        ),
+        Command::ClaimBtc { state_file } => on_chain_skeleton(
+            "ClaimBtc (Alice)",
+            "broadcast Alice's BTC claim",
+            resolve_state_path(state_file)?,
+        ),
+        Command::ClaimCync { state_file } => on_chain_skeleton(
+            "ClaimCync (Bob)",
+            "broadcast Bob's CYNC claim",
+            resolve_state_path(state_file)?,
+        ),
         Command::DesignVersion => {
             println!("CIP-001 (atomic-swap) — phase 2.5 (state machine + persistence)");
             println!("Implementation status:");
@@ -341,8 +357,14 @@ fn status_cmd(state_path: PathBuf) -> Result<(), String> {
     println!("  state:      {}", state_string(swap.state));
     println!("  cync_amount:        {}", swap.parameters.cync_amount);
     println!("  btc_amount_sats:    {}", swap.parameters.btc_amount_sats);
-    println!("  cync_timeout_blocks: {}", swap.parameters.cync_timeout_blocks);
-    println!("  btc_timeout_blocks:  {}", swap.parameters.btc_timeout_blocks);
+    println!(
+        "  cync_timeout_blocks: {}",
+        swap.parameters.cync_timeout_blocks
+    );
+    println!(
+        "  btc_timeout_blocks:  {}",
+        swap.parameters.btc_timeout_blocks
+    );
 
     let legal = swap.legal_transitions();
     if legal.is_empty() {
@@ -520,27 +542,27 @@ fn read_random(buf: &mut [u8]) -> std::io::Result<()> {
 
 fn state_string(s: State) -> &'static str {
     match s {
-        State::Negotiated     => "Negotiated",
-        State::AliceLocked    => "AliceLocked",
-        State::BobLocked      => "BobLocked",
+        State::Negotiated => "Negotiated",
+        State::AliceLocked => "AliceLocked",
+        State::BobLocked => "BobLocked",
         State::SecretRevealed => "SecretRevealed",
-        State::Completed      => "Completed (terminal)",
-        State::Refunded       => "Refunded (terminal)",
-        State::Aborted        => "Aborted (terminal)",
+        State::Completed => "Completed (terminal)",
+        State::Refunded => "Refunded (terminal)",
+        State::Aborted => "Aborted (terminal)",
     }
 }
 
 fn transition_hint(t: Transition) -> &'static str {
     match t {
-        Transition::AliceLocksCync         => "  (broadcast Alice's CYNC lock — `cyncswap lock-cync`)",
-        Transition::BobLocksBtc            => "  (broadcast Bob's BTC lock — `cyncswap lock-btc`)",
-        Transition::AliceClaimsBtc         => "  (broadcast Alice's BTC claim — `cyncswap claim-btc`)",
-        Transition::BobClaimsCync          => "  (broadcast Bob's CYNC claim — `cyncswap claim-cync`)",
-        Transition::AliceRefunds           => "  (Alice broadcasts CYNC refund)",
-        Transition::BobRefunds             => "  (Bob broadcasts BTC refund)",
-        Transition::ObserveBobLocked       => "  (auto on Bob's BTC lock confirming)",
-        Transition::ObserveSecretRevealed  => "  (auto on Alice's BTC claim confirming)",
-        Transition::ObserveCompleted       => "  (auto on Bob's CYNC claim confirming)",
-        Transition::Abort                  => "  (`cyncswap cancel`)",
+        Transition::AliceLocksCync => "  (broadcast Alice's CYNC lock — `cyncswap lock-cync`)",
+        Transition::BobLocksBtc => "  (broadcast Bob's BTC lock — `cyncswap lock-btc`)",
+        Transition::AliceClaimsBtc => "  (broadcast Alice's BTC claim — `cyncswap claim-btc`)",
+        Transition::BobClaimsCync => "  (broadcast Bob's CYNC claim — `cyncswap claim-cync`)",
+        Transition::AliceRefunds => "  (Alice broadcasts CYNC refund)",
+        Transition::BobRefunds => "  (Bob broadcasts BTC refund)",
+        Transition::ObserveBobLocked => "  (auto on Bob's BTC lock confirming)",
+        Transition::ObserveSecretRevealed => "  (auto on Alice's BTC claim confirming)",
+        Transition::ObserveCompleted => "  (auto on Bob's CYNC claim confirming)",
+        Transition::Abort => "  (`cyncswap cancel`)",
     }
 }

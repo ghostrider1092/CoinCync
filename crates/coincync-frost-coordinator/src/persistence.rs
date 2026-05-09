@@ -112,10 +112,7 @@ pub enum PersistError {
     /// version. Loud-failure rather than silent-best-effort by
     /// design.
     #[error("unsupported persistence version: file is v{file_version}, this binary handles v1..={supported}")]
-    UnsupportedVersion {
-        file_version: u32,
-        supported: u32,
-    },
+    UnsupportedVersion { file_version: u32, supported: u32 },
 
     /// `saved_at` time isn't a valid unix timestamp.
     /// Should never happen in practice; if it does, the file is
@@ -247,8 +244,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn fresh_session() -> Session {
-        Session::new(2, 3, [1u8; 32], ParticipantId([0xAA; 32]), 1000)
-            .expect("test session valid")
+        Session::new(2, 3, [1u8; 32], ParticipantId([0xAA; 32]), 1000).expect("test session valid")
     }
 
     #[test]
@@ -282,7 +278,9 @@ mod tests {
 
         store.save(&[fresh_session()]).unwrap();
         // Now save a different set
-        store.save(&[fresh_session(), fresh_session(), fresh_session()]).unwrap();
+        store
+            .save(&[fresh_session(), fresh_session(), fresh_session()])
+            .unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 3);
     }
@@ -314,7 +312,13 @@ mod tests {
 
         let store = SessionStore::new(&path);
         let err = store.load().unwrap_err();
-        assert!(matches!(err, PersistError::UnsupportedVersion { file_version: 999, .. }));
+        assert!(matches!(
+            err,
+            PersistError::UnsupportedVersion {
+                file_version: 999,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -338,9 +342,11 @@ mod tests {
         store.save(&[fresh_session()]).unwrap();
 
         // Add another via update
-        store.update(|sessions| {
-            sessions.push(fresh_session());
-        }).unwrap();
+        store
+            .update(|sessions| {
+                sessions.push(fresh_session());
+            })
+            .unwrap();
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 2);
@@ -352,9 +358,11 @@ mod tests {
         let path = dir.path().join("fresh.json");
         let store = SessionStore::new(&path);
 
-        store.update(|sessions| {
-            sessions.push(fresh_session());
-        }).unwrap();
+        store
+            .update(|sessions| {
+                sessions.push(fresh_session());
+            })
+            .unwrap();
 
         assert!(path.exists());
         let loaded = store.load().unwrap();
@@ -402,9 +410,13 @@ mod tests {
         let store = SessionStore::new(&path);
 
         let mut s = fresh_session();
-        s.apply(Transition::Abort {
-            participant: ParticipantId([0xAA; 32]),
-        }, 1100).unwrap();
+        s.apply(
+            Transition::Abort {
+                participant: ParticipantId([0xAA; 32]),
+            },
+            1100,
+        )
+        .unwrap();
         store.save(&[s]).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 1);

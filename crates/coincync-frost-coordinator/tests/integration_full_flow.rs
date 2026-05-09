@@ -83,7 +83,9 @@ fn full_2_of_3_signing_flow() {
         let mut sessions = store.load().unwrap();
         let s = sessions.iter_mut().find(|s| s.id == session_id).unwrap();
         s.apply(
-            Transition::AttachParticipant { participant: pubkey },
+            Transition::AttachParticipant {
+                participant: pubkey,
+            },
             now + 20,
         )
         .unwrap();
@@ -291,12 +293,7 @@ fn double_submit_round1_rejected() {
         .apply(Transition::AttachParticipant { participant: bob }, now)
         .unwrap();
     session
-        .apply(
-            Transition::DeclareMessage {
-                message: vec![1],
-            },
-            now,
-        )
+        .apply(Transition::DeclareMessage { message: vec![1] }, now)
         .unwrap();
 
     session
@@ -362,7 +359,10 @@ fn aborted_session_rejects_further_transitions_after_reload() {
     ];
     for t in attempts {
         let result = s.apply(t, 1200);
-        assert!(result.is_err(), "terminal session must reject every transition");
+        assert!(
+            result.is_err(),
+            "terminal session must reject every transition"
+        );
     }
 }
 
