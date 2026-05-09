@@ -17,40 +17,57 @@ account.
 
 ## Quick start
 
+All testnet binaries are published as a single GitHub release at
+[`v1.0.2-testnet`](https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.2-testnet)
+along with `SHA256SUMS.txt`. Verify after download with
+`sha256sum -c SHA256SUMS.txt`.
+
 ### Windows
 
-Download two binaries from `coincync.network`:
+Download the node binary:
 
 |Binary|URL|
 |---|---|
-|coincync-node|<https://coincync.network/release/v1.0.1-testnet/coincync-node-windows-x86_64.exe>|
-|coincync-tui-miner|<https://coincync.network/release/v1.0.1-testnet/coincync-tui-miner-windows-x86_64.exe>|
+|coincync-node|<https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.2-testnet/coincync-node.exe>|
+|coincync-rig (miner)|<https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.2-testnet/coincync-rig.exe>|
 
 Open PowerShell in the folder where you saved them and run:
 
 ```powershell
-# Start a node (one-time, leave running)
-.\coincync-node-windows-x86_64.exe --network testnet
+# Start a node (leave this window running)
+.\coincync-node.exe --network testnet
 
 # In a second window, start mining (replace tCYNC… with your address)
-.\coincync-tui-miner-windows-x86_64.exe --testnet --address tCYNC3Z6jt428m... --threads 4 --log
+.\coincync-rig.exe run-solo --node http://127.0.0.1:28081 `
+    --address tCYNC3Z6jt428m... --threads 4 --tui
 ```
+
+The `--tui` flag opens a live ratatui dashboard (stats bar +
+scrolling log). Press `q` or `Esc` to quit.
 
 ### Linux
 
 ```bash
-curl -L -O https://coincync.network/release/v1.0.1-testnet/coincync-node-linux-x86_64
-curl -L -O https://coincync.network/release/v1.0.1-testnet/coincync-tui-miner-linux-x86_64
-chmod +x coincync-node-linux-x86_64 coincync-tui-miner-linux-x86_64
+BASE=https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.2-testnet
+curl -L -O $BASE/coincync-node-linux-x86_64
+curl -L -O $BASE/coincync-rig-linux-x86_64
+curl -L -O $BASE/SHA256SUMS.txt
+chmod +x coincync-node-linux-x86_64 coincync-rig-linux-x86_64
+
+# (optional) verify
+sha256sum -c SHA256SUMS.txt 2>/dev/null | grep -E "node|rig"
 
 ./coincync-node-linux-x86_64 --network testnet &
-./coincync-tui-miner-linux-x86_64 --testnet --address tCYNC3Z6jt428m... --threads 4 --log
+./coincync-rig-linux-x86_64 run-solo --node http://127.0.0.1:28081 \
+    --address tCYNC3Z6jt428m... --threads 4 --tui
 ```
 
 ### macOS
 
-Same as Linux. The macOS-native build is not yet published; build from
-source for Apple Silicon (see [Build from source](./build.md)).
+The macOS-native build is not yet published; build from source for
+Apple Silicon (see [Build from source](./build.md)). Reproducible
+build environment is documented in
+`docs/operations/REPRODUCIBLE_BUILDS.md`.
 
 ## What success looks like
 
