@@ -457,6 +457,13 @@ async fn health() -> Json<Value> {
 /// GET /api/v1/status — node status summary for the explorer header bar
 async fn get_status(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let info = jsonrpc_call(&st, "get_info", Value::Array(vec![])).await?;
+    // Privacy: deliberately omit `anonymity_set` and `effective_ring_size`
+    // from this public REST endpoint. The /rpc proxy strips the same fields
+    // at line ~291 of this file; an earlier version of /api/v1/status leaked
+    // them, giving a passive observer a cheap correlator for the ring sizes
+    // wallets are using. peer_count and mempool_size are mild
+    // network-state stats kept here because the public status page wants
+    // to render them; the strict-privacy fields are not.
     Ok(Json(serde_json::json!({
         "height": info["height"],
         "network": info["network"],
@@ -468,8 +475,6 @@ async fn get_status(State(st): State<RestState>) -> Result<Json<Value>, (StatusC
         "tip_hash": info["top_hash"],
         "tip_timestamp": info["tip_timestamp"],
         "tip_age_secs": info["tip_age_secs"],
-        "anonymity_set": info["anonymity_set"],
-        "effective_ring_size": info["effective_ring_size"],
     })))
 }
 

@@ -33,7 +33,7 @@ type OutputKey = (Hash, u8);
 ///
 /// All operations that modify state require exclusive (write) access:
 /// - `add_output()`, `spend_output()`, `mark_key_image_spent()`, `remove_output()`
-/// - `remove_key_image()`, `restore_output()`
+/// - `remove_key_image()`
 ///
 /// Read-only operations require shared (read) access:
 /// - `contains_key_image()`, `get_output()`, `output_count()`, `outputs_in_range()`
@@ -255,20 +255,6 @@ impl UtxoSet {
         self.key_images.remove(ki)
     }
 
-    /// Restore a previously spent output (used during block disconnection)
-    pub fn restore_output(&mut self, output_ref: OutputRef, key_image: &KeyImage) {
-        let key = (output_ref.tx_hash, output_ref.index);
-        let height = output_ref.height;
-        let stealth_addr = *output_ref.output.stealth_address.as_bytes();
-
-        self.outputs.insert(key, output_ref);
-        self.height_index
-            .entry(height)
-            .or_insert_with(BTreeSet::new)
-            .insert(key);
-        self.stealth_index.insert(stealth_addr, key);
-        self.key_images.remove(key_image);
-    }
 
     // ===== Fast decoy selection methods =====
 

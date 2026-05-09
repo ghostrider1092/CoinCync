@@ -507,8 +507,24 @@ pub fn load_wallet(
     path: &Path,
     password: Option<&str>,
 ) -> Result<WalletData> {
-    let mut file = File::open(path)
+    let bytes = std::fs::read(path)
         .map_err(|e| Error::WalletNotFound(e.to_string()))?;
+    load_wallet_from_bytes(&bytes, password)
+}
+
+/// Parse a wallet from an in-memory byte slice. Used by the deniable
+/// wallet loader so it can try password attempts against each region
+/// without writing plaintext fragments to disk (the prior
+/// path-based-only API forced the deniable loader to materialize
+/// `tmp_d`/`tmp_r` files, and a crash between write and remove left
+/// the chosen region's plaintext on disk — defeating the deniability
+/// property the feature exists to provide).
+pub fn load_wallet_from_bytes(
+    bytes: &[u8],
+    password: Option<&str>,
+) -> Result<WalletData> {
+    use std::io::Cursor;
+    let mut file = Cursor::new(bytes);
 
     // Read header length
     let mut header_len_bytes = [0u8; 4];
@@ -920,6 +936,16 @@ pub fn create_deniable_wallet(
 /// Load from a deniable wallet. Tries the password against both regions.
 /// Returns whichever one decrypts successfully.
 /// An attacker cannot determine whether a second region exists.
+///
+/// The earlier implementation materialized `tmp_d`/`tmp_r` plaintext
+/// fragments on disk so it could call `load_wallet(path, ...)` against
+/// each region. That broke the deniability property: a crash between
+/// `write` and `remove_file` left the decrypted region's bytes on
+/// disk, and even on a successful round-trip the bytes lingered until
+/// the filesystem reused the underlying blocks (no reliable wipe on
+/// SSDs without TRIM). Now we feed each region through
+/// `load_wallet_from_bytes` directly — no plaintext ever leaves
+/// process memory.
 pub fn load_deniable_wallet(
     path: &std::path::Path,
     password: &str,
@@ -936,28 +962,18 @@ pub fn load_deniable_wallet(
             let decoy_region = &data[4..4 + decoy_len];
             let real_region = &data[4 + decoy_len..];
 
-            // Try decoy region first
-            let tmp_decoy = path.with_extension("tmp_d");
-            if std::fs::write(&tmp_decoy, decoy_region).is_ok() {
-                if let Ok(wallet) = load_wallet(&tmp_decoy, Some(password)) {
-                    let _ = std::fs::remove_file(&tmp_decoy);
-                    return Ok(wallet);
-                }
-                let _ = std::fs::remove_file(&tmp_decoy);
+            // Try decoy region first — purely in-memory.
+            if let Ok(wallet) = load_wallet_from_bytes(decoy_region, Some(password)) {
+                return Ok(wallet);
             }
 
-            // Try real region
-            let tmp_real = path.with_extension("tmp_r");
-            if std::fs::write(&tmp_real, real_region).is_ok() {
-                if let Ok(wallet) = load_wallet(&tmp_real, Some(password)) {
-                    let _ = std::fs::remove_file(&tmp_real);
-                    return Ok(wallet);
-                }
-                let _ = std::fs::remove_file(&tmp_real);
+            // Try real region — purely in-memory.
+            if let Ok(wallet) = load_wallet_from_bytes(real_region, Some(password)) {
+                return Ok(wallet);
             }
         }
     }
 
-    // Fall back to standard load (non-deniable wallet)
-    load_wallet(path, Some(password))
+    // Fall back to standard load (non-deniable wallet) — single-region file.
+    load_wallet_from_bytes(&data, Some(password))
 }

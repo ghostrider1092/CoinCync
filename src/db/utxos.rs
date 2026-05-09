@@ -355,11 +355,28 @@ impl UtxoDb {
     /// with BlockDb (which also uses BE). Enables correct ordered iteration.
     fn increment_height_count(&self, height: u64) -> Result<()> {
         let key = height.to_be_bytes();
+        // On a malformed entry (length != 8 — only possible if sled itself
+        // is corrupted) we previously fell back to current=0 silently and
+        // wrote 1, permanently destroying the true count. Emit a tracing
+        // warn instead so the corruption is visible; we still continue
+        // (treating the entry as 0) because returning an error from inside
+        // fetch_and_update isn't supported, but the operator has a signal.
         self.height_counts.fetch_and_update(&key, |old| {
-            let current = old.map(|b| {
-                let arr: [u8; 8] = b.try_into().unwrap_or([0u8; 8]);
-                u64::from_le_bytes(arr)
-            }).unwrap_or(0);
+            let current = match old {
+                Some(b) if b.len() == 8 => {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(b);
+                    u64::from_le_bytes(arr)
+                }
+                Some(b) => {
+                    tracing::error!(
+                        "DB CORRUPTION: height_counts[height={}] has {} bytes, expected 8 — treating as 0",
+                        height, b.len()
+                    );
+                    0
+                }
+                None => 0,
+            };
             Some((current + 1).to_le_bytes().to_vec())
         }).map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
@@ -369,10 +386,21 @@ impl UtxoDb {
     fn decrement_height_count(&self, height: u64) -> Result<()> {
         let key = height.to_be_bytes();
         self.height_counts.fetch_and_update(&key, |old| {
-            let current = old.map(|b| {
-                let arr: [u8; 8] = b.try_into().unwrap_or([0u8; 8]);
-                u64::from_le_bytes(arr)
-            }).unwrap_or(0);
+            let current = match old {
+                Some(b) if b.len() == 8 => {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(b);
+                    u64::from_le_bytes(arr)
+                }
+                Some(b) => {
+                    tracing::error!(
+                        "DB CORRUPTION: height_counts[height={}] has {} bytes, expected 8 — treating as 0",
+                        height, b.len()
+                    );
+                    0
+                }
+                None => 0,
+            };
             let new_count = current.saturating_sub(1);
             if new_count == 0 {
                 None // remove key
@@ -389,7 +417,14 @@ impl UtxoDb {
 
         match self.height_counts.get(&key) {
             Ok(Some(data)) => {
-                let bytes: [u8; 8] = data.as_ref().try_into().unwrap_or([0u8; 8]);
+                if data.len() != 8 {
+                    return Err(Error::DatabaseError(format!(
+                        "Corrupted height_counts entry for height {} ({} bytes, expected 8)",
+                        height, data.len()
+                    )));
+                }
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(data.as_ref());
                 Ok(u64::from_le_bytes(bytes))
             }
             Ok(None) => Ok(0),
