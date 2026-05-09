@@ -1011,9 +1011,12 @@ dependencies = [
 name = "coincync-frost-coordinator"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "thiserror 1.0.69",
  "uuid",
 ]

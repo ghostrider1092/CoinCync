@@ -54,9 +54,18 @@
 pub mod error;
 pub mod session;
 
+#[cfg(feature = "invitations")]
+pub mod invitations;
+
 pub use error::{CoordinatorError, Result};
 pub use session::{
     Session, SessionId, SessionState, ParticipantId, ParticipantState,
     Transition, ROUND_1_TIMEOUT_SECS, ROUND_2_TIMEOUT_SECS,
     INVITED_TIMEOUT_SECS, AGGREGATED_RETENTION_SECS,
+};
+
+#[cfg(feature = "invitations")]
+pub use invitations::{
+    InvitationToken, InvitationError, MAC_LEN, SESSION_SECRET_LEN,
+    mint_token, verify_token,
 };
