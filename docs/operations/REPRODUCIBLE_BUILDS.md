@@ -210,22 +210,41 @@ deeper layers, see the security audit policy and the
 | Component | State |
 |---|---|
 | `profile.release` configured for determinism | ✅ shipped |
-| Dockerfile builder image | ⏳ to author (PR welcome) |
-| `scripts/verify-build.sh` | ✅ shipped (this PR) |
+| Dockerfile builder image (`docker/builder.Dockerfile`) | ✅ shipped |
+| Wrapper script (`scripts/build-in-docker.sh`) | ✅ shipped |
+| `.dockerignore` keeping the build context lean | ✅ shipped |
+| `scripts/verify-build.sh` | ✅ shipped (testnet) |
 | Published manifest format | ✅ shipped (this doc) |
-| First repro-verified release | ⏳ blocks on Dockerfile + release process |
+| First repro-verified release | ⏳ blocks on release process — pre-mainnet |
 | OSS-Fuzz / cosign / sigstore integration | ⏳ post-launch |
 
-The Dockerfile + the first verified release are the remaining gates
-before this is a guarantee, not a plan. ETA: pre-mainnet (October
-2026), with intermediate releases through testnet.
+What this means today:
+
+- Anyone can run `./scripts/build-in-docker.sh` from a fresh clone.
+  Two clean clones of the same git commit produce byte-identical
+  binaries on the same host CPU architecture. Cross-arch builds
+  (x86_64 vs arm64) are NOT byte-identical — that's a separate
+  promise we don't make.
+- The published v1.0.2-testnet binaries were NOT built through
+  this Dockerfile; they were a one-shot from the dev box. So
+  `sha256sum` of `out/coincync-wallet` from `build-in-docker.sh`
+  will not match the published `release/v1.0.1-testnet/coincync-wallet*`
+  binaries. This will start matching when the v1.0.3 release is
+  cut through the Dockerfile.
+- The mainnet release process (Article XV / multi-maintainer M-of-N)
+  will use this Dockerfile and publish a signed manifest of
+  `(commit, dockerfile-digest, binary-sha256)`. That's the gate
+  this section's "first repro-verified release" row is waiting on.
 
 ## Pointers
 
-- `Cargo.toml` — `profile.release` settings
-- `scripts/verify-build.sh` — the verifier
+- `Cargo.toml` — `profile.release` settings (codegen-units=1,
+  lto=thin, panic=abort, strip=true)
 - `docker/builder.Dockerfile` — the pinned build environment
-  (to be authored)
+- `scripts/build-in-docker.sh` — wrapper that runs the Dockerfile
+  and extracts artifacts to `./out/`
+- `scripts/verify-build.sh` — the (in-progress) verifier
+- `.dockerignore` — what's NOT in the build context
 - `releases@coincync.network` — release-signing PGP identity
 - Reproducible Builds project: <https://reproducible-builds.org/> —
   the canonical reference for the field

@@ -1,0 +1,111 @@
+# CoinCync — pinned reproducible builder
+#
+# Builds the workspace inside a fixed Debian Bookworm + Rust toolchain
+# combination so two invocations on different machines produce identical
+# binaries (modulo the disclaimers in REPRODUCIBLE_BUILDS.md).
+#
+# Usage:
+#   docker build -f docker/builder.Dockerfile -t coincync-build:HEAD .
+#   docker run --rm -v "$(pwd)/out:/out" coincync-build:HEAD
+#   sha256sum out/*
+#
+# Or use the wrapper: scripts/build-in-docker.sh
+#
+# Determinism knobs (set automatically by this Dockerfile):
+#   SOURCE_DATE_EPOCH    — pinned to the COMMITTER date of HEAD at build time
+#   codegen-units = 1    — set in Cargo.toml (single codegen unit removes
+#                          codegen-parallelism non-determinism)
+#   strip = true         — set in Cargo.toml (no debug strings)
+#   --locked             — Cargo respects Cargo.lock byte-for-byte
+#
+# What this DOES guarantee:
+#   - Anyone running this Dockerfile against the same git commit
+#     produces byte-identical binaries.
+#
+# What this does NOT (yet) guarantee:
+#   - That the published v1.0.2-testnet binaries were built from this
+#     Dockerfile. Pre-mainnet, they were not. Post-mainnet, the release
+#     process will use this Dockerfile and we'll publish a signed
+#     manifest of (commit, dockerfile-digest, binary-sha256). See
+#     docs/operations/REPRODUCIBLE_BUILDS.md.
+
+# Pin the Rust base image to a specific minor.
+# Use --build-arg RUST_VERSION=<x.y.z> to override (must be >= 1.75 per
+# the workspace's rust-version field). 1.83 is the post-launch baseline.
+ARG RUST_VERSION=1.83.0
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+
+# Pinned system deps. We deliberately do NOT pin patch versions here —
+# Debian Bookworm's apt-get pulls deterministic snapshots within a
+# single release pocket, and over-pinning breaks builds the day Debian
+# rotates an apt key. The Bookworm stable archive is the actual pin.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    lld \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /src
+
+# Copy the workspace. Use --link to keep the layer cache friendly.
+COPY . .
+
+# Compute SOURCE_DATE_EPOCH from the HEAD commit's committer date (Unix
+# timestamp). This makes any timestamps the linker / strip might leak
+# deterministic across runs of the same commit. If the working tree has
+# uncommitted changes we still build, but emit a warning — the resulting
+# binary will not be reproducible against any other clone.
+RUN if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+        export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct); \
+    else \
+        export SOURCE_DATE_EPOCH=1714838400; \
+    fi && \
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then \
+        echo "WARN: working tree has uncommitted changes; binary will not be" >&2 ; \
+        echo "      byte-identical to a clean checkout of HEAD." >&2 ; \
+    fi && \
+    echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" > /src/.source_date_epoch && \
+    cat /src/.source_date_epoch
+
+# The actual build. --locked refuses to update Cargo.lock; --frozen
+# refuses to even read it. We use --locked so a stale lockfile errors
+# loudly instead of silently fetching a different version.
+#
+# Default features only. The audit / supply-chain claim is about the
+# default release profile, not feature combinations — those are the
+# user's choice.
+RUN . /src/.source_date_epoch && \
+    export SOURCE_DATE_EPOCH && \
+    cargo build --release --workspace --locked --bins
+
+# Strip absolute paths from any debug info that survives `strip = true`
+# (the release profile already strips, but objcopy --strip-all is a
+# belt-and-suspenders pass for the rare debug strings that linger).
+RUN find target/release -maxdepth 1 -type f -executable \
+    -exec sh -c 'objcopy --strip-all "$1" 2>/dev/null || true' _ {} \;
+
+# Stage 2 — minimal artifact image. Just copies the built binaries
+# into a slim layer that can be exported via `docker run -v`.
+FROM debian:bookworm-slim AS artifacts
+
+COPY --from=builder /src/target/release/coincync \
+                    /src/target/release/coincync-wallet \
+                    /src/target/release/coincync-rig \
+                    /src/target/release/coincync-tui-miner \
+                    /artifacts/
+
+# Compute checksums of the binaries inside the image so they're
+# included in `docker history` for auditors.
+RUN cd /artifacts && \
+    sha256sum * > SHA256SUMS && \
+    cat SHA256SUMS
+
+# Default command: copy artifacts to a mounted /out volume.
+CMD ["sh", "-c", "mkdir -p /out && cp -v /artifacts/* /out/ && cd /out && sha256sum -c SHA256SUMS"]

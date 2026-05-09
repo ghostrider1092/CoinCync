@@ -1,0 +1,53 @@
+# .dockerignore — keep the build context minimal.
+#
+# These paths bloat the COPY at the top of builder.Dockerfile and slow
+# down every build with no benefit (none of them are inputs to the
+# release-binary build).
+
+target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Editor / IDE state
+.idea/
+.vscode/
+.claude/
+*.swp
+
+# Git history is needed (Dockerfile reads HEAD for SOURCE_DATE_EPOCH),
+# but the lock file from any IDE-bound git is fine. Don't exclude .git.
+
+# Local node data, logs, agent runs
+/data/
+/node_data/
+/db/
+*.log
+agents/
+fleet-backup-*/
+
+# Release artifacts (we BUILD these; don't include the prior outputs)
+release/
+website/release/
+
+# Operating-system noise
+.DS_Store
+
+# Discord webhooks file (gitignored anyway, but the Dockerfile copies the
+# tree, so .dockerignore must be exhaustive)
+discord_webhooks.json
+
+# Keys & secrets — defense in depth (also in .gitignore)
+node_key
+**/node_key
+*.key
+*.pem
+*.p12
+
+# Tests / fuzz corpora — not needed for the release-binary build
+tests/extended_tiers/
+fuzz/corpus/
+fuzz/artifacts/
+
+# WSL / mdbook outputs
+docs/book/
