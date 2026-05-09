@@ -68,6 +68,12 @@ pub mod types;
 pub mod active_set;
 pub mod finality;
 
+#[cfg(feature = "ed25519")]
+pub mod verifier_ed25519;
+
+#[cfg(feature = "wire-codec")]
+pub mod codec;
+
 pub use error::{FinalityError, Result};
 pub use types::{
     FinalityAttestation, MinerPubkey, BlockHash, AttestationVerifier,
@@ -78,3 +84,9 @@ pub use finality::{
     FinalityTracker, ApplyOutcome, FinalityStats,
     DEFAULT_WINDOW, DEFAULT_LAG, DEFAULT_MIN_QUORUM,
 };
+
+#[cfg(feature = "ed25519")]
+pub use verifier_ed25519::{Ed25519Verifier, Ed25519VerifyError};
+
+#[cfg(feature = "wire-codec")]
+pub use codec::{WireAttestation, WireError, WIRE_MAGIC, WIRE_VERSION, encode, decode};

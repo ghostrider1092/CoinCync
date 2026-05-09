@@ -1044,7 +1044,10 @@ dependencies = [
 name = "coincync-rolling-finality"
 version = "0.1.0"
 dependencies = [
+ "borsh",
+ "ed25519-dalek",
  "proptest",
+ "rand 0.8.6",
  "serde",
  "thiserror 1.0.69",
 ]

@@ -15,11 +15,28 @@ license      = "MIT"
 name = "coincync_rolling_finality"
 path = "src/lib.rs"
 
+[features]
+default = []
+
+# Real ed25519 verification. Off by default so the core state-
+# machine library remains zero-crypto. Production binaries
+# (`coincync-node`) enable this feature; tests + property tests
+# can run without it via `NoopVerifier`.
+ed25519 = ["dep:ed25519-dalek"]
+
+# Borsh-serializable wire codec for the coinbase-embedded
+# attestation. Off by default so a downstream consumer that just
+# wants the state machine doesn't pull in borsh. Phase 3
+# (validate_block integration) will turn this on at the consensus
+# boundary.
+wire-codec = ["dep:borsh"]
+
 [dependencies]
-# Phase 1 is a pure state-machine library, intentionally without a
-# dependency on the `coincync` crate. The verification surface is a
-# trait (`AttestationVerifier`), so the real ed25519 plug-in lives
-# at the consensus boundary, not here.
+# Phase 1 was a pure state-machine library. Phase 2 adds two
+# OPT-IN features that bring in cryptographic verification and
+# the on-wire codec respectively. The state machine itself
+# remains zero-crypto and zero-codec when no features are
+# enabled.
 
 # State + serialization
 serde       = { version = "1", features = ["derive"] }
@@ -27,9 +44,22 @@ serde       = { version = "1", features = ["derive"] }
 # Errors
 thiserror   = "1"
 
+# Real ed25519 — feature-gated. Used by `verifier_ed25519` module.
+ed25519-dalek = { version = "2", features = ["rand_core"], optional = true }
+
+# Borsh wire-format codec — feature-gated. Used by `codec` module.
+borsh       = { version = "1", features = ["derive"], optional = true }
+
 [dev-dependencies]
 # Property-based testing — generates thousands of inputs to verify
 # state-machine invariants hold across arbitrary attestation
 # sequences. Same justification as the FROST coordinator phase 1
 # crate.
 proptest    = "1"
+
+# Test-only access to ed25519 signing for round-trip tests of the
+# verifier. We use rand_core 0.6 so we match `ed25519-dalek`'s
+# constraint (it doesn't yet depend on rand 0.8's traits).
+rand        = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+borsh       = { version = "1", features = ["derive"] }
