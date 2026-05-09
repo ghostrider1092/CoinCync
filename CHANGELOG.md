@@ -198,11 +198,23 @@ Six items from the launch-blocker punch list, all closed:
 
 ### Stats
 
-- 27 commits; ~3500 lines added, ~80 lines removed
-- 1093 + workspace tests; 0 regressions
-- All 12+ public launch URLs return 200
-- 5 fleet nodes synced, all on build `28b342099695`
-  (api on `1715693a252d`, minor drift)
+- 35+ commits; ~5000 lines added, ~80 lines removed
+- 1098 workspace tests; 0 regressions; cargo audit reports
+  0 vulnerabilities across 742 dependency crates
+- All 12+ public launch URLs return 200; mining-onboarding URLs
+  now point at the GitHub Releases v1.0.2-testnet assets that
+  actually exist (8 assets after operator drag-uploaded
+  `coincync-rig.exe` + `coincync-tui-miner.exe`)
+- 5 fleet nodes synced
+- Two cron-driven monitors live (faucet balance every 15 min on
+  api box; fleet health every 5 min on explorer); both alert via
+  Discord webhook on threshold violation
+- Reproducible-build Dockerfile + wrapper script + .dockerignore
+  shipped at `docker/builder.Dockerfile` and `scripts/build-in-docker.sh`
+- Public status page deployed at <https://coincync.network/status>
+- Troubleshooting documentation page added at
+  <https://docs.coincync.network/troubleshooting>
+- Pre-launch checklist at `docs/launch/MONDAY_PRELAUNCH.md`
 
 ---
 
