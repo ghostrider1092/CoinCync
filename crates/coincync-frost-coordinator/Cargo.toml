@@ -30,6 +30,11 @@ persistence = []
 # WSS server binary (phase 4). Pulls in tokio + tokio-tungstenite
 # + futures + tracing for the async networking layer. Off by
 # default so library consumers don't pay the async runtime cost.
+#
+# Phase 6 added rate limiting (governor), idle-timeout, and a
+# Prometheus metrics endpoint (axum + prometheus). All folded
+# into the same `server` feature because the production server
+# wants all three together.
 server = [
     "invitations",
     "persistence",
@@ -38,6 +43,10 @@ server = [
     "dep:futures-util",
     "dep:tracing",
     "dep:tracing-subscriber",
+    "dep:governor",
+    "dep:prometheus",
+    "dep:axum",
+    "dep:hyper",
 ]
 
 # Operator CLI binary (phase 4.5). Sync; no async runtime.
@@ -100,6 +109,15 @@ tokio-tungstenite  = { version = "0.21", optional = true }
 futures-util       = { version = "0.3", optional = true }
 tracing            = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# Phase 6 hardening deps. governor for per-IP attach rate
+# limiting, prometheus for the /metrics endpoint, axum + hyper
+# for the metrics HTTP server (a separate port from the WSS
+# server so a metrics-scrape-flood can't DoS the protocol).
+governor   = { version = "0.6", optional = true }
+prometheus = { version = "0.14", optional = true }
+axum       = { version = "0.7", optional = true }
+hyper      = { version = "1", features = ["full"], optional = true }
 
 # CLI binary deps (phase 4.5, opt-in via `cli` feature).
 clap               = { version = "4", features = ["derive"], optional = true }

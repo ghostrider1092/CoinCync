@@ -70,12 +70,16 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
+use governor::clock::DefaultClock;
+use governor::{Quota, RateLimiter};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
@@ -95,13 +99,31 @@ use coincync_frost_coordinator::{
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Maximum number of concurrent WebSocket connections. Bounds
-/// memory; production phase 6 will make this configurable.
+/// memory; phase 6 makes this enforceable but not configurable —
+/// future ops work can promote it to an env var.
 const MAX_CONNECTIONS: usize = 1000;
 
 /// Channel capacity for per-session broadcast. A single session
 /// won't generate many events (a few transitions over its
 /// lifetime); 64 is plenty.
 const SESSION_BROADCAST_CAPACITY: usize = 64;
+
+/// Per-IP attach-rate limit (per minute). Defends against an
+/// attacker spamming attach attempts to exhaust state. 60/min is
+/// loose enough that a legitimate user (one attach per session,
+/// at most a handful of sessions per hour) has zero friction;
+/// tight enough that a flood is bounded.
+const ATTACH_RATE_PER_MINUTE_PER_IP: u32 = 60;
+
+/// Idle-connection timeout. After this many seconds of NO
+/// inbound traffic from a connection, we close it. Defends
+/// against connection-hoarding attacks that open a socket and
+/// never speak. 5 minutes is long enough to absorb human-paced
+/// flows + occasional WSS keepalive gaps.
+const IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Default metrics endpoint bind address.
+const DEFAULT_METRICS_LISTEN: &str = "127.0.0.1:9100";
 
 // ──────────────────────────────────────────────────────────────────
 // Wire types
@@ -188,6 +210,104 @@ enum Response {
 // Server state
 // ──────────────────────────────────────────────────────────────────
 
+/// Type alias for the per-IP attach-rate limiter. governor's
+/// keyed-state limiter wraps a HashMap<IpAddr, _> internally;
+/// the type signature is verbose so we hide it here.
+type AttachLimiter = governor::RateLimiter<
+    IpAddr,
+    governor::state::keyed::DashMapStateStore<IpAddr>,
+    DefaultClock,
+>;
+
+/// Prometheus metrics registered on the dedicated metrics
+/// endpoint. Each field is a separate counter / gauge so a
+/// scraper can chart them independently.
+struct Metrics {
+    registry: Registry,
+    /// Total connection attempts (success + reject).
+    connections_attempted: IntCounter,
+    /// Connection attempts rejected because MAX_CONNECTIONS hit.
+    connections_rejected_limit: IntCounter,
+    /// Currently-active connection count.
+    connections_active: IntGauge,
+    /// Attach attempts grouped by outcome (accepted / rejected).
+    attach_attempts: IntCounterVec,
+    /// Attestation-equivalent: state-machine transitions accepted
+    /// or rejected (by transition kind label).
+    transitions: IntCounterVec,
+    /// Per-IP attach rate-limit hits.
+    attach_rate_limit_hits: IntCounter,
+    /// Connections closed because the idle-timeout fired.
+    idle_timeouts: IntCounter,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        let registry = Registry::new();
+        let connections_attempted =
+            IntCounter::new("coord_connections_attempted_total", "Total WSS connections accepted")
+                .expect("static counter init");
+        let connections_rejected_limit = IntCounter::new(
+            "coord_connections_rejected_max_total",
+            "Connections rejected because MAX_CONNECTIONS was reached",
+        )
+        .expect("static counter init");
+        let connections_active = IntGauge::new(
+            "coord_connections_active",
+            "Currently-active WSS connections",
+        )
+        .expect("static gauge init");
+        let attach_attempts = IntCounterVec::new(
+            Opts::new("coord_attach_attempts_total", "Attach requests by outcome"),
+            &["outcome"],
+        )
+        .expect("static counter init");
+        let transitions = IntCounterVec::new(
+            Opts::new(
+                "coord_transitions_total",
+                "State-machine transitions by kind and outcome",
+            ),
+            &["kind", "outcome"],
+        )
+        .expect("static counter init");
+        let attach_rate_limit_hits = IntCounter::new(
+            "coord_attach_rate_limit_hits_total",
+            "Attach attempts dropped by per-IP rate limiter",
+        )
+        .expect("static counter init");
+        let idle_timeouts = IntCounter::new(
+            "coord_idle_timeouts_total",
+            "Connections closed because the idle-timeout fired",
+        )
+        .expect("static counter init");
+
+        for c in [
+            Box::new(connections_attempted.clone()) as Box<dyn prometheus::core::Collector>,
+            Box::new(connections_rejected_limit.clone()),
+            Box::new(connections_active.clone()),
+            Box::new(attach_attempts.clone()),
+            Box::new(transitions.clone()),
+            Box::new(attach_rate_limit_hits.clone()),
+            Box::new(idle_timeouts.clone()),
+        ] {
+            registry
+                .register(c)
+                .expect("registering static metric must not fail");
+        }
+
+        Metrics {
+            registry,
+            connections_attempted,
+            connections_rejected_limit,
+            connections_active,
+            attach_attempts,
+            transitions,
+            attach_rate_limit_hits,
+            idle_timeouts,
+        }
+    }
+}
+
 struct Coord {
     /// All sessions known to the coordinator. Keyed by SessionId.
     sessions: RwLock<HashMap<SessionId, Session>>,
@@ -206,16 +326,30 @@ struct Coord {
 
     /// Active connection count. Used to enforce MAX_CONNECTIONS.
     connections: RwLock<usize>,
+
+    /// Per-IP attach-rate limiter (phase 6). Quota-keyed by
+    /// IpAddr; uses `governor` with an in-memory dashmap.
+    attach_limiter: AttachLimiter,
+
+    /// Prometheus metrics for the dedicated metrics endpoint.
+    metrics: Arc<Metrics>,
 }
 
 impl Coord {
     fn new(invite_secret: [u8; SESSION_SECRET_LEN], store: SessionStore) -> Self {
+        let quota = Quota::per_minute(
+            NonZeroU32::new(ATTACH_RATE_PER_MINUTE_PER_IP)
+                .expect("ATTACH_RATE_PER_MINUTE_PER_IP must be > 0"),
+        );
+        let attach_limiter = RateLimiter::keyed(quota);
         Coord {
             sessions: RwLock::new(HashMap::new()),
             broadcasters: RwLock::new(HashMap::new()),
             invite_secret,
             store,
             connections: RwLock::new(0),
+            attach_limiter,
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -317,13 +451,16 @@ impl Coord {
 // ──────────────────────────────────────────────────────────────────
 
 async fn handle_connection(coord: Arc<Coord>, stream: TcpStream, peer: SocketAddr) {
+    coord.metrics.connections_attempted.inc();
     {
         let mut count = coord.connections.write().await;
         if *count >= MAX_CONNECTIONS {
+            coord.metrics.connections_rejected_limit.inc();
             warn!(?peer, "rejected: connection limit reached");
             return;
         }
         *count += 1;
+        coord.metrics.connections_active.set(*count as i64);
     }
     debug!(?peer, "client connected");
 
@@ -332,6 +469,7 @@ async fn handle_connection(coord: Arc<Coord>, stream: TcpStream, peer: SocketAdd
     {
         let mut count = coord.connections.write().await;
         *count = count.saturating_sub(1);
+        coord.metrics.connections_active.set(*count as i64);
     }
     match result {
         Ok(()) => debug!(?peer, "client disconnected cleanly"),
@@ -353,12 +491,27 @@ async fn run_connection(
     // attached to? We hold one broadcast::Receiver per attached
     // session.
     let mut attached: HashMap<SessionId, broadcast::Receiver<Response>> = HashMap::new();
+    let idle_timeout = Duration::from_secs(IDLE_TIMEOUT_SECS);
 
     loop {
-        // Multiplex: either an inbound WS message, or a
-        // broadcast event from any attached session.
+        // Multiplex: either an inbound WS message, a broadcast
+        // event from any attached session, or the idle-timeout
+        // expiring. The timeout resets on every inbound message;
+        // a connection that goes silent past the timeout window
+        // is closed.
         tokio::select! {
-            ws_msg = stream_in.next() => {
+            ws_msg = tokio::time::timeout(idle_timeout, stream_in.next()) => {
+                let ws_msg = match ws_msg {
+                    Ok(m) => m,
+                    Err(_) => {
+                        // Idle-timeout expired. Close the
+                        // connection so a hoarding peer can't
+                        // keep state pinned indefinitely.
+                        coord.metrics.idle_timeouts.inc();
+                        debug!(?peer, "idle timeout; closing connection");
+                        return Ok(());
+                    }
+                };
                 let Some(msg_result) = ws_msg else {
                     return Ok(()); // stream ended
                 };
@@ -368,7 +521,7 @@ async fn run_connection(
                         if text.len() > MAX_MESSAGE_BYTES {
                             return Err(format!("message too large: {} bytes", text.len()));
                         }
-                        let response = handle_request(&coord, &text, &mut attached).await;
+                        let response = handle_request(&coord, &text, &mut attached, peer.ip()).await;
                         let payload = serde_json::to_string(&response)
                             .map_err(|e| format!("encode response: {e}"))?;
                         sink.send(Message::Text(payload))
@@ -447,6 +600,7 @@ async fn handle_request(
     coord: &Arc<Coord>,
     text: &str,
     attached: &mut HashMap<SessionId, broadcast::Receiver<Response>>,
+    peer_ip: IpAddr,
 ) -> Response {
     let req: Request = match serde_json::from_str(text) {
         Ok(r) => r,
@@ -461,7 +615,7 @@ async fn handle_request(
 
     match req {
         Request::Attach { request_id, token } => {
-            handle_attach(coord, request_id, token, attached).await
+            handle_attach(coord, request_id, token, attached, peer_ip).await
         }
         Request::DeclareMessage {
             request_id,
@@ -548,10 +702,36 @@ async fn handle_attach(
     request_id: String,
     token: InvitationToken,
     attached: &mut HashMap<SessionId, broadcast::Receiver<Response>>,
+    peer_ip: IpAddr,
 ) -> Response {
+    // Phase 6: per-IP attach rate-limit. The check is non-blocking
+    // (`check_key`); a denied attempt returns immediately without
+    // ever touching the state machine.
+    if coord.attach_limiter.check_key(&peer_ip).is_err() {
+        coord.metrics.attach_rate_limit_hits.inc();
+        coord
+            .metrics
+            .attach_attempts
+            .with_label_values(&["rate_limited"])
+            .inc();
+        return Response::Rejected {
+            request_id,
+            code: "rate_limited",
+            message: format!(
+                "attach rate limit exceeded ({} attempts/min/IP)",
+                ATTACH_RATE_PER_MINUTE_PER_IP
+            ),
+        };
+    }
+
     let now = unix_now();
     let secret = coord.invite_secret;
     if let Err(e) = verify_token(&secret, &token, now) {
+        coord
+            .metrics
+            .attach_attempts
+            .with_label_values(&["bad_token"])
+            .inc();
         return Response::Rejected {
             request_id,
             code: invitation_error_code(&e),
@@ -562,6 +742,11 @@ async fn handle_attach(
     // Verify the session exists.
     let sessions = coord.sessions.read().await;
     if !sessions.contains_key(&token.session_id) {
+        coord
+            .metrics
+            .attach_attempts
+            .with_label_values(&["unknown_session"])
+            .inc();
         return Response::Rejected {
             request_id,
             code: "unknown_session",
@@ -588,16 +773,28 @@ async fn handle_attach(
                 let rx = tx.subscribe();
                 attached.insert(token.session_id, rx);
             }
+            coord
+                .metrics
+                .attach_attempts
+                .with_label_values(&["accepted"])
+                .inc();
             Response::Accepted {
                 request_id,
                 new_state,
             }
         }
-        Err(e) => Response::Rejected {
-            request_id,
-            code: coordinator_error_code(&e),
-            message: e.to_string(),
-        },
+        Err(e) => {
+            coord
+                .metrics
+                .attach_attempts
+                .with_label_values(&["rejected"])
+                .inc();
+            Response::Rejected {
+                request_id,
+                code: coordinator_error_code(&e),
+                message: e.to_string(),
+            }
+        }
     }
 }
 
@@ -607,16 +804,46 @@ async fn apply_helper(
     session_id: SessionId,
     transition: Transition,
 ) -> Response {
+    let kind = transition_kind(&transition);
     match coord.apply_transition(session_id, transition).await {
-        Ok(new_state) => Response::Accepted {
-            request_id: request_id.to_string(),
-            new_state,
-        },
-        Err(e) => Response::Rejected {
-            request_id: request_id.to_string(),
-            code: coordinator_error_code(&e),
-            message: e.to_string(),
-        },
+        Ok(new_state) => {
+            coord
+                .metrics
+                .transitions
+                .with_label_values(&[kind, "accepted"])
+                .inc();
+            Response::Accepted {
+                request_id: request_id.to_string(),
+                new_state,
+            }
+        }
+        Err(e) => {
+            coord
+                .metrics
+                .transitions
+                .with_label_values(&[kind, "rejected"])
+                .inc();
+            Response::Rejected {
+                request_id: request_id.to_string(),
+                code: coordinator_error_code(&e),
+                message: e.to_string(),
+            }
+        }
+    }
+}
+
+/// Kind label for the `coord_transitions_total{kind=...}`
+/// Prometheus metric. Static-string return so the labels stay
+/// bounded — no high-cardinality leakage.
+fn transition_kind(t: &Transition) -> &'static str {
+    match t {
+        Transition::AttachParticipant { .. } => "attach",
+        Transition::DeclareMessage { .. } => "declare_message",
+        Transition::SubmitRound1 { .. } => "submit_round1",
+        Transition::SubmitRound2 { .. } => "submit_round2",
+        Transition::SubmitAggregate { .. } => "submit_aggregate",
+        Transition::Abort { .. } => "abort",
+        Transition::Tick => "tick",
     }
 }
 
@@ -706,6 +933,10 @@ async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "127.0.0.1:8443".to_string())
         .parse()
         .map_err(|e| format!("invalid COINCYNC_COORD_LISTEN: {e}"))?;
+    let metrics_listen: SocketAddr = env::var("COINCYNC_COORD_METRICS_LISTEN")
+        .unwrap_or_else(|_| DEFAULT_METRICS_LISTEN.to_string())
+        .parse()
+        .map_err(|e| format!("invalid COINCYNC_COORD_METRICS_LISTEN: {e}"))?;
     let state_path = env::var("COINCYNC_COORD_STATE")
         .unwrap_or_else(|_| "/var/lib/coincync-coord/sessions.json".to_string());
     let secret_hex = env::var("COINCYNC_COORD_INVITE_SECRET")
@@ -718,6 +949,7 @@ async fn run() -> Result<(), String> {
     let n = coord.load_existing_sessions().await?;
     info!(
         listen = %listen,
+        metrics_listen = %metrics_listen,
         state_file = %state_path,
         existing_sessions = n,
         "coord starting"
@@ -746,15 +978,62 @@ async fn run() -> Result<(), String> {
         }
     });
 
+    // Phase 6: dedicated metrics endpoint on a separate port. A
+    // metrics-scrape flood on port 9100 cannot exhaust state on
+    // the protocol port 8443 because they're independent
+    // listeners.
+    let metrics_task = tokio::spawn(serve_metrics(coord.clone(), metrics_listen));
+
     // Wait for SIGINT.
     let _ = signal::ctrl_c().await;
     info!("SIGINT received; shutting down");
     accept_task.abort();
+    metrics_task.abort();
     // Best-effort final persist.
     if let Err(e) = coord.persist().await {
         warn!(error=%e, "final persist failed during shutdown");
     }
     Ok(())
+}
+
+/// Serve the Prometheus `/metrics` endpoint on `bind`. Returns
+/// only when the spawned task is aborted.
+async fn serve_metrics(coord: Arc<Coord>, bind: SocketAddr) {
+    use axum::routing::get;
+    use axum::Router;
+
+    let coord_for_handler = coord.clone();
+    let app = Router::new().route(
+        "/metrics",
+        get(move || {
+            let coord = coord_for_handler.clone();
+            async move { render_metrics(coord).await }
+        }),
+    );
+
+    match TcpListener::bind(bind).await {
+        Ok(listener) => {
+            info!(?bind, "metrics endpoint listening");
+            if let Err(e) = axum::serve(listener, app).await {
+                warn!(error=%e, "metrics server exited");
+            }
+        }
+        Err(e) => {
+            warn!(?bind, error=%e, "metrics endpoint failed to bind");
+        }
+    }
+}
+
+async fn render_metrics(coord: Arc<Coord>) -> (axum::http::StatusCode, String) {
+    let metric_families = coord.metrics.registry.gather();
+    let encoder = TextEncoder::new();
+    match encoder.encode_to_string(&metric_families) {
+        Ok(body) => (axum::http::StatusCode::OK, body),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("metrics encode failed: {e}"),
+        ),
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────
