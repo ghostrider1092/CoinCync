@@ -84,6 +84,27 @@ cargo build --release --features "randomx testnet"
 cargo test --release
 ```
 
+## Workspace structure
+
+The repository is a Cargo workspace. The main crate is the
+node + wallet (`coincync-node`, `coincync-wallet`); supporting
+crates ship privacy-adjacent infrastructure that's gated behind
+feature flags and only pulled in by the binaries that need it:
+
+| Crate | Purpose | Status |
+| --- | --- | --- |
+| (root) | Full node + wallet + miner | Production-ready, public testnet |
+| `crates/bridge` | Cross-stack byte-only types | Stable |
+| `crates/coincync-rig` | Mining rig binary | Production-ready |
+| `crates/coincync-faucet` | Testnet faucet service | Deployed |
+| `crates/coincync-frost-coordinator` | FROST M-of-N signing relay (CIP-008) | State machine, auth, persistence, WSS server, operator CLI all shipped; integration tests pass. Ships `coord` (server) and `coord-cli` (operator) binaries. |
+| `crates/coincync-rolling-finality` | Miner-signed soft-finality (CIP-009.D) | State machine, ed25519 verifier, wire codec all shipped; integration tests pass with real ed25519 throughout. `validate_block` integration queued for activation per CIP-011. |
+| `crates/coincync-swap` | CYNC↔BTC atomic swap (CIP-001) | Protocol state machine, handshake state machine, state persistence shipped; CLI `cyncswap` operational. Real adaptor signatures + transport queued for the audit window. |
+
+Each multi-phase crate's `tests/` directory has a focused
+integration test that composes every layer; see
+[`tests/README.md`](tests/README.md) for the full catalog.
+
 ## Documentation
 
 - [Getting Started](docs/src/getting-started/build.md)
@@ -92,6 +113,8 @@ cargo test --release
 - [Node Operations](docs/src/operations/deployment.md)
 - [Constitution](CONSTITUTION.md)
 - [API Reference](docs/API.md)
+- [CIP register](docs/cip/) — CIP-001 (atomic swap), CIP-007 (hard-fork activation policy), CIP-008 (FROST coordinator), CIP-009 + CIP-009.D (reorg defense + miner-signed rolling checkpoints), CIP-010 (testnet hard-fork rehearsal), CIP-011 (rolling-finality activation), CIP-012 (FROST coordinator deployment)
+- [Operational runbooks](docs/operations/) — incident response, status page design, reproducible builds, continuous fuzzing, DNS failover, checkpoint procedure
 
 ## License
 
