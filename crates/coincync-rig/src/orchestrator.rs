@@ -341,7 +341,7 @@ async fn mine_parallel(
                 // every 1024 hashes — same trade-off as before, but
                 // now there's no contention because each thread owns
                 // a separate atomic.
-                if local.is_multiple_of(1024) {
+                if local % 1024 == 0 {
                     my_attempts.fetch_add(1024, Ordering::Relaxed);
                     local = 0;
                 }

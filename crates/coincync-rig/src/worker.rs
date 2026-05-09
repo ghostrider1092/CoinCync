@@ -171,7 +171,7 @@ pub fn run_worker(
             // Periodically peek at the channel for a fresh `clean` job;
             // every 4096 hashes is a good tradeoff between latency on
             // pivots and overhead in the inner loop.
-            if nonce.is_multiple_of(4096) {
+            if nonce % 4096 == 0 {
                 if let Ok(new_job) = job_rx.try_recv() {
                     if new_job.clean {
                         debug!(worker_id, "worker: clean job arrived, restarting");
@@ -274,9 +274,9 @@ mod tests {
     fn extract_anchor_and_tx_root_happy_path() {
         // 32-byte anchor || 4-byte nonce slot || 32-byte tx_root = 68 bytes
         let mut blob = Vec::with_capacity(68);
-        blob.extend(std::iter::repeat_n(0xAA, 32));
+        blob.extend(std::iter::repeat(0xAA).take(32));
         blob.extend([0xBB; 4]); // nonce slot
-        blob.extend(std::iter::repeat_n(0xCC, 32));
+        blob.extend(std::iter::repeat(0xCC).take(32));
         let (anchor, tx_root) = extract_anchor_and_tx_root(&blob, 32).expect("parse");
         assert_eq!(anchor.as_bytes(), &[0xAA; 32]);
         assert_eq!(tx_root.as_bytes(), &[0xCC; 32]);

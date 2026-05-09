@@ -334,7 +334,7 @@ fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
                 let _ = hasher.hash(&input, nonce);
                 nonce = nonce.wrapping_add(1);
                 local += 1;
-                if local.is_multiple_of(1024) {
+                if local % 1024 == 0 {
                     counter.fetch_add(1024, Ordering::Relaxed);
                     local = 0;
                 }

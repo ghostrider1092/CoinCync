@@ -131,7 +131,8 @@ impl Bootstrapper {
 
         let resolver = TokioResolver::builder_tokio()
             .map_err(|e| Error::ConnectionFailed(e.to_string()))?
-            .build();
+            .build()
+            .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
         let lookup = timeout(self.config.dns_timeout, resolver.lookup_ip(seed))
             .await

@@ -691,7 +691,7 @@ fn draw_worker_heatmap(f: &mut Frame, area: Rect, metrics: &MetricsState, theme:
             3 => theme.accent_dim,// above average
             _ => theme.accent,    // full speed
         };
-        let cell: String = std::iter::repeat_n('▆', per_cell).collect();
+        let cell: String = std::iter::repeat('▆').take(per_cell).collect();
         spans.push(Span::styled(cell, Style::default().fg(color).add_modifier(Modifier::BOLD)));
         spans.push(Span::raw(" "));
     }

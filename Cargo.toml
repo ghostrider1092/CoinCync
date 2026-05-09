@@ -100,7 +100,7 @@ axum       = { version = "0.7", features = ["ws"] }
 reqwest    = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # ── Networking ───────────────────────────────────────────────
-hickory-resolver = "0.25"
+hickory-resolver = "0.26"
 socket2            = "0.5"
 igd                = { version = "0.12", features = ["aio"] }
 tokio-socks        = "0.5"
