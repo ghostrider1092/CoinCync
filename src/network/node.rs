@@ -793,14 +793,21 @@ impl P2PNode {
                     // even when the prior connection was still alive —
                     // surfaced as eclipse-defense drift "sum=2 but
                     // outbound_count=1" in 2026-05-09 sandbox testing.
-                    // The live peer list dedupes by peer_id (same Noise
-                    // key resolves to one peer), but the redundant dial
-                    // wastes a tokio spawn, runs the Noise handshake, and
-                    // — once we wire eclipse defense — leaks a /16 slot
-                    // because both spawn bodies' try_track_outbound_subnet
-                    // succeed even though only one peer survives.
+                    //
+                    // We ALSO mark the address as `tried` so get_next
+                    // rotates to a different address on the next tick.
+                    // Without this, mark_success on a freshly-connected
+                    // peer keeps that address at the top of the
+                    // last_seen-sorted list, get_next returns it again,
+                    // we skip it again, and the connector loops forever
+                    // on a single peer (regression caught when cap=1
+                    // testing showed "0 cap fires" instead of one — the
+                    // node never tried the 2nd 207.148/16 address). The
+                    // tried set self-clears once all addresses have
+                    // been tried, so this isn't permanent exclusion.
                     if connector_peers.iter().any(|p| p.addr == addr) {
                         trace!("Skipping {} — already have an active peer at this address", addr);
+                        connector_addresses.write().await.mark_tried(addr);
                         continue;
                     }
 
@@ -844,6 +851,16 @@ impl P2PNode {
                                 "Eclipse cap: /16 of {} is at MAX_OUTBOUND_PER_SUBNET, skipping",
                                 addr
                             );
+                            // Mark as tried so the connector rotates to a
+                            // different /16 next tick, instead of burning
+                            // ticks repeatedly hitting the cap on the same
+                            // address. Symmetric with the dup-dial skip
+                            // above. The tried set self-clears once all
+                            // addresses are exhausted, so this isn't a
+                            // permanent block — if the cap clears later
+                            // (peer drops), the address becomes eligible
+                            // again on the next round.
+                            connector_addresses.write().await.mark_tried(addr);
                             continue;
                         }
                     };
