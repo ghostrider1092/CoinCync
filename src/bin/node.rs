@@ -324,12 +324,18 @@ async fn start_node(
                     let block_txs = block.transactions.clone();
                     let block_for_relay = block.clone();
                     match event_chain.process_block(block) {
-                        Ok(BlockStatus::Accepted)
-                        | Ok(BlockStatus::AcceptedFork)
-                        | Ok(BlockStatus::AcceptedReorg { .. }) => {
+                        Ok(status @ (BlockStatus::Accepted
+                                    | BlockStatus::AcceptedFork
+                                    | BlockStatus::AcceptedReorg { .. })) => {
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.
                             event_mempool.remove_confirmed(&block_txs);
+                            // On reorg, re-admit txs that were mined in disconnected
+                            // blocks but are still spendable on the new chain. Without
+                            // this, user transactions silently vanish across a reorg.
+                            if let BlockStatus::AcceptedReorg { orphaned_txs } = status {
+                                event_mempool.restore_orphaned(orphaned_txs, &event_chain);
+                            }
                             event_mempool.set_height(event_chain.height());
 
                             // Notify IBD sync manager so it advances its

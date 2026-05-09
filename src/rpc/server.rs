@@ -774,15 +774,20 @@ pub async fn start_rpc_server(
         // when the block was not actually accepted. Without this, the
         // miner sees a silent success while the chain never advances.
         match state.chain.process_block(block) {
-            Ok(crate::chain::BlockStatus::Accepted)
-            | Ok(crate::chain::BlockStatus::AcceptedFork)
-            | Ok(crate::chain::BlockStatus::AcceptedReorg { .. }) => {
+            Ok(status @ (crate::chain::BlockStatus::Accepted
+                        | crate::chain::BlockStatus::AcceptedFork
+                        | crate::chain::BlockStatus::AcceptedReorg { .. })) => {
                 // Mempool sync — same calls as the wire-side handler in
                 // bin/node.rs after BlockReceived. remove_confirmed drops
                 // mined txs AND shadow-evicts any mempool tx that shares
                 // a key image with a confirmed tx (the poison-tx scenario
                 // that stalled the chain at h=6001 on 2026-05-08).
                 state.mempool.remove_confirmed(&block_txs);
+                // On reorg, re-admit txs that were mined in disconnected
+                // blocks but are still spendable on the new chain.
+                if let crate::chain::BlockStatus::AcceptedReorg { orphaned_txs } = status {
+                    state.mempool.restore_orphaned(orphaned_txs, &state.chain);
+                }
                 state.mempool.set_height(state.chain.height());
 
                 // Fire-and-forget P2P announcement so the block reaches
@@ -813,6 +818,11 @@ pub async fn start_rpc_server(
                 }))
             }
             Ok(crate::chain::BlockStatus::AlreadyKnown) => {
+                // Even when the block is already known, advance the mempool's
+                // tracked chain height so activation-gated validation stays in
+                // sync. The wire-side handler in bin/node.rs does the same
+                // thing for AlreadyKnown — keeps the two paths symmetric.
+                state.mempool.set_height(state.chain.height());
                 Ok::<_, ErrorObjectOwned>(json!({
                     "accepted": true,
                     "status": "already_known",

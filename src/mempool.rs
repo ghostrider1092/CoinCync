@@ -992,6 +992,44 @@ impl SharedMempool {
         self.write_lock().add(tx)
     }
 
+    /// Re-admit transactions that were mined in blocks that just got
+    /// disconnected during a chain reorganization. Each tx is re-checked
+    /// against the new chain state — txs whose key images are spent in
+    /// the new fork are silently dropped (the new chain superseded them),
+    /// the rest go back into the mempool to be mined into the new chain.
+    /// Returns the number of txs successfully restored.
+    ///
+    /// Without this, user transactions that were mined in orphaned blocks
+    /// vanish on reorg — losing fee income for senders and breaking
+    /// expectations for any wallet that observed the (now-orphaned)
+    /// confirmation.
+    pub fn restore_orphaned(
+        &self,
+        orphaned_txs: Vec<Transaction>,
+        chain: &crate::chain::SharedBlockchain,
+    ) -> usize {
+        let total = orphaned_txs.len();
+        let mut restored = 0;
+        for tx in orphaned_txs {
+            match self.add_with_chain(tx, chain) {
+                Ok(_) => restored += 1,
+                Err(e) => {
+                    tracing::debug!(
+                        "Reorg-orphaned tx not restored to mempool (likely superseded): {}",
+                        e
+                    );
+                }
+            }
+        }
+        if total > 0 {
+            tracing::info!(
+                "Reorg: restored {}/{} orphaned tx(s) to mempool",
+                restored, total
+            );
+        }
+        restored
+    }
+
     pub fn remove(&self, tx_hash: &Hash) -> Option<Transaction> {
         self.write_lock().remove(tx_hash)
     }
