@@ -382,9 +382,14 @@ impl Session {
         // expires REGARDLESS of what the caller asked for.
         if let Some(timeout) = self.state.timeout_secs() {
             if now >= self.state_entered_at + timeout {
+                // Capture the timing-out state's name BEFORE
+                // transitioning — otherwise the error reports
+                // "Expired" instead of which-state-just-expired,
+                // which is what callers actually need.
+                let expiring_state = self.state.name().to_string();
                 self.transition_to(SessionState::Expired, now);
                 return Err(CoordinatorError::SessionExpired {
-                    state: self.state.name().into(),
+                    state: expiring_state,
                 });
             }
         }

@@ -70,7 +70,7 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -707,7 +707,15 @@ async fn handle_attach(
     // Phase 6: per-IP attach rate-limit. The check is non-blocking
     // (`check_key`); a denied attempt returns immediately without
     // ever touching the state machine.
-    if coord.attach_limiter.check_key(&peer_ip).is_err() {
+    //
+    // The bucket key is the CANONICALIZED IP — we collapse an
+    // IPv4-mapped IPv6 (`::ffff:1.2.3.4`) to its IPv4 form so a
+    // single client can't get two buckets by toggling families.
+    // For IPv6 we further bucket by /64 prefix because rotating
+    // within a /64 is trivially cheap for an attacker; treating
+    // the whole /64 as one entity is the standard mitigation.
+    let bucket_ip = canonicalize_ip_for_rate_limit(peer_ip);
+    if coord.attach_limiter.check_key(&bucket_ip).is_err() {
         coord.metrics.attach_rate_limit_hits.inc();
         coord
             .metrics
@@ -888,6 +896,56 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Map an inbound peer IP to the bucket key the rate limiter
+/// should use. Two normalizations:
+///
+/// 1. **IPv4-mapped IPv6 → IPv4.** `::ffff:1.2.3.4` and
+///    `1.2.3.4` are the same client; a misconfigured stack
+///    can flip between them on reconnects. Without this,
+///    one client gets two rate-limit buckets and effectively
+///    doubles its allowed rate.
+///
+/// 2. **IPv6 /64 collapse.** A single IPv6 client typically
+///    has a /64 of their own; rotating addresses within their
+///    own /64 is trivial. Treating the /64 as one bucket means
+///    the rate limit applies to the client, not to each IP they
+///    can rotate to.
+fn canonicalize_ip_for_rate_limit(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            // Pull out an embedded IPv4 if present (::ffff:x.y.z.w
+            // form). std::net::Ipv6Addr::to_ipv4_mapped() is
+            // stable since 1.85; we open-code it for MSRV 1.75.
+            let segments = v6.segments();
+            let is_v4_mapped = segments[0] == 0
+                && segments[1] == 0
+                && segments[2] == 0
+                && segments[3] == 0
+                && segments[4] == 0
+                && segments[5] == 0xffff;
+            if is_v4_mapped {
+                let high = segments[6];
+                let low = segments[7];
+                return IpAddr::V4(std::net::Ipv4Addr::new(
+                    (high >> 8) as u8,
+                    (high & 0xff) as u8,
+                    (low >> 8) as u8,
+                    (low & 0xff) as u8,
+                ));
+            }
+            // Otherwise collapse to /64 (zero out the lower 64 bits).
+            IpAddr::V6(Ipv6Addr::new(
+                segments[0],
+                segments[1],
+                segments[2],
+                segments[3],
+                0, 0, 0, 0,
+            ))
+        }
+    }
 }
 
 fn parse_invite_secret(hex_str: &str) -> Result<[u8; SESSION_SECRET_LEN], String> {

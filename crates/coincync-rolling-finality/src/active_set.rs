@@ -118,20 +118,50 @@ impl ActiveMinerSet {
     }
 
     /// Inner: is this record active at this height?
+    ///
+    /// A miner is active at `at_height` iff they mined at least one
+    /// block in `(at_height - window, at_height]`. We don't store
+    /// every block height, only `first_seen` and `last_seen`. Two
+    /// cases give us evidence the miner is active:
+    ///
+    /// 1. `first_seen` itself is in the window. The miner mined at
+    ///    `first_seen`; if that block is in `(at_height - window,
+    ///    at_height]`, they were active.
+    /// 2. `last_seen` is in the window AND `last_seen <= at_height`.
+    ///    The miner mined at `last_seen`; if that's in the window
+    ///    and not in the future, they were active.
+    ///
+    /// What this MISSES: a miner with `first_seen` way old and
+    /// `last_seen` way in the future and a silent gap covering the
+    /// window. Without per-block heights we can't detect that case;
+    /// we conservatively return `false` (no false positives). For
+    /// the (much more common) case of a miner who mined recently
+    /// but `last_seen` has since advanced past `at_height`, we now
+    /// correctly accept based on `first_seen` — earlier code rejected
+    /// these legitimate retrospective attestations.
     fn is_active_record(record: &MinerRecord, at_height: u64, window: u64) -> bool {
-        // Active = last_seen is within (at_height - window, at_height].
-        // The miner who mined block `at_height` itself is active.
-        // The miner who last mined `at_height - window` is NOT active
-        // (boundary excludes the oldest).
-        if at_height < record.last_seen_height {
-            // We're querying for a height before the miner's last
-            // appearance. They couldn't have been active "then"
-            // because we have no earlier block from them. Treat as
-            // inactive.
+        // Miner hadn't appeared yet at the query height.
+        if record.first_seen_height > at_height {
             return false;
         }
-        let elapsed = at_height - record.last_seen_height;
-        elapsed < window
+        // first_seen is at-or-before at_height by the check above.
+        // If first_seen lies inside the window, we have evidence
+        // of activity: that block is in (at_height - window, at_height].
+        if at_height - record.first_seen_height < window {
+            return true;
+        }
+        // first_seen is too far back to count by itself. Check
+        // whether last_seen lies in the window AND isn't in the
+        // future relative to the query.
+        if at_height >= record.last_seen_height
+            && at_height - record.last_seen_height < window
+        {
+            return true;
+        }
+        // Otherwise we have no evidence either way (miner's known
+        // blocks straddle at_height with a silent gap covering the
+        // window). Conservative: inactive.
+        false
     }
 
     /// Borrow the underlying map. Used by serialization integration

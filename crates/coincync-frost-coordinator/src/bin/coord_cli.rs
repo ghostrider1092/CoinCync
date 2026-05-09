@@ -542,38 +542,20 @@ fn read_secret_file(path: &PathBuf) -> Result<[u8; SESSION_SECRET_LEN], String> 
 }
 
 fn read_random(buf: &mut [u8]) -> std::io::Result<()> {
-    use std::io::Read;
-    // /dev/urandom on Unix; on Windows we'd ideally call
-    // BCryptGenRandom but pulling in winapi for one CLI is
-    // overkill. Fall back to a time-based seed (acceptable for
-    // a one-time key generation that the operator pipes to file
-    // and never re-runs — the resulting secret is then used as
-    // an HMAC key, which doesn't depend on the entropy source's
-    // properties beyond uniqueness).
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        f.read_exact(buf)?;
-        return Ok(());
-    }
-    // Windows fallback: derive from system clock + process id.
-    // Not cryptographically strong; phase 6 should pull in the
-    // `getrandom` crate (already a workspace dep) for a real
-    // CSRNG cross-platform.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let mut seed = now.wrapping_mul(pid.wrapping_add(1));
-    for b in buf.iter_mut() {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *b = ((seed >> 64) & 0xff) as u8;
-    }
-    eprintln!("warning: /dev/urandom unavailable; using time+pid PRNG. For");
-    eprintln!("         production, run `coord-cli gen-secret` on a Unix host");
-    eprintln!("         or wait for phase 6's getrandom integration.");
-    Ok(())
+    // CSPRNG: getrandom maps to the OS's secure-random syscall
+    // on every platform we ship — Linux/macOS getrandom(2),
+    // Windows BCryptGenRandom, WASI random_get. HMAC keys MUST
+    // be unguessable; any fallback to weaker entropy here
+    // would be a security defect, so we fail loudly instead.
+    //
+    // Earlier versions of this function fell back to an LCG
+    // seeded from now()+pid on Windows. That was a critical
+    // bug found in the May-8 aggressive-test pass: an attacker
+    // who knew approximate process-start time and PID range
+    // could brute-force the secret in seconds and forge attach
+    // tokens. Replaced with getrandom — no fallback, fail-fast.
+    getrandom::getrandom(buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
 }
 
 // ──────────────────────────────────────────────────────────────────
