@@ -239,6 +239,42 @@ pub fn rpc_methods_doc() -> serde_json::Value {
                 "auth": true
             },
             {
+                "name": "get_output_digests",
+                "description": "Light-wallet SPV: compact per-block output summaries for client-side scanning. Server learns only the height range, never which outputs the wallet cares about. Strictly stronger privacy than BIP-157. See docs/security/LIGHTSYNC_AUDIT.md.",
+                "params": [
+                    { "name": "start_height", "type": "number", "required": true },
+                    { "name": "end_height", "type": "number", "required": true, "description": "Capped to start_height+99 to bound response size." }
+                ],
+                "result": {
+                    "type": "object",
+                    "fields": {
+                        "start": "number - actual start height of returned digests",
+                        "end": "number - actual end height (capped)",
+                        "count": "number - number of digests returned",
+                        "digests": "array of BlockDigest objects (~138 bytes per output)"
+                    }
+                },
+                "auth": false
+            },
+            {
+                "name": "get_sync_checkpoints",
+                "description": "Periodic trust anchors so a fresh light wallet can skip ancient history and start scanning from a recent height. Wallets MUST cross-check against the hardcoded CONSENSUS_CHECKPOINTS in src/constants.rs until miner-signed authentication ships in v1.0.1 (CIP-009.D activation track).",
+                "params": [
+                    { "name": "stride", "type": "number", "required": false, "description": "Emit one checkpoint every `stride` blocks. Default 10000 (~14 days at 120s). Clamped to [1, 50000]." }
+                ],
+                "result": {
+                    "type": "object",
+                    "fields": {
+                        "stride": "number - actual stride used",
+                        "chain_height": "number - tracker's current chain tip",
+                        "count": "number - checkpoints returned",
+                        "checkpoints": "array of SyncCheckpoint objects",
+                        "auth_note": "string - reminder that wallets must cross-check against CONSENSUS_CHECKPOINTS"
+                    }
+                },
+                "auth": false
+            },
+            {
                 "name": "rpc.discover",
                 "description": "Returns this service discovery document",
                 "params": [],
