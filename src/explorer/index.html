@@ -1267,6 +1267,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <!-- Label -->
             <text x="140" y="150" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">ECDH → unlinkable output</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Sender derives a fresh one-time output address from the receiver's view+spend keys via ECDH. Two payments to the same recipient share <em>no</em> on-chain link — the receiver scans for outputs only their view key recognizes.</div>
         </div>
       </div>
 
@@ -1300,6 +1301,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <text x="140" y="110" text-anchor="middle" font-family="monospace" font-size="8" fill="#D4A059" font-weight="600">✓ BALANCE VERIFIED</text>
             <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">zero knowledge — no amounts revealed</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Each amount is encoded as <code>C = aG + rH</code> with a random blinding factor <code>r</code>. The chain verifies inputs sum equals outputs sum without ever seeing the values — perfect hiding, computationally binding.</div>
         </div>
       </div>
 
@@ -1333,6 +1335,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <text x="140" y="125" text-anchor="middle" font-family="monospace" font-size="8" fill="#D4A059" font-weight="600">RANGE PROOF VALID</text>
             <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">~672 bytes · logarithmic scaling</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Logarithmic-size range proof showing the hidden amount lies in <code>[0, 2⁶⁴)</code> without revealing it. Stops a sender from forging coins via integer overflow. ~672 bytes per output, verifies in single-digit milliseconds.</div>
         </div>
       </div>
 
@@ -1377,6 +1380,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <rect x="50" y="115" width="180" height="22" rx="11" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
             <text x="140" y="130" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#D4A059">origin IP hidden from observers</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Each transaction relays through a randomized stem of 1–3 peers before flooding the rest of the network (the "fluff" phase). An adversary watching gossip sees the broadcast but cannot trace the IP origin.</div>
         </div>
       </div>
 
@@ -1402,6 +1406,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <text x="140" y="124" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#D4A059">✓ serial double-spend check via RPC</text>
             <text x="140" y="150" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">Lelantus Spark — full sender+receiver privacy</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Lelantus Spark accumulator provides full sender + receiver + amount privacy with no ring decoys. Spent serial numbers prevent double-spends. Phase-2 module — disabled on testnet, scheduled for mainnet activation.</div>
         </div>
       </div>
 
@@ -1440,6 +1445,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.6;0.2" dur="4s" repeatCount="indefinite"/></rect>
             <text x="140" y="139" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#A855F7">Halo2 ZK proofs · no trusted setup</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Zcash Orchard shielded pool with recursive Halo2 zk-SNARKs — <em>no trusted setup ceremony</em> needed. Phase-2 module — disabled on testnet, optional opt-in pool for mainnet.</div>
         </div>
       </div>
 
@@ -1476,6 +1482,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
             <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#D4A059">CIP-008 · zero key material at coord</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Threshold Schnorr signatures (RFC 9591). M-of-N participants each hold one secret share; the coordinator routes round-1 commitments and round-2 signature shares but <em>never holds a key</em>. The aggregate output is indistinguishable from a single-sig — observers can't tell on-chain that this was multi-sig.</div>
         </div>
       </div>
 
@@ -1510,6 +1517,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
             <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#A855F7">CIP-001 · trustless · either-party refund</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Trustless CYNC↔BTC trade via adaptor signatures. Both chains' spend transactions commit to the <em>same</em> secret; redeeming one chain reveals the secret, letting the counterparty redeem the other. Either party times out and refunds if the counterparty stalls. No exchange, no escrow, no listing required.</div>
         </div>
       </div>
 
@@ -1544,6 +1552,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <rect x="40" y="125" width="200" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
             <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">stronger privacy than BIP-157</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Mobile-friendly SPV. Server returns per-block view-tag digests (~138 B per output); the wallet scans locally with its view key. The server never learns which addresses you watch — strictly stronger privacy than Bitcoin's BIP-157 compact filters.</div>
         </div>
       </div>
 
@@ -1579,6 +1588,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
             <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">CIP-009.D · time-warp immune</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Active miners (those who mined in the last ~10 000 blocks) attest to recent <code>tip-LAG</code> blocks with ed25519 signatures. ⌈2/3⌉ attestations soft-finalize that height. Window measured in <em>blocks-not-time</em> so the protocol is immune to time-warp manipulation. Library shipped; <code>validate_block</code> hook activates next phase.</div>
         </div>
       </div>
 
@@ -1618,6 +1628,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
             <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
             <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">multi-node test verifies the privacy invariant</text>
           </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Continuous-integration harness that spins up multi-node test graphs and asserts the privacy invariant: each origin chooses <em>exactly one</em> stem peer per epoch. Catches regressions where a code change would accidentally fan out at the stem stage and leak the origin IP.</div>
         </div>
       </div>
     </div>
