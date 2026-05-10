@@ -219,7 +219,7 @@ discord.gg/5tYNSCsqzy
 ```bbcode
 [size=14pt][b]CoinCync — Privacy-First Proof-of-Work, Constitutionally Locked[/b][/size]
 
-[size=11pt]Public testnet is live as of [b]2026-05-11[/b]. Mainnet target [b]2026-10-01[/b].
+[size=11pt]Public testnet is live as of [b]2026-05-10[/b]. Mainnet target [b]2026-10-01[/b].
 Built solo, MIT-licensed, no premine, no dev tax, no foundation, no token sale.[/size]
 
 [hr]
@@ -298,7 +298,7 @@ Tested on Linux x86_64, macOS arm64/x86_64, Windows MSVC. Rust 1.75+.
 [b]Mainnet roadmap[/b]
 
 [list]
-[li][b]2026-05-11[/b] — Public testnet (today)[/li]
+[li][b]2026-05-10[/b] — Public testnet (today)[/li]
 [li][b]2026-05 → 2026-08[/b] — CIP-001 atomic-swap reference implementation, third-party audit kickoff[/li]
 [li][b]2026-09[/b] — Mainnet release candidates, multi-maintainer signed-release infra (M-of-N)[/li]
 [li][b]2026-10-01[/b] — Mainnet genesis (target)[/li]
@@ -487,28 +487,35 @@ Author here. CoinCync is a Rust implementation of a privacy-first PoW cryptocurr
 
 ---
 
-## Posting checklist (Mon 2026-05-11 morning)
+## Posting checklist (Sun 2026-05-10 — 11 AM ET launch)
 
 Run through this 30 minutes before posting. None of these should still be open by the time the announcement goes out.
 
+- [x] IBD wedge bug fixed + deployed to fleet (binary `8328625` on all 5 Vultr boxes — verified live)
 - [x] Soak verdict GO (verified 2026-05-07, see [v1.0.2-testnet-soak-summary.md](v1.0.2-testnet-soak-summary.md))
 - [x] Faucet endpoint live: `https://api.coincync.network/faucet/health` returns 200
-- [ ] Hot wallet has tCYNC balance (check via faucet stats: `curl https://api.coincync.network/faucet/stats`)
-- [ ] End-to-end smoke verified: `.\scripts\smoke-test-faucet.ps1` returns PASS
-- [ ] Forgejo deployed at git.coincync.network — OR — replace `git.coincync.network/...` mentions with "Source: see Discord pinned message" before posting
-- [ ] Block height + hashrate updated to current values (run `curl https://api.coincync.network/get_info -H 'Authorization: Bearer ...'` for current numbers if more than ~24h old)
+- [x] Hot wallet has tCYNC balance: ~1500 tCYNC after top-up (≈150 drips of buffer)
+- [x] Anonymity-set tile on explorer shows real value (~6800)
+- [x] Fresh-node IBD smoke-test PASSED on nyc (h=0 → h=429+ progressing, ring=11)
+- [x] GitHub Release created at v1.0.3-testnet with binaries
+- [ ] CI green for the latest commit (check after the rand-dep fix lands)
+- [ ] Forgejo `git.coincync.network/coincync/cync-protocol` — if NOT yet deployed, swap all references in this doc to `https://github.com/ghostrider1092/Coincync-Testnet-` before posting
+- [ ] Block height + hashrate updated to current values (run `curl https://api.coincync.network/rpc/testnet -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' | python3 -m json.tool` to grab fresh numbers)
 - [ ] Discord invite tested in private browser (not rate-limited)
-- [ ] Wallet installer download URL on coincync.network points at the v1.0.2-testnet release artifacts
+- [ ] Wallet installer download URL points at v1.0.3-testnet release artifacts (in README + announcement bodies)
+- [ ] Local home miner is **set to start on boot** (Sunday windows-sleep is OFF; if your machine reboots overnight, the chain stalls)
 
-## Posting order (Mon 2026-05-11)
+## Posting order (Sun 2026-05-10 — adjusted from Mon to Sun)
 
 | Time (ET) | Channel |
 | --- | --- |
-| 09:30 | Pin the welcome thread on your Discord. Be present in-channel from this point onward. |
-| 10:00 | r/CryptoCurrency (Discussion flair) |
-| 10:30 | BitcoinTalk ANN |
-| 11:00 | Twitter / X thread (5 posts in section 3 above) |
-| 14:00 | lobste.rs (with the first-comment context) |
+| 10:30 | Pin the welcome thread on your Discord. Be present in-channel from this point onward. |
+| 11:00 | **GO LIVE.** r/CryptoCurrency (Discussion flair) |
+| 11:30 | BitcoinTalk ANN |
+| 12:00 | Twitter / X thread (5 posts in section 3 above) |
+| 15:00 | lobste.rs (with the first-comment context) |
+| Tue 11:00 | Hacker News Show HN (give Day-1 traffic time to peak first) |
+| Wed 11:00 | r/Monero (they want 48h of external traction signals) |
 
 Hold r/Monero and Hacker News for **Wed 2026-05-13** — they want 48h of activity from the other channels to point at. Posting them on Day 0 is the worst-case timing.
 
