@@ -1,0 +1,10 @@
+[Unit]
+Description=CoinCync fleet self-check (one-shot, fired by .timer)
+After=coincync-node.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/coincync-selfcheck
+StandardOutput=journal
+StandardError=journal

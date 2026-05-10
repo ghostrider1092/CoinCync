@@ -1,0 +1,12 @@
+[Unit]
+Description=CoinCync long-duration soak (one-shot)
+After=coincync-node.service network-online.target
+
+[Service]
+Type=oneshot
+TimeoutSec=infinity
+User=root
+EnvironmentFile=-/etc/coincync/soak.env
+ExecStart=/usr/local/bin/coincync-soak
+StandardOutput=journal
+StandardError=journal

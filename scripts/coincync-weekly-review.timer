@@ -1,0 +1,13 @@
+[Unit]
+Description=Run coincync-weekly-review every Sunday at 9am PT (16:00 UTC)
+
+[Timer]
+# 16:00 UTC = 9am PT during DST (PDT, UTC-7)
+# In standard time (PST, UTC-8) this fires at 8am PT — close enough to "Sunday morning"
+OnCalendar=Sun *-*-* 16:00:00 UTC
+Persistent=true
+AccuracySec=2min
+Unit=coincync-weekly-review.service
+
+[Install]
+WantedBy=timers.target
