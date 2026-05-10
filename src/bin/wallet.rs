@@ -930,6 +930,23 @@ async fn cmd_send(
     let to_spend = parse_pk(&to_spend_hex, "to-spend")?;
     let to_view = parse_pk(&to_view_hex, "to-view")?;
 
+    // Cheap arg-validation before any network or wallet I/O. A
+    // wrong --memo or mismatched --recovery-* pair shouldn't make
+    // the user wait for an RPC roundtrip + decoy fetch only to
+    // bail. The deeper checks (hex decode, output_index against
+    // recipients) stay below where the values are consumed.
+    if let Some(s) = memo.as_deref() {
+        if s.len() > 256 {
+            return Err(format!("memo too long: {} bytes (max 256)", s.len()));
+        }
+    }
+    match (recovery_address_hex.as_deref(), recovery_timeout) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("--recovery-address and --recovery-timeout must be passed together".into());
+        }
+        _ => {}
+    }
+
     // Unlock wallet
     let password = match password {
         Some(p) => p,
