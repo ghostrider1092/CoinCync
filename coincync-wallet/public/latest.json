@@ -1,0 +1,40 @@
+{
+  "version": "1.0.1",
+  "release_date": "2026-04-19",
+  "release_notes_url": "https://github.com/CoinCync/CoinCync/releases/tag/v1.0.1",
+  "download_url": "https://releases.coincync.network/wallet/CoinCync-Wallet_1.0.1_x64-setup.exe",
+  "platforms": {
+    "windows-x86_64": "https://releases.coincync.network/wallet/CoinCync-Wallet_1.0.1_x64-setup.exe",
+    "darwin-x86_64": "https://releases.coincync.network/wallet/CoinCync-Wallet_1.0.1_x64.dmg",
+    "linux-x86_64": "https://releases.coincync.network/wallet/CoinCync-Wallet_1.0.1_x64.AppImage"
+  },
+  "releases": [
+    {
+      "version": "1.0.1",
+      "date": "2026-04-19",
+      "changes": [
+        { "type": "fix", "text": "Balance now persists after wallet scan instead of vanishing" },
+        { "type": "fix", "text": "Fee burn calculation matches node consensus (congestion-aware)" },
+        { "type": "new", "text": "9-node testnet with dedicated mempool nodes (NYC1, FRA)" },
+        { "type": "new", "text": "Update notification system with changelog" },
+        { "type": "new", "text": "Hardcoded checkpoints for fast sync (heights 10-300)" },
+        { "type": "improve", "text": "IBD sync 4x faster (500ms tick, reduced timeouts)" },
+        { "type": "improve", "text": "Peer discovery increased (16 outbound, 4 per subnet)" },
+        { "type": "improve", "text": "Settings split into 4 tabs (General/Privacy/Advanced/Security)" },
+        { "type": "new", "text": "Batch block download RPC (get_blocks_batch)" },
+        { "type": "new", "text": "State snapshot RPC for instant sync verification" }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "date": "2026-04-17",
+      "changes": [
+        { "type": "new", "text": "Initial testnet release — CoinCync Phantom Testnet" },
+        { "type": "new", "text": "22 privacy features across 4 layers" },
+        { "type": "new", "text": "RandomX CPU-only mining with asymptotic emission" },
+        { "type": "new", "text": "CLSAG ring-11, Bulletproofs+, stealth addresses" },
+        { "type": "new", "text": "100M supply cap, 30% fee burn, 0% dev tax" }
+      ]
+    }
+  ]
+}

@@ -138,3 +138,13 @@ deploy/ops/template-check.sh
 # Fleet backups — per-host /etc/coincync/ snapshots include RPC API
 # keys, faucet wallet password, and node signing keys. Never commit.
 /fleet-backup-*/
+
+# Release artifacts — go on GitHub Releases, not in git history.
+# Pre-built binaries bloat .git/ forever and clones pay the cost.
+/release/v*/
+/release/windows/
+# Tauri bundles these from cargo build at packaging time; the
+# source-tree slot is a drop point for the build pipeline, not for
+# source control. README.md alongside is fine to commit.
+/coincync-wallet/src-tauri/resources/binaries/*.exe
+/coincync-wallet/src-tauri/resources/binaries/*-linux-x86_64
