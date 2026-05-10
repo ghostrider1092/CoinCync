@@ -295,6 +295,21 @@ enum Command {
         #[command(subcommand)]
         action: DiscloseAction,
     },
+
+    /// Decrypt and print the encrypted memo attached to one of
+    /// this wallet's UTXOs. Senders embed memos in the first
+    /// recipient output via `send --memo`; the bytes are encrypted
+    /// to the recipient's view key and round-trip through chain
+    /// untouched. Only the recipient (this wallet) can read them.
+    ShowMemo {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Index of the UTXO in the wallet's UTXO list (0-based).
+        /// Run `scan` first to populate; the order is the persisted
+        /// order. Use the same index you'd pass to `disclose balance`.
+        #[arg(long)]
+        utxo_index: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -442,6 +457,9 @@ async fn main() {
                 cmd_disclose_verify_ownership(&proof).await
             }
         },
+        Command::ShowMemo { password, utxo_index } => {
+            cmd_show_memo(&wallet_path, password, utxo_index, &cli.node).await
+        }
     };
 
     if let Err(e) = result {
@@ -1940,4 +1958,78 @@ async fn cmd_disclose_verify_ownership(proof_hex: &str) -> Result<(), String> {
     } else {
         Err("INVALID: proof verification failed".into())
     }
+}
+
+async fn cmd_show_memo(
+    path: &PathBuf,
+    password: Option<String>,
+    utxo_index: usize,
+    node: &str,
+) -> Result<(), String> {
+    use coincync::crypto::decrypt_memo;
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = match password {
+        Some(p) => p,
+        None => prompt_password(false)?,
+    };
+    let mut wallet = Wallet::open(path.clone())
+        .map_err(|e| format!("open wallet: {}", e))?;
+    wallet.unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+
+    let keys = wallet.current_keys()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+    let view_secret_bytes: [u8; 32] = *keys.view_secret.as_bytes();
+
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let utxo = utxos.get(utxo_index)
+        .ok_or_else(|| format!(
+            "utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            utxo_index, utxos.len()
+        ))?;
+
+    let tx_hash_hex = hex::encode(utxo.tx_hash.as_bytes());
+    let resp = rpc_call(node, "get_transaction", serde_json::json!([tx_hash_hex]))
+        .await
+        .map_err(|e| format!("rpc get_transaction: {}", e))?;
+
+    let outputs = resp.get("outputs")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "rpc response missing 'outputs' array".to_string())?;
+    let output = outputs.get(utxo.output_index as usize)
+        .ok_or_else(|| format!(
+            "output_index {} out of range (tx has {} outputs)",
+            utxo.output_index, outputs.len()
+        ))?;
+    let memo_hex = output.get("encrypted_memo")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "rpc response missing 'encrypted_memo' field — node may be on an older build".to_string())?;
+
+    if memo_hex.is_empty() {
+        println!("No memo on UTXO #{} (tx {} output {}).",
+            utxo_index, &tx_hash_hex[..16], utxo.output_index);
+        return Ok(());
+    }
+
+    let encrypted = hex::decode(memo_hex)
+        .map_err(|e| format!("decode encrypted_memo hex: {}", e))?;
+    let tx_pub_bytes: [u8; 32] = *utxo.tx_public_key.as_bytes();
+
+    let plaintext = decrypt_memo(&encrypted, &view_secret_bytes, &tx_pub_bytes)
+        .map_err(|e| format!("decrypt_memo: {} (memo is on-chain but this wallet's view key didn't decrypt — wrong key epoch or different recipient)", e))?;
+
+    println!("UTXO #{} (tx {}, output {}, height {}):",
+        utxo_index, &tx_hash_hex[..16], utxo.output_index, utxo.height);
+    println!("  encrypted bytes: {}", encrypted.len());
+    match std::str::from_utf8(&plaintext) {
+        Ok(s) => println!("  decrypted memo:  {:?}", s),
+        Err(_) => println!("  decrypted bytes: {} (not valid UTF-8) — hex={}",
+            plaintext.len(), hex::encode(&plaintext)),
+    }
+    Ok(())
 }

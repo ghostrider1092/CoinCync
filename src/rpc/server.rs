@@ -1284,6 +1284,11 @@ pub async fn start_rpc_server(
                                         "view_tag": out.view_tag,
                                         "lock_height": out.lock_height,
                                         "has_memo": !out.encrypted_memo.is_empty(),
+                                        // Encrypted memo bytes (ChaCha20-Poly1305 ciphertext).
+                                        // Public on chain anyway — exposing here only saves a
+                                        // block-scan trip for clients that want to decrypt with
+                                        // the recipient's view key. Empty when there's no memo.
+                                        "encrypted_memo": hex::encode(&out.encrypted_memo),
                                     })
                                 }).collect();
                                 let has_range_proof = !tx.range_proof.is_empty();
