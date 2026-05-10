@@ -161,15 +161,52 @@ pub fn create_privacy_transaction<R: RngCore + CryptoRng>(
     create_privacy_transaction_with_fee(balance, recipients, keys, decoy_pool, current_height, 1.0, rng)
 }
 
-/// Create a full privacy transaction with a fee multiplier for priority/RBF
+/// Create a full privacy transaction with a fee multiplier for priority/RBF.
+///
+/// Wrapper that calls the options-bearing variant with `memo = None` and
+/// `extra = Vec::new()`. Preserves the no-extras call shape used by
+/// `wallet::churn` and other callers that don't need a memo or recovery
+/// metadata. New callers that DO need either should call
+/// `create_privacy_transaction_with_options` directly.
 #[allow(dead_code)]
 pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
+    balance: &Balance,
+    recipients: &[(PublicKey, PublicKey, Amount)],
+    keys: &KeyEpoch,
+    decoy_pool: &[DecoyOutput],
+    current_height: u64,
+    fee_multiplier: f64,
+    rng: &mut R,
+) -> Result<Transaction> {
+    create_privacy_transaction_with_options(
+        balance, recipients, keys, decoy_pool, current_height,
+        fee_multiplier, None, Vec::new(), rng,
+    )
+}
+
+/// Create a full privacy transaction with optional encrypted memo and
+/// optional `tx.extra` bytes.
+///
+/// `memo` (if `Some`) is encrypted on the first recipient output and
+/// recoverable by anyone holding the recipient's view key (max 256
+/// bytes plaintext per consensus rules).
+///
+/// `extra` is embedded into `tx.extra` verbatim. The current production
+/// use is `RecoveryMeta::encode_all(&[meta])` for the dead-man's-switch
+/// flow — `set-recovery` configures the recovery pubkey + timeout,
+/// `send --recovery-address X --recovery-timeout Y` produces the
+/// 42-byte encoding, and the chain validator persists it so the
+/// recovery wallet can detect expiry and sweep.
+#[allow(dead_code)]
+pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     balance: &Balance,
     recipients: &[(PublicKey, PublicKey, Amount)], // (spend_pub, view_pub, amount)
     keys: &KeyEpoch,
     decoy_pool: &[DecoyOutput],
     current_height: u64,
     fee_multiplier: f64, // wallet-side only, NOT consensus. 1.0 = normal, 2.0 = double fee
+    memo: Option<&[u8]>,
+    extra: Vec<u8>,
     rng: &mut R,
 ) -> Result<Transaction> {
     let total_send: Amount = recipients.iter().map(|(_, _, a)| *a).sum();
@@ -343,6 +380,12 @@ pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
     // Build the transaction (BP+ range proofs at/above activation height)
     let mut builder = TransactionBuilder::transfer()
         .with_target_height(current_height);
+    if let Some(m) = memo {
+        builder = builder.with_memo(m);
+    }
+    if !extra.is_empty() {
+        builder = builder.with_extra(extra.clone());
+    }
 
     // Add inputs with ring signatures
     for utxo in &selected {

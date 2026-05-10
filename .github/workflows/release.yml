@@ -25,10 +25,12 @@ jobs:
         run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
+      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
+        run: cargo build --release -p coincync-swap --bin cyncswap
       - name: Package
         run: |
           mkdir pkg
-          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet pkg/
+          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet target/release/cyncswap pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
@@ -52,11 +54,13 @@ jobs:
         run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
+      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
+        run: cargo build --release -p coincync-swap --bin cyncswap
       - name: Package
         shell: bash
         run: |
           mkdir pkg
-          cp target/release/coincync-node.exe target/release/coincync-rig.exe target/release/coincync-wallet.exe pkg/
+          cp target/release/coincync-node.exe target/release/coincync-rig.exe target/release/coincync-wallet.exe target/release/cyncswap.exe pkg/
           cd pkg && sha256sum * > SHA256SUMS.txt && cd ..
           tar czf coincync-windows-x64.tar.gz -C pkg .
       - uses: actions/upload-artifact@v4
@@ -79,10 +83,12 @@ jobs:
         run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
+      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
+        run: cargo build --release -p coincync-swap --bin cyncswap
       - name: Package
         run: |
           mkdir pkg
-          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet pkg/
+          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet target/release/cyncswap pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
@@ -108,10 +114,12 @@ jobs:
         run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
+      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
+        run: cargo build --release -p coincync-swap --bin cyncswap
       - name: Package
         run: |
           mkdir pkg
-          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet pkg/
+          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet target/release/cyncswap pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh

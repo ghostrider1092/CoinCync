@@ -112,6 +112,13 @@ pub struct TransactionBuilder {
     target_height: u64,
     /// Optional plaintext memo to encrypt on the first recipient output.
     memo: Option<Vec<u8>>,
+    /// Optional bytes to embed in `tx.extra`. Used by the dead-man's
+    /// switch to encode `RecoveryMeta` (sender provides a recovery
+    /// pubkey + inactivity-timeout-blocks; if the wallet stops signing
+    /// for `timeout_blocks`, the recovery address can sweep these
+    /// outputs). The CLI flow is `set-recovery` → store config →
+    /// `send --recovery-address X --recovery-timeout Y` → embed.
+    extra: Vec<u8>,
     /// Transaction version.
     tx_version: u8,
 }
@@ -128,8 +135,20 @@ impl TransactionBuilder {
             output_tx_secrets: Vec::new(),
             target_height: 0,
             memo: None,
+            extra: Vec::new(),
             tx_version: 1,
         }
+    }
+
+    /// Attach raw bytes to `tx.extra`. Used to embed `RecoveryMeta`
+    /// (dead-man's switch) so the chain validator can persist the
+    /// recovery address + timeout, and the recovery wallet can detect
+    /// expiry. Format is whatever the caller provides — typically
+    /// `RecoveryMeta::encode_all(&[meta])` for the dead-man's switch
+    /// case. Empty → standard tx with no recovery metadata (default).
+    pub fn with_extra(mut self, extra: Vec<u8>) -> Self {
+        self.extra = extra;
+        self
     }
 
     /// Set the target block height for range proof version selection.
@@ -595,6 +614,15 @@ impl TransactionBuilder {
                 )
             })
             .collect();
+        // The signing hash MUST cover `extra` for sign/verify consistency.
+        // Earlier versions of the builder hardcoded extra = [] here and
+        // also hardcoded `extra: Vec::new()` in the final Transaction —
+        // those two zeros agreed by accident. Now that `with_extra()`
+        // can populate `self.extra` (used by the dead-man's-switch flow
+        // in wallet/send.rs::create_privacy_transaction_with_options),
+        // the hash MUST cover the actual bytes — otherwise the verifier
+        // computes a hash over the non-empty extra and rejects the
+        // signature with "Ring signature verification failed".
         let signing_hash = Transaction::compute_signing_hash(
             self.tx_version,
             self.tx_type,
@@ -602,7 +630,7 @@ impl TransactionBuilder {
             signing_input_views,
             &tx_outputs,
             &range_proof_bytes,
-            &[], // builder always sets extra = empty
+            &self.extra,
         );
         let message = signing_hash.as_bytes().to_vec();
 
@@ -653,7 +681,7 @@ impl TransactionBuilder {
             outputs: tx_outputs,
             fee: self.fee,
             range_proof: range_proof_bytes,
-            extra: Vec::new(),
+            extra: self.extra,
         })
     }
 

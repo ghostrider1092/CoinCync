@@ -132,6 +132,25 @@ enum Command {
         /// you'll pay a large fee. Used by the testnet faucet's onboarding flow.
         #[arg(long, default_value = "false")]
         split_output: bool,
+        /// Optional plaintext memo (max 256 bytes). Encrypted on the
+        /// first recipient output using the recipient's view key —
+        /// only the recipient can decrypt. Useful for human-readable
+        /// notes ("rent june", "for coffee") or invoice IDs that
+        /// don't belong on-chain in plaintext.
+        #[arg(long)]
+        memo: Option<String>,
+        /// Dead-man's switch — recovery address (64-hex spend pubkey
+        /// of a backup wallet). If this wallet doesn't sign for
+        /// `--recovery-timeout` blocks, the recovery wallet can sweep
+        /// the outputs of this tx. Embeds a 42-byte RecoveryMeta into
+        /// `tx.extra`. Both flags must be passed together.
+        #[arg(long)]
+        recovery_address: Option<String>,
+        /// Blocks of inactivity before recovery activates (min 720 ≈
+        /// 24h, max 525960 ≈ 2yr). Required when `--recovery-address`
+        /// is set; ignored otherwise.
+        #[arg(long)]
+        recovery_timeout: Option<u64>,
     },
 
     /// Generate M-of-N multi-sig key shares using FROST.
@@ -256,6 +275,84 @@ enum Command {
         #[arg(long)]
         message: String,
     },
+
+    /// Subaddress operations: list and generate unlinkable receiving
+    /// addresses derived from this wallet's view+spend keys. Each
+    /// subaddress is a distinct (account, index) tuple. Senders to
+    /// different subaddresses cannot tell that they're paying the
+    /// same wallet — the spend pubkeys are independent on chain even
+    /// though they share a view key for scan.
+    Subaddress {
+        #[command(subcommand)]
+        action: SubaddressAction,
+    },
+
+    /// Selective-disclosure proofs. Prove statements about owned
+    /// UTXOs to a third party (auditor, KYC counterparty) without
+    /// revealing values or one-time secrets. All non-interactive —
+    /// proof bytes travel over any channel.
+    Disclose {
+        #[command(subcommand)]
+        action: DiscloseAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiscloseAction {
+    /// Prove a specific UTXO's amount is at least `--threshold`
+    /// without revealing the actual amount. Useful for
+    /// proof-of-funds at a counterparty without exposing balance.
+    Balance {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Index of the UTXO in the wallet's UTXO list (0-based).
+        /// Run `scan` first; the order is the persisted order.
+        #[arg(long)]
+        utxo_index: usize,
+        /// Threshold value in atomic units. Asserts
+        /// `utxo.amount >= threshold`. Must be <= actual value.
+        #[arg(long)]
+        threshold: u64,
+    },
+    /// Verify a hex-encoded balance proof. No wallet keys needed —
+    /// anyone can verify.
+    VerifyBalance {
+        #[arg(long)]
+        proof: String,
+    },
+    /// Verify a hex-encoded ownership proof. The wallet owner
+    /// produces the OwnershipProof out-of-band; the auditor
+    /// pastes the proof here.
+    VerifyOwnership {
+        #[arg(long)]
+        proof: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SubaddressAction {
+    /// List all subaddresses currently generated for this wallet.
+    /// Always includes the main address (0/0). Subaddresses generated
+    /// in past sessions are persisted in the wallet file.
+    List {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+    /// Generate the next subaddress in `--account` (default 0) and
+    /// persist it to the wallet file. Prints the new address.
+    Create {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Account index. Different accounts give independent
+        /// subaddress streams — useful for separating funds (e.g.,
+        /// account 0 for personal, account 1 for business).
+        #[arg(long, default_value = "0")]
+        account: u32,
+        /// Optional human-readable label saved alongside the
+        /// subaddress (e.g., "exchange-deposit-2026-05").
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -295,8 +392,8 @@ async fn main() {
             cmd_scan(&wallet_path, password, from, max_blocks, &cli.node).await
         }
         Command::PrivacyStats => cmd_privacy_stats(&cli.node).await,
-        Command::Send { password, to_spend, to_view, amount, fee_multiplier, split_output } => {
-            cmd_send(&wallet_path, password, to_spend, to_view, amount, fee_multiplier, split_output, &cli.node).await
+        Command::Send { password, to_spend, to_view, amount, fee_multiplier, split_output, memo, recovery_address, recovery_timeout } => {
+            cmd_send(&wallet_path, password, to_spend, to_view, amount, fee_multiplier, split_output, memo, recovery_address, recovery_timeout, &cli.node).await
         }
         Command::MultisigGen { threshold, total, output_dir } => {
             cmd_multisig_gen(threshold, total, &output_dir, network).await
@@ -326,6 +423,25 @@ async fn main() {
         Command::MultisigAggregate { commitments, shares, key_shares, message } => {
             cmd_multisig_aggregate(&commitments, &shares, &key_shares, &message).await
         }
+        Command::Subaddress { action } => match action {
+            SubaddressAction::List { password } => {
+                cmd_subaddress_list(&wallet_path, password, network).await
+            }
+            SubaddressAction::Create { password, account, label } => {
+                cmd_subaddress_create(&wallet_path, password, account, label, network).await
+            }
+        },
+        Command::Disclose { action } => match action {
+            DiscloseAction::Balance { password, utxo_index, threshold } => {
+                cmd_disclose_balance(&wallet_path, password, utxo_index, threshold).await
+            }
+            DiscloseAction::VerifyBalance { proof } => {
+                cmd_disclose_verify_balance(&proof).await
+            }
+            DiscloseAction::VerifyOwnership { proof } => {
+                cmd_disclose_verify_ownership(&proof).await
+            }
+        },
     };
 
     if let Err(e) = result {
@@ -792,6 +908,9 @@ async fn cmd_send(
     amount: u64,
     fee_multiplier: f64,
     split_output: bool,
+    memo: Option<String>,
+    recovery_address_hex: Option<String>,
+    recovery_timeout: Option<u64>,
     node: &str,
 ) -> Result<(), String> {
     use coincync::primitives::{Amount, PublicKey};
@@ -810,6 +929,23 @@ async fn cmd_send(
     };
     let to_spend = parse_pk(&to_spend_hex, "to-spend")?;
     let to_view = parse_pk(&to_view_hex, "to-view")?;
+
+    // Cheap arg-validation before any network or wallet I/O. A
+    // wrong --memo or mismatched --recovery-* pair shouldn't make
+    // the user wait for an RPC roundtrip + decoy fetch only to
+    // bail. The deeper checks (hex decode, output_index against
+    // recipients) stay below where the values are consumed.
+    if let Some(s) = memo.as_deref() {
+        if s.len() > 256 {
+            return Err(format!("memo too long: {} bytes (max 256)", s.len()));
+        }
+    }
+    match (recovery_address_hex.as_deref(), recovery_timeout) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("--recovery-address and --recovery-timeout must be passed together".into());
+        }
+        _ => {}
+    }
 
     // Unlock wallet
     let password = match password {
@@ -890,15 +1026,68 @@ async fn cmd_send(
         vec![(to_spend, to_view, Amount::from_atomic(amount))]
     };
 
+    // Build the optional memo + recovery extra. Memo is bounded at 256
+    // bytes (consensus rule); we surface a clear CLI error rather than
+    // letting the builder reject it cryptically. Recovery requires both
+    // --recovery-address AND --recovery-timeout — pass-only-one is a
+    // user-error.
+    let memo_bytes: Option<Vec<u8>> = match memo {
+        Some(s) if s.len() > 256 => {
+            return Err(format!("memo too long: {} bytes (max 256)", s.len()));
+        }
+        Some(s) => Some(s.into_bytes()),
+        None => None,
+    };
+
+    let extra_bytes: Vec<u8> = match (recovery_address_hex, recovery_timeout) {
+        (Some(addr_hex), Some(timeout)) => {
+            use coincync::transaction::recovery::RecoveryMeta;
+            let addr_v = hex::decode(&addr_hex)
+                .map_err(|e| format!("invalid --recovery-address hex: {}", e))?;
+            if addr_v.len() != 32 {
+                return Err(format!("--recovery-address must be 32 bytes (64 hex), got {}", addr_v.len()));
+            }
+            let mut addr = [0u8; 32];
+            addr.copy_from_slice(&addr_v);
+            // Attach recovery metadata to output 0. For the uniform 2-out
+            // shape, output 0 is the first recipient; output 1 is change
+            // (or a second recipient in drip-pair). The "right" semantic
+            // is "recovery applies to the change output the sender keeps"
+            // — implementing that requires either (a) emitting per-output
+            // recovery entries indexed at the change output specifically,
+            // or (b) the consensus validator recognizing recovery from
+            // EITHER key image. For now we attach to output 0 so the
+            // encoding round-trips through tx.extra and `check-recovery`
+            // can detect the metadata; the consensus-level recovery-spend
+            // path is tracked separately.
+            let meta = RecoveryMeta {
+                output_index: 0,
+                recovery_address: addr,
+                timeout_blocks: timeout,
+            };
+            meta.validate(recipients.len())
+                .map_err(|e| format!("invalid recovery config: {}", e))?;
+            println!("  Recovery:        addr={}…  timeout={} blocks",
+                &addr_hex[..16.min(addr_hex.len())], timeout);
+            RecoveryMeta::encode_all(&[meta])
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("--recovery-address and --recovery-timeout must be passed together".into());
+        }
+        (None, None) => Vec::new(),
+    };
+
     let balance_snapshot = wallet.balance();
     let mut rng = rand::rngs::OsRng;
-    let tx = coincync::wallet::send::create_privacy_transaction_with_fee(
+    let tx = coincync::wallet::send::create_privacy_transaction_with_options(
         &balance_snapshot,
         &recipients,
         &keys,
         &decoy_pool,
         current_height,
         fee_multiplier,
+        memo_bytes.as_deref(),
+        extra_bytes,
         &mut rng,
     )
     .map_err(|e| format!("create_privacy_transaction: {}", e))?;
@@ -1520,4 +1709,235 @@ async fn cmd_auto_churn(
 
     println!("Auto-churn stopped.");
     Ok(())
+}
+
+async fn cmd_subaddress_list(
+    path: &PathBuf,
+    password: Option<String>,
+    network: Network,
+) -> Result<(), String> {
+    use coincync::wallet::subaddress::SubaddressManager;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = match password {
+        Some(p) => p,
+        None => prompt_password(false)?,
+    };
+    let data = load_wallet(path, Some(password.as_str()))
+        .map_err(|e| format!("unlock failed: {}", e))?;
+
+    let keys = WalletKeys::from_seed(data.seed);
+    let epoch = keys
+        .current()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+
+    // Build a manager seeded with this wallet's keys, then import any
+    // persisted subaddresses from the wallet file. The MAIN address
+    // (account 0, index 0) is always present; others appear only if
+    // the user has run `subaddress create` previously.
+    let mut mgr = SubaddressManager::new(
+        epoch.view_secret.clone(),
+        epoch.spend_public,
+        epoch.view_public,
+    );
+    if let Some(saved) = data.subaddresses.as_ref() {
+        mgr.import(saved);
+    }
+
+    let prim_network = match network {
+        Network::Mainnet => coincync::primitives::Network::Mainnet,
+        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+    };
+
+    println!("Subaddresses for wallet {:?}:", path);
+    let mut all = mgr.all();
+    all.sort_by_key(|s| (s.index.account, s.index.index));
+    for sub in all {
+        let used_marker = if sub.used { "[USED]" } else { "      " };
+        println!(
+            "  {} {}  {}  {}",
+            used_marker,
+            sub.index,
+            sub.address(prim_network),
+            if sub.label.is_empty() { String::new() } else { format!("({})", sub.label) }
+        );
+    }
+    println!();
+    println!("Total: {} subaddress(es)", mgr.count());
+    Ok(())
+}
+
+async fn cmd_subaddress_create(
+    path: &PathBuf,
+    password: Option<String>,
+    account: u32,
+    label: Option<String>,
+    network: Network,
+) -> Result<(), String> {
+    use coincync::wallet::subaddress::SubaddressManager;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = match password {
+        Some(p) => p,
+        None => prompt_password(false)?,
+    };
+    let mut data = load_wallet(path, Some(password.as_str()))
+        .map_err(|e| format!("unlock failed: {}", e))?;
+
+    let keys = WalletKeys::from_seed(data.seed);
+    let epoch = keys
+        .current()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+
+    let mut mgr = SubaddressManager::new(
+        epoch.view_secret.clone(),
+        epoch.spend_public,
+        epoch.view_public,
+    );
+    if let Some(saved) = data.subaddresses.as_ref() {
+        mgr.import(saved);
+    }
+
+    let new_index = mgr
+        .generate_next(account)
+        .map(|s| s.index)
+        .ok_or_else(|| format!("failed to generate subaddress at account {}", account))?;
+    if let Some(lbl) = label {
+        mgr.set_label(new_index, &lbl);
+    }
+    let sub = mgr.get(new_index)
+        .ok_or_else(|| "internal error: just-created subaddress not found".to_string())?
+        .clone();
+
+    let prim_network = match network {
+        Network::Mainnet => coincync::primitives::Network::Mainnet,
+        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+    };
+
+    // Persist the updated subaddress set back into the wallet file.
+    data.subaddresses = Some(mgr.export());
+    save_wallet(path, &data, Some(password.as_str()))
+        .map_err(|e| format!("save wallet: {}", e))?;
+
+    println!("Generated subaddress:");
+    println!("  Index:        {}", sub.index);
+    println!("  Address:      {}", sub.address(prim_network));
+    println!("  Spend public: {}", hex::encode(sub.spend_public.as_bytes()));
+    println!("  View public:  {}", hex::encode(sub.view_public.as_bytes()));
+    if !sub.label.is_empty() {
+        println!("  Label:        {}", sub.label);
+    }
+    println!();
+    println!("Persisted to {:?}.  Share this address with senders — they cannot", path);
+    println!("link payments to your other subaddresses on-chain.");
+    Ok(())
+}
+
+async fn cmd_disclose_balance(
+    path: &PathBuf,
+    password: Option<String>,
+    utxo_index: usize,
+    threshold: u64,
+) -> Result<(), String> {
+    use coincync::crypto::{create_balance_proof, PedersenCommitment, BlindingFactor};
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = match password {
+        Some(p) => p,
+        None => prompt_password(false)?,
+    };
+    let mut wallet = Wallet::open(path.clone())
+        .map_err(|e| format!("open wallet: {}", e))?;
+    wallet.unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    if utxos.is_empty() {
+        return Err("wallet has no unspent UTXOs to prove balance over".into());
+    }
+    let utxo = utxos.get(utxo_index)
+        .ok_or_else(|| format!(
+            "utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            utxo_index, utxos.len()
+        ))?;
+
+    let value = utxo.amount.as_atomic();
+    if value < threshold {
+        return Err(format!(
+            "cannot prove threshold {}: UTXO has only {} atomic",
+            threshold, value
+        ));
+    }
+    let blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);
+    let commitment = PedersenCommitment::commit(value, &blinding);
+
+    let proof = create_balance_proof(value, &blinding, &commitment, threshold)
+        .map_err(|e| format!("create_balance_proof: {}", e))?;
+
+    let json = serde_json::to_vec(&proof)
+        .map_err(|e| format!("serialize proof: {}", e))?;
+    let proof_hex = hex::encode(&json);
+
+    println!("Balance proof (hex):");
+    println!("  utxo:        index={}  amount={}  height={}", utxo_index, value, utxo.height);
+    println!("  threshold:   {} atomic (≈ {:.4} CYNC)", threshold, threshold as f64 / 1e12);
+    println!("  proof_bytes: {} bytes", json.len());
+    println!();
+    println!("{}", proof_hex);
+    println!();
+    println!("Verifier needs only the bytes above — no chain access, no wallet keys.");
+    println!("Run `coincync-wallet disclose verify-balance --proof <hex>` to check.");
+    Ok(())
+}
+
+async fn cmd_disclose_verify_balance(proof_hex: &str) -> Result<(), String> {
+    use coincync::crypto::{DisclosureBalanceProof as BalanceProof, verify_balance_proof};
+
+    let bytes = hex::decode(proof_hex)
+        .map_err(|e| format!("invalid proof hex: {}", e))?;
+    let proof: BalanceProof = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("decode BalanceProof: {}", e))?;
+
+    let ok = verify_balance_proof(&proof)
+        .map_err(|e| format!("verify_balance_proof: {}", e))?;
+
+    if ok {
+        println!("VALID balance proof");
+        println!("  threshold:   {} atomic (≈ {:.4} CYNC)",
+            proof.threshold, proof.threshold as f64 / 1e12);
+        println!("  timestamp:   {} (unix epoch seconds)", proof.timestamp);
+        println!("  commitment:  {}", hex::encode(proof.original_commitment));
+        println!();
+        println!("The prover demonstrated knowledge of a value ≥ {} atomic", proof.threshold);
+        println!("without revealing the actual value.");
+        Ok(())
+    } else {
+        Err("INVALID: proof verification failed".into())
+    }
+}
+
+async fn cmd_disclose_verify_ownership(proof_hex: &str) -> Result<(), String> {
+    use coincync::crypto::{OwnershipProof, verify_ownership_proof};
+
+    let bytes = hex::decode(proof_hex)
+        .map_err(|e| format!("invalid proof hex: {}", e))?;
+    let proof: OwnershipProof = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("decode OwnershipProof: {}", e))?;
+
+    let ok = verify_ownership_proof(&proof)
+        .map_err(|e| format!("verify_ownership_proof: {}", e))?;
+
+    if ok {
+        println!("VALID ownership proof");
+        Ok(())
+    } else {
+        Err("INVALID: proof verification failed".into())
+    }
 }

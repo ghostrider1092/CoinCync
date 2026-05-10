@@ -323,14 +323,26 @@ impl P2PNode {
             // Pick first available peer in this stripe
             let target = stripe_peers[0];
             if let Some(sender) = self.peer_senders.get(&target) {
-                let mut payload = vec![super::protocol::MessageType::GetKeyImageStatus as u8];
                 if let Ok(encoded) = borsh::to_vec(ki_bytes) {
-                    payload.extend_from_slice(&encoded);
-                    let _ = sender.send(payload).await;
-                    tracing::debug!(
-                        "DHT: sent {} key image queries to stripe {} peer {:?}",
-                        ki_bytes.len(), stripe, &target[..4]
+                    // Frame as a real Message — the per-peer write loop in
+                    // peer_handler reads `data[4]` as the message type and
+                    // expects the full magic+type+length+checksum header. A
+                    // raw `vec![type, ...payload]` makes data[4] a body byte,
+                    // which the framer then rejects with "unknown type: N",
+                    // breaking the connection mid-IBD. (See: 2026-05-09 IBD
+                    // wedge investigation.)
+                    let msg = super::protocol::Message::new(
+                        self.config.magic,
+                        super::protocol::MessageType::GetKeyImageStatus,
+                        encoded,
                     );
+                    if let Ok(data) = msg.to_bytes() {
+                        let _ = sender.send(data).await;
+                        tracing::debug!(
+                            "DHT: sent {} key image queries to stripe {} peer {:?}",
+                            ki_bytes.len(), stripe, &target[..4]
+                        );
+                    }
                 }
             }
         }
@@ -3049,12 +3061,16 @@ async fn process_message(
                     }
                 }
 
-                // Serialize and send response
+                // Serialize and send response. Use Message::to_bytes() so
+                // the per-peer write loop reads `data[4]` as the real
+                // message type instead of a body byte (see 2026-05-09 IBD
+                // wedge: 5 sites bypassed framing and broke the connection).
                 if let Some(sender) = senders.get(&peer_id) {
-                    let mut resp_data = vec![MessageType::Filters as u8];
                     if let Ok(encoded) = borsh::to_vec(&filters) {
-                        resp_data.extend_from_slice(&encoded);
-                        let _ = sender.send(resp_data).await;
+                        let msg = Message::new(magic, MessageType::Filters, encoded);
+                        if let Ok(data) = msg.to_bytes() {
+                            let _ = sender.send(data).await;
+                        }
                     }
                 }
             }
@@ -3105,10 +3121,11 @@ async fn process_message(
             }
 
             if let Some(sender) = senders.get(&peer_id) {
-                let mut resp_data = vec![MessageType::OutputDigests as u8];
                 if let Ok(encoded) = borsh::to_vec(&digests) {
-                    resp_data.extend_from_slice(&encoded);
-                    let _ = sender.send(resp_data).await;
+                    let msg = Message::new(magic, MessageType::OutputDigests, encoded);
+                    if let Ok(data) = msg.to_bytes() {
+                        let _ = sender.send(data).await;
+                    }
                 }
             }
         }
@@ -3156,10 +3173,11 @@ async fn process_message(
             }
 
             if let Some(sender) = senders.get(&peer_id) {
-                let mut resp_data = vec![MessageType::FilterCheckpoints as u8];
                 if let Ok(encoded) = borsh::to_vec(&checkpoints) {
-                    resp_data.extend_from_slice(&encoded);
-                    let _ = sender.send(resp_data).await;
+                    let msg = Message::new(magic, MessageType::FilterCheckpoints, encoded);
+                    if let Ok(data) = msg.to_bytes() {
+                        let _ = sender.send(data).await;
+                    }
                 }
             }
         }
@@ -3187,10 +3205,11 @@ async fn process_message(
                 }
 
                 if let Some(sender) = senders.get(&peer_id) {
-                    let mut resp_data = vec![MessageType::KeyImageStatus as u8];
                     if let Ok(encoded) = borsh::to_vec(&statuses) {
-                        resp_data.extend_from_slice(&encoded);
-                        let _ = sender.send(resp_data).await;
+                        let msg = Message::new(magic, MessageType::KeyImageStatus, encoded);
+                        if let Ok(data) = msg.to_bytes() {
+                            let _ = sender.send(data).await;
+                        }
                     }
                 }
             }
