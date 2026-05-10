@@ -497,12 +497,14 @@ Run through this 30 minutes before posting. None of these should still be open b
 - [x] Hot wallet has tCYNC balance: ~1500 tCYNC after top-up (≈150 drips of buffer)
 - [x] Anonymity-set tile on explorer shows real value (~6800)
 - [x] Fresh-node IBD smoke-test PASSED on nyc (h=0 → h=429+ progressing, ring=11)
-- [x] GitHub Release created at v1.0.3-testnet with binaries
-- [ ] CI green for the latest commit (check after the rand-dep fix lands)
+- [x] Launch convergence fix shipped — v1.0.5-testnet binary on all 5 Vultr boxes (commit `d955362`, see commit message for the two-bug story)
+- [x] Fleet convergence stress-tested: parallel cold start of 5 boxes + miner producing at floor difficulty converged at h=197 in ~7 min, all synced=true
+- [ ] GitHub Release created at v1.0.5-testnet with binaries (manually attach files from `cync-release-v1.0.5-testnet/`)
+- [ ] CI green for the latest commit
 - [ ] Forgejo `git.coincync.network/coincync/cync-protocol` — if NOT yet deployed, swap all references in this doc to `https://github.com/ghostrider1092/Coincync-Testnet-` before posting
 - [ ] Block height + hashrate updated to current values (run `curl https://api.coincync.network/rpc/testnet -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' | python3 -m json.tool` to grab fresh numbers)
 - [ ] Discord invite tested in private browser (not rate-limited)
-- [ ] Wallet installer download URL points at v1.0.3-testnet release artifacts (in README + announcement bodies)
+- [ ] Wallet installer download URL points at v1.0.5-testnet release artifacts (in README + announcement bodies)
 - [ ] Local home miner is **set to start on boot** (Sunday windows-sleep is OFF; if your machine reboots overnight, the chain stalls)
 
 ## Posting order (Sun 2026-05-10 — adjusted from Mon to Sun)
