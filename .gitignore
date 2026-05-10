@@ -135,3 +135,6 @@ deploy/ops/template-check.sh
 .wrangler/
 *.wrangler-account.json
 
+# Fleet backups — per-host /etc/coincync/ snapshots include RPC API
+# keys, faucet wallet password, and node signing keys. Never commit.
+/fleet-backup-*/

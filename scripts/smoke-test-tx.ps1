@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   End-to-end smoke test: create two wallets, mine to A, send to B, verify receipt.

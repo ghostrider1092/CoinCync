@@ -22,7 +22,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUST_VERSION="1.85.0"
+RUST_VERSION="1.88.0"
 IMAGE_TAG="coincync-build:HEAD"
 OUT_DIR="$REPO_ROOT/out"
 
