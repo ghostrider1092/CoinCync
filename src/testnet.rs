@@ -78,24 +78,17 @@ pub const TESTNET_GENESIS_HASH: [u8; 32] = [
 /// an alternative chain from genesis. Any chain that disagrees with a checkpoint
 /// at or below the checkpoint height is rejected immediately.
 pub const TESTNET_CHECKPOINT_LIST: &[(u64, &str)] = &[
-    // Checkpoints enable fast sync: blocks below the highest checkpoint
-    // skip expensive crypto verification (range proofs, ring signatures,
-    // RandomX PoW). Structural checks still run. ~10-50x faster initial sync.
+    // CLEARED 2026-05-10 for the public-launch chain reset.
     //
-    // Pulled from the canonical testnet (post-2026-05-02 redeploy) via
-    // `get_block_by_height`. Add new entries every ~50–100 blocks as the
-    // chain matures. Never remove an existing entry — that would let a
-    // long-range attacker rewrite history below the deleted checkpoint.
-    (  50, "9b282b2732ce2b935ecffae92e00c243ea579331d304d522cbf0f507458e04f2"),
-    ( 100, "e2f6cdb8e496ae0b8a526ce8a91150d96d675625c69d64724627bcdbaa546a9b"),
-    ( 150, "4060d5059f25c1be5234da1947495c6128ec9980d37915d06463576bee58ca3d"),
-    ( 200, "8c8a44d79aa4b330e2f731c5323cd24bbed1d819660d3a3569a85bbf92039b29"),
-    ( 250, "a00ffb1ccd0e5acf77cf114937c3ab824bfe7ffb2a90b95ab974231e1e242ce3"),
-    ( 300, "7f026477d87e6a8e73ee47fd7ceb3fbb6f3e449e1ab672bdc1d8b7d59f824af4"),
-    ( 350, "54f346581f666f08e6561e639f9f12b471382bc8fee0c8bf65a9d52a2f1048cc"),
-    ( 400, "da1601f6b62b05f7f8be983fdfe5cf69ffb47bbd277fa1d88f481629038ce37a"),
-    ( 450, "da3f78bd553f2cb36c335a37118d52e630939d88dafa9b3c1d092921233b2e4d"),
-    ( 488, "17384b417ffd0a5bd0f49c26f599bd44cda88010ae2146e8fe260d7e47185e22"),
+    // The previous entries were pulled from the pre-launch testnet that
+    // was wiped + re-mined fresh under v1.0.3-testnet rules at launch
+    // time; the new chain's blocks at those heights have different
+    // hashes, so leaving the old entries in here would reject every
+    // freshly-mined block at h=50/100/150/.../488 with "Hardcoded
+    // checkpoint mismatch". Will be re-populated from the post-launch
+    // canonical chain in a v1.0.5+ release once the chain has matured
+    // past block 500. Until then, full PoW verification runs on every
+    // block of every fresh sync — slower but correct.
 ];
 
 pub fn highest_checkpoint_height() -> u64 {
