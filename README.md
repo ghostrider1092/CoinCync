@@ -31,18 +31,22 @@ A privacy-first cryptocurrency with mandatory shielding, auditable supply, and c
 ## Quick Start
 
 ```bash
-# Download
-wget https://explorer.coincync.network/releases/v1.0.0-testnet/coincync-1.0.0-testnet-linux-x86_64.tar.gz
-tar xzf coincync-1.0.0-testnet-linux-x86_64.tar.gz
+# Download — Linux x86_64 (Windows builds available in same release)
+wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.3-testnet/coincync-linux-x86_64.tar.gz
+tar xzf coincync-linux-x86_64.tar.gz
 
-# Run a node
+# Verify checksums (recommended)
+wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.3-testnet/SHA256SUMS.txt
+sha256sum -c SHA256SUMS.txt
+
+# Run a node (binds 0.0.0.0:28080 P2P, 127.0.0.1:28081 RPC)
 ./coincync-node --network testnet
 
 # Create wallet
 ./coincync-wallet create -p YOUR_PASSWORD
 
-# Mine
-./coincync-miner --address YOUR_tCYNC_ADDRESS --threads 4 --node 127.0.0.1:28081
+# Mine — RandomX, CPU only
+./coincync-rig run-solo --node http://127.0.0.1:28081 --address YOUR_tCYNC_ADDRESS --threads 0
 ```
 
 See [Getting started docs](docs/src/getting-started/build.md) for full instructions.
