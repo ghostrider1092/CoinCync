@@ -1,0 +1,43 @@
+[package]
+name         = "coincync-faucet"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+description  = "Public testnet faucet — drips a fixed amount of tCYNC to requesters with per-address + per-IP rate-limiting"
+license      = "MIT"
+
+[[bin]]
+name = "coincync-faucet"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the project's Address codec so we accept exactly the address
+# format the rest of the stack emits.
+coincync = { path = "../..", default-features = false, features = ["randomx", "testnet"] }
+
+# Web server
+axum            = { version = "0.7", features = ["macros"] }
+tokio           = { version = "1", features = ["full", "signal"] }
+tower           = "0.4"
+tower-http      = { version = "0.5", features = ["cors", "trace"] }
+
+# JSON
+serde           = { version = "1", features = ["derive"] }
+serde_json      = "1"
+
+# SQLite for rate-limiting persistence
+rusqlite        = { version = "0.32", features = ["bundled"] }
+
+# Errors
+thiserror       = "1"
+anyhow          = "1"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap            = { version = "4", features = ["derive", "env"] }
+
+# Hex
+hex             = "0.4"
