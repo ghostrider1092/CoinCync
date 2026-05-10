@@ -16,6 +16,10 @@ tracing   = "0.1"
 tracing-subscriber = "0.3"
 zeroize = "1"
 keyring = "2"
+# Used by generate_rpc_key() to create a fresh 64-hex bearer key on
+# first launch. Pinned to 0.8 to match the workspace-wide version
+# elsewhere (root Cargo.toml + crates/coincync-rig/Cargo.toml).
+rand = "0.8"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
