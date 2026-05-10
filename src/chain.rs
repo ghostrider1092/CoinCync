@@ -1103,15 +1103,31 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
 
         // SECURITY: Enforce hardcoded + recorded checkpoints.
         // If we know the hash at this height, reject blocks that don't match.
+        //
+        // DB-recorded checkpoints are only enforced once the block is at least
+        // RECENT_REORG_DEPTH blocks deep from the tip. This avoids the failure
+        // mode that broke the 2026-05-10 launch: every fleet box commits to
+        // its first-seen block at every height, so when 5 boxes get blocks
+        // from different peers concurrently they record 5 incompatible
+        // checkpoint sets and can never accept each other's blocks. By only
+        // enforcing once the block is deep enough that reorg is implausible,
+        // standard longest-chain fork resolution gets to run first and the
+        // fleet converges naturally.
+        const RECENT_REORG_DEPTH: u64 = 10;
+        let current_tip_height = self.height();
+        let too_recent_for_db_checkpoint =
+            block.header.height + RECENT_REORG_DEPTH > current_tip_height;
         if let Some(ref db) = self.db {
-            if let Ok(Some(expected_hash)) = db.state.get_checkpoint(block.header.height) {
-                if hash != expected_hash {
-                    return Ok(BlockStatus::Invalid(format!(
-                        "Checkpoint mismatch at height {}: expected {}, got {}",
-                        block.header.height,
-                        expected_hash.to_hex()[..16].to_string(),
-                        hash.to_hex()[..16].to_string(),
-                    )));
+            if !too_recent_for_db_checkpoint {
+                if let Ok(Some(expected_hash)) = db.state.get_checkpoint(block.header.height) {
+                    if hash != expected_hash {
+                        return Ok(BlockStatus::Invalid(format!(
+                            "Checkpoint mismatch at height {}: expected {}, got {}",
+                            block.header.height,
+                            expected_hash.to_hex()[..16].to_string(),
+                            hash.to_hex()[..16].to_string(),
+                        )));
+                    }
                 }
             }
         }
