@@ -446,16 +446,17 @@ pub async fn start_rpc_server(
             .as_ref()
             .map(|p| p.network_stats().peer_count)
             .unwrap_or(0);
-        // (Item 5) anonymity_set + effective_ring_size are no longer
-        // emitted from get_info — they're chain-analyst correlators that
-        // aren't needed by any wallet that uses get_decoys directly. The
-        // values are still computed in get_decoys / chain.rs where they're
-        // genuinely needed. Let-bindings retained but underscore-prefixed
-        // so any future code addition that wants them can re-bind without
-        // recomputing.
-        let _anonymity_set = state.chain.available_output_count();
-        let _effective_ring_size =
-            crate::constants::effective_ring_size(height, _anonymity_set);
+        // anonymity_set + effective_ring_size are emitted in get_info.
+        // The 2026-05-07 review proposed removing them as a chain-analyst
+        // correlator (every public scrape recording "anonymity_set was M
+        // at time T" gives an attacker an intersection on rings built
+        // around T). The UX cost — the explorer's "anonymity set" tile
+        // showing 00, every user seeing a broken stat — proved larger
+        // than the marginal correlator gain (an attacker who wants this
+        // data can poll get_decoys directly anyway). Field is back.
+        let anonymity_set = state.chain.available_output_count();
+        let effective_ring_size =
+            crate::constants::effective_ring_size(height, anonymity_set);
 
         // Wall-clock read can fail if the system clock is set before
         // UNIX_EPOCH. On failure we report `tip_age_secs = null` + a
@@ -516,35 +517,15 @@ pub async fn start_rpc_server(
             // Mempool
             "tx_pool_size":            state.mempool.len(),
             "mempool_size":            state.mempool.len(), // back-compat alias
-            // Privacy metrics — INTENTIONALLY OMITTED from get_info (Item 5
-            // of the 2026-05-07 senior review).
-            //
-            // The fields `anonymity_set`, `available_outputs`, and
-            // `effective_ring_size` describe the chain's current decoy
-            // pool size. Wallets that build txs need this info, but they
-            // already query `get_decoys` directly which gives them the
-            // ring construction without exposing the chain-wide totals.
-            // Publishing the totals on every `get_info` call gives chain
-            // analysts a cheap correlator: "this tx with ring=N was built
-            // when anonymity_set was M; how many wallets are in that
-            // intersection?"
-            //
-            // The cost of removing these from get_info: the embedded
-            // explorer's "anonymity set" stat tile shows N/A. That's a
-            // worthwhile trade for the privacy improvement, and the
-            // explorer can fetch the same data from `get_decoys` if it
-            // really wants to display it locally without baking it into
-            // every public-facing scrape.
-            //
-            // Operator scripts that genuinely need these (selfcheck etc.)
-            // should read them from the local node via the dedicated
-            // `get_anonymity_set` method (TODO: add) which can require
-            // auth. Until that method exists, anything internal that
-            // needs them can scan the chain directly.
-            //
-            // The `_` (unused) bindings retain the upstream computation
-            // so removing the fields from this map doesn't accidentally
-            // dead-code-eliminate work that has side effects elsewhere.
+            // Privacy metrics. Reflect the chain-wide decoy pool size +
+            // the ring size every wallet uses. Public on-chain data —
+            // any caller that wants this can poll get_decoys to recover
+            // the same number, so withholding it from get_info gives
+            // negligible privacy gain at the cost of breaking every UI
+            // that surfaces the anonymity-set stat.
+            "anonymity_set":           anonymity_set,
+            "available_outputs":       anonymity_set, // back-compat alias
+            "effective_ring_size":     effective_ring_size,
             // Health / monitoring
             "status":                  status,
             "health_score":            health_score,
