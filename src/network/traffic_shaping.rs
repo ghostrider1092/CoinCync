@@ -273,6 +273,68 @@ impl TrafficShaper {
         debug!("traffic shaper padding loop stopped");
     }
 
+    /// Run the constant-rate padding loop, broadcasting a fresh padding
+    /// packet to every currently-connected peer at each interval.
+    ///
+    /// This is the production wire-up. The single-`Sender` variant
+    /// `run_padding_loop` above is for unit tests; in a live node we
+    /// have many peers and a DashMap of senders, and we want every peer
+    /// to see the padding stream so an observer correlating two peers'
+    /// inbound traffic still sees it constant.
+    ///
+    /// Per-tick behavior:
+    ///   1. Sleep `padding_interval_ms`.
+    ///   2. If shaper or padding feature is disabled, skip the tick.
+    ///   3. Generate ONE padding packet per peer (fresh randomness so the
+    ///      packet bytes differ across peers — otherwise a colluding pair
+    ///      could detect that they received the SAME bytes at the SAME
+    ///      time and infer a single sender).
+    ///   4. `try_send` to each peer (non-blocking — a saturated peer
+    ///      gets its tick skipped, the loop doesn't stall on one slow
+    ///      peer).
+    ///
+    /// Increments `padding_sent` once per *successful* send so the stat
+    /// reflects packets that actually entered the per-peer write queue.
+    pub async fn run_padding_loop_broadcast<I, F>(
+        self: Arc<Self>,
+        peer_senders: F,
+        shutdown: Arc<AtomicBool>,
+    ) where
+        F: Fn() -> I + Send + 'static,
+        I: IntoIterator<Item = mpsc::Sender<Vec<u8>>>,
+    {
+        let interval = Duration::from_millis(self.config.padding_interval_ms);
+        debug!(
+            interval_ms = self.config.padding_interval_ms,
+            "traffic shaper padding broadcast loop started"
+        );
+
+        while !shutdown.load(Ordering::Relaxed) {
+            sleep(interval).await;
+
+            if !self.is_enabled() || !self.config.padding_enabled {
+                continue;
+            }
+
+            let mut sent_this_tick: u64 = 0;
+            for sender in peer_senders() {
+                let packet = Self::generate_padding_packet();
+                if sender.try_send(packet).is_ok() {
+                    sent_this_tick += 1;
+                }
+                // Drop on full / disconnected channel — don't block the
+                // broadcast on a slow peer. The peer will see the next
+                // tick's packet if its queue drains.
+            }
+            if sent_this_tick > 0 {
+                self.padding_sent.fetch_add(sent_this_tick, Ordering::Relaxed);
+                trace!(packets = sent_this_tick, "broadcast padding packets");
+            }
+        }
+
+        debug!("traffic shaper padding broadcast loop stopped");
+    }
+
     // ─── Diagnostics ───────────────────────────────────────────────
 
     /// Get traffic shaping statistics.
@@ -374,5 +436,177 @@ mod tests {
         let original = b"passthrough data";
         let result = shaper.normalize_size(original);
         assert_eq!(result, original);
+    }
+
+    // ─── Broadcast-loop production wire-up tests ─────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broadcast_loop_emits_packets_per_peer_per_tick() {
+        // Three mock peers (each with its own mpsc Receiver). Tight
+        // padding_interval (50ms) so the test finishes fast. Verify
+        // every receiver sees at least one padding packet within ~3
+        // ticks AND padding_sent counts match the total deliveries.
+        let cfg = TrafficShaperConfig {
+            padding_interval_ms: 50,
+            ..TrafficShaperConfig::default()
+        };
+        let shaper = Arc::new(TrafficShaper::new(cfg));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let (tx0, mut rx0) = mpsc::channel::<Vec<u8>>(8);
+        let (tx1, mut rx1) = mpsc::channel::<Vec<u8>>(8);
+        let (tx2, mut rx2) = mpsc::channel::<Vec<u8>>(8);
+        let txs = vec![tx0, tx1, tx2];
+
+        let s_clone = shaper.clone();
+        let sd_clone = shutdown.clone();
+        let txs_clone = txs.clone();
+        let handle = tokio::spawn(async move {
+            s_clone.run_padding_loop_broadcast(
+                move || txs_clone.clone().into_iter(),
+                sd_clone,
+            ).await;
+        });
+
+        // Wait long enough for ~3 ticks to fire.
+        tokio::time::sleep(Duration::from_millis(180)).await;
+        shutdown.store(true, Ordering::Relaxed);
+        // Drop the loop's senders so the loop's try_send errors out
+        // and the recvs we hold below stop blocking.
+        drop(txs);
+        let _ = handle.await;
+
+        // Each peer should have received at least 2 packets in 180ms
+        // at 50ms cadence.
+        let r0 = collect_until_empty(&mut rx0).await;
+        let r1 = collect_until_empty(&mut rx1).await;
+        let r2 = collect_until_empty(&mut rx2).await;
+        assert!(r0.len() >= 2, "peer 0 saw {} packets, expected >= 2", r0.len());
+        assert!(r1.len() >= 2, "peer 1 saw {} packets, expected >= 2", r1.len());
+        assert!(r2.len() >= 2, "peer 2 saw {} packets, expected >= 2", r2.len());
+
+        // padding_sent should equal sum of all peer deliveries
+        // (the loop counts each successful try_send).
+        let stats = shaper.stats();
+        let total_received = (r0.len() + r1.len() + r2.len()) as u64;
+        assert_eq!(
+            stats.padding_sent, total_received,
+            "padding_sent counter ({}) must match peers' received total ({})",
+            stats.padding_sent, total_received
+        );
+
+        // Every received packet must be valid PADDING_MAGIC.
+        for p in r0.iter().chain(r1.iter()).chain(r2.iter()) {
+            assert!(TrafficShaper::is_padding_packet(p), "peer received non-padding bytes");
+        }
+
+        // Per-peer packets must differ — otherwise colluding observers
+        // could detect the shared payload.
+        if !r0.is_empty() && !r1.is_empty() {
+            assert_ne!(r0[0], r1[0], "peers 0 and 1 received identical padding bytes");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broadcast_loop_skips_ticks_when_disabled() {
+        // Disable the shaper after spawning. Padding counter must
+        // freeze. Verifies the per-tick is_enabled / padding_enabled
+        // gate works at runtime.
+        let cfg = TrafficShaperConfig {
+            padding_interval_ms: 50,
+            ..TrafficShaperConfig::default()
+        };
+        let shaper = Arc::new(TrafficShaper::new(cfg));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        let txs = vec![tx];
+        let s_clone = shaper.clone();
+        let sd_clone = shutdown.clone();
+        let txs_clone = txs.clone();
+        let handle = tokio::spawn(async move {
+            s_clone.run_padding_loop_broadcast(
+                move || txs_clone.clone().into_iter(),
+                sd_clone,
+            ).await;
+        });
+
+        // Run ~2 ticks while ENABLED so the loop ramps up.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            shaper.stats().padding_sent >= 1,
+            "shaper should have sent at least 1 packet before disable"
+        );
+
+        // Disable, then sleep at least 2× the interval so any tick
+        // that was already past the is_enabled gate when we flipped
+        // the flag has time to complete. Read the WARM baseline
+        // AFTER that drain — anything between this read and the
+        // cold read below is the test signal.
+        shaper.set_enabled(false);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let warm = shaper.stats().padding_sent;
+
+        // Run another 200ms — counter must NOT increase past warm.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let cold = shaper.stats().padding_sent;
+        assert_eq!(warm, cold, "disabled shaper still emitted packets ({} -> {})", warm, cold);
+
+        shutdown.store(true, Ordering::Relaxed);
+        drop(txs);
+        let _ = handle.await;
+        let _ = collect_until_empty(&mut rx).await; // drain
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broadcast_loop_does_not_block_on_full_peer() {
+        // One peer with a 1-slot channel that we never drain. The
+        // broadcast loop must NOT stall — it should `try_send`, see
+        // Full, drop the packet, and continue ticking. Verifies
+        // backpressure-safety.
+        let cfg = TrafficShaperConfig {
+            padding_interval_ms: 30,
+            ..TrafficShaperConfig::default()
+        };
+        let shaper = Arc::new(TrafficShaper::new(cfg));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let (slow_tx, _slow_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (fast_tx, mut fast_rx) = mpsc::channel::<Vec<u8>>(64);
+        let txs = vec![slow_tx, fast_tx];
+        let s_clone = shaper.clone();
+        let sd_clone = shutdown.clone();
+        let txs_clone = txs.clone();
+        let handle = tokio::spawn(async move {
+            s_clone.run_padding_loop_broadcast(
+                move || txs_clone.clone().into_iter(),
+                sd_clone,
+            ).await;
+        });
+
+        // 10 ticks at 30ms = 300ms.
+        tokio::time::sleep(Duration::from_millis(330)).await;
+        shutdown.store(true, Ordering::Relaxed);
+        drop(txs);
+        let _ = handle.await;
+
+        // Fast peer should have received many packets — proves the
+        // loop wasn't blocked by the slow peer.
+        let fast_received = collect_until_empty(&mut fast_rx).await;
+        assert!(
+            fast_received.len() >= 5,
+            "fast peer saw only {} packets, expected >= 5 (slow peer stalled the loop?)",
+            fast_received.len()
+        );
+    }
+
+    async fn collect_until_empty(rx: &mut mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(20), rx.recv()).await {
+                Ok(Some(v)) => out.push(v),
+                _ => return out,
+            }
+        }
     }
 }
