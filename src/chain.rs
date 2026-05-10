@@ -81,14 +81,26 @@ pub const REORG_UNCONDITIONAL_DEPTH: u64 = 10;
 /// Higher divisor = gentler curve. 20 means doubling every 20 blocks above threshold.
 pub const MESS_EXPONENT_DIVISOR: u64 = 20;
 
+/// Tier-2 MESS is disabled below this tip height. During chain bootstrap every
+/// box that boots independently can mine its own h=1 at floor difficulty, and
+/// the work-multiplier defense would permanently lock those parallel forks in
+/// place because none of them can ever satisfy 2^x of the others. Matches the
+/// shape of the ring-size bootstrap relaxation (`BOOTSTRAP_MIN_RING_SIZE`): a
+/// young chain has too little cumulative work for MESS to be meaningful, and
+/// the per-DB checkpoint plus Tier-3 hard cap still bound how far an attacker
+/// can reach.
+pub const BOOTSTRAP_MESS_HEIGHT: u64 = 1000;
+
 /// Evaluate whether a reorg at `depth` with `fork_work` cumulative work should
-/// be accepted given `honest_work` on the current chain.
+/// be accepted given `honest_work` on the current chain. `current_height` is the
+/// caller's current tip; below `BOOTSTRAP_MESS_HEIGHT` we skip Tier-2 MESS.
 ///
 /// Returns `Ok(())` if the reorg is acceptable, `Err(reason)` if rejected.
 pub fn evaluate_reorg_acceptability(
     depth: u64,
     fork_work: u128,
     honest_work: u128,
+    current_height: u64,
 ) -> std::result::Result<(), String> {
     // Tier 3: Hard reject beyond absolute max depth
     let max = max_reorg_depth();
@@ -106,6 +118,18 @@ pub fn evaluate_reorg_acceptability(
         } else {
             return Err(format!(
                 "Fork at depth {} has less work ({} <= {})",
+                depth, fork_work, honest_work
+            ));
+        }
+    }
+
+    // Bootstrap phase: skip Tier-2 MESS, fall back to plain longest-chain.
+    if current_height < BOOTSTRAP_MESS_HEIGHT {
+        if fork_work > honest_work {
+            return Ok(());
+        } else {
+            return Err(format!(
+                "Fork at depth {} has less work ({} <= {}) (bootstrap phase, MESS disabled)",
                 depth, fork_work, honest_work
             ));
         }
@@ -1489,7 +1513,7 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                 // Tier 3 (>100): hard reject.
                 let reorg_depth = block.header.height.saturating_sub(fork_point);
                 if let Err(reason) = evaluate_reorg_acceptability(
-                    reorg_depth, fork_cumulative, current_total_difficulty
+                    reorg_depth, fork_cumulative, current_total_difficulty, self.height()
                 ) {
                     tracing::error!(
                         "Rejecting reorg at depth {}: {}",
@@ -2421,22 +2445,42 @@ mod tests {
     #[test]
     fn test_reorg_acceptability_shallow_requires_more_work() {
         // Shallow reorgs still require strict cumulative-work superiority.
-        assert!(evaluate_reorg_acceptability(3, 101, 100).is_ok());
-        assert!(evaluate_reorg_acceptability(3, 100, 100).is_err());
+        let h = BOOTSTRAP_MESS_HEIGHT + 1; // post-bootstrap, full rules apply
+        assert!(evaluate_reorg_acceptability(3, 101, 100, h).is_ok());
+        assert!(evaluate_reorg_acceptability(3, 100, 100, h).is_err());
     }
 
     #[test]
     fn test_reorg_acceptability_mess_multiplier() {
         // At depth 50, exponent = (50-10)/20 = 2 => required multiplier 4x.
-        let err = evaluate_reorg_acceptability(50, 399, 100).unwrap_err();
+        let h = BOOTSTRAP_MESS_HEIGHT + 1; // post-bootstrap
+        let err = evaluate_reorg_acceptability(50, 399, 100, h).unwrap_err();
         assert!(err.contains("requires 4x work"));
-        assert!(evaluate_reorg_acceptability(50, 401, 100).is_ok());
+        assert!(evaluate_reorg_acceptability(50, 401, 100, h).is_ok());
     }
 
     #[test]
     fn test_reorg_acceptability_hard_depth_cap() {
         let max = max_reorg_depth();
-        let err = evaluate_reorg_acceptability(max + 1, u128::MAX, 1).unwrap_err();
+        let err = evaluate_reorg_acceptability(max + 1, u128::MAX, 1, BOOTSTRAP_MESS_HEIGHT + 1).unwrap_err();
         assert!(err.contains("exceeds absolute maximum"));
+    }
+
+    #[test]
+    fn test_reorg_acceptability_bootstrap_bypass() {
+        // Below BOOTSTRAP_MESS_HEIGHT, Tier-2 MESS is skipped and only the
+        // longest-chain rule applies even at deep reorg depths. This is the
+        // launch convergence fix: a young fleet whose nodes diverge at low
+        // heights must be able to converge once one chain pulls ahead.
+        let bootstrap_h = BOOTSTRAP_MESS_HEIGHT / 2;
+        // Depth 50 with only slightly-more work: rejected post-bootstrap,
+        // accepted during bootstrap.
+        assert!(evaluate_reorg_acceptability(50, 101, 100, bootstrap_h).is_ok());
+        // Equal work still loses (longest chain must strictly exceed).
+        let err = evaluate_reorg_acceptability(50, 100, 100, bootstrap_h).unwrap_err();
+        assert!(err.contains("bootstrap phase"));
+        // Tier-3 hard cap still enforced during bootstrap.
+        let max = max_reorg_depth();
+        assert!(evaluate_reorg_acceptability(max + 1, u128::MAX, 1, bootstrap_h).is_err());
     }
 }

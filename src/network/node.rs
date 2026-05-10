@@ -2524,18 +2524,38 @@ async fn process_message(
                     return Ok(());
                 }
 
-                // During IBD, skip InvBlock to prevent newly-mined blocks from
-                // racing with the sequential IBD download. A block-1 from InvBlock
-                // may have a different hash than block-1 in the seed's chain,
-                // causing all subsequent IBD blocks to become orphans.
+                // During IBD, skip the block-body fetch (a new-tip InvBlock hash
+                // generally won't chain off our current IBD position and would
+                // pile up orphans). BUT — send a GetHeaders to this peer first
+                // so peer.height refreshes from real header.height values in the
+                // response. Without this, peer.height stays frozen at the handshake-
+                // time value: when the source mines past handshake, our sync
+                // target never rises, IBD declares done at the stale tip, and the
+                // node stays permanently behind (this was the launch-day stall).
                 if !sync.read().await.is_synced() {
-                    debug!("Ignoring InvBlock during IBD from peer {:?}", &peer_id[..4]);
+                    let our_height = chain.height();
+                    let chain_ref = &chain;
+                    let locator = build_locator(our_height, |h| chain_ref.get_block_hash(h));
+                    if !locator.is_empty() {
+                        let nonce = sync.write().await.allocate_header_nonce();
+                        if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
+                            if let Ok(data) = msg.to_bytes() {
+                                if let Some(sender) = senders.get(&peer_id) {
+                                    let _ = sender.send(data).await;
+                                    debug!(
+                                        "InvBlock during IBD: sent GetHeaders nonce={} to peer {:?} to refresh tip (our_h={})",
+                                        nonce, &peer_id[..4], our_height
+                                    );
+                                }
+                            }
+                        }
+                    }
                     return Ok(());
                 }
 
-                // If we're receiving InvBlock, the peer has blocks we don't.
-                // Update their height estimate in the sync manager — at minimum
-                // they're at our height + 1.
+                // Post-IBD: peer has blocks we don't. Update their height
+                // estimate to our_h+1 (lower bound — they're at least one
+                // block ahead). Body fetch follows below.
                 let our_h = chain.height();
                 let estimated_peer_height = our_h + 1;
                 sync.write().await.update_peer_height_for(peer_id, estimated_peer_height);
