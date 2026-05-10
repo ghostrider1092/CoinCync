@@ -135,31 +135,3 @@ deploy/ops/template-check.sh
 .wrangler/
 *.wrangler-account.json
 
-# ── Jarvis / Autman assistant (NEVER push to github) ──
-# Keep all assistant-related code, voice models, and the parked
-# Tauri shell strictly local. None of this should appear on the
-# public repo until explicitly approved.
-/OpenJarvis/
-/coincync-jarvis-bridge/
-/future-update/
-
-# Wallet — Jarvis browser entrypoint + standalone build
-/coincync-wallet/jarvis.html
-/coincync-wallet/src/main-jarvis.jsx
-/coincync-wallet/src/JarvisStandaloneApp.jsx
-
-# Wallet — Jarvis-only React surfaces (page, components, utils)
-/coincync-wallet/src/pages/Jarvis.jsx
-/coincync-wallet/src/components/Jarvis*.jsx
-/coincync-wallet/src/utils/jarvis*.js
-/coincync-wallet/src/utils/jarvis*.test.js
-/coincync-wallet/src/utils/agentNamePolicy.js
-
-# Wallet — Jarvis-only dev/launch scripts
-/coincync-wallet/scripts/dev-jarvis.ps1
-/coincync-wallet/scripts/dev-jarvis.sh
-
-# Built release artifacts inside the website/ deploy tree.
-# Wrangler uploads them directly to Pages from the filesystem;
-# they don't need to be committed to git.
-website/release/
