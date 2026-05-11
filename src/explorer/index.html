@@ -5693,7 +5693,11 @@ async function requestFaucet() {
   }
   if (resEl) resEl.innerHTML = '<span style="color:var(--t3)">Sending 10 CYNC...</span>';
   try {
-    const r = await fetch('/faucet/', {
+    // POST to /faucet (no trailing slash — api nginx uses `location = /faucet`
+    // as an exact-match; trailing slash gets routed to the static 404 handler).
+    // The explorer's own nginx proxies /faucet to api.coincync.network/faucet
+    // so the browser request stays same-origin and avoids a CORS preflight.
+    const r = await fetch('/faucet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: addr })
