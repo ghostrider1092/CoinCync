@@ -32,11 +32,11 @@ A privacy-first cryptocurrency with mandatory shielding, auditable supply, and c
 
 ```bash
 # Download — Linux x86_64 (Windows builds available in same release)
-wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.5-testnet/coincync-linux-x86_64.tar.gz
+wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.6-testnet/coincync-linux-x86_64.tar.gz
 tar xzf coincync-linux-x86_64.tar.gz
 
 # Verify checksums (recommended)
-wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.5-testnet/SHA256SUMS.txt
+wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.6-testnet/SHA256SUMS.txt
 sha256sum -c SHA256SUMS.txt
 
 # Run a node (binds 0.0.0.0:28080 P2P, 127.0.0.1:28081 RPC)
