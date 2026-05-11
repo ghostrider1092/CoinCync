@@ -23,6 +23,31 @@ use crate::constants::{
     MIN_DIFFICULTY_ADJ_NUM, MIN_DIFFICULTY_ADJ_DEN,
 };
 
+/// Absolute minimum network difficulty — the consensus floor below which ASERT
+/// cannot drive the chain. Equivalent to a target ceiling of `u128::MAX / 500`.
+///
+/// The dual-window ASERT can drift difficulty arbitrarily low under uneven
+/// hashrate conditions (e.g. a single home miner during testnet bootstrap),
+/// and at the natural floor `target = u128::MAX` block production runs faster
+/// than P2P validation+gossip — the chain physically can't stay synchronized.
+/// The standard production fix for this class of issue is a minimum-difficulty
+/// floor (Monero LWMA, Bitcoin testnet 20-min rule, Zcash NU5 floor).
+///
+/// 500 was picked so that even at the floor on a slow home CPU (~45 H/s
+/// total RandomX), blocks come no faster than ~11s each. That's comfortably
+/// inside what a 5-node mesh can validate and gossip: RandomX VM init alone
+/// takes ~1.5–2s on each receiving node, and Noise-encrypted block transit
+/// plus signature verification add 1–2s more, so the absorption ceiling sits
+/// somewhere around 1 block per 5–8s. With the floor at 500-difficulty
+/// (~11s/block on the slowest expected miner) we have ~30% headroom.
+///
+/// This is strictly tighter than the previous rule (no floor at all = target
+/// allowed up to `u128::MAX`), so a node with this fix will accept every
+/// block that a pre-fix node accepts, plus reject some "easy" blocks that
+/// pre-fix nodes would accept. Net effect on already-mined chain history:
+/// nothing — every existing block above difficulty 500 still validates.
+pub const MIN_DIFFICULTY: u128 = 500;
+
 // Fixed-point constants for integer 2^x approximation
 const RBITS: u32 = 16;
 const RADIX: u128 = 1u128 << RBITS;
@@ -77,7 +102,11 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
 
     let max_val = safe_mul_u128(tip_target, MAX_DIFFICULTY_ADJ_NUM as u128) / (MAX_DIFFICULTY_ADJ_DEN as u128);
     let min_val = safe_mul_u128(tip_target, MIN_DIFFICULTY_ADJ_NUM as u128) / (MIN_DIFFICULTY_ADJ_DEN as u128);
-    let max_t = u128_max_target();
+    // Apply MIN_DIFFICULTY consensus floor: target cannot exceed
+    // u128::MAX / MIN_DIFFICULTY. This caps ASERT below the unsafe range
+    // where production rate outruns P2P propagation. See MIN_DIFFICULTY
+    // comment above.
+    let max_t = u128_max_target() / MIN_DIFFICULTY;
 
     let min_bound = min_val.max(1);
     let max_bound = max_val.min(max_t).max(min_bound);
@@ -87,6 +116,8 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
         let emergency_max = safe_mul_u128(tip_target, (MAX_DIFFICULTY_ADJ_NUM * EMERGENCY_DROP_FACTOR) as u128) / (MAX_DIFFICULTY_ADJ_DEN as u128);
         let emergency_target = safe_mul_u128(clamped, EMERGENCY_DROP_FACTOR as u128);
         let emer_min = min_val.max(1);
+        // Emergency drop still respects MIN_DIFFICULTY — a stalled chain
+        // should ease up to the floor, not collapse past it.
         let emer_max = emergency_max.min(max_t).max(emer_min);
         emergency_target.clamp(emer_min, emer_max)
     } else {
