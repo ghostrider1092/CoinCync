@@ -235,6 +235,13 @@ test-case         = "3"
 # integration-test crate.
 coincync = { path = ".", features = ["test-utilities"] }
 
+# ── Benchmarks ────────────────────────────────────────────────────────
+# Run with: cargo bench --features "randomx testnet" --bench <name>
+# Criterion provides its own harness, so we disable the default one.
+[[bench]]
+name = "crypto_hot_paths"
+harness = false
+
 [profile.release]
 opt-level     = 3
 lto           = "thin"
