@@ -590,10 +590,14 @@ pub async fn start_rpc_server(
     // Returns individual transaction details from the mempool so
     // the explorer can render them in a table (like the blocks page).
     module.register_method("get_mempool_transactions", |_params, state, _ext| {
-        let txs = state.mempool.get_block_transactions(
-            crate::constants::MAX_BLOCK_SIZE,
-            500, // max 500 txs
-        );
+        // Layer 2: mempool iteration up to 500 txs under block_in_place
+        // keeps the worker thread reusable during the fetch.
+        let txs = tokio::task::block_in_place(|| {
+            state.mempool.get_block_transactions(
+                crate::constants::MAX_BLOCK_SIZE,
+                500, // max 500 txs
+            )
+        });
         let tx_list: Vec<Value> = txs.iter().map(|tx| {
             let kind = match tx.tx_type {
                 crate::transaction::TxType::Coinbase => "coinbase",
@@ -1066,7 +1070,11 @@ pub async fn start_rpc_server(
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
         let capped = count.min(256); // sanity cap
-        let decoys = state.chain.get_decoy_outputs(capped, min_age);
+        // Layer 2: up to 256 output records scanned from the chain DB
+        // with age filtering; wrap in block_in_place.
+        let decoys = tokio::task::block_in_place(|| {
+            state.chain.get_decoy_outputs(capped, min_age)
+        });
         let encoded: Vec<Value> = decoys
             .iter()
             .map(|d| {
@@ -1271,9 +1279,20 @@ pub async fn start_rpc_server(
                 -32602, "tx hash must be 32 bytes (64 hex chars)".to_string(), None::<()>,
             ));
         }
-        match state.chain.get_tx_location(&tx_hash_bytes) {
+        // Layer 2: tx-location index lookup is the first chain DB read;
+        // the subsequent block fetch is the second. Wrap each in
+        // block_in_place so the worker thread is reusable across both
+        // calls while preserving the original error-message distinction
+        // between "tx not found" and "block missing for a known tx".
+        let location_opt = tokio::task::block_in_place(|| {
+            state.chain.get_tx_location(&tx_hash_bytes)
+        });
+        match location_opt {
             Some((block_height, tx_idx)) => {
-                match state.chain.get_block_by_height(block_height) {
+                let block_opt = tokio::task::block_in_place(|| {
+                    state.chain.get_block_by_height(block_height)
+                });
+                match block_opt {
                     Some(block) => {
                         let tx = block.transactions.get(tx_idx as usize);
                         match tx {
