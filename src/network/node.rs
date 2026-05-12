@@ -2704,9 +2704,22 @@ async fn process_message(
                     // SECURITY: Quick-validate transaction structure before relay.
                     // Prevents garbage txs from consuming CPU across the network.
                     if let Err(e) = crate::consensus::validate_transaction_basic(&tx) {
-                        warn!("Rejecting invalid tx from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                        let reason = e.to_string();
+                        warn!("Rejecting invalid tx from peer {}: {}", hex::encode(&peer_id[..8]), reason);
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr).record_invalid_tx();
+                            // Score using the unified MisbehaviorType ladder
+                            // (InvalidTransaction = 25 pts, 2-3 offenses → ban).
+                            // The previous `record_invalid_tx()` path only
+                            // deducted 5 pts, requiring ~10 strikes to ban.
+                            // Active disconnect is handled by the maintenance
+                            // loop's `auto_ban_bad_peers()` tick at node.rs:1493
+                            // (within ~10s of crossing the ban threshold).
+                            let offense = super::scoring::classify_invalid_tx_reason(&reason);
+                            let mut s = scorer.write().await;
+                            let score = s.get_or_create(addr);
+                            score.record_misbehavior(offense);
+                            // Keep legacy counter in sync for stats/reporting.
+                            score.invalid_txs += 1;
                         }
                         continue;
                     }

@@ -133,6 +133,36 @@ pub fn classify_invalid_block_reason(reason: &str) -> MisbehaviorType {
     MisbehaviorType::InvalidBlockProofs
 }
 
+/// Classify a transaction-validation error into a peer-misbehavior category.
+///
+/// Today's call site is the network-layer pre-relay check in
+/// `process_message::Transactions` which runs `validate_transaction_basic`
+/// (version, input/output count, size bounds, fee floor). Every error from
+/// that path is the peer's fault — they relayed a malformed tx that any
+/// honest node would have caught locally. Score as `InvalidTransaction`
+/// (penalty 25, 2-3 offenses → ban).
+///
+/// Oversized payloads are routed to `ProtocolViolation` (penalty 20) since
+/// they're upstream of validation and signal misuse of the protocol envelope
+/// more than tx-content forgery.
+///
+/// When peer_id is plumbed through `NodeEvent::TransactionReceived` in a
+/// future change, this classifier will also cover full-crypto failures from
+/// mempool admit (bad ring sig, range proof, key image). Add additional
+/// substring matchers here when that wiring lands.
+pub fn classify_invalid_tx_reason(reason: &str) -> MisbehaviorType {
+    let r = reason.to_ascii_lowercase();
+
+    if r.contains("too large") || r.contains("oversized") || r.contains("payload size") {
+        return MisbehaviorType::ProtocolViolation;
+    }
+
+    // Default for tx-level rejections: structural, fee-floor, version, body
+    // crypto. All are honest-node-catchable, so the peer that relayed it
+    // misbehaved.
+    MisbehaviorType::InvalidTransaction
+}
+
 /// Detailed peer score with multiple factors
 #[derive(Clone, Debug)]
 pub struct PeerScore {
@@ -907,6 +937,63 @@ mod tests {
             classify_invalid_block_reason(r),
             MisbehaviorType::InvalidBlockPoW,
         );
+    }
+
+    #[test]
+    fn classify_tx_oversized_is_protocol_violation() {
+        // Use the real Display strings from Error::TransactionTooLarge.
+        for r in [
+            "Transaction too large: 100000 bytes (max 50000)",
+            "Payload size exceeded for tx message",
+            "tx oversized",
+        ] {
+            assert_eq!(
+                classify_invalid_tx_reason(r),
+                MisbehaviorType::ProtocolViolation,
+                "reason: {}", r,
+            );
+        }
+    }
+
+    #[test]
+    fn classify_tx_default_is_invalid_transaction() {
+        // validate_transaction_basic errors: version, empty in/out, fee floor,
+        // size-too-small. All map to InvalidTransaction.
+        for r in [
+            "Invalid tx version: 0",
+            "transaction has no inputs",
+            "transaction has no outputs",
+            "fee below floor",
+            "Transaction too small: 50 bytes (min 100)",
+            "something we haven't seen yet",
+            "",
+        ] {
+            assert_eq!(
+                classify_invalid_tx_reason(r),
+                MisbehaviorType::InvalidTransaction,
+                "reason: {}", r,
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_tx_misbehavior_bans_after_four_offenses() {
+        // PeerScore::default() starts at reputation=50, ban threshold is -50,
+        // InvalidTransaction penalty is 25. So:
+        //   50 → 25 → 0 → -25 → -50 (ban)
+        // 4 strikes from default reputation to ban.
+        let mut score = PeerScore::default();
+        assert_eq!(score.reputation, 50, "default reputation is 50");
+
+        for i in 1..=3 {
+            score.record_misbehavior(MisbehaviorType::InvalidTransaction);
+            assert!(
+                !score.should_ban(),
+                "strike {} should not ban yet (rep={})", i, score.reputation,
+            );
+        }
+        score.record_misbehavior(MisbehaviorType::InvalidTransaction);
+        assert!(score.should_ban(), "4th strike should ban (rep={})", score.reputation);
     }
 
     #[test]
