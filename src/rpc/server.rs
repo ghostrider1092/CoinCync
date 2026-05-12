@@ -696,10 +696,18 @@ pub async fn start_rpc_server(
     // compat with the 2.0 miner CLI; the address parameter is
     // ignored.
     module.register_method("get_block_template", |_params, state, _ext| {
-        Ok::<_, ErrorObjectOwned>(crate::mining::template::build_template_json(
-            &state.chain,
-            &state.mempool,
-        ))
+        // SECURITY (runtime resilience, Layer 2): build_template_json iterates
+        // mempool and runs `chain.validate_transaction()` for every candidate
+        // (full ring sig + range proof verify). On a busy mempool this is the
+        // most CPU-heavy synchronous call in the RPC surface, and it runs
+        // many times per minute because the failover miner polls for fresh
+        // templates. `block_in_place` lets tokio's multi-thread runtime
+        // (Layer 1 forces 4 workers) keep scheduling other tasks during the
+        // call instead of monopolizing the worker thread.
+        let template = tokio::task::block_in_place(|| {
+            crate::mining::template::build_template_json(&state.chain, &state.mempool)
+        });
+        Ok::<_, ErrorObjectOwned>(template)
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── submit_block ──────────────────────────────────────────
@@ -754,7 +762,15 @@ pub async fn start_rpc_server(
         // outcomes, so we must inspect the status and surface a failure
         // when the block was not actually accepted. Without this, the
         // miner sees a silent success while the chain never advances.
-        match state.chain.process_block(block) {
+        //
+        // SECURITY (runtime resilience, Layer 2): the wire-side BlockReceived
+        // handler in bin/node.rs routes its process_block through
+        // spawn_blocking. The locally-submitted path here uses
+        // `block_in_place` for the same effect from a sync RPC handler —
+        // tokio's multi-thread runtime can keep scheduling other tasks
+        // during full block validation (PoW recheck + per-tx crypto verify).
+        let process_result = tokio::task::block_in_place(|| state.chain.process_block(block));
+        match process_result {
             Ok(status @ (crate::chain::BlockStatus::Accepted
                         | crate::chain::BlockStatus::AcceptedFork
                         | crate::chain::BlockStatus::AcceptedReorg { .. })) => {
@@ -863,7 +879,14 @@ pub async fn start_rpc_server(
         })?;
         let hash = tx.hash();
         let tx_for_broadcast = tx.clone();
-        match state.mempool.add_with_chain(tx, &state.chain) {
+        // SECURITY (runtime resilience, Layer 2): mempool admit runs full
+        // crypto verify (ring sig + range proof) and walks the chain DB to
+        // check key-image conflicts. `block_in_place` lets tokio's multi-
+        // thread runtime keep scheduling other tasks during the validation.
+        let admit_result = tokio::task::block_in_place(|| {
+            state.mempool.add_with_chain(tx, &state.chain)
+        });
+        match admit_result {
             Ok(_) => {
                 // Broadcast via Dandelion++ so other nodes see the tx
                 if let Some(p2p) = state.p2p.as_ref() {
