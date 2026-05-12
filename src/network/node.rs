@@ -2562,28 +2562,33 @@ async fn process_message(
                     return Ok(());
                 }
 
-                // Walk locator to find the fork point
-                let mut start_height = 0u64;
-                for hash in &msg.locator {
-                    if let Some(block) = chain.get_block(hash) {
-                        start_height = block.height() + 1;
-                        break;
-                    }
-                }
-
-                // Collect headers from start_height up to MAX_HEADERS_RESPONSE
-                let mut headers = Vec::new();
-                for h in start_height..start_height + MAX_HEADERS_RESPONSE as u64 {
-                    if let Some(block) = chain.get_block_by_height(h) {
-                        let block_hash = block.hash();
-                        headers.push(block.header.clone());
-                        if block_hash == msg.stop_hash {
+                // Walk locator to find the fork point, then collect headers
+                // up to MAX_HEADERS_RESPONSE. Both loops do per-iteration
+                // chain DB reads; wrap the whole transactional view in
+                // `block_in_place` so the worker can be reused for other
+                // tasks if a read stalls. (Layer 2 of post-launch campaign.)
+                let headers = tokio::task::block_in_place(|| {
+                    let mut start_height = 0u64;
+                    for hash in &msg.locator {
+                        if let Some(block) = chain.get_block(hash) {
+                            start_height = block.height() + 1;
                             break;
                         }
-                    } else {
-                        break;
                     }
-                }
+                    let mut headers = Vec::new();
+                    for h in start_height..start_height + MAX_HEADERS_RESPONSE as u64 {
+                        if let Some(block) = chain.get_block_by_height(h) {
+                            let block_hash = block.hash();
+                            headers.push(block.header.clone());
+                            if block_hash == msg.stop_hash {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    headers
+                });
 
                 // Always respond (even with empty headers) so the requester knows.
                 // Echo the nonce for request/response correlation.
@@ -2619,15 +2624,21 @@ async fn process_message(
                     }
 
                     let requested = msg.hashes.len();
-                    let mut blocks = Vec::new();
-                    for hash in &msg.hashes {
-                        if let Some(block) = chain.get_block(hash) {
-                            blocks.push(block);
-                            if blocks.len() >= MAX_BLOCK_HASHES {
-                                break;
+                    // Layer 2: pull full blocks from the chain DB inside
+                    // block_in_place so a slow DB read doesn't freeze the
+                    // worker thread mid-response.
+                    let blocks = tokio::task::block_in_place(|| {
+                        let mut blocks = Vec::new();
+                        for hash in &msg.hashes {
+                            if let Some(block) = chain.get_block(hash) {
+                                blocks.push(block);
+                                if blocks.len() >= MAX_BLOCK_HASHES {
+                                    break;
+                                }
                             }
                         }
-                    }
+                        blocks
+                    });
 
                     debug!(
                         "GetBlocks from {:?}: {} requested, {} found",
@@ -3187,16 +3198,22 @@ async fn process_message(
                     warn!("Invalid GetData from peer {:?}: {}", &peer_id[..4], e);
                     return Ok(());
                 }
-                // Send each block individually as BlockData
-                for hash in &msg.hashes {
-                    if let Some(block) = chain.get_block(hash) {
-                        if let Ok(block_bytes) = borsh::to_vec(&block) {
-                            let msg = Message::new(magic, MessageType::BlockData, block_bytes);
-                            if let Some(sender) = senders.get(&peer_id) {
-                                if let Ok(data) = msg.to_bytes() {
-                                    let _ = sender.send(data).await;
-                                }
-                            }
+                // Send each block individually as BlockData.
+                // Layer 2: pre-fetch + serialize all blocks under
+                // block_in_place, then do the async per-peer sends after.
+                // This keeps the sync DB reads + borsh serialization off
+                // the worker thread for the duration of the request.
+                let payloads: Vec<Vec<u8>> = tokio::task::block_in_place(|| {
+                    msg.hashes.iter()
+                        .filter_map(|hash| chain.get_block(hash))
+                        .filter_map(|block| borsh::to_vec(&block).ok())
+                        .collect()
+                });
+                for block_bytes in payloads {
+                    let m = Message::new(magic, MessageType::BlockData, block_bytes);
+                    if let Some(sender) = senders.get(&peer_id) {
+                        if let Ok(data) = m.to_bytes() {
+                            let _ = sender.send(data).await;
                         }
                     }
                 }
@@ -3268,18 +3285,24 @@ async fn process_message(
                     "GetFilters from {:?}: heights {}..={}", &peer_id[..4], start, end
                 );
 
-                // Build filters on the fly from blocks (or serve from cache/db)
-                let mut filters = Vec::new();
-                let mut prev_filter_hash = crate::primitives::Hash::default();
-                for h in start..=end {
-                    if let Some(block) = chain.get_block_by_height(h) {
-                        let filter = crate::network::block_filter::BlockFilter::from_block(
-                            &block, prev_filter_hash
-                        );
-                        prev_filter_hash = filter.filter_hash();
-                        filters.push(filter);
+                // Build filters on the fly from blocks (or serve from cache/db).
+                // Layer 2: per-height DB read + filter computation are both
+                // synchronous and CPU-bound; the chained filter_hash means
+                // the loop can't easily parallelize. Wrap in block_in_place.
+                let filters = tokio::task::block_in_place(|| {
+                    let mut filters = Vec::new();
+                    let mut prev_filter_hash = crate::primitives::Hash::default();
+                    for h in start..=end {
+                        if let Some(block) = chain.get_block_by_height(h) {
+                            let filter = crate::network::block_filter::BlockFilter::from_block(
+                                &block, prev_filter_hash
+                            );
+                            prev_filter_hash = filter.filter_hash();
+                            filters.push(filter);
+                        }
                     }
-                }
+                    filters
+                });
 
                 // Serialize and send response. Use Message::to_bytes() so
                 // the per-peer write loop reads `data[4]` as the real
@@ -3331,14 +3354,20 @@ async fn process_message(
                 &peer_id[..4], start, end
             );
 
-            let mut digests = Vec::with_capacity(((end - start + 1) as usize).min(
-                MAX_DIGEST_BLOCKS_PER_REQ as usize,
-            ));
-            for h in start..=end {
-                if let Some(block) = chain.get_block_by_height(h) {
-                    digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
+            // Layer 2: per-height DB read + BlockDigest computation
+            // wrapped in block_in_place so the worker thread is reusable
+            // during the synchronous fan-out.
+            let digests = tokio::task::block_in_place(|| {
+                let mut digests = Vec::with_capacity(((end - start + 1) as usize).min(
+                    MAX_DIGEST_BLOCKS_PER_REQ as usize,
+                ));
+                for h in start..=end {
+                    if let Some(block) = chain.get_block_by_height(h) {
+                        digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
+                    }
                 }
-            }
+                digests
+            });
 
             if let Some(sender) = senders.get(&peer_id) {
                 if let Ok(encoded) = borsh::to_vec(&digests) {
@@ -3367,24 +3396,30 @@ async fn process_message(
             const MAX_CHECKPOINTS: usize = 1000;
             const SPACING: u64 = 1000;
             let chain_height = chain.height();
-            let mut checkpoints = Vec::with_capacity(MAX_CHECKPOINTS);
-            let mut h = 0u64;
-            while h <= chain_height && checkpoints.len() < MAX_CHECKPOINTS {
-                if let Some(block) = chain.get_block_by_height(h) {
-                    let filter = crate::network::block_filter::BlockFilter::from_block(
-                        &block, crate::primitives::Hash::default()
-                    );
-                    checkpoints.push(crate::network::block_filter::FilterCheckpoint {
-                        height: h,
-                        block_hash: block.hash(),
-                        filter_hash: filter.filter_hash(),
-                    });
+            // Layer 2: up to 1000 disk-backed get_block_by_height +
+            // filter recomputations per request. Worst-case CPU heavy;
+            // wrap the whole walk in block_in_place.
+            let checkpoints = tokio::task::block_in_place(|| {
+                let mut checkpoints = Vec::with_capacity(MAX_CHECKPOINTS);
+                let mut h = 0u64;
+                while h <= chain_height && checkpoints.len() < MAX_CHECKPOINTS {
+                    if let Some(block) = chain.get_block_by_height(h) {
+                        let filter = crate::network::block_filter::BlockFilter::from_block(
+                            &block, crate::primitives::Hash::default()
+                        );
+                        checkpoints.push(crate::network::block_filter::FilterCheckpoint {
+                            height: h,
+                            block_hash: block.hash(),
+                            filter_hash: filter.filter_hash(),
+                        });
+                    }
+                    h = match h.checked_add(SPACING) {
+                        Some(next) => next,
+                        None => break,
+                    };
                 }
-                h = match h.checked_add(SPACING) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
+                checkpoints
+            });
             if checkpoints.len() == MAX_CHECKPOINTS {
                 tracing::warn!(
                     "GetFilterCheckpoints from {:?}: hit MAX_CHECKPOINTS={} cap (chain_height={})",
@@ -3416,13 +3451,18 @@ async fn process_message(
                     &peer_id[..4], key_images.len()
                 );
 
-                // Check each key image against the chain's spent set
-                let mut statuses: Vec<u8> = Vec::with_capacity(key_images.len());
-                for ki_bytes in &key_images {
-                    let ki = crate::primitives::KeyImage::from_bytes(*ki_bytes);
-                    let spent = chain.is_spent(&ki);
-                    statuses.push(if spent { 1 } else { 0 });
-                }
+                // Check each key image against the chain's spent set.
+                // Layer 2: up to 100 DB lookups per request; wrap in
+                // block_in_place so the worker thread is reusable.
+                let statuses: Vec<u8> = tokio::task::block_in_place(|| {
+                    let mut statuses: Vec<u8> = Vec::with_capacity(key_images.len());
+                    for ki_bytes in &key_images {
+                        let ki = crate::primitives::KeyImage::from_bytes(*ki_bytes);
+                        let spent = chain.is_spent(&ki);
+                        statuses.push(if spent { 1 } else { 0 });
+                    }
+                    statuses
+                });
 
                 if let Some(sender) = senders.get(&peer_id) {
                     if let Ok(encoded) = borsh::to_vec(&statuses) {

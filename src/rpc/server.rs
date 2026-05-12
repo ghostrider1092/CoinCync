@@ -643,7 +643,10 @@ pub async fn start_rpc_server(
         let (h,): (u64,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
-        match state.chain.get_block_by_height(h) {
+        // Layer 2: DB lookup + serialize under block_in_place so a slow
+        // RocksDB read doesn't freeze the worker mid-handler.
+        let block_opt = tokio::task::block_in_place(|| state.chain.get_block_by_height(h));
+        match block_opt {
             Some(block) => Ok::<_, ErrorObjectOwned>(serialize_block(&block, h)),
             None => Err(ErrorObjectOwned::owned(
                 -32000, format!("block at height {} not found", h), None::<()>,
@@ -670,7 +673,10 @@ pub async fn start_rpc_server(
             ));
         }
         let hash = crate::primitives::Hash::from_bytes(bytes);
-        match state.chain.get_block(&hash) {
+        // Layer 2: DB lookup under block_in_place — same rationale as
+        // get_block_by_height above.
+        let block_opt = tokio::task::block_in_place(|| state.chain.get_block(&hash));
+        match block_opt {
             Some(block) => {
                 let height = block.header.height;
                 Ok::<_, ErrorObjectOwned>(serialize_block(&block, height))
