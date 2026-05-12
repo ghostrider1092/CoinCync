@@ -24,12 +24,19 @@
 //! Criterion prints a median time per call and a 95% confidence interval.
 //! Baseline numbers captured 2026-05-12 on commodity x86-64 (single core):
 //!
-//! | bench                          | median  | per block(10 in/10 out) |
-//! |--------------------------------|---------|-------------------------|
-//! | randomx_hash                   |  22.94 ms |               22.94 ms |
-//! | bulletproof_plus_verify_64bit  |   3.28 ms |               32.80 ms |
-//! | clsag_verify_ring16            |   5.64 ms |               56.40 ms |
-//! |                                |  TOTAL    |              112.14 ms |
+//! | bench                                  | median   | per block(10 in/10 out) |
+//! |----------------------------------------|----------|-------------------------|
+//! | randomx_hash                           |  22.94 ms |               22.94 ms |
+//! | bulletproof_plus_verify_64bit          |   3.28 ms |               32.80 ms |
+//! | bulletproof_plus_verify_aggregated_4   |  14.00 ms |  (3.50 ms / output)    |
+//! | clsag_verify_ring16                    |   5.64 ms |               56.40 ms |
+//! |                                        |  TOTAL    |              112.14 ms |
+//!
+//! Note on the aggregated bench: at N=4 outputs the per-output verify
+//! cost is roughly the same as N independent single-output proofs
+//! (3.5 ms vs 3.28 ms). Aggregation's main win at low N is *proof size*,
+//! not verify-time. The verify speedup scales as O(N/log N), so it only
+//! becomes a meaningful win at higher output counts.
 //!
 //! At a 120-second block target, validation cost on a quiet block is
 //! ~0.1% of the inter-block window. Plenty of headroom; any future
@@ -44,8 +51,9 @@ use rand::rngs::OsRng;
 
 use coincync::consensus::pow::{compute_pow_hash, PowAlgorithm};
 use coincync::crypto::{
-    clsag_sign, clsag_verify, commit, create_range_proof, verify_range_proof,
-    ClsagRingMember as RingMember, EcCommitment as Commitment, SecretScalar,
+    clsag_sign, clsag_verify, commit, create_aggregated_range_proof, create_range_proof,
+    verify_range_proof, verify_range_proofs, ClsagRingMember as RingMember,
+    EcCommitment as Commitment, SecretScalar,
 };
 use coincync::primitives::{Amount, Hash};
 
@@ -168,10 +176,43 @@ fn bench_clsag_verify_ring16(c: &mut Criterion) {
     });
 }
 
+// ─── Bulletproof+ aggregated range-proof verify (4 outputs) ───────────
+//
+// Real transactions usually carry multiple outputs that are aggregated
+// into one proof — verifying the aggregate is cheaper per-output than
+// verifying N separate single-output proofs. This measures the common
+// case for a 4-output tx (e.g., a transfer that returns change + has
+// a dust/fee adjustment + the actual recipient + a churn output).
+
+fn bench_bulletproof_verify_aggregated_4(c: &mut Criterion) {
+    let amounts: Vec<Amount> = (0..4u64)
+        .map(|i| Amount::from_atomic(100_000 * (i + 1)))
+        .collect();
+    let pairs: Vec<_> = amounts.iter().map(|a| commit(&mut OsRng, *a)).collect();
+    let commitments: Vec<_> = pairs.iter().map(|(c, _)| c.clone()).collect();
+    let blindings: Vec<_> = pairs.iter().map(|(_, b)| b.clone()).collect();
+    let proof = create_aggregated_range_proof(&amounts, &blindings, &mut OsRng)
+        .expect("create_aggregated_range_proof failed");
+
+    // Sanity-check the aggregated proof verifies — otherwise the bench
+    // is timing a constant-time reject, not a real verify.
+    assert!(
+        verify_range_proofs(&commitments, &proof),
+        "bench setup produced an invalid aggregated proof",
+    );
+
+    c.bench_function("bulletproof_plus_verify_aggregated_4", |b| {
+        b.iter(|| {
+            black_box(verify_range_proofs(black_box(&commitments), black_box(&proof)));
+        });
+    });
+}
+
 criterion_group!(
     crypto_hot_paths,
     bench_randomx_hash,
     bench_bulletproof_verify,
+    bench_bulletproof_verify_aggregated_4,
     bench_clsag_verify_ring16,
 );
 criterion_main!(crypto_hot_paths);
