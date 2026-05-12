@@ -88,7 +88,28 @@ enum Command {
     Status,
 }
 
-#[tokio::main]
+// SECURITY (runtime resilience): force at least 4 worker threads regardless of
+// host CPU count. The default `#[tokio::main]` derives worker_threads from
+// num_cpus, which gives ONE worker on the single-vCPU Vultr boxes that run
+// our fleet. A single blocked worker — whether from a RocksDB compaction
+// stall, a parking_lot mutex contention spike, or any other synchronous
+// block — freezes the entire async runtime: RPC stops responding, P2P stops
+// processing, the broadcast channel saturates, and the node sits zombie
+// until manual restart.
+//
+// Observed live 2026-05-12 16:18 UTC on the api box: process alive per
+// systemd, zero log output for 13+ minutes, RPC TCP timing out. Workaround
+// was a manual restart; root cause was the single-worker fragility.
+//
+// 4 workers means a single blocked worker leaves 3 others scheduling, so
+// the runtime stays responsive even when one task is wedged. On the actual
+// 1-vCPU hardware this is just kernel time-slicing (no real parallelism
+// added), but it converts a permanent freeze into a transient slowdown.
+//
+// The deeper fix (Layer 2) is to route every blocking DB call through
+// `tokio::task::spawn_blocking` so it never lands on a worker thread at
+// all. That's a larger refactor queued for the post-launch campaign.
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     let cli = Cli::parse();
 
