@@ -85,6 +85,54 @@ impl MisbehaviorType {
     }
 }
 
+/// Classify a `BlockStatus::Invalid(reason)` string into a peer-misbehavior
+/// category. Returns `None` when the failure is genuinely ambiguous (the
+/// reason string didn't match any known rejection — caller falls back to a
+/// conservative default rather than picking a penalty blindly).
+///
+/// The classification is intentionally substring-based on the reason strings
+/// produced in `chain.rs`. If those messages are reworded, update the
+/// matchers here in lockstep.
+pub fn classify_invalid_block_reason(reason: &str) -> MisbehaviorType {
+    let r = reason.to_ascii_lowercase();
+
+    // Wrong-chain markers — peer is on a different chain entirely.
+    // Instant ban prevents log-spam loops like the 165k/24h pattern observed
+    // 2026-05-11 from pre-MIN_DIFFICULTY-floor fork peers.
+    if r.contains("difficulty target mismatch")
+        || r.contains("checkpoint mismatch")
+        || r.contains("hardcoded checkpoint")
+    {
+        return MisbehaviorType::InvalidBlockPoW;
+    }
+
+    // Header-rule violations: PoW or timestamp consensus rules the peer is
+    // expected to enforce locally before relay. Instant-ban category.
+    if r.contains("proof of work")
+        || r.contains("hash above target")
+        || r.contains("median-time-past")
+        || r.contains("timestamp")
+    {
+        return MisbehaviorType::InvalidBlockPoW;
+    }
+
+    // Anchor stamp violations get their own category.
+    if r.contains("anchor") {
+        return MisbehaviorType::InvalidAnchorStamp;
+    }
+
+    // Wrong height in a block message: protocol-level violation.
+    if r.contains("invalid height") {
+        return MisbehaviorType::ProtocolViolation;
+    }
+
+    // Body-level cryptographic failures (signatures, range proofs, ring sigs,
+    // commitments, key images, merkle roots, coinbase rules). 2-strike ban.
+    // This is also the default for unrecognized reasons — better to accumulate
+    // slowly than to be too lenient.
+    MisbehaviorType::InvalidBlockProofs
+}
+
 /// Detailed peer score with multiple factors
 #[derive(Clone, Debug)]
 pub struct PeerScore {
@@ -776,5 +824,103 @@ mod tests {
         scorer.auto_ban_bad_peers();
         assert!(scorer.is_banned(&addr));
         assert!(scorer.get(&addr).is_none(), "banned peer score should be removed");
+    }
+
+    #[test]
+    fn classify_difficulty_target_mismatch_is_instant_ban() {
+        // This is the exact reason string from chain.rs:1308 that produced
+        // 164,966 warnings in 24h on 2026-05-11. Must map to instant-ban.
+        let reason = "Difficulty target mismatch: expected 0147ae147ae147ae, got 028f5c28f5c28f5c";
+        let m = classify_invalid_block_reason(reason);
+        assert_eq!(m, MisbehaviorType::InvalidBlockPoW);
+        assert_eq!(m.penalty(), 100, "single offense must cross -50 ban threshold");
+    }
+
+    #[test]
+    fn classify_checkpoint_mismatch_is_instant_ban() {
+        for r in [
+            "Checkpoint mismatch at height 100: expected abc, got def",
+            "Hardcoded checkpoint mismatch at height 42",
+        ] {
+            let m = classify_invalid_block_reason(r);
+            assert_eq!(m, MisbehaviorType::InvalidBlockPoW, "reason: {}", r);
+        }
+    }
+
+    #[test]
+    fn classify_pow_and_timestamp_violations_are_instant_ban() {
+        for r in [
+            "Invalid proof of work",
+            "Block hash above target",
+            "Block timestamp 12345 is not greater than median-time-past 12346",
+            "timestamp drift exceeded",
+        ] {
+            assert_eq!(
+                classify_invalid_block_reason(r),
+                MisbehaviorType::InvalidBlockPoW,
+                "reason: {}", r,
+            );
+        }
+    }
+
+    #[test]
+    fn classify_anchor_violation_is_anchor_stamp() {
+        let r = "Block missing ChainAnchorStamp at height 8";
+        assert_eq!(
+            classify_invalid_block_reason(r),
+            MisbehaviorType::InvalidAnchorStamp,
+        );
+    }
+
+    #[test]
+    fn classify_height_violation_is_protocol() {
+        let r = "Invalid height: expected 100, got 200";
+        assert_eq!(
+            classify_invalid_block_reason(r),
+            MisbehaviorType::ProtocolViolation,
+        );
+    }
+
+    #[test]
+    fn classify_unknown_reason_defaults_to_block_proofs() {
+        // Conservative fallback: 50-penalty (2-strike). Better than nothing
+        // and protects against future reason strings we don't recognize yet.
+        for r in [
+            "Some new failure mode we haven't seen yet",
+            "Coinbase output too large",
+            "Ring signature failed",
+            "",
+        ] {
+            assert_eq!(
+                classify_invalid_block_reason(r),
+                MisbehaviorType::InvalidBlockProofs,
+                "reason: {}", r,
+            );
+        }
+    }
+
+    #[test]
+    fn classify_is_case_insensitive() {
+        // Reason strings come from many places — be resilient to casing.
+        let r = "DIFFICULTY TARGET MISMATCH";
+        assert_eq!(
+            classify_invalid_block_reason(r),
+            MisbehaviorType::InvalidBlockPoW,
+        );
+    }
+
+    #[test]
+    fn classified_instant_ban_actually_bans_on_first_offense() {
+        // End-to-end: feed the production-observed reason string through the
+        // classifier into a fresh scorer and confirm the peer is now bannable.
+        let mut scorer = PeerScorer::new();
+        let addr = test_addr(28080);
+        let reason = "Difficulty target mismatch: expected x, got y";
+        let offense = classify_invalid_block_reason(reason);
+        {
+            let s = scorer.get_or_create(addr);
+            s.record_misbehavior(offense);
+            assert!(s.should_ban(), "1 offense should be enough for ban");
+        }
     }
 }

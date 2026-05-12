@@ -393,10 +393,14 @@ async fn start_node(
                                 &peer_id[..4],
                                 reason
                             );
+                            // Score the peer for the invalid block. Without this,
+                            // a peer on a divergent chain spams the same rejected
+                            // block forever (165k/24h pattern observed 2026-05-11).
                             let p2p2 = event_p2p.clone();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
                                 p2p2.notify_block_failed(&hash).await;
+                                p2p2.notify_block_invalid(&peer_id, &reason).await;
                             });
                         }
                         Err(e) => {

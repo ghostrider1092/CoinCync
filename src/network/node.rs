@@ -434,6 +434,47 @@ impl P2PNode {
         self.sync.write().await.mark_block_failed(hash);
     }
 
+    /// Record peer misbehavior for an invalid block and, if the resulting
+    /// reputation crosses the ban threshold, disconnect the peer.
+    ///
+    /// Without this wiring, a peer can spam invalid blocks indefinitely — the
+    /// validator correctly rejects them but the peer keeps reconnecting and
+    /// resending, burning CPU on PoW re-verification and generating log noise.
+    /// Observed in production 2026-05-11: 6 peers on a pre-MIN_DIFFICULTY-floor
+    /// fork produced 164,966 `Difficulty target mismatch` warnings in 24h.
+    ///
+    /// The reason string (from `BlockStatus::Invalid(reason)`) is classified
+    /// by [`super::scoring::classify_invalid_block_reason`] into an appropriate
+    /// `MisbehaviorType`. Wrong-chain / wrong-PoW failures map to instant ban
+    /// (100 penalty); body-cryptographic failures accumulate (50 penalty,
+    /// 2-strike).
+    pub async fn notify_block_invalid(&self, peer_id: &PeerId, reason: &str) {
+        let offense = super::scoring::classify_invalid_block_reason(reason);
+        let addr = match self.peers.get(peer_id).map(|p| p.addr) {
+            Some(a) => a,
+            None => {
+                // Peer already gone (disconnect race). Nothing to score.
+                return;
+            }
+        };
+        let banned = {
+            let mut scorer = self.peer_scorer.write().await;
+            let score = scorer.get_or_create(addr);
+            score.record_misbehavior(offense);
+            score.should_ban()
+        };
+        if banned {
+            tracing::warn!(
+                "Banning peer {:?} ({}): {:?} (reason: {})",
+                &peer_id[..4],
+                addr,
+                offense,
+                reason
+            );
+            self.ban_peer(peer_id).await;
+        }
+    }
+
     /// IBD orphan recovery: when a block came back as Orphan, ask the
     /// sync manager to fetch the parent so the gap fills, instead of
     /// re-requesting the orphan itself in a loop. See sync::mark_block_orphan
