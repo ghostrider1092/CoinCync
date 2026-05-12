@@ -383,7 +383,7 @@ async fn start_node(
                             let p2p2 = event_p2p.clone();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_orphan(&hash, &prev_hash).await;
+                                p2p2.notify_block_orphan(&peer_id, &hash, &prev_hash).await;
                             });
                         }
                         Ok(BlockStatus::Invalid(reason)) => {
@@ -418,10 +418,22 @@ async fn start_node(
                         }
                     }
                 }
-                Ok(NodeEvent::TransactionReceived(tx)) => {
+                Ok(NodeEvent::TransactionReceived(tx, source)) => {
                     // Admit fluffed network txs into local mempool so they become mineable.
                     if let Err(e) = event_mempool.add_with_chain(tx, &event_chain) {
-                        warn!("P2P transaction rejected by mempool: {}", e);
+                        let reason = e.to_string();
+                        warn!("P2P transaction rejected by mempool: {}", reason);
+                        // Score the originating peer if known. Mempool admit
+                        // runs full crypto (ring sig, range proof, key image,
+                        // double-spend) which an honest peer should have caught
+                        // before relay. Locally-generated txs (source=None)
+                        // are skipped — that's our own broken tx, not abuse.
+                        if let Some(peer_id) = source {
+                            let p2p2 = event_p2p.clone();
+                            tokio::spawn(async move {
+                                p2p2.notify_tx_invalid_full(&peer_id, &reason).await;
+                            });
+                        }
                     }
                 }
                 Ok(_other) => {

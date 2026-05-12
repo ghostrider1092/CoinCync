@@ -146,10 +146,10 @@ pub fn classify_invalid_block_reason(reason: &str) -> MisbehaviorType {
 /// they're upstream of validation and signal misuse of the protocol envelope
 /// more than tx-content forgery.
 ///
-/// When peer_id is plumbed through `NodeEvent::TransactionReceived` in a
-/// future change, this classifier will also cover full-crypto failures from
-/// mempool admit (bad ring sig, range proof, key image). Add additional
-/// substring matchers here when that wiring lands.
+/// Also called from `P2PNode::notify_tx_invalid_full` for mempool-admit
+/// failures (bad ring sig, range proof, key image, double-spend) — those
+/// reasons fall through to the `InvalidTransaction` default and accumulate
+/// the same 25-point penalty.
 pub fn classify_invalid_tx_reason(reason: &str) -> MisbehaviorType {
     let r = reason.to_ascii_lowercase();
 
@@ -313,6 +313,84 @@ impl PeerMessageRateTracker {
 }
 
 impl Default for PeerMessageRateTracker {
+    fn default() -> Self { Self::new() }
+}
+
+/// Threshold for orphan-flood detection: more than this many orphans from one
+/// peer inside [`ORPHAN_FLOOD_WINDOW_SECS`] is treated as abuse. Five was
+/// picked to comfortably exceed normal IBD churn (where a peer may push 2-3
+/// orphans in a burst while we're catching up) but stay tight enough that a
+/// peer can't drown us in PoW-recheck CPU on garbage parents.
+pub const ORPHAN_FLOOD_THRESHOLD: u32 = 5;
+
+/// Window length for orphan-flood detection (seconds).
+pub const ORPHAN_FLOOD_WINDOW_SECS: u64 = 60;
+
+#[derive(Clone, Copy, Debug)]
+struct OrphanWindow {
+    count: u32,
+    window_start: Instant,
+    /// Have we already returned `true` for this window? Prevents a single
+    /// flood from registering one misbehavior per orphan after threshold
+    /// (which would ban within seconds and tarpit accidental floods too
+    /// aggressively). One score per window is enough — sustained floods
+    /// across multiple windows accumulate naturally.
+    flagged: bool,
+}
+
+/// Tracks per-peer orphan-block submission rate to detect flooding.
+///
+/// Wired at `P2PNode::notify_block_orphan`; when `record` returns true the
+/// caller should score the peer with [`MisbehaviorType::OrphanFlood`].
+pub struct OrphanFloodTracker {
+    peers: HashMap<[u8; 32], OrphanWindow>,
+}
+
+impl OrphanFloodTracker {
+    pub fn new() -> Self {
+        OrphanFloodTracker { peers: HashMap::new() }
+    }
+
+    /// Record an orphan from this peer. Returns `true` exactly once per
+    /// rolling window when the peer crosses the flood threshold.
+    pub fn record(&mut self, peer_id: [u8; 32]) -> bool {
+        let now = Instant::now();
+        let entry = self.peers.entry(peer_id).or_insert(OrphanWindow {
+            count: 0,
+            window_start: now,
+            flagged: false,
+        });
+
+        if now.duration_since(entry.window_start).as_secs() >= ORPHAN_FLOOD_WINDOW_SECS {
+            // Window expired — start a fresh count for this peer.
+            entry.count = 1;
+            entry.window_start = now;
+            entry.flagged = false;
+            return false;
+        }
+
+        entry.count += 1;
+        if entry.count > ORPHAN_FLOOD_THRESHOLD && !entry.flagged {
+            entry.flagged = true;
+            return true;
+        }
+        false
+    }
+
+    /// Drop tracking for a disconnected peer so memory doesn't grow with
+    /// churn. Called from the peer-disconnect path.
+    pub fn forget(&mut self, peer_id: &[u8; 32]) {
+        self.peers.remove(peer_id);
+    }
+
+    /// Test/diagnostic accessor for the current count in the active window.
+    #[cfg(test)]
+    pub fn count_for(&self, peer_id: &[u8; 32]) -> u32 {
+        self.peers.get(peer_id).map(|w| w.count).unwrap_or(0)
+    }
+}
+
+impl Default for OrphanFloodTracker {
     fn default() -> Self { Self::new() }
 }
 
@@ -840,6 +918,63 @@ mod tests {
         let mut score = PeerScore::default();
         score.record_misbehavior(MisbehaviorType::WrongNetwork);
         assert!(score.should_ban(), "wrong-network offense should trigger ban");
+    }
+
+    #[test]
+    fn orphan_flood_below_threshold_does_not_trigger() {
+        let mut t = OrphanFloodTracker::new();
+        let pid = [42u8; 32];
+        for i in 1..=ORPHAN_FLOOD_THRESHOLD {
+            assert!(!t.record(pid), "orphan {} of {} below threshold should not flag", i, ORPHAN_FLOOD_THRESHOLD);
+        }
+        assert_eq!(t.count_for(&pid), ORPHAN_FLOOD_THRESHOLD);
+    }
+
+    #[test]
+    fn orphan_flood_crossing_threshold_triggers_once() {
+        let mut t = OrphanFloodTracker::new();
+        let pid = [42u8; 32];
+        // Fill up to threshold quietly.
+        for _ in 0..ORPHAN_FLOOD_THRESHOLD {
+            assert!(!t.record(pid));
+        }
+        // One more = threshold crossed.
+        assert!(t.record(pid), "first orphan past threshold should flag");
+        // Subsequent orphans within the same window should NOT re-flag
+        // (one score per window — sustained flooders accumulate across windows).
+        for _ in 0..20 {
+            assert!(!t.record(pid), "already-flagged window should not re-trigger");
+        }
+    }
+
+    #[test]
+    fn orphan_flood_per_peer_isolated() {
+        let mut t = OrphanFloodTracker::new();
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        // Peer A floods; peer B is innocent.
+        for _ in 0..=ORPHAN_FLOOD_THRESHOLD {
+            t.record(a);
+        }
+        assert!(t.count_for(&a) > ORPHAN_FLOOD_THRESHOLD);
+        // Peer B's first orphan must not be affected by A's count.
+        assert!(!t.record(b));
+        assert_eq!(t.count_for(&b), 1);
+    }
+
+    #[test]
+    fn orphan_flood_forget_clears_state() {
+        let mut t = OrphanFloodTracker::new();
+        let pid = [3u8; 32];
+        for _ in 0..=ORPHAN_FLOOD_THRESHOLD {
+            t.record(pid);
+        }
+        assert!(t.count_for(&pid) > 0);
+        t.forget(&pid);
+        assert_eq!(t.count_for(&pid), 0);
+        // After forget, the next record should start a fresh window.
+        assert!(!t.record(pid));
+        assert_eq!(t.count_for(&pid), 1);
     }
 
     #[test]

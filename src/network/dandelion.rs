@@ -380,7 +380,7 @@ impl DandelionRouter {
                     );
                     if let Some(entry) = self.stempool.remove(&hash) {
                         self.fluffed.insert(hash, now);
-                        actions.fluff.push((hash, entry.tx));
+                        actions.fluff.push((hash, entry.tx, entry.source));
                         crate::metrics::dandelion::EMBARGO_FLUFFS_TOTAL.inc();
                     }
                 }
@@ -426,7 +426,7 @@ impl DandelionRouter {
                     );
                     if let Some(entry) = self.stempool.remove(&hash) {
                         self.fluffed.insert(hash, now);
-                        actions.fluff.push((hash, entry.tx));
+                        actions.fluff.push((hash, entry.tx, entry.source));
                     }
                 }
             }
@@ -551,8 +551,12 @@ pub struct DandelionActions {
     /// SECURITY (BUG-4): Includes the full Transaction so the node can send
     /// the actual tx body (not just InvTx hash) to the relay peer.
     pub stem_relay: Vec<(Hash, Transaction, PeerId)>,
-    /// Transactions to broadcast via diffusion (fluff).
-    pub fluff: Vec<(Hash, Transaction)>,
+    /// Transactions to broadcast via diffusion (fluff). The third tuple
+    /// element is the originating peer (the peer that relayed the tx into
+    /// our stempool) when known, or `None` for locally-generated txs. The
+    /// originator is plumbed downstream so mempool-admit failures can
+    /// score the responsible peer.
+    pub fluff: Vec<(Hash, Transaction, Option<PeerId>)>,
 }
 
 /// Dandelion++ statistics.

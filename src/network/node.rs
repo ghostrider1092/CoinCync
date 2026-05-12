@@ -104,7 +104,12 @@ pub enum NodeEvent {
     /// `P2pNode::iron_on_block_verdict`.
     BlockReceived(Block, PeerId),
     /// New transaction received
-    TransactionReceived(Transaction),
+    /// A transaction has been received and is ready for mempool admission.
+    /// The second tuple element is the originating peer (the peer that
+    /// relayed the tx into our stempool / fluff path) when known, or
+    /// `None` for locally-generated txs. Consumers use this to score the
+    /// peer on mempool-admit failure (bad ring sig, range proof, etc.).
+    TransactionReceived(Transaction, Option<PeerId>),
     /// Sync state changed
     SyncStateChanged(SyncState),
     /// Network error
@@ -209,6 +214,10 @@ pub struct P2PNode {
     conn_tracker: Arc<ConnectionTracker>,
     /// Peer scoring and reputation management
     peer_scorer: Arc<RwLock<PeerScorer>>,
+    /// Per-peer orphan-block rate tracker for flood detection.
+    /// Wired into `notify_block_orphan`; flooders are scored with
+    /// `MisbehaviorType::OrphanFlood`.
+    orphan_flood: Arc<RwLock<super::scoring::OrphanFloodTracker>>,
     /// SECURITY (NET-001): Version nonce for self-connection detection
     version_nonce: u64,
     /// Channel for sync-safe transaction broadcast queueing (used by RPC handlers)
@@ -275,6 +284,7 @@ impl P2PNode {
             running: Arc::new(RwLock::new(false)),
             conn_tracker: Arc::new(ConnectionTracker::new(MEMORY_BUDGET_BYTES)),
             peer_scorer: Arc::new(RwLock::new(PeerScorer::new())),
+            orphan_flood: Arc::new(RwLock::new(super::scoring::OrphanFloodTracker::new())),
             version_nonce: rand::random::<u64>(),
             tx_broadcast_tx,
             tx_broadcast_rx: parking_lot::Mutex::new(Some(tx_broadcast_rx)),
@@ -475,12 +485,87 @@ impl P2PNode {
         }
     }
 
+    /// Score a peer that relayed a transaction which then failed full
+    /// mempool validation (ring sig, range proof, key image, double-spend,
+    /// or any other admit-time check). Counterpart to `notify_block_invalid`.
+    ///
+    /// The structural pre-relay validation at `process_message::Transactions`
+    /// catches a small subset of bad txs (version, empty in/out, size, fee).
+    /// The expensive crypto runs only in mempool admit and historically had
+    /// no peer_id available, so the warning fired but no scoring happened.
+    /// Plumbing `source` through `NodeEvent::TransactionReceived` closed
+    /// that gap; this method scores the responsible peer.
+    pub async fn notify_tx_invalid_full(&self, peer_id: &PeerId, reason: &str) {
+        let offense = super::scoring::classify_invalid_tx_reason(reason);
+        let addr = match self.peers.get(peer_id).map(|p| p.addr) {
+            Some(a) => a,
+            None => return,
+        };
+        let banned = {
+            let mut scorer = self.peer_scorer.write().await;
+            let score = scorer.get_or_create(addr);
+            score.record_misbehavior(offense);
+            score.invalid_txs += 1;
+            score.should_ban()
+        };
+        if banned {
+            tracing::warn!(
+                "Banning peer {:?} ({}): {:?} (reason: {})",
+                &peer_id[..4],
+                addr,
+                offense,
+                reason,
+            );
+            self.ban_peer(peer_id).await;
+        }
+    }
+
     /// IBD orphan recovery: when a block came back as Orphan, ask the
     /// sync manager to fetch the parent so the gap fills, instead of
     /// re-requesting the orphan itself in a loop. See sync::mark_block_orphan
     /// for the full rationale.
-    pub async fn notify_block_orphan(&self, orphan_hash: &Hash, parent_hash: &Hash) {
+    ///
+    /// Also runs orphan-flood detection on the originating peer. A handful
+    /// of orphans during IBD is normal (we're catching up), but more than
+    /// `ORPHAN_FLOOD_THRESHOLD` orphans in `ORPHAN_FLOOD_WINDOW_SECS` from
+    /// one peer indicates abuse (e.g. malicious chain-tip spoofing or
+    /// PoW-recheck CPU exhaustion). Flooders accumulate
+    /// `MisbehaviorType::OrphanFlood` strikes (20 points each); five
+    /// distinct flooding windows ban the peer.
+    pub async fn notify_block_orphan(&self, peer_id: &PeerId, orphan_hash: &Hash, parent_hash: &Hash) {
         self.sync.write().await.mark_block_orphan(orphan_hash, parent_hash);
+
+        let flooded = self.orphan_flood.write().await.record(*peer_id);
+        if !flooded {
+            return;
+        }
+        // Threshold crossed. Score the peer.
+        let addr = match self.peers.get(peer_id).map(|p| p.addr) {
+            Some(a) => a,
+            None => return,
+        };
+        let banned = {
+            let mut scorer = self.peer_scorer.write().await;
+            let score = scorer.get_or_create(addr);
+            score.record_misbehavior(super::scoring::MisbehaviorType::OrphanFlood);
+            score.should_ban()
+        };
+        if banned {
+            tracing::warn!(
+                "Banning peer {:?} ({}): OrphanFlood (>{} orphans in {}s)",
+                &peer_id[..4],
+                addr,
+                super::scoring::ORPHAN_FLOOD_THRESHOLD,
+                super::scoring::ORPHAN_FLOOD_WINDOW_SECS,
+            );
+            self.ban_peer(peer_id).await;
+        } else {
+            tracing::warn!(
+                "Orphan flood detected from peer {:?} ({}): scored OrphanFlood",
+                &peer_id[..4],
+                addr,
+            );
+        }
     }
 
     /// Force a full resync by clearing sync state and requesting headers again.
@@ -1434,7 +1519,7 @@ impl P2PNode {
                         }
 
                         // Execute fluff: broadcast InvTx to ALL peers + emit event
-                        for (tx_hash, tx) in &actions.fluff {
+                        for (tx_hash, tx, source) in &actions.fluff {
                             if let Ok(msg) = Message::inv_tx(magic, *tx_hash) {
                                 if let Ok(data) = msg.to_bytes() {
                                     for sender in maint_senders.iter() {
@@ -1442,8 +1527,11 @@ impl P2PNode {
                                     }
                                 }
                             }
-                            // Emit event so the tx enters the mempool
-                            let _ = maint_event_tx.send(NodeEvent::TransactionReceived(tx.clone()));
+                            // Emit event so the tx enters the mempool.
+                            // `source` is the peer that relayed the stem tx into
+                            // our stempool (None for locally-generated). Consumers
+                            // use it to score the peer on mempool-admit failure.
+                            let _ = maint_event_tx.send(NodeEvent::TransactionReceived(tx.clone(), *source));
                             crate::metrics::dandelion::FLUFF_BROADCASTS_TOTAL.inc();
                         }
 
@@ -1762,6 +1850,8 @@ impl P2PNode {
         self.dandelion.write().await.remove_outbound_peer(peer_id);
         self.peers.remove(peer_id);
         self.peer_senders.remove(peer_id);
+        // Drop any orphan-flood tracking state — keeps the tracker bounded.
+        self.orphan_flood.write().await.forget(peer_id);
         let _ = self.event_tx.send(NodeEvent::PeerDisconnected(*peer_id));
     }
 }
@@ -2291,6 +2381,10 @@ async fn process_message(
             const MAX_VERSION_MSG_SIZE: usize = 1024;
             if payload.len() > MAX_VERSION_MSG_SIZE {
                 warn!("Version message too large ({} bytes) from peer {:?}", payload.len(), &peer_id[..4]);
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                }
                 peers.remove(&peer_id);
                 senders.remove(&peer_id);
                 let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
@@ -2301,6 +2395,10 @@ async fn process_message(
                 Ok(v) => v,
                 Err(e) => {
                     warn!("Failed to deserialize Version from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                     peers.remove(&peer_id);
                     senders.remove(&peer_id);
                     let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
@@ -2329,6 +2427,10 @@ async fn process_message(
                 // SECURITY: Validate version message (protocol version, user agent length)
                 if let Err(e) = version.validate() {
                     warn!("Rejecting peer {:?}: invalid version: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                     // Disconnect the peer
                     peers.remove(&peer_id);
                     senders.remove(&peer_id);
@@ -2444,11 +2546,19 @@ async fn process_message(
             // Peer is requesting headers - serve from our chain
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("GetHeaders message too large from peer {:?}", &peer_id[..4]);
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                }
                 return Ok(());
             }
             if let Ok(msg) = borsh::from_slice::<GetHeadersMessage>(payload) {
                 if let Err(e) = msg.validate() {
                     warn!("Invalid GetHeaders from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                     return Ok(());
                 }
 
@@ -2491,12 +2601,20 @@ async fn process_message(
             // Peer is requesting full blocks by hash
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("GetBlocks message too large from peer {:?}", &peer_id[..4]);
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                }
                 return Ok(());
             }
             match borsh::from_slice::<GetBlocksMessage>(payload) {
                 Ok(msg) => {
                     if let Err(e) = msg.validate() {
                         warn!("Invalid GetBlocks from peer {:?}: {}", &peer_id[..4], e);
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr)
+                                .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                        }
                         return Ok(());
                     }
 
@@ -2526,6 +2644,10 @@ async fn process_message(
                 }
                 Err(e) => {
                     warn!("Failed to deserialize GetBlocks from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                 }
             }
         }
@@ -2535,6 +2657,10 @@ async fn process_message(
             if let Ok(inv_msg) = borsh::from_slice::<InvMessage>(payload) {
                 if let Err(e) = inv_msg.validate() {
                     warn!("Invalid InvTx from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                     return Ok(());
                 }
                 let mut needed = Vec::new();
@@ -2562,6 +2688,10 @@ async fn process_message(
             if let Ok(inv_msg) = borsh::from_slice::<InvMessage>(payload) {
                 if let Err(e) = inv_msg.validate() {
                     warn!("Invalid InvBlock from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                     return Ok(());
                 }
 
@@ -2651,11 +2781,19 @@ async fn process_message(
             // Peer is requesting transactions by hash
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("GetTxs message too large from peer {:?}", &peer_id[..4]);
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                }
                 return Ok(());
             }
             if let Ok(msg) = borsh::from_slice::<GetBlocksMessage>(payload) {
                 if let Err(e) = msg.validate() {
                     warn!("Invalid GetTxs from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                     return Ok(());
                 }
                 let mut txs = Vec::new();
@@ -2736,7 +2874,11 @@ async fn process_message(
                                     }
                                 }
                             }
-                            let _ = event_tx.send(NodeEvent::TransactionReceived(fluff_tx));
+                            // Immediate-fluff (loop detection or fluff epoch).
+                            // `peer_id` is the peer that just relayed this tx
+                            // to us — they're the responsible party if mempool
+                            // admit fails on full-crypto validation.
+                            let _ = event_tx.send(NodeEvent::TransactionReceived(fluff_tx, Some(peer_id)));
                         }
                         StemAction::Stem => {
                             // Stem mode: tx is in stempool, will be relayed by tick()
@@ -2983,6 +3125,10 @@ async fn process_message(
             if let Ok(addr_msg) = borsh::from_slice::<super::protocol::AddrMessage>(payload) {
                 if let Err(e) = addr_msg.validate() {
                     warn!("Invalid AddrMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::InvalidAddress);
+                    }
                     return Ok(());
                 }
 
