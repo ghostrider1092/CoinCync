@@ -20,6 +20,25 @@ The articles that follow are the operative law. Each one is a wall. None of them
 
 ---
 
+## Threat Model
+
+This Constitution defines protections against the following adversary classes. Naming them explicitly bounds what "privacy," "sovereignty," and "permissionless" mean in operative terms and prevents future debate over whether a given protection is in scope.
+
+- **Chain analysts** — blockchain forensics firms, surveillance contractors, and entities that correlate on-chain data with off-chain identity. Defended primarily by Articles III, IX, XIV.
+- **State-level adversaries** — governments seeking to compel transaction visibility, identify users, freeze funds, or compel protocol changes. Defended by Articles III, VI, IX, XII.
+- **Capture by maintainers** — present or future contributors who attempt to introduce backdoors, dev taxes, admin keys, or governance capture. Defended by Articles II, VIII, X, XII, XVIII.
+- **Economic capture** — entities attempting to influence consensus through coin holdings, exchange listings, hash-rate concentration, or financial pressure on contributors. Defended by Articles V, VIII, XI.
+- **External-system dependencies** — bridges, oracles, wrapped assets, or hybrid protocols that could import trust from systems CoinCync does not control. Defended by Article XIII.
+- **Network-level fingerprinting** — observers attempting to identify transaction originators through traffic analysis below the protocol layer. Defended by Article IX (Dandelion++ and encrypted P2P).
+
+Adversary classes explicitly **out of scope** — this Constitution cannot defend against them, and any protocol change premised on defending against them is reaching beyond the scope of these articles:
+
+- **User-side operational-security failures** — lost keys, malware on the user's device, weak passwords, social-engineering of the user. The protocol cannot defend across the user's own threat boundary.
+- **Legal compulsion of an individual user** — court orders directing a specific person to disclose their view keys. Article VI provides voluntary disclosure tools; the protocol cannot prevent a user from being legally compelled to invoke them.
+- **Network-layer censorship below the protocol** — ISP blocking, DNS censorship, geo-blocking of access. Article VII guarantees permissionless participation at the protocol level; circumvention (Tor, I2P, VPN) is a user-side concern, not a protocol guarantee.
+
+---
+
 ## Article I — Fixed Supply
 
 The total supply of CYNC shall never exceed **100,000,000** coins. This limit is asymptotic — the emission curve approaches but never reaches it. It is not subject to amendment, emergency override, governance vote, or any other mechanism.
@@ -172,7 +191,7 @@ The project layer coordinates human effort around building CoinCync. The protoco
 2. Minimum 30-day public discussion period before any vote
 3. Working implementation required before activation
 4. Node operator adoption required for protocol-layer changes
-5. Constitutional amendments: not permitted under any circumstances
+5. Constitutional amendments: permitted only under the narrow security-strengthening path defined in Article XVII; otherwise prohibited
 
 **Enforcement:** Node adoption is the only vote that matters at the protocol level.
 
@@ -194,6 +213,18 @@ Encrypted peer-to-peer communication and Dandelion++ transaction routing are bui
 The distinction between lawful monitoring and surveillance infrastructure is not recognized at the protocol level. The protocol does not know who is asking. It protects everyone equally or it protects no one reliably.
 
 **Enforcement:** Protocol-enforced. No surveillance mechanism exists in the protocol. Dandelion++ and encrypted P2P are mandatory.
+
+## Article X — Immutability
+
+This Constitution is permanent in its principles and modifiable only under the narrow security-strengthening path defined in Article XVII. No other amendment, repeal, or suspension mechanism exists. The articles cannot be weakened by any governance process, community vote, developer decision, legal order, court ruling, regulatory requirement, or supermajority of any kind.
+
+The articles of this Constitution are not starting points for negotiation. They are the final word on what CoinCync is and what it can never become.
+
+A protocol that violates these articles is not CoinCync — regardless of what its developers call it, regardless of what exchanges list it, regardless of how much hash power backs it, and regardless of how many users it has. A chain that removes mandatory privacy is a different chain. A chain that raises the supply cap is a different chain. A chain that introduces a developer tax is a different chain.
+
+The only legitimate evolution of CoinCync is one that honors every article of this Constitution in full, strengthens the protections it describes via Article XVII, and leaves the foundations untouched. Users, miners, and node operators are encouraged to identify chains that violate these articles clearly and to continue running the original protocol.
+
+**Enforcement:** Enforced by every node on the network and by the community's right and responsibility to fork.
 
 ## Article XI — No Algorithmic Capture
 
@@ -249,37 +280,13 @@ This Constitution describes the technical properties of the CoinCync protocol �
 
 **Enforcement:** Legal framing. The MIT license under which all CoinCync code is released disclaims warranty in all jurisdictions where such disclaimers are recognized.
 
-## Article X — Immutability
-
-This Constitution is permanent.
-
-It cannot be amended. It cannot be repealed. It cannot be superseded by any governance process, community vote, developer decision, legal order, court ruling, regulatory requirement, or supermajority of any kind. There is no emergency provision. There is no sunset clause. There is no mechanism by which these articles can be weakened, suspended, or removed.
-
-The articles of this Constitution are not starting points for negotiation. They are the final word on what CoinCync is and what it can never become.
-
-Any protocol that violates these articles is not CoinCync — regardless of what its developers call it, regardless of what exchanges list it, regardless of how much hash power backs it, and regardless of how many users it has. A chain that removes mandatory privacy is a different chain. A chain that raises the supply cap is a different chain. A chain that introduces a developer tax is a different chain.
-
-Users, miners, and node operators are encouraged to identify such chains clearly and to continue running the original protocol.
-
-The only legitimate evolution of CoinCync is one that honors every article of this Constitution in full, strengthens the protections it describes, and leaves its foundations untouched.
-
-**Enforcement:** Enforced by every node on the network and by the community's right and responsibility to fork.
-
 ---
 
 ## Closing Statement
 
-These ten articles were written because code without principles is just software — and software without principles serves whoever controls it.
-
-CoinCync was built to serve its users. Not its developers. Not its investors. Not any government or institution. Its users — every person who runs a node, mines a block, sends a transaction, or simply holds CYNC in a wallet on a device in their pocket.
-
-Financial privacy is not a luxury. It is not a feature for criminals. It is the condition under which free people conduct their lives without accounting for themselves to institutions that did not earn that accounting. It is the difference between a tool that serves you and a tool that reports on you.
-
-CoinCync exists because that difference matters. This Constitution exists to make sure it always will.
+These articles were written because code without principles is just software — and software without principles serves whoever controls it. CoinCync was built to serve its users: every person who runs a node, mines a block, sends a transaction, or holds CYNC in a wallet on a device in their pocket. Financial privacy is the condition under which free people conduct their lives without accounting for themselves to institutions that did not earn that accounting. CoinCync exists because that difference matters, and this Constitution exists to make sure it always will.
 
 *These are not just words. They are compiled into every node, verified by every miner, and enforced by mathematics. No person, committee, or future version of this project can undo what is written here.*
-
-*CoinCync serves its users. No one else.*
 
 ---
 
