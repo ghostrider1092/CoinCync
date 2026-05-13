@@ -1156,6 +1156,49 @@ impl Clone for SharedMempool {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Async wrappers (Phase 2 of the post-launch runtime-resilience refactor)
+// ════════════════════════════════════════════════════════════════════
+//
+// Mirror of the `Blockchain::*_async` wrappers in `chain.rs`. The
+// SharedMempool sync methods take parking_lot write locks and run full
+// crypto verification on tx admit. Routing those through
+// `tokio::task::spawn_blocking` from async contexts prevents the
+// single-vCPU runtime-freeze pattern observed 2026-05-12 16:18 UTC.
+//
+// `SharedMempool` is `Clone` (just an Arc bump), so callers pass an
+// owned clone instead of `&self`; the `spawn_blocking` closure needs
+// `'static + Send` and an owned value satisfies that trivially.
+
+impl SharedMempool {
+    /// Async wrapper around [`SharedMempool::add_with_chain`]. Runs the
+    /// cheap chain-state pre-check + full mempool admit (which includes
+    /// CLSAG and Bulletproof+ verify) on `tokio::task::spawn_blocking`.
+    pub async fn add_with_chain_async(
+        self,
+        tx: Transaction,
+        chain: crate::chain::SharedBlockchain,
+    ) -> Result<Hash> {
+        tokio::task::spawn_blocking(move || self.add_with_chain(tx, &chain))
+            .await
+            .map_err(|e| Error::Internal(format!(
+                "spawn_blocking join error in add_with_chain: {}", e
+            )))?
+    }
+
+    /// Async wrapper around [`SharedMempool::get_block_transactions`].
+    /// Mempool iteration up to `max_count` txs / `max_size` bytes.
+    pub async fn get_block_transactions_async(
+        self,
+        max_size: usize,
+        max_count: usize,
+    ) -> Vec<Transaction> {
+        tokio::task::spawn_blocking(move || self.get_block_transactions(max_size, max_count))
+            .await
+            .unwrap_or_default()
+    }
+}
+
 // NOTE: the mempool test module previously used `TxType::AssetIssuance`
 // to build cheap test transactions that bypassed crypto verification.
 // The asset layer has been removed in the 1.0 cleanup, so the tests are

@@ -339,44 +339,27 @@ async fn start_node(
         loop {
             match node_events.recv().await {
                 Ok(NodeEvent::BlockReceived(block, peer_id)) => {
+                    // Phase 1 #6: time the full block-receive-to-tip path.
+                    // Captures spawn_blocking dispatch + chain.process_block +
+                    // mempool sync + chain_state refresh. The stopwatch lives
+                    // for the entire match arm; observe() fires before the
+                    // continue/loop-back.
+                    let _block_timer = coincync::metrics::BLOCK_RECEIVE_TO_TIP.start_timer();
                     let hash = block.hash();
                     let block_height = block.header.height;
                     let prev_hash = block.header.prev_hash;
                     let block_txs = block.transactions.clone();
                     let block_for_relay = block.clone();
-                    // SECURITY (runtime resilience, Layer 2 of post-launch
-                    // campaign): route the synchronous block-processing path
-                    // through `spawn_blocking` so it never executes on a
-                    // tokio worker thread. process_block runs CPU-bound
-                    // validation (PoW recheck, ring sig verify, range proof
-                    // verify) and takes parking_lot write locks against the
-                    // chain DB. On a single-vCPU box those operations froze
-                    // the only worker for 13 minutes on 2026-05-12 16:18 UTC,
-                    // taking down RPC and P2P. Layer 1 (commit 5c98bae)
-                    // forced 4 worker threads as a defensive workaround;
-                    // this is the proper structural fix.
-                    let chain_for_block = event_chain.clone();
-                    let process_result = tokio::task::spawn_blocking(move || {
-                        chain_for_block.process_block(block)
-                    })
-                    .await;
-                    let block_status = match process_result {
-                        Ok(inner) => inner,
-                        Err(join_err) => {
-                            // spawn_blocking task panicked. Don't crash the
-                            // consumer loop — log and move on. The same block
-                            // will be re-offered by sync retry if it's still
-                            // valid; if the panic is deterministic for this
-                            // block, the chain will simply not advance past
-                            // it and the watchdog will kick in.
-                            warn!(
-                                "spawn_blocking panicked in process_block for {}: {}",
-                                hex::encode(&hash.as_bytes()[..8]),
-                                join_err,
-                            );
-                            continue;
-                        }
-                    };
+                    // Runtime resilience: route block processing through the
+                    // `process_block_async` wrapper (chain.rs Phase 2 #9), which
+                    // moves the CPU-bound + DB-write path onto tokio's blocking
+                    // thread pool. Layer 1 (commit 5c98bae, 4 worker threads)
+                    // remains as defense in depth. The async wrapper converts
+                    // spawn_blocking JoinError into `Error::Internal(...)` —
+                    // caught by the `Err(e)` arm below alongside any other
+                    // process_block failure, no special-case panic handling
+                    // needed at this call site.
+                    let block_status = event_chain.clone().process_block_async(block).await;
                     match block_status {
                         Ok(status @ (BlockStatus::Accepted
                                     | BlockStatus::AcceptedFork
@@ -473,29 +456,20 @@ async fn start_node(
                     }
                 }
                 Ok(NodeEvent::TransactionReceived(tx, source)) => {
+                    // Phase 1 #6: time the full tx-admit path including
+                    // spawn_blocking dispatch + full crypto verify + mempool
+                    // insert + Dandelion stempool update.
+                    let _tx_timer = coincync::metrics::TX_ADMIT_TO_MEMPOOL.start_timer();
                     // Admit fluffed network txs into local mempool so they become mineable.
-                    // SECURITY (runtime resilience, Layer 2): mempool admit runs full
-                    // crypto validation (ring sig + range proof verify per tx, key-image
-                    // dedup against the chain DB). On a single-vCPU box that can take
-                    // hundreds of milliseconds and holds locks the whole time. Route it
-                    // through spawn_blocking so the worker thread stays free for RPC,
-                    // P2P reads, and the consumer loop itself.
-                    let mempool_for_admit = event_mempool.clone();
-                    let chain_for_admit = event_chain.clone();
-                    let admit_result = tokio::task::spawn_blocking(move || {
-                        mempool_for_admit.add_with_chain(tx, &chain_for_admit)
-                    })
-                    .await;
-                    let admit = match admit_result {
-                        Ok(r) => r,
-                        Err(join_err) => {
-                            warn!(
-                                "spawn_blocking panicked in mempool.add_with_chain: {}",
-                                join_err,
-                            );
-                            continue;
-                        }
-                    };
+                    // Routes through `add_with_chain_async` (mempool.rs Phase 2 #9)
+                    // which moves the full crypto verify + key-image dedup off
+                    // the worker thread. JoinError on spawn_blocking comes back
+                    // as `Error::Internal(...)` — handled by the same Err arm
+                    // below as any other admit failure.
+                    let admit = event_mempool
+                        .clone()
+                        .add_with_chain_async(tx, event_chain.clone())
+                        .await;
                     if let Err(e) = admit {
                         let reason = e.to_string();
                         warn!("P2P transaction rejected by mempool: {}", reason);
@@ -553,6 +527,22 @@ async fn start_node(
         rpc_config,
     )
     .await?;
+
+    // ── Prometheus /metrics scrape endpoint ─────────────────────
+    //
+    // Bound to RPC port + 1 (e.g. 28081 → 28082). Phase 1 #6 of
+    // the post-launch campaign: real production observability
+    // backing the noop stubs that lived in src/metrics.rs in the
+    // 1.0 trim. Spawned as a background task so node shutdown
+    // still flows through the ctrl-c handler below.
+    let metrics_listen: std::net::SocketAddr =
+        ([127, 0, 0, 1], rpc_listen.port().wrapping_add(1)).into();
+    info!("Starting Prometheus /metrics endpoint on {}", metrics_listen);
+    tokio::spawn(async move {
+        if let Err(e) = coincync::metrics::serve_metrics(metrics_listen).await {
+            warn!("Metrics endpoint exited: {}", e);
+        }
+    });
 
     // ── REST + (optional) embedded explorer ────────────────────
     //

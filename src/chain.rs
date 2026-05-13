@@ -2371,6 +2371,77 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
     }
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Async wrappers (Phase 2 of the post-launch runtime-resilience refactor)
+// ════════════════════════════════════════════════════════════════════
+//
+// The sync methods above acquire `parking_lot::RwLock`s and run RocksDB
+// I/O. When called from async context they block whichever tokio worker
+// thread happens to pick up the task. On the single-vCPU fleet boxes
+// that's enough to freeze the entire runtime — observed live 2026-05-12
+// 16:18 UTC, 13-minute RPC outage. Phase 2 #9 introduced these `*_async`
+// companions that move the sync call onto tokio's blocking thread pool
+// via `spawn_blocking`, leaving worker threads free to keep scheduling.
+//
+// USE FROM ASYNC CONTEXTS. The sync versions remain for:
+//   - RPC handlers using `block_in_place` (jsonrpsee register_method
+//     closures are sync; `block_in_place` is the right primitive there)
+//   - Truly synchronous code (mining loop, tests, validator unit tests)
+//   - Internal helpers themselves called from inside spawn_blocking
+//
+// All wrappers take `self: Arc<Self>` so the caller passes an Arc clone
+// — required for `spawn_blocking`'s `'static + Send` bound. Cheap:
+// atomic refcount bump only.
+
+impl Blockchain {
+    /// Async wrapper around [`Blockchain::add_block`]. Runs full block
+    /// validation + DB write on `tokio::task::spawn_blocking`.
+    pub async fn add_block_async(self: Arc<Self>, block: Block) -> Result<BlockStatus> {
+        tokio::task::spawn_blocking(move || self.add_block(block))
+            .await
+            .map_err(|e| Error::Internal(format!("spawn_blocking join error in add_block: {}", e)))?
+    }
+
+    /// Async wrapper around [`Blockchain::process_block`]. Equivalent to
+    /// `add_block_async` (process_block is a thin alias today).
+    pub async fn process_block_async(self: Arc<Self>, block: Block) -> Result<BlockStatus> {
+        tokio::task::spawn_blocking(move || self.process_block(block))
+            .await
+            .map_err(|e| Error::Internal(format!("spawn_blocking join error in process_block: {}", e)))?
+    }
+
+    /// Async wrapper around [`Blockchain::get_block`]. Hash-keyed DB read.
+    pub async fn get_block_async(self: Arc<Self>, hash: Hash) -> Option<Block> {
+        tokio::task::spawn_blocking(move || self.get_block(&hash))
+            .await
+            .unwrap_or(None)
+    }
+
+    /// Async wrapper around [`Blockchain::get_block_by_height`].
+    pub async fn get_block_by_height_async(self: Arc<Self>, height: u64) -> Option<Block> {
+        tokio::task::spawn_blocking(move || self.get_block_by_height(height))
+            .await
+            .unwrap_or(None)
+    }
+
+    /// Async wrapper around [`Blockchain::validate_transaction`]. Runs full
+    /// crypto verify (ring sig + range proof + key-image dedup).
+    pub async fn validate_transaction_async(self: Arc<Self>, tx: Transaction) -> Result<()> {
+        tokio::task::spawn_blocking(move || self.validate_transaction(&tx))
+            .await
+            .map_err(|e| Error::Internal(format!(
+                "spawn_blocking join error in validate_transaction: {}", e
+            )))?
+    }
+
+    /// Async wrapper around [`Blockchain::is_spent`]. Key-image lookup.
+    pub async fn is_spent_async(self: Arc<Self>, key_image: KeyImage) -> bool {
+        tokio::task::spawn_blocking(move || self.is_spent(&key_image))
+            .await
+            .unwrap_or(false)
+    }
+}
+
 /// Calculate difficulty from target using `2^128 / target` for precision.
 ///
 /// This matches Bitcoin's work calculation where difficulty is inversely

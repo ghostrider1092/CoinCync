@@ -60,6 +60,10 @@ pub struct PeerInfo {
     pub user_agent: String,
     /// Last activity time
     pub last_seen: Instant,
+    /// Connection start time. Set once at PeerInfo construction and
+    /// not updated thereafter. Used to time the Noise + Version/Verack
+    /// handshake (Phase 1 #6: `PEER_HANDSHAKE` histogram).
+    pub connected_at: Instant,
     /// Reputation score
     pub reputation: i32,
     /// Whether we initiated the connection
@@ -97,6 +101,7 @@ pub struct PeerInfo {
 
 impl PeerInfo {
     pub fn new(id: PeerId, addr: SocketAddr, outbound: bool) -> Self {
+        let now = Instant::now();
         PeerInfo {
             id,
             addr,
@@ -105,7 +110,8 @@ impl PeerInfo {
             tip_hash: Hash::zero(),
             version: 0,
             user_agent: String::new(),
-            last_seen: Instant::now(),
+            last_seen: now,
+            connected_at: now,
             reputation: 100,
             outbound,
             bytes_recv: 0,
