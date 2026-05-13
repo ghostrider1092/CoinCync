@@ -190,7 +190,6 @@ dotenvy   = "0.15"
 # ── RPC extras ───────────────────────────────────────────────
 utoipa             = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui  = { version = "9", features = ["axum"] }
-jsonwebtoken       = "9"
 governor           = "0.6"
 tokio-tungstenite  = "0.24"
 
