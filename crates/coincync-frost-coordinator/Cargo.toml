@@ -106,7 +106,7 @@ subtle      = { version = "2",    optional = true }
 # Server binary deps (phase 4, opt-in via `server` feature). The
 # async runtime is gated so library consumers don't pay for it.
 tokio              = { version = "1", features = ["full", "signal"], optional = true }
-tokio-tungstenite  = { version = "0.21", optional = true }
+tokio-tungstenite  = { version = "0.24", optional = true }
 futures-util       = { version = "0.3", optional = true }
 tracing            = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
