@@ -46,10 +46,13 @@ const DEFAULT_PADDING_INTERVAL_MS: u64 = 500;
 /// Default maximum random jitter added to outbound messages (milliseconds).
 const DEFAULT_MAX_JITTER_MS: u64 = 200;
 
-/// Magic prefix for dummy padding packets. Peers recognize and discard
-/// these without processing. The tag is chosen to never collide with
-/// any valid CoinCync protocol message magic.
-const PADDING_MAGIC: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+// Padding packets are now framed as `MessageType::Padding` (discriminant 99)
+// rather than using a custom magic. The pre-launch `PADDING_MAGIC = 0xDEADBEEF`
+// scheme bypassed the message framer entirely and could never reach a peer
+// (the per-peer write loop in `node.rs::handle_connection` validates the
+// msg_type byte against `MessageType::try_from`, so untyped padding bytes
+// would drop the connection). Phase 2 of the post-launch campaign replaced
+// that hack with proper framing.
 
 // ═══════════════════════════════════════════════════════════════════════
 // TrafficShaper
@@ -217,25 +220,38 @@ impl TrafficShaper {
 
     /// Generate a dummy padding packet that peers will discard.
     ///
-    /// The packet is a random standard size filled with random bytes,
-    /// prefixed with the `PADDING_MAGIC` tag so the receiver can
-    /// identify and drop it without parsing.
-    pub fn generate_padding_packet() -> Vec<u8> {
+    /// Returns a fully framed `Message` (magic + header + random payload)
+    /// using `MessageType::Padding`. The total wire size is one of the
+    /// standard TLS frame sizes so the packet is indistinguishable from
+    /// a real shaped message on the wire.
+    ///
+    /// Pass the live network magic the node is configured with — the
+    /// receiver's framer rejects messages whose magic doesn't match.
+    pub fn generate_padding_packet(magic: [u8; 4]) -> Vec<u8> {
+        use super::framing::HEADER_SIZE;
+        use super::protocol::{Message, MessageType};
         let mut rng = rand::thread_rng();
         let size_idx = rng.gen_range(0..STANDARD_SIZES.len());
-        let size = STANDARD_SIZES[size_idx];
-
-        let mut packet = Vec::with_capacity(size);
-        packet.extend_from_slice(&PADDING_MAGIC);
-        let mut fill = vec![0u8; size - PADDING_MAGIC.len()];
-        rng.fill(&mut fill[..]);
-        packet.extend_from_slice(&fill);
-        packet
+        let total_size = STANDARD_SIZES[size_idx];
+        // Reserve space for the framer header (magic + length + msg_type).
+        // The random-bytes payload makes up the difference so the wire
+        // packet still matches one of the standard sizes.
+        let payload_size = total_size.saturating_sub(HEADER_SIZE);
+        let mut payload = vec![0u8; payload_size];
+        rng.fill(&mut payload[..]);
+        Message::new(magic, MessageType::Padding, payload)
+            .to_bytes()
+            .unwrap_or_default()
     }
 
-    /// Check if a received packet is a dummy padding packet.
-    pub fn is_padding_packet(data: &[u8]) -> bool {
-        data.len() >= PADDING_MAGIC.len() && data[..PADDING_MAGIC.len()] == PADDING_MAGIC
+    /// Legacy is-padding pre-check. Retained for backward compatibility
+    /// with tests; production no longer needs it because the framer
+    /// routes `MessageType::Padding` to the dispatch arm that discards
+    /// silently. New code should match on `MessageType::Padding`
+    /// directly. Will be removed in a follow-up after callers migrate.
+    #[deprecated(note = "match MessageType::Padding in process_message instead")]
+    pub fn is_padding_packet(_data: &[u8]) -> bool {
+        false
     }
 
     /// Run the constant-rate padding loop as a background task.
@@ -245,6 +261,7 @@ impl TrafficShaper {
     /// look identical to a network observer.
     pub async fn run_padding_loop(
         self: Arc<Self>,
+        magic: [u8; 4],
         sender: mpsc::Sender<Vec<u8>>,
         shutdown: Arc<AtomicBool>,
     ) {
@@ -261,7 +278,7 @@ impl TrafficShaper {
                 continue;
             }
 
-            let packet = Self::generate_padding_packet();
+            let packet = Self::generate_padding_packet(magic);
             if sender.send(packet).await.is_err() {
                 debug!("padding loop: channel closed, stopping");
                 break;
@@ -297,6 +314,7 @@ impl TrafficShaper {
     /// reflects packets that actually entered the per-peer write queue.
     pub async fn run_padding_loop_broadcast<I, F>(
         self: Arc<Self>,
+        magic: [u8; 4],
         peer_senders: F,
         shutdown: Arc<AtomicBool>,
     ) where
@@ -318,7 +336,9 @@ impl TrafficShaper {
 
             let mut sent_this_tick: u64 = 0;
             for sender in peer_senders() {
-                let packet = Self::generate_padding_packet();
+                // Fresh randomness per peer — a colluding pair must not
+                // be able to detect that they received the same bytes.
+                let packet = Self::generate_padding_packet(magic);
                 if sender.try_send(packet).is_ok() {
                     sent_this_tick += 1;
                 }
@@ -373,6 +393,11 @@ pub struct TrafficShapingStats {
 mod tests {
     use super::*;
 
+    /// Test-only network magic. Production uses the live testnet/mainnet
+    /// value from `NetworkType::magic_bytes()`; these bytes never appear
+    /// on a real wire so collisions with production aren't possible.
+    const TEST_MAGIC: [u8; 4] = [0x42, 0x42, 0x42, 0x42];
+
     #[test]
     fn normalize_round_trips() {
         let shaper = TrafficShaper::default_enabled();
@@ -405,16 +430,44 @@ mod tests {
     }
 
     #[test]
-    fn padding_packet_detected() {
-        let packet = TrafficShaper::generate_padding_packet();
-        assert!(TrafficShaper::is_padding_packet(&packet));
-        assert!(STANDARD_SIZES.contains(&packet.len()));
+    fn padding_packet_is_properly_framed() {
+        // Phase 2: padding now goes through the framer as MessageType::Padding.
+        // Verify the bytes have the right magic in the prefix and the
+        // msg_type byte (at offset 4) is the Padding discriminant (99).
+        let packet = TrafficShaper::generate_padding_packet(TEST_MAGIC);
+        assert!(packet.len() >= super::super::framing::HEADER_SIZE);
+        assert_eq!(
+            &packet[..4],
+            &TEST_MAGIC,
+            "packet must start with the supplied network magic",
+        );
+        assert_eq!(
+            packet[4], super::super::protocol::MessageType::Padding as u8,
+            "msg_type byte must be MessageType::Padding ({})",
+            super::super::protocol::MessageType::Padding as u8,
+        );
+        assert!(
+            STANDARD_SIZES.contains(&packet.len()),
+            "packet size {} not in STANDARD_SIZES",
+            packet.len(),
+        );
     }
 
     #[test]
-    fn real_packet_not_detected_as_padding() {
-        let real = b"not a padding packet at all";
-        assert!(!TrafficShaper::is_padding_packet(real));
+    fn padding_packet_random_per_call() {
+        // Fresh randomness per packet — two consecutive packets must
+        // differ in their payload bytes (the header is deterministic).
+        let p1 = TrafficShaper::generate_padding_packet(TEST_MAGIC);
+        let p2 = TrafficShaper::generate_padding_packet(TEST_MAGIC);
+        // Skip header bytes when comparing — the payload after HEADER_SIZE
+        // is random per call.
+        let body1 = &p1[super::super::framing::HEADER_SIZE..];
+        let body2 = &p2[super::super::framing::HEADER_SIZE..];
+        // The size index is also random, so packets might differ in length.
+        // If they're the same length, the bodies must differ.
+        if body1.len() == body2.len() && body1.len() > 0 {
+            assert_ne!(body1, body2, "padding packet bodies must be random per call");
+        }
     }
 
     #[test]
@@ -463,6 +516,7 @@ mod tests {
         let txs_clone = txs.clone();
         let handle = tokio::spawn(async move {
             s_clone.run_padding_loop_broadcast(
+                TEST_MAGIC,
                 move || txs_clone.clone().into_iter(),
                 sd_clone,
             ).await;
@@ -495,9 +549,15 @@ mod tests {
             stats.padding_sent, total_received
         );
 
-        // Every received packet must be valid PADDING_MAGIC.
+        // Every received packet must be properly framed: TEST_MAGIC
+        // in the first 4 bytes, MessageType::Padding (99) at offset 4.
         for p in r0.iter().chain(r1.iter()).chain(r2.iter()) {
-            assert!(TrafficShaper::is_padding_packet(p), "peer received non-padding bytes");
+            assert!(p.len() >= super::super::framing::HEADER_SIZE, "packet too short");
+            assert_eq!(&p[..4], &TEST_MAGIC, "wrong magic prefix");
+            assert_eq!(
+                p[4], super::super::protocol::MessageType::Padding as u8,
+                "msg_type byte must be Padding",
+            );
         }
 
         // Per-peer packets must differ — otherwise colluding observers
@@ -526,6 +586,7 @@ mod tests {
         let txs_clone = txs.clone();
         let handle = tokio::spawn(async move {
             s_clone.run_padding_loop_broadcast(
+                TEST_MAGIC,
                 move || txs_clone.clone().into_iter(),
                 sd_clone,
             ).await;
@@ -579,6 +640,7 @@ mod tests {
         let txs_clone = txs.clone();
         let handle = tokio::spawn(async move {
             s_clone.run_padding_loop_broadcast(
+                TEST_MAGIC,
                 move || txs_clone.clone().into_iter(),
                 sd_clone,
             ).await;

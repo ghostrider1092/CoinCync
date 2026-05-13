@@ -154,6 +154,19 @@ pub enum MessageType {
     AnchorRequest = 80,
     /// Peer responds with its Ed25519 signature over the canonical payload.
     AnchorResponse = 81,
+
+    // ── Traffic shaping (4th Amendment defense) ─────────────────────
+    /// Dummy cover-traffic packet from the constant-rate padding loop.
+    /// Receiver silently discards. Payload is random bytes sized to one
+    /// of the standard TLS frame sizes so an observer can't distinguish
+    /// real traffic from cover.
+    ///
+    /// Replaces the `PADDING_MAGIC` (0xDEADBEEF) hack that bypassed the
+    /// framer entirely — that scheme was wired in tests but never
+    /// reached production because the per-peer write loop expects
+    /// framed messages and would have dropped the connection on the
+    /// padding bytes.
+    Padding = 99,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -190,6 +203,7 @@ impl TryFrom<u8> for MessageType {
             71 => Ok(MessageType::KeyImageStatus),
             80 => Ok(MessageType::AnchorRequest),
             81 => Ok(MessageType::AnchorResponse),
+            99 => Ok(MessageType::Padding),
             _ => Err(Error::InvalidMessage(format!("unknown type: {}", value))),
         }
     }
@@ -257,6 +271,11 @@ impl MessageType {
             // ChainAnchorStamp (Invention 2) — small, bounded payloads
             MessageType::AnchorRequest  => 1024,        // 1 KB
             MessageType::AnchorResponse => 1024,        // 1 KB
+
+            // Traffic-shaping cover packet: bounded to the largest standard
+            // padded frame (MAX_PADDED_SIZE in traffic_shaping.rs is 4096).
+            // We accept up to 8 KB to leave headroom for the framer header.
+            MessageType::Padding => 8 * 1024,
         }
     }
 }

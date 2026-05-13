@@ -30,6 +30,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
@@ -673,6 +674,40 @@ impl P2PNode {
             .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
 
         info!("P2P node listening on {}", self.config.listen_addr);
+
+        // ── Phase 2: constant-rate cover-traffic loop ──────────────────
+        //
+        // Spawns the broadcast padding loop so an observer can't tell idle
+        // from active nodes (4th Amendment defense). Replaces the
+        // 0xDEADBEEF magic hack that was never reachable in production —
+        // padding now flows through the framer as `MessageType::Padding`.
+        // Default config (TrafficShaperConfig::default) has padding_enabled
+        // = true, so this activates immediately.
+        //
+        // The shutdown flag is intentionally never flipped: the loop is a
+        // background daemon that dies with the tokio runtime on node
+        // shutdown. Disconnected per-peer senders are handled by try_send
+        // returning Err, which the loop silently discards.
+        {
+            let shaper = self.traffic_shaper.clone();
+            let senders_for_padding = self.peer_senders.clone();
+            let padding_magic = self.config.magic;
+            let padding_shutdown = Arc::new(AtomicBool::new(false));
+            tokio::spawn(async move {
+                shaper
+                    .run_padding_loop_broadcast(
+                        padding_magic,
+                        move || {
+                            senders_for_padding
+                                .iter()
+                                .map(|entry| entry.value().clone())
+                                .collect::<Vec<_>>()
+                        },
+                        padding_shutdown,
+                    )
+                    .await;
+            });
+        }
 
         // Clone for background tasks
         let peers = self.peers.clone();
@@ -2327,14 +2362,6 @@ async fn process_message(
     scorer: Arc<RwLock<PeerScorer>>,
     _identity: Arc<super::noise::NodeIdentity>,
 ) -> Result<()> {
-    // Traffic shaping: discard dummy padding packets (4th Amendment defense).
-    // Padding packets are injected by the constant-rate padding loop and
-    // should never reach message processing.
-    if TrafficShaper::is_padding_packet(data) {
-        trace!("Discarded padding packet from peer {:?}", &peer_id[..4]);
-        return Ok(());
-    }
-
     // Data format is now [msg_type, ...payload] after framer processing
     if data.is_empty() {
         return Err(Error::InvalidMessage("empty message".into()));
@@ -2342,6 +2369,15 @@ async fn process_message(
 
     let msg_type = MessageType::try_from(data[0])?;
     let payload = if data.len() > 1 { &data[1..] } else { &[] };
+
+    // Traffic shaping: cover-traffic packets carry no semantic content and
+    // are discarded silently. Phase 2 moved padding from the pre-launch
+    // 0xDEADBEEF magic hack to a proper `MessageType::Padding` discriminant
+    // routed through the framer like any other message.
+    if matches!(msg_type, MessageType::Padding) {
+        trace!("Discarded Padding packet from peer {:?}", &peer_id[..4]);
+        return Ok(());
+    }
 
     trace!("Received {:?} from peer {:?}", msg_type, &peer_id[..4]);
 
@@ -2485,6 +2521,13 @@ async fn process_message(
 
         MessageType::Verack => {
             let is_outbound = peers.get(&peer_id).map(|p| p.outbound).unwrap_or(false);
+
+            // Phase 1 #6: handshake complete — observe wall-time from
+            // PeerInfo::connected_at (set at peers.insert) to now.
+            if let Some(p) = peers.get(&peer_id) {
+                let elapsed = p.connected_at.elapsed().as_secs_f64();
+                crate::metrics::PEER_HANDSHAKE.observe(elapsed);
+            }
 
             if let Some(mut peer) = peers.get_mut(&peer_id) {
                 peer.state = PeerState::Connected;

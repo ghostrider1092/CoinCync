@@ -96,7 +96,11 @@ RUN if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
 # user's choice.
 RUN . /src/.source_date_epoch && \
     export SOURCE_DATE_EPOCH && \
-    cargo build --release --workspace --locked --bins
+    cargo build --release --workspace --locked --bins && \
+    cargo build --release --locked \
+        -p coincync-frost-coordinator \
+        --features "server cli" \
+        --bin coord --bin coord-cli
 
 # Strip absolute paths from any debug info that survives `strip = true`
 # (the release profile already strips, but objcopy --strip-all is a
@@ -111,6 +115,8 @@ FROM debian:bookworm-slim AS artifacts
 COPY --from=builder /src/target/release/coincync-node \
                     /src/target/release/coincync-wallet \
                     /src/target/release/coincync-rig \
+                    /src/target/release/coord \
+                    /src/target/release/coord-cli \
                     /artifacts/
 
 # Compute checksums of the binaries inside the image so they're
