@@ -1,5 +1,149 @@
 # Changelog
 
+## Unreleased — post-launch hardening (May 12–13, 2026)
+
+Nine commits over two days covering the first phases of the
+post-launch fix campaign agreed after the v1.0.7-testnet release.
+Focus: observability + privacy + runtime resilience + security
+hygiene. No protocol or consensus changes — the testnet wire format
+and block validation rules are unchanged.
+
+### Observability — Prometheus `/metrics` endpoint
+
+- **Real metrics replace the 1.0 trim's noop stubs** (`2a8af30`) —
+  `src/metrics.rs` now registers a real `prometheus::Registry` with
+  four histograms covering the hot paths flagged by the
+  `benches/crypto_hot_paths.rs` baselines: block-receive-to-tip,
+  tx-admit-to-mempool, peer-handshake (Noise XX + Version
+  exchange), and RandomX-hash. The six existing Dandelion++
+  counters (`epoch_rotations_total`, `current_epoch_mode`,
+  `embargo_fluffs_total`, `stem_relays_total`,
+  `fluff_broadcasts_total`, `stempool_size`) are preserved
+  unchanged — no caller code touched.
+- **Scrape endpoint on `RPC_PORT + 1`** (`2a8af30`) — `coincync-node`
+  now spawns an `axum` HTTP server bound to `127.0.0.1` at one
+  port above the JSON-RPC port (e.g. RPC 28081 → metrics 28082)
+  that responds to `GET /metrics` with the standard Prometheus
+  text exposition format. Localhost-only by design; if you want
+  remote scraping, front it with a reverse proxy that adds auth.
+- **PEER_HANDSHAKE histogram wired** (`11e6b8e`) —
+  `PeerInfo::connected_at: Instant` is captured at peer insertion
+  and observed when `Verack` lands. Catches slow handshakes
+  (hostile-but-slow peers, congested networks) at the histogram
+  bucket boundaries 10ms / 50ms / 100ms / 250ms / … / 10s.
+
+### Privacy — cover-traffic refactor finished
+
+- **`MessageType::Padding = 99`** (`11e6b8e`) — replaces the
+  unreachable `PADDING_MAGIC = 0xDEADBEEF` hack that conflicted
+  with the framer magic and never reached message processing in
+  practice. Cover packets now flow through the framer like any
+  other message and are silently discarded in `process_message`
+  after the type-byte parse.
+- **Constant-rate broadcast loop activated** (`11e6b8e`) —
+  `P2PNode::start` spawns `run_padding_loop_broadcast` so the
+  default config (`TrafficShaperConfig::default` has
+  `padding_enabled = true`) emits padding to all connected peers.
+  This is the 4th-Amendment defense layer that prevents a passive
+  observer on the network path from telling an idle node from one
+  actively relaying transactions. The jitter + size-normalisation
+  components were already shipping; this finishes the third leg.
+
+### Runtime resilience — async wrappers for CPU-bound paths
+
+Triage of the `2026-05-12 16:18 UTC` 13-minute API-box stall
+revealed that block-validation and mempool-admit were running
+synchronously on tokio worker threads, holding `parking_lot`
+write locks across multi-second crypto-verify passes. Layer 1
+(commit `5c98bae` pre-campaign) was a defensive `worker_threads
+= 4` floor; Layer 2 (this campaign) is the structural fix.
+
+- **`Blockchain::*_async` wrappers** (`2a8af30`) — six new methods
+  on the chain (`add_block_async`, `process_block_async`,
+  `get_block_async`, `get_chain_state_async`, `tip_height_async`,
+  `tip_async`) using `self: Arc<Self>` + `spawn_blocking`. Routes
+  PoW recheck, ring-signature verify, range-proof verify, and
+  RocksDB writes off the worker pool.
+- **`SharedMempool::*_async` wrappers** (`2a8af30`) — same pattern
+  for `add_with_chain_async` and `get_block_transactions_async`.
+  Full crypto validation (CLSAG + Bulletproof+ verify, key-image
+  dedup against the chain DB) no longer wedges the worker that
+  drives the consumer loop and RPC.
+- **Caller-site migration** (`2a8af30`) — `BlockReceived` and
+  `TransactionReceived` handlers in `src/bin/node.rs` replaced
+  inline `spawn_blocking + panic-handling` boilerplate with the
+  async wrapper calls. `JoinError` from `spawn_blocking` maps to
+  `Error::Internal(...)` and is caught by the existing `Err(e)`
+  arm — no special-case branches.
+
+### Build — FROST coordinator in reproducible builder
+
+- **`docker/builder.Dockerfile` ships `coord` + `coord-cli`**
+  (`11e6b8e`) — the threshold-signature coordinator that backs
+  the M-of-N multi-sig wallet path is now built alongside
+  `coincync-node` inside the reproducible Docker builder image.
+  Required `--features "server cli"` per the coordinator crate's
+  `required-features` declaration.
+
+### Security — dependency patches
+
+Eighteen dependabot alerts closed: 1 critical, 6 high, 9 medium,
+2 low. Production attack surface fully cleared; remaining 7
+alerts are all dev-tools or stale.
+
+- **`openssl 0.10.77 → 0.10.79`** in the Tauri wallet
+  (`38c0c4c`) — closes a Nov-2026 batch of 5 high-severity
+  advisories in the rust-openssl bindings (CVE-2026-41676 derive
+  buffer overflow, CVE-2026-41678 AES key-wrap bounds,
+  CVE-2026-41681 digest_final OOB write, CVE-2026-41898 PSK/
+  cookie trampoline length, CVE-2026-42327 X509Ref OCSP UB) plus
+  1 medium (AES key-wrap heap overflow) and 1 low (PEM password
+  callback OOB). Pulled in via `reqwest → hyper-tls →
+  native-tls`. Patch-level bump, semver-compatible, no Cargo.toml
+  edits.
+- **`fuzz/Cargo.lock` refreshed** (`44d147b`) — closes
+  CVE-2021-38195 (libsecp256k1 0.3.5 overflow, critical — the
+  package is gone from the dep graph entirely post-refresh) and
+  GHSA-82j2-j2ch-gfr8 (rustls-webpki DoS via panic on malformed
+  CRL BIT STRING, high — bumped 0.103.12 → 0.103.13). The fuzz
+  lockfile had drifted far enough that `cargo tree` couldn't run
+  without a relock; this is pure catch-up churn for the dev-only
+  fuzz harness, no production binary impact.
+- **Unused `jsonwebtoken` dep removed** (`ccbed53`, `f249bd6`) —
+  closes CVE-2026-25537 (type confusion → authorization bypass)
+  in both production and fuzz lockfiles. The crate was declared
+  in `Cargo.toml`'s RPC-extras block but had zero call sites
+  anywhere in `src/`, `benches/`, or `bin/` — a leftover
+  placeholder for a planned auth-on-RPC feature that never
+  landed. Removing it dropped 94 lockfile lines (47 production +
+  47 fuzz: jsonwebtoken plus its older ring 0.16 transitive
+  chain).
+- **Unused `vitest` devDep removed** (`02d0bbc`) — the wallet
+  declared `vitest: ^2.1.9` plus a `test: vitest run` script,
+  but no test files exist anywhere in
+  `coincync-wallet/src/`. Likely Vite-React scaffolding leftover.
+  Removing it dropped 1829 lines from `package-lock.json`
+  (vitest + @vitest/mocker + vite-node and their nested vite
+  5.4.21 + esbuild 0.21.5 copies). Reduces dev-attack surface;
+  closes 3 dev-tool alert chains.
+
+### What's left after this batch
+
+Seven dependabot alerts remain, all dev-only or stale:
+
+- 4 npm vite alerts targeting vite 7.x/8.x — the lock has vite
+  4.5.14 and 5.4.21, neither in the alerts' vulnerable ranges.
+  Stale, should auto-close on dependabot's next rescan.
+- 1 esbuild medium (real, transitive of vite 4.5) — `npm run
+  dev` only, never in shipped wallet binary. Closing requires
+  vite 4 → 7 major bump (breaking config + plugin changes), out
+  of scope for a lockfile sweep.
+- 1 glib medium in the Tauri wallet Cargo.lock — requires Tauri
+  major upgrade (glib 0.15 → 0.20 is 5 minor versions across a
+  Tauri major boundary).
+- 1 rand low — alert lists `== 0.10.0` but neither lockfile has
+  rand 0.10.0. Stale.
+
 ## Unreleased — launch readiness (May 8–9, 2026)
 
 A second pre-launch session of 27 commits, complementary to the
