@@ -12,7 +12,7 @@
 # NEVER refresh these hashes without a thorough review of the changes.
 # Accidental modifications to these files can cause chain forks.
 
-CONSTITUTION.md=6a8cb5764250c0a74ee6ebc50752de69989eab2b70ebdc657c1142c90306cfff
+CONSTITUTION.md=ec619ff198957ac20824a137c0b16b319be099e43f2359ecb06a37097dd47302
 docs/BILL_OF_RIGHTS.md=b2d01894a0334133d068c660054b7352493bc7ca1ebb00c231638901a19be753
 src/testnet.rs=031984afbcb5b386f110e73bab886ced6b497cdf345f14f2c874b9022c3cf428
 src/constants.rs=a12913bd869a1a3b81f0bf9c05726afdc10843db4809dcb4c07cd11783890b4b
