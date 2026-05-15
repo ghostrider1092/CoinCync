@@ -534,7 +534,18 @@ pub fn verify_pow(
         return Err(crate::error::Error::PowValidation(error.to_string()));
     }
 
-    let pow_hash = compute_pow_hash(anchor.algorithm, &anchor.mixed_hash, nonce, tx_root, height)?;
+    // Time the RandomX VM call in isolation. Scoping the timer to just
+    // this line keeps the observation tight to the expensive work — the
+    // rest of `verify_pow` is cheap header arithmetic. `verify_pow` runs
+    // ~once per accepted block (low-frequency, high-signal); the miner's
+    // inner loop is deliberately *not* instrumented, since per-hash
+    // observations there would dominate the histogram and add real
+    // overhead to the hash hot path. See `src/metrics.rs::RANDOMX_HASH`
+    // for the bucket boundaries.
+    let pow_hash = {
+        let _timer = crate::metrics::RANDOMX_HASH.start_timer();
+        compute_pow_hash(anchor.algorithm, &anchor.mixed_hash, nonce, tx_root, height)?
+    };
 
     if !pow_hash.meets_difficulty(target) {
         let error = PowVerifyError::TargetNotMet {
