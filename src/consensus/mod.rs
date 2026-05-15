@@ -15,6 +15,13 @@ pub mod fee_market;
 pub mod fork_signal;
 pub mod privacy_policy;
 
+// CIP-009.D rolling soft-finality adapter. Gated behind the
+// off-by-default `rolling-finality` feature (see Cargo.toml). With
+// the feature disabled this module is not compiled and node
+// behaviour is byte-identical to a build without it. CIP-011 phase 3.
+#[cfg(feature = "rolling-finality")]
+pub mod rolling_finality;
+
 pub use block::Block;
 pub use header::BlockHeader;
 pub use pow::{

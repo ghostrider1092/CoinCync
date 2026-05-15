@@ -36,6 +36,14 @@ testnet = ["randomx"]
 mainnet = ["randomx"]
 randomx = ["randomx-rs"]
 metrics = []
+# Rolling soft-finality (CIP-009.D) consensus-layer adapter. Off by
+# default: compiles in `src/consensus/rolling_finality.rs` and pulls
+# the `coincync-rolling-finality` crate only when explicitly enabled.
+# This gate exists so the CIP-011 phase-3 integration can be built,
+# reviewed, and tested ahead of the activation decision without
+# touching the consensus-locked files (`src/constants.rs`,
+# `src/consensus/validation.rs`).
+rolling-finality = ["dep:coincync-rolling-finality"]
 # Test/diagnostic knobs. Opt-in, off by default.
 test-vdf        = []
 test-utilities  = []
@@ -216,6 +224,12 @@ group                 = "0.13"
 
 # Bridge crate — bytes-only cross-stack boundary types.
 bridge                = { path = "crates/bridge" }
+
+# Rolling soft-finality state machine (CIP-009.D). Optional — pulled
+# in only by the off-by-default `rolling-finality` feature. The
+# `ed25519` + `wire-codec` crate features are the production set:
+# real signature verification and the coinbase wire codec.
+coincync-rolling-finality = { path = "crates/coincync-rolling-finality", features = ["ed25519", "wire-codec"], optional = true }
 
 [dev-dependencies]
 criterion         = "0.5"

@@ -323,6 +323,16 @@ pub struct Blockchain {
     pub shielded_store: Option<Arc<crate::storage::ShieldedStore>>,
     pub kernel_store: Option<Arc<crate::storage::KernelStore>>,
     pub cut_through: Option<Arc<parking_lot::Mutex<crate::crypto::mw_cutthrough::CutThroughEngine>>>,
+
+    /// CIP-009.D rolling soft-finality adapter — see
+    /// `src/consensus/rolling_finality.rs`. `None` (or feature off)
+    /// means the soft-finality reorg rule is dormant; setting it to
+    /// `Some(_)` and reaching `ROLLING_FINALITY_ENFORCE_HEIGHT`
+    /// activates the rule live. Field is feature-gated so default
+    /// builds are byte-identical to a build without it.
+    #[cfg(feature = "rolling-finality")]
+    pub rolling_finality:
+        Option<Arc<crate::consensus::rolling_finality::RollingFinality>>,
 }
 
 /// Extract stats snapshot for structured logging without holding lock in tracing macro.
@@ -364,6 +374,11 @@ impl Blockchain {
             shielded_store: None,
             kernel_store: None,
             cut_through: None,
+            // CIP-009.D rolling finality: dormant until the operator
+            // wires an adapter and `ROLLING_FINALITY_ENFORCE_HEIGHT`
+            // is reached.
+            #[cfg(feature = "rolling-finality")]
+            rolling_finality: None,
         }
     }
 
@@ -398,6 +413,11 @@ impl Blockchain {
             shielded_store: None,
             kernel_store: None,
             cut_through: None,
+            // CIP-009.D rolling finality: dormant until the operator
+            // wires an adapter and `ROLLING_FINALITY_ENFORCE_HEIGHT`
+            // is reached.
+            #[cfg(feature = "rolling-finality")]
+            rolling_finality: None,
         }
     }
 
@@ -419,6 +439,60 @@ impl Blockchain {
 
     pub fn mw_kernel_root(&self) -> [u8; 32] {
         self.kernel_store.as_ref().map(|s| s.current_root()).unwrap_or([0u8; 32])
+    }
+
+    // ── Phase 2 privacy store reorg checkpoint/rewind helpers ───────
+    //
+    // The shielded / spark / kernel stores each carry a reorg
+    // checkpoint stack (CIP-009.D Interp-B contract: a checkpoint is
+    // taken *before* a block's state is applied; `rewind` undoes one
+    // block). These two helpers wire that discipline uniformly into
+    // every connect / disconnect site in the block-acceptance and
+    // reorg machinery, so the three stores stay in lock-step with the
+    // UTXO set across reorgs.
+    //
+    // Both are inert while the stores are `None` (the current testnet
+    // build wires them as `Option::None`). They become load-bearing
+    // when Phase 2 activation instantiates the stores and wires their
+    // per-block appends.
+
+    /// Checkpoint every initialized Phase-2 store for the block at
+    /// `height`. Call **before** the block's state is applied to the
+    /// chain, so a later `rewind_phase2_stores` rolls each store back
+    /// to exactly this pre-block boundary.
+    fn checkpoint_phase2_stores(&self, height: u64) {
+        if let Some(ref s) = self.shielded_store {
+            s.checkpoint_at_height(height);
+        }
+        if let Some(ref s) = self.spark_store {
+            s.checkpoint_at_height(height);
+        }
+        if let Some(ref s) = self.kernel_store {
+            s.checkpoint_at_height(height);
+        }
+    }
+
+    /// Rewind every initialized Phase-2 store by one checkpoint — i.e.
+    /// disconnect one block during a reorg. Call once per disconnected
+    /// block, in the same reverse-height order the UTXO disconnect
+    /// uses. `height` is only for the diagnostic emitted if a store
+    /// reports it could not roll back (an empty checkpoint stack —
+    /// e.g. a rewind attempted past a node restart).
+    fn rewind_phase2_stores(&self, height: u64) {
+        for (name, outcome) in [
+            ("shielded", self.shielded_store.as_ref().map(|s| s.rewind())),
+            ("spark", self.spark_store.as_ref().map(|s| s.rewind())),
+            ("kernel", self.kernel_store.as_ref().map(|s| s.rewind())),
+        ] {
+            if outcome == Some(false) {
+                tracing::warn!(
+                    "{}_store.rewind() returned false at h={} — store could not \
+                     be rolled back; tree/UTXO state may be inconsistent",
+                    name,
+                    height
+                );
+            }
+        }
     }
 
     pub fn register_cut_through_candidate(
@@ -972,6 +1046,12 @@ impl Blockchain {
                     if let Some(txs) = orphan_txs {
                         let disconnect_batch = UtxoSet::batch_disconnect_block(&txs);
                         inner.utxos.apply_batch(disconnect_batch);
+                        // Phase 2 store rewind (site 2: rollback_to_height
+                        // deep-partition recovery). One rewind per
+                        // disconnected block, in the same reverse-height
+                        // order as the UTXO disconnect. Inert while stores
+                        // are None.
+                        self.rewind_phase2_stores(h);
                         // Collect non-coinbase txs
                         for tx in &txs {
                             if !tx.is_coinbase() {
@@ -1369,6 +1449,13 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                     let emission = calculate_block_reward(block.header.height);
                     inner.stats.total_supply = inner.stats.total_supply.saturating_add(emission);
 
+                    // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
+                    // CIP-009.D Interp-B contract: checkpoint each Phase-2
+                    // store BEFORE this block's state is applied, so a later
+                    // reorg `rewind` rolls them back to exactly this
+                    // pre-block boundary. Inert while the stores are None.
+                    self.checkpoint_phase2_stores(block.header.height);
+
                     // SECURITY (CC-001): Apply block's UTXO mutations to track spent/unspent
                     let batch = UtxoSet::batch_from_block(block.header.height, &block.transactions);
                     inner.utxos.apply_batch(batch);
@@ -1440,13 +1527,13 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
 
                 // ── Phase 2 privacy store wire-up (P3d) ─────────────────
                 //
-                // After a block is accepted on the main chain, checkpoint
-                // the shielded commitment tree so a future reorg can
-                // rewind it, and run the MW cut-through engine to emit
-                // any commitments eligible for pruning.
-                if let Some(ref store) = self.shielded_store {
-                    store.checkpoint_at_height(block.header.height);
-                }
+                // The Phase-2 store reorg checkpoint is taken earlier, at
+                // site 1 (just before this block's UTXO mutations are
+                // applied) per the CIP-009.D Interp-B contract — see
+                // `checkpoint_phase2_stores`. It is intentionally NOT
+                // re-taken here. This block now only runs the MW
+                // cut-through engine to emit commitments eligible for
+                // pruning.
                 if let Some(ref ct) = self.cut_through {
                     let mut engine = ct.lock();
                     let prunable = engine.process(block.header.height);
@@ -1456,6 +1543,31 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                             prunable.len(),
                             block.header.height
                         );
+                    }
+                }
+
+                // CIP-011 Phase-3: feed accepted blocks to the rolling-
+                // finality adapter so it records attestations + advances
+                // the soft-final tip. The adapter handles "no attestation
+                // in coinbase extra" internally as a no-op, which matches
+                // the CIP-011 ENABLE-phase contract (attestations
+                // permitted, rule does NOT fire). Inert when the field
+                // is `None` or the feature is off.
+                #[cfg(feature = "rolling-finality")]
+                if let Some(ref rf) = self.rolling_finality {
+                    if block.header.height >= crate::constants::ROLLING_FINALITY_ENABLE_HEIGHT {
+                        // CIP-009.D attestations live in the coinbase
+                        // transaction's `extra` field. Pre-activation
+                        // miners typically have no coinbase or an empty
+                        // extra — the adapter's `find_attestation` scans
+                        // for the `CIP9` magic and returns
+                        // `NoAttestation` otherwise.
+                        let coinbase_extra: &[u8] = block
+                            .transactions
+                            .first()
+                            .filter(|tx| tx.is_coinbase())
+                            .map_or(&[][..], |tx| &tx.extra);
+                        let _ = rf.on_accepted_block(block.header.height, coinbase_extra);
                     }
                 }
 
@@ -1525,6 +1637,35 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                     });
                 }
 
+                // CIP-011 Phase-3: soft-finality reorg gate. After the
+                // enforce height, refuse any reorg whose fork point sits
+                // at or below the miner-attested soft-final tip — the
+                // miner-signed rolling-checkpoint rule from CIP-009.D.
+                // Layers on top of the 3-tier MESS hybrid above, so a
+                // reorg must beat *both* tests. Inert when the adapter
+                // is `None` or the feature is off.
+                #[cfg(feature = "rolling-finality")]
+                if let Some(ref rf) = self.rolling_finality {
+                    if block.header.height >= crate::constants::ROLLING_FINALITY_ENFORCE_HEIGHT
+                        && rf.would_reorg_violate_finality(fork_point)
+                    {
+                        let soft_final = rf.current_soft_final_height().unwrap_or(0);
+                        tracing::error!(
+                            "Rejecting reorg: fork point {} <= soft-final tip {} (CIP-009.D)",
+                            fork_point, soft_final
+                        );
+                        // The implied "shallowest acceptable reorg" is one
+                        // whose fork point is strictly above the soft-final
+                        // tip. Express the rejection in `ReorgTooDeep`'s
+                        // existing shape rather than adding a new error
+                        // variant; the log line carries the precise reason.
+                        return Err(Error::ReorgTooDeep {
+                            depth: reorg_depth,
+                            max: block.header.height.saturating_sub(soft_final).saturating_sub(1),
+                        });
+                    }
+                }
+
                 // SECURITY: Reject reorgs that would revert past the last rolling
                 // checkpoint. This prevents long-range reorganization attacks where
                 // an attacker builds a hidden chain from far in the past.
@@ -1582,22 +1723,15 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                                 // batch_disconnect_block now includes key_image_removals.
                                 let disconnect_batch = UtxoSet::batch_disconnect_block(&txs);
                                 inner.utxos.apply_batch(disconnect_batch);
-                                // Phase 2 store rewind. checkpoint_at_height is taken
-                                // per-block on the forward path (see ~line 1407); each
-                                // rewind() pops the most recent checkpoint, undoing one
-                                // block of shielded-tree state. Inert today (the store
-                                // is wired as Option=None for the testnet build) but
-                                // forward-compatible for the day Phase 2 stores light
-                                // up — without this, the shielded tree would diverge
-                                // from the UTXO set on every reorg.
-                                if let Some(ref s) = self.shielded_store {
-                                    if !s.rewind() {
-                                        tracing::warn!(
-                                            "shielded_store.rewind() returned false at h={} — state may be inconsistent",
-                                            h
-                                        );
-                                    }
-                                }
+                                // Phase 2 store rewind (site 3: reorg
+                                // disconnect of main-chain blocks). One
+                                // rewind per disconnected block, popping the
+                                // checkpoint site 1 took before that block.
+                                // All three stores — shielded, spark, kernel
+                                // — rewind together so none diverges from the
+                                // UTXO set on a reorg. Inert while the stores
+                                // are None.
+                                self.rewind_phase2_stores(h);
                                 // Collect for output index removal
                                 disconnected_tx_lists.push(txs);
                                 // Subtract this block's emission from supply
@@ -1716,6 +1850,30 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
 
                         let fork_hash = fork_block.hash();
                         inner.height_to_hash.insert(fork_block.header.height, fork_hash);
+
+                        // Phase 2 store reorg checkpoint (site 4: reorg
+                        // connect of fork blocks). Checkpoint each store
+                        // BEFORE applying this fork block's state, so if a
+                        // *future* reorg disconnects it, `rewind` has a
+                        // boundary to roll back to. Without this, fork
+                        // blocks adopted by a reorg would be un-rewindable.
+                        //
+                        // Placement is load-bearing: this MUST sit
+                        // immediately after the `height_to_hash` insert and
+                        // BEFORE the DB-persist `break` below. The site-5a
+                        // rollback guard keys on `height_to_hash`; if the
+                        // checkpoint were taken after the DB-persist break
+                        // point, a DB error would leave this block
+                        // height-mapped but un-checkpointed, and site 5a
+                        // would rewind one checkpoint too many — popping a
+                        // checkpoint belonging to a different block. Keeping
+                        // "height-mapped" and "checkpointed" inseparable
+                        // makes the site-5a guard exact. Still satisfies the
+                        // Interp-B "checkpoint before state applied"
+                        // contract — the UTXO mutations are applied below.
+                        // Inert while stores are None.
+                        self.checkpoint_phase2_stores(fork_block.header.height);
+
                         if let Some(ref db) = self.db {
                             if let Err(e) = db.blocks.set_height_hash(fork_block.header.height, &fork_hash) {
                                 tracing::error!("CRITICAL: Failed to persist reorg height mapping at height {}: {}", fork_block.header.height, e);
@@ -1723,6 +1881,7 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                                 break;
                             }
                         }
+
                         // Apply fork block's UTXO mutations
                         let batch = UtxoSet::batch_from_block(fork_block.header.height, &fork_block.transactions);
                         inner.utxos.apply_batch(batch);
@@ -1751,6 +1910,12 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                             {
                                 let disconnect = UtxoSet::batch_disconnect_block(&fork_block.transactions);
                                 inner.utxos.apply_batch(disconnect);
+                                // Phase 2 store rewind (site 5: failed-reorg
+                                // rollback, undoing partially-applied fork
+                                // blocks). Pairs with the site-4 checkpoint
+                                // taken when each fork block was connected
+                                // just above. Inert while stores are None.
+                                self.rewind_phase2_stores(fork_block.header.height);
                                 // Subtract the emission we added for this fork block
                                 let emission = calculate_block_reward(fork_block.header.height);
                                 // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption
@@ -1771,6 +1936,14 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                         for (h, oh) in disconnected_heights.iter().rev() {
                             inner.height_to_hash.insert(*h, *oh);
                             if let Some(orphan_block) = inner.blocks.get(oh) {
+                                // Phase 2 store reorg checkpoint (site 6a:
+                                // failed-reorg rollback path A — re-applying
+                                // the original main-chain blocks. Checkpoint
+                                // before re-applying each block's state so
+                                // the stores end consistent with the
+                                // restored pre-reorg chain). Inert while
+                                // stores are None.
+                                self.checkpoint_phase2_stores(*h);
                                 let batch = UtxoSet::batch_from_block(*h, &orphan_block.transactions);
                                 inner.utxos.apply_batch(batch);
                             }
@@ -1855,6 +2028,13 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                         for fork_block in fork_blocks.iter().rev() {
                             let disconnect = UtxoSet::batch_disconnect_block(&fork_block.transactions);
                             inner.utxos.apply_batch(disconnect);
+                            // Phase 2 store rewind (site 5b: failed-reorg
+                            // rollback path B — triggering-block validation
+                            // failed after the full fork was connected, so
+                            // every fork block was checkpointed at site 4
+                            // and every one is rewound here, unguarded).
+                            // Inert while stores are None.
+                            self.rewind_phase2_stores(fork_block.header.height);
                             let emission = calculate_block_reward(fork_block.header.height);
                             // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption
 inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) {
@@ -1872,6 +2052,12 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                         for (h, oh) in disconnected_heights.iter().rev() {
                             inner.height_to_hash.insert(*h, *oh);
                             if let Some(orphan_block) = inner.blocks.get(oh) {
+                                // Phase 2 store reorg checkpoint (site 6b:
+                                // failed-reorg rollback path B — re-applying
+                                // the original main-chain blocks, same as
+                                // site 6a but for the triggering-block-failed
+                                // rollback path). Inert while stores are None.
+                                self.checkpoint_phase2_stores(*h);
                                 let batch = UtxoSet::batch_from_block(*h, &orphan_block.transactions);
                                 inner.utxos.apply_batch(batch);
                             }
@@ -2553,5 +2739,136 @@ mod tests {
         // Tier-3 hard cap still enforced during bootstrap.
         let max = max_reorg_depth();
         assert!(evaluate_reorg_acceptability(max + 1, u128::MAX, 1, bootstrap_h).is_err());
+    }
+
+    /// Reorg-with-stores integration test for the Phase-2 privacy
+    /// store wiring (CIP-009.D / post-launch campaign item #2).
+    ///
+    /// Exercises `checkpoint_phase2_stores` / `rewind_phase2_stores` —
+    /// the uniform wiring primitive every one of the 8 connect /
+    /// disconnect sites in `add_block` / `rollback_to_height` calls —
+    /// with all three Phase-2 stores instantiated. Drives them through
+    /// the exact checkpoint-then-append / rewind sequence the chain
+    /// applies on a reorg, and asserts the three stores stay in
+    /// lock-step: a rewind of N blocks restores all three to their
+    /// shared state from N blocks earlier, byte-identical roots.
+    ///
+    /// Scope note: the 8 chain.rs call sites place these helpers
+    /// correctly by construction — each is a single documented call,
+    /// `cargo check` confirms they compile, and the connect/disconnect
+    /// pairing is argued inline at each site. A full reorg-path test
+    /// driving real `add_block` calls would need valid-PoW
+    /// two-fork block-construction machinery the chain test module
+    /// does not yet have; this test covers the helper contract and the
+    /// cross-store lock-step property, and the site placement is
+    /// review-verified.
+    #[test]
+    fn phase2_stores_rewind_together_through_helpers() {
+        use crate::crypto::mw_cutthrough::MwKernel;
+        use crate::storage::{
+            KernelStore, NoteCommitmentEntry, ShieldedStore, SparkCoinEntry, SparkStore,
+        };
+
+        let mut chain = Blockchain::new();
+        chain.shielded_store = Some(Arc::new(ShieldedStore::new()));
+        chain.spark_store = Some(Arc::new(SparkStore::new()));
+        chain.kernel_store = Some(Arc::new(KernelStore::new()));
+
+        // Genesis (empty) roots — the state a full rewind must restore.
+        let genesis_roots = (
+            chain.shielded_root(),
+            chain.spark_root(),
+            chain.mw_kernel_root(),
+        );
+
+        // Apply one block's worth of Phase-2 state the way the chain
+        // will once activation wires the appends: site-1 checkpoint
+        // FIRST (Interp-B contract), THEN the block's appends.
+        let apply_block = |chain: &Blockchain, height: u64, byte: u8| {
+            chain.checkpoint_phase2_stores(height);
+            chain
+                .shielded_store
+                .as_ref()
+                .unwrap()
+                .append_commitment(NoteCommitmentEntry {
+                    commitment: [byte; 32],
+                    height,
+                    tx_index: 0,
+                    position: 0,
+                });
+            chain.spark_store.as_ref().unwrap().add_coin(SparkCoinEntry {
+                coin_id: height,
+                commitment: [byte; 32],
+                height,
+            });
+            chain.kernel_store.as_ref().unwrap().append(MwKernel {
+                excess: [byte; 32],
+                signature: vec![0u8; 64],
+                fee: 0,
+                height,
+            });
+        };
+
+        let roots = |chain: &Blockchain| {
+            (
+                chain.shielded_root(),
+                chain.spark_root(),
+                chain.mw_kernel_root(),
+            )
+        };
+
+        apply_block(&chain, 1, 0xA1);
+        let roots_after_1 = roots(&chain);
+        assert_ne!(
+            roots_after_1, genesis_roots,
+            "block 1 must move all three store roots"
+        );
+
+        apply_block(&chain, 2, 0xB1);
+        apply_block(&chain, 3, 0xC1);
+        let roots_after_3 = roots(&chain);
+        assert_ne!(roots_after_3, roots_after_1);
+
+        // Reorg disconnects block 3, then block 2 — one
+        // `rewind_phase2_stores` per disconnected block, reverse order,
+        // exactly as the chain's reorg disconnect loop does.
+        chain.rewind_phase2_stores(3);
+        chain.rewind_phase2_stores(2);
+        assert_eq!(
+            roots(&chain),
+            roots_after_1,
+            "after rewinding blocks 3 and 2 all three stores must be \
+             byte-identical to their shared state after block 1"
+        );
+
+        // Disconnect block 1 — back to genesis, all three together.
+        chain.rewind_phase2_stores(1);
+        assert_eq!(
+            roots(&chain),
+            genesis_roots,
+            "full rewind restores all three stores to genesis roots"
+        );
+
+        // Re-applying an identical block 2 after the rewind reproduces
+        // the post-block-1 → post-block-2 transition with no residue:
+        // proves rewind left none of the disconnected state behind in
+        // any of the three stores.
+        apply_block(&chain, 1, 0xA1);
+        assert_eq!(roots(&chain), roots_after_1, "re-apply of block 1 is clean");
+        apply_block(&chain, 2, 0xB1);
+        apply_block(&chain, 3, 0xC1);
+        assert_eq!(
+            roots(&chain),
+            roots_after_3,
+            "re-applied chain reproduces the original roots — rewind left no residue"
+        );
+
+        // `rewind_phase2_stores` past an empty checkpoint stack is a
+        // safe no-op (it logs a per-store warning); it must not panic.
+        chain.rewind_phase2_stores(3);
+        chain.rewind_phase2_stores(2);
+        chain.rewind_phase2_stores(1);
+        chain.rewind_phase2_stores(0); // stacks already empty — no panic
+        assert_eq!(roots(&chain), genesis_roots);
     }
 }

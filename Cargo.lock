@@ -902,6 +902,7 @@ dependencies = [
  "chrono",
  "clap",
  "coincync",
+ "coincync-rolling-finality",
  "colored",
  "config",
  "console 0.15.11",

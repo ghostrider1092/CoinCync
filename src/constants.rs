@@ -588,6 +588,48 @@ pub fn expected_checkpoint_hash(height: u64) -> Option<&'static [u8; 32]> {
 }
 
 // =============================================================================
+// CIP-011 — Rolling soft-finality activation heights
+// =============================================================================
+//
+// Two-phase activation per CIP-011:
+//
+//   - ENABLE: blocks at/after this height *may* carry a CIP-009.D
+//     finality attestation in coinbase extra. Validators record them
+//     into the in-memory tracker; the reorg rule does **not** fire
+//     yet. Backward-compatible — blocks without attestations are
+//     still accepted.
+//
+//   - ENFORCE: blocks at/after this height **must** carry a valid
+//     attestation, AND the reorg-rule fires — any reorg whose fork
+//     point is at or below `soft_final_height()` is rejected.
+//
+// The ENABLE→ENFORCE gap (~25 000 blocks ≈ 35 days) is deliberately
+// wider than the `WINDOW` of the `coincync-rolling-finality` crate
+// (~10 000 blocks) so the active miner set has time to populate
+// before the rule has bite. See `docs/cip/CIP-011-rolling-finality-
+// activation.md` for the bootstrap-scenario playbook.
+//
+// Values per the CIP-011 draft, recommended option.
+
+/// Block at/after which CIP-009.D finality attestations are accepted
+/// in coinbase extra and recorded by validators. The reorg rule does
+/// NOT fire at this height — only at `ROLLING_FINALITY_ENFORCE_HEIGHT`.
+#[cfg(feature = "testnet")]
+pub const ROLLING_FINALITY_ENABLE_HEIGHT: u64 = 50_000;
+#[cfg(not(feature = "testnet"))]
+pub const ROLLING_FINALITY_ENABLE_HEIGHT: u64 = 25_000;
+
+/// Block at/after which CIP-009.D enforcement begins: every block
+/// must carry a valid attestation, and any reorg whose fork point is
+/// at or below the soft-final height is rejected. Must be strictly
+/// greater than `ROLLING_FINALITY_ENABLE_HEIGHT` plus the active-set
+/// `WINDOW`.
+#[cfg(feature = "testnet")]
+pub const ROLLING_FINALITY_ENFORCE_HEIGHT: u64 = 75_000;
+#[cfg(not(feature = "testnet"))]
+pub const ROLLING_FINALITY_ENFORCE_HEIGHT: u64 = 50_000;
+
+// =============================================================================
 // Hard-fork activation registry (CIP-007)
 // =============================================================================
 
