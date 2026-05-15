@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name         = "coincync"
-version      = "1.0.0"
+version      = "1.0.8"
 edition      = "2021"
 rust-version = "1.75"
 authors      = ["CoinCync 1.0 Contributors"]
