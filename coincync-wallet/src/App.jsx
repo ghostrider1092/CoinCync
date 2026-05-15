@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { THEMES, DARK, LIGHT, applyTheme, applyWallpaper } from "./utils/theme";
 import { loadTheme, saveTheme, isWalletCreated, isSeedBackedUp, loadSettings } from "./utils/storage";
 import { useWallet } from "./hooks/useWallet";
@@ -157,6 +157,37 @@ export default function App() {
       setTimeout(() => wallet.scanWallet(), 1500);
     }
   }, [appState]);
+
+  // Startup update-check — Monero posture: only runs when the user has
+  // explicitly opted in via Settings → Updates → "Check for updates on
+  // startup" (default OFF). Fires once per app session, after first
+  // unlock so Notifications is mounted. Errors are silent — a wallet
+  // launch should not raise a popup just because GitHub blipped.
+  const updateChecked = useRef(false);
+  useEffect(() => {
+    if (updateChecked.current) return;
+    if (appState !== "unlocked") return;
+    if (!isWalletBackendAvailable()) return;
+    if (!loadSettings().checkUpdates) return;
+    updateChecked.current = true;
+    (async () => {
+      try {
+        const r = await rpc.checkForUpdate();
+        if (r?.error) {
+          console.warn("[update-check]", r.error);
+          return;
+        }
+        if (r?.available) {
+          notifs.push(
+            `Update available: ${r.tag} (you have ${r.current})`,
+            "info"
+          );
+        }
+      } catch (e) {
+        console.warn("[update-check]", e?.message || e);
+      }
+    })();
+  }, [appState, notifs]);
 
   function toggleTheme() {
     const next = themeName === "dark" ? "paper" : "dark";

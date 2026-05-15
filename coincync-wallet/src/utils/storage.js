@@ -2,6 +2,11 @@ export const defaults = {
   daemonAddr:"127.0.0.1:28081",network:"testnet",torEnabled:false,
   ringSize:11,dandelion:true,autoChurn:false,scanOnStart:true,
   autoLockMinutes:15,
+  // Privacy posture (Monero-style): default OFF. When ON, the wallet
+  // makes one HTTPS request to api.github.com on startup to check for
+  // a newer release. Off means no startup phone-home — see
+  // `check_for_update` in src-tauri/src/main.rs.
+  checkUpdates:false,
 };
 export const loadSettings  = ()=>{ try{const s=localStorage.getItem("cc_settings"); return s?{...defaults,...JSON.parse(s)}:{...defaults};}catch{return{...defaults};} };
 export const saveSettings  = s=>{ try{localStorage.setItem("cc_settings",JSON.stringify(s));}catch{} };

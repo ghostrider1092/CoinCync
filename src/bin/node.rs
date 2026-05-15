@@ -86,6 +86,14 @@ enum Command {
     PrintGenesisHash,
     /// Show node status.
     Status,
+    /// Check the GitHub releases page for a newer version and exit.
+    ///
+    /// User-invoked only. The node does *not* poll for updates on
+    /// startup — for a privacy coin, an automatic phone-home would
+    /// leak "a CoinCync node is starting" from every user's IP to
+    /// GitHub and intermediaries on every restart. Running this
+    /// subcommand explicitly is informed-consent update checking.
+    CheckUpdate,
 }
 
 // SECURITY (runtime resilience): force at least 4 worker threads regardless of
@@ -148,6 +156,7 @@ async fn main() {
     match cli.command.unwrap_or(Command::Start) {
         Command::PrintGenesisHash => print_genesis_hash(network),
         Command::Status => show_status(network, &data_dir).await,
+        Command::CheckUpdate => check_update().await,
         Command::Start => {
             if let Err(e) = start_node(
                 network,
@@ -181,6 +190,149 @@ fn print_genesis_hash(network: Network) {
             Network::Regtest => "testnet",
         }
     );
+}
+
+/// Print the current binary's version and, if it differs from the
+/// latest published GitHub release, the new version's tag and download
+/// URL. Single outbound HTTPS request to `api.github.com`; exits 0 on
+/// success, 1 on network failure or unparseable response.
+///
+/// Privacy: this subcommand is user-invoked only — there is no
+/// automatic update poll. For a privacy coin, a startup phone-home to
+/// `api.github.com` from every user's IP would leak "a CoinCync node
+/// is starting up here" to GitHub and any on-path observer on every
+/// restart. Running `coincync-node check-update` explicitly is the
+/// informed-consent alternative.
+async fn check_update() {
+    const REPO: &str = "ghostrider1092/Coincync-Testnet-";
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Current version: {}", current);
+    println!("Contacting api.github.com to check for releases...");
+
+    let client = match reqwest::Client::builder()
+        .user_agent(format!("coincync-node/{}", current))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to build HTTP client: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Try the GitHub-blessed `/releases/latest` first (respects the
+    // "Latest" badge — returns the most recent NON-prerelease). If
+    // 404, fall back to the most recently published release including
+    // prereleases — every CoinCync release is currently flagged
+    // prerelease, so the badged endpoint returns 404 today.
+    let latest_url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
+    let recent_url = format!("https://api.github.com/repos/{}/releases?per_page=1", REPO);
+
+    let release = match client
+        .get(&latest_url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(v) => extract_release(&v),
+            Err(e) => {
+                eprintln!("Failed to parse GitHub response: {}", e);
+                None
+            }
+        },
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+            // No "Latest"-badged release — fall back.
+            match client
+                .get(&recent_url)
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(serde_json::Value::Array(arr)) => arr.first().and_then(extract_release),
+                        Ok(_) => None,
+                        Err(e) => {
+                            eprintln!("Failed to parse GitHub response: {}", e);
+                            None
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    eprintln!("GitHub returned status {}", resp.status());
+                    None
+                }
+                Err(e) => {
+                    eprintln!("Couldn't reach api.github.com: {}", e);
+                    None
+                }
+            }
+        }
+        Ok(resp) => {
+            eprintln!("GitHub returned status {}", resp.status());
+            None
+        }
+        Err(e) => {
+            eprintln!("Couldn't reach api.github.com: {}", e);
+            None
+        }
+    };
+
+    match release {
+        Some((tag, name, url, is_pre)) => {
+            // Normalise the tag for comparison: strip the leading `v`
+            // and anything after the first `-` (e.g. `v1.0.7-testnet`
+            // → `1.0.7`). Compare via plain string equality — sufficient
+            // for "is the release a different version", which is the
+            // user-facing question. Semver-aware comparison can land
+            // later if there's a use case for distinguishing
+            // ahead-of-stable from behind-stable.
+            let latest_clean: String = tag
+                .trim_start_matches('v')
+                .split('-')
+                .next()
+                .unwrap_or(&tag)
+                .to_string();
+            let pre_note = if is_pre { " (prerelease)" } else { "" };
+            if current == latest_clean {
+                println!("✓ You have the latest release{}: {} ({})", pre_note, tag, name);
+            } else {
+                println!("⚠ A different release is available{}: {} ({})", pre_note, tag, name);
+                println!("    Current: {}", current);
+                println!("    Latest:  {}", latest_clean);
+                println!("    Download: {}", url);
+            }
+        }
+        None => {
+            eprintln!(
+                "Could not determine the latest release. \
+                 Check manually at https://github.com/{}/releases",
+                REPO
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Pull `(tag_name, name, html_url, prerelease)` out of a release JSON
+/// object. Returns `None` if any of the load-bearing fields is missing
+/// or the wrong type — better to fail closed than to print garbage.
+fn extract_release(v: &serde_json::Value) -> Option<(String, String, String, bool)> {
+    let tag = v.get("tag_name")?.as_str()?.to_string();
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or(&tag)
+        .to_string();
+    let url = v
+        .get("html_url")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let is_pre = v.get("prerelease").and_then(|x| x.as_bool()).unwrap_or(false);
+    Some((tag, name, url, is_pre))
 }
 
 async fn show_status(network: Network, data_dir: &PathBuf) {

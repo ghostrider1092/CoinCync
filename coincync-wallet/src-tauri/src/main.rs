@@ -1043,6 +1043,153 @@ fn get_mining_stats(state: tauri::State<'_, State>) -> MiningStats {
         algorithm: "RandomX".into(),
     }
 }
+// ═══════════════════════════════════════════════════════════════════════
+// Update check (CIP / Monero posture)
+//
+// Privacy: this command is user-invoked only — the frontend gates the
+// call behind a Settings toggle that defaults to OFF, with a privacy
+// warning on opt-in. For a privacy coin, an automatic startup
+// phone-home to `api.github.com` from every wallet IP would leak
+// "a CoinCync wallet is starting up here" to GitHub and any on-path
+// observer on every launch. Mirrors `coincync-node check-update`.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    current: String,
+    latest: String,
+    tag: String,
+    name: String,
+    url: String,
+    available: bool,
+    prerelease: bool,
+    /// `Some` carries a network/parse error message; `None` means the
+    /// check succeeded. The frontend only surfaces `available` when
+    /// `error` is `None`.
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn check_for_update() -> UpdateInfo {
+    const REPO: &str = "ghostrider1092/Coincync-Testnet-";
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    let mut info = UpdateInfo {
+        current: current.clone(),
+        latest: String::new(),
+        tag: String::new(),
+        name: String::new(),
+        url: String::new(),
+        available: false,
+        prerelease: false,
+        error: None,
+    };
+
+    let client = match reqwest::blocking::Client::builder()
+        .user_agent(format!("coincync-wallet/{}", current))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            info.error = Some(format!("HTTP client build failed: {}", e));
+            return info;
+        }
+    };
+
+    // `/releases/latest` returns the most recent NON-prerelease (the
+    // "Latest"-badged one). All CoinCync releases are currently
+    // prerelease, so that endpoint 404s — fall back to the most recent
+    // release including prereleases.
+    let latest_url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
+    let recent_url = format!("https://api.github.com/repos/{}/releases?per_page=1", REPO);
+
+    let release = match client
+        .get(&latest_url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+    {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>() {
+                Ok(v) => extract_release(&v),
+                Err(e) => {
+                    info.error = Some(format!("parse failed: {}", e));
+                    return info;
+                }
+            }
+        }
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+            match client
+                .get(&recent_url)
+                .header("Accept", "application/vnd.github+json")
+                .send()
+            {
+                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>() {
+                    Ok(serde_json::Value::Array(arr)) => arr.first().and_then(extract_release),
+                    Ok(_) => None,
+                    Err(e) => {
+                        info.error = Some(format!("parse failed: {}", e));
+                        return info;
+                    }
+                },
+                Ok(r) => {
+                    info.error = Some(format!("GitHub returned {}", r.status()));
+                    return info;
+                }
+                Err(e) => {
+                    info.error = Some(format!("network error: {}", e));
+                    return info;
+                }
+            }
+        }
+        Ok(resp) => {
+            info.error = Some(format!("GitHub returned {}", resp.status()));
+            return info;
+        }
+        Err(e) => {
+            info.error = Some(format!("network error: {}", e));
+            return info;
+        }
+    };
+
+    match release {
+        Some((tag, name, url, is_pre)) => {
+            // Normalise: strip leading `v` and anything after the first
+            // `-` (e.g. `v1.0.7-testnet` → `1.0.7`). Plain string
+            // equality is enough for "is the release different from
+            // mine"; semver-aware compare can land later if needed.
+            let latest_clean: String = tag
+                .trim_start_matches('v')
+                .split('-')
+                .next()
+                .unwrap_or(&tag)
+                .to_string();
+            info.available = current != latest_clean;
+            info.latest = latest_clean;
+            info.tag = tag;
+            info.name = name;
+            info.url = url;
+            info.prerelease = is_pre;
+            info
+        }
+        None => {
+            info.error = Some("could not determine the latest release".into());
+            info
+        }
+    }
+}
+
+/// Pull `(tag_name, name, html_url, prerelease)` out of a release JSON
+/// object. Returns `None` if any of the load-bearing fields is missing
+/// or the wrong type — better to fail closed than to render garbage.
+fn extract_release(v: &serde_json::Value) -> Option<(String, String, String, bool)> {
+    let tag = v.get("tag_name")?.as_str()?.to_string();
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or(&tag).to_string();
+    let url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let is_pre = v.get("prerelease").and_then(|x| x.as_bool()).unwrap_or(false);
+    Some((tag, name, url, is_pre))
+}
+
 fn time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1120,6 +1267,7 @@ fn main() {
             create_wallet, restore_wallet, unlock_wallet, lock_wallet, scan_wallet, send_transaction,
             check_binaries, start_mining, stop_mining, get_mining_stats,
             get_wallet_address,
+            check_for_update,
         ])
         .on_window_event(move |event| {
             if let tauri::WindowEvent::Destroyed = event.event() {

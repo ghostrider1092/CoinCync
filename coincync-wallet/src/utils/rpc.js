@@ -109,4 +109,9 @@ export const rpc = {
   checkBinaries: async () => tauri("check_binaries"),
 
   getWalletAddress: async () => tauri("get_wallet_address"),
+
+  // Update check — Monero posture, user-invoked only. Backend gates
+  // the GitHub HTTPS request behind this call; the frontend gates this
+  // call behind the Settings `checkUpdates` toggle (default OFF).
+  checkForUpdate: async () => tauri("check_for_update"),
 };

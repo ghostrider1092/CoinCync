@@ -55,6 +55,48 @@ export default function Settings({ onThemeToggle, isDark, themeName, onChangeThe
 
   function update(k, v) { const n = {...cfg,[k]:v}; setCfg(n); saveSettings(n); push("Setting saved","success"); }
 
+  // Privacy-sensitive toggle: opt-in requires explicit consent because
+  // turning this ON means the wallet phones home to api.github.com on
+  // every startup. Off → on prompts; on → off is a clean disable.
+  function toggleCheckUpdates() {
+    const next = !cfg.checkUpdates;
+    if (next) {
+      const ok = window.confirm(
+        "Enable update checks?\n\n" +
+        "Your wallet will make one HTTPS request to api.github.com on " +
+        "each launch to check for a newer release.\n\n" +
+        "Privacy impact: GitHub (and any on-path observer) will see " +
+        "that a CoinCync wallet started up from your IP. The request " +
+        "carries no wallet data — only the User-Agent and version.\n\n" +
+        "Default is OFF for privacy. Leave it off and check releases " +
+        "manually at github.com if you'd rather not phone home."
+      );
+      if (!ok) return;
+    }
+    update("checkUpdates", next);
+  }
+
+  // Manual one-off check. Independent of the toggle — the user is
+  // already consenting by clicking. Surfaces result via NotifCtx.
+  async function checkUpdateNow() {
+    if (!isWalletBackendAvailable()) {
+      push("Update check requires the desktop wallet", "warning");
+      return;
+    }
+    try {
+      const r = await rpc.checkForUpdate();
+      if (r?.error) {
+        push("Update check failed: " + r.error, "warning");
+      } else if (r?.available) {
+        push(`Update available: ${r.tag} (current ${r.current})`, "info");
+      } else {
+        push(`You have the latest release (${r?.current ?? "?"})`, "success");
+      }
+    } catch (e) {
+      push("Update check failed: " + (e?.message || e), "warning");
+    }
+  }
+
   const churnError = churnMin >= churnMax ? "Min must be less than max" : "";
   const deadManAddrError = deadManAddr && !deadManAddr.startsWith("tCYNC") && !deadManAddr.startsWith("CYNC")
     ? "Must start with tCYNC or CYNC" : "";
@@ -194,6 +236,23 @@ export default function Settings({ onThemeToggle, isDark, themeName, onChangeThe
               options={["5","15","30","60","0"]}
               labels={["5 minutes","15 minutes","30 minutes","60 minutes","Off"]}
             />
+          </Row>
+        </Section>
+
+        <Section title="Updates">
+          <div style={{ fontSize:10, color:T.t3, marginBottom:14 }}>
+            Off by default. When enabled, the wallet contacts GitHub once per launch
+            to check for a newer release. Off means no automatic phone-home — leak
+            nothing, check releases manually.
+          </div>
+          <Row
+            label="Check for updates on startup"
+            hint="One HTTPS request to api.github.com per launch. OFF for privacy."
+          >
+            <Toggle val={!!cfg.checkUpdates} onToggle={toggleCheckUpdates}/>
+          </Row>
+          <Row label="Check now" hint="One-off manual check. Does not change the toggle.">
+            <Btn small onClick={checkUpdateNow}>Check</Btn>
           </Row>
         </Section>
       </>}
