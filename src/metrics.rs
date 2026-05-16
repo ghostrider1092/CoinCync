@@ -118,8 +118,25 @@ pub fn render_metrics() -> Vec<u8> {
 
 /// Spawn the metrics scrape server. Binds the provided address and
 /// serves `GET /metrics` until cancelled.
+///
+/// Force-touches the four hot-path histograms (`BLOCK_RECEIVE_TO_TIP`,
+/// `TX_ADMIT_TO_MEMPOOL`, `PEER_HANDSHAKE`, `RANDOMX_HASH`) so they
+/// register with `REGISTRY` at process start. Without this, the
+/// `Lazy<Histogram>` initialisers only fire on the first `.observe()`
+/// call — meaning a fresh node with no traffic yet would show zero
+/// histograms on its `/metrics` scrape, confusing dashboards into
+/// thinking the metric doesn't exist. Touching `&*HISTOGRAM` is the
+/// cheapest possible dereference (one atomic Lazy::get) and adds the
+/// metric to the registry with empty buckets, which is the standard
+/// Prometheus posture for a freshly-started process.
 pub async fn serve_metrics(bind_addr: std::net::SocketAddr) -> Result<()> {
     use axum::{routing::get, Router};
+
+    // Pre-register the four hot-path histograms.
+    let _ = &*BLOCK_RECEIVE_TO_TIP;
+    let _ = &*TX_ADMIT_TO_MEMPOOL;
+    let _ = &*PEER_HANDSHAKE;
+    let _ = &*RANDOMX_HASH;
 
     let app = Router::new().route(
         "/metrics",
