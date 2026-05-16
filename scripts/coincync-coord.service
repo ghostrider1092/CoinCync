@@ -1,0 +1,41 @@
+[Unit]
+Description=CoinCync FROST signing coordinator (CIP-008)
+Documentation=https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/crates/coincync-frost-coordinator/src/bin/coord.rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coincync-coord
+Group=coincync-coord
+EnvironmentFile=/etc/coincync/coord.env
+ExecStart=/usr/local/bin/coincync-coord
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal
+
+# Filesystem isolation. The state file at /var/lib/coincync-coord/
+# is the only writable path. Read-only everywhere else.
+ReadWritePaths=/var/lib/coincync-coord
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+# Network — the coord binary speaks plain WS on loopback only; nginx
+# in front terminates WSS and forwards to 127.0.0.1:8443. Restrict the
+# unit to the loopback address family explicitly so an env-var typo
+# can't expose it to the public interface.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=127.0.0.0/8 ::1
+IPAddressDeny=any
+
+# Resource caps
+MemoryMax=512M
+TasksMax=64
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

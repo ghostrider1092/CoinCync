@@ -60,6 +60,26 @@ server {
     # /rpc/mainnet -> mainnet RPC (not running yet, will 502 — fine)
     location = /rpc/mainnet { rewrite ^ / break; proxy_pass http://127.0.0.1:19081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
 
+    # /coord/ -> FROST signing coordinator (CIP-008). The coord binary
+    # speaks plain WS on 127.0.0.1:8443; nginx terminates WSS in front.
+    # WebSocket-specific overrides: Upgrade headers + long read/send
+    # timeouts so idle WS connections aren't reaped by the 8s global.
+    location /coord/ {
+        proxy_pass http://127.0.0.1:8443/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # WS sessions can idle through round-1 / round-2 deliberation.
+        # 5 minutes is the coord's idle-timeout default; raise both
+        # together if you ever extend it.
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        # No buffering — round-trip latency matters for signing UX.
+        proxy_buffering off;
+    }
+
     # Anything else: 404 with JSON
     location / {
         default_type application/json;
@@ -120,6 +140,13 @@ curl -sS -X POST -H 'Host: api.coincync.network' -H 'Content-Type: application/j
      -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' \
      -k https://127.0.0.1/rpc/testnet | head -c 200
 echo
+# /coord/ probe: WS handshake against the upstream returns 400 from
+# nginx if the coord is down, 101 if up. We don't send a proper
+# Upgrade dance with curl, so 426/400 is the expected "nginx is
+# forwarding, coord may or may not be running" signal. A 502 means
+# nginx can't reach the coord at 127.0.0.1:8443 — check that the
+# coincync-coord.service is active.
+curl -sS -o /dev/null -w "HTTP %{http_code} HTTPS-port-443 /coord/ (expect 400/426 if coord up, 502 if down)\n" -k -H 'Host: api.coincync.network' https://127.0.0.1/coord/
 echo "OK on `$(hostname)"
 "@
 
