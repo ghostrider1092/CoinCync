@@ -242,6 +242,7 @@ body.has-wallpaper .stat{background:var(--surface)}
 .dev-mode-banner{display:none;background:rgba(196,92,79,0.14);border-top:1px solid rgba(196,92,79,0.45);border-bottom:1px solid rgba(196,92,79,0.45);color:var(--critical);padding:8px 16px;text-align:center;font-family:var(--mono);font-size:11px;letter-spacing:.04em}
 .dev-mode-banner strong{color:var(--critical)}
 .page{display:none}.page.active{display:block}
+.hidden{display:none!important}
 .hero{background:var(--surface);border-bottom:1px solid var(--b);padding:40px 40px;transition:background var(--transition-base);position:relative}
 .hero::after{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:200px;height:1px;background:linear-gradient(90deg,transparent,var(--ac),transparent)}
 .hero-inner{max-width:1600px;margin:0 auto}
@@ -610,7 +611,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
 </div>
 
 
-<div class="top"><strong>TESTNET</strong> CoinCync is a privacy tool, not an investment — No central authority — 0% dev tax — Fully decentralized — Orchard/Spark phase-2 modules are currently disabled on live testnet</div>
+<div class="top"><strong>TESTNET</strong> CoinCync is a privacy tool, not an investment — No central authority — 0% dev tax — Fully decentralized — Orchard/Spark/Kernel phase-2 stores dormant (reorg-rewind machinery wired, trees not yet appended to)</div>
 
 <div id="block-pulse-bar" style="position:fixed;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--ac2),transparent);z-index:999;transform-origin:left;transform:scaleX(0);opacity:0"></div>
 <nav>
@@ -782,7 +783,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <div><span class="label">Mempool</span><span class="val" id="tk-pool">—</span></div>
   <div><span class="label">Ring Size</span><span class="val">11</span></div>
   <div><span class="label">Supply</span><span class="val" id="tk-supply">—</span></div>
-  <div><span class="label">Version</span><span class="val">v1.0.0</span></div>
+  <div><span class="label">Version</span><span class="val">v1.0.8</span></div>
 </div>
 
 <div class="priv-bar">
@@ -906,6 +907,90 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     </div>
   </div></div>
   <div class="content">
+    <!-- ═══ v1.0.8 NETWORK STATUS PANEL ═══ -->
+    <!-- Five live tiles driven by get_finality_info / get_shielded_anchor /
+         get_spark_anchor / get_health / get_metrics. Plus an expandable
+         "What's new in 1.0.8" callout. Auto-refreshes every 15s while
+         the home page is active. Added 2026-05-15. -->
+    <div class="panel" style="margin-bottom:24px;border:1px solid var(--b);background:var(--surface)">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b);background:linear-gradient(180deg,rgba(212,160,89,.06),transparent)">
+        <div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.16em;text-transform:uppercase">Release</div>
+          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.0.8-testnet &middot; Network Status</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span id="v108-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--t3);transition:background .3s"></span>
+          <span id="v108-status-text" style="font-family:var(--mono);font-size:11px;color:var(--t3)">probing&hellip;</span>
+          <button onclick="document.getElementById('v108-whatsnew').classList.toggle('hidden')" style="font-family:var(--mono);font-size:10px;padding:5px 10px;border:1px solid var(--b);border-radius:4px;background:transparent;color:var(--t2);cursor:pointer">What's new &#9662;</button>
+        </div>
+      </div>
+
+      <!-- What's new in 1.0.8, collapsed by default -->
+      <div id="v108-whatsnew" class="hidden" style="padding:14px 18px;border-bottom:1px solid var(--b);background:rgba(212,160,89,.02)">
+        <div style="font-size:12px;color:var(--t2);line-height:1.7">
+          <strong style="color:var(--ac2)">No consensus break.</strong> Operators upgrade at their own pace.
+        </div>
+        <ul style="margin:8px 0 4px;padding-left:20px;font-size:11px;color:var(--t3);line-height:1.7">
+          <li><strong style="color:var(--t2)">Observability.</strong> Prometheus <code>/metrics</code> with four hot-path histograms (block-receive-to-tip, tx-admit-to-mempool, peer-handshake, RandomX-hash). Localhost-only by design.</li>
+          <li><strong style="color:var(--t2)">Privacy.</strong> Constant-rate cover traffic on the wire via <code>MessageType::Padding = 99</code>. Third leg of jitter + size-norm + cover packets is now complete.</li>
+          <li><strong style="color:var(--t2)">Runtime.</strong> Six new <code>Blockchain::*_async</code> methods route block/mempool work off the tokio worker pool via <code>spawn_blocking</code>. Structural fix for the 2026-05-12 stall.</li>
+          <li><strong style="color:var(--t2)">Consensus prep.</strong> CIP-011 rolling-finality machinery merged behind <code>rolling-finality</code> feature flag (default OFF). Phase-2 storage trees gain reorg checkpoint/rewind (dormant, trees still <code>None</code>).</li>
+          <li><strong style="color:var(--t2)">Wallet.</strong> Opt-in update check (Monero posture): default OFF, explicit privacy warning on enable.</li>
+          <li><strong style="color:var(--t2)">Security.</strong> 18 dependabot alerts closed (1 critical, 6 high, 9 medium, 2 low).</li>
+        </ul>
+        <div style="margin-top:8px;font-size:10px;color:var(--t3)">
+          Coming in v1.0.9 (3rd week of June): <code>MIN_OUTPUT_AGE</code> 10 &rarr; 100 hard fork with coordinated activation height.
+        </div>
+      </div>
+
+      <!-- 4-tile grid: finality / phase-2 / health / metrics -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--b)">
+        <!-- Tile 1: Checkpoint finality (Path B) + CIP-011 activation distance -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Finality</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px"><span id="v108-tip">&mdash;</span> &middot; tip</div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t2);margin-bottom:8px"><span id="v108-checkpoint">&mdash;</span> &middot; last checkpoint</div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            Max reorg: <span id="v108-maxreorg">&mdash;</span><br>
+            CIP-011 enable in <span id="v108-cip011-enable" style="color:var(--ac2)">&mdash;</span> blocks
+          </div>
+        </div>
+
+        <!-- Tile 2: Phase-2 storage readiness -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Phase-2 storage</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px">Shielded: <span id="v108-shielded-size">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:8px">Spark: <span id="v108-spark-size">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            <span id="v108-phase2-status" style="display:inline-block;padding:2px 6px;border-radius:3px;background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.3);font-size:9px;letter-spacing:.05em">REWIND READY</span><br>
+            <span style="color:var(--t3)">Trees dormant &middot; v1.0.8 ships the prep</span>
+          </div>
+        </div>
+
+        <!-- Tile 3: Node health -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Health</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px"><span id="v108-health-status" style="color:var(--t3)">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t2);margin-bottom:8px">Peers: <span id="v108-peers">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            Synced: <span id="v108-synced">&mdash;</span><br>
+            <a href="#" onclick="event.preventDefault();go('health')" style="color:var(--ac2);text-decoration:none;border-bottom:1px solid var(--ac-dim)">fleet view &rarr;</a>
+          </div>
+        </div>
+
+        <!-- Tile 4: Metrics snapshot -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Operations</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px">Mempool: <span id="v108-mempool">&mdash;</span> tx</div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t2);margin-bottom:8px"><span id="v108-tx-total">&mdash;</span> total txs</div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            Blocks: <span id="v108-blocks-total">&mdash;</span><br>
+            <span style="color:var(--t3)">Updated <span id="v108-updated-ago">never</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ NETWORK CONSTELLATION ═══ -->
     <!-- 3D particle ring rendered with three.js (lazy-loaded by
          ensureNetworkVizDeps). Inner ring + outer ring of glowing dots,
@@ -2055,7 +2140,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
         <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('✉','Subscribed',e.value,3000);e.value=''}else{showToast('⚠','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
       </div>
-      <div class="footer-credit">Developed by Cync Lab · v1.0.1 · <span class="badge">✓ Auditable</span></div>
+      <div class="footer-credit">Developed by Cync Lab · v1.0.8 · <span class="badge">✓ Auditable</span></div>
     </div>
   </div>
 </footer>
@@ -2180,6 +2265,14 @@ document.addEventListener('DOMContentLoaded', function() {
         try { initConstellation(); } catch(_){}
       }
     }, 300);
+    // v1.0.8 status panel: kick on initial paint too. Same reason as
+    // initConstellation above — go() isn't called on first load when
+    // page-home starts active in the DOM.
+    setTimeout(function(){
+      if (typeof ensureV108Polling === 'function') {
+        try { ensureV108Polling(); } catch(_){}
+      }
+    }, 400);
   }
 });
 // _rpc: internal RPC endpoint for health queries. Never displayed to users.
@@ -3189,6 +3282,127 @@ async function loadHealth(){
   // Auto-refresh every 15 seconds while on health page
   if(!_healthInterval) _healthInterval=setInterval(loadHealth,15000);
   if(!_healthMetaInterval) _healthMetaInterval=setInterval(_updateHealthProbeMeta,1000);
+}
+
+// ── v1.0.8 NETWORK STATUS PANEL ───────────────────────────────
+//
+// Five tiles driven by parallel RPC calls. Tile-level fallbacks so a
+// single endpoint failure (e.g. get_shielded_anchor on an old node)
+// doesn't blank the whole panel. Auto-refreshes every 15s while the
+// home page is active.
+
+// CIP-011 testnet activation heights — must match
+// src/constants.rs::ROLLING_FINALITY_ENABLE_HEIGHT for testnet.
+const CIP011_TESTNET_ENABLE = 50000;
+const CIP011_TESTNET_ENFORCE = 75000;
+
+let _v108Interval = null;
+let _v108LastOk = 0;
+
+async function loadV108Panel(){
+  // Set "probing" state on the dot
+  const dot = $('v108-status-dot');
+  const statusText = $('v108-status-text');
+  if (dot) dot.style.background = 'var(--ac2)';
+  if (statusText) statusText.textContent = 'updating…';
+
+  const safe = async (fn) => { try { return await fn(); } catch(e) { return null; } };
+
+  // Fire all four in parallel; any individual failure leaves its tile as "—".
+  const [finality, shielded, spark, health, metrics] = await Promise.all([
+    safe(() => rpc('get_finality_info')),
+    safe(() => rpc('get_shielded_anchor')),
+    safe(() => rpc('get_spark_anchor')),
+    safe(() => rpc('get_health')),
+    safe(() => rpc('get_metrics')),
+  ]);
+
+  // Tile 1: Finality
+  if (finality) {
+    const tip = finality.current_height ?? 0;
+    if ($('v108-tip'))         $('v108-tip').textContent = tip.toLocaleString();
+    if ($('v108-checkpoint'))  $('v108-checkpoint').textContent = (finality.last_checkpoint ?? 0).toLocaleString();
+    if ($('v108-maxreorg'))    $('v108-maxreorg').textContent = (finality.max_reorg_depth ?? '—').toString();
+    const cipEnable = $('v108-cip011-enable');
+    if (cipEnable) {
+      const dist = CIP011_TESTNET_ENABLE - tip;
+      if (dist > 0) {
+        cipEnable.textContent = dist.toLocaleString();
+        cipEnable.style.color = 'var(--ac2)';
+      } else if (tip < CIP011_TESTNET_ENFORCE) {
+        cipEnable.textContent = '0 (enabled, awaiting enforce)';
+        cipEnable.style.color = '#7FB879';
+      } else {
+        cipEnable.textContent = '0 (enforced)';
+        cipEnable.style.color = '#7FB879';
+      }
+    }
+  }
+
+  // Tile 2: Phase-2 readiness
+  const sSize = shielded?.tree_size ?? 0;
+  const pSize = spark?.size ?? 0;
+  if ($('v108-shielded-size')) $('v108-shielded-size').textContent = sSize.toLocaleString();
+  if ($('v108-spark-size'))    $('v108-spark-size').textContent    = pSize.toLocaleString();
+  const phase2 = $('v108-phase2-status');
+  if (phase2) {
+    if (sSize === 0 && pSize === 0) {
+      phase2.textContent = 'REWIND READY';
+      phase2.style.background = 'rgba(127,184,121,.15)';
+      phase2.style.color = '#7FB879';
+      phase2.style.borderColor = 'rgba(127,184,121,.3)';
+    } else {
+      phase2.textContent = 'ACTIVE';
+      phase2.style.background = 'rgba(212,160,89,.15)';
+      phase2.style.color = 'var(--ac2)';
+      phase2.style.borderColor = 'rgba(212,160,89,.4)';
+    }
+  }
+
+  // Tile 3: Health
+  if (health) {
+    const hs = $('v108-health-status');
+    if (hs) {
+      hs.textContent = (health.status || 'unknown').toUpperCase();
+      hs.style.color = health.status === 'healthy' ? '#7FB879' : (health.status === 'degraded' ? 'var(--ac2)' : 'var(--t3)');
+    }
+    if ($('v108-peers'))  $('v108-peers').textContent  = (health.peers ?? '—').toString();
+    if ($('v108-synced')) $('v108-synced').textContent = health.synced ? 'yes' : 'no';
+  }
+
+  // Tile 4: Metrics snapshot
+  if (metrics) {
+    if ($('v108-mempool'))      $('v108-mempool').textContent      = (metrics.mempool_size ?? 0).toLocaleString();
+    if ($('v108-tx-total'))     $('v108-tx-total').textContent     = (metrics.chain_total_transactions ?? 0).toLocaleString();
+    if ($('v108-blocks-total')) $('v108-blocks-total').textContent = (metrics.chain_total_blocks ?? 0).toLocaleString();
+  }
+
+  // Overall status dot — green if at least one RPC succeeded
+  const anyOk = !!(finality || shielded || spark || health || metrics);
+  if (dot) dot.style.background = anyOk ? '#7FB879' : 'var(--t3)';
+  if (statusText) statusText.textContent = anyOk ? 'live' : 'unreachable';
+
+  if (anyOk) {
+    _v108LastOk = Date.now();
+    if ($('v108-updated-ago')) $('v108-updated-ago').textContent = 'just now';
+  }
+}
+
+// Tick the "updated X ago" line every second without re-fetching
+setInterval(() => {
+  if (!_v108LastOk) return;
+  const el = $('v108-updated-ago');
+  if (!el) return;
+  const secs = Math.round((Date.now() - _v108LastOk) / 1000);
+  if (secs < 5)       el.textContent = 'just now';
+  else if (secs < 60) el.textContent = `${secs}s ago`;
+  else                el.textContent = `${Math.floor(secs/60)}m ago`;
+}, 1000);
+
+// Kick the panel + refresh while home is the active page
+function ensureV108Polling() {
+  loadV108Panel();
+  if (!_v108Interval) _v108Interval = setInterval(loadV108Panel, 15000);
 }
 
 // ── DIFFICULTY CHART ──────────────────────────────────────────
@@ -5070,7 +5284,14 @@ function go(id){
   if(id==='mempool'){loadMempool();}else{if(_mpAutoInterval){clearInterval(_mpAutoInterval);_mpAutoInterval=null;const cb=$('mp-auto-sync');if(cb)cb.checked=false;}}
   if(id==='network'){loadPeers();setTimeout(renderHrHistChart,300);}
   if(id==='globe'){setTimeout(()=>{initGlobe().catch(()=>{});},200);}
-  if(id==='home'){setTimeout(()=>{try{initConstellation();}catch(_){}}, 200);}
+  if(id==='home'){
+    setTimeout(()=>{try{initConstellation();}catch(_){}}, 200);
+    // Kick the v1.0.8 status panel; will start its own 15s interval
+    setTimeout(()=>{try{ensureV108Polling();}catch(_){}}, 100);
+  }else{
+    // Stop the v1.0.8 panel refresh when leaving home — no point burning RPCs.
+    if(_v108Interval){clearInterval(_v108Interval);_v108Interval=null;}
+  }
   if(id==='health'){
     _updateHealthProbeMeta();
     loadHealth();
@@ -6177,7 +6398,9 @@ function showToast(icon, title, sub, duration=5000) {
 
 // Block notification sound (#17)
 let _soundEnabled = localStorage.getItem('cync-sound') === '1';
-const _blockSound = new AudioContext ? null : null; // placeholder
+// (Sound is generated on-demand via `new AudioContext()` inside playBlockSound;
+//  the legacy `_blockSound = new AudioContext ? null : null` placeholder was
+//  dead code — the ternary always evaluated to `null`. Removed in v1.0.8.)
 function playBlockSound() {
   if (!_soundEnabled) return;
   try {
@@ -6502,7 +6725,7 @@ function copyText(text, btn) {
       <div class="doc-card" onclick="go('changelog')">
         <div class="doc-card-icon">📋</div>
         <div class="doc-card-title">Changelog</div>
-        <div class="doc-card-desc">Version history, what changed in v1.0.0, and upcoming mainnet features.</div>
+        <div class="doc-card-desc">Version history, what changed across the v1.0.x testnet series, and upcoming mainnet features.</div>
       </div>
     </div>
     <div class="panel">
@@ -9356,11 +9579,11 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
         <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
         <tbody>
           <tr><td><strong>Path B &mdash; consensus checkpoints</strong></td><td>Reorgs past project-cut checkpoints (cold horizon)</td><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">shipped</span></td></tr>
-          <tr><td><strong>Path D &mdash; miner-signed rolling checkpoints (CIP-009.D)</strong></td><td>Reorgs past the live tip (~100 blocks deep) once 2/3 of active miners attest</td><td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">library shipped, activation queued</span></td></tr>
+          <tr><td><strong>Path D &mdash; miner-signed rolling checkpoints (CIP-009.D)</strong></td><td>Reorgs past the live tip (~100 blocks deep) once 2/3 of active miners attest</td><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">shipped behind <code>rolling-finality</code> feature flag</span></td></tr>
         </tbody>
       </table></div>
       <div style="padding:0 18px 14px;font-size:11px;color:var(--t3);line-height:1.6">
-        <p>Path D replaces the rejected MESS approach with discrete miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners (with at least one block in the last ~14 days) have signed it. No clock readings, no decay-tuning knobs, observable on-chain. Pure-state library, real ed25519 verifier, and borsh wire codec all shipped (<code>crates/coincync-rolling-finality</code>); validate_block integration follows the activation playbook in <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-011-rolling-finality-activation.md" target="_blank" style="color:var(--ac2)">CIP-011</a>.</p>
+        <p>Path D replaces the rejected MESS approach with discrete miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners (with at least one block in the last ~14 days) have signed it. No clock readings, no decay-tuning knobs, observable on-chain. Pure-state library, real ed25519 verifier, borsh wire codec (<code>crates/coincync-rolling-finality</code>), and <code>validate_block</code> reorg-rule integration all shipped &mdash; gated by the <code>rolling-finality</code> cargo feature (default OFF). Activation heights per <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-011-rolling-finality-activation.md" target="_blank" style="color:var(--ac2)">CIP-011</a>: testnet enables at 50,000 and enforces at 75,000; mainnet at 25,000 / 50,000.</p>
       </div>
     </div>
 
@@ -9477,7 +9700,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
             <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
             <td>
               <strong>Miner-Signed Rolling Checkpoints</strong>
-              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Replaces MESS with explicit miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners have signed. No clock readings (immune to time-warp), no tuning knobs that decide security, observable on-chain. Pure-state library + ed25519 verifier + wire codec all shipped (<code>crates/coincync-rolling-finality</code>); validate_block integration queued post-launch.</div>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Replaces MESS with explicit miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners have signed. No clock readings (immune to time-warp), no tuning knobs that decide security, observable on-chain. Pure-state library + ed25519 verifier + wire codec + <code>validate_block</code> reorg-rule integration all shipped behind the <code>rolling-finality</code> cargo feature (OFF by default). Activates per CIP-011 schedule.</div>
             </td>
             <td><span class="badge">Standards Track</span></td>
             <td class="mono" style="color:var(--t3)">2026-05-08</td>
