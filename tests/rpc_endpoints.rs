@@ -235,7 +235,7 @@ async fn start_test_server_with_peer_fixture_loopback(
 // VALID CALL TESTS — every method returns a proper result
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_info_returns_result() {
     let (url, _server) = start_test_server(19100).await;
     let resp = rpc_call(&url, "get_info", json!([])).await;
@@ -246,14 +246,14 @@ async fn rpc_get_info_returns_result() {
     assert!(result.get("is_synced").is_some(), "get_info must have is_synced");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_blockchain_info_returns_result() {
     let (url, _server) = start_test_server(19101).await;
     let resp = rpc_call(&url, "get_blockchain_info", json!([])).await;
     assert!(resp.get("result").is_some(), "get_blockchain_info must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_mempool_info_returns_result() {
     let (url, _server) = start_test_server(19102).await;
     let resp = rpc_call(&url, "get_mempool_info", json!([])).await;
@@ -262,70 +262,70 @@ async fn rpc_get_mempool_info_returns_result() {
     assert!(result.get("size").is_some(), "mempool_info must have size");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_supply_info_returns_result() {
     let (url, _server) = start_test_server(19103).await;
     let resp = rpc_call(&url, "get_supply_info", json!([])).await;
     assert!(resp.get("result").is_some(), "get_supply_info must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_privacy_stats_returns_result() {
     let (url, _server) = start_test_server(19104).await;
     let resp = rpc_call(&url, "get_privacy_stats", json!([])).await;
     assert!(resp.get("result").is_some(), "get_privacy_stats must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_network_info_returns_result() {
     let (url, _server) = start_test_server(19105).await;
     let resp = rpc_call(&url, "get_network_info", json!([])).await;
     assert!(resp.get("result").is_some(), "get_network_info must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_sync_status_returns_result() {
     let (url, _server) = start_test_server(19106).await;
     let resp = rpc_call(&url, "get_sync_status", json!([])).await;
     assert!(resp.get("result").is_some(), "get_sync_status must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_anonymity_set_returns_result() {
     let (url, _server) = start_test_server(19107).await;
     let resp = rpc_call(&url, "get_anonymity_set", json!([])).await;
     assert!(resp.get("result").is_some(), "get_anonymity_set must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_chain_events_returns_result() {
     let (url, _server) = start_test_server(19108).await;
     let resp = rpc_call(&url, "get_chain_events", json!([10])).await;
     assert!(resp.get("result").is_some(), "get_chain_events must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_mining_live_returns_result() {
     let (url, _server) = start_test_server(19109).await;
     let resp = rpc_call(&url, "get_mining_live", json!([])).await;
     assert!(resp.get("result").is_some(), "get_mining_live must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_peers_returns_result() {
     let (url, _server) = start_test_server(19110).await;
     let resp = rpc_call(&url, "get_peers", json!([])).await;
     assert!(resp.get("result").is_some(), "get_peers must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_template_returns_result() {
     let (url, _server) = start_test_server(19111).await;
     let resp = rpc_call(&url, "get_block_template", json!([])).await;
     assert!(resp.get("result").is_some(), "get_block_template must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_template_includes_network_magic_for_testnet_chain() {
     let (url, _server) = start_test_server_for_network(19150, NetworkType::Testnet).await;
     let resp = rpc_call(&url, "get_block_template", json!([])).await;
@@ -337,7 +337,7 @@ async fn rpc_get_block_template_includes_network_magic_for_testnet_chain() {
     assert_eq!(magic, hex::encode(NetworkType::Testnet.magic_bytes()));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_template_includes_network_magic_for_mainnet_chain() {
     let (url, _server) = start_test_server_for_network(19151, NetworkType::Mainnet).await;
     let resp = rpc_call(&url, "get_block_template", json!([])).await;
@@ -349,7 +349,7 @@ async fn rpc_get_block_template_includes_network_magic_for_mainnet_chain() {
     assert_eq!(magic, hex::encode(NetworkType::Mainnet.magic_bytes()));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_template_includes_network_magic_for_regtest_chain() {
     let (url, _server) = start_test_server_for_network(19152, NetworkType::Regtest).await;
     let resp = rpc_call(&url, "get_block_template", json!([])).await;
@@ -361,7 +361,7 @@ async fn rpc_get_block_template_includes_network_magic_for_regtest_chain() {
     assert_eq!(magic, hex::encode(NetworkType::Regtest.magic_bytes()));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_template_network_magic_maps_to_known_network_testnet() {
     let (url, _server) = start_test_server_for_network(19153, NetworkType::Testnet).await;
     let resp = rpc_call(&url, "get_block_template", json!([])).await;
@@ -376,7 +376,7 @@ async fn rpc_get_block_template_network_magic_maps_to_known_network_testnet() {
     assert_eq!(parsed, Some(NetworkType::Testnet));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_template_network_magic_maps_to_known_network_mainnet() {
     let (url, _server) = start_test_server_for_network(19154, NetworkType::Mainnet).await;
     let resp = rpc_call(&url, "get_block_template", json!([])).await;
@@ -391,7 +391,7 @@ async fn rpc_get_block_template_network_magic_maps_to_known_network_mainnet() {
     assert_eq!(parsed, Some(NetworkType::Mainnet));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_asset_info_returns_error() {
     // CoinCync 1.0 has no asset layer — this method should return an error.
     let (url, _server) = start_test_server(19112).await;
@@ -404,7 +404,7 @@ async fn rpc_get_asset_info_returns_error() {
 // PARAMETERIZED CALL TESTS — methods that take arguments
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_by_height_valid() {
     let (url, _server) = start_test_server(19120).await;
     // Height 0 should return genesis (or error if chain is empty)
@@ -416,7 +416,7 @@ async fn rpc_get_block_by_height_valid() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_by_height_future() {
     let (url, _server) = start_test_server(19121).await;
     // Height 999999 doesn't exist
@@ -424,7 +424,7 @@ async fn rpc_get_block_by_height_future() {
     assert!(resp.get("error").is_some(), "nonexistent height must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_by_hash_missing() {
     let (url, _server) = start_test_server(19122).await;
     let fake_hash = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -432,7 +432,7 @@ async fn rpc_get_block_by_hash_missing() {
     assert!(resp.get("error").is_some(), "nonexistent block hash must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_transaction_missing() {
     let (url, _server) = start_test_server(19123).await;
     let fake_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -440,21 +440,21 @@ async fn rpc_get_transaction_missing() {
     assert!(resp.get("error").is_some(), "nonexistent tx must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_decoys_returns_result() {
     let (url, _server) = start_test_server(19124).await;
     let resp = rpc_call(&url, "get_decoys", json!([16, 0])).await;
     assert!(resp.get("result").is_some(), "get_decoys must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_range_returns_result() {
     let (url, _server) = start_test_server(19125).await;
     let resp = rpc_call(&url, "get_block_range", json!([0, 10])).await;
     assert!(resp.get("result").is_some(), "get_block_range must return result: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_is_nullifier_spent_returns_result() {
     let (url, _server) = start_test_server(19126).await;
     let fake_null = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -466,14 +466,14 @@ async fn rpc_is_nullifier_spent_returns_result() {
 // MALFORMED INPUT TESTS — must return errors, not crash
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_unknown_method_returns_error() {
     let (url, _server) = start_test_server(19130).await;
     let resp = rpc_call(&url, "nonexistent_method_xyz", json!([])).await;
     assert!(resp.get("error").is_some(), "unknown method must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_by_height_string_param() {
     let (url, _server) = start_test_server(19131).await;
     // Send string instead of number
@@ -481,49 +481,49 @@ async fn rpc_get_block_by_height_string_param() {
     assert!(resp.get("error").is_some(), "string param for height must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_by_height_negative() {
     let (url, _server) = start_test_server(19132).await;
     let resp = rpc_call(&url, "get_block_by_height", json!([-1])).await;
     assert!(resp.get("error").is_some(), "negative height must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_submit_block_garbage() {
     let (url, _server) = start_test_server(19133).await;
     let resp = rpc_call(&url, "submit_block", json!(["not_valid_hex"])).await;
     assert!(resp.get("error").is_some(), "garbage block must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_send_raw_transaction_garbage() {
     let (url, _server) = start_test_server(19134).await;
     let resp = rpc_call(&url, "send_raw_transaction", json!(["deadbeef"])).await;
     assert!(resp.get("error").is_some(), "garbage tx must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_by_height_no_params() {
     let (url, _server) = start_test_server(19135).await;
     let resp = rpc_call(&url, "get_block_by_height", json!([])).await;
     assert!(resp.get("error").is_some(), "missing params must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_submit_block_empty_hex() {
     let (url, _server) = start_test_server(19136).await;
     let resp = rpc_call(&url, "submit_block", json!([""])).await;
     assert!(resp.get("error").is_some(), "empty hex block must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_transaction_invalid_hex() {
     let (url, _server) = start_test_server(19137).await;
     let resp = rpc_call(&url, "get_transaction", json!(["zzzz_not_hex"])).await;
     assert!(resp.get("error").is_some(), "invalid hex tx hash must return error: {}", resp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_block_range_inverted() {
     let (url, _server) = start_test_server(19138).await;
     // start > end
@@ -539,7 +539,7 @@ async fn rpc_get_block_range_inverted() {
 // RESPONSE STRUCTURE TESTS — verify field presence in key responses
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_info_has_all_fields() {
     let (url, _server) = start_test_server(19140).await;
     let resp = rpc_call(&url, "get_info", json!([])).await;
@@ -554,7 +554,7 @@ async fn rpc_get_info_has_all_fields() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_supply_info_has_fields() {
     let (url, _server) = start_test_server(19141).await;
     let resp = rpc_call(&url, "get_supply_info", json!([])).await;
@@ -570,7 +570,7 @@ async fn rpc_get_supply_info_has_fields() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_get_privacy_stats_has_fields() {
     let (url, _server) = start_test_server(19142).await;
     let resp = rpc_call(&url, "get_privacy_stats", json!([])).await;
@@ -586,7 +586,7 @@ async fn rpc_get_privacy_stats_has_fields() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_public_bind_defaults_to_metadata_minimized() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -605,7 +605,7 @@ async fn rpc_public_bind_defaults_to_metadata_minimized() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_info_reports_runtime_hardening_posture() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -620,7 +620,7 @@ async fn rpc_info_reports_runtime_hardening_posture() {
     assert_eq!(r.get("metadata_minimized").and_then(|v| v.as_bool()), Some(true));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_public_bind_rejects_missing_bearer_for_get_peers() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -633,7 +633,7 @@ async fn rpc_public_bind_rejects_missing_bearer_for_get_peers() {
     assert_eq!(resp["error"]["code"], 401, "public bind should reject missing bearer auth");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_public_bind_rejects_plain_get_without_upgrade() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -646,7 +646,7 @@ async fn rpc_public_bind_rejects_plain_get_without_upgrade() {
     assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_public_bind_rejects_ws_upgrade_get_without_bearer() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -659,7 +659,7 @@ async fn rpc_public_bind_rejects_ws_upgrade_get_without_bearer() {
     assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_public_bind_ws_upgrade_get_with_bearer_is_not_unauthorized() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -672,7 +672,7 @@ async fn rpc_public_bind_ws_upgrade_get_with_bearer_is_not_unauthorized() {
     assert_ne!(status, reqwest::StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_public_bind_get_peers_response_shape_is_privacy_safe() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -697,7 +697,7 @@ async fn rpc_public_bind_get_peers_response_shape_is_privacy_safe() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_public_bind_redacts_real_peer_fixture_fields() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -729,7 +729,7 @@ async fn rpc_public_bind_redacts_real_peer_fixture_fields() {
     assert_eq!(p["metadata_minimized"], true);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_loopback_exposes_peer_fixture_fields_when_not_minimized() {
     let config = RpcConfig {
         auth_enabled: false,
@@ -762,7 +762,7 @@ async fn rpc_loopback_exposes_peer_fixture_fields_when_not_minimized() {
     assert_eq!(p["bytes_sent"], peer.bytes_sent);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_loopback_env_override_forces_metadata_minimization() {
     let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_RPC_MINIMIZE_METADATA", "1");
@@ -795,7 +795,7 @@ async fn rpc_loopback_env_override_forces_metadata_minimization() {
     std::env::remove_var("COINCYNC_RPC_MINIMIZE_METADATA");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_info_reports_stratum_posture_hardened_when_not_public() {
     let _guard = env_lock().lock().await;
     std::env::remove_var("COINCYNC_STRATUM_PUBLIC_BIND");
@@ -811,7 +811,7 @@ async fn rpc_info_reports_stratum_posture_hardened_when_not_public() {
     assert_eq!(r.get("stratum_transport_hardened").and_then(|v| v.as_bool()), Some(true));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_info_reports_stratum_posture_unhardened_when_public_without_tls() {
     let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND", "1");
@@ -834,7 +834,7 @@ async fn rpc_info_reports_stratum_posture_unhardened_when_public_without_tls() {
     std::env::remove_var("COINCYNC_STRATUM_PASSWORD");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_info_reports_stratum_posture_hardened_with_native_tls() {
     let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND", "1");
@@ -857,7 +857,7 @@ async fn rpc_info_reports_stratum_posture_hardened_with_native_tls() {
     std::env::remove_var("COINCYNC_STRATUM_PASSWORD");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_blockchain_info_reports_stratum_posture_fields() {
     let _guard = env_lock().lock().await;
     std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND", "1");

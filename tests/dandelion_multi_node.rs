@@ -132,7 +132,11 @@ impl TestNetwork {
             // entire test graph. Using full-graph broadcast keeps
             // the harness simple while still letting us assert on
             // "every node eventually sees the tx" reachability.
-            for (hash, _tx) in &actions.fluff {
+            // `actions.fluff` widened from (Hash, Transaction) to
+            // (Hash, Transaction, Option<[u8;32]>) when per-fluff
+            // commit-reveal cookies were added; the test only needs
+            // the hash, so the extra field is discarded.
+            for (hash, _tx, _cookie) in &actions.fluff {
                 let entry = self.fluff_seen.entry(*hash).or_default();
                 for i in 0..self.routers.len() {
                     entry.insert(i);
@@ -328,7 +332,7 @@ fn embargo_timeout_fluffs_eventually() {
     let mut fluffed = false;
     for now in 1010..u64::MAX.min(1010 + 60_000) {
         let actions = router.tick(now);
-        if actions.fluff.iter().any(|(h, _)| h == &hash) {
+        if actions.fluff.iter().any(|(h, _, _)| h == &hash) {
             fluffed = true;
             break;
         }
