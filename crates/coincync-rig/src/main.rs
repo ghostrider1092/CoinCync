@@ -158,10 +158,16 @@ enum Command {
 }
 
 /// Network selector that maps cleanly to coincync::config::NetworkType.
+///
+/// Regtest is accepted so local end-to-end mine + send rehearsals
+/// (the kind that exercise spawn_blocking + cover-packet flows
+/// against a real chain without polluting the live testnet) can run
+/// against an isolated `coincync-node --network regtest` instance.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum NetworkArg {
     Mainnet,
     Testnet,
+    Regtest,
 }
 
 impl NetworkArg {
@@ -169,6 +175,7 @@ impl NetworkArg {
         match self {
             NetworkArg::Mainnet => coincync::config::NetworkType::Mainnet,
             NetworkArg::Testnet => coincync::config::NetworkType::Testnet,
+            NetworkArg::Regtest => coincync::config::NetworkType::Regtest,
         }
     }
 }
@@ -526,6 +533,7 @@ fn run_config_cli(config_path: &str) -> Result<()> {
     let network = match cfg.mining.network.to_lowercase().as_str() {
         "mainnet" => NetworkArg::Mainnet,
         "testnet" => NetworkArg::Testnet,
+        "regtest" => NetworkArg::Regtest,
         other => return Err(anyhow::anyhow!("unknown network in config: {other:?}")),
     };
 
