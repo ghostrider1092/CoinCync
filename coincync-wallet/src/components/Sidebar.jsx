@@ -1,19 +1,33 @@
 import { useTheme, Ico, ICONS, CoinLogo, Badge } from "./ui";
 
-const NAV = [
-  {id:"dashboard",label:"Dashboard",icon:"dashboard"},
-  {id:"send",label:"Send",icon:"send"},
-  {id:"receive",label:"Receive",icon:"receive"},
-  {id:"history",label:"History",icon:"history"},
-  {id:"addresses",label:"Addresses",icon:"addresses"},
-  {id:"mining",label:"Mining",icon:"mining"},
-  {id:"keys",label:"Keys",icon:"keys"},
-  {id:"constitution",label:"Constitution",icon:"constitution"},
-  {id:"privacy",label:"Privacy",icon:"privacy",badge:"22"},
-  {id:"audit",label:"Supply Audit",icon:"shield"},
-  {id:"settings",label:"Settings",icon:"settings"},
-  {id:"changelog",label:"What's New",icon:"bell",badge:"1.0.1"},
-  {id:"about",label:"About",icon:"info"},
+// 14 entries grouped into 4 conceptual sections.
+// Wallet  — what you do with money (4)
+// Tools   — extensions of the wallet (4)
+// Trust   — verify what the chain is doing (3)
+// System  — app-level concerns (3)
+const NAV_GROUPS = [
+  { label: "Wallet", items: [
+    {id:"dashboard",label:"Dashboard",icon:"dashboard"},
+    {id:"send",     label:"Send",     icon:"send"},
+    {id:"receive",  label:"Receive",  icon:"receive"},
+    {id:"history",  label:"History",  icon:"history"},
+  ]},
+  { label: "Tools", items: [
+    {id:"addresses",label:"Addresses",icon:"addresses"},
+    {id:"mining",   label:"Mining",   icon:"mining"},
+    {id:"multisig", label:"Multi-sig",icon:"users", badge:"NEW"},
+    {id:"keys",     label:"Keys",     icon:"keys"},
+  ]},
+  { label: "Trust", items: [
+    {id:"privacy",     label:"Privacy",      icon:"privacy",      badge:"22"},
+    {id:"audit",       label:"Supply Audit", icon:"shield"},
+    {id:"constitution",label:"Constitution", icon:"constitution"},
+  ]},
+  { label: "System", items: [
+    {id:"settings", label:"Settings",  icon:"settings"},
+    {id:"changelog",label:"What's New",icon:"bell", badge:"1.0.8"},
+    {id:"about",    label:"About",     icon:"info"},
+  ]},
 ];
 
 export default function Sidebar({ page, setPage, syncInfo, balance, peers, seedBacked, autoLockMinutes = 15, onThemeToggle, isDark, onLock }) {
@@ -123,33 +137,51 @@ export default function Sidebar({ page, setPage, syncInfo, balance, peers, seedB
         </div>
       </div>
 
-      {/* ── Navigation ─────────────────────────────── */}
-      <nav style={{ flex:1, overflowY:"auto", padding:"0 8px 4px" }}>
-        {NAV.map(n => {
-          const active = page === n.id;
-          return (
-            <button key={n.id} onClick={()=>setPage(n.id)} style={{
-              display:"flex", alignItems:"center", gap:10, width:"100%",
-              padding:"9px 12px", borderRadius:10, border:"none",
-              background: active ? `linear-gradient(135deg, ${T.ac2}14, ${T.ac2}08)` : "transparent",
-              color: active ? T.ac2 : T.t2,
-              fontSize:12, fontWeight: active ? 600 : 400,
-              cursor:"pointer", marginBottom:1, transition:"all .15s",
-              borderLeft: active ? `3px solid ${T.ac2}` : "3px solid transparent",
-            }}
-              onMouseEnter={e=>{if(!active){e.currentTarget.style.background=`${T.ac2}08`;e.currentTarget.style.color=T.t1;}}}
-              onMouseLeave={e=>{if(!active){e.currentTarget.style.background="transparent";e.currentTarget.style.color=T.t2;}}}>
-              <Ico d={ICONS[n.icon]||ICONS.dashboard} size={15}
-                color={active?T.ac2:T.t3}/>
-              {n.label}
-              {n.badge && <span style={{ marginLeft:"auto",
-                background:`${T.ac2}18`, color:T.ac2,
-                borderRadius:12, padding:"1px 7px", fontSize:9, fontWeight:700 }}>
-                {n.badge}
-              </span>}
-            </button>
-          );
-        })}
+      {/* ── Navigation (grouped) ─────────────────────────────── */}
+      <nav style={{ flex:1, overflowY:"auto", padding:"4px 8px 4px" }}>
+        {NAV_GROUPS.map((group, gi) => (
+          <div key={group.label} style={{ marginTop: gi === 0 ? 0 : 14 }}>
+            {/* Group header — small uppercase label, low contrast */}
+            <div style={{
+              padding:"4px 14px 6px", fontSize:9, fontWeight:700,
+              color:T.t3, letterSpacing:".14em", textTransform:"uppercase",
+              fontFamily:T.mono,
+            }}>
+              {group.label}
+            </div>
+            {group.items.map(n => {
+              const active = page === n.id;
+              return (
+                <button key={n.id} onClick={()=>setPage(n.id)} style={{
+                  display:"flex", alignItems:"center", gap:10, width:"100%",
+                  padding:"8px 12px", borderRadius:8, border:"none",
+                  background: active ? `${T.ac2}14` : "transparent",
+                  color: active ? T.ac2 : T.t2,
+                  fontSize:12, fontWeight: active ? 600 : 400,
+                  cursor:"pointer", marginBottom:1, transition:"background .15s, color .15s",
+                  borderLeft: active ? `2px solid ${T.ac2}` : "2px solid transparent",
+                }}
+                  onMouseEnter={e=>{if(!active){e.currentTarget.style.background=`${T.ac2}08`;e.currentTarget.style.color=T.t1;}}}
+                  onMouseLeave={e=>{if(!active){e.currentTarget.style.background="transparent";e.currentTarget.style.color=T.t2;}}}>
+                  <Ico d={ICONS[n.icon]||ICONS.dashboard} size={14}
+                    color={active?T.ac2:T.t3}/>
+                  <span style={{ flex:1, textAlign:"left" }}>{n.label}</span>
+                  {n.badge && (
+                    <span style={{
+                      background: n.badge === "NEW" ? `${T.amber}20` : `${T.ac2}18`,
+                      color:      n.badge === "NEW" ? T.amber       : T.ac2,
+                      borderRadius:10, padding:"1px 7px",
+                      fontSize:8, fontWeight:700, letterSpacing:".05em",
+                      fontFamily:T.mono,
+                    }}>
+                      {n.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       {/* ── Status Bar ─────────────────────────────── */}

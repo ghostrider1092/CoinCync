@@ -18,6 +18,7 @@ import Keys from "./pages/Keys";
 import Constitution from "./pages/Compliance";
 import Privacy from "./pages/Privacy";
 import Settings from "./pages/Settings";
+import Multisig from "./pages/Multisig";
 import About from "./pages/About";
 import Changelog from "./pages/Changelog";
 import Audit from "./pages/Audit";
@@ -31,7 +32,8 @@ window.React = React;
 const PAGES = {
   dashboard:Dashboard, send:Send, receive:Receive, history:History,
   addresses:Addresses, mining:Mining, keys:Keys, constitution:Constitution,
-  privacy:Privacy, audit:Audit, settings:Settings, changelog:Changelog, about:About,
+  privacy:Privacy, audit:Audit, multisig:Multisig,
+  settings:Settings, changelog:Changelog, about:About,
 };
 
 // ── Disclaimer ────────────────────────────────────────────────────────

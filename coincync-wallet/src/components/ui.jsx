@@ -353,6 +353,8 @@ export const ICONS = {
   receive:"M12 2v14M5 9l7 7 7-7",
   history:"M12 8v4l3 3M3.05 11a9 9 0 1 0 .5-4.5",
   addresses:"M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M12 11a4 4 0 100-8 4 4 0 000 8z",
+  // Multi-sig nav icon — three figures = M-of-N participants.
+  users:"M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75",
   mining:"M22 12h-4l-3 9L9 3l-3 9H2",
   keys:"M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4",
   constitution:"M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",

@@ -114,4 +114,32 @@ export const rpc = {
   // the GitHub HTTPS request behind this call; the frontend gates this
   // call behind the Settings `checkUpdates` toggle (default OFF).
   checkForUpdate: async () => tauri("check_for_update"),
+
+  // ── Multi-sig (FROST M-of-N) ─────────────────────────────────────
+  // File-based flow: the wallet CLI handles the FROST crypto; these
+  // wrappers shuttle JSON paths between participants. The eventual
+  // coord-relayed variant (wss://api.coincync.network/coord/) will
+  // automate the file shuffling; this set is the offline / fallback
+  // path that always works.
+  multisig: {
+    gen:       async ({ threshold, total, outputDir }) =>
+                 tauri("multisig_gen", { params: { threshold, total, output_dir: outputDir } }),
+    info:      async ({ shareFile }) =>
+                 tauri("multisig_info", { params: { share_file: shareFile } }),
+    round1:    async ({ shareFile, output }) =>
+                 tauri("multisig_round1", { params: { share_file: shareFile, output } }),
+    round2:    async ({ shareFile, nonceFile, commitments, message, output }) =>
+                 tauri("multisig_round2", { params: {
+                   share_file: shareFile, nonce_file: nonceFile,
+                   commitments, message, output,
+                 } }),
+    aggregate: async ({ commitments, shares, keyShares, message }) =>
+                 tauri("multisig_aggregate", { params: {
+                   commitments, shares, key_shares: keyShares, message,
+                 } }),
+    send:      async ({ keyShares, toSpend, toView, amount }) =>
+                 tauri("multisig_send", { params: {
+                   key_shares: keyShares, to_spend: toSpend, to_view: toView, amount,
+                 } }),
+  },
 };
