@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "CoinCync Wallet",
-    "version": "1.0.0"
+    "version": "1.0.8"
   },
   "tauri": {
     "allowlist": {
@@ -20,7 +20,7 @@
       "active": true,
       "category": "Finance",
       "identifier": "org.coincync.wallet",
-      "icon": ["icons/icon.png", "icons/32x32.png"],
+      "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
       "shortDescription": "CoinCync privacy wallet — desktop app with local node & mining.",
       "longDescription": "CoinCync Wallet is the official desktop client: wallet setup, private send/receive, optional local node, and mining integration. Installers bundle the node, wallet CLI, and miner so you do not need separate downloads.",
       "resources": ["resources/binaries/*"],
