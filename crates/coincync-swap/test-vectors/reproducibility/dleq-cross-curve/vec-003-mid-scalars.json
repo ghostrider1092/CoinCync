@@ -1,0 +1,19 @@
+{
+  "expected": {
+    "proof_a_btc": "0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b2920967",
+    "proof_a_cync": "b8f7a9200f12593e41717e64156d8a81b78972345a3258c928c6ae4029d1307f",
+    "proof_s_btc": "0105adf05fda360cb6b7fce6b6df900865d39bfeca842081ad395c0da29ae7b0",
+    "proof_s_cync": "9997466d08f245b17233e12729eb94ef2338cff296f1945b20a9484aca4c1f0d",
+    "t_btc_compressed": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+    "t_cync_ristretto": "82ef1f297fbda67b35e213bddb9c043e61dc23d5389a5e939bb6f57bdd414541"
+  },
+  "inputs": {
+    "adaptor_secret_ristretto": "0808080808080808080808080808080808080808080808080808080808080808",
+    "nonce_k_ristretto": "0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "notes": "Self-generated regression vector for Maxwell-Poelstra cross-curve DLEQ.",
+  "operation": "prove_then_verify",
+  "primitive": "dleq-cross-curve",
+  "source_file": "crates/coincync-swap/src/adaptor.rs",
+  "source_test": "examples/gen_reproducibility_vectors.rs"
+}

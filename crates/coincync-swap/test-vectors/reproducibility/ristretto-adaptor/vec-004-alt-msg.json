@@ -1,0 +1,21 @@
+{
+  "expected": {
+    "adaptor_pubkey_t_ristretto": "f6d73cfa04628744bf6939147f8535be14a0ef13e3ab294413177b541f08da09",
+    "adaptor_r_point_ristretto": "78cbb09cd18f90824f8ce357ac6163276fbc70df590a3853ad056f4af16f662b",
+    "adaptor_s_pre": "b1d0b4b5d35d1496a61401855f960b270570f9e45946e46b62711213d1128f05",
+    "final_sig_64": "0c185646531770f1ad1847e01c691e281f0ce23605d03a2625f7e1d44623d62ab3d2b6b7d55f1698a816038761980d290772fbe65b48e66d64731415d3149107",
+    "recovered_secret_ristretto": "0202020202020202020202020202020202020202020202020202020202020202",
+    "signer_pub_ristretto": "3e440469a098036d89ffb2d77a4542928f2f74c2b5769da7480736ace829dc10"
+  },
+  "inputs": {
+    "adaptor_secret_ristretto": "0202020202020202020202020202020202020202020202020202020202020202",
+    "message_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "nonce": "0404040404040404040404040404040404040404040404040404040404040404",
+    "signer_seckey_ristretto": "0101010101010101010101010101010101010101010101010101010101010101"
+  },
+  "notes": "Self-generated regression vector. Same shape as btc-adaptor on the Ristretto255 side.",
+  "operation": "create_then_recover_secret",
+  "primitive": "ristretto-adaptor",
+  "source_file": "crates/coincync-swap/src/adaptor.rs",
+  "source_test": "examples/gen_reproducibility_vectors.rs"
+}
