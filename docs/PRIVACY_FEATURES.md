@@ -1,6 +1,8 @@
 <!-- markdownlint-disable MD013 MD033 -->
 # CoinCync — Privacy Features Map
 
+**Privacy money that requires no permission.** The features below are how that promise is implemented at the consensus, network, and wallet layers. Anything that would weaken the promise is on the [explicitly-not-doing](explicitly-not-doing.md) list.
+
 **Purpose:** new-developer onboarding reference. Every privacy feature in the
 codebase, where it lives, what it does, and its **honest implementation
 status**. Read this alongside [`THREAT_MODEL.md`](THREAT_MODEL.md) (which

@@ -1,6 +1,8 @@
 # Contributing to CoinCync
 
-Thanks for considering a contribution. CoinCync is a privacy-first proof-of-work payments coin governed by an explicit Constitution. This document tells you how to ship code, where bugs go, what we'll accept, and what we won't.
+**Privacy money that requires no permission.** That's the promise. Every contribution is evaluated against whether it keeps that promise intact.
+
+CoinCync is a privacy-first proof-of-work payments coin governed by an explicit Constitution. This document tells you how to ship code, where bugs go, what we'll accept, and what we won't.
 
 If you're scanning: skip to **Quick Start** below.
 
@@ -9,9 +11,10 @@ If you're scanning: skip to **Quick Start** below.
 ## TL;DR
 
 - **Welcome:** privacy improvements, performance optimizations, UX polish, wallet work, network-stack improvements, audit fixes, documentation, test coverage.
-- **Out of scope:** stablecoins, smart-contract VMs, cross-chain bridges, NFTs / name services, governance tokens, admin keys, fee redirects to any party. These are constitutionally forbidden — see `CONSTITUTION.md`.
+- **Out of scope:** see [docs/explicitly-not-doing.md](docs/explicitly-not-doing.md) for the canonical "we will not add this" list. Quick summary: stablecoins, smart-contract VMs, cross-chain bridges beyond cyncswap/CyncHub, NFTs / name services, governance tokens, admin keys, fee redirects, KYC integration. Asking again in 6 months will get the same answer.
 - **Pseudonymous participation is a Right** (Right V). Use whatever name you want.
-- **Security bugs:** email `security@coincync.network` with a PGP-encrypted message. Do not open a public issue.
+- **Security bugs:** email `security@coincync.network` with a PGP-encrypted message. Do not open a public issue. See [SECURITY.md](SECURITY.md).
+- **Roadmap commitments:** only what's in [docs/roadmap.md](docs/roadmap.md) is committed. CIPs marked `Sketch` are research, not commitments — see [docs/cip/README.md](docs/cip/README.md) for the legend.
 - **Everything else:** open a PR.
 
 ---

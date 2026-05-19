@@ -1,6 +1,8 @@
 <!-- markdownlint-disable MD036 MD013 -->
 # CoinCync Developer Guide
 
+**Privacy money that requires no permission.** That's what every commit is evaluated against. Before contributing, read [docs/explicitly-not-doing.md](explicitly-not-doing.md) for the canonical "we will not add this" list.
+
 Build, test, lint, deploy, troubleshoot. Every command someone working on the codebase will reach for, in one place. For end-user CLI commands (`coincync-wallet send …`, `coincync-rig run-solo …`), see [`COMMANDS.md`](COMMANDS.md).
 
 ---

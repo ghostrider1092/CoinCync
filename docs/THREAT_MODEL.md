@@ -1,8 +1,8 @@
 # CoinCync threat model
 
-This document specifies what CoinCync defends against, what it does not,
-and which feature defends against which adversary. It exists because
-"22 privacy features" is unfalsifiable on its own — competent reviewers
+**Privacy money that requires no permission.** This document specifies which adversaries CoinCync defends that promise against, which it does not, and which feature defends against which adversary.
+
+It exists because "22 privacy features" is unfalsifiable on its own — competent reviewers
 will ask "what is the adversary?" and "what is the trust model?" Without
 explicit answers the privacy claims are marketing, not engineering.
 

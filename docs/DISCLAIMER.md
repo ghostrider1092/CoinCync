@@ -1,7 +1,9 @@
 # CoinCync: Disclaimer, Limitations, and Prohibited Uses
 
-**Last Updated:** March 2026
-**Version:** 1.0
+**Last Updated:** 2026-05-18
+**Version:** 1.1
+
+**Privacy money that requires no permission.** The promise is intentional. The limitations below are also intentional. They are not bugs to fix — they are properties to preserve. See [docs/explicitly-not-doing.md](explicitly-not-doing.md) for the canonical "we will not add this" list.
 
 ---
 

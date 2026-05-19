@@ -1,5 +1,7 @@
 # CoinCync API Reference (index)
 
+**Privacy money that requires no permission.** API integrations are evaluated against keeping that promise intact — no KYC hooks, no chain-analysis-friendly enrichments, no surveillance-friendly metadata in responses. See [docs/explicitly-not-doing.md](explicitly-not-doing.md) §Surveillance for the full list.
+
 This file is a short index. The canonical API docs are maintained under `docs/src/api/`.
 
 ## Canonical docs

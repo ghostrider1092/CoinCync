@@ -2,6 +2,23 @@
 
 All notable changes to CoinCync are recorded here.
 
+## 2026-05-18 — Apple-style discipline shift (docs only, no code changes to production)
+
+Internal organizational change to release + roadmap discipline. No protocol changes, no consensus changes, no behavior changes.
+
+- **Locked one-sentence promise:** "Privacy money that requires no permission." Used in README, doc index, security policy, contributing guide, wallet integration guide. See [README](README.md) header.
+- **Public roadmap discipline:** new [docs/roadmap.md](docs/roadmap.md) — only v1.1, v1.2, v1.3 are documented as release commitments. Anything past v1.3 is research, not roadmap.
+- **CIP register reorganized** ([docs/cip/README.md](docs/cip/README.md)) into 3 sections: Currently shipping toward v1.1 / Active design / Sketch (research).
+- **CIP-002 (CyncHub) reverted to Sketch** — earlier same-day promotion to Draft was rolled back under Apple-style "no commitment past the next 3 releases" discipline. CyncHub V1 design captured for future reconsideration (v1.3+ conditional).
+- **Cyncswap design path locked** in [docs/decisions/2026-05-18-cyncswap-path.md](docs/decisions/2026-05-18-cyncswap-path.md): adaptor-signature + DLEQ design retained, hash-locked-stealth alternative explicitly rejected.
+- **6-layer user-safety stack** specified in [docs/cyncswap-user-safety.md](docs/cyncswap-user-safety.md): $500 V1 per-swap cap, mandatory watchtower default, refund-by-default architecture, circuit breakers + kill-switch advisory, triple-backup state + recovery, dual audit + bug bounty + slow rollout.
+- **Audit-alignment plan** in [docs/cyncswap-farcaster-comit-alignment.md](docs/cyncswap-farcaster-comit-alignment.md): 5-step plan to align cyncswap with Comit + Farcaster prior art, cutting audit cost ~50%.
+- **Canonical doc home:** new [docs/INDEX.md](docs/INDEX.md). Anything not linked from there is internal.
+- **Refusal list:** new [docs/explicitly-not-doing.md](docs/explicitly-not-doing.md) — 30+ features CoinCync will not add, organized into 6 categories. The discipline is the product.
+- **CyncHub skeleton crate** scaffolded at [crates/cynchub/](crates/cynchub/) — Sketch status, 15/15 stub tests pass; not on any committed release. Code lives so future-V1.3 work has a starting place if/when the entry criteria are met.
+- **Cyncswap external-vector harness** scaffolded at [crates/coincync-swap/tests/external_vectors.rs](crates/coincync-swap/tests/external_vectors.rs) — Comit + Farcaster vendor vector dirs created; vectors not yet imported (Step 1 of alignment plan).
+- **docs/BLOCKCHAIN_ROADMAP.md repositioned** as the technical update log + cross-CIP sequencing notes (not the authoritative roadmap — docs/roadmap.md is).
+
 ## How to read this changelog
 
 Entries are grouped by category so you can scan for just the kind of

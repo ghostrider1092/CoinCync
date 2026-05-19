@@ -1,9 +1,8 @@
-# Blockchain — Update Log + Roadmap
+# Blockchain — Update Log + Technical Context
 
-The protocol, consensus, P2P, and wallet layers of CoinCync. This is
-the forward-looking companion to the [CIP register](cip/README.md) —
-the CIP register is the spec source-of-truth for any one design, this
-roadmap is how the work sequences across releases.
+> **Note (2026-05-18):** This document is now the **technical update log + cross-CIP sequencing notes**, not the authoritative roadmap. For public release commitments (v1.1, v1.2, v1.3 only, with shippable bars) see [docs/roadmap.md](roadmap.md) — that is the source of truth for *what ships when*. This document captures the historical update log and forward-looking technical context that doesn't fit neatly into per-CIP files.
+
+The protocol, consensus, P2P, and wallet layers of CoinCync. Companion to the [CIP register](cip/README.md) — the CIP register is the spec source-of-truth for any one design; this document captures the cross-cutting technical narrative.
 
 Effort labels: **S** (under half a day), **M** (half a day to two
 days), **L** (two to five days), **XL** (more than a week).
@@ -138,24 +137,55 @@ The first consensus break since launch. Coordinated upgrade required.
 
 ## Mainnet blockers — must ship before tag
 
-10. **CIP-001 atomic swap real crypto** — **XL** (multi-month). State
-    machine + handshake + persistence shipped in `crates/coincync-swap`;
-    Schnorr adaptor sigs (musig2-style), BTC RPC client + tx broadcast/
-    monitor, CYNC RPC integration, dual-testnet smoke (BTC testnet +
-    CYNC testnet) all pending. NLnet-funded. **The constitutional
-    commitment** — see [[project_atomic_swap_mainnet_blocker]].
+10. **CIP-001 atomic swap real crypto** — **L** remaining (was XL).
+    **Refreshed 2026-05-18 — substantially complete.** What's now
+    shipped: state machine + handshake + persistence; Schnorr adaptor
+    sigs (BTC BIP-340 parity-correct + CYNC Ristretto255); dual-response
+    cross-curve DLEQ + strict-binding Noether 2018 variant (gated by
+    Cargo feature `strict-dleq`); BTC + CYNC RPC clients with mock
+    impls; BTC lock/claim/refund tx construction (BIP-341 script-path);
+    CYNC swap key-derivation + `SwapLockRecipient` wallet-bridge helper;
+    coordinator transport (Plain TCP + Noise XX + SOCKS5/Tor dial, all
+    with DoS-hardened filtered-listen variants); 6 CLI orchestration
+    handlers (`lock-cync`, `lock-btc`, `claim-btc`, `claim-cync`,
+    `refund-btc`, `refund-cync`); operator-driven dual-testnet smoke
+    harness ([scripts/cyncswap-dual-testnet-smoke.sh](../scripts/cyncswap-dual-testnet-smoke.sh));
+    operator transport-setup guide ([docs/cyncswap-transport-setup.md](cyncswap-transport-setup.md)).
+    **346 tests pass with `--features strict-dleq`; 288 in default
+    builds.** What's left: **(a)** wallet integration consuming
+    `SwapLockRecipient` (feature-freeze exception); **(b)** optional
+    CLSAG ring-binding for the CYNC-side adaptor (touches audited
+    consensus, separate planning); **(c)** audit. NLnet-funded. See
+    [[project_atomic_swap_mainnet_blocker]] (status entry refreshed).
 11. **Phase-2 activation (Orchard shielded pool)** — **XL** (months).
-    Storage-side rewind shipped this session (`ef4f48c`, dormant).
-    Activation requires (a) construct `ShieldedStore` at chain init,
-    (b) wire block-apply-time append calls, (c) hard-fork height, (d)
-    **Halo2 circuit** — `crates/orchard-side/src/` is currently empty,
-    (e) transaction-format hard fork (current tx format is ring-only),
-    (f) wallet support for shielded send/receive. The single biggest
-    piece of work left.
+    Storage-side rewind shipped (`ef4f48c`, dormant). Cryptographic
+    primitives layer shipped in `crates/orchard-side/` — 86 tests pass:
+    commitment, note, nullifier, value-commit + RedPallas binding sig,
+    full spend-key hierarchy, action-circuit skeleton with Halo2 IPA
+    prove/verify wiring + 8-row public-input scaffolding. **Halo2 Action
+    circuit constraint roadmap: Step 1 ✅ (column scaffolding for the
+    chip set), Steps 2-8 ⏳** (ECC chip + Sinsemilla + Merkle + Poseidon,
+    plus lookups + ranges + public-input equality + audit pass). Step 2
+    is blocked on a dep-version decision: orchard 0.12 needs
+    halo2_gadgets 0.4 but we're on 0.3; either bump our pin (low-risk
+    upgrade) or implement local `FixedPoints` (heavier, dep-free) —
+    documented in [crates/orchard-side/src/action.rs](../crates/orchard-side/src/action.rs)
+    `ConstraintRoadmap`. Activation also requires: (a) construct
+    `ShieldedStore` at chain init, (b) wire block-apply-time append
+    calls, (c) hard-fork height, (d) transaction-format hard fork
+    (current tx format is ring-only), (e) wallet support for shielded
+    send/receive. The single biggest piece of work left, dominated by
+    Steps 2-8 of the constraint roadmap (estimated multi-month per
+    reference `orchard` crate's ~3000 LOC `synthesize` body).
 12. **Security audit** — **XL** (3-6 months). NLnet-funded. Outreach
     to Cypher Stack / OSTIF / Teserakt drafted in
     `C:\Users\unkno\grants\nlnet-2026-06-coincync-application.md`; not
-    sent.
+    sent. **Audit-prep checklist for `cyncswap`** (the largest
+    cryptographic component to be reviewed) shipped 2026-05-18 at
+    [docs/cyncswap-audit-prep.md](cyncswap-audit-prep.md) — scope,
+    cryptographic-module map, primary review targets, test-vector
+    inventory, license-boundary statement, and build-reproducibility
+    commands. Audit firm picks the commit + works from there.
 13. **Mainnet genesis ceremony** — **M**. Operational only: mainnet
     seed nodes, initial checkpoint set, mainnet faucet decision (or
     "mine your own"), DNS, monitoring.

@@ -2,6 +2,10 @@
 
 **For wallet app developers (Trust Wallet, Exodus, Cake Wallet, custom apps)**
 
+CoinCync's promise: **privacy money that requires no permission.** Wallet integrations are evaluated against whether they keep that promise — in particular, against the constitutional posture (no KYC integration, no custodial fallback paths, no address blacklists). See [docs/explicitly-not-doing.md](docs/explicitly-not-doing.md) for the canonical list.
+
+If your wallet is privacy-first and non-custodial, we want to support you. If you're looking for a coin to add to a regulated/KYC product, CoinCync is the wrong coin — that's by design, not oversight.
+
 ---
 
 ## Coin Specification

@@ -1,6 +1,8 @@
 # CoinCync 1.0
 
-A privacy-first cryptocurrency with mandatory shielding, auditable supply, and constitutional protections.
+**Privacy money that requires no permission.**
+
+A proof-of-work cryptocurrency with mandatory privacy at the consensus layer, an auditable supply curve, and constitutional protections against admin authority, federations, governance tokens, and compliance hooks.
 
 **Status:** Public testnet · v1.0.8-testnet
 **Network:** 5-node fleet across US-East / EU / Asia-Pacific

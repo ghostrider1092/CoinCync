@@ -1,12 +1,25 @@
 # Security policy
 
-CoinCync is a privacy-preserving cryptocurrency. Bugs in this codebase
-can lead to direct financial loss, deanonymization of users, or chain
-forks. Disclosure handled responsibly is the difference between "we
-fixed a bug before anyone noticed" and "users lost money."
+**Privacy money that requires no permission.** That promise is what
+makes security disclosure load-bearing for CoinCync: bugs in this
+codebase can lead to direct financial loss, deanonymization of users,
+or chain forks. Disclosure handled responsibly is the difference
+between "we fixed a bug before anyone noticed" and "users lost money."
 
 This document tells you how to report a vulnerability, what to expect
 in response, and what protections we extend to good-faith researchers.
+
+## See also
+
+- [docs/cyncswap-user-safety.md](docs/cyncswap-user-safety.md) — the
+  6-layer user-safety stack that bounds principal-loss risk in the
+  cyncswap atomic-swap and CyncHub orderbook surfaces (V1 cap: $500
+  per swap).
+- [docs/explicitly-not-doing.md](docs/explicitly-not-doing.md) — the
+  features CoinCync will not add, which constrain what bugs are even
+  possible (e.g., no smart-contract VM means no reentrancy bug class).
+- [docs/decisions/](docs/decisions/) — recorded design decisions that
+  affect the security perimeter.
 
 ## Reporting a vulnerability
 
