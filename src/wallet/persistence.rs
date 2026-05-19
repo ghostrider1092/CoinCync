@@ -193,6 +193,38 @@ impl WalletHeader {
         if self.version > WALLET_VERSION {
             return Err(Error::WalletNotFound("unsupported wallet version".into()));
         }
+
+        // KDF-parameter bounds. Argon2id's m_cost is in KiB; a malicious
+        // wallet file could set m_cost to a huge value and trick the
+        // KDF into trying to allocate terabytes of memory before any
+        // useful error surfaces. Bound generously above the defaults
+        // (ARGON2_M_COST = 262 144, ARGON2_T_COST = 3, ARGON2_P_COST = 4)
+        // so future upgrades have room but adversarial values are
+        // refused immediately. Discovered 2026-05-19 by fuzz target
+        // `fuzz_wallet_persistence` (crash file
+        // `crash-6b3e53ff71c9e8e1cda383857565624d387c68fe`).
+        const KDF_M_COST_MAX_KIB: u32 = 1_048_576;  // 1 GiB; 4× default
+        const KDF_T_COST_MAX: u32 = 100;            // 100 iter; ~33× default
+        const KDF_P_COST_MAX: u32 = 16;             // 16 lanes; 4× default
+        if self.kdf_m_cost > KDF_M_COST_MAX_KIB {
+            return Err(Error::Corruption(format!(
+                "kdf_m_cost out of range: {} KiB (max {} KiB)",
+                self.kdf_m_cost, KDF_M_COST_MAX_KIB
+            )));
+        }
+        if self.kdf_t_cost > KDF_T_COST_MAX {
+            return Err(Error::Corruption(format!(
+                "kdf_t_cost out of range: {} (max {})",
+                self.kdf_t_cost, KDF_T_COST_MAX
+            )));
+        }
+        if self.kdf_p_cost > KDF_P_COST_MAX {
+            return Err(Error::Corruption(format!(
+                "kdf_p_cost out of range: {} (max {})",
+                self.kdf_p_cost, KDF_P_COST_MAX
+            )));
+        }
+
         Ok(())
     }
 }
@@ -729,6 +761,124 @@ pub fn mnemonic_to_seed(mnemonic: &str) -> Result<[u8; 32]> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Regression test for the kdf-param validation gap surfaced by the
+    /// 2026-05-18 overnight fuzz pass (target `fuzz_wallet_persistence`,
+    /// crash file `crash-6b3e53ff71c9e8e1cda383857565624d387c68fe`).
+    ///
+    /// The original crash was an ASAN `allocation-size-too-big` (~2.4 TB
+    /// requested) because Argon2id was being asked to allocate
+    /// `kdf_m_cost = 0x8c004242 ≈ 2.34 GB` worth of memory cost (in KiB
+    /// units, that's 2.4 TB of actual heap). The fix added bounds in
+    /// `WalletHeader::validate()`. This test guards against regression.
+    #[test]
+    fn validate_rejects_outsized_kdf_m_cost() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: 0x8c00_4242, // ≈ 2.34 GB KiB — would trigger the original 2.4 TB Argon2 alloc
+            kdf_t_cost: ARGON2_T_COST,
+            kdf_p_cost: ARGON2_P_COST,
+        };
+        let err = header
+            .validate()
+            .expect_err("validate must reject out-of-range kdf_m_cost");
+        match err {
+            Error::Corruption(msg) => assert!(
+                msg.contains("kdf_m_cost"),
+                "expected kdf_m_cost-specific error, got: {}",
+                msg
+            ),
+            other => panic!("expected Error::Corruption, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_outsized_kdf_t_cost() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: ARGON2_M_COST,
+            kdf_t_cost: 1_000_000, // way above any sane iter count
+            kdf_p_cost: ARGON2_P_COST,
+        };
+        let err = header.validate().expect_err("must reject t_cost overflow");
+        match err {
+            Error::Corruption(msg) => assert!(msg.contains("kdf_t_cost"), "got: {}", msg),
+            other => panic!("expected Error::Corruption, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_outsized_kdf_p_cost() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: ARGON2_M_COST,
+            kdf_t_cost: ARGON2_T_COST,
+            kdf_p_cost: 10_000, // way above any sane parallelism
+        };
+        let err = header.validate().expect_err("must reject p_cost overflow");
+        match err {
+            Error::Corruption(msg) => assert!(msg.contains("kdf_p_cost"), "got: {}", msg),
+            other => panic!("expected Error::Corruption, got: {:?}", other),
+        }
+    }
+
+    /// Validate the canonical defaults still pass — make sure the
+    /// new bounds didn't accidentally reject legitimate wallets.
+    #[test]
+    fn validate_accepts_default_kdf_params() {
+        let header = WalletHeader::new(true);
+        header
+            .validate()
+            .expect("default-constructed header must validate");
+    }
+
+    /// End-to-end: feed the actual fuzz-discovered crash bytes through
+    /// `load_wallet_from_bytes` and verify the validation rejects it
+    /// cleanly (no crash, no allocation attempt).
+    ///
+    /// 106 bytes from
+    /// `~/coincync-fuzz/fuzz/artifacts/fuzz_wallet_persistence/crash-6b3e53ff71c9e8e1cda383857565624d387c68fe`.
+    #[test]
+    fn load_wallet_rejects_fuzz_crash_bytes_2026_05_18() {
+        const CRASH_BYTES: &[u8] = &[
+            0x4e, 0x00, 0x00, 0x00, 0x43, 0x59, 0x57, 0x4c, 0x03, 0x01, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xc7, 0x00, 0x00, 0x00, 0x42, 0x42, 0x1a,
+            0xfa, 0xff, 0xff, 0x5d, 0x5d, 0x5d, 0x5d, 0x5d, 0x5d, 0x00, 0x42, 0x42, 0x00, 0x8c,
+            0x42, 0x42, 0x00, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
+            0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x5d, 0x5d, 0x00,
+            0x42, 0x42, 0x00, 0x8c, 0x42, 0x42, 0x00, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x03, 0x03,
+        ];
+
+        // Must return an Err — not crash, not OOM, not panic.
+        let result = load_wallet_from_bytes(CRASH_BYTES, None);
+        assert!(
+            result.is_err(),
+            "fuzz-discovered crash input must be rejected by validate()"
+        );
+        // And the password-included path must reject too.
+        let result_pw = load_wallet_from_bytes(CRASH_BYTES, Some("fuzz-passphrase"));
+        assert!(
+            result_pw.is_err(),
+            "fuzz-discovered crash input must be rejected on the password path too"
+        );
+    }
 
     #[test]
     fn test_encrypt_decrypt() {
