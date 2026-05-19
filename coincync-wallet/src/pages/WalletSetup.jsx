@@ -91,7 +91,7 @@ export default function WalletSetup({ onComplete }) {
       <div style={{ textAlign:"center" }}>
         <CoinLogo size={72} style={{ margin:"0 auto 20px" }}/>
         <h1 style={{ fontSize:24, fontWeight:700, marginBottom:8 }}>CoinCync Wallet</h1>
-        <p style={{ fontSize:13, color:T.t2, marginBottom:32 }}>Private by law. Private by math. · v1.0</p>
+        <p style={{ fontSize:13, color:T.t2, marginBottom:32 }}>Privacy money that requires no permission. · v1.0</p>
         <div style={{ display:"flex", gap:12 }}>
           <div onClick={()=>setStep("create")} style={{ padding:"20px 28px", border:`1px solid ${T.b}`,
             borderRadius:12, background:T.card, cursor:"pointer", textAlign:"left", width:200,

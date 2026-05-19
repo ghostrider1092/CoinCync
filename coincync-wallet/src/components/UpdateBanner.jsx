@@ -325,7 +325,7 @@ export default function UpdateBanner({ update }) {
             letterSpacing: 0.5,
           }}
         >
-          Private by law. Private by math.
+          Privacy money that requires no permission.
         </div>
       </div>
     </div>

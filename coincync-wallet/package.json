@@ -1,7 +1,7 @@
 {
   "name": "coincync-wallet",
   "version": "1.0.8",
-  "description": "CoinCync Privacy Wallet — Private by law. Private by math.",
+  "description": "CoinCync Privacy Wallet — Privacy money that requires no permission.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

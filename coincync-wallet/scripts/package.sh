@@ -58,7 +58,7 @@ cat > "$OUT/README.txt" << 'EOF'
 CoinCync Wallet v1.0.0
 ======================
 
-Private by law. Private by math.
+Privacy money that requires no permission.
 
 QUICK START:
   Double-click "CoinCync Wallet" (or coincync-wallet.exe on Windows)

@@ -290,7 +290,7 @@ export default function Changelog() {
       })}
 
       <div style={{ textAlign: "center", padding: `${SP.xxl}px 0`, fontFamily: T.serif, fontStyle: "italic", fontSize: 11, color: T.t3 }}>
-        Private by law. Private by math.
+        Privacy money that requires no permission.
       </div>
     </div>
   );

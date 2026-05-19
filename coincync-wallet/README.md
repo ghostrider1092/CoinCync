@@ -2,7 +2,7 @@
 
 Privacy wallet for CoinCync — 22 privacy features across 4 independent layers.
 
-*Private by law. Private by math.*
+*Privacy money that requires no permission.*
 
 ## What's included
 

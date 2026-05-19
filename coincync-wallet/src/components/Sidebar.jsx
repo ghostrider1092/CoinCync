@@ -133,7 +133,7 @@ export default function Sidebar({ page, setPage, syncInfo, balance, peers, seedB
       <div style={{ padding:"8px 16px", textAlign:"center" }}>
         <div style={{ fontFamily:T.serif, fontSize:10, fontStyle:"italic",
           color:T.t3, lineHeight:1.4, opacity:.7 }}>
-          Private by law. Private by math.
+          Privacy money that requires no permission.
         </div>
       </div>
 

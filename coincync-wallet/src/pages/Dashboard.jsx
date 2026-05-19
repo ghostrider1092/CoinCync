@@ -242,7 +242,7 @@ export default function Dashboard() {
           fontFamily: T.serif, fontStyle: "italic", fontSize: 11,
           color: T.t3, lineHeight: 1.5, maxWidth: 460, margin: "0 auto",
         }}>
-          Private by law. Private by math.
+          Privacy money that requires no permission.
         </div>
         <div style={{
           fontFamily: T.mono, fontSize: 9, color: T.t3,

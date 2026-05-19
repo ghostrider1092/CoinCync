@@ -5,7 +5,7 @@ export default function Constitution() {
     <div style={{animation:"fadeIn .2s ease",maxWidth:620}}>
       <div style={{marginBottom:18}}>
         <h1 style={{fontFamily:T.serif,fontSize:21,fontWeight:400}}>Constitution</h1>
-        <p style={{fontFamily:T.serif,fontStyle:"italic",fontSize:12,color:T.ac2,marginTop:3}}>Private by law. Private by math.</p>
+        <p style={{fontFamily:T.serif,fontStyle:"italic",fontSize:12,color:T.ac2,marginTop:3}}>Privacy money that requires no permission.</p>
       </div>
 
       <div style={{marginBottom:14,padding:"16px 20px",background:`linear-gradient(135deg,rgba(13,122,88,.08),rgba(13,122,88,.02))`,border:`1px solid rgba(13,122,88,.2)`,borderRadius:11}}>

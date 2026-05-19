@@ -16,7 +16,7 @@ export default function About() {
         <CoinLogo size={64}/>
         <h1 style={{ fontFamily:T.serif, fontSize:24, fontWeight:400, marginTop:16 }}>CoinCync Wallet</h1>
         <div style={{ fontFamily:T.serif, fontStyle:"italic", fontSize:13, color:T.ac2, marginTop:4 }}>
-          Private by law. Private by math.
+          Privacy money that requires no permission.
         </div>
         <div style={{ fontFamily:T.mono, fontSize:10, color:T.t3, marginTop:8 }}>v1.0.0 · Testnet</div>
       </div>

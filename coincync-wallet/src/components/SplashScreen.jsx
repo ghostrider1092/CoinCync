@@ -304,7 +304,7 @@ export default function SplashScreen({ onComplete }) {
           transform: `translateY(${phase >= 2 ? 0 : 10}px)`,
           transition: "opacity 0.5s ease 0.1s, transform 0.5s ease 0.1s",
         }}>
-          Private by law. Private by math.
+          Privacy money that requires no permission.
         </div>
       </div>
 
