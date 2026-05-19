@@ -1,0 +1,103 @@
+name: Fuzz
+
+# Per-commit fuzz: runs the 5 most attacker-reachable libFuzzer + ASAN
+# targets for 60 seconds each on every PR and every push to main.
+#
+# This is the same-day regression catch. The overnight script
+# `scripts/fuzz-overnight.sh` handles deep multi-hour accumulation
+# (manual cadence today; will be replaced by OSS-Fuzz once integrated).
+#
+# Build artifacts cached via Swatinem/rust-cache so per-target rebuilds
+# stay sub-minute on a warm cache. Crash files (if produced) get
+# uploaded as workflow artifacts; reproduce locally with:
+#
+#     cargo +nightly fuzz run <target> <path/to/crash-file>
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # The 5 most attacker-reachable surfaces:
+          #   - p2p_message: peer wire format (anyone over the network)
+          #   - block: block deserialization (peer-supplied)
+          #   - transaction: tx deserialization (peer-supplied)
+          #   - rpc_body: JSON-RPC body parser (peer-supplied if RPC is exposed)
+          #   - wallet_persistence: caught the kdf_m_cost bug in fuzz #1
+          #     (commit 91a19cd). Kept in CI to lock the regression.
+          - fuzz_p2p_message
+          - fuzz_block
+          - fuzz_transaction
+          - fuzz_rpc_body
+          - fuzz_wallet_persistence
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly + rust-src
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Cache cargo + fuzz target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+          shared-key: fuzz-v1
+          key: ${{ matrix.target }}
+
+      - name: Fuzz ${{ matrix.target }} (60s)
+        working-directory: ./fuzz
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=60 \
+            -print_final_stats=1
+
+      - name: Upload crash files (if any)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  fuzz-gate:
+    name: fuzz-gate
+    runs-on: ubuntu-22.04
+    needs: fuzz
+    if: always()
+    steps:
+      - name: Verify
+        run: |
+          if [ "${{ needs.fuzz.result }}" != "success" ]; then
+            echo "::error::Fuzz failed: ${{ needs.fuzz.result }}"
+            exit 1
+          fi
+          echo "Fuzz passed."
