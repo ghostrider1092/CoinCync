@@ -164,7 +164,7 @@ Each multi-phase crate's `tests/` directory composes every layer in a focused in
 
 > Privacy money that doesn't depend on permission to participate. CYNC↔BTC atomic swaps are a constitutional mainnet-launch commitment, not a roadmap item to be deferred. Whether this combination works is what testnet and mainnet are for.
 >
-> *Private by law. Private by math.*
+> *Privacy money that requires no permission.*
 
 ---
 

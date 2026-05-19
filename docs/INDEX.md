@@ -15,6 +15,8 @@ This is the canonical entry point for everything you can read about CoinCync. An
 | [CONSTITUTION](../CONSTITUTION.md) | The seven articles + ten rights that bound what CoinCync can become |
 | [roadmap](roadmap.md) | The next three releases — v1.1, v1.2, v1.3 — with shippable bars |
 | [explicitly-not-doing](explicitly-not-doing.md) | The features CoinCync will never have, and why |
+| [deprecation-schedule](deprecation-schedule.md) | What's queued for removal in each release, and the N-1 warning policy |
+| [v1.1-prep](v1.1-prep.md) | Synthesis tracker for what's between today and v1.1 ship — the 8 shippable-bar criteria, the 7 work categories, the 5 open decisions |
 
 ---
 

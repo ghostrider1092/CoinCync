@@ -13,7 +13,7 @@
   </g>
   <!-- Text -->
   <text x="500" y="260" font-family="'Fraunces',Georgia,serif" font-size="64" font-weight="400" fill="#f5f0e8" letter-spacing="-1">Coin<tspan font-style="italic" font-weight="500" fill="#d4a059">Cync</tspan></text>
-  <text x="500" y="310" font-family="'Fraunces',Georgia,serif" font-style="italic" font-size="22" fill="#8a857d">Private by law. Private by math.</text>
+  <text x="500" y="310" font-family="'Fraunces',Georgia,serif" font-style="italic" font-size="22" fill="#8a857d">Privacy money that requires no permission.</text>
   <!-- Bottom bar -->
   <line x1="100" y1="530" x2="1100" y2="530" stroke="#25241f" stroke-width="1"/>
   <text x="100" y="565" font-family="'JetBrains Mono',monospace" font-size="14" fill="#5d5953" letter-spacing="1">coincync.network</text>
