@@ -46,6 +46,16 @@ serde_json = "1"
 # Filesystem fixtures for the state-persistence tests.
 tempfile   = "3"
 
+# Property-based testing — `tests/property_invariants.rs` +
+# `tests/state_machine_invariants.rs`. Generates hundreds of random
+# valid inputs per property and asserts each property holds for every
+# one. Complements the fuzz suite: fuzz catches crashes on malformed
+# input, property tests catch *logic* bugs on well-formed input
+# (e.g., "adaptor-sign + decrypt + recover roundtrip equals identity"
+# or "the state machine never accepts an illegal transition without
+# returning Err"). See `docs/property-testing.md`.
+proptest = "1"
+
 [lints.rust]
 unsafe_code  = "forbid"
 missing_docs = "allow"
