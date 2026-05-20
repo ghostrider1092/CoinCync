@@ -81,9 +81,19 @@ jobs:
 
       - name: Fuzz ${{ matrix.target }} (60s)
         working-directory: ./fuzz
+        # --target x86_64-unknown-linux-gnu: force the GNU triple
+        # explicitly. The prebuilt cargo-fuzz binary from
+        # taiki-e/install-action is itself musl-linked and recent
+        # versions default to compiling user crates for the same
+        # target as the binary's host triple. Musl is incompatible
+        # with -Zsanitizer=address (statically linked libc + sanitizer
+        # don't co-exist), so without this override the build fails
+        # with "sanitizer is incompatible with statically linked libc".
         run: |
           set -euo pipefail
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            --target x86_64-unknown-linux-gnu \
+            -- \
             -max_total_time=60 \
             -print_final_stats=1
 
