@@ -162,10 +162,19 @@ export const rpc = {
   //   - in-wallet rate negotiation (operator-driven today)
   //   - refund — automatic on CSV timeout, no operator action
   swap: {
-    init:      async ({ role, amount, btcAddress }) =>
-                 tauri("swap_init", { params: { role, amount, btc_address: btcAddress } }),
-    handshake: async ({ swapId, peerInvite }) =>
-                 tauri("swap_handshake", { params: { swap_id: swapId, peer_invite: peerInvite } }),
+    init:      async ({ role, cyncAmount, btcAmountSats, btcAddress, listen }) =>
+                 tauri("swap_init", { params: {
+                   role,
+                   cync_amount: cyncAmount,
+                   btc_amount_sats: btcAmountSats,
+                   btc_address: btcAddress,
+                   listen,
+                 } }),
+    handshake: async ({ inviteHex, btcAddress }) =>
+                 tauri("swap_handshake", { params: {
+                   invite_hex: inviteHex,
+                   btc_address: btcAddress,
+                 } }),
     lock:      async ({ swapId }) =>
                  tauri("swap_lock", { params: { swap_id: swapId } }),
     claim:     async ({ swapId }) =>

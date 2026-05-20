@@ -1098,22 +1098,97 @@ fn multisig_send(params: MultisigSendParams, state: tauri::State<'_, State>) -> 
 // invocations following the multisig_gen pattern above.
 
 #[derive(Deserialize)]
-struct SwapInitParams { role: String, amount: f64, btc_address: Option<String> }
+struct SwapInitParams {
+    role: String,
+    cync_amount: u64,
+    btc_amount_sats: u64,
+    btc_address: Option<String>,
+    listen: Option<String>,
+}
 
 #[derive(Serialize)]
-struct SwapInitResult { id: String, invite_b64: String }
+struct SwapInitResult {
+    id: String,
+    role: String,
+    state: String,
+    invite_hex: String,
+}
 
 #[tauri::command]
-fn swap_init(_params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<SwapInitResult, String> {
-    Err("swap_init: pending cyncswap CLI 'init' subcommand. Track at docs/cyncswap-audit-prep.md §8 (wallet integration deferred until the high-level wizard subcommands land).".into())
+fn swap_init(params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<SwapInitResult, String> {
+    if params.role != "alice" {
+        // Bob's join flow runs through swap_handshake (paste invite +
+        // call wallet-init-bob). swap_init is Alice-only.
+        return Err(format!(
+            "swap_init currently supports role=alice only; got role={}. \
+             For role=bob, use the Handshake tab and paste your counterparty's invite.",
+            params.role
+        ));
+    }
+    if params.cync_amount == 0 {
+        return Err("cync_amount must be > 0".into());
+    }
+    if params.btc_amount_sats == 0 {
+        return Err("btc_amount_sats must be > 0".into());
+    }
+
+    let bin = resolve_binary("cyncswap");
+    // Default the listen address for v0.1 (the actual coordinator
+    // listening lands in a later slice; the value is recorded in the
+    // state file and the invite blob only at this step).
+    let listen = params.listen.unwrap_or_else(|| "127.0.0.1:9000".into());
+    let cync_amount_s = params.cync_amount.to_string();
+    let btc_amount_s = params.btc_amount_sats.to_string();
+
+    let mut args = vec![
+        "wallet-init-alice",
+        "--listen", &listen,
+        "--cync-amount", &cync_amount_s,
+        "--btc-amount-sats", &btc_amount_s,
+    ];
+    if let Some(addr) = &params.btc_address {
+        if !addr.is_empty() {
+            args.push("--bob-btc-address");
+            args.push(addr);
+        }
+    }
+    let out = wallet_cli(&bin, &args, "")?;
+    let v: serde_json::Value = serde_json::from_str(out.trim())
+        .map_err(|e| format!("cyncswap output not JSON: {}\n---output---\n{}", e, out))?;
+
+    Ok(SwapInitResult {
+        id: v.get("swap_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        role: v.get("role").and_then(|x| x.as_str()).unwrap_or("alice").to_string(),
+        state: v.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        invite_hex: v.get("invite_hex").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    })
 }
 
 #[derive(Deserialize)]
-struct SwapHandshakeParams { swap_id: String, peer_invite: String }
+struct SwapHandshakeParams {
+    invite_hex: String,
+    btc_address: Option<String>,
+}
 
 #[tauri::command]
-fn swap_handshake(_params: SwapHandshakeParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
-    Err("swap_handshake: pending cyncswap CLI 'handshake' subcommand.".into())
+fn swap_handshake(params: SwapHandshakeParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+    if params.invite_hex.trim().is_empty() {
+        return Err("invite_hex is required".into());
+    }
+    let bin = resolve_binary("cyncswap");
+    let mut args = vec![
+        "wallet-init-bob",
+        "--invite-hex", params.invite_hex.trim(),
+    ];
+    if let Some(addr) = &params.btc_address {
+        if !addr.is_empty() {
+            args.push("--bob-btc-address");
+            args.push(addr);
+        }
+    }
+    let out = wallet_cli(&bin, &args, "")?;
+    serde_json::from_str(out.trim())
+        .map_err(|e| format!("cyncswap output not JSON: {}\n---output---\n{}", e, out))
 }
 
 #[derive(Deserialize)]

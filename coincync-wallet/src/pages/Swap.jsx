@@ -179,25 +179,43 @@ function ActiveSwapsCard({ swaps, loading, backendOk, onJump }) {
 function SetupForm({ push, backendOk, onProgress }) {
   const T = useTheme();
   const [role, setRole] = useState("alice"); // alice = locks CYNC, gets BTC; bob = locks BTC, gets CYNC
-  const [amount, setAmount] = useState("");
+  const [cyncAmount, setCyncAmount] = useState(""); // CYNC display units
+  const [btcAmount, setBtcAmount] = useState("");   // BTC display units
   const [btcAddress, setBtcAddress] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
 
   async function onStart() {
     if (!backendOk) return;
-    const amt = parseFloat(amount);
-    if (!(amt > 0)) {
-      push("Amount must be a positive number", "warning");
+    if (role !== "alice") {
+      push("Bob's join flow lives in the Handshake tab — paste the invite there.", "info");
       return;
     }
-    if (role === "alice" && !btcAddress.trim()) {
-      push("Alice needs the BTC receive address", "warning");
+    const cync = parseFloat(cyncAmount);
+    const btc = parseFloat(btcAmount);
+    if (!(cync > 0)) {
+      push("CYNC amount must be a positive number", "warning");
       return;
     }
+    if (!(btc > 0)) {
+      push("BTC amount must be a positive number", "warning");
+      return;
+    }
+    if (!btcAddress.trim()) {
+      push("Alice needs the BTC receive address (where Bob will pay her)", "warning");
+      return;
+    }
+    // CYNC: 1 CYNC = 1e12 atomic units; BTC: 1 BTC = 1e8 sats.
+    const cyncAtomic = Math.round(cync * 1e12);
+    const btcSats    = Math.round(btc  * 1e8);
     setLoading(true);
     try {
-      const r = await rpc.swap.init({ role, amount: amt, btcAddress: btcAddress.trim() });
+      const r = await rpc.swap.init({
+        role,
+        cyncAmount: cyncAtomic,
+        btcAmountSats: btcSats,
+        btcAddress: btcAddress.trim(),
+      });
       setResult(r);
       push("Swap initialized — share the invite with your counterparty", "success");
     } catch (e) {
@@ -231,23 +249,42 @@ function SetupForm({ push, backendOk, onProgress }) {
         />
       </div>
 
-      <Input
-        label={`Amount (${role === "alice" ? "CYNC" : "BTC"})`}
-        value={amount} onChange={e => setAmount(e.target.value)} mono
-        placeholder={role === "alice" ? "e.g. 100.0" : "e.g. 0.01"}
-        hint="The exchange rate is negotiated out-of-band; this is just your leg's amount."
-      />
-      {role === "alice" && (
-        <Input
-          label="Your BTC receive address"
-          value={btcAddress} onChange={e => setBtcAddress(e.target.value)} mono
-          placeholder="bc1p… or tb1p… (taproot, P2TR)"
-          hint="Must be a P2TR address for the network in BtcConfig (mainnet / testnet / regtest / signet)."
-        />
+      {role === "alice" ? (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <Input
+              label="CYNC amount you lock"
+              value={cyncAmount} onChange={e => setCyncAmount(e.target.value)} mono
+              placeholder="e.g. 100.0"
+              hint="In CYNC display units."
+            />
+            <Input
+              label="BTC amount Bob pays"
+              value={btcAmount} onChange={e => setBtcAmount(e.target.value)} mono
+              placeholder="e.g. 0.01"
+              hint="In BTC display units. Both amounts agreed out-of-band."
+            />
+          </div>
+          <Input
+            label="Your BTC receive address"
+            value={btcAddress} onChange={e => setBtcAddress(e.target.value)} mono
+            placeholder="bc1p… or tb1p… (taproot, P2TR)"
+            hint="Must be a P2TR address for the BtcConfig network (mainnet / testnet / regtest / signet)."
+          />
+        </>
+      ) : (
+        <div style={{
+          padding: "12px 14px", background: `${T.ac2}06`, borderLeft: `3px solid ${T.ac2}`,
+          borderRadius: "0 8px 8px 0", fontSize: 11, color: T.t2, lineHeight: 1.6,
+        }}>
+          <strong style={{ color: T.ac2 }}>Bob's flow:</strong> join via the Handshake tab.
+          Paste the invite blob your counterparty (Alice) sent. The wallet decodes the
+          swap_id, amounts, and connect URL from the invite — no need to retype them.
+        </div>
       )}
 
-      <Btn onClick={onStart} disabled={!backendOk || loading} style={{ marginTop: SP.md }}>
-        {loading ? "Initializing…" : "Start swap"}
+      <Btn onClick={onStart} disabled={!backendOk || loading || role !== "alice"} style={{ marginTop: SP.md }}>
+        {loading ? "Initializing…" : role === "alice" ? "Start swap" : "Switch to Handshake tab →"}
       </Btn>
 
       {result && (
@@ -257,7 +294,7 @@ function SetupForm({ push, backendOk, onProgress }) {
           fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
           color: T.t2, whiteSpace: "pre-wrap", wordBreak: "break-all",
         }}>
-          {`Swap initialized.\n\nSwap ID:    ${result.id}\nInvite blob:\n${result.invite_b64}\n\nNext: hand this invite to your counterparty (Signal, email, anything authenticated). Open the Handshake tab once they reply.`}
+          {`Swap initialized.\n\nSwap ID:    ${result.id}\nState:      ${result.state}\n\nInvite (hex):\n${result.invite_hex}\n\nNext: hand the invite hex to your counterparty (Signal, email, anything authenticated). They paste it into their Handshake tab and reply with their state.`}
         </div>
       )}
     </Section>
@@ -283,22 +320,25 @@ function RoleChip({ selected, onClick, title, subtitle }) {
 
 function HandshakeForm({ push, backendOk }) {
   const T = useTheme();
-  const [swapId, setSwapId] = useState("");
-  const [peerInvite, setPeerInvite] = useState("");
+  const [inviteHex, setInviteHex] = useState("");
+  const [btcAddress, setBtcAddress] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
 
   async function onHandshake() {
     if (!backendOk) return;
-    if (!swapId.trim() || !peerInvite.trim()) {
-      push("Swap ID + peer invite are required", "warning");
+    if (!inviteHex.trim()) {
+      push("Invite hex is required (Alice's wallet produced it in Setup)", "warning");
       return;
     }
     setLoading(true);
     try {
-      const r = await rpc.swap.handshake({ swapId: swapId.trim(), peerInvite: peerInvite.trim() });
+      const r = await rpc.swap.handshake({
+        inviteHex: inviteHex.trim(),
+        btcAddress: btcAddress.trim(),
+      });
       setResult(r);
-      push("Handshake complete — proceed to Lock", "success");
+      push("Joined as Bob — proceed to Lock", "success");
     } catch (e) {
       push(formatWalletError(e, "Handshake failed"), "warning");
     }
@@ -306,27 +346,31 @@ function HandshakeForm({ push, backendOk }) {
   }
 
   return (
-    <Section title="Exchange handshake material">
+    <Section title="Join as Bob: consume Alice's invite">
       <div style={{ fontSize: 11, color: T.t3, marginBottom: 14, lineHeight: 1.6 }}>
-        Paste your counterparty's invite blob. The wallet completes the Noise XX
-        handshake, exchanges adaptor material + the cross-curve DLEQ proof, and
-        produces a signed refund tx so neither side can be stranded.
+        Paste Alice's invite hex (produced from her Setup step). The wallet decodes
+        the swap_id, amounts, and her connect URL from the invite — no need to
+        retype them. The Noise XX handshake + adaptor exchange happens in the next
+        slice; this step just initializes Bob's state file with matching parameters.
       </div>
 
-      <Input label="Swap ID" value={swapId} onChange={e => setSwapId(e.target.value)} mono
-             placeholder="abc1234…" />
-      <Lbl>Peer invite (paste exactly)</Lbl>
-      <textarea value={peerInvite} onChange={e => setPeerInvite(e.target.value)} rows={6}
-        placeholder="paste the counterparty's invite_b64 here"
+      <Lbl>Invite hex (paste exactly)</Lbl>
+      <textarea value={inviteHex} onChange={e => setInviteHex(e.target.value)} rows={5}
+        placeholder="paste the invite_hex Alice's wallet emitted"
         style={{
           width: "100%", padding: "10px 12px", marginBottom: SP.md,
           background: T.inputBg, border: `1px solid ${T.b}`, borderRadius: 8,
           fontSize: 11, color: T.t1, outline: "none",
-          fontFamily: "'JetBrains Mono', monospace", resize: "vertical",
+          fontFamily: "'JetBrains Mono', monospace", resize: "vertical", wordBreak: "break-all",
         }}/>
 
+      <Input label="Your BTC funding address (optional)"
+        value={btcAddress} onChange={e => setBtcAddress(e.target.value)} mono
+        placeholder="bc1q… (Bob's address that will fund the BTC lock)"
+        hint="If your wallet picks a UTXO automatically, leave blank. The default placeholder is used otherwise."/>
+
       <Btn onClick={onHandshake} disabled={!backendOk || loading}>
-        {loading ? "Handshaking…" : "Run handshake"}
+        {loading ? "Joining…" : "Join swap"}
       </Btn>
 
       {result && (
