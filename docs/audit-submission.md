@@ -65,6 +65,8 @@ cargo test --workspace --exclude coincync --features coincync-swap/strict-dleq  
 
 If any of these counts differ from this document, the audit baseline has shifted — re-derive the commit + the counts before proceeding. The audit-prep doc [§10](cyncswap-audit-prep.md#10-build--test-reproducibility) carries the up-to-date expected counts plus the reproducibility-vector regeneration recipe.
 
+**One-shot smoke verification:** `bash scripts/cyncswap-audit-smoke.sh` runs every check above in one pass (test counts vs the docs, reproducibility-vector bit-equality, property-test execution, Cargo.lock presence) and exits non-zero on any drift. Auditor should run this immediately after `git clone` to verify the perimeter state matches what this packet claims, before opening any source files.
+
 ---
 
 ## 4. Test-evidence summary
@@ -76,7 +78,8 @@ The four legs of the test stool:
 | **Property tests** | Random valid inputs satisfy declared invariants | [tests/property_invariants.rs](../crates/coincync-swap/tests/property_invariants.rs), [property_invariants_cync.rs](../crates/coincync-swap/tests/property_invariants_cync.rs), [state_machine_invariants.rs](../crates/coincync-swap/tests/state_machine_invariants.rs) |
 | **Fuzz** | No random adversarial input crashes the parser | [fuzz/](../fuzz/) — 27 targets, per-commit CI on 5 attacker-reachable surfaces, manual overnight runner covers all 27 |
 | **External vectors** | Outputs reproduce byte-for-byte against published expected values | [tests/external_vectors.rs](../crates/coincync-swap/tests/external_vectors.rs) walks [test-vectors/{reproducibility,comit,farcaster}/](../crates/coincync-swap/test-vectors/) — 12 in-house deterministic vectors shipped, vendor vectors pending license review |
-| **Mutation testing** | Test suite catches single-line code mutations | Score: **~100%** (339+ caught / ≤1 missed) across the four crypto-critical files (`strict_dleq.rs`, `adaptor.rs`, `cync.rs`, `btc.rs`). `adaptor.rs` was 95/95 caught at baseline. See [§11.4 of the audit-prep doc](cyncswap-audit-prep.md#114-mutation-testing) for methodology. |
+| **Mutation testing** | Test suite catches single-line code mutations | Score: **100.0%** (340 caught / 0 missed) across the four crypto-critical files (`strict_dleq.rs`, `adaptor.rs`, `cync.rs`, `btc.rs`). `adaptor.rs` was 95/95 caught at baseline. See [§11.4 of the audit-prep doc](cyncswap-audit-prep.md#114-mutation-testing) for methodology. |
+| **Line coverage** | Source lines exercised by tests | **~97% average** across the four crypto-critical files (range 96.72% – 99.07%). Per-file report at [docs/cyncswap-coverage-2026-05-20.md](cyncswap-coverage-2026-05-20.md). |
 
 Mutation score is the empirical answer to "do your tests actually exercise the crypto, or just call it?" 100% across the four crypto-critical files means every operator, constant, return, and match arm in the audit perimeter has at least one test that fails when it's mutated.
 

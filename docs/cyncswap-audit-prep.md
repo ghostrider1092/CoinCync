@@ -281,6 +281,26 @@ Mutation testing measures whether the test suite would *catch* an adversarial co
 
 For the auditor: a mutation score of 100% on the four crypto-critical files is the empirical answer to "do your tests actually exercise the crypto, or just call it?" Every operator, constant, return, and match-arm mutation cargo-mutants could generate is caught by at least one test. This complements property tests (random valid inputs → invariants hold), fuzz (random adversarial inputs → no crash), and external vectors (cross-impl byte-equality). Together: four legs of the stool, not one.
 
+### 11.5 Line coverage
+
+Measured via `cargo llvm-cov` on Linux (WSL), 2026-05-20:
+
+| File | Line coverage |
+| --- | --- |
+| `strict_dleq.rs` | **99.07%** (1182 lines, 11 missed) |
+| `cync.rs` | **97.38%** (725 lines, 19 missed) |
+| `adaptor.rs` | **97.39%** (767 lines, 20 missed) |
+| `btc.rs` | **96.72%** (1433 lines, 47 missed) |
+
+Audit-perimeter average: **~97% line coverage**. Full per-file report (including regions + functions + the non-audit files in the crate) at [docs/cyncswap-coverage-2026-05-20.md](cyncswap-coverage-2026-05-20.md). Re-run via:
+
+```bash
+CARGO_TARGET_DIR=/tmp/coincync-cov \
+  cargo llvm-cov --package coincync-swap --features strict-dleq --summary-only
+```
+
+Coverage measures whether tests *execute* a line; mutation measures whether tests *catch a deliberate change* on that line. 97% coverage + 100% mutation means no large blocks of audit-critical code go un-exercised, AND every operator / constant / return / match-arm mutation in the executed code is caught by at least one test.
+
 ### 11.5 What this does **not** cover
 
 To preserve the §8 "knowingly missing" discipline:
