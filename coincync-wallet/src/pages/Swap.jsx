@@ -156,20 +156,33 @@ function ActiveSwapsCard({ swaps, loading, backendOk, onJump }) {
       <div style={{ fontSize: 12, fontWeight: 600, marginBottom: SP.sm, color: T.t1 }}>
         Active swaps ({swaps.length})
       </div>
-      {swaps.map(s => (
-        <div key={s.id} style={{
-          display: "flex", justifyContent: "space-between", alignItems: "center",
-          padding: "8px 0", borderBottom: `1px solid ${T.b}`, fontSize: 11,
-        }}>
-          <div>
-            <div style={{ color: T.t1, fontFamily: "'JetBrains Mono', monospace" }}>{s.id.slice(0, 12)}…</div>
-            <div style={{ color: T.t3, marginTop: 2 }}>
-              {s.role} · {s.amount} · {s.state}
+      {swaps.map(s => {
+        const id = s.swap_id || s.id || "";
+        const role = s.role || "?";
+        const state = s.state || "?";
+        const cync = (s.cync_amount || 0) / 1e12;
+        const btc = (s.btc_amount_sats || 0) / 1e8;
+        // Map state to the right wizard tab.
+        const stageFor = (st) => {
+          if (st === "Negotiated") return "handshake";
+          if (st === "Locked" || st === "BothLocked" || st === "AliceLocked" || st === "BobLocked") return "claim";
+          return "lock";
+        };
+        return (
+          <div key={id} style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "8px 0", borderBottom: `1px solid ${T.b}`, fontSize: 11,
+          }}>
+            <div>
+              <div style={{ color: T.t1, fontFamily: "'JetBrains Mono', monospace" }}>{id.slice(0, 20)}…</div>
+              <div style={{ color: T.t3, marginTop: 2 }}>
+                {role} · {cync.toFixed(6)} CYNC ↔ {btc.toFixed(8)} BTC · {state}
+              </div>
             </div>
+            <Btn size="sm" onClick={() => onJump(stageFor(state))}>Continue</Btn>
           </div>
-          <Btn size="sm" onClick={() => onJump(s.next_stage || "lock")}>Continue</Btn>
-        </div>
-      ))}
+        );
+      })}
     </Card>
   );
 }
@@ -515,21 +528,28 @@ function HistoryView({ push, backendOk }) {
           No swap history yet. Completed and refunded swaps will appear here.
         </div>
       )}
-      {!loading && history.map(s => (
-        <div key={s.id} style={{
-          padding: "10px 12px", marginBottom: SP.sm,
-          background: T.bg, border: `1px solid ${T.b}`, borderRadius: 8,
-          fontSize: 11, color: T.t2,
-        }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", color: T.t1 }}>{s.id}</div>
-            <StateChip state={s.state} />
+      {!loading && history.map(s => {
+        const id = s.swap_id || s.id || "";
+        const role = s.role || "?";
+        const state = s.state || "?";
+        const cync = (s.cync_amount || 0) / 1e12;
+        const btc = (s.btc_amount_sats || 0) / 1e8;
+        return (
+          <div key={id} style={{
+            padding: "10px 12px", marginBottom: SP.sm,
+            background: T.bg, border: `1px solid ${T.b}`, borderRadius: 8,
+            fontSize: 11, color: T.t2,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", color: T.t1 }}>{id}</div>
+              <StateChip state={state} />
+            </div>
+            <div style={{ color: T.t3 }}>
+              {role} · {cync.toFixed(6)} CYNC ↔ {btc.toFixed(8)} BTC
+            </div>
           </div>
-          <div style={{ color: T.t3 }}>
-            {s.role} · {s.amount} · finalized {s.finalized_at || "—"}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </Section>
   );
 }

@@ -233,6 +233,20 @@ enum Command {
         state_file: Option<PathBuf>,
     },
 
+    /// Read a swap state file and emit its contents as JSON.
+    /// Wallet-friendly counterpart to `Status`. Returns Ok with the
+    /// JSON payload on stdout if the state file exists; returns an
+    /// Err (the wallet treats this as "no active swap") if it does
+    /// not. The payload is { swap_id, role, state, terminal,
+    /// cync_amount, btc_amount_sats, cync_timeout_blocks,
+    /// btc_timeout_blocks, alice_cync_address, bob_btc_address,
+    /// legal_transitions: [..] }.
+    WalletStatus {
+        /// State file. Defaults to `~/.coincync/swap.json`.
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+    },
+
     /// Show status of an active swap (loaded from the on-disk
     /// state file).
     Status {
@@ -1466,6 +1480,7 @@ fn run(cli: Cli) -> Result<(), String> {
             bob_btc_address,
             resolve_state_path(state_file)?,
         ),
+        Command::WalletStatus { state_file } => wallet_status_cmd(resolve_state_path(state_file)?),
         Command::Status { state_file } => status_cmd(resolve_state_path(state_file)?),
         Command::Cancel { state_file } => cancel_cmd(resolve_state_path(state_file)?),
         Command::LockCync {
@@ -2114,6 +2129,48 @@ fn wallet_init_bob_cmd(
         "connect": connect,
         "cync_amount": cync_amount,
         "btc_amount_sats": btc_amount_sats,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&out).map_err(|e| format!("json encode: {e}"))?
+    );
+    Ok(())
+}
+
+/// Machine-readable counterpart to [`status_cmd`]. Returns a single
+/// JSON line on stdout. The wallet's `swap_list` Tauri command
+/// invokes this to populate the "Active swaps" panel.
+fn wallet_status_cmd(state_path: PathBuf) -> Result<(), String> {
+    let store = SwapStore::new(&state_path);
+    let swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
+        Some(s) => s,
+        None => {
+            return Err(format!(
+                "no swap state at {}; nothing to show.",
+                state_path.display()
+            ));
+        }
+    };
+
+    let legal: Vec<String> = swap
+        .legal_transitions()
+        .into_iter()
+        .map(|t| format!("{t:?}"))
+        .collect();
+
+    let out = serde_json::json!({
+        "swap_id":             swap.id,
+        "role":                format!("{:?}", swap.role),
+        "state":               state_string(swap.state),
+        "terminal":            swap.is_terminal(),
+        "state_file":          state_path.display().to_string(),
+        "cync_amount":         swap.parameters.cync_amount,
+        "btc_amount_sats":     swap.parameters.btc_amount_sats,
+        "cync_timeout_blocks": swap.parameters.cync_timeout_blocks,
+        "btc_timeout_blocks":  swap.parameters.btc_timeout_blocks,
+        "alice_cync_address":  swap.parameters.alice_cync_address,
+        "bob_btc_address":     swap.parameters.bob_btc_address,
+        "legal_transitions":   legal,
     });
     println!(
         "{}",

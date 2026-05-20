@@ -1212,16 +1212,72 @@ fn swap_abort(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<
 #[derive(Serialize)]
 struct SwapListResult { swaps: Vec<serde_json::Value> }
 
+/// Default state-file path the cyncswap CLI uses (matches the CLI's
+/// `resolve_state_path(None)` fallback). The wallet maintains exactly
+/// one active swap at the default path today; multi-swap support
+/// awaits a follow-up slice with a directory-iteration design.
+fn default_swap_state_path() -> std::path::PathBuf {
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        std::path::PathBuf::from(home).join(".coincync").join("swap.json")
+    } else {
+        std::path::PathBuf::from("swap.json")
+    }
+}
+
 #[tauri::command]
 fn swap_list(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> {
-    // Empty by design until the state-file directory iteration lands.
-    Ok(SwapListResult { swaps: Vec::new() })
+    let bin = resolve_binary("cyncswap");
+    let path = default_swap_state_path();
+    let path_str = path.to_string_lossy().to_string();
+    // wallet-status exits 1 with "no swap state at..." when the file is
+    // absent. That's the "no active swap" case — return empty rather
+    // than propagating the error.
+    if !path.exists() {
+        return Ok(SwapListResult { swaps: Vec::new() });
+    }
+    match wallet_cli(&bin, &["wallet-status", "--state-file", &path_str], "") {
+        Ok(out) => {
+            let v: serde_json::Value = serde_json::from_str(out.trim()).map_err(|e| {
+                format!("wallet-status output not JSON: {}\n---output---\n{}", e, out)
+            })?;
+            // Filter out terminal states from "active" — they belong in history.
+            let terminal = v.get("terminal").and_then(|x| x.as_bool()).unwrap_or(false);
+            if terminal {
+                Ok(SwapListResult { swaps: Vec::new() })
+            } else {
+                Ok(SwapListResult { swaps: vec![v] })
+            }
+        }
+        Err(_) => Ok(SwapListResult { swaps: Vec::new() }),
+    }
 }
 
 #[tauri::command]
 fn swap_history(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> {
-    // Empty by design until the state-file directory iteration lands.
-    Ok(SwapListResult { swaps: Vec::new() })
+    // Mirror of swap_list but for terminal states. A future slice
+    // will iterate a `~/.coincync/swap-history/` directory; today
+    // the wallet only tracks one swap at a time, so history is the
+    // current state file IF it's terminal, otherwise empty.
+    let bin = resolve_binary("cyncswap");
+    let path = default_swap_state_path();
+    let path_str = path.to_string_lossy().to_string();
+    if !path.exists() {
+        return Ok(SwapListResult { swaps: Vec::new() });
+    }
+    match wallet_cli(&bin, &["wallet-status", "--state-file", &path_str], "") {
+        Ok(out) => {
+            let v: serde_json::Value = serde_json::from_str(out.trim()).map_err(|e| {
+                format!("wallet-status output not JSON: {}\n---output---\n{}", e, out)
+            })?;
+            let terminal = v.get("terminal").and_then(|x| x.as_bool()).unwrap_or(false);
+            if terminal {
+                Ok(SwapListResult { swaps: vec![v] })
+            } else {
+                Ok(SwapListResult { swaps: Vec::new() })
+            }
+        }
+        Err(_) => Ok(SwapListResult { swaps: Vec::new() }),
+    }
 }
 
 // ── Mining ────────────────────────────────────────────────────────────
