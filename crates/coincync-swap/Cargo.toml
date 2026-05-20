@@ -26,13 +26,51 @@ name = "cyncswap"
 path = "src/bin/cyncswap.rs"
 
 [dependencies]
-# Stdlib only for the skeleton — no crypto deps yet. The day the
-# protocol implementation begins, the natural additions will be:
-#   bitcoin     — for BTC-side HTLC + adaptor-signature handling
-#   secp256k1   — adaptor signature primitives (BTC side)
-#   curve25519-dalek — Ed25519 adaptor signatures (CYNC side)
-#   tokio       — async P2P swap-coordination loop
-# Holding off until those decisions are made formally in CIP-001.
+# Crypto: real BIP-340 Schnorr adaptor primitives (slice landed
+# 2026-05-17). secp256k1 supplies the curve + scalar arithmetic;
+# sha2 supplies the BIP-340 tagged-hash challenge. The remaining
+# stubbed surfaces (BTC RPC, CYNC adaptor, cross-curve DL proof,
+# coordinator transport) still return NotImplemented and will
+# pull in `bitcoin`, `curve25519-dalek`, `tokio` etc. as each
+# lands.
+secp256k1  = { version = "0.29", features = ["rand", "global-context"] }
+sha2       = "0.10"
+# HMAC-SHA256 over the state-file canonical body for integrity. Without it,
+# an attacker with filesystem write to the state file can forge any swap
+# state (including terminal `Completed`) and the binary will trust it on
+# load. The HMAC key lives in a sidecar at `<state_file>.hmac-key`
+# (0o600 on Unix). Closes CYNC-AUDIT-2026-05-17-state-file-hmac.
+hmac       = "0.12"
+# CYNC-side adaptor primitives — Ristretto255 (prime-order group on
+# Curve25519). Same version the parent `coincync` crate uses for
+# CLSAG so the resolver gets a single tree; `digest` feature is
+# needed for the scalar-from-hash convenience constructor.
+curve25519-dalek = { version = "4.1", features = ["rand_core", "digest"] }
+
+# Constant-time comparison for AdaptorSecret. The default plain
+# `==` would leak via timing whether two recovered/stored secrets
+# match — relevant when the comparison is on the hot path of swap
+# state machine transitions. Same version + posture the bridge
+# crate uses for its 32-byte identifier comparisons.
+subtle           = "2.5"
+
+# Bitcoin Core JSON-RPC client — Phase 1 of the BTC chain integration
+# slice. Async, json-only, rustls so we don't drag in OpenSSL on
+# Windows. Same version + feature flags the parent `coincync` crate
+# already uses for its update-checker / HTTPS calls.
+reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio            = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+async-trait      = "0.1"
+hex              = "0.4"
+
+# Bitcoin transaction construction — Phase 2 of the BTC chain
+# integration. `bitcoin` 0.32 is paired with secp256k1 0.29 (the
+# same version we already use for adaptor sigs); `serde` is on for
+# wire-format helpers. Heavy dep tree (~1MB) but isolated to this
+# workspace member since coincync-swap is opt-in and not pulled
+# into the main `coincync` binary.
+bitcoin          = { version = "0.32", default-features = false, features = ["std", "secp-recovery", "rand-std"] }
+
 clap       = { version = "4", features = ["derive"] }
 thiserror  = "1"
 serde      = { version = "1", features = ["derive"] }
@@ -42,19 +80,95 @@ serde      = { version = "1", features = ["derive"] }
 # can resume across invocations.
 serde_json = "1"
 
+# Noise Protocol Framework for the coordinator transport's
+# confidentiality + integrity layer. We use the XX pattern
+# (mutual-authentication, both sides learn the other's static
+# Curve25519 key during the handshake) over our existing
+# `TcpTransport`. Cipher suite is the snow default: `Noise_XX_
+# 25519_ChaChaPoly_BLAKE2s`. The curve25519-dalek + chacha20poly1305
+# + blake2 underlying primitives are already in our tree (dalek 4
+# is the same one we use for Ristretto in adaptor.rs).
+snow       = { version = "0.9", default-features = false, features = ["default-resolver"] }
+
+# OS randomness for the cyncswap CLI's `noise-keygen` subcommand,
+# which generates fresh 32-byte Curve25519 static keys at operator-
+# setup time. Promoted from dev-dependencies (where it was used by
+# adaptor-roundtrip tests) to regular dependencies so the binary
+# can pull it in. The library code uses `OsRng` directly via this
+# same crate; same version pin keeps the resolver tree clean.
+rand       = "0.8"
+
 [dev-dependencies]
 # Filesystem fixtures for the state-persistence tests.
 tempfile   = "3"
+# (`rand` was here; promoted to [dependencies] above for the cyncswap
+# CLI's `noise-keygen` subcommand. Test code still uses it the same way.)
 
-# Property-based testing — `tests/property_invariants.rs` +
-# `tests/state_machine_invariants.rs`. Generates hundreds of random
-# valid inputs per property and asserts each property holds for every
-# one. Complements the fuzz suite: fuzz catches crashes on malformed
-# input, property tests catch *logic* bugs on well-formed input
-# (e.g., "adaptor-sign + decrypt + recover roundtrip equals identity"
-# or "the state machine never accepts an illegal transition without
-# returning Err"). See `docs/property-testing.md`.
+# Property-based testing — `tests/property_invariants.rs`. Generates
+# hundreds of random valid inputs per property and asserts each property
+# holds for every one. Complements the fuzz suite: fuzz catches crashes
+# on malformed input, property tests catch *logic* bugs on well-formed
+# input (e.g., "roundtrip equality holds" or "adaptor binding rejects
+# the wrong secret"). See `docs/property-testing.md` for the discipline.
 proptest = "1"
+
+# wiremock for unit-testing `BitcoinCoreRpc` and `CyncNodeRpc` against
+# a controllable HTTP JSON-RPC server. Lets us exercise every branch of
+# the RPC client (success path, timeout path, error response, missing
+# field, etc.) without needing a live bitcoind / coincync-node. Caught
+# ~20 mutation-testing misses across btc.rs and cync.rs RPC layers.
+wiremock = "0.6"
+
+# Benchmarking for the audit-relevant cryptographic primitives. The
+# audit-prep doc §8 carried "no published strict-DLEQ benchmark numbers"
+# as a known gap; this dep + the `benches/` directory closes that gap.
+# Only used by `cargo bench`, never by `cargo test`.
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Benchmark targets.
+[[bench]]
+name = "strict_dleq"
+harness = false
+required-features = ["strict-dleq"]
+
+# ── Unix-only deps ────────────────────────────────────────────────────
+#
+# `libc` for the `O_NOFOLLOW` constant used in `state.rs::save` to
+# defend against symlink-substitution attacks on the temp file. The
+# value of `O_NOFOLLOW` varies per Unix flavor (Linux: 0x20000, macOS/
+# BSD: 0x0100, NetBSD: 0x00800000), so we pull it from libc rather
+# than hardcoding. No `unsafe` is required — `OpenOptionsExt::custom_
+# flags` is safe Rust. Windows: no equivalent semantics; the save
+# path uses bare `OpenOptions` there.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# ── Cargo features ────────────────────────────────────────────────────
+#
+# `strict-dleq` enables the Noether 2018 strict-binding cross-curve
+# discrete-log-equality proof (see `src/strict_dleq.rs` and CIP-001
+# §"Pre-audit hardening"). The construction proves cross-curve
+# same-secret binding cryptographically rather than relying on the
+# operational binding from the adaptor signatures themselves. It is
+# **off by default** because:
+#   - The dual-response Schoenmakers fast-floor proof (always available)
+#     is operationally sufficient: Alice's BTC claim reveals `t` to
+#     Bob, and Bob's CYNC spend secret = bob_secret + t either succeeds
+#     (correct t) or fails the swap (wrong t). No funds at risk either
+#     way.
+#   - Strict-DLEQ proofs are ~81 KB on the wire vs ~129 bytes for the
+#     fast-floor proof. Bandwidth budget is fine for a once-per-swap
+#     exchange but it's pointless cost unless the audit team requires it.
+#   - Verifier cost: ~252 EC scalar muls per curve for the bit-OR-proofs
+#     plus 2 multi-scalar muls for the linear-combination openings.
+#     Negligible CPU but non-zero.
+#
+# Flip on with `--features strict-dleq` when the audit team asks for
+# the stronger same-secret-cross-curve property. No deps added — the
+# module uses only crates already in `[dependencies]`.
+[features]
+default = []
+strict-dleq = []
 
 [lints.rust]
 unsafe_code  = "forbid"

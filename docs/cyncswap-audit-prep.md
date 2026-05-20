@@ -164,7 +164,7 @@ Auditor should know:
 
 - **Live dual-testnet smoke** ([scripts/cyncswap-dual-testnet-smoke.sh](../scripts/cyncswap-dual-testnet-smoke.sh)) is operator-driven (operator pastes signed-tx hex per step). An automated dual-testnet harness would require a running bitcoind regtest + coincync-node testnet bound to the test runner; this is a deployment concern, not a coverage concern, but worth noting.
 - **Joint-key full-CLSAG round-trip** requires the parent `coincync` crate as a dev-dependency; deferred until wallet integration lands.
-- **Performance benchmarks** for the strict-DLEQ prove/verify (~81 KB proof) exist only as test timing in CI, not as published benchmark numbers. Reasonable to add if the audit cares about performance bounds.
+- ~~**Performance benchmarks** for the strict-DLEQ prove/verify (~81 KB proof) exist only as test timing in CI~~. **Closed 2026-05-20.** Criterion benchmark at [crates/coincync-swap/benches/strict_dleq.rs](../crates/coincync-swap/benches/strict_dleq.rs). Measured on a modern x86 desktop: `prove` ≈ **133 ms** median, `verify` ≈ **172 ms** median (100-sample criterion runs, release mode). Re-run via `cargo bench -p coincync-swap --features strict-dleq`. Cost is comfortably below the swap protocol's coordination latency budget; not a DoS surface on the verify path.
 - ~~**Fuzzing harnesses** for the protocol state machine + the wire-format JSON parser would be valuable but are not shipped.~~ **Partially closed 2026-05-19.** Per-commit CI fuzz on 5 attacker-reachable surfaces (`fuzz_p2p_message`, `fuzz_block`, `fuzz_transaction`, `fuzz_rpc_body`, `fuzz_wallet_persistence`) at [.github/workflows/fuzz.yml](../.github/workflows/fuzz.yml) — 60 s libFuzzer + ASAN per target, every PR + push to main. Overnight script [scripts/fuzz-overnight.sh](../scripts/fuzz-overnight.sh) walks all 27 targets for deep accumulation (10.2 hr overnight #1 found + fixed wallet kdf_m_cost validation gap, commit 91a19cd). Protocol state machine still uses property tests rather than libFuzzer; the state-machine surface is a constrained finite-state graph where proptest random transition sequences arguably outperform libFuzzer.
 - ~~**CDLP external test vectors**~~ **Shipped 2026-05-18** at [crates/coincync-swap/test-vectors/strict-dleq-vectors.json](../crates/coincync-swap/test-vectors/strict-dleq-vectors.json). 3 vectors with `(secret, seed) → (T_btc, T_cync, fast_proof_hex, strict_proof_sha256)` derivation. Validated by `vectors_match_checked_in_file` golden-file test — any wire-format drift fails the test, forcing explicit re-baseline review.
 
@@ -268,7 +268,20 @@ Three vector directories under [crates/coincync-swap/test-vectors/](../crates/co
 
 All three directories are walked by [tests/external_vectors.rs](../crates/coincync-swap/tests/external_vectors.rs), so the moment vectors land in `comit/` or `farcaster/`, validation runs every CI run with no harness changes required.
 
-### 11.4 What this does **not** cover
+### 11.4 Mutation testing
+
+Mutation testing measures whether the test suite would *catch* an adversarial code change. cargo-mutants flips operators, constants, returns, and match arms one at a time across the four audit-critical files; for each mutation it re-runs the test suite and reports MISSED (tests still pass — bad) vs CAUGHT (tests fail — good).
+
+| Pass | Score | Caught / missed | Notes |
+| --- | --- | --- | --- |
+| Baseline 2026-05-19 | **84.3%** | 285 / 53 | First measured. Most misses in RPC/IO layer (`BitcoinCoreRpc::*`, `CyncNodeRpc::*`) and tx-construction arithmetic. `adaptor.rs` already at 95/95 caught — the BIP-340 + Ristretto adaptor primitives. |
+| Hardening 2026-05-20 | **100.0%** | 340 / 0 | +24 new tests across 5 categories: parameterized network-string tests, dust-threshold boundary tests, mock-impl arithmetic + timing tests, `wiremock`-backed RPC tests (real HTTP server controls `getblockcount` / `get_transaction` / `get_blockchain_info` / `send_raw_transaction` responses), explicit error-message-string assertions. Score landed at 100.0% on the verification pass (340 caught / 0 missed / 68 unviable / 2 timeout, 1h 17m wall-clock). |
+
+**Config:** [.cargo/mutants.toml](../.cargo/mutants.toml) scopes mutation testing to the four audit-critical files. **Runner:** [scripts/mutants-overnight.sh](../scripts/mutants-overnight.sh) (single mode, generates per-file summary + writes `~/mutants-overnight-report.txt`). **Re-run cost:** ~1h 17m on a warm cache for the full 408-mutant pass.
+
+For the auditor: a mutation score of 100% on the four crypto-critical files is the empirical answer to "do your tests actually exercise the crypto, or just call it?" Every operator, constant, return, and match-arm mutation cargo-mutants could generate is caught by at least one test. This complements property tests (random valid inputs → invariants hold), fuzz (random adversarial inputs → no crash), and external vectors (cross-impl byte-equality). Together: four legs of the stool, not one.
+
+### 11.5 What this does **not** cover
 
 To preserve the §8 "knowingly missing" discipline:
 
@@ -277,7 +290,7 @@ To preserve the §8 "knowingly missing" discipline:
 - Live dual-testnet vectors are still operator-driven (§8 bullet 1).
 - Strict-DLEQ benchmark numbers (§8 bullet 3) are still test-timing only.
 
-The §8 gap list above is the authoritative statement of what is missing. §11 is the statement of what was added.
+The §8 gap list above is the authoritative statement of what is missing. §11 is the statement of what was added — including the §11.4 mutation-score measurement of how thoroughly the tests exercise the code paths.
 
 ---
 
@@ -287,6 +300,7 @@ The §8 gap list above is the authoritative statement of what is missing. §11 i
 - **2026-05-18 (later)** — External strict-DLEQ test vectors shipped at [crates/coincync-swap/test-vectors/strict-dleq-vectors.json](../crates/coincync-swap/test-vectors/strict-dleq-vectors.json). §7 + §8 + §10 updated to reflect: vectors gap closed (was "deferred until requested"), workspace test count under `--features strict-dleq` bumped to 350 (was 346, +4 new golden-file regression tests in [tests/strict_dleq_vectors.rs](../crates/coincync-swap/tests/strict_dleq_vectors.rs)).
 - **2026-05-19** — Pre-audit testing evidence section added (now §11; prior changelog renumbered to §12). Captures: (a) 17 new property tests in `coincync-swap` across adaptor / CYNC derivation / state machine + external-vector replay harness; (b) fuzz history including overnight #1 finding the `kdf_m_cost` validation gap fixed in commit `91a19cd`; (c) 12 reproducibility vectors at [test-vectors/reproducibility/](../crates/coincync-swap/test-vectors/reproducibility/) with regeneration recipe at §10; (d) per-commit CI fuzz workflow [.github/workflows/fuzz.yml](../.github/workflows/fuzz.yml) running 5 critical targets every PR + push. §8 fuzz-harness gap line annotated as partially closed.
 - **2026-05-19 (evening)** — Fuzz overnight #2 finished. 26/27 targets clean; **`fuzz_wallet_persistence` found a second crash** — the symmetric lower-bound case the #1 fix didn't cover (`kdf_m_cost < argon2::Params::MIN_M_COST` panics with `MemoryTooLittle`). Lower bounds added in [src/wallet/persistence.rs](../src/wallet/persistence.rs) `WalletHeader::validate()` for all three KDF params; 4 new regression tests including hardcoded `crash-c0a0e826...` bytes. Re-fuzzing the same crash file post-fix runs clean in 1 ms. §11.2 fuzz history table updated with the result + the lesson (symmetric bounds discipline).
+- **2026-05-20** — Mutation testing pre-engagement pass. Baseline measurement of the four audit-critical files (`strict_dleq.rs`, `adaptor.rs`, `cync.rs`, `btc.rs`) at 84.3% (285/338 caught) revealed missing coverage in RPC adapters and tx-construction arithmetic. **+24 new tests** added across five categories (parameterized network-string match arms in tx builders, dust-threshold boundary tests, mock-impl + sync-wrapper trait tests, wiremock-backed real-HTTP-server tests for `BitcoinCoreRpc` and `CyncNodeRpc`, explicit error-message-string assertions for the strict-DLEQ bit-0 arm). Score raised to **100.0% verified** (340 caught / 0 missed). `adaptor.rs` was 95/95 caught at baseline — no test additions needed there. New §11.4 captures the methodology + result.
 
 ---
 

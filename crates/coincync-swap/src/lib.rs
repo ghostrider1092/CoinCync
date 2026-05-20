@@ -35,19 +35,24 @@
 //! away from holding CYNC trustlessly, and major-CEX listings stop
 //! being load-bearing for liquidity.
 //!
-//! ## Module layout (planned)
+//! ## Module layout
 //!
 //! - [`protocol`] — state machine + role types + transition rules
-//! - [`adaptor`] — adaptor-signature primitives shared by both sides
-//! - [`btc`]      — Bitcoin-side: HTLC construction, broadcasting, watching
-//! - [`cync`]     — CoinCync-side: tx construction with adaptor binding
-//! - [`coordinator`] — peer-to-peer messaging skeleton between Alice / Bob
+//! - [`adaptor`] — adaptor-signature primitives shared by both sides.
+//!                 **BTC-side primitives (BIP-340 Schnorr adaptors)
+//!                 are real as of the 2026-05-17 slice — see the
+//!                 module docs.** CYNC adaptor + cross-curve DL
+//!                 proof are still stubs.
+//! - [`btc`]      — Bitcoin-side: HTLC construction, broadcasting, watching (stub)
+//! - [`cync`]     — CoinCync-side: tx construction with adaptor binding (stub)
+//! - [`coordinator`] — peer-to-peer messaging skeleton between Alice / Bob (stub)
 //! - [`error`]    — typed errors for the swap state machine
 //!
-//! Today every module is a stub. Each function returns
-//! `Error::NotImplemented` with a structured note about what the
-//! eventual implementation will do. This keeps downstream type
-//! signatures stable while the cryptography is still being built.
+//! The remaining stubbed functions return `Error::NotImplemented` with
+//! a structured `stage` note. This keeps downstream type signatures
+//! stable while the rest of the cryptography is built. Once all
+//! `NotImplemented` returns have been replaced and the dual-testnet
+//! smoke passes, [`is_implemented`] flips to `true`.
 
 #![forbid(unsafe_code)]
 
@@ -58,6 +63,16 @@ pub mod cync;
 pub mod error;
 pub mod protocol;
 pub mod state;
+
+/// Strict-binding cross-curve DLEQ (Noether 2018). **Opt-in** via the
+/// `strict-dleq` Cargo feature. The default fast-floor proof in
+/// [`adaptor`] is operationally sufficient for the atomic-swap
+/// protocol; the strict variant is here for audit-team-requested
+/// cryptographic-level same-secret binding. See `Cargo.toml`'s
+/// `[features]` section and `docs/cip/CIP-001-atomic-swap.md`
+/// §"Pre-audit hardening" for the rationale.
+#[cfg(feature = "strict-dleq")]
+pub mod strict_dleq;
 
 pub use error::Error;
 pub use state::{StateError, SwapStore, STATE_VERSION};

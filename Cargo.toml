@@ -1,5 +1,5 @@
 [workspace]
-members  = [".", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality"]
+members  = [".", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/cynchub", "crates/orchard-side"]
 exclude  = ["coincync-wallet/src-tauri"]
 resolver = "2"
 

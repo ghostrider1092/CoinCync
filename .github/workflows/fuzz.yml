@@ -29,7 +29,13 @@ jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    # 30 min covers the cold-cache first build (compile coincync +
+    # fuzz deps with sancov + ASAN takes 15-25 min from scratch) plus
+    # the 60-sec fuzz. Subsequent runs hit Swatinem/rust-cache and
+    # complete in 3-5 min. The earlier 15-min cap killed the first
+    # run mid-build (commit f08965f, run 26139385586) before any
+    # cache could be populated.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

@@ -214,6 +214,25 @@ pub struct SwapParameters {
 
     /// BTC P2WPKH address Bob spends to (placeholder).
     pub bob_btc_address: String,
+
+    /// CYNC network this swap binds to (`mainnet` / `testnet` /
+    /// `regtest`). Defaults to `"unknown"` on `serde` deserialization
+    /// of a pre-v2 state file (see `state.rs` migration). When
+    /// `unknown`, every broadcast subcommand MUST refuse to act —
+    /// the operator has to re-create the state file with an explicit
+    /// network. Closes
+    /// CYNC-AUDIT-2026-05-17-state-network-binding.
+    #[serde(default = "default_network_unknown")]
+    pub cync_network: String,
+
+    /// BTC network this swap binds to (`mainnet` / `testnet` /
+    /// `regtest` / `signet`). Same semantics as `cync_network`.
+    #[serde(default = "default_network_unknown")]
+    pub btc_network: String,
+}
+
+fn default_network_unknown() -> String {
+    "unknown".to_string()
 }
 
 impl SwapParameters {
@@ -471,6 +490,8 @@ mod tests {
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".into(),
             bob_btc_address: "bob".into(),
+cync_network: "regtest".to_string(),
+btc_network: "regtest".to_string(),
         }
     }
 
@@ -746,6 +767,8 @@ mod tests {
                 btc_timeout_blocks: btc_blocks,
                 alice_cync_address: "a".into(),
                 bob_btc_address: "b".into(),
+cync_network: "regtest".to_string(),
+btc_network: "regtest".to_string(),
             };
             assert!(
                 !p.is_timeout_safe(),

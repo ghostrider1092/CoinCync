@@ -1,0 +1,36 @@
+{
+  "_comment": "Strict-binding cross-curve DLEQ test vectors (Noether 2018). Re-derived from (secret_le_hex, seed_hex) under the same PRF construction the prover uses internally. The strict-proof body is too large to inline (~81 KB) — verifiers should hash their own output via CrossCurveDlProofStrict::canonical_sha256() and byte-compare against the published SHA-256. Format version: 1.",
+  "format_version": 1,
+  "vectors": [
+  {
+    "name": "small-secret-66",
+    "secret_le_hex": "4200000000000000000000000000000000000000000000000000000000000000",
+    "seed_hex": "7777777777777777777777777777777777777777777777777777777777777777",
+    "t_btc_hex": "03079264c4b4bfcd7fe3a7b7b92b6c439f3a5b3abcd29189bf7b54d781ff03d722",
+    "t_cync_hex": "2e13985bb0c9917266eadb0cc69215b73ad8de78a3fc910e6cadf2d988088b7e",
+    "fast_proof_canonical_hex": "0217e73222a24c914b0f31a00b45fcc15f4d060da77ad2b031e1550d1823c425e8c220c880855a76b70e3aaf0ed76f20b341a5eee496406df284ba0e60c65f236daad62a275d26a4dfceac05bff65718f57116f0bfc39789e10445337d1a65f1c835b99b0d5b2177ac245acd728c4b7f89f397982446270a10879889998a94dc07",
+    "strict_proof_canonical_sha256_hex": "879fc88bac64fee9e4b326917991f1c3911a99472dd9107c0179488a6123fa33",
+    "strict_proof_canonical_len_bytes": 81085
+  },
+  {
+    "name": "middle-range-2pow128-plus-1",
+    "secret_le_hex": "0100000000000000000000000000000001000000000000000000000000000000",
+    "seed_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "t_btc_hex": "038b300e513eff872cdaa6d12df54a3e332f27ce937be77e3e63c5e885114cbf09",
+    "t_cync_hex": "d475adfd4f0e2675c36b31c0fc94f1214714430ff3fcde353f4a21dac6f3b717",
+    "fast_proof_canonical_hex": "03b734eab5d7924d242ab6692d3978a1f44a790c3ebcfa592e6c9606da318ccbfa122a8df6c42644a0ae7e5ae0ba69feea2d3b61873502beff5eba311c8d31747057ee1a2c0579054bf11389197be99cebb4e47f9eb46104aa4eb906c5fb43a7e00e9fce58e2ac4faa8efc472b3c8ede26144abb2cd0a86502a0c90b9e61d3ed0a",
+    "strict_proof_canonical_sha256_hex": "ed86de4fa87421f0b506fb77d5aa43de3ec5598bd93b119b217cad3684482e8f",
+    "strict_proof_canonical_len_bytes": 81085
+  },
+  {
+    "name": "near-bit-251-boundary",
+    "secret_le_hex": "0100000000000000000000000000000000000000000000000000000000000008",
+    "seed_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "t_btc_hex": "0380d22350576a8ecf5e32d9a7a8e6d1a526a099c836471b850061ffb2bd7a6e7b",
+    "t_cync_hex": "e2da44bbeeee3a75507c38443de7d63e051b8db376ad58ac5d56f87b32336a65",
+    "fast_proof_canonical_hex": "02e19ae921229cf7be5edc346eafed1760425ecb6aa602e1aa3cdedb6990b94f05063c9241de58d4b94b7176174e80ae568adc651312810c42681810900922807d018e7550bb7a2182a4232e5b680fd928b79471285e3193f4b1dd0f86d8f7723fd4ef5d74721646a9bca1da3f91e34ae4c205fa32bf60b1592585da11b28adf09",
+    "strict_proof_canonical_sha256_hex": "f8d6c826054e2f880374608348d06fd890691e3412f73f207f64618a06a8d972",
+    "strict_proof_canonical_len_bytes": 81085
+  }
+  ]
+}

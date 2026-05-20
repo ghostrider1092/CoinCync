@@ -44,6 +44,13 @@ pub enum Error {
     /// Reserved: I/O during peer-to-peer coordination failed.
     #[error("I/O error during swap: {0}")]
     Io(#[from] std::io::Error),
+
+    /// RPC-layer failure with a dynamic context message. Used by
+    /// the BTC / CYNC chain interactors when the underlying HTTP
+    /// transport or the remote node returns an error — the message
+    /// is propagated verbatim for debugging.
+    #[error("RPC error: {0}")]
+    Rpc(String),
 }
 
 impl Error {

@@ -49,6 +49,8 @@ fn safe_params() -> SwapParameters {
         btc_timeout_blocks: 100,
         alice_cync_address: "alice-stealth".into(),
         bob_btc_address: "bob-p2wpkh".into(),
+cync_network: "regtest".to_string(),
+btc_network: "regtest".to_string(),
     }
 }
 
