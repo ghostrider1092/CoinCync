@@ -197,31 +197,49 @@ impl WalletHeader {
         // KDF-parameter bounds. Argon2id's m_cost is in KiB; a malicious
         // wallet file could set m_cost to a huge value and trick the
         // KDF into trying to allocate terabytes of memory before any
-        // useful error surfaces. Bound generously above the defaults
+        // useful error surfaces. The symmetric case (m_cost / t_cost /
+        // p_cost BELOW Argon2's minimums) makes `Params::new` return
+        // Err, which the call site at `derive_key` panics on (intended
+        // for an unreachable path under v3 defaults, but a corrupted
+        // header bypasses that). Both directions reject the file here.
+        //
+        // Bound generously above the defaults
         // (ARGON2_M_COST = 262 144, ARGON2_T_COST = 3, ARGON2_P_COST = 4)
         // so future upgrades have room but adversarial values are
-        // refused immediately. Discovered 2026-05-19 by fuzz target
+        // refused immediately.
+        //
+        // Upper-bound discovered 2026-05-19 by fuzz target
         // `fuzz_wallet_persistence` (crash file
         // `crash-6b3e53ff71c9e8e1cda383857565624d387c68fe`).
+        // Lower-bound discovered 2026-05-19 by the same target in the
+        // next overnight pass (crash file
+        // `crash-c0a0e826ccb435bd9d48b5b1ed6ab0e0e6063050`,
+        // panic = "valid Argon2 params: MemoryTooLittle").
         const KDF_M_COST_MAX_KIB: u32 = 1_048_576;  // 1 GiB; 4× default
         const KDF_T_COST_MAX: u32 = 100;            // 100 iter; ~33× default
         const KDF_P_COST_MAX: u32 = 16;             // 16 lanes; 4× default
-        if self.kdf_m_cost > KDF_M_COST_MAX_KIB {
+        // Argon2 crate minimums (`argon2::Params::MIN_*`). Hardcoded
+        // here so a future crate-version bump that lowers them doesn't
+        // silently widen our acceptance window.
+        const KDF_M_COST_MIN_KIB: u32 = 8;          // argon2::Params::MIN_M_COST
+        const KDF_T_COST_MIN: u32 = 2;              // argon2::Params::MIN_T_COST
+        const KDF_P_COST_MIN: u32 = 1;              // argon2::Params::MIN_P_COST
+        if self.kdf_m_cost > KDF_M_COST_MAX_KIB || self.kdf_m_cost < KDF_M_COST_MIN_KIB {
             return Err(Error::Corruption(format!(
-                "kdf_m_cost out of range: {} KiB (max {} KiB)",
-                self.kdf_m_cost, KDF_M_COST_MAX_KIB
+                "kdf_m_cost out of range: {} KiB (allowed {}..={} KiB)",
+                self.kdf_m_cost, KDF_M_COST_MIN_KIB, KDF_M_COST_MAX_KIB
             )));
         }
-        if self.kdf_t_cost > KDF_T_COST_MAX {
+        if self.kdf_t_cost > KDF_T_COST_MAX || self.kdf_t_cost < KDF_T_COST_MIN {
             return Err(Error::Corruption(format!(
-                "kdf_t_cost out of range: {} (max {})",
-                self.kdf_t_cost, KDF_T_COST_MAX
+                "kdf_t_cost out of range: {} (allowed {}..={})",
+                self.kdf_t_cost, KDF_T_COST_MIN, KDF_T_COST_MAX
             )));
         }
-        if self.kdf_p_cost > KDF_P_COST_MAX {
+        if self.kdf_p_cost > KDF_P_COST_MAX || self.kdf_p_cost < KDF_P_COST_MIN {
             return Err(Error::Corruption(format!(
-                "kdf_p_cost out of range: {} (max {})",
-                self.kdf_p_cost, KDF_P_COST_MAX
+                "kdf_p_cost out of range: {} (allowed {}..={})",
+                self.kdf_p_cost, KDF_P_COST_MIN, KDF_P_COST_MAX
             )));
         }
 
@@ -837,6 +855,84 @@ mod tests {
         }
     }
 
+    /// Regression test for the symmetric lower-bound case surfaced by
+    /// fuzz overnight #2 on 2026-05-19 (target `fuzz_wallet_persistence`,
+    /// crash file `crash-c0a0e826ccb435bd9d48b5b1ed6ab0e0e6063050`).
+    ///
+    /// The panic was `valid Argon2 params: MemoryTooLittle` —
+    /// `argon2::Params::new()` returns Err when m_cost < 8 KiB, and the
+    /// call site uses `.expect()`. The fix added a lower bound matching
+    /// `argon2::Params::MIN_M_COST` in `WalletHeader::validate()`.
+    #[test]
+    fn validate_rejects_undersized_kdf_m_cost() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: 0, // would panic Argon2::Params::new with MemoryTooLittle
+            kdf_t_cost: ARGON2_T_COST,
+            kdf_p_cost: ARGON2_P_COST,
+        };
+        let err = header
+            .validate()
+            .expect_err("validate must reject undersized kdf_m_cost");
+        match err {
+            Error::Corruption(msg) => assert!(
+                msg.contains("kdf_m_cost"),
+                "expected kdf_m_cost-specific error, got: {}",
+                msg
+            ),
+            other => panic!("expected Error::Corruption, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_undersized_kdf_t_cost() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: ARGON2_M_COST,
+            kdf_t_cost: 1, // below argon2::Params::MIN_T_COST = 2
+            kdf_p_cost: ARGON2_P_COST,
+        };
+        let err = header
+            .validate()
+            .expect_err("validate must reject undersized kdf_t_cost");
+        match err {
+            Error::Corruption(msg) => assert!(msg.contains("kdf_t_cost"), "got: {}", msg),
+            other => panic!("expected Error::Corruption, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_undersized_kdf_p_cost() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: ARGON2_M_COST,
+            kdf_t_cost: ARGON2_T_COST,
+            kdf_p_cost: 0, // below argon2::Params::MIN_P_COST = 1
+        };
+        let err = header
+            .validate()
+            .expect_err("validate must reject undersized kdf_p_cost");
+        match err {
+            Error::Corruption(msg) => assert!(msg.contains("kdf_p_cost"), "got: {}", msg),
+            other => panic!("expected Error::Corruption, got: {:?}", other),
+        }
+    }
+
     /// Validate the canonical defaults still pass — make sure the
     /// new bounds didn't accidentally reject legitimate wallets.
     #[test]
@@ -877,6 +973,40 @@ mod tests {
         assert!(
             result_pw.is_err(),
             "fuzz-discovered crash input must be rejected on the password path too"
+        );
+    }
+
+    /// End-to-end: the 2026-05-19 overnight fuzz crash. Same shape as the
+    /// 2026-05-18 case but in the opposite direction — `kdf_m_cost` set
+    /// to a value BELOW `argon2::Params::MIN_M_COST`, triggering the
+    /// `valid Argon2 params: MemoryTooLittle` panic at `derive_key`.
+    /// The added lower-bound checks in `validate()` reject this before
+    /// the `Params::new` call ever runs.
+    ///
+    /// 113 bytes from
+    /// `~/coincync-fuzz/fuzz/artifacts/fuzz_wallet_persistence/crash-c0a0e826ccb435bd9d48b5b1ed6ab0e0e6063050`.
+    #[test]
+    fn load_wallet_rejects_fuzz_crash_bytes_2026_05_19() {
+        const CRASH_BYTES: &[u8] = &[
+            0x4e, 0x00, 0x00, 0x00, 0x43, 0x59, 0x57, 0x4c, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x0a, 0x83, 0x5b, 0xc7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x42, 0x00, 0x8c, 0x42, 0x42, 0x00, 0x00,
+            0x00, 0x00, 0x71, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0xff, 0xff, 0xff,
+            0xf8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x06, 0x00, 0x03, 0x03,
+        ];
+
+        let result = load_wallet_from_bytes(CRASH_BYTES, None);
+        assert!(
+            result.is_err(),
+            "2026-05-19 fuzz crash must be rejected by validate()"
+        );
+        let result_pw = load_wallet_from_bytes(CRASH_BYTES, Some("fuzz-passphrase"));
+        assert!(
+            result_pw.is_err(),
+            "2026-05-19 fuzz crash must be rejected on the password path too"
         );
     }
 
