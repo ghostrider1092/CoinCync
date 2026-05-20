@@ -98,6 +98,18 @@ snow       = { version = "0.9", default-features = false, features = ["default-r
 # same crate; same version pin keeps the resolver tree clean.
 rand       = "0.8"
 
+# SOCKS5 client for dialing through Tor (or any RFC 1928 proxy).
+# Sync crate — matches the std::net::TcpStream architecture used
+# in coordinator.rs without dragging in an extra tokio runtime
+# instantiation. Replaces ~166 LOC of hand-rolled SOCKS5 protocol
+# code (closes audit-prep §5 priority 9 + the corresponding "use
+# a crate, not a custom impl" principle).
+#
+# Pinned by version-major to the v0.3 series so a future-major
+# bump (with a potentially renamed API surface) triggers a
+# deliberate review.
+socks      = "0.3"
+
 [dev-dependencies]
 # Filesystem fixtures for the state-persistence tests.
 tempfile   = "3"

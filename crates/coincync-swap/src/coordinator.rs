@@ -1054,29 +1054,18 @@ pub fn derive_noise_static_public(private: &[u8; 32]) -> [u8; 32] {
 // SOCKS5 CONNECT (for Tor / proxy dial)
 // ──────────────────────────────────────────────────────────────────
 //
-// Hand-rolled RFC 1928 §3-4 client, no-auth method, ATYP=DOMAINNAME.
-// The target hostname is passed through to the SOCKS proxy as a
-// domain string rather than resolved client-side — this is the
-// required behavior for Tor (the .onion address has no public DNS
-// entry; only Tor's hidden-service directory can resolve it).
+// SOCKS5 CONNECT helper. Thin wrapper around the `socks` crate; we
+// keep this fn (rather than inlining the crate call at every caller)
+// so the validation + timeout + nodelay policy stays in one place.
+// Was hand-rolled (~166 LOC) until commit replacing it with the crate
+// — see audit-prep §5 priority 9 closure.
 //
-// Why hand-roll instead of `tokio-socks`?
-//   - `tokio-socks` is async and requires a tokio runtime; our
-//     coordinator is sync (matches the rest of the swap crate's
-//     CLI-friendly posture).
-//   - The no-auth CONNECT subset is ~50 LOC; adding a sync dep + a
-//     glue layer would be more.
-//   - Hand-rolling keeps the implementation auditable from a single
-//     file — anyone reviewing the Tor surface can read one short
-//     function rather than chasing a crate.
-//
-// What this does NOT cover:
-//   - Username/password authentication (RFC 1929). Tor's local
-//     SOCKS5 doesn't require it; if a future deployment uses an
-//     authenticated proxy, add it as a parallel constructor.
-//   - BIND or UDP-ASSOCIATE commands (we only do CONNECT).
-//   - Reply codes other than 0x00 success — we just propagate them
-//     as `Error::Rpc`.
+// The target hostname is passed through to the proxy as a domain
+// string (ATYP=DOMAINNAME), NOT resolved client-side. This is the
+// required behavior for Tor: the .onion address has no public DNS
+// entry; only Tor's hidden-service directory can resolve it. The
+// `socks` crate produces ATYP=DOMAINNAME when given a `(&str, u16)`
+// tuple as the target (the `ToTargetAddr` impl for that pair).
 
 /// SOCKS5 CONNECT through `proxy_addr` to `target_host:target_port`.
 /// Returns the established TCP socket on success.
@@ -1095,6 +1084,10 @@ fn socks5_connect_domain(
     target_host: &str,
     target_port: u16,
 ) -> Result<TcpStream> {
+    // Pre-validate before handing to the crate: an empty or
+    // over-length host would be either accepted-and-silently-corrupt
+    // or rejected with an unhelpful inner error. Explicit checks here
+    // surface the bug at the caller's boundary.
     if target_host.is_empty() {
         return Err(Error::Rpc("SOCKS5: empty target host".into()));
     }
@@ -1105,106 +1098,25 @@ fn socks5_connect_domain(
         )));
     }
 
-    let mut stream = TcpStream::connect(proxy_addr)
-        .map_err(|e| Error::Rpc(format!("SOCKS5 dial proxy {proxy_addr}: {e}")))?;
+    // `(target_host, target_port)` -> ATYP=DOMAINNAME via the crate's
+    // `ToTargetAddr` impl for `(&str, u16)`. No client-side DNS
+    // resolution happens — the host string is sent verbatim to the
+    // proxy. This is the critical Tor property; see the ATYP=3 path
+    // in the audit-prep doc §5 priority 9.
+    let s = socks::Socks5Stream::connect(proxy_addr, (target_host, target_port))
+        .map_err(|e| {
+            Error::Rpc(format!(
+                "SOCKS5 CONNECT to {target_host}:{target_port} via {proxy_addr}: {e}"
+            ))
+        })?;
+
+    let stream = s.into_inner();
     stream
         .set_read_timeout(Some(DEFAULT_SOCKET_TIMEOUT))
         .map_err(|e| Error::Rpc(format!("SOCKS5 set_read_timeout: {e}")))?;
     stream
         .set_write_timeout(Some(DEFAULT_SOCKET_TIMEOUT))
         .map_err(|e| Error::Rpc(format!("SOCKS5 set_write_timeout: {e}")))?;
-
-    // ── Greeting: VER=5, NMETHODS=1, METHODS=[NO_AUTH] ──
-    stream
-        .write_all(&[0x05, 0x01, 0x00])
-        .map_err(|e| Error::Rpc(format!("SOCKS5 greeting write: {e}")))?;
-
-    // ── Method selection: VER=5, METHOD=0x00 (NO_AUTH) ──
-    let mut method = [0u8; 2];
-    stream
-        .read_exact(&mut method)
-        .map_err(|e| Error::Rpc(format!("SOCKS5 method-selection read: {e}")))?;
-    if method[0] != 0x05 {
-        return Err(Error::Rpc(format!(
-            "SOCKS5 method-selection: bad version {:#x}",
-            method[0]
-        )));
-    }
-    if method[1] != 0x00 {
-        return Err(Error::Rpc(format!(
-            "SOCKS5 method-selection: proxy rejected NO_AUTH (got {:#x})",
-            method[1]
-        )));
-    }
-
-    // ── CONNECT request: VER=5, CMD=1, RSV=0, ATYP=3, LEN, HOST, PORT ──
-    let mut req = Vec::with_capacity(7 + target_host.len());
-    req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03]);
-    req.push(target_host.len() as u8);
-    req.extend_from_slice(target_host.as_bytes());
-    req.extend_from_slice(&target_port.to_be_bytes());
-    stream
-        .write_all(&req)
-        .map_err(|e| Error::Rpc(format!("SOCKS5 CONNECT write: {e}")))?;
-
-    // ── Response: VER=5, REP, RSV=0, ATYP, BND.ADDR, BND.PORT ──
-    let mut hdr = [0u8; 4];
-    stream
-        .read_exact(&mut hdr)
-        .map_err(|e| Error::Rpc(format!("SOCKS5 CONNECT response head read: {e}")))?;
-    if hdr[0] != 0x05 {
-        return Err(Error::Rpc(format!(
-            "SOCKS5 response: bad version {:#x}",
-            hdr[0]
-        )));
-    }
-    if hdr[1] != 0x00 {
-        // RFC 1928 §6 reply codes. The common ones:
-        //   0x01 general failure, 0x02 not allowed, 0x03 network unreachable,
-        //   0x04 host unreachable, 0x05 connection refused, 0x06 TTL expired,
-        //   0x07 command not supported, 0x08 address type not supported.
-        let name = match hdr[1] {
-            0x01 => "general SOCKS server failure",
-            0x02 => "connection not allowed by ruleset",
-            0x03 => "network unreachable",
-            0x04 => "host unreachable",
-            0x05 => "connection refused",
-            0x06 => "TTL expired",
-            0x07 => "command not supported",
-            0x08 => "address type not supported",
-            _ => "unknown error",
-        };
-        return Err(Error::Rpc(format!(
-            "SOCKS5 CONNECT to {target_host}:{target_port} failed: {} ({:#x})",
-            name, hdr[1]
-        )));
-    }
-    // Skip the bound address — we don't need it. Length depends on ATYP.
-    let atyp = hdr[3];
-    let bnd_addr_len: usize = match atyp {
-        0x01 => 4,  // IPv4
-        0x04 => 16, // IPv6
-        0x03 => {
-            // Read 1-byte length first.
-            let mut len_buf = [0u8; 1];
-            stream.read_exact(&mut len_buf).map_err(|e| {
-                Error::Rpc(format!("SOCKS5 response BND.ADDR domain length: {e}"))
-            })?;
-            len_buf[0] as usize
-        }
-        _ => {
-            return Err(Error::Rpc(format!(
-                "SOCKS5 response: unsupported ATYP {:#x}",
-                atyp
-            )))
-        }
-    };
-    let mut skip = vec![0u8; bnd_addr_len + 2 /* port */];
-    stream
-        .read_exact(&mut skip)
-        .map_err(|e| Error::Rpc(format!("SOCKS5 response BND.ADDR/PORT skip: {e}")))?;
-
-    // Restore the nodelay + production timeouts on the tunneled stream.
     stream
         .set_nodelay(true)
         .map_err(|e| Error::Rpc(format!("SOCKS5 tunneled set_nodelay: {e}")))?;
