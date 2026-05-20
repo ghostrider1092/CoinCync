@@ -60,7 +60,15 @@ jobs:
           sudo apt-get install -y cmake clang libssl-dev pkg-config
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Pre-built binary install (~1 sec). Was: `cargo install
+        # cargo-fuzz --locked`, which failed in 4 sec on the first
+        # CI run (commit 8a81b79 → run 26131359189) — almost certainly
+        # a --locked lockfile/cargo-version mismatch in the runner's
+        # nightly. The pre-built path skips source compilation +
+        # avoids the lockfile-resolution failure mode entirely.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Cache cargo + fuzz target
         uses: Swatinem/rust-cache@v2
