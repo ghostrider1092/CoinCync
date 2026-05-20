@@ -142,4 +142,39 @@ export const rpc = {
                    key_shares: keyShares, to_spend: toSpend, to_view: toView, amount,
                  } }),
   },
+
+  // ── Atomic Swap (cyncswap / CIP-001) ─────────────────────────────
+  // CYNC ↔ BTC atomic swap. The Tauri backend shells out to the
+  // `cyncswap` CLI (mirrors the multisig CLI pattern) and surfaces
+  // the resulting JSON state to the wallet UI. Six stages:
+  //
+  //   init       — create swap-id + Noise XX static key, emit invite
+  //   handshake  — consume peer invite, run Noise XX, exchange
+  //                adaptor material + DLEQ proof + refund tx
+  //   lock       — broadcast our chain's lock tx
+  //   claim      — broadcast our claim tx (reveals adaptor secret
+  //                for the other side to extract)
+  //   list       — active swaps + their state (polled every 10s)
+  //   history    — completed + refunded swaps (read-only)
+  //
+  // Out-of-scope of the v0.1 wallet integration:
+  //   - automatic counterparty discovery (coord-relayed)
+  //   - in-wallet rate negotiation (operator-driven today)
+  //   - refund — automatic on CSV timeout, no operator action
+  swap: {
+    init:      async ({ role, amount, btcAddress }) =>
+                 tauri("swap_init", { params: { role, amount, btc_address: btcAddress } }),
+    handshake: async ({ swapId, peerInvite }) =>
+                 tauri("swap_handshake", { params: { swap_id: swapId, peer_invite: peerInvite } }),
+    lock:      async ({ swapId }) =>
+                 tauri("swap_lock", { params: { swap_id: swapId } }),
+    claim:     async ({ swapId }) =>
+                 tauri("swap_claim", { params: { swap_id: swapId } }),
+    list:      async () =>
+                 tauri("swap_list"),
+    history:   async () =>
+                 tauri("swap_history"),
+    abort:     async ({ swapId }) =>
+                 tauri("swap_abort", { params: { swap_id: swapId } }),
+  },
 };

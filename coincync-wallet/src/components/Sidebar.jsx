@@ -16,6 +16,7 @@ const NAV_GROUPS = [
     {id:"addresses",label:"Addresses",icon:"addresses"},
     {id:"mining",   label:"Mining",   icon:"mining"},
     {id:"multisig", label:"Multi-sig",icon:"users", badge:"NEW"},
+    {id:"swap",     label:"Swap",     icon:"users", badge:"NEW"},
     {id:"keys",     label:"Keys",     icon:"keys"},
   ]},
   { label: "Trust", items: [

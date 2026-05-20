@@ -19,6 +19,7 @@ import Constitution from "./pages/Compliance";
 import Privacy from "./pages/Privacy";
 import Settings from "./pages/Settings";
 import Multisig from "./pages/Multisig";
+import Swap from "./pages/Swap";
 import About from "./pages/About";
 import Changelog from "./pages/Changelog";
 import Audit from "./pages/Audit";
@@ -32,7 +33,7 @@ window.React = React;
 const PAGES = {
   dashboard:Dashboard, send:Send, receive:Receive, history:History,
   addresses:Addresses, mining:Mining, keys:Keys, constitution:Constitution,
-  privacy:Privacy, audit:Audit, multisig:Multisig,
+  privacy:Privacy, audit:Audit, multisig:Multisig, swap:Swap,
   settings:Settings, changelog:Changelog, about:About,
 };
 

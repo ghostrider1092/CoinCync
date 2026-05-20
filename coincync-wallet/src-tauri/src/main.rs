@@ -1084,6 +1084,71 @@ fn multisig_send(params: MultisigSendParams, state: tauri::State<'_, State>) -> 
     Ok(MultisigSendResult { txid, status: "accepted".into() })
 }
 
+// ── Atomic Swap (cyncswap / CIP-001) ──────────────────────────────────
+//
+// Shells out to the `cyncswap` CLI binary. The CLI has granular
+// subcommands (lock-cync, lock-btc, btc-claim, etc.); these wallet
+// commands expose a higher-level wizard flow to the UI. The current
+// scaffold returns a "wiring-pending" error so the UI surfaces
+// exactly which CLI plumbing remains to be wired (the cyncswap CLI
+// needs a few thin "init / handshake / lock / claim / list / history"
+// wrapper subcommands added on its end before this works end-to-end).
+//
+// Once those land, replace the `Err(...)` returns with `wallet_cli`
+// invocations following the multisig_gen pattern above.
+
+#[derive(Deserialize)]
+struct SwapInitParams { role: String, amount: f64, btc_address: Option<String> }
+
+#[derive(Serialize)]
+struct SwapInitResult { id: String, invite_b64: String }
+
+#[tauri::command]
+fn swap_init(_params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<SwapInitResult, String> {
+    Err("swap_init: pending cyncswap CLI 'init' subcommand. Track at docs/cyncswap-audit-prep.md §8 (wallet integration deferred until the high-level wizard subcommands land).".into())
+}
+
+#[derive(Deserialize)]
+struct SwapHandshakeParams { swap_id: String, peer_invite: String }
+
+#[tauri::command]
+fn swap_handshake(_params: SwapHandshakeParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+    Err("swap_handshake: pending cyncswap CLI 'handshake' subcommand.".into())
+}
+
+#[derive(Deserialize)]
+struct SwapIdParams { swap_id: String }
+
+#[tauri::command]
+fn swap_lock(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+    Err("swap_lock: pending cyncswap CLI orchestration (calls lock-btc or lock-cync depending on role).".into())
+}
+
+#[tauri::command]
+fn swap_claim(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+    Err("swap_claim: pending cyncswap CLI orchestration (calls btc-claim or cync-claim depending on role).".into())
+}
+
+#[tauri::command]
+fn swap_abort(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+    Err("swap_abort: pending. Pre-lock abort writes Aborted state; post-lock requires waiting for the CSV refund.".into())
+}
+
+#[derive(Serialize)]
+struct SwapListResult { swaps: Vec<serde_json::Value> }
+
+#[tauri::command]
+fn swap_list(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> {
+    // Empty by design until the state-file directory iteration lands.
+    Ok(SwapListResult { swaps: Vec::new() })
+}
+
+#[tauri::command]
+fn swap_history(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> {
+    // Empty by design until the state-file directory iteration lands.
+    Ok(SwapListResult { swaps: Vec::new() })
+}
+
 // ── Mining ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1487,6 +1552,8 @@ fn main() {
             check_for_update,
             multisig_gen, multisig_info, multisig_round1, multisig_round2,
             multisig_aggregate, multisig_send,
+            swap_init, swap_handshake, swap_lock, swap_claim,
+            swap_abort, swap_list, swap_history,
         ])
         .on_window_event(move |event| {
             if let tauri::WindowEvent::Destroyed = event.event() {
