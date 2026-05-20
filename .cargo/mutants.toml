@@ -1,0 +1,41 @@
+# cargo-mutants config for the cyncswap audit perimeter.
+#
+# Mutation testing measures whether the test suite would *catch* an
+# adversarial code change. cargo-mutants flips operators, constants,
+# returns, and match arms one at a time; for each mutation it re-runs
+# the test suite and reports MISSED (tests still pass — bad) vs
+# CAUGHT (tests fail — good).
+#
+# Scope: only the four load-bearing cryptographic files identified
+# as Priority 1-7 in docs/cyncswap-audit-prep.md §5. Mutating the
+# CLI binary, transport/coordinator, or state-machine doesn't tell
+# us anything about CRYPTOGRAPHIC test quality, which is what the
+# audit will scrutinize.
+#
+# Run:
+#   cargo mutants -p coincync-swap
+# Or use the overnight script for the full report:
+#   bash scripts/mutants-overnight.sh
+
+# The four files mutation-tested. Order = audit §5 priority.
+examine_globs = [
+    "crates/coincync-swap/src/strict_dleq.rs",  # Priority 1 + 2: CDLP scalar-order, soundness
+    "crates/coincync-swap/src/adaptor.rs",      # Priority 3 + 6: BTC adaptor + BIP-340 parity
+    "crates/coincync-swap/src/cync.rs",         # Priority 4 + 5: joint-key derivation
+    "crates/coincync-swap/src/btc.rs",          # Priority 7: BIP-341 script-path
+]
+
+# Tests in these files exercise the strict-DLEQ path; without the
+# feature flag, ~250 LOC of the audit perimeter is `#[cfg(...)]`-gated
+# out and mutants there would falsely report as MISSED.
+additional_cargo_test_args = ["--features", "strict-dleq"]
+
+# A few patterns we deliberately don't mutate — they would generate
+# noise without measuring real test coverage.
+exclude_re = [
+    # `Display` and `Debug` impls are formatting plumbing, not security
+    # surface; mutating them generates noise but doesn't test anything
+    # the audit cares about.
+    "impl .* Display for",
+    "impl .* Debug for",
+]
