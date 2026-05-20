@@ -189,6 +189,50 @@ enum Command {
         state_file: Option<PathBuf>,
     },
 
+    /// Initialize a new swap as Alice (wallet-friendly JSON output).
+    /// Exposes a single subcommand for the wallet wizard to call —
+    /// same underlying logic as `Alice`, but the output is a single
+    /// JSON line on stdout including an `invite_hex` blob the wallet
+    /// hands to Bob's wallet to complete the join (see [`WalletInitBob`]).
+    WalletInitAlice {
+        /// Listen endpoint Alice publishes (recorded only at this step;
+        /// the wallet binds at coordinator-handshake time).
+        #[arg(long)]
+        listen: String,
+        /// Amount of CYNC to lock, in atomic units.
+        #[arg(long)]
+        cync_amount: u64,
+        /// Amount of satoshis Bob will lock in return.
+        #[arg(long)]
+        btc_amount_sats: u64,
+        #[arg(long, default_value = "alice-cync-addr-placeholder")]
+        alice_cync_address: String,
+        #[arg(long, default_value = "bob-btc-addr-placeholder")]
+        bob_btc_address: String,
+        /// State file. Defaults to `~/.coincync/swap.json`.
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+    },
+
+    /// Join a swap as Bob by consuming Alice's invite blob.
+    /// Same underlying logic as `Bob`, but takes a single
+    /// `--invite-hex` argument (the hex-encoded JSON blob Alice's
+    /// wallet emitted from `WalletInitAlice`) and produces JSON output.
+    /// All amounts and the connect URL are decoded from the invite,
+    /// so the wallet doesn't need to ask the operator to retype them.
+    WalletInitBob {
+        /// Hex-encoded invite blob received from Alice's wallet.
+        #[arg(long)]
+        invite_hex: String,
+        #[arg(long, default_value = "alice-cync-addr-placeholder")]
+        alice_cync_address: String,
+        #[arg(long, default_value = "bob-btc-addr-placeholder")]
+        bob_btc_address: String,
+        /// State file. Defaults to `~/.coincync/swap.json`.
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+    },
+
     /// Show status of an active swap (loaded from the on-disk
     /// state file).
     Status {
@@ -1396,6 +1440,32 @@ fn run(cli: Cli) -> Result<(), String> {
             bob_btc_address,
             resolve_state_path(state_file)?,
         ),
+        Command::WalletInitAlice {
+            listen,
+            cync_amount,
+            btc_amount_sats,
+            alice_cync_address,
+            bob_btc_address,
+            state_file,
+        } => wallet_init_alice_cmd(
+            &listen,
+            cync_amount,
+            btc_amount_sats,
+            alice_cync_address,
+            bob_btc_address,
+            resolve_state_path(state_file)?,
+        ),
+        Command::WalletInitBob {
+            invite_hex,
+            alice_cync_address,
+            bob_btc_address,
+            state_file,
+        } => wallet_init_bob_cmd(
+            &invite_hex,
+            alice_cync_address,
+            bob_btc_address,
+            resolve_state_path(state_file)?,
+        ),
         Command::Status { state_file } => status_cmd(resolve_state_path(state_file)?),
         Command::Cancel { state_file } => cancel_cmd(resolve_state_path(state_file)?),
         Command::LockCync {
@@ -1882,6 +1952,173 @@ btc_network: "unknown".to_string(),
     println!("  state:      {}", state_string(swap.state));
     println!("  state file: {}", state_path.display());
     println!("  connect:    {connect} (phase-3 placeholder; not yet active)");
+    Ok(())
+}
+
+/// Wallet-friendly Alice init. Same flow as [`alice_cmd`] but emits a
+/// single JSON line on stdout (so the Tauri layer can parse it without
+/// scraping human-readable strings) and produces an `invite_hex` blob
+/// that carries everything Bob's wallet needs to join.
+///
+/// The invite blob is hex-encoded JSON `{ v, role, swap_id, listen,
+/// cync_amount, btc_amount_sats, alice_cync_address, bob_btc_address }`.
+/// `v` is a wire-version integer (currently 1) so a future schema
+/// change can be detected and refused; ALL other fields are required.
+fn wallet_init_alice_cmd(
+    listen: &str,
+    cync_amount: u64,
+    btc_amount_sats: u64,
+    alice_cync_address: String,
+    bob_btc_address: String,
+    state_path: PathBuf,
+) -> Result<(), String> {
+    if cync_amount == 0 {
+        return Err("--cync-amount must be > 0 (zero-amount swap is meaningless)".into());
+    }
+    if btc_amount_sats == 0 {
+        return Err("--btc-amount-sats must be > 0 (zero-amount swap is meaningless)".into());
+    }
+
+    let store = SwapStore::new(&state_path);
+    if store.exists() {
+        return Err(format!(
+            "state file {} already exists; refusing to overwrite. Run `cyncswap status` to inspect, or `cyncswap cancel` first.",
+            state_path.display()
+        ));
+    }
+
+    let id = generate_swap_id();
+    let params = SwapParameters {
+        cync_amount,
+        btc_amount_sats,
+        cync_timeout_blocks: DEFAULT_CYNC_TIMEOUT_BLOCKS,
+        btc_timeout_blocks: DEFAULT_BTC_TIMEOUT_BLOCKS,
+        alice_cync_address: alice_cync_address.clone(),
+        bob_btc_address: bob_btc_address.clone(),
+        cync_network: "unknown".to_string(),
+        btc_network: "unknown".to_string(),
+    };
+    let swap = Swap::negotiate(id.clone(), Role::Alice, params)
+        .map_err(|e| format!("swap construction failed: {e}"))?;
+    store.save(&swap).map_err(|e| format!("save failed: {e}"))?;
+
+    let invite_json = serde_json::json!({
+        "v": 1,
+        "role": "alice",
+        "swap_id": id,
+        "listen": listen,
+        "cync_amount": cync_amount,
+        "btc_amount_sats": btc_amount_sats,
+        "alice_cync_address": alice_cync_address,
+        "bob_btc_address": bob_btc_address,
+    });
+    let invite_hex = hex::encode(invite_json.to_string().as_bytes());
+
+    let out = serde_json::json!({
+        "swap_id": id,
+        "role": "alice",
+        "state": state_string(swap.state),
+        "state_file": state_path.display().to_string(),
+        "invite_hex": invite_hex,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&out).map_err(|e| format!("json encode: {e}"))?
+    );
+    Ok(())
+}
+
+/// Wallet-friendly Bob init. Same flow as [`bob_cmd`] but takes a
+/// single `--invite-hex` blob (output of [`wallet_init_alice_cmd`])
+/// and emits a single JSON line on stdout.
+fn wallet_init_bob_cmd(
+    invite_hex: &str,
+    alice_cync_address: String,
+    bob_btc_address: String,
+    state_path: PathBuf,
+) -> Result<(), String> {
+    let invite_bytes =
+        hex::decode(invite_hex).map_err(|e| format!("invite_hex is not valid hex: {e}"))?;
+    let invite: serde_json::Value =
+        serde_json::from_slice(&invite_bytes).map_err(|e| format!("invite is not valid JSON: {e}"))?;
+
+    // Refuse unknown wire versions so a future schema change doesn't
+    // silently downgrade by ignoring new fields.
+    let v = invite.get("v").and_then(|v| v.as_u64()).unwrap_or(0);
+    if v != 1 {
+        return Err(format!(
+            "invite wire version {} not supported by this build (expected 1)",
+            v
+        ));
+    }
+    let role = invite.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+    if role != "alice" {
+        return Err(format!(
+            "expected invite from role=alice, got role={role}"
+        ));
+    }
+
+    let swap_id = invite
+        .get("swap_id")
+        .and_then(|v| v.as_str())
+        .ok_or("invite missing swap_id")?
+        .to_string();
+    let cync_amount = invite
+        .get("cync_amount")
+        .and_then(|v| v.as_u64())
+        .ok_or("invite missing cync_amount")?;
+    let btc_amount_sats = invite
+        .get("btc_amount_sats")
+        .and_then(|v| v.as_u64())
+        .ok_or("invite missing btc_amount_sats")?;
+    let connect = invite
+        .get("listen")
+        .and_then(|v| v.as_str())
+        .ok_or("invite missing listen")?
+        .to_string();
+
+    if cync_amount == 0 {
+        return Err("invite has zero cync_amount (Alice's wallet rejected this earlier; refusing to proceed)".into());
+    }
+    if btc_amount_sats == 0 {
+        return Err("invite has zero btc_amount_sats (Alice's wallet rejected this earlier; refusing to proceed)".into());
+    }
+
+    let store = SwapStore::new(&state_path);
+    if store.exists() {
+        return Err(format!(
+            "state file {} already exists; refusing to overwrite.",
+            state_path.display()
+        ));
+    }
+
+    let params = SwapParameters {
+        cync_amount,
+        btc_amount_sats,
+        cync_timeout_blocks: DEFAULT_CYNC_TIMEOUT_BLOCKS,
+        btc_timeout_blocks: DEFAULT_BTC_TIMEOUT_BLOCKS,
+        alice_cync_address,
+        bob_btc_address,
+        cync_network: "unknown".to_string(),
+        btc_network: "unknown".to_string(),
+    };
+    let swap = Swap::negotiate(swap_id.clone(), Role::Bob, params)
+        .map_err(|e| format!("swap construction failed: {e}"))?;
+    store.save(&swap).map_err(|e| format!("save failed: {e}"))?;
+
+    let out = serde_json::json!({
+        "swap_id": swap_id,
+        "role": "bob",
+        "state": state_string(swap.state),
+        "state_file": state_path.display().to_string(),
+        "connect": connect,
+        "cync_amount": cync_amount,
+        "btc_amount_sats": btc_amount_sats,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&out).map_err(|e| format!("json encode: {e}"))?
+    );
     Ok(())
 }
 
