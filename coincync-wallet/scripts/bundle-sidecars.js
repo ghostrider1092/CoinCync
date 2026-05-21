@@ -18,7 +18,7 @@ const releaseDir = triple
   ? path.join(REPO_ROOT, "target", triple, "release")
   : path.join(REPO_ROOT, "target", "release");
 
-const names = ["coincync-node", "coincync-wallet", "coincync-rig"];
+const names = ["coincync-node", "coincync-wallet", "coincync-rig", "cyncswap"];
 
 function platformExe(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
