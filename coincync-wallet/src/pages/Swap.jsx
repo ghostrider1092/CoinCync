@@ -401,95 +401,107 @@ function HandshakeForm({ push, backendOk }) {
 // ── 3. Lock ───────────────────────────────────────────────────────────
 
 function LockForm({ push, backendOk }) {
-  const T = useTheme();
-  const [swapId, setSwapId] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
-
-  async function onLock() {
-    if (!backendOk) return;
-    if (!swapId.trim()) {
-      push("Swap ID is required", "warning");
-      return;
-    }
-    setLoading(true);
-    try {
-      const r = await rpc.swap.lock({ swapId: swapId.trim() });
-      setResult(r);
-      push(`Lock broadcast — txid ${r.lock_txid?.slice(0, 16) || "(see output)"}…`, "success");
-    } catch (e) {
-      push(formatWalletError(e, "Lock failed"), "warning");
-    }
-    setLoading(false);
-  }
-
-  return (
-    <Section title="Broadcast the lock transaction">
-      <div style={{ fontSize: 11, color: T.t3, marginBottom: 14, lineHeight: 1.6 }}>
-        Bob broadcasts the BTC lock first. Alice broadcasts CYNC only after seeing
-        N confirmations on the BTC lock — this prevents Bob from claiming both legs
-        before Alice's CYNC is committed. The wallet polls for confirmations
-        automatically; check the Active Swaps panel above for live state.
-      </div>
-
-      <Input label="Swap ID" value={swapId} onChange={e => setSwapId(e.target.value)} mono
-             placeholder="abc1234…" />
-
-      <Btn onClick={onLock} disabled={!backendOk || loading} style={{ marginTop: SP.md }}>
-        {loading ? "Broadcasting…" : "Broadcast lock"}
-      </Btn>
-
-      {result && (
-        <div style={{
-          marginTop: SP.md, padding: "10px 12px",
-          background: T.bg, border: `1px solid ${T.b}`, borderRadius: 8,
-          fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-          color: T.t2, whiteSpace: "pre-wrap", wordBreak: "break-all",
-        }}>{JSON.stringify(result, null, 2)}</div>
-      )}
-    </Section>
-  );
+  return <BroadcastForm
+    push={push} backendOk={backendOk}
+    title="Broadcast the lock transaction"
+    blurb={`Bob broadcasts the BTC lock first. Alice broadcasts CYNC only after seeing N confirmations on the BTC lock — this prevents Bob from claiming both legs before Alice's CYNC is committed. v0.1 expects the operator to construct + sign the lock tx externally (via bitcoind for Bob, coincync-node for Alice) and paste the signed hex here.`}
+    rpcFn={rpc.swap.lock}
+    actionLabel="Broadcast lock"
+  />;
 }
 
 // ── 4. Claim ──────────────────────────────────────────────────────────
 
 function ClaimForm({ push, backendOk }) {
+  return <BroadcastForm
+    push={push} backendOk={backendOk}
+    title="Claim the counterparty's leg"
+    blurb={`Alice claims BTC first; the claim signature reveals the adaptor secret. Bob then claims CYNC using the revealed secret. The order is enforced cryptographically — Bob cannot claim CYNC before Alice has claimed BTC. v0.1 expects the operator to construct + sign the claim tx externally and paste the signed hex here.`}
+    rpcFn={rpc.swap.claim}
+    actionLabel="Broadcast claim"
+  />;
+}
+
+// Shared form for Lock + Claim. They have the same shape today:
+//   signed_tx_hex + network + rpc_url + (optional) auth fields
+// The Tauri side dispatches to the right granular subcommand based
+// on the active swap's role (Alice → lock-cync / claim-btc;
+// Bob → lock-btc / claim-cync).
+function BroadcastForm({ push, backendOk, title, blurb, rpcFn, actionLabel }) {
   const T = useTheme();
-  const [swapId, setSwapId] = useState("");
+  const [signedTxHex, setSignedTxHex] = useState("");
+  const [network, setNetwork] = useState("regtest");
+  const [rpcUrl, setRpcUrl] = useState("");
+  const [rpcUser, setRpcUser] = useState("");
+  const [rpcPass, setRpcPass] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
 
-  async function onClaim() {
+  async function onBroadcast() {
     if (!backendOk) return;
-    if (!swapId.trim()) {
-      push("Swap ID is required", "warning");
+    if (!signedTxHex.trim()) {
+      push("Signed tx hex is required (build + sign via bitcoind / coincync-node CLI)", "warning");
+      return;
+    }
+    if (!rpcUrl.trim()) {
+      push("RPC URL is required (the chain endpoint that will broadcast the tx)", "warning");
       return;
     }
     setLoading(true);
     try {
-      const r = await rpc.swap.claim({ swapId: swapId.trim() });
+      const r = await rpcFn({
+        signedTxHex: signedTxHex.trim(),
+        network: network.trim(),
+        rpcUrl: rpcUrl.trim(),
+        rpcUser: rpcUser.trim(),
+        rpcPass: rpcPass.trim(),
+        apiKey: apiKey.trim(),
+      });
       setResult(r);
-      push("Claim broadcast — swap completing", "success");
+      push(`${actionLabel} succeeded`, "success");
     } catch (e) {
-      push(formatWalletError(e, "Claim failed"), "warning");
+      push(formatWalletError(e, `${actionLabel} failed`), "warning");
     }
     setLoading(false);
   }
 
   return (
-    <Section title="Claim the counterparty's leg">
+    <Section title={title}>
       <div style={{ fontSize: 11, color: T.t3, marginBottom: 14, lineHeight: 1.6 }}>
-        Alice claims BTC first; the claim signature reveals the adaptor secret.
-        Bob's wallet watches the BTC claim, extracts the secret, and automatically
-        spends the CYNC lock. <strong>The order is enforced cryptographically</strong> —
-        Bob cannot claim CYNC before Alice has claimed BTC.
+        {blurb}
       </div>
 
-      <Input label="Swap ID" value={swapId} onChange={e => setSwapId(e.target.value)} mono
-             placeholder="abc1234…" />
+      <Lbl>Signed tx hex (paste)</Lbl>
+      <textarea value={signedTxHex} onChange={e => setSignedTxHex(e.target.value)} rows={4}
+        placeholder="0200000001... (full signed transaction in hex)"
+        style={{
+          width: "100%", padding: "10px 12px", marginBottom: SP.md,
+          background: T.inputBg, border: `1px solid ${T.b}`, borderRadius: 8,
+          fontSize: 11, color: T.t1, outline: "none",
+          fontFamily: "'JetBrains Mono', monospace", resize: "vertical", wordBreak: "break-all",
+        }}/>
 
-      <Btn onClick={onClaim} disabled={!backendOk || loading} style={{ marginTop: SP.md }}>
-        {loading ? "Broadcasting claim…" : "Claim"}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 10, marginBottom: 10 }}>
+        <Input label="Network" value={network} onChange={e => setNetwork(e.target.value)} mono
+               placeholder="regtest" hint="mainnet / testnet / regtest / signet"/>
+        <Input label="RPC URL" value={rpcUrl} onChange={e => setRpcUrl(e.target.value)} mono
+               placeholder="http://127.0.0.1:18443 (bitcoind) or http://127.0.0.1:28085 (cync)"
+               hint="The chain endpoint for this leg. BTC for lock-btc/claim-btc; CYNC for the others."/>
+      </div>
+
+      <div style={{ fontSize: 10, color: T.t3, marginBottom: 6 }}>BTC auth (optional, only for bitcoind):</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <Input label="RPC user" value={rpcUser} onChange={e => setRpcUser(e.target.value)} mono placeholder="(blank if no auth)"/>
+        <Input label="RPC pass" value={rpcPass} onChange={e => setRpcPass(e.target.value)} mono placeholder="(blank if no auth)"/>
+      </div>
+
+      <Input label="CYNC API key (optional, coincync-node only)"
+        value={apiKey} onChange={e => setApiKey(e.target.value)} mono
+        placeholder="(blank if no auth)" hint="Bearer / X-API-Key header value for the CYNC node."/>
+
+      <Btn onClick={onBroadcast} disabled={!backendOk || loading} style={{ marginTop: SP.md }}>
+        {loading ? `${actionLabel}…` : actionLabel}
       </Btn>
 
       {result && (
@@ -498,7 +510,7 @@ function ClaimForm({ push, backendOk }) {
           background: T.bg, border: `1px solid ${T.b}`, borderRadius: 8,
           fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
           color: T.t2, whiteSpace: "pre-wrap", wordBreak: "break-all",
-        }}>{JSON.stringify(result, null, 2)}</div>
+        }}>{result.output || JSON.stringify(result, null, 2)}</div>
       )}
     </Section>
   );

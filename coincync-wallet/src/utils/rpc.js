@@ -175,10 +175,24 @@ export const rpc = {
                    invite_hex: inviteHex,
                    btc_address: btcAddress,
                  } }),
-    lock:      async ({ swapId }) =>
-                 tauri("swap_lock", { params: { swap_id: swapId } }),
-    claim:     async ({ swapId }) =>
-                 tauri("swap_claim", { params: { swap_id: swapId } }),
+    lock:      async ({ signedTxHex, network, rpcUrl, rpcUser, rpcPass, apiKey }) =>
+                 tauri("swap_lock", { params: {
+                   signed_tx_hex: signedTxHex,
+                   network,
+                   rpc_url: rpcUrl,
+                   rpc_user: rpcUser,
+                   rpc_pass: rpcPass,
+                   api_key: apiKey,
+                 } }),
+    claim:     async ({ signedTxHex, network, rpcUrl, rpcUser, rpcPass, apiKey }) =>
+                 tauri("swap_claim", { params: {
+                   signed_tx_hex: signedTxHex,
+                   network,
+                   rpc_url: rpcUrl,
+                   rpc_user: rpcUser,
+                   rpc_pass: rpcPass,
+                   api_key: apiKey,
+                 } }),
     list:      async () =>
                  tauri("swap_list"),
     history:   async () =>

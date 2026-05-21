@@ -1194,19 +1194,178 @@ fn swap_handshake(params: SwapHandshakeParams, _state: tauri::State<'_, State>) 
 #[derive(Deserialize)]
 struct SwapIdParams { swap_id: String }
 
-#[tauri::command]
-fn swap_lock(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
-    Err("swap_lock: pending cyncswap CLI orchestration (calls lock-btc or lock-cync depending on role).".into())
+/// Determine the role of the active swap from the state file via
+/// `cyncswap wallet-status`. Returns "Alice", "Bob", or an Err
+/// describing why (no swap, bad path, parse failure).
+fn active_swap_role(bin: &str) -> Result<(String, String), String> {
+    let path = default_swap_state_path();
+    let path_str = path.to_string_lossy().to_string();
+    if !path.exists() {
+        return Err(format!(
+            "no active swap (state file {} does not exist). Run Setup or Handshake first.",
+            path_str
+        ));
+    }
+    let out = wallet_cli(bin, &["wallet-status", "--state-file", &path_str], "")?;
+    let v: serde_json::Value = serde_json::from_str(out.trim())
+        .map_err(|e| format!("wallet-status output not JSON: {}\n---output---\n{}", e, out))?;
+    let role = v
+        .get("role")
+        .and_then(|x| x.as_str())
+        .ok_or("wallet-status missing role")?
+        .to_string();
+    Ok((role, path_str))
+}
+
+#[derive(Deserialize)]
+struct SwapBroadcastParams {
+    /// Operator-constructed signed tx hex. v0.1 expects the wallet
+    /// operator to build + sign the tx out-of-band (via bitcoind /
+    /// coincync-node CLI). A later slice will have the wallet
+    /// construct + sign in-process.
+    signed_tx_hex: String,
+    /// "mainnet" / "testnet" / "regtest" / "signet".
+    network: String,
+    /// JSON-RPC endpoint for the chain we're broadcasting to.
+    /// bitcoind for lock-btc/claim-btc; coincync-node for the others.
+    rpc_url: String,
+    /// BTC-side only: HTTP-basic auth pair for bitcoind.
+    rpc_user: Option<String>,
+    rpc_pass: Option<String>,
+    /// CYNC-side only: bearer token for coincync-node.
+    api_key: Option<String>,
 }
 
 #[tauri::command]
-fn swap_claim(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
-    Err("swap_claim: pending cyncswap CLI orchestration (calls btc-claim or cync-claim depending on role).".into())
+fn swap_lock(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+    if params.signed_tx_hex.trim().is_empty() {
+        return Err("signed_tx_hex is required".into());
+    }
+    let bin = resolve_binary("cyncswap");
+    let (role, path_str) = active_swap_role(&bin)?;
+
+    // Dispatch to lock-cync (Alice locks CYNC) or lock-btc (Bob locks BTC).
+    let signed = params.signed_tx_hex.trim().to_string();
+    let out = match role.as_str() {
+        "Alice" => {
+            let mut args = vec![
+                "lock-cync",
+                "--state-file", &path_str,
+                "--network", &params.network,
+                "--rpc-url", &params.rpc_url,
+                "--signed-tx-hex", &signed,
+            ];
+            let key_owned;
+            if let Some(key) = &params.api_key {
+                if !key.is_empty() {
+                    key_owned = key.clone();
+                    args.push("--api-key");
+                    args.push(&key_owned);
+                    return wallet_cli(&bin, &args, "")
+                        .map(|out| serde_json::json!({ "output": out, "role": role }));
+                }
+            }
+            wallet_cli(&bin, &args, "")?
+        }
+        "Bob" => {
+            let mut args = vec![
+                "lock-btc",
+                "--state-file", &path_str,
+                "--network", &params.network,
+                "--rpc-url", &params.rpc_url,
+                "--signed-tx-hex", &signed,
+            ];
+            let user_owned;
+            let pass_owned;
+            if let (Some(u), Some(p)) = (&params.rpc_user, &params.rpc_pass) {
+                if !u.is_empty() && !p.is_empty() {
+                    user_owned = u.clone();
+                    pass_owned = p.clone();
+                    args.push("--rpc-user");
+                    args.push(&user_owned);
+                    args.push("--rpc-pass");
+                    args.push(&pass_owned);
+                    return wallet_cli(&bin, &args, "")
+                        .map(|out| serde_json::json!({ "output": out, "role": role }));
+                }
+            }
+            wallet_cli(&bin, &args, "")?
+        }
+        other => return Err(format!("unexpected role from wallet-status: {}", other)),
+    };
+    Ok(serde_json::json!({ "output": out, "role": role }))
+}
+
+#[tauri::command]
+fn swap_claim(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+    if params.signed_tx_hex.trim().is_empty() {
+        return Err("signed_tx_hex is required".into());
+    }
+    let bin = resolve_binary("cyncswap");
+    let (role, path_str) = active_swap_role(&bin)?;
+
+    // Dispatch to claim-btc (Alice claims BTC) or claim-cync (Bob claims CYNC).
+    let signed = params.signed_tx_hex.trim().to_string();
+    let out = match role.as_str() {
+        "Alice" => {
+            let mut args = vec![
+                "claim-btc",
+                "--state-file", &path_str,
+                "--network", &params.network,
+                "--rpc-url", &params.rpc_url,
+                "--signed-tx-hex", &signed,
+            ];
+            let user_owned;
+            let pass_owned;
+            if let (Some(u), Some(p)) = (&params.rpc_user, &params.rpc_pass) {
+                if !u.is_empty() && !p.is_empty() {
+                    user_owned = u.clone();
+                    pass_owned = p.clone();
+                    args.push("--rpc-user");
+                    args.push(&user_owned);
+                    args.push("--rpc-pass");
+                    args.push(&pass_owned);
+                    return wallet_cli(&bin, &args, "")
+                        .map(|out| serde_json::json!({ "output": out, "role": role }));
+                }
+            }
+            wallet_cli(&bin, &args, "")?
+        }
+        "Bob" => {
+            let mut args = vec![
+                "claim-cync",
+                "--state-file", &path_str,
+                "--network", &params.network,
+                "--rpc-url", &params.rpc_url,
+                "--signed-tx-hex", &signed,
+            ];
+            let key_owned;
+            if let Some(key) = &params.api_key {
+                if !key.is_empty() {
+                    key_owned = key.clone();
+                    args.push("--api-key");
+                    args.push(&key_owned);
+                    return wallet_cli(&bin, &args, "")
+                        .map(|out| serde_json::json!({ "output": out, "role": role }));
+                }
+            }
+            wallet_cli(&bin, &args, "")?
+        }
+        other => return Err(format!("unexpected role from wallet-status: {}", other)),
+    };
+    Ok(serde_json::json!({ "output": out, "role": role }))
 }
 
 #[tauri::command]
 fn swap_abort(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
-    Err("swap_abort: pending. Pre-lock abort writes Aborted state; post-lock requires waiting for the CSV refund.".into())
+    let bin = resolve_binary("cyncswap");
+    let path = default_swap_state_path();
+    let path_str = path.to_string_lossy().to_string();
+    if !path.exists() {
+        return Err(format!("no active swap at {}", path_str));
+    }
+    let out = wallet_cli(&bin, &["cancel", "--state-file", &path_str], "")?;
+    Ok(serde_json::json!({ "output": out }))
 }
 
 #[derive(Serialize)]
