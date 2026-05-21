@@ -230,7 +230,7 @@ export const EmptyState = ({ icon, title, subtitle, action }) => {
 };
 
 // ── Button ────────────────────────────────────────────────────────────
-export const Btn = ({ children, onClick, variant="primary", small=false, disabled=false, full=false, style={} }) => {
+export const Btn = ({ children, onClick, type="button", variant="primary", small=false, disabled=false, full=false, style={} }) => {
   const T = useTheme();
   const [pressed, setPressed] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -259,7 +259,9 @@ export const Btn = ({ children, onClick, variant="primary", small=false, disable
   };
   return (
     <button
+      type={type}
       onClick={disabled?undefined:onClick}
+      disabled={disabled}
       onMouseDown={()=>setPressed(true)}
       onMouseUp={()=>setPressed(false)}
       onMouseEnter={()=>setHovered(true)}

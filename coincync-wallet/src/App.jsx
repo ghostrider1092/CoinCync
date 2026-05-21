@@ -120,10 +120,15 @@ export default function App() {
     }, 120);
   }, [page]);
 
-  // Auto-lock after inactivity timeout
-  const [lastActivity, setLastActivity] = useState(Date.now());
+  // Auto-lock after inactivity timeout.
+  // Uses a ref (not state) for lastActivity so keystrokes don't
+  // trigger a full App re-render — the previous pattern had
+  // `setLastActivity` firing on every keystroke + `lastActivity` in
+  // the useEffect deps, which tore down/reinstalled the listeners
+  // on every keystroke and made password typing feel like a freeze.
+  const lastActivityRef = useRef(Date.now());
   useEffect(() => {
-    const reset = () => setLastActivity(Date.now());
+    const reset = () => { lastActivityRef.current = Date.now(); };
     window.addEventListener("mousemove", reset);
     window.addEventListener("keydown", reset);
     const checker = setInterval(() => {
@@ -131,12 +136,12 @@ export default function App() {
       const autoLockMinutes = Number(settings.autoLockMinutes ?? 15);
       if (!Number.isFinite(autoLockMinutes) || autoLockMinutes <= 0) return;
       const autoLockMs = autoLockMinutes * 60 * 1000;
-      if (appState === "unlocked" && Date.now() - lastActivity > autoLockMs) {
+      if (appState === "unlocked" && Date.now() - lastActivityRef.current > autoLockMs) {
         lockWalletUi(`Wallet locked (${autoLockMinutes} min inactivity)`);
       }
     }, 30000);
     return () => { window.removeEventListener("mousemove", reset); window.removeEventListener("keydown", reset); clearInterval(checker); };
-  }, [appState, lastActivity, lockWalletUi]);
+  }, [appState, lockWalletUi]);
 
   // Keyboard shortcuts
   useEffect(() => {
