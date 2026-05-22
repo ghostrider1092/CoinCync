@@ -1,6 +1,11 @@
 [workspace]
-members  = [".", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/cynchub", "crates/orchard-side"]
-exclude  = ["coincync-wallet/src-tauri"]
+members  = [".", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side"]
+# crates/cynchub: CIP-002 skeleton (post-mainnet merge-mined liquidity layer).
+# Doesn't define the workspace's "randomx"/"testnet" features, so workspace-
+# wide builds with --features error on its Cargo.toml. Build standalone:
+# `cd crates/cynchub && cargo build`. Re-joins workspace when CIP-002
+# implementation starts (post v1.1).
+exclude  = ["coincync-wallet-v2/src-tauri", "crates/cynchub"]
 resolver = "2"
 
 [package]

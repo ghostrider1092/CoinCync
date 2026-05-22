@@ -16,9 +16,9 @@ updates:
       prefix: "deps"
       include: "scope"
 
-  # Tauri desktop wallet (Rust side)
+  # Tauri desktop wallet v2 (Rust side)
   - package-ecosystem: "cargo"
-    directory: "/coincync-wallet/src-tauri"
+    directory: "/coincync-wallet-v2/src-tauri"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -33,9 +33,9 @@ updates:
       prefix: "deps(wallet)"
       include: "scope"
 
-  # Tauri desktop wallet (JS side)
+  # Tauri desktop wallet v2 (JS side)
   - package-ecosystem: "npm"
-    directory: "/coincync-wallet"
+    directory: "/coincync-wallet-v2"
     schedule:
       interval: "weekly"
       day: "monday"
