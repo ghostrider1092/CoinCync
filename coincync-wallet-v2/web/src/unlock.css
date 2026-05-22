@@ -1,0 +1,278 @@
+/* ─── Unlock screen ───────────────────────────────────────────────── */
+
+.unlock {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-8);
+  overflow: hidden;
+
+  /* Same mesh backdrop as splash, slightly cooler so it feels like a
+     distinct moment (transition from splash → unlock). */
+  background:
+    radial-gradient(ellipse 70% 60% at 30% 20%, rgba(212, 160, 89, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 50% at 75% 80%, rgba(74, 184, 240, 0.04) 0%, transparent 55%),
+    radial-gradient(ellipse 90% 80% at 50% 100%, rgba(52, 227, 136, 0.03) 0%, transparent 50%),
+    var(--bg-base);
+
+  animation: fade-in var(--t-base) var(--ease-out);
+}
+
+/* Vignette + grain (same recipe as splash for visual continuity) */
+.unlock::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.45'/></svg>");
+  opacity: 0.022;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+/* ── The card ───────────────────────────────────────────────────── */
+.unlock__card {
+  position: relative;
+  width: 460px;
+  max-width: 100%;
+  padding: var(--sp-12) var(--sp-10) var(--sp-8);
+  border-radius: var(--r-2xl);
+
+  /* Frosted glass effect — needs backdrop-filter on the body's
+     gradient backdrop to see through. */
+  background: var(--glass-light);
+  backdrop-filter: blur(40px) saturate(140%);
+  -webkit-backdrop-filter: blur(40px) saturate(140%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    var(--shadow-xl),
+    var(--shadow-glass-inset);
+
+  animation: scale-in var(--t-slow) var(--ease-out);
+}
+
+/* Accent top-edge line (subtle gold gradient) */
+.unlock__card::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: var(--sp-12);
+  right: var(--sp-12);
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--gold-400) 50%,
+    transparent 100%
+  );
+  opacity: 0.7;
+}
+
+/* ── Hero (logo + glow) ─────────────────────────────────────────── */
+.unlock__logo-wrap {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  margin: 0 auto var(--sp-8);
+}
+
+.unlock__logo-glow {
+  position: absolute;
+  inset: -24px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--gold-glow) 0%, transparent 65%);
+  animation: breathe 4s var(--ease-in-out) infinite;
+  filter: blur(6px);
+}
+
+.unlock__logo {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 2px 16px rgba(212, 160, 89, 0.2));
+}
+
+/* ── Titles ─────────────────────────────────────────────────────── */
+.unlock__eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-widest);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  text-align: center;
+  margin-bottom: var(--sp-2);
+}
+
+.unlock__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-3xl);
+  font-weight: 300;
+  letter-spacing: var(--ls-tight);
+  color: var(--text-primary);
+  text-align: center;
+  line-height: var(--lh-tight);
+  margin-bottom: var(--sp-10);
+}
+
+/* ── Form ───────────────────────────────────────────────────────── */
+.unlock__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* Input — pill-shaped, glass surface, focus glow */
+.unlock__input-wrap {
+  position: relative;
+}
+
+.unlock__input {
+  width: 100%;
+  padding: 16px 20px;
+  background: var(--glass-medium);
+  border: 1px solid var(--glass-border-strong);
+  border-radius: var(--r-lg);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  letter-spacing: var(--ls-snug);
+  outline: none;
+  transition:
+    border-color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.unlock__input::placeholder {
+  color: var(--text-quaternary);
+  letter-spacing: var(--ls-snug);
+}
+
+.unlock__input:focus {
+  border-color: var(--gold-400);
+  background: var(--glass-strong);
+  box-shadow:
+    0 0 0 4px rgba(212, 160, 89, 0.12),
+    var(--shadow-glass-inset);
+}
+
+.unlock__input.has-error {
+  border-color: var(--red);
+  box-shadow:
+    0 0 0 4px rgba(255, 94, 94, 0.1);
+}
+
+/* Status line */
+.unlock__status {
+  min-height: 18px;
+  padding: 0 var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-snug);
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.unlock__status.is-error { color: var(--red); }
+
+.unlock__status kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--glass-medium);
+  border: 1px solid var(--glass-border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin: 0 2px;
+}
+
+/* Primary button */
+.unlock__button {
+  width: 100%;
+  padding: 16px 0;
+  margin-top: var(--sp-2);
+  border: none;
+  border-radius: var(--r-lg);
+  background: linear-gradient(135deg, var(--gold-300) 0%, var(--gold-400) 100%);
+  color: #0a0a0a;
+  font-family: var(--font-body);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: var(--ls-snug);
+  cursor: pointer;
+  box-shadow:
+    0 4px 16px rgba(212, 160, 89, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out),
+    opacity var(--t-fast) var(--ease-out);
+}
+
+.unlock__button:hover:not(:disabled) {
+  box-shadow:
+    0 6px 24px rgba(212, 160, 89, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.unlock__button:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.unlock__button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.unlock__button .spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -3px;
+  margin-right: 8px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Footer ─────────────────────────────────────────────────────── */
+.unlock__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--sp-8);
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--glass-border);
+}
+
+.unlock__version {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-wide);
+  color: var(--text-quaternary);
+}
+
+.unlock__forgot {
+  background: none;
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-snug);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  transition: color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+}
+
+.unlock__forgot:hover {
+  color: var(--amber);
+  background: rgba(255, 201, 96, 0.06);
+}

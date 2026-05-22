@@ -1,0 +1,13 @@
+# Build outputs
+/src-tauri/target/
+/src-tauri/Cargo.lock
+
+# Dependencies (will be installed by npm install)
+/node_modules/
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Dev artifacts
+/dist/

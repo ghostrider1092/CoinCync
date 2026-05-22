@@ -1,0 +1,159 @@
+/* ─── Splash screen ───────────────────────────────────────────────── */
+
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+
+  /* Layered mesh gradient — three radials at different positions
+     produce a soft, painterly depth that doesn't look "designed".  */
+  background:
+    radial-gradient(ellipse 60% 50% at 20% 25%, rgba(212, 160, 89, 0.10) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 80% 75%, rgba(212, 160, 89, 0.06) 0%, transparent 55%),
+    radial-gradient(ellipse 90% 80% at 50% 100%, rgba(52, 227, 136, 0.04) 0%, transparent 50%),
+    var(--bg-base);
+
+  transition: opacity var(--t-slow) var(--ease-out);
+}
+
+.splash.fade-out { opacity: 0; pointer-events: none; }
+
+/* Film-grain noise overlay — pure CSS, no asset.
+   Uses an SVG turbulence filter encoded as data URI. */
+.splash::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.45'/></svg>");
+  opacity: 0.025;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+/* Top vignette — barely visible, adds depth */
+.splash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 120% 50% at 50% 0%, transparent 70%, rgba(0, 0, 0, 0.45) 100%),
+    radial-gradient(ellipse 120% 50% at 50% 100%, transparent 70%, rgba(0, 0, 0, 0.55) 100%);
+  pointer-events: none;
+}
+
+/* ── Hero composition ───────────────────────────────────────────── */
+.splash__hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 2;
+}
+
+/* Logo with breathing accent glow */
+.splash__logo-wrap {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  margin-bottom: var(--sp-10);
+  opacity: 0;
+  transform: scale(0.86);
+  animation: scale-in var(--t-slow) var(--ease-out) 100ms forwards;
+}
+
+.splash__logo-glow {
+  position: absolute;
+  inset: -32px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--gold-glow) 0%, transparent 65%);
+  animation: breathe 3.6s var(--ease-in-out) infinite;
+  filter: blur(8px);
+}
+
+.splash__logo {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 2px 20px rgba(212, 160, 89, 0.25));
+}
+
+/* Brand wordmark */
+.splash__wordmark {
+  font-family: var(--font-display);
+  font-size: var(--fs-5xl);
+  font-weight: 300;
+  letter-spacing: var(--ls-tight);
+  color: var(--text-primary);
+  line-height: 1;
+  opacity: 0;
+  transform: translateY(10px);
+  animation: lift-in var(--t-slow) var(--ease-out) 350ms forwards;
+}
+
+.splash__wordmark-accent {
+  background: linear-gradient(135deg, var(--gold-200) 0%, var(--gold-400) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 400;
+}
+
+/* Tagline */
+.splash__tagline {
+  margin-top: var(--sp-5);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-widest);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  opacity: 0;
+  animation: lift-in var(--t-base) var(--ease-out) 550ms forwards;
+}
+
+/* ── Bottom progress line ───────────────────────────────────────── */
+.splash__progress {
+  position: absolute;
+  bottom: var(--sp-12);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 240px;
+  height: 1px;
+  background: var(--glass-border);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  opacity: 0;
+  animation: fade-in var(--t-base) var(--ease-out) 200ms forwards;
+}
+
+.splash__progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--gold-200) 30%,
+    var(--gold-400) 50%,
+    var(--gold-200) 70%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  transition: width 60ms linear;
+}
+
+/* ── Version stamp ──────────────────────────────────────────────── */
+.splash__version {
+  position: absolute;
+  bottom: var(--sp-5);
+  right: var(--sp-6);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-wide);
+  color: var(--text-quaternary);
+  opacity: 0;
+  animation: fade-in var(--t-slow) var(--ease-out) 700ms forwards;
+}

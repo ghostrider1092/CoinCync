@@ -1,0 +1,430 @@
+/* ─── Dashboard ─────────────────────────────────────────────────── */
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+  /* No max-width — fill the full main column.
+     Readability cap at ~1400 keeps line-length sane on 4K displays. */
+  max-width: 1400px;
+  width: 100%;
+  margin-inline: auto;
+  animation: lift-in var(--t-slow) var(--ease-out);
+}
+
+/* Live-status dot that sits inline before the subtitle text.
+ * Driven by the data-status attribute on .main__subtitle:
+ *   "online"  — green, pulsing slowly = "we have chain data"
+ *   "syncing" — amber, pulsing fast    = "catching up"
+ *   "offline" — red, steady             = "node RPC unreachable" */
+.status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: 1px;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green-glow);
+  animation: glow-pulse 3.5s var(--ease-in-out) infinite;
+}
+.status-dot.is-syncing {
+  background: var(--amber);
+  box-shadow: 0 0 8px rgba(255, 201, 96, 0.4);
+  animation: glow-pulse 1.5s var(--ease-in-out) infinite;
+}
+.status-dot.is-offline {
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red-glow);
+  animation: none;
+}
+
+/* ── Hero balance card ──────────────────────────────────────────── */
+.hero-balance {
+  position: relative;
+  padding: var(--sp-10) var(--sp-12);
+  border-radius: var(--r-2xl);
+  background:
+    linear-gradient(135deg, rgba(212, 160, 89, 0.10) 0%, transparent 60%),
+    var(--glass-medium);
+  backdrop-filter: blur(40px) saturate(140%);
+  -webkit-backdrop-filter: blur(40px) saturate(140%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    var(--shadow-lg),
+    var(--shadow-glass-inset);
+  overflow: hidden;
+}
+
+/* Decorative gradient blob (top-right corner) */
+.hero-balance::before {
+  content: "";
+  position: absolute;
+  top: -80px;
+  right: -80px;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--gold-glow) 0%, transparent 65%);
+  filter: blur(20px);
+  pointer-events: none;
+}
+
+/* Accent top-edge */
+.hero-balance::after {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 20%;
+  right: 20%;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--gold-400) 50%,
+    transparent 100%
+  );
+  opacity: 0.6;
+}
+
+.hero-balance__label {
+  position: relative;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-widest);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: var(--sp-2);
+}
+
+.hero-balance__row {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+
+.hero-balance__value {
+  font-family: var(--font-display);
+  font-size: var(--fs-6xl);
+  font-weight: 400;                  /* up from 300 — confident, not loud */
+  letter-spacing: -0.035em;          /* tighter than --ls-tight for hero scale */
+  color: var(--text-primary);
+  line-height: 0.95;                 /* slight optical tightening for the display weight */
+  font-feature-settings: "tnum", "ss01";
+  /* Soft halo behind the number — reads as "this is the number that matters" */
+  text-shadow:
+    0 0 64px rgba(212, 160, 89, 0.22),
+    0 0 24px rgba(212, 160, 89, 0.12);
+}
+
+.hero-balance__unit {
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--gold-400);
+  letter-spacing: var(--ls-tight);
+}
+
+.hero-balance__sub {
+  position: relative;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  letter-spacing: var(--ls-snug);
+}
+
+.hero-balance__sub span { color: var(--text-secondary); }
+
+/* ── Quick actions row ──────────────────────────────────────────── */
+.quick-actions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-3);
+}
+
+.action-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-6);
+  border-radius: var(--r-xl);
+  background: var(--glass-light);
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+  /* Phantom/Rainbow-style tap feel:
+   * - hover lifts gently (ease-out)
+   * - active scales down to 0.97 (immediate, snappy)
+   * - release springs back with overshoot (ease-bounce) so the
+   *   acknowledgment FEELS instant even though the transition is 320ms */
+  transition:
+    background var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    transform var(--t-base) var(--ease-bounce),
+    box-shadow var(--t-fast) var(--ease-out);
+  will-change: transform;
+}
+
+.action-card:hover {
+  background: var(--glass-medium);
+  border-color: var(--glass-border-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.action-card:active {
+  transform: scale(0.97);
+  transition: transform var(--t-instant) var(--ease-snappy);
+}
+
+.action-card__icon-wrap {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: linear-gradient(135deg, var(--gold-300) 0%, var(--gold-400) 100%);
+  color: #0a0a0a;
+  box-shadow: 0 2px 12px var(--gold-glow);
+}
+
+.action-card__icon-wrap.is-secondary {
+  background: var(--glass-strong);
+  color: var(--text-primary);
+  box-shadow: none;
+}
+
+.action-card__icon-wrap svg {
+  width: 20px;
+  height: 20px;
+}
+
+.action-card__label {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: var(--ls-snug);
+}
+
+.action-card__sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  letter-spacing: var(--ls-snug);
+  line-height: var(--lh-snug);
+}
+
+/* ── Activity section ───────────────────────────────────────────── */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.section__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 400;
+  letter-spacing: var(--ls-snug);
+  color: var(--text-primary);
+}
+
+.section__link {
+  background: none;
+  border: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-snug);
+  color: var(--gold-400);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast) var(--ease-out);
+}
+
+.section__link:hover { background: rgba(212, 160, 89, 0.08); }
+
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-radius: var(--r-xl);
+  background: var(--glass-light);
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: var(--sp-4);
+  align-items: center;
+  padding: var(--sp-4) var(--sp-5);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease-out);
+}
+
+.activity-row:hover { background: var(--glass-light); }
+
+.activity-row + .activity-row {
+  border-top: 1px solid var(--glass-border);
+}
+
+.activity-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--glass-medium);
+  color: var(--text-primary);
+}
+
+.activity-icon.is-out {
+  background: linear-gradient(135deg, rgba(255, 94, 94, 0.2) 0%, rgba(255, 94, 94, 0.1) 100%);
+  color: var(--red);
+}
+
+.activity-icon.is-in {
+  background: linear-gradient(135deg, rgba(52, 227, 136, 0.2) 0%, rgba(52, 227, 136, 0.1) 100%);
+  color: var(--green);
+}
+
+.activity-icon svg { width: 14px; height: 14px; }
+
+.activity-body__label {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.activity-body__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  letter-spacing: var(--ls-snug);
+}
+
+.activity-amount {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: var(--ls-snug);
+  font-feature-settings: "tnum";
+}
+
+.activity-amount.is-out { color: var(--red); }
+.activity-amount.is-in  { color: var(--green); }
+
+.activity-amount__unit {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+  letter-spacing: var(--ls-wide);
+}
+
+/* ── Empty state for activity list ─────────────────────────────────
+ * Phantom-tier: empty wallet treats first-receive as a feature, not
+ * an apology. Illustrated card (CSS-drawn, no asset deps), warm copy,
+ * soft violet accent breaks the gold-only monotony on a fresh wallet. */
+.activity-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: var(--sp-12) var(--sp-8);
+  gap: var(--sp-4);
+}
+
+.activity-empty__art {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 30% 30%, var(--violet-glow) 0%, transparent 60%),
+    radial-gradient(circle at 70% 70%, var(--gold-glow) 0%, transparent 60%),
+    var(--glass-medium);
+  border: 1px solid var(--glass-border);
+  display: grid;
+  place-items: center;
+  margin-bottom: var(--sp-2);
+  animation: breathe 4s var(--ease-in-out) infinite;
+}
+
+.activity-empty__art::before {
+  /* Soft outer ring — adds depth without illustration assets */
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  border: 1px solid var(--violet-glow);
+  opacity: 0.6;
+  animation: glow-pulse 3s var(--ease-in-out) infinite;
+}
+
+.activity-empty__art svg {
+  width: 32px;
+  height: 32px;
+  color: var(--gold-300);
+}
+
+.activity-empty__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 400;
+  color: var(--text-primary);
+  letter-spacing: var(--ls-snug);
+}
+
+.activity-empty__body {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  max-width: 360px;
+  line-height: var(--lh-relaxed);
+}
+
+.activity-empty__cta {
+  margin-top: var(--sp-2);
+  padding: var(--sp-3) var(--sp-6);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--gold-400);
+  background: var(--gold-glow);
+  color: var(--gold-100);
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  letter-spacing: var(--ls-snug);
+  cursor: pointer;
+  transition:
+    transform var(--t-base) var(--ease-bounce),
+    background var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.activity-empty__cta:hover {
+  background: rgba(212, 160, 89, 0.28);
+  box-shadow: var(--shadow-gold-glow);
+}
+
+.activity-empty__cta:active {
+  transform: scale(0.96);
+  transition: transform var(--t-instant) var(--ease-snappy);
+}

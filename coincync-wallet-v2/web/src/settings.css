@@ -1,0 +1,250 @@
+/* ─── Settings screen ───────────────────────────────────────────── */
+
+.settings {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: var(--sp-10);
+  max-width: 1400px;
+  width: 100%;
+  margin-inline: auto;
+  animation: lift-in var(--t-slow) var(--ease-out);
+}
+
+/* ── Sidebar nav within settings ────────────────────────────────── */
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: sticky;
+  top: 0;
+  height: fit-content;
+}
+
+.settings-nav__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-3);
+  border-radius: var(--r-md);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--t-fast) var(--ease-out);
+}
+
+.settings-nav__item:hover {
+  background: var(--glass-light);
+  color: var(--text-primary);
+}
+
+.settings-nav__item.is-active {
+  background: var(--glass-medium);
+  color: var(--text-primary);
+}
+
+.settings-nav__item-icon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.7;
+}
+
+.settings-nav__item.is-active .settings-nav__item-icon { opacity: 1; color: var(--gold-400); }
+
+/* ── Right column: settings cards ───────────────────────────────── */
+.settings-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.settings-section__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 400;
+  letter-spacing: var(--ls-snug);
+  color: var(--text-primary);
+  margin-bottom: var(--sp-2);
+}
+
+.settings-section__sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  letter-spacing: var(--ls-snug);
+  line-height: var(--lh-relaxed);
+  margin-bottom: var(--sp-4);
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-radius: var(--r-xl);
+  background: var(--glass-light);
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  background: transparent;
+  transition: background var(--t-fast) var(--ease-out);
+}
+
+.settings-row + .settings-row { border-top: 1px solid var(--glass-border); }
+
+.settings-row.is-link { cursor: pointer; }
+.settings-row.is-link:hover { background: var(--glass-light); }
+
+.settings-row__label {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.settings-row__sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  letter-spacing: var(--ls-snug);
+  line-height: var(--lh-snug);
+}
+
+.settings-row__control {
+  flex-shrink: 0;
+}
+
+/* ── Controls: toggle, select, value, chevron ───────────────────── */
+.toggle {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  border-radius: var(--r-pill);
+  background: var(--glass-medium);
+  border: 1px solid var(--glass-border-strong);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease-out);
+}
+
+.toggle::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: all var(--t-fast) var(--ease-spring);
+}
+
+.toggle.is-on {
+  background: linear-gradient(135deg, var(--gold-300) 0%, var(--gold-400) 100%);
+  border-color: transparent;
+  box-shadow: 0 2px 12px var(--gold-glow);
+}
+
+.toggle.is-on::before {
+  left: 20px;
+  background: #fafaf5;
+}
+
+.settings-select {
+  padding: 6px 12px;
+  padding-right: 32px;
+  background: var(--glass-medium);
+  border: 1px solid var(--glass-border-strong);
+  border-radius: var(--r-md);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: var(--ls-snug);
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  transition: all var(--t-fast) var(--ease-out);
+}
+
+.settings-select:hover {
+  background-color: var(--glass-strong);
+  border-color: var(--gold-400);
+}
+
+.settings-row__value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+  letter-spacing: var(--ls-snug);
+}
+
+.chevron {
+  width: 16px;
+  height: 16px;
+  color: var(--text-tertiary);
+}
+
+/* Theme swatches */
+.theme-swatches {
+  display: flex;
+  gap: 6px;
+}
+
+.theme-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  border: 1.5px solid var(--glass-border-strong);
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease-out);
+}
+
+.theme-swatch:hover { transform: translateY(-1px); }
+
+.theme-swatch.is-active {
+  border-color: var(--gold-400);
+  box-shadow: 0 0 0 3px rgba(212, 160, 89, 0.15);
+}
+
+.theme-swatch--dark { background: linear-gradient(135deg, #0a0a0a 0%, #1a1d22 100%); }
+.theme-swatch--gold { background: linear-gradient(135deg, var(--gold-300) 0%, var(--gold-500) 100%); }
+.theme-swatch--paper { background: linear-gradient(135deg, #fafaf5 0%, #d4cfb8 100%); }
+.theme-swatch--midnight { background: linear-gradient(135deg, #0a0e1a 0%, #1a2244 100%); }
+
+/* Inline "SOON" pill — used on settings rows whose backend isn't wired yet. */
+.pill-soon {
+  display: inline-block;
+  margin-left: var(--sp-2);
+  padding: 1px 7px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: var(--ls-widest);
+  text-transform: uppercase;
+  color: var(--violet-200);
+  background: var(--violet-glow);
+  border: 1px solid var(--violet-300);
+  border-radius: var(--r-pill);
+  vertical-align: 2px;
+}

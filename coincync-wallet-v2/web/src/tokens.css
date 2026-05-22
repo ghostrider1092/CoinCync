@@ -1,0 +1,546 @@
+/* ─── CoinCync v2 design tokens ─────────────────────────────────────
+ *
+ * Design system for the v2 wallet. Apple-style restrained palette,
+ * high-resolution typography, deliberate spacing, refined motion.
+ * All UI references these tokens — never hardcode a colour or radius.
+ *
+ * Themes: defaults below are the "dark" theme. Theme overrides live at
+ * the bottom of this file and are toggled via .theme-gold / .theme-midnight
+ * / .theme-paper classes on the <html> element. Pick a theme in Settings;
+ * it persists to localStorage and is applied at boot before the splash.
+ */
+
+:root {
+  /* ── Colour: backgrounds (dark theme, layered depth) ──────────── */
+  --bg-base:        #08090c;
+  --bg-1:           #0e1014;
+  --bg-2:           #14171c;
+  --bg-3:           #1c2027;
+
+  /* Frosted glass surfaces — pair with backdrop-filter: blur(24px) */
+  --glass-light:    rgba(255, 255, 255, 0.04);
+  --glass-medium:   rgba(255, 255, 255, 0.07);
+  --glass-strong:   rgba(255, 255, 255, 0.10);
+  --glass-border:   rgba(255, 255, 255, 0.08);
+  --glass-border-strong: rgba(255, 255, 255, 0.14);
+
+  /* ── Colour: text ─────────────────────────────────────────────── */
+  --text-primary:   #fafaf5;   /* warm white, almost paper */
+  --text-secondary: rgba(250, 250, 245, 0.65);
+  --text-tertiary:  rgba(250, 250, 245, 0.4);
+  --text-quaternary: rgba(250, 250, 245, 0.22);
+
+  /* ── Colour: brand (CoinCync gold) ────────────────────────────── */
+  --gold-100:       #f9e6b8;
+  --gold-200:       #f5cf7f;
+  --gold-300:       #e8c178;
+  --gold-400:       #d4a059;   /* primary brand */
+  --gold-500:       #b8854a;
+  --gold-glow:      rgba(212, 160, 89, 0.18);
+
+  /* Cyan accent for technical surfaces (not used on opening screens) */
+  --cyan-300:       #7cdcff;
+  --cyan-400:       #4ab8f0;
+
+  /* Violet — secondary accent. Pairs with gold for warmth without
+   * diluting the brand. Use sparingly: state changes, pending tx,
+   * empty-state illustrations, "new" indicators. Never on primary CTAs. */
+  --violet-200:     #d6b8ff;
+  --violet-300:     #b58cff;
+  --violet-400:     #9966ff;
+  --violet-glow:    rgba(153, 102, 255, 0.18);
+
+  /* Pink — tertiary warmth for emoji-free illustration accents */
+  --pink-300:       #ffadc9;
+  --pink-400:       #ff7aa0;
+
+  /* Semantic */
+  --green:          #34e388;
+  --green-glow:     rgba(52, 227, 136, 0.15);
+  --red:            #ff5e5e;
+  --red-glow:       rgba(255, 94, 94, 0.15);
+  --amber:          #ffc960;
+
+  /* ── Typography ───────────────────────────────────────────────── */
+  --font-display:   'Fraunces', 'New York', Georgia, serif;
+  --font-body:      'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono:      'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+
+  /* Type scale (modular, base 16 → ratio 1.25) */
+  --fs-xs:          11px;
+  --fs-sm:          12px;
+  --fs-base:        14px;
+  --fs-md:          16px;
+  --fs-lg:          18px;
+  --fs-xl:          22px;
+  --fs-2xl:         28px;
+  --fs-3xl:         36px;
+  --fs-4xl:         48px;
+  --fs-5xl:         64px;
+  --fs-6xl:         84px;
+
+  --lh-tight:       1.1;
+  --lh-snug:        1.3;
+  --lh-base:        1.5;
+  --lh-relaxed:     1.7;
+
+  --ls-tight:       -0.03em;
+  --ls-snug:        -0.015em;
+  --ls-normal:      0;
+  --ls-wide:        0.06em;
+  --ls-wider:       0.12em;
+  --ls-widest:      0.2em;
+
+  /* ── Spacing (4-based scale) ──────────────────────────────────── */
+  --sp-1:           4px;
+  --sp-2:           8px;
+  --sp-3:           12px;
+  --sp-4:           16px;
+  --sp-5:           20px;
+  --sp-6:           24px;
+  --sp-8:           32px;
+  --sp-10:          40px;
+  --sp-12:          48px;
+  --sp-16:          64px;
+  --sp-20:          80px;
+  --sp-24:          96px;
+
+  /* ── Radii ────────────────────────────────────────────────────── */
+  --r-sm:           6px;
+  --r-md:           10px;
+  --r-lg:           14px;
+  --r-xl:           20px;
+  --r-2xl:          28px;
+  --r-3xl:          40px;
+  --r-pill:         999px;
+
+  /* ── Shadows (layered, depth-aware) ───────────────────────────── */
+  /* Soft elevation for cards on dark background */
+  --shadow-sm:      0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md:      0 4px 16px rgba(0, 0, 0, 0.3),
+                    0 1px 3px rgba(0, 0, 0, 0.2);
+  --shadow-lg:      0 12px 48px rgba(0, 0, 0, 0.45),
+                    0 4px 12px rgba(0, 0, 0, 0.25);
+  --shadow-xl:      0 24px 80px rgba(0, 0, 0, 0.55),
+                    0 8px 24px rgba(0, 0, 0, 0.3);
+
+  /* Inner highlights for glass surfaces (top-edge specular) */
+  --shadow-glass-inset:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+
+  /* Gold glow for focus / hover states */
+  --shadow-gold-glow:
+    0 0 32px rgba(212, 160, 89, 0.25),
+    0 0 64px rgba(212, 160, 89, 0.1);
+
+  /* ── Motion (Apple + Phantom-style spring easings) ───────────── */
+  --ease-out:       cubic-bezier(0.2, 0.7, 0.3, 1);
+  --ease-in-out:    cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring:    cubic-bezier(0.34, 1.56, 0.64, 1);   /* soft overshoot — page entries */
+  --ease-bounce:    cubic-bezier(0.68, -0.55, 0.27, 1.55); /* stronger overshoot — tap-release */
+  --ease-snappy:    cubic-bezier(0.4, 0, 0, 1);
+
+  --t-instant:      120ms;
+  --t-fast:         200ms;
+  --t-base:         320ms;
+  --t-slow:         500ms;
+  --t-glacial:      800ms;
+}
+
+/* ── Reset + base ─────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #app {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  color: var(--text-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01", "cv11";  /* Inter tabular + alt 6/9 */
+  text-rendering: optimizeLegibility;
+}
+
+/* High-DPI text crispness */
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+  body { -webkit-font-smoothing: subpixel-antialiased; }
+}
+
+/* Selection */
+::selection {
+  background: rgba(212, 160, 89, 0.3);
+  color: var(--text-primary);
+}
+
+/* Focus ring — only on keyboard nav */
+:focus-visible {
+  outline: 2px solid var(--gold-400);
+  outline-offset: 3px;
+  border-radius: var(--r-sm);
+}
+
+/* ── Keyframes ────────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes lift-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(1.06); opacity: 0.85; }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
+/* ── Future-feature banner ─────────────────────────────────────────
+ * Reusable card that sits at the top of a screen rendering a feature
+ * that exists in the codebase but isn't user-active yet (cyncswap,
+ * multi-sig, etc.). Communicates "this is real, just not yet" without
+ * blocking the operator from inspecting the UI scaffolding underneath. */
+.future-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  margin-bottom: var(--sp-6);
+  border-radius: var(--r-xl);
+  background:
+    linear-gradient(135deg, var(--violet-glow) 0%, transparent 60%),
+    var(--glass-light);
+  border: 1px solid var(--glass-border);
+  border-left: 2px solid var(--violet-300);
+  position: relative;
+  overflow: hidden;
+}
+
+.future-banner::before {
+  /* Soft violet halo top-right — picks up the "future" / "in-development" tone */
+  content: "";
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--violet-glow) 0%, transparent 70%);
+  filter: blur(20px);
+  pointer-events: none;
+}
+
+.future-banner__icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: var(--violet-glow);
+  border: 1px solid var(--violet-300);
+  color: var(--violet-200);
+}
+
+.future-banner__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.future-banner__body {
+  flex: 1;
+  position: relative;     /* sit above the ::before halo */
+}
+
+.future-banner__chip {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--ls-widest);
+  text-transform: uppercase;
+  color: var(--violet-200);
+  background: var(--violet-glow);
+  border: 1px solid var(--violet-300);
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  margin-bottom: var(--sp-2);
+}
+
+.future-banner__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 400;
+  color: var(--text-primary);
+  letter-spacing: var(--ls-snug);
+  margin-bottom: var(--sp-1);
+}
+
+.future-banner__text {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  line-height: var(--lh-relaxed);
+  color: var(--text-secondary);
+  max-width: 720px;
+}
+
+.future-banner__text strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* ── Mining toast ──────────────────────────────────────────────────
+ * Bottom-right transient notification used by the block_found event.
+ * Slides up + fades in on .is-visible, fades out after ~4.5s. Single
+ * instance globally — the JS reuses one DOM node and resets the timer
+ * on repeat events. */
+.mining-toast {
+  position: fixed;
+  bottom: 32px;
+  right: 32px;
+  z-index: 1000;
+  padding: var(--sp-4) var(--sp-6);
+  border-radius: var(--r-xl);
+  background:
+    linear-gradient(135deg, var(--gold-glow) 0%, transparent 60%),
+    var(--glass-strong);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid var(--gold-400);
+  box-shadow: var(--shadow-lg), 0 0 32px var(--gold-glow);
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: var(--ls-snug);
+  max-width: 380px;
+  opacity: 0;
+  transform: translateY(16px) scale(0.96);
+  pointer-events: none;
+  transition:
+    opacity var(--t-base) var(--ease-out),
+    transform var(--t-base) var(--ease-bounce);
+}
+
+.mining-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+/* ── Theme overrides ───────────────────────────────────────────────
+ * Applied via classes on the <html> element. Set in Settings →
+ * Appearance → Color scheme; persisted to localStorage; reapplied at
+ * boot before the splash so there's no flash of wrong theme. */
+
+/* Gold — brand-forward, warmer base with stronger gold presence. */
+html.theme-gold {
+  --bg-base:        #100c05;
+  --bg-1:           #1a1408;
+  --bg-2:           #221a0d;
+  --bg-3:           #2c2210;
+  --gold-glow:      rgba(212, 160, 89, 0.28);
+  --glass-light:    rgba(212, 160, 89, 0.04);
+  --glass-medium:   rgba(212, 160, 89, 0.07);
+  --glass-strong:   rgba(212, 160, 89, 0.11);
+  --glass-border:   rgba(212, 160, 89, 0.12);
+  --glass-border-strong: rgba(212, 160, 89, 0.20);
+}
+
+/* Midnight — cool navy palette, modernist. */
+html.theme-midnight {
+  --bg-base:        #060a14;
+  --bg-1:           #0a1020;
+  --bg-2:           #131a2e;
+  --bg-3:           #1b2440;
+  --glass-light:    rgba(140, 180, 255, 0.04);
+  --glass-medium:   rgba(140, 180, 255, 0.07);
+  --glass-strong:   rgba(140, 180, 255, 0.10);
+  --glass-border:   rgba(140, 180, 255, 0.10);
+  --glass-border-strong: rgba(140, 180, 255, 0.18);
+}
+
+/* Paper — light mode. Cream background, ink text, gold accent. */
+html.theme-paper {
+  --bg-base:        #f7f3ea;
+  --bg-1:           #f0ebe0;
+  --bg-2:           #e8e1d0;
+  --bg-3:           #ddd4bf;
+  --text-primary:   #1a1d22;
+  --text-secondary: rgba(26, 29, 34, 0.65);
+  --text-tertiary:  rgba(26, 29, 34, 0.45);
+  --text-quaternary: rgba(26, 29, 34, 0.25);
+  --glass-light:    rgba(0, 0, 0, 0.025);
+  --glass-medium:   rgba(0, 0, 0, 0.05);
+  --glass-strong:   rgba(0, 0, 0, 0.08);
+  --glass-border:   rgba(0, 0, 0, 0.08);
+  --glass-border-strong: rgba(0, 0, 0, 0.16);
+  --gold-glow:      rgba(184, 133, 74, 0.22);
+  --shadow-glass-inset:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.02);
+}
+
+/* ── Accessibility / preference toggles ──────────────────────────── */
+
+/* User-toggled "reduce motion" — kills CSS animations + transitions. */
+html.reduce-motion *,
+html.reduce-motion *::before,
+html.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* Font weight preference — applies to body + display text. */
+html.fw-light { --fw-body: 300; --fw-heading: 300; }
+html.fw-medium { --fw-body: 500; --fw-heading: 500; }
+html.fw-light body, html.fw-light p, html.fw-light .activity-body__label { font-weight: var(--fw-body, 400); }
+html.fw-medium body, html.fw-medium p, html.fw-medium .activity-body__label { font-weight: var(--fw-body, 400); }
+
+/* ── Onboarding choice cards ───────────────────────────────────────
+ * Two side-by-side cards on the "Set up your wallet" screen.
+ * Spring-physics tap feedback matching the dashboard action cards. */
+.onboarding-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-4);
+  margin: var(--sp-6) 0;
+}
+@media (max-width: 560px) {
+  .onboarding-choices { grid-template-columns: 1fr; }
+}
+.onboarding-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-6);
+  border-radius: var(--r-xl);
+  background: var(--glass-light);
+  border: 1px solid var(--glass-border);
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition:
+    background var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    transform var(--t-base) var(--ease-bounce),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+.onboarding-choice:hover {
+  background: var(--glass-medium);
+  border-color: var(--glass-border-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+.onboarding-choice:active {
+  transform: scale(0.97);
+  transition: transform var(--t-instant) var(--ease-snappy);
+}
+.onboarding-choice__icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: linear-gradient(135deg, var(--gold-300) 0%, var(--gold-400) 100%);
+  color: #0a0a09;
+  box-shadow: 0 2px 12px var(--gold-glow);
+}
+.onboarding-choice__icon svg { width: 20px; height: 20px; }
+.onboarding-choice__title {
+  font-family: var(--font-body);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: var(--ls-snug);
+}
+.onboarding-choice__body {
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-relaxed);
+}
+
+/* ── Seed phrase grid ──────────────────────────────────────────────
+ * Numbered 24-word display for the post-create "write this down" step.
+ * Mono font so the words are unambiguous; subtle background so each
+ * word is its own readable cell. */
+.seed-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-2);
+  padding: var(--sp-5);
+  border-radius: var(--r-xl);
+  background: var(--glass-light);
+  border: 1px solid var(--glass-border);
+  margin-bottom: var(--sp-5);
+}
+@media (max-width: 600px) { .seed-grid { grid-template-columns: repeat(2, 1fr); } }
+.seed-word {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--glass-medium);
+  border: 1px solid var(--glass-border);
+}
+.seed-word__num {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+  letter-spacing: var(--ls-snug);
+  min-width: 18px;
+}
+.seed-word__text {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.seed-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.seed-ack input[type="checkbox"] {
+  margin-top: 3px;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--gold-400);
+  cursor: pointer;
+}
