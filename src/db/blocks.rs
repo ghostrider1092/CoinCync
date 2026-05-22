@@ -151,11 +151,23 @@ impl BlockDb {
     ///
     /// Uses `last()` on the height index, which works correctly because
     /// heights are stored as big-endian bytes (lexicographic == numeric order).
+    ///
+    /// A malformed (non-8-byte) key is treated as database corruption and
+    /// surfaces as a `DatabaseError` — silently defaulting to 0 was the
+    /// prior behaviour and would have masked corruption as a legitimate
+    /// "genesis tip" reading, which is consensus-relevant.
     pub fn height(&self) -> Result<u64> {
         match self.height_index.last() {
             Ok(Some((key, _))) => {
-                let height = u64::from_be_bytes(key.as_ref().try_into().unwrap_or([0u8; 8]));
-                Ok(height)
+                let key_bytes = key.as_ref();
+                let arr: [u8; 8] = key_bytes.try_into().map_err(|_| {
+                    Error::DatabaseError(format!(
+                        "height_index key has unexpected length {} (expected 8); \
+                         block database may be corrupted",
+                        key_bytes.len()
+                    ))
+                })?;
+                Ok(u64::from_be_bytes(arr))
             }
             Ok(None) => Ok(0),
             Err(e) => Err(Error::DatabaseError(e.to_string())),

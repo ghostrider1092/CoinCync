@@ -220,13 +220,28 @@ impl MetricsState {
     }
 }
 
-/// Spawn the Prometheus /metrics server on `port`. Returns once the
-/// listener is bound; the actual accept loop runs forever in a tokio task.
-/// Errors are logged but do not bring down mining — metrics is never
-/// allowed to interfere with the hot path.
-pub async fn serve(port: u16, state: Arc<MetricsState>) -> io::Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!(port, "metrics: /metrics endpoint live");
+/// Spawn the Prometheus /metrics server bound to `bind_addr:port`.
+/// Returns once the listener is bound; the actual accept loop runs
+/// forever in a tokio task. Errors are logged but do not bring down
+/// mining — metrics is never allowed to interfere with the hot path.
+///
+/// `bind_addr` defaults to `127.0.0.1` at the CLI/config layer.
+/// /metrics is unauthenticated; binding to a non-loopback address
+/// publishes mining stats to anyone who can reach the port. Operators
+/// who scrape from another host should bind to a specific internal IP
+/// rather than `0.0.0.0`, and firewall the port.
+pub async fn serve(bind_addr: &str, port: u16, state: Arc<MetricsState>) -> io::Result<()> {
+    let listener = TcpListener::bind((bind_addr, port)).await?;
+    if bind_addr == "0.0.0.0" || bind_addr == "::" {
+        tracing::warn!(
+            bind_addr,
+            port,
+            "metrics: /metrics endpoint is bound to all interfaces with no authentication — \
+             firewall the port or bind to 127.0.0.1 / a specific internal IP",
+        );
+    } else {
+        tracing::info!(bind_addr, port, "metrics: /metrics endpoint live");
+    }
 
     tokio::spawn(async move {
         loop {

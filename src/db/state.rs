@@ -114,13 +114,25 @@ impl StateDb {
         }
     }
 
-    /// Get all checkpoints
+    /// Get all checkpoints.
+    ///
+    /// A malformed (non-8-byte) checkpoint key is treated as DB
+    /// corruption and surfaces as DatabaseError — silently coercing
+    /// to height 0 would attribute a corrupted checkpoint to genesis,
+    /// which downstream reorg-validation code would then trust.
     pub fn get_checkpoints(&self) -> Result<Vec<(u64, Hash)>> {
         let mut result = Vec::new();
 
         for entry in self.checkpoints.iter() {
             let (key, value) = entry.map_err(|e| Error::DatabaseError(e.to_string()))?;
-            let height = u64::from_be_bytes(key.as_ref().try_into().unwrap_or([0u8; 8]));
+            let arr: [u8; 8] = key.as_ref().try_into().map_err(|_| {
+                Error::DatabaseError(format!(
+                    "checkpoint entry has unexpected key length {} (expected 8); \
+                     state database may be corrupted",
+                    key.as_ref().len()
+                ))
+            })?;
+            let height = u64::from_be_bytes(arr);
             if let Some(hash) = Hash::from_slice(&value) {
                 result.push((height, hash));
             }
@@ -159,10 +171,22 @@ impl StateDb {
         // SECURITY (A6-DB-CORRUPT): Propagate DB read errors instead of silently
         // dropping them. Corrupted undo entries that are silently skipped will never
         // be cleaned up and could cause incomplete reorgs.
+        //
+        // A malformed (non-8-byte) undo key is treated as DB corruption and
+        // surfaces as DatabaseError — silently coercing to height 0 would
+        // mark every legitimate height-0 entry as "below keep_from_height"
+        // and queue them all for deletion, exactly the wrong behaviour.
         let mut keys_to_remove = Vec::new();
         for result in self.undo.iter() {
             let (k, _) = result.map_err(|e| Error::DatabaseError(format!("undo iter: {}", e)))?;
-            let height = u64::from_be_bytes(k.as_ref().try_into().unwrap_or([0u8; 8]));
+            let arr: [u8; 8] = k.as_ref().try_into().map_err(|_| {
+                Error::DatabaseError(format!(
+                    "undo entry has unexpected key length {} (expected 8); \
+                     undo log may be corrupted",
+                    k.as_ref().len()
+                ))
+            })?;
+            let height = u64::from_be_bytes(arr);
             if height < keep_from_height {
                 keys_to_remove.push(k);
             }

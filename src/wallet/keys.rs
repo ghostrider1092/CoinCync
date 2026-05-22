@@ -241,8 +241,20 @@ fn diversify_hash(d: &[u8; 11]) -> Option<RistrettoPoint> {
         .update(d)
         .finalize();
     let pt = RP::from_uniform_bytes(hash.as_bytes().try_into().ok()?);
-    // Reject the identity point (extremely rare)
-    if pt == RistrettoPoint::default() { None } else { Some(pt) }
+    // Reject the identity point. This is astronomically rare (probability
+    // ~1/2^252 from a 64-byte uniform hash), but if it ever fires the
+    // wallet would otherwise silently return None and skip a diversifier
+    // index, which is hard to debug post-mortem. Surface the event so an
+    // operator looking at logs can correlate the gap.
+    if pt == RistrettoPoint::default() {
+        tracing::warn!(
+            "wallet/keys::diversify_hash: derived identity point — \
+             extremely rare ECDH edge case; caller should advance diversifier index"
+        );
+        None
+    } else {
+        Some(pt)
+    }
 }
 
 #[cfg(test)]

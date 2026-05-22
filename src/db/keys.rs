@@ -122,13 +122,26 @@ impl KeyDb {
         }
     }
 
-    /// Get all view keys
+    /// Get all view keys.
+    ///
+    /// A malformed (non-8-byte) epoch key is treated as DB corruption and
+    /// surfaces as a `DatabaseError` rather than being silently coerced to
+    /// epoch 0 — mixing entries into the wrong epoch would be worse than
+    /// failing the lookup loudly.
     pub fn get_all_view_keys(&self) -> Result<Vec<(u64, KeyEntry)>> {
         let mut result = Vec::new();
 
         for entry in self.view_keys.iter() {
             let (key, value) = entry.map_err(|e| Error::DatabaseError(e.to_string()))?;
-            let epoch = u64::from_be_bytes(key.as_ref().try_into().unwrap_or([0u8; 8]));
+            let key_bytes = key.as_ref();
+            let arr: [u8; 8] = key_bytes.try_into().map_err(|_| {
+                Error::DatabaseError(format!(
+                    "view_keys index entry has unexpected key length {} (expected 8); \
+                     key database may be corrupted",
+                    key_bytes.len()
+                ))
+            })?;
+            let epoch = u64::from_be_bytes(arr);
             let key_entry: KeyEntry = deserialize(&value)?;
             result.push((epoch, key_entry));
         }
@@ -136,11 +149,23 @@ impl KeyDb {
         Ok(result)
     }
 
-    /// Get current epoch
+    /// Get current epoch.
+    ///
+    /// A malformed (non-8-byte) value is treated as DB corruption and
+    /// surfaces as a `DatabaseError` rather than being silently coerced
+    /// to epoch 0 — masking corruption as "fresh wallet" could lead the
+    /// caller to start over-writing entries from the wrong epoch.
     pub fn get_current_epoch(&self) -> Result<u64> {
         match self.current_epoch.get(Self::KEY_CURRENT_EPOCH) {
             Ok(Some(data)) => {
-                let bytes: [u8; 8] = data.as_ref().try_into().unwrap_or([0u8; 8]);
+                let data_bytes = data.as_ref();
+                let bytes: [u8; 8] = data_bytes.try_into().map_err(|_| {
+                    Error::DatabaseError(format!(
+                        "current_epoch value has unexpected length {} (expected 8); \
+                         key database may be corrupted",
+                        data_bytes.len()
+                    ))
+                })?;
                 Ok(u64::from_be_bytes(bytes))
             }
             Ok(None) => Ok(0),

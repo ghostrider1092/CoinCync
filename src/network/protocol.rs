@@ -610,15 +610,21 @@ impl Message {
         let mut nonce = [0u8; 8];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
         let msg = PingPongMessage { nonce: u64::from_le_bytes(nonce) };
-        // SECURITY: PingPongMessage is a simple struct that should always serialize
-        let payload = borsh::to_vec(&msg).expect("PingPongMessage serialization should never fail");
+        // INVARIANT: PingPongMessage is a single u64 wrapper — borsh writes 8
+        // bytes with no I/O and no fallible step. Changing the type's layout
+        // (e.g., adding a Vec field) would break this invariant and re-introduce
+        // a panic-in-network-hot-path. If the type grows, switch to a fallible
+        // helper that returns Result<Self> and update node.rs:1511 + 2578.
+        let payload = borsh::to_vec(&msg)
+            .expect("PingPongMessage borsh: single u64, infallible");
         Self::new(magic, MessageType::Ping, payload)
     }
 
     pub fn pong(magic: [u8; 4], nonce: u64) -> Self {
         let msg = PingPongMessage { nonce };
-        // SECURITY: PingPongMessage is a simple struct that should always serialize
-        let payload = borsh::to_vec(&msg).expect("PingPongMessage serialization should never fail");
+        // INVARIANT: see ping() above — borsh of a single u64 is infallible.
+        let payload = borsh::to_vec(&msg)
+            .expect("PingPongMessage borsh: single u64, infallible");
         Self::new(magic, MessageType::Pong, payload)
     }
 

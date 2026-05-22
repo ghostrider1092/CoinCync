@@ -357,18 +357,29 @@ impl WalletData {
 pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_cost: u32) -> [u8; 32] {
     use argon2::{Algorithm, Version, Params};
 
+    // INVARIANT: callers MUST pre-validate (m_cost, t_cost, p_cost) via
+    // `KdfParams::validate()` before reaching this function. The expects
+    // below are invariants of that validation, not user-input checks —
+    // bypassing validate() (e.g., by introducing a new caller that loads
+    // params from an unvalidated wallet header) re-introduces a panic-
+    // on-malformed-input DoS that the load path is supposed to prevent.
     let params = Params::new(
         m_cost,
         t_cost,
         p_cost,
-        Some(32),  // Output 32-byte key
-    ).expect("valid Argon2 params");
+        Some(32),  // 32-byte output
+    ).expect("Argon2 Params: bounds enforced by KdfParams::validate()");
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let mut key = [0u8; 32];
+    // hash_password_into fails only on (a) buffer size mismatch — impossible
+    // here, key is exactly 32 bytes — or (b) m_cost allocation OOM, which is
+    // an operator-config issue (validate() upper-bound chosen to fit any
+    // sane host). A panic in that case is the correct failure mode: the
+    // process can't function with insufficient RAM for the configured KDF.
     argon2.hash_password_into(password.as_bytes(), salt, &mut key)
-        .expect("Argon2 key derivation failed");
+        .expect("Argon2 KDF: buffer size and m_cost upper-bound are invariants");
 
     key
 }

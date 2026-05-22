@@ -38,6 +38,13 @@ use crate::primitives::PublicKey;
 /// Hard cap on number of candidate outputs returned per scan request.
 const MAX_SCAN_OUTPUTS: usize = 10_000;
 
+/// Hard cap on the block range a single scan request may sweep. A
+/// caller asking for more must paginate. Previously the over-cap was
+/// silently clamped — the caller couldn't tell their requested range
+/// got truncated, so they'd keep re-issuing the same over-cap request
+/// and never finish syncing.
+const MAX_SCAN_BLOCKS_PER_REQ: u64 = 5_000;
+
 // ═══════════════════════════════════════════════════════════════════════
 // API types
 // ═══════════════════════════════════════════════════════════════════════
@@ -91,7 +98,10 @@ pub struct ScanRequest {
     pub spend_public: String,
     /// Start scanning from this block height
     pub start_height: u64,
-    /// Maximum number of blocks to scan (default 1000)
+    /// Maximum number of blocks to scan in this request. Default 1000;
+    /// hard limit `MAX_SCAN_BLOCKS_PER_REQ` (5000). Values above the
+    /// hard limit are rejected with `max_blocks too large` — callers
+    /// must paginate by advancing `start_height` and re-issuing.
     pub max_blocks: Option<u64>,
 }
 
@@ -198,7 +208,13 @@ impl LightWalletServer {
         let spend_pub = parse_public_key(&req.spend_public)
             .map_err(|e| format!("invalid spend_public: {}", e))?;
 
-        let max_blocks = req.max_blocks.unwrap_or(1000).min(5000);
+        let max_blocks = req.max_blocks.unwrap_or(1000);
+        if max_blocks > MAX_SCAN_BLOCKS_PER_REQ {
+            return Err(format!(
+                "max_blocks too large: {} (limit {}); paginate by advancing start_height",
+                max_blocks, MAX_SCAN_BLOCKS_PER_REQ
+            ));
+        }
         let chain_height = self.chain.height();
         let end_height = (req.start_height + max_blocks).min(chain_height);
 

@@ -58,7 +58,7 @@
 //! their finality voice counts — and is handled entirely inside the
 //! crate; the adapter neither needs nor adds special-casing for it.
 
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 use coincync_rolling_finality::{
     codec, ApplyOutcome, Ed25519Verifier, FinalityError, FinalityStats, FinalityTracker,
@@ -172,10 +172,7 @@ impl RollingFinality {
             Err(e) => return OnBlockOutcome::Malformed(e),
         };
 
-        let mut tracker = self
-            .tracker
-            .write()
-            .expect("RollingFinality tracker lock poisoned");
+        let mut tracker = self.tracker.write();
 
         // Ordering invariant (see module docs): record the block —
         // which advances `chain_tip` and adds the miner to the active
@@ -206,7 +203,6 @@ impl RollingFinality {
     pub fn would_reorg_violate_finality(&self, proposed_fork_height: u64) -> bool {
         self.tracker
             .read()
-            .expect("RollingFinality tracker lock poisoned")
             .would_reorg_violate_finality(proposed_fork_height)
     }
 
@@ -214,19 +210,13 @@ impl RollingFinality {
     /// height crosses the 2/3 quorum threshold. Consumed by the RPC
     /// surface, the status page, and metrics.
     pub fn current_soft_final_height(&self) -> Option<u64> {
-        self.tracker
-            .read()
-            .expect("RollingFinality tracker lock poisoned")
-            .soft_final_height()
+        self.tracker.read().soft_final_height()
     }
 
     /// Snapshot of tracker state for observability (RPC
     /// `get_finality_status`, status page, Prometheus metrics).
     pub fn stats(&self) -> FinalityStats {
-        self.tracker
-            .read()
-            .expect("RollingFinality tracker lock poisoned")
-            .stats()
+        self.tracker.read().stats()
     }
 }
 

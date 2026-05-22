@@ -59,12 +59,35 @@ impl DaemonClient {
     /// `https://api.coincync.network/rpc/testnet` for the public
     /// nginx-fronted endpoint.
     pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Result<Self> {
+        let base_url = base_url.into();
+
+        // Warn loudly if the operator is pointing at a non-localhost daemon
+        // over plaintext HTTP. The bearer token (when set) and every block
+        // template + share submission then crosses the network unencrypted,
+        // and any path-adjacent attacker can lift the token, submit shares
+        // under the operator's address, or inject malicious templates.
+        // Localhost http is fine — the network-stack hop never leaves the
+        // box, and the upstream daemon ↔ public endpoint TLS handles the
+        // wire from there.
+        let is_http = base_url.starts_with("http://");
+        let is_local = base_url.contains("://127.0.0.1")
+            || base_url.contains("://localhost")
+            || base_url.contains("://[::1]");
+        if is_http && !is_local {
+            tracing::warn!(
+                base_url = %base_url,
+                "DaemonClient: connecting to a remote daemon over plaintext http:// — \
+                 the API key (if set) and mining traffic are exposed on the wire. \
+                 Prefer https:// for any non-loopback destination."
+            );
+        }
+
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .context("building reqwest client")?;
         Ok(Self {
-            base_url: base_url.into(),
+            base_url,
             api_key,
             http,
         })

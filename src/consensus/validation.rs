@@ -841,9 +841,20 @@ fn validate_difficulty_target(
 ) {
     let target = &block.header.target;
 
-    // Check 1: Target must not be easier than max_target
+    // Check 1: Target must not be easier than max_target.
+    //
+    // Use the same u128 path as the adjustment-ratio check below
+    // (line ~862) so the two comparisons can't drift. The previous
+    // bytewise `target.as_bytes() > max.as_bytes()` was mathematically
+    // equivalent only while max_target = [0xFF; 32] (in which case the
+    // check is dead code — no 32-byte value can be lexicographically
+    // greater than all-0xFF). If max_target is ever lowered, bytewise
+    // comparison would consider bytes [16..32] which target_to_u128
+    // ignores, and the two checks would disagree.
     let max = max_target();
-    if target.as_bytes() > max.as_bytes() {
+    let target_value = target_to_u128(target.as_bytes());
+    let max_value = target_to_u128(max.as_bytes());
+    if target_value > max_value {
         result.add_error("Target easier than max_target (minimum difficulty)");
         return;
     }

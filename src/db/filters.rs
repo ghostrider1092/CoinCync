@@ -40,10 +40,21 @@ impl FilterDb {
         let checkpoints = db.open_tree("filter_checkpoints")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-        // Recover tip height from last entry
+        // Recover tip height from last entry. A malformed (non-8-byte)
+        // filter index key is treated as DB corruption and propagated
+        // — silently coercing to 0 would mask the corruption as "no
+        // filters yet" and cause the node to re-download from genesis.
         let tip_height = match filters.last() {
             Ok(Some((key, _))) => {
-                u64::from_be_bytes(key.as_ref().try_into().unwrap_or([0u8; 8]))
+                let key_bytes = key.as_ref();
+                let arr: [u8; 8] = key_bytes.try_into().map_err(|_| {
+                    Error::DatabaseError(format!(
+                        "filter index tip key has unexpected length {} (expected 8); \
+                         filter database may be corrupted",
+                        key_bytes.len()
+                    ))
+                })?;
+                u64::from_be_bytes(arr)
             }
             _ => 0,
         };

@@ -121,12 +121,22 @@ enum Command {
 async fn main() {
     let cli = Cli::parse();
 
-    // Initialize tracing
+    // Initialize tracing. Prefer RUST_LOG, then --log-level, then "info"
+    // as a guaranteed-valid last resort. A malformed RUST_LOG or
+    // --log-level must NOT panic before tracing is up — that's a node
+    // failure with zero diagnostic output. We warn to stderr instead.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .or_else(|_| cli.log_level.parse())
+        .unwrap_or_else(|_| {
+            eprintln!(
+                "warning: log filter '{}' is invalid (and RUST_LOG was unset or also invalid); \
+                 falling back to 'info'",
+                cli.log_level
+            );
+            "info".parse().expect("'info' is a valid log filter")
+        });
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| cli.log_level.parse().unwrap()),
-        )
+        .with_env_filter(env_filter)
         .with_target(false)
         .init();
 

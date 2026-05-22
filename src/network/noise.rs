@@ -29,23 +29,74 @@ const MAX_NOISE_PAYLOAD: usize = 65519;
 /// Noise handshake timeout in seconds.
 pub const NOISE_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 
+/// Maximum legal size of a single Noise XX handshake frame. The XX
+/// pattern produces three messages whose worst-case sizes are
+/// dominated by an ephemeral key (32 B) plus a static key (32 B) plus
+/// an AEAD tag (16 B) plus the snow framing overhead — comfortably
+/// under 200 bytes in practice. We allow 8 KB as a safety margin and
+/// to absorb any future payload extension, but reject anything larger:
+/// the snow crate accepts up to 65535 bytes per Noise spec, which lets
+/// an unauthenticated peer force a 64 KB allocation per handshake
+/// attempt before the snow `read_message` call fails. Cap here trims
+/// that to 8 KB per attempt.
+const NOISE_HANDSHAKE_FRAME_MAX: usize = 8192;
+
 fn harden_secret_file_permissions(path: &Path) {
+    // Best-effort: the function is fire-and-forget (callers can't act on
+    // failure mid-handshake), but failure must be operator-visible —
+    // silently leaving a noise secret with default ACLs is exactly the
+    // kind of finding an auditor will flag. Log on any failure path so
+    // the operator can fix the underlying issue (UAC, AV interfering
+    // with icacls, network-share ACL inheritance lock, etc.).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                path = %path.display(), error = %e,
+                "harden_secret_file_permissions: failed to chmod 600 — secret file may be world-readable",
+            );
+        }
     }
     #[cfg(windows)]
     {
         if let Some(path_str) = path.to_str() {
-            let _ = std::process::Command::new("icacls")
+            let inh = std::process::Command::new("icacls")
                 .args([path_str, "/inheritance:r"])
                 .status();
+            match inh {
+                Ok(s) if s.success() => {}
+                Ok(s) => tracing::warn!(
+                    path = path_str, exit = ?s.code(),
+                    "harden_secret_file_permissions: icacls /inheritance:r exited non-zero",
+                ),
+                Err(e) => tracing::warn!(
+                    path = path_str, error = %e,
+                    "harden_secret_file_permissions: icacls /inheritance:r failed to spawn",
+                ),
+            }
+
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "Users".to_string());
             let grant = format!("{user}:F");
-            let _ = std::process::Command::new("icacls")
+            let g = std::process::Command::new("icacls")
                 .args([path_str, "/grant:r", &grant])
                 .status();
+            match g {
+                Ok(s) if s.success() => {}
+                Ok(s) => tracing::warn!(
+                    path = path_str, user = %user, exit = ?s.code(),
+                    "harden_secret_file_permissions: icacls /grant:r exited non-zero",
+                ),
+                Err(e) => tracing::warn!(
+                    path = path_str, user = %user, error = %e,
+                    "harden_secret_file_permissions: icacls /grant:r failed to spawn",
+                ),
+            }
+        } else {
+            tracing::warn!(
+                path = ?path,
+                "harden_secret_file_permissions: path is not valid UTF-8 — cannot pass to icacls",
+            );
         }
     }
 }
@@ -475,8 +526,11 @@ async fn read_noise_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8
     let mut len_buf = [0u8; 2];
     reader.read_exact(&mut len_buf).await?;
     let len = u16::from_be_bytes(len_buf) as usize;
-    if len > 65535 {
-        return Err(Error::NoiseHandshakeFailed("handshake frame too large".into()));
+    if len > NOISE_HANDSHAKE_FRAME_MAX {
+        return Err(Error::NoiseHandshakeFailed(format!(
+            "handshake frame too large: {} bytes (max {})",
+            len, NOISE_HANDSHAKE_FRAME_MAX
+        )));
     }
     let mut data = vec![0u8; len];
     reader.read_exact(&mut data).await?;

@@ -217,6 +217,12 @@ pub struct BackgroundSyncManager {
     stats: SyncStats,
     /// Is running flag
     is_running: Arc<AtomicBool>,
+    /// Last error message — surfaced via [`Self::progress`] in
+    /// `SyncProgress::last_error` so the UI can show *why* sync entered
+    /// `SyncState::Error`. Previously [`Self::record_error`] dropped its
+    /// `msg` argument on the floor and the operator saw only "Error"
+    /// with no explanation.
+    last_error: Option<String>,
 }
 
 /// Sync statistics
@@ -262,6 +268,7 @@ impl BackgroundSyncManager {
             config,
             stats: SyncStats::default(),
             is_running: Arc::new(AtomicBool::new(false)),
+            last_error: None,
         }
     }
 
@@ -338,7 +345,7 @@ impl BackgroundSyncManager {
             eta_seconds: eta,
             is_complete: self.state == SyncState::Complete,
             is_paused: self.state == SyncState::Paused,
-            last_error: None,
+            last_error: self.last_error.clone(),
         }
     }
 
@@ -368,9 +375,18 @@ impl BackgroundSyncManager {
         Some((start, end))
     }
 
-    /// Record an error
-    pub fn record_error(&mut self, _msg: String) {
+    /// Record an error and stash the message for the next [`Self::progress`]
+    /// call. The UI's sync indicator reads `progress.last_error` to show
+    /// the operator why sync stopped; without this stash the operator
+    /// sees a generic "Error" state with no diagnostic.
+    pub fn record_error(&mut self, msg: String) {
         self.state = SyncState::Error;
+        self.last_error = Some(msg);
+    }
+
+    /// Clear the recorded error (call when sync resumes).
+    pub fn clear_error(&mut self) {
+        self.last_error = None;
     }
 }
 

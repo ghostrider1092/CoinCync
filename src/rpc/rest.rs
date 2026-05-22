@@ -52,8 +52,44 @@ const MAX_EMISSION_POINTS: u64 = 1000;
 /// Hard cap on concurrent websocket clients (DoS guard).
 const MAX_WS_CONNECTIONS: usize = 128;
 
+/// Per-IP cap on concurrent websocket clients. Stops a single IP
+/// (or a single trusted-proxy-forwarded IP) from monopolising the
+/// 128 global slots. When proxy headers aren't trusted, every caller
+/// shares the "unknown" bucket and this collapses to a global cap —
+/// fine, the global cap above already handles that case.
+const MAX_WS_PER_IP: u32 = 5;
+
 /// Global websocket connection counter for this process.
 static ACTIVE_WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Per-IP websocket connection counters. Keyed by whatever
+/// `client_ip_from_headers` returns — a real client IP when proxy
+/// headers are trusted, "unknown" otherwise.
+static ACTIVE_WS_PER_IP: parking_lot::Mutex<Option<HashMap<String, u32>>> =
+    parking_lot::Mutex::new(None);
+
+fn ws_per_ip_check_and_increment(ip: &str) -> bool {
+    let mut guard = ACTIVE_WS_PER_IP.lock();
+    let map = guard.get_or_insert_with(HashMap::new);
+    let count = map.entry(ip.to_string()).or_insert(0);
+    if *count >= MAX_WS_PER_IP {
+        return false;
+    }
+    *count += 1;
+    true
+}
+
+fn ws_per_ip_decrement(ip: &str) {
+    let mut guard = ACTIVE_WS_PER_IP.lock();
+    if let Some(map) = guard.as_mut() {
+        if let Some(count) = map.get_mut(ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(ip);
+            }
+        }
+    }
+}
 
 /// Dependency-free fixed-window guards for high-risk endpoints.
 const RPC_PROXY_MAX_REQ_PER_SEC: u32 = 60;
@@ -408,7 +444,29 @@ fn enforce_fixed_window_limit(
     Ok(())
 }
 
+/// Whether to honor `X-Forwarded-For` / `X-Real-IP` headers from
+/// inbound requests. Default: false. Operators running behind a
+/// trusted reverse proxy (nginx, Caddy) that strips inbound forwarded
+/// headers and re-sets them from the real client IP must opt in via
+/// `COINCYNC_TRUST_PROXY_HEADERS=1`. Otherwise any direct client can
+/// rotate IPs to bypass per-IP rate limits trivially.
+fn trust_proxy_headers() -> bool {
+    static TRUST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRUST.get_or_init(|| {
+        let value = std::env::var("COINCYNC_TRUST_PROXY_HEADERS").unwrap_or_default();
+        matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
+    })
+}
+
 fn client_ip_from_headers(headers: &HeaderMap) -> String {
+    // When proxy headers are not explicitly trusted, treat every
+    // request as "unknown" so the per-IP rate limit collapses into a
+    // global rate limit (all callers share one bucket). This is the
+    // safer default than letting an unauthenticated client spoof
+    // X-Forwarded-For to rotate through buckets.
+    if !trust_proxy_headers() {
+        return "unknown".to_string();
+    }
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -1032,11 +1090,22 @@ async fn list_assets(State(st): State<RestState>) -> Result<Json<Value>, (Status
 /// Future: connect to the native SubscriptionManager for push-based events.
 async fn ws_upgrade(
     State(st): State<RestState>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // Per-IP cap first — cheaper than the global atomic CAS dance and
+    // closes the easier DoS (one attacker eating all 128 slots).
+    let client_ip = client_ip_from_headers(&headers);
+    if !ws_per_ip_check_and_increment(&client_ip) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+
+    // Global cap second. If we don't get a slot, we must release the
+    // per-IP reservation we just took or it leaks.
     loop {
         let current = ACTIVE_WS_CONNECTIONS.load(Ordering::Relaxed);
         if current >= MAX_WS_CONNECTIONS {
+            ws_per_ip_decrement(&client_ip);
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
         if ACTIVE_WS_CONNECTIONS
@@ -1051,21 +1120,31 @@ async fn ws_upgrade(
             break;
         }
     }
-    ws.on_upgrade(move |socket| ws_handler(socket, st))
+    ws.on_upgrade(move |socket| ws_handler(socket, st, client_ip))
 }
 
-async fn ws_handler(mut socket: ws::WebSocket, state: RestState) {
-    use tokio::time::{interval, Duration};
+async fn ws_handler(mut socket: ws::WebSocket, state: RestState, client_ip: String) {
+    use tokio::time::{interval, Duration, Instant};
 
-    struct WsConnGuard;
+    // Close a client that hasn't sent us anything in this long. Prevents
+    // an attacker from holding 128/128 WS slots open by reading bytes
+    // but never speaking — TCP keepalives alone are slow and OS-tuned.
+    const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+    struct WsConnGuard {
+        client_ip: String,
+    }
     impl Drop for WsConnGuard {
         fn drop(&mut self) {
             ACTIVE_WS_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+            ws_per_ip_decrement(&self.client_ip);
         }
     }
-    let _guard = WsConnGuard;
+    let _guard = WsConnGuard { client_ip };
 
     let mut tick = interval(Duration::from_secs(3));
+    let mut idle_check = interval(Duration::from_secs(30));
+    let mut last_client_activity = Instant::now();
     let mut last_height: u64 = 0;
     let mut last_mempool_count: u64 = 0;
 
@@ -1135,6 +1214,7 @@ async fn ws_handler(mut socket: ws::WebSocket, state: RestState) {
                 last_mempool_count = mempool_size;
             }
             msg = socket.recv() => {
+                last_client_activity = Instant::now();
                 match msg {
                     Some(Ok(ws::Message::Text(text))) => {
                         // Handle client commands (ping, subscribe to specific events)
@@ -1146,7 +1226,13 @@ async fn ws_handler(mut socket: ws::WebSocket, state: RestState) {
                         }
                     }
                     Some(Ok(ws::Message::Close(_))) | None => break,
+                    Some(Err(_)) => break, // Protocol error — close the connection
                     _ => {} // Ignore binary frames, pings handled by axum
+                }
+            }
+            _ = idle_check.tick() => {
+                if last_client_activity.elapsed() >= WS_IDLE_TIMEOUT {
+                    break;
                 }
             }
         }

@@ -134,11 +134,19 @@ enum Command {
         #[arg(long, default_value = "0")]
         threads: usize,
         /// If set, expose a Prometheus /metrics endpoint on this TCP
-        /// port. 0 = disabled. Bind is 0.0.0.0:<port> — firewall it if
-        /// you don't want it on the public internet. Cheap (one accept
-        /// per scrape, no impact on the mining hot path).
+        /// port. 0 = disabled. Defaults to binding `127.0.0.1` only —
+        /// override with --metrics-bind to publish more widely. /metrics
+        /// is unauthenticated, so non-loopback binds should be firewalled.
         #[arg(long, default_value = "0")]
         metrics_port: u16,
+        /// Bind address for the /metrics endpoint. Default `127.0.0.1`
+        /// (loopback only — safe by default). Set to `0.0.0.0` to expose
+        /// to all interfaces, or to a specific internal IP for split-
+        /// horizon scraping. Operators upgrading from earlier versions
+        /// previously got 0.0.0.0 implicitly; set this explicitly to
+        /// restore that behavior.
+        #[arg(long, default_value = "127.0.0.1")]
+        metrics_bind: String,
         /// Render an interactive ratatui dashboard (stats bar + scrolling
         /// log pane). Tracing logs are routed into the pane instead of
         /// stdout while the TUI is up. Press q / Esc to quit. Don't use
@@ -218,8 +226,8 @@ fn main() -> Result<()> {
         }
         Command::Bench { threads, duration } => run_bench(threads, duration),
         Command::Info { node, api_key } => run_info(&node, api_key),
-        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port, tui } => {
-            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port, tui, tui_log_rx)
+        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port, metrics_bind, tui } => {
+            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port, &metrics_bind, tui, tui_log_rx)
         }
         Command::RunConfig { config } => run_config_cli(&config),
     }
@@ -301,9 +309,17 @@ fn decode_nonce(s: &str) -> Result<u64> {
 
 fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
     let n_threads = if threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        match std::thread::available_parallelism() {
+            Ok(n) => n.get(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "available_parallelism() failed; falling back to 1 mining thread — \
+                     pass --threads N explicitly to override",
+                );
+                1
+            }
+        }
     } else {
         threads
     };
@@ -407,13 +423,22 @@ fn run_solo_cli(
     poll_interval_secs: u64,
     threads: usize,
     metrics_port: u16,
+    metrics_bind: &str,
     tui_enabled: bool,
     tui_log_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
     let n_threads = if threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        match std::thread::available_parallelism() {
+            Ok(n) => n.get(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "available_parallelism() failed; falling back to 1 mining thread — \
+                     pass --threads N explicitly to override",
+                );
+                1
+            }
+        }
     } else {
         threads
     };
@@ -453,8 +478,8 @@ fn run_solo_cli(
         };
         if metrics_port != 0 {
             if let Some(state) = metrics_state.as_ref() {
-                if let Err(e) = metrics::serve(metrics_port, state.clone()).await {
-                    tracing::warn!(error = %e, port = metrics_port,
+                if let Err(e) = metrics::serve(metrics_bind, metrics_port, state.clone()).await {
+                    tracing::warn!(error = %e, bind = metrics_bind, port = metrics_port,
                         "metrics: failed to bind /metrics endpoint, continuing without metrics");
                 }
             }
@@ -515,6 +540,16 @@ struct MiningSection {
     /// Prometheus /metrics endpoint port. 0 (or unset) = disabled.
     #[serde(default)]
     metrics_port: u16,
+    /// Bind address for /metrics. Default `127.0.0.1` (loopback only).
+    /// Set to `0.0.0.0` or a specific internal IP to expose more widely;
+    /// /metrics is unauthenticated, so non-loopback binds should be
+    /// firewalled.
+    #[serde(default = "default_metrics_bind")]
+    metrics_bind: String,
+}
+
+fn default_metrics_bind() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_network() -> String {
@@ -554,6 +589,7 @@ fn run_config_cli(config_path: &str) -> Result<()> {
         cfg.mining.poll_interval_secs,
         cfg.mining.threads,
         cfg.mining.metrics_port,
+        &cfg.mining.metrics_bind,
         false,
         None,
     )
