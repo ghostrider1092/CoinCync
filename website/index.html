@@ -563,7 +563,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   </div>
   <h1>Your money<br>is <em class="bubble"><span class="bubble-letter">y</span><span class="bubble-letter">o</span><span class="bubble-letter">u</span><span class="bubble-letter">r</span><span class="bubble-letter">s</span></em>.</h1>
   <p class="hero-sub">A privacy-first cryptocurrency where every transaction is shielded by default, supply is cryptographically auditable, and no permission is required to participate.</p>
-  <p class="hero-thesis" style="font-family:var(--serif);font-style:italic;font-size:clamp(15px,1.5vw,18px);line-height:1.5;color:var(--t2);max-width:680px;margin:0 auto 36px;padding:0 24px;border-left:2px solid var(--ac);text-align:left;padding-left:20px">Privacy money that doesn&rsquo;t depend on permission to participate. CYNC&harr;BTC atomic swaps are a constitutional mainnet-launch commitment, not a roadmap item to be deferred. Whether this combination works is what testnet and mainnet are for.</p>
+  <p class="hero-thesis" style="font-family:var(--serif);font-style:italic;font-size:clamp(15px,1.5vw,18px);line-height:1.5;color:var(--t2);max-width:680px;margin:0 auto 36px;padding:0 24px;border-left:2px solid var(--ac);text-align:left;padding-left:20px">Privacy money that doesn&rsquo;t depend on permission to participate. CYNC&harr;BTC atomic swaps are a constitutional commitment under Article&nbsp;XV &mdash; they ship in v1.1, after the base chain is live on mainnet and cyncswap has cleared its own dedicated audit. Same staging Monero used: chain first, novel crypto later, each behind its own audit.</p>
   <div class="hero-actions">
     <a href="#download" class="btn-primary">Download Wallet</a>
     <a href="https://explorer.coincync.network" class="btn-ghost" target="_blank">Explore the chain</a>
@@ -1008,21 +1008,27 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
       <div class="roadmap-tag active">In Progress</div>
     </div>
     <div class="roadmap-item">
-      <div class="roadmap-phase">Phase 5 &mdash; Mainnet Prep</div>
-      <div class="roadmap-title">Atomic Swaps &amp; Signed Releases</div>
-      <div class="roadmap-desc">CIP-001 working CYNC&harr;BTC atomic swap &mdash; protocol state machine, handshake state machine, state persistence, and operator CLI all shipped during phase 4; what remains for mainnet is the cryptographic core (adaptor signatures over CLSAG and secp256k1, cross-curve DL-equality proof, Tor/Noise transport) plus an external audit. Mainnet launch blocker per Article XV. Multi-maintainer signed-release infrastructure (M-of-N via FROST coordinator). Reproducible builds verified.</div>
+      <div class="roadmap-phase">Phase 5 &mdash; Mainnet Prep (v1.0)</div>
+      <div class="roadmap-title">Base-Chain Audit &amp; Signed Releases</div>
+      <div class="roadmap-desc">Base-chain audit on consensus, P2P, wallet, mining, and reorg defense. Multi-maintainer signed-release infrastructure (M-of-N via FROST coordinator). Reproducible Docker builds verified byte-identical. Genesis ceremony preparation: mainnet seed nodes, initial checkpoint set, monitoring live ≥ 7 days pre-genesis. <strong>Atomic swaps (cyncswap) and the Orchard shielded pool are deliberately not in v1.0 scope</strong> &mdash; each is the largest novel-cryptography surface in the codebase and ships in its own release after its own audit. Same staging Monero used: chain first, novel crypto later.</div>
       <div class="roadmap-tag">Planned</div>
     </div>
     <div class="roadmap-item">
-      <div class="roadmap-phase">Phase 6 &mdash; Mainnet Genesis</div>
-      <div class="roadmap-title">October 1, 2026</div>
-      <div class="roadmap-desc">Mainnet launch. Hardware wallet support. Mobile wallet beta. Direct integrations with privacy-friendly swap services (Cake Wallet, Haveno, ChangeNOW, FixedFloat) for trustless on/off ramps via atomic swaps.</div>
+      <div class="roadmap-phase">Phase 6 &mdash; Mainnet Genesis (v1.0)</div>
+      <div class="roadmap-title">October 1, 2026 &mdash; Base Chain</div>
+      <div class="roadmap-desc">v1.0 mainnet launch. Privacy money chain: mine, send, receive, multi-sig, with the full 7-feature privacy stack and CIP-009 reorg defense active. Desktop wallet ships base-chain features only; the Trade tab unhides in v1.1 once cyncswap clears its own audit. Hardware wallet support and mobile wallet beta land in v1.0.x point releases.</div>
       <div class="roadmap-tag">Planned</div>
     </div>
     <div class="roadmap-item">
-      <div class="roadmap-phase">Phase 7 &mdash; cynchub Liquidity Layer</div>
+      <div class="roadmap-phase">Phase 7 &mdash; cyncswap (v1.1)</div>
+      <div class="roadmap-title">CIP-001: CYNC&harr;BTC Atomic Swaps</div>
+      <div class="roadmap-desc">Trustless CYNC&harr;BTC atomic swaps with the 6-layer user-safety stack. Substantially complete today &mdash; 346 tests pass with strict-DLEQ, mutation score 100% on audit-critical files, ~97% line coverage on the audit perimeter, libFuzzer + AddressSanitizer overnight runs clean across 27 targets. Ships <strong>after v1.0 mainnet is live</strong> and cyncswap has cleared its own dedicated audit (kickoff target ~30 days post-mainnet; estimated Q1&ndash;Q2 2027). Once it ships, every Bitcoin holder is one transaction away from holding CYNC trustlessly &mdash; no centralized exchange, no federation, no custodial bridge.</div>
+      <div class="roadmap-tag">Planned</div>
+    </div>
+    <div class="roadmap-item">
+      <div class="roadmap-phase">Phase 8 &mdash; cynchub Liquidity Layer</div>
       <div class="roadmap-title">CIP-002: PoW-Secured Cross-Chain Trading</div>
-      <div class="roadmap-desc">12&ndash;24 months post-mainnet. Auxiliary PoW chain merge-mined with CoinCync, hosting an on-chain order book for trustless CYNC&harr;BTC&harr;stablecoin trading. Miners coordinate; HTLCs settle. The PoW alternative to PoS bridges &mdash; no multisig, no federation, no admin authority.</div>
+      <div class="roadmap-desc">12&ndash;24 months post-mainnet. Auxiliary PoW chain merge-mined with CoinCync, hosting an on-chain order book for trustless CYNC&harr;BTC&harr;stablecoin trading. Miners coordinate; HTLCs settle. The PoW alternative to PoS bridges &mdash; no multisig, no federation, no admin authority. Conditional on cyncswap stability and the v1.3 entry criteria in the public roadmap.</div>
       <div class="roadmap-tag">Future</div>
     </div>
   </div>
@@ -1107,7 +1113,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     </div>
     <div class="faq-item">
       <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">When does mainnet launch?</div>
-      <div class="faq-a"><div class="faq-a-inner">October 1, 2026 at 00:00:00 UTC. The genesis message reads: "CoinCync Mainnet Genesis - Privacy You Can Audit - October 2026". Until then, the testnet is live with mining active. All testnet coins will be wiped at mainnet launch.</div></div>
+      <div class="faq-a"><div class="faq-a-inner">October 1, 2026 at 00:00:00 UTC. The genesis message reads: "CoinCync Mainnet Genesis - Privacy You Can Audit - October 2026". Until then, the testnet is live with mining active. All testnet coins will be wiped at mainnet launch. <strong>v1.0 mainnet ships the base chain only</strong> &mdash; mine, send, receive, multi-sig, with the full 7-feature privacy stack. CYNC&harr;BTC atomic swaps (cyncswap) ship in v1.1 after their own dedicated audit, ~Q1&ndash;Q2 2027. Same staging Monero used: chain first, novel crypto later, each behind its own audit.</div></div>
     </div>
   </div>
 </section>

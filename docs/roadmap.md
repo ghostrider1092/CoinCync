@@ -3,7 +3,7 @@
 
 **Discipline:** one headline feature per release, polished to "really good" before ship. Apple-style — see [docs/decisions/2026-05-18-cyncswap-path.md](decisions/2026-05-18-cyncswap-path.md) for the underlying philosophy. **This document lists only the next three releases.** Anything past v1.3 is research, not roadmap.
 
-**Last updated:** 2026-05-18
+**Last updated:** 2026-05-20
 
 ---
 
@@ -17,38 +17,63 @@
 
 ---
 
-## v1.0 — Privacy primitives + 6-node testnet (shipped)
+## v1.0 — Base chain mainnet (testnet live; mainnet next)
 
-**Status:** Shipped and live.
-**Date:** Testnet went live 2026-04-30, currently running 5 Vultr-hosted nodes (per `project_vultr_fleet`).
+**Status:** Testnet shipped and live. Mainnet ship is the next release.
+**Date:** Testnet went live 2026-04-30, currently running 5 Vultr-hosted nodes (per `project_vultr_fleet`). Mainnet target: October 1, 2026.
 
-**What it contains:**
+**Headline:** Privacy money chain — mine, send, receive, mainnet-grade. **No cyncswap; no shielded pool.** The base chain ships first, novel cryptographic features ship after each clears its own audit. Same pattern Monero used: chain first (2014), Bulletproofs and CLSAG and other novel crypto later, behind their own audits.
+
+**What v1.0 mainnet contains:**
 
 - 7 privacy innovations (decoy defense, encrypted memos, scoped view keys, deniable wallets, traffic shaping, dead man's switch, auto-churn)
 - FROST M-of-N multisig (per CIP-008)
 - 6-layer reorg defense (CIP-009) + miner-signed rolling checkpoints (CIP-009.D, feature-gated)
 - 46-feature blockchain explorer
 - `coincync-node` + `coincync-wallet` reference implementations
+- RandomX CPU mining
+- Send / receive / history / addresses / mining / multi-sig in the desktop wallet
+- Hardened P2P (jitter + size normalisation + constant-rate cover traffic)
+- Reproducible Docker builds, multi-maintainer signed-release infrastructure
 
-**What it does NOT contain** (intentionally cut, deferred to later releases):
+**What v1.0 mainnet does NOT contain** (intentionally cut, deferred to later releases):
 
-- Atomic swaps (cyncswap) — v1.1
+- **Atomic swaps (cyncswap) — v1.1**, after dedicated cyncswap-only audit
+- Shielded pool (Orchard / Phase-2) — v1.2 earliest, scope under review
 - On-chain orderbook (CyncHub) — v1.3 earliest, conditional
-- Shielded pool (Orchard) — v1.x, scope under review
 - Stablecoin support — never, by constitutional design
 - Federation, governance token, admin authority — never, by constitutional design
 
+**Why the base chain ships without cyncswap:**
+
+Cyncswap is the largest novel-cryptography component in the codebase: Schnorr adaptor signatures (BIP-340 + Ristretto255), strict-binding Noether 2018 cross-curve DLEQ, joint-key CLSAG for the CYNC side, two transports (Noise XX, SOCKS5/Tor). It is the right size for its own focused audit — and a 3-6 month audit on cyncswap would block the base-chain mainnet by 3-6 months for code that the chain itself does not depend on. Decoupling the two lets v1.0 ship to mainnet on schedule and lets the cyncswap audit start from a frozen tag rather than a moving target. See [decisions/2026-05-20-staged-mainnet-and-cyncswap.md](decisions/2026-05-20-staged-mainnet-and-cyncswap.md) for the full rationale.
+
+**Shippable bar for v1.0 mainnet (all must be met before tag):**
+
+| Criterion | Threshold |
+| --- | --- |
+| Consensus tests | Full suite green on current tip |
+| Testnet soak | ≥ 60 days uninterrupted operation of the 5-node fleet with no consensus split |
+| Audit | Base-chain audit cleared, report public at `coincync.org/security` |
+| Reorg defense | CIP-009 layers 1-3 active in production; CIP-009.D feature-gated and exercised on testnet |
+| Reproducible build | Byte-identical binary from Docker on the documented host arch |
+| Wallet | Desktop wallet ships base-chain features only (no Trade tab) |
+| Genesis ceremony | Mainnet seeds + initial checkpoint set + monitoring live ≥ 7 days pre-genesis |
+| Docs | Operator guide + node-runner guide + wallet user guide reviewed by ≥ 3 non-dev users |
+
+If any criterion is not met by the target month, **v1.0 mainnet slips**. The criteria do not relax.
+
 ---
 
-## v1.1 — cyncswap mainnet ship
+## v1.1 — cyncswap (post-mainnet, post-audit)
 
-**Headline:** Trustless CYNC↔BTC atomic swaps with the 6-layer user-safety stack.
-**Target:** 6 months from "v1.1 ready to audit" (currently estimated Q3 2026; specific month locked when audits are scheduled).
-**Status:** ~70% implemented, audit prep underway.
+**Headline:** Trustless CYNC↔BTC atomic swaps with the 6-layer user-safety stack. **Ships after v1.0 mainnet is stable** and cyncswap has cleared its own dedicated audit.
+**Target:** 3-6 months after v1.0 mainnet (currently estimated Q1-Q2 2027; specific month locked when the cyncswap audit is scheduled).
+**Status:** ~95% implemented (346 tests pass with `--features strict-dleq`), audit prep complete at [docs/cyncswap-audit-prep.md](cyncswap-audit-prep.md). Audit outreach to Cypher Stack / OSTIF / Teserakt pending NLnet grant outcome.
 
 **Why this is the v1.1 headline:**
 
-Once cyncswap ships, every Bitcoin holder is one transaction away from holding CYNC trustlessly. Liquidity stops depending on centralized exchange listings — the listing-independence design that compensates for CYNC's expected CEX delisting trajectory. This is the strategically load-bearing feature of v1.x.
+Once cyncswap ships, every Bitcoin holder is one transaction away from holding CYNC trustlessly. Liquidity stops depending on centralized exchange listings — the listing-independence design that compensates for CYNC's expected CEX delisting trajectory. This is the strategically load-bearing feature of v1.x, and it deserves its own audit cycle separate from the base chain.
 
 **What's in scope:**
 
@@ -95,7 +120,7 @@ If any of the 8 above is not met by the target month, **v1.1 slips**. The criter
 
 - Cap denomination (USD-via-oracle vs sats) — current proposal: sats for V1
 - Bounty pool funding source — dev allocation, crowdfunding, NLnet grant
-- Whether CIP-013 (Orchard shielded pool) ships with v1.1 or as a separate v1.x — **this needs an explicit decision before the v1.1 scope is locked**. Two mainnet blockers in one release is non-Apple.
+- CIP-013 (Orchard shielded pool) is now explicitly **not** part of v1.1 — it ships in its own v1.x release after its own audit (same staged pattern). One headline per release.
 
 ---
 
@@ -210,4 +235,5 @@ Apple's discipline — announce only what ships this year — builds credibility
 
 ## Changelog
 
+- **2026-05-20** — **Staged mainnet decision locked in.** v1.0 explicitly defined as base-chain mainnet only (no cyncswap, no shielded pool). v1.1 reframed as cyncswap, shipped after the base chain is live on mainnet and cyncswap has cleared its own dedicated audit. Rationale: cyncswap is the largest novel-cryptography surface in the codebase and deserves an independent audit cycle rather than gating the base chain on it. Mirrors Monero's "chain first, novel crypto later" pattern. Decision recorded at [decisions/2026-05-20-staged-mainnet-and-cyncswap.md](decisions/2026-05-20-staged-mainnet-and-cyncswap.md).
 - **2026-05-18** — Roadmap created. v1.0 documented as shipped; v1.1 = cyncswap; v1.2 = polish; v1.3 = CyncHub (conditional on entry criteria). CIP-002 (CyncHub) reverted from Draft to Sketch the same day to reflect Apple-style "no commitment past the next 3 releases" discipline.

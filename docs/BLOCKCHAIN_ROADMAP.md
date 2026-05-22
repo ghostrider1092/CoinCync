@@ -1,6 +1,6 @@
 # Blockchain — Update Log + Technical Context
 
-> **Note (2026-05-18):** This document is now the **technical update log + cross-CIP sequencing notes**, not the authoritative roadmap. For public release commitments (v1.1, v1.2, v1.3 only, with shippable bars) see [docs/roadmap.md](roadmap.md) — that is the source of truth for *what ships when*. This document captures the historical update log and forward-looking technical context that doesn't fit neatly into per-CIP files.
+> **Note (2026-05-20, staged-mainnet decision):** This document is the **technical update log + cross-CIP sequencing notes**, not the authoritative roadmap. For public release commitments see [docs/roadmap.md](roadmap.md) — that is the source of truth for *what ships when*. **As of 2026-05-20, atomic swaps (cyncswap) are no longer a v1.0 mainnet blocker**; they ship in v1.1 after a dedicated cyncswap-only audit. See [decisions/2026-05-20-staged-mainnet-and-cyncswap.md](decisions/2026-05-20-staged-mainnet-and-cyncswap.md) for rationale. This document captures the historical update log and forward-looking technical context that doesn't fit neatly into per-CIP files.
 
 The protocol, consensus, P2P, and wallet layers of CoinCync. Companion to the [CIP register](cip/README.md) — the CIP register is the spec source-of-truth for any one design; this document captures the cross-cutting technical narrative.
 
@@ -135,29 +135,63 @@ The first consensus break since launch. Coordinated upgrade required.
    DNS privacy. The peer-routing side of Tor support already exists
    (`onion_only` + `proxy_active` flags); this closes the DNS leak.
 
-## Mainnet blockers — must ship before tag
+## v1.0 mainnet blockers — must ship before tag
 
-10. **CIP-001 atomic swap real crypto** — **L** remaining (was XL).
-    **Refreshed 2026-05-18 — substantially complete.** What's now
-    shipped: state machine + handshake + persistence; Schnorr adaptor
-    sigs (BTC BIP-340 parity-correct + CYNC Ristretto255); dual-response
-    cross-curve DLEQ + strict-binding Noether 2018 variant (gated by
-    Cargo feature `strict-dleq`); BTC + CYNC RPC clients with mock
-    impls; BTC lock/claim/refund tx construction (BIP-341 script-path);
-    CYNC swap key-derivation + `SwapLockRecipient` wallet-bridge helper;
-    coordinator transport (Plain TCP + Noise XX + SOCKS5/Tor dial, all
-    with DoS-hardened filtered-listen variants); 6 CLI orchestration
-    handlers (`lock-cync`, `lock-btc`, `claim-btc`, `claim-cync`,
-    `refund-btc`, `refund-cync`); operator-driven dual-testnet smoke
-    harness ([scripts/cyncswap-dual-testnet-smoke.sh](../scripts/cyncswap-dual-testnet-smoke.sh));
+> **Updated 2026-05-20:** Atomic swap (CIP-001) and Phase-2 activation (Orchard) have been **moved out of v1.0 mainnet blockers** and into their own staged releases (v1.1 and a separate v1.x, respectively). They are each the largest novel-cryptography surface in the codebase and deserve their own dedicated audit cycles rather than gating the base chain. See [decisions/2026-05-20-staged-mainnet-and-cyncswap.md](decisions/2026-05-20-staged-mainnet-and-cyncswap.md). The remaining v1.0 mainnet blockers are:
+
+10. **Base-chain security audit** — **XL** (3-6 months). NLnet-funded.
+    Scope: consensus, P2P, wallet, mining, reorg defense. **Cyncswap
+    and Orchard are NOT in v1.0 audit scope** (they ship in their own
+    releases behind their own audits). Outreach to Cypher Stack / OSTIF
+    / Teserakt drafted in
+    `C:\Users\unkno\grants\nlnet-2026-06-coincync-application.md`; not
+    sent. Audit firm picks the commit + works from there.
+11. **Mainnet genesis ceremony** — **M**. Operational only: mainnet
+    seed nodes, initial checkpoint set, mainnet faucet decision (or
+    "mine your own"), DNS, monitoring.
+12. **CIP-009.D rolling-finality production posture** — **M**.
+    Feature-gated machinery shipped in v1.0.8. Decide whether v1.0
+    mainnet enables CIP-009.D from genesis (with checkpoint signers
+    elected) or ships it dormant and activates via CIP-007 later.
+    Either is defensible; pick one before tag.
+13. **Reproducible Docker build sign-off** — **S**. Confirm byte-identical
+    output on the documented host arch, document the verifier workflow,
+    publish the SHA-256 set with the v1.0 release notes.
+14. **Wallet v2 ships base-chain only** — **M**. Trade tab hidden behind
+    a build flag for v1.0 (unhides in v1.1). Send, receive, history,
+    addresses, mining, multi-sig all wired against live mainnet RPC.
+
+## v1.1 — cyncswap (post-mainnet, post-audit)
+
+15. **CIP-001 atomic swap real crypto** — **substantially complete**.
+    What's now shipped: state machine + handshake + persistence;
+    Schnorr adaptor sigs (BTC BIP-340 parity-correct + CYNC
+    Ristretto255); dual-response cross-curve DLEQ + strict-binding
+    Noether 2018 variant (gated by Cargo feature `strict-dleq`); BTC
+    + CYNC RPC clients with mock impls; BTC lock/claim/refund tx
+    construction (BIP-341 script-path); CYNC swap key-derivation +
+    `SwapLockRecipient` wallet-bridge helper; coordinator transport
+    (Plain TCP + Noise XX + SOCKS5/Tor dial, all with DoS-hardened
+    filtered-listen variants); 6 CLI orchestration handlers
+    (`lock-cync`, `lock-btc`, `claim-btc`, `claim-cync`, `refund-btc`,
+    `refund-cync`); operator-driven dual-testnet smoke harness
+    ([scripts/cyncswap-dual-testnet-smoke.sh](../scripts/cyncswap-dual-testnet-smoke.sh));
     operator transport-setup guide ([docs/cyncswap-transport-setup.md](cyncswap-transport-setup.md)).
     **346 tests pass with `--features strict-dleq`; 288 in default
-    builds.** What's left: **(a)** wallet integration consuming
-    `SwapLockRecipient` (feature-freeze exception); **(b)** optional
-    CLSAG ring-binding for the CYNC-side adaptor (touches audited
-    consensus, separate planning); **(c)** audit. NLnet-funded. See
-    [[project_atomic_swap_mainnet_blocker]] (status entry refreshed).
-11. **Phase-2 activation (Orchard shielded pool)** — **XL** (months).
+    builds.** Mutation score 100% on audit-critical files. Audit prep
+    complete at [docs/cyncswap-audit-prep.md](cyncswap-audit-prep.md).
+    What's left: **(a)** wallet Trade tab; **(b)** optional CLSAG
+    ring-binding for the CYNC-side adaptor (touches audited consensus,
+    separate planning); **(c)** **dedicated cyncswap audit** —
+    kickoff target ~30 days after v1.0 mainnet ships.
+16. **Cyncswap audit** — **L-XL**. Scope: adaptor signatures (both
+    curves), cross-curve DLEQ + Noether strict-binding variant, BTC
+    script paths, coordinator transport, refund timing. Separate from
+    the base-chain audit. Estimate Q1-Q2 2027.
+
+## v1.x — Phase-2 activation (Orchard shielded pool)
+
+17. **Phase-2 activation (Orchard shielded pool)** — **XL** (months).
     Storage-side rewind shipped (`ef4f48c`, dormant). Cryptographic
     primitives layer shipped in `crates/orchard-side/` — 86 tests pass:
     commitment, note, nullifier, value-commit + RedPallas binding sig,
