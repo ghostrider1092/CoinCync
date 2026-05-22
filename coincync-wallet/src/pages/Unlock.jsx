@@ -4,26 +4,27 @@ import NonTauriPrompt from "../components/NonTauriPrompt";
 import { rpc, isWalletBackendAvailable, formatWalletError } from "../utils/rpc";
 import { clearCoincyncLocalState } from "../utils/storage";
 
-// ── Unlock — redesigned 2026-05-17 ────────────────────────────────────
+// ── Unlock — redesigned 2026-05-17, hardened 2026-05-21 ──────────────
 //
-// First thing every user sees every session. Was a plain centered card;
-// now matches the wallet's brand language (Fraunces title, mono eyebrow,
-// gradient backing, accent top-edge line) and adds small UX details:
-//   - Pulsing halo behind the logo
-//   - "Welcome back" eyebrow + "Unlock your wallet" Fraunces title
-//   - Full-width password input with show/hide toggle inside
-//   - Form-wrapped so Enter submits + autocomplete=current-password
-//     (lets OS-level keychains offer to fill)
-//   - autofocus on mount so users can just start typing
-//   - Enter-to-unlock hint visible under input until error replaces it
-//   - Forgot Password as deliberate ghost button at bottom (was a
-//     misclick-prone single line of text)
-//   - Footer shows wallet version — build identity matters when
-//     things go wrong
+// First thing every user sees every session. Visual: Fraunces title,
+// mono eyebrow, gradient backing, accent top-edge line, pulsing halo
+// behind the logo, footer with version + forgot-password.
 //
-// Brute-force protection (5 failures → 30s cooldown) is enforced
-// server-side; the existing formatWalletError surface already humanises
-// AUTH_RATE_LIMITED, so no new client state needed.
+// Hardened 2026-05-21 after a "can't type in password / freezes" bug:
+//   - Uses the wallet's proven <Input> component (NOT a raw <input>).
+//     The raw input + show/hide toggle overlay had a subtle issue in
+//     Tauri's webview that masked keystrokes.
+//   - Btn passed `type="submit"` (Btn now propagates `type` properly,
+//     fix in components/ui.jsx). No onClick on the Btn — the form's
+//     onSubmit handles unlocking once.  Eliminates the double-call
+//     race that the previous "type=submit + onClick" pattern caused.
+//   - App.jsx's auto-lock listener no longer re-renders the entire
+//     App tree on every keystroke (was using state, now uses ref).
+//     That was the load-bearing fix that made typing feel responsive
+//     in the heavy gradient/halo/animation context.
+//
+// Brute-force protection (5 failures → 30s cooldown) enforced
+// server-side; formatWalletError humanises AUTH_RATE_LIMITED.
 
 export default function Unlock({ onUnlock }) {
   const T = useTheme();
@@ -76,7 +77,7 @@ export default function Unlock({ onUnlock }) {
         boxShadow: `0 20px 60px ${T.shadow}`,
         overflow: "hidden",
       }}>
-        {/* Accent top-edge line — brand cue shared with Dashboard / Send / Receive hero cards */}
+        {/* Accent top-edge line */}
         <div style={{
           position: "absolute", top: 0, left: 0, right: 0, height: 2,
           background: `linear-gradient(90deg, transparent, ${T.ac2}, transparent)`,
@@ -99,7 +100,7 @@ export default function Unlock({ onUnlock }) {
         </div>
 
         {/* Title */}
-        <div style={{ textAlign: "center", marginBottom: 26 }}>
+        <div style={{ textAlign: "center", marginBottom: 22 }}>
           <div style={{
             fontFamily: T.mono, fontSize: 10, color: T.t3,
             letterSpacing: ".16em", textTransform: "uppercase", marginBottom: 4,
@@ -114,8 +115,10 @@ export default function Unlock({ onUnlock }) {
           </h2>
         </div>
 
-        {/* Password input using the wallet's proven Input component */}
-        <div style={{ marginBottom: 14 }}>
+        {/* Password form — Enter submits; Btn type="submit" so click
+            also submits (one path through onSubmit). No onClick on Btn
+            to avoid the double-call bug. */}
+        <form onSubmit={e => { e.preventDefault(); tryUnlock(); }}>
           <Input
             value={pw}
             onChange={e => { setPw(e.target.value); setErr(""); }}
@@ -124,28 +127,37 @@ export default function Unlock({ onUnlock }) {
             error={err}
             mono
           />
-        </div>
 
-        <Btn onClick={tryUnlock} disabled={!pw || loading} full
-          style={{ padding: "13px 0", fontSize: 13, fontWeight: 700 }}>
-          {loading ? (
-            <div style={{
-              width: 16, height: 16,
-              border: "2px solid currentColor", borderTopColor: "transparent",
-              borderRadius: "50%", animation: "spin .7s linear infinite",
-            }}/>
-          ) : (
-            <Ico d={ICONS.lock} size={14} color="currentColor"/>
-          )}
-          {loading ? "Unlocking…" : "Unlock"}
-        </Btn>
-
-        {/* Hint */}
-        {!err && (
-          <div style={{ marginTop: 12, fontSize: 11, fontFamily: T.mono, color: T.t3, textAlign: "center" }}>
-            Type your password and click Unlock
+          {/* Enter-to-unlock hint, replaced by error if any */}
+          <div style={{
+            minHeight: 18, marginTop: 6, marginBottom: 12,
+            fontSize: 11, fontFamily: T.mono,
+            color: err ? T.red : T.t3,
+            textAlign: "left",
+          }}>
+            {err
+              ? err
+              : <>Press <kbd style={{
+                  fontFamily: T.mono, fontSize: 10,
+                  background: T.bg, border: `1px solid ${T.b}`, borderRadius: 4,
+                  padding: "1px 6px", color: T.t2,
+                }}>Enter</kbd> to unlock</>}
           </div>
-        )}
+
+          <Btn type="submit" disabled={!pw || loading} full
+            style={{ padding: "13px 0", fontSize: 13, fontWeight: 700 }}>
+            {loading ? (
+              <div style={{
+                width: 16, height: 16,
+                border: "2px solid currentColor", borderTopColor: "transparent",
+                borderRadius: "50%", animation: "spin .7s linear infinite",
+              }}/>
+            ) : (
+              <Ico d={ICONS.lock} size={14} color="currentColor"/>
+            )}
+            {loading ? "Unlocking…" : "Unlock"}
+          </Btn>
+        </form>
 
         {/* Footer: version + forgot password */}
         <div style={{
