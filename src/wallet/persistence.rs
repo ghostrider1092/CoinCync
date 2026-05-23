@@ -243,6 +243,23 @@ impl WalletHeader {
             )));
         }
 
+        // RFC 9106 §3.1: m_cost MUST satisfy m_cost >= 8 × p_cost.
+        // Individual bounds above don't catch this cross-constraint —
+        // e.g., m_cost = 8 + p_cost = 16 passes both but Argon2 rejects
+        // with `MemoryTooLittle`, which the loader's `.expect` then
+        // turns into a panic-on-malformed-input DoS.
+        // Discovered by fuzz overnight #4 (2026-05-23) via crash file
+        // `crash-1c3a7e3e370f472432dfbedaba8b8ce6b7338246`.
+        // p_cost is bounded to <= 16 above, so 8 * p_cost is at most
+        // 128 and never overflows u32.
+        let min_m_for_p = 8 * self.kdf_p_cost;
+        if self.kdf_m_cost < min_m_for_p {
+            return Err(Error::Corruption(format!(
+                "kdf_m_cost {} KiB too small for kdf_p_cost {} (min: {} KiB = 8 × p_cost per RFC 9106)",
+                self.kdf_m_cost, self.kdf_p_cost, min_m_for_p
+            )));
+        }
+
         Ok(())
     }
 }
