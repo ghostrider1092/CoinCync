@@ -215,9 +215,17 @@ impl WalletHeader {
         // next overnight pass (crash file
         // `crash-c0a0e826ccb435bd9d48b5b1ed6ab0e0e6063050`,
         // panic = "valid Argon2 params: MemoryTooLittle").
-        const KDF_M_COST_MAX_KIB: u32 = 1_048_576;  // 1 GiB; 4× default
-        const KDF_T_COST_MAX: u32 = 100;            // 100 iter; ~33× default
-        const KDF_P_COST_MAX: u32 = 16;             // 16 lanes; 4× default
+        // Upper bounds tightened 2026-05-23 after fuzz overnight #4
+        // surfaced legit-but-pathological Argon2 inputs that took
+        // ~30+ seconds at the previous 1 GiB / 100-iter / 16-lane
+        // caps (slow-units 025434bd, 0a9d8f66, 7487547a). The
+        // previous bounds were "future-proof" but allowed crafted
+        // wallets to make the loader spend a full minute deriving a
+        // key. Defaults (m=256 MiB, t=3, p=4) sit well below the new
+        // caps, so legitimate wallets are unaffected.
+        const KDF_M_COST_MAX_KIB: u32 = 524_288;    // 512 MiB; 2× default (was 1 GiB)
+        const KDF_T_COST_MAX: u32 = 32;             // 32 iter; ~10× default (was 100)
+        const KDF_P_COST_MAX: u32 = 8;              // 8 lanes; 2× default (was 16)
         // Argon2 crate minimums (`argon2::Params::MIN_*`). Hardcoded
         // here so a future crate-version bump that lowers them doesn't
         // silently widen our acceptance window.
