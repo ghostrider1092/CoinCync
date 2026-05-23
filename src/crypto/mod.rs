@@ -14,6 +14,21 @@ mod view_keys;
 mod curve;
 mod clsag;
 pub mod clsag_multisig;
+
+/// Re-exports for the out-of-tree adversarial/benchmark testbed at
+/// `audit-suite/sketches/`. Lets sandbox crates wrap CoinCync's CLSAG
+/// and curve primitives without making the internal `crypto::clsag`
+/// and `crypto::curve` modules themselves public.
+///
+/// This doesn't widen the audit perimeter — the underlying code is
+/// the same code the audit firm reviews regardless. The named module
+/// just gives the sandbox a stable, documented entry point.
+///
+/// See `audit-suite/sketches/cross-primitive-bench/` for the consumer.
+pub mod testbed {
+    pub use super::clsag::{clsag_sign, clsag_verify, ClsagSignature, RingMember};
+    pub use super::curve::{Commitment, KeyImage, PublicPoint, SecretScalar};
+}
 mod secure;
 mod ring_selection;
 mod audit;
