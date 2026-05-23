@@ -1,4 +1,4 @@
-<!-- markdownlint-disable MD036 -->
+<!-- markdownlint-disable MD036 MD040 -->
 # CoinCync — Milestone Update 2026-05-22
 
 **Status:** draft. Three formats: long form (website / blog hero copy), Discord (community channel, under embed limits), short social (X / Mastodon / Nostr).
@@ -54,6 +54,8 @@ A focused review pass across the ~165 source files in the v1.0 audit perimeter. 
 585 of 585 library tests pass with all fixes applied. Agent-claimed findings had a ~37% false-positive rate (in line with the codebase's standing expectation), so each H-severity claim was verified against the actual source before fixing.
 
 **Fuzz overnight #3** ran the full 24-hour budget across all 27 libFuzzer + AddressSanitizer targets. 26 clean, one slow-input flagged in `fuzz_wallet_persistence` (DoS-class, not memory-unsafety — queued as audit-prep follow-up).
+
+**Update — fuzz overnight #4 (2026-05-23):** ran the same 27-target / 24-hour budget against the post-v1.0.9 main branch. **Surfaced a real panic-on-malformed-input DoS** in `wallet/persistence.rs::KdfParams::validate()` — the function bounded Argon2 m_cost, t_cost, and p_cost individually but missed the RFC 9106 §3.1 cross-constraint `m_cost ≥ 8 × p_cost`. A crafted wallet header with `m_cost=8 + p_cost=16` passed validate(), reached `Argon2::Params::new()`, and triggered `MemoryTooLittle` → `.expect()` panic. Closed in commit `6e06b6f`. Argon2 upper caps also tightened in `69c27dc` (1 GiB → 512 MiB, 100 iter → 32, 16 lanes → 8) to close 3 related slow-units that exploited the previous "future-proof" bounds. Both fixes shipped pre-audit; fuzz overnight #5 launched against the patched code to confirm a clean baseline before the audit firm engages. Read: the fuzz pipeline is working as intended — catches real bugs pre-audit, fixes them, re-validates. That's a stronger audit-prep posture than "26 clean" would have been.
 
 ### Wallet v2 redesign
 

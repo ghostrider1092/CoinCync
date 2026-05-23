@@ -1,4 +1,4 @@
-<!-- markdownlint-disable MD036 -->
+<!-- markdownlint-disable MD036 MD034 MD040 -->
 # GitHub Release — 2026-05-22
 
 **Suggested tag:** `v1.0.9-testnet-pre-audit`
@@ -17,6 +17,7 @@
 - **23 pre-audit hardening fixes** across the v1.0 audit perimeter. 585/585 library tests green.
 - **Wallet v2 rebuild** (`coincync-wallet-v2/`) — Apple-aesthetic Tauri redesign with full reactive push-event wiring, typed errors, complete first-launch onboarding, working settings, zero mock data.
 - **Fuzz overnight #3** — 24h budget, 27 libFuzzer + ASAN targets, 26 clean, 1 slow-input flagged (DoS-class, queued).
+- **Post-release update (fuzz #4, 2026-05-23):** A subsequent 24h fuzz pass surfaced a real panic-on-malformed-input DoS in `wallet/persistence.rs::KdfParams::validate()` — missing RFC 9106 §3.1 cross-constraint check (`m_cost ≥ 8 × p_cost`). Fixed in `6e06b6f`; Argon2 upper caps additionally tightened in `69c27dc`. Both shipped to `main` pre-audit. Overnight #5 launched against patched code to confirm clean baseline. Working fuzz pipeline catching real bugs is a stronger pre-audit signal than "all clean."
 
 ---
 
