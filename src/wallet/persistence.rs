@@ -1229,10 +1229,11 @@ pub fn create_deniable_wallet(
     // Combine into a single file: [decoy_file_bytes][real_file_bytes]
     // The load function tries password against the first region;
     // if it fails, tries the second. This way one file, two passwords.
-    let decoy_file = std::fs::read(path)
-        .map_err(crate::error::Error::IoError)?;
-    let real_file = std::fs::read(&hidden_path)
-        .map_err(crate::error::Error::IoError)?;
+    // `?` directly via `From<io::Error> for Error` — was previously
+    // `.map_err(Error::IoError)?` which used the tuple-variant
+    // constructor. Both work; `?` is idiomatic.
+    let decoy_file = std::fs::read(path)?;
+    let real_file = std::fs::read(&hidden_path)?;
 
     // Combined format: [4-byte decoy_len][decoy_data][real_data]
     let mut combined = Vec::new();
@@ -1240,8 +1241,7 @@ pub fn create_deniable_wallet(
     combined.extend_from_slice(&decoy_file);
     combined.extend_from_slice(&real_file);
 
-    std::fs::write(path, &combined)
-        .map_err(crate::error::Error::IoError)?;
+    std::fs::write(path, &combined)?;
 
     // Clean up hidden temp file
     let _ = std::fs::remove_file(&hidden_path);

@@ -333,8 +333,19 @@ pub enum Error {
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    // Path-redacted IO error. `std::io::Error`'s Display (since Rust
+    // 1.66 for path-aware ops like `File::open`) includes the
+    // attempted path in the message — leaks filesystem-layout info
+    // through any error logged/displayed. Audit-prep nicety on a
+    // privacy chain: surface only `kind()` in Display, keep the full
+    // error available via `#[source]` for debug logging that's
+    // explicit about path exposure.
+    #[error("IO error: {kind}")]
+    IoError {
+        kind: std::io::ErrorKind,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("{0}")]
     Other(String),
@@ -343,6 +354,18 @@ pub enum Error {
 impl From<rocksdb::Error> for Error {
     fn from(e: rocksdb::Error) -> Self {
         Error::DatabaseError(e.to_string())
+    }
+}
+
+// Manual `From<io::Error>` replaces the `#[from]` removed from the
+// struct variant above. Same `?` operator ergonomics, path-redacted
+// Display.
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::IoError {
+            kind: e.kind(),
+            source: e,
+        }
     }
 }
 
@@ -381,7 +404,7 @@ impl Error {
         matches!(self,
             Error::DatabaseError(_) |
             Error::Corruption(_) |
-            Error::IoError(_)
+            Error::IoError { .. }
         )
     }
 }

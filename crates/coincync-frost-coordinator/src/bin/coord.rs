@@ -733,8 +733,12 @@ async fn handle_attach(
     }
 
     let now = unix_now();
-    let secret = coord.invite_secret;
-    if let Err(e) = verify_token(&secret, &token, now) {
+    // Borrow `invite_secret` directly rather than copying onto the
+    // stack. The previous `let secret = coord.invite_secret;` made a
+    // stack-resident copy that lingered until the function frame was
+    // overwritten — observable to an attacker with stack-read primitive
+    // (rare, but free to close). Audit-prep nicety, no behavioral change.
+    if let Err(e) = verify_token(&coord.invite_secret, &token, now) {
         coord
             .metrics
             .attach_attempts
