@@ -1,0 +1,99 @@
+[package]
+name         = "orchard-side"
+version      = "0.0.1"
+edition      = "2021"
+rust-version = "1.75"
+authors      = ["CoinCync 1.0 Contributors"]
+description  = "CoinCync Phase-2 shielded pool — Halo2 Orchard action circuit (skeleton)."
+license      = "MIT"
+publish      = false
+
+# Status: SKELETON. The Halo2 action circuit lands in stages;
+# this crate is the load-bearing module layout that the eventual
+# implementation fills in. See `src/lib.rs` for the staged plan.
+#
+# Mainnet launch blocker per BLOCKCHAIN_ROADMAP.md #11.
+# The crate exists in its own workspace member so the heavy
+# Halo2 dep graph (halo2_proofs, pasta_curves, ff, group,
+# halo2_gadgets) is **not** pulled into the main `coincync`
+# binary by default — Phase-2 activation is post-mainnet, and
+# the node ships without it until the hard fork lands. See the
+# top-of-file comment in `Cargo.toml` of the root workspace
+# explaining the deliberate isolation.
+
+[lib]
+name = "orchard_side"
+path = "src/lib.rs"
+
+[dependencies]
+# Halo2 stack — versions pinned to match the workspace-level
+# `[workspace.dependencies]` we already use elsewhere. Held to
+# 0.3 because that's what the bridgetree / incrementalmerkletree
+# crates in `src/storage/shielded.rs` already integrate with.
+halo2_proofs  = "0.3"
+halo2_gadgets = "0.3"
+pasta_curves  = "0.5"
+ff            = "0.13"
+group         = "0.13"
+
+# Opaque 32-byte boundary types — the SAME interface
+# `src/storage/shielded.rs` consumes, so anchors and nullifiers
+# crossing the bridge are validated identically on both sides.
+bridge        = { path = "../bridge" }
+
+# Error machinery + structured error enum.
+thiserror     = "1"
+
+# Subtle ConstantTimeEq for nullifier comparisons (mirrors the
+# bridge crate's posture — anything that compares a 32-byte
+# identifier MUST be constant time).
+subtle        = "2.5"
+
+# Blake2b-512 with personalization — used by Zcash's PRF_expand
+# construction (NU5 §5.4.1.2) which derives every key in the
+# spending-key hierarchy from the seed. blake2b_simd is what the
+# reference `orchard` crate uses; lets us hit byte-for-byte the
+# same PRF outputs.
+blake2b_simd  = "1"
+
+# RNG for halo2 proof creation. `OsRng` is the canonical CSPRNG
+# the reference orchard crate uses; promoted from dev-deps to
+# regular deps when `prove_action` started consuming it directly.
+rand          = "0.8"
+
+# `zeroize` for secret-byte hygiene on every key struct in
+# `spend_key.rs` (SpendingKey, FullViewingKey, IncomingViewingKey).
+# `ZeroizeOnDrop` derive wipes the inner `[u8; 32]` when the key
+# leaves scope — defends against memory-forensics recovery via
+# core dump / swap file / cold-boot attack. `zeroize_derive`
+# provides the derive macros; no `unsafe` is required so the
+# crate's `unsafe_code = "forbid"` lint is preserved. Closes
+# audit-suite finding CYNC-AUDIT-2026-05-17-orchard-spendkey-zeroize.
+zeroize       = { version = "1.7", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+# Deterministic-RNG fixtures for tests (separate from production
+# `OsRng` usage).
+rand_chacha   = "0.3"
+
+# **Zcash conformance testing** — we use the Zcash-canonical
+# `(secret → ask, ak, nk, rivk, ivk, ovk, dk, default_d,
+# default_pk_d, note_cmx, note_nf)` test vectors copied from the
+# reference `orchard` 0.12 crate's `src/test_vectors/keys.rs`
+# (sourced from https://github.com/zcash-hackworks/zcash-test-vectors).
+#
+# These vectors are the **same fixtures the Zcash audit
+# pipeline uses** — passing them = byte-for-byte conformance
+# with Zcash NU5. Failing one is a consensus-incompatibility
+# bug.
+#
+# Vendored rather than pulled via dev-dep on `orchard = "0.12"`
+# because orchard 0.12 transitively requires `core2 = "^0.3"`
+# which is **yanked** on crates.io. The vectors themselves are
+# pure data (test inputs + expected outputs); no code copy.
+# Both crates are MIT/Apache-2.0 — copy with attribution.
+hex           = "0.4"
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "allow"
