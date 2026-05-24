@@ -11,6 +11,15 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 borsh = "1"
 
+# Deep-shim deps for fuzz_rpc_body — drives the FULL request pipeline
+# through `Router::oneshot` so the body extractor + Json<> extractor
+# reject paths are exercised, not just serde_json in isolation.
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum  = { version = "0.7", default-features = false, features = ["json", "http1", "tokio"] }
+tower = { version = "0.4", features = ["util"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "sync"] }
+
 [dependencies.coincync]
 path = ".."
 
@@ -37,6 +46,16 @@ doc = false
 [[bin]]
 name = "fuzz_stealth"
 path = "fuzz_targets/fuzz_stealth.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_wallet_persistence"
+path = "fuzz_targets/fuzz_wallet_persistence.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_rpc_body"
+path = "fuzz_targets/fuzz_rpc_body.rs"
 doc = false
 
 [workspace]
