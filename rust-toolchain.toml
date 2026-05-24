@@ -1,0 +1,52 @@
+# Pinned Rust toolchain for the CoinCync workspace.
+#
+# Why this file exists:
+#
+# Rust 1.92.0 introduced stricter higher-rank-trait-bound checking that
+# breaks `tari_bulletproofs_plus = "0.4"`'s SIMD code path. Specifically,
+# `cargo build --release` on Rust 1.92 produces
+#
+#   error[E0275]: overflow evaluating the requirement
+#                 `for<'v> &'v Simd<_, _>: Add`
+#
+# in `src/crypto/bulletproofs.rs` (the call site that derives the
+# tari range-proof signatures). Bumping to `tari_bulletproofs_plus =
+# "0.5"` fixes that error but surfaces a different one in
+# `utoipa-swagger-ui = "9.0.2"` (`SwaggerUiDist::get` missing) — 9.0.2
+# is the latest published version, so the upstream fix isn't released
+# yet.
+#
+# Pinning to 1.88.0 sidesteps both:
+#   - tari_bulletproofs_plus 0.4 compiles fine
+#   - utoipa-swagger-ui 9.0.2 compiles fine
+#   - The full dep tree resolves end-to-end
+#   - Matches the Dockerfile floor (which exists for the same reason)
+#
+# Why 1.88 specifically:
+#   - workspace `rust-version = "1.75"` is the source-level promise;
+#     CoinCync's own code stays 1.75-compatible
+#   - transitive deps (cpufeatures 0.3.0 needs edition2024 = 1.85+,
+#     time 0.3.47 / time-core / time-macros need 1.88+) drag the
+#     ACTUAL floor up to 1.88
+#   - 1.88.0 was the baseline that resolves the current Cargo.lock
+#     end-to-end; documented in docker/builder.Dockerfile lines 38-46
+#
+# When to revisit:
+#   - When `tari_bulletproofs_plus` ships a release that compiles on
+#     1.92+ AND `utoipa-swagger-ui` lands a fix for the
+#     `SwaggerUiDist::get` regression. At that point bump this pin
+#     forward.
+#   - Audit firm engagement will use this exact toolchain version for
+#     reproducibility — the pin is part of the audit-prep contract.
+#
+# Resolution + escape-hatch:
+#   - rustup will auto-install 1.88.0 the first time anyone enters
+#     this directory (`rustup show` triggers it).
+#   - If a contributor needs to test against a newer Rust transiently,
+#     they can override with `RUSTUP_TOOLCHAIN=stable cargo build`
+#     for one-off invocations.
+
+[toolchain]
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+profile = "default"
