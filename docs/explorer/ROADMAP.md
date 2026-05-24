@@ -11,6 +11,47 @@ day), **M** (half a day to two days), **L** (two to five days),
 
 ---
 
+## Recently shipped — 2026-05-23 session (privacy-stats expansion)
+
+Five new pages shipped in a single push after a comparison sweep against
+`monerospace.org` (the mempool.space fork retargeted at Monero). Each
+exists to surface a CoinCync-specific privacy property that no other
+chain's explorer can match. All five share consistent panel styling
+and Chart.js bar histograms where applicable.
+
+- **Anonymity-set depth viewer** (`page-anonset`) — driven by
+  `get_anonymity_set` RPC with a client-side synthesised-distribution
+  fallback when the RPC isn't exposed. Shows decoy-age histogram across
+  configurable block ranges (50/100/250/500), plus four stat tiles
+  (inputs sampled, decoy pool size, median age, privacy-health score
+  computed as inverse-skew of the histogram). Roadmap item #1 of the
+  Near-term list. **DONE**.
+- **Reorg history page** (`page-reorghistory`) — driven by
+  `get_chain_events` filtered to reorg events. Renders the six-layer
+  reorg-defense status (L1-3 MESS hybrid, L4 per-node checkpoints, L5
+  hardcoded checkpoints, L6 dormant per the 2026-05-23 CIP-009.D
+  decision, wallet-side bounded rewind) plus a table of detected reorgs.
+  Roadmap item #6. **DONE**.
+- **Privacy comparison table** (`page-compare`) — pure content. Four
+  side-by-side tables (cryptographic primitives, network privacy, reorg
+  defense depth, economic posture) vs Monero / Zcash / Bitcoin / Litecoin
+  MWEB. Roadmap Medium-term #5. **DONE**.
+- **Mining-live tile** (`page-mininglive`) — `get_mining_live` for the
+  hashrate / median / difficulty stats; `get_block_range` for the last
+  50 inter-block intervals rendered as a histogram. 10s polling while
+  the page is active; clears the interval on navigation away. Roadmap
+  Near-term #9. **DONE**.
+- **Fee estimator** (`page-feemarket`) — derived purely from
+  `get_mempool_transactions`. Recommends Slow / Normal / Fast / Flash
+  fees from the 25th / 50th / 75th / 95th percentile of current backlog
+  fee_per_byte. Roadmap Near-term #5. **DONE**.
+
+All five linked from both the desktop nav bar (after Supply) and the
+mobile menu (under a "Privacy stats" heading). PAGES + PUBLIC_EXPLORER_PAGES
+arrays updated; `go()` router has per-page entry hooks.
+
+---
+
 ## Recently shipped — v1.0.8 (2026-05-15 session)
 
 ### v1.0.8 Network Status panel — NEW

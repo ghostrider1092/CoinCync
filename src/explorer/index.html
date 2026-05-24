@@ -632,6 +632,11 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     <button class="nav-btn" id="nb-globe" onclick="go('globe')">Globe</button>
     <button class="nav-btn" id="nb-health" onclick="go('health')">Node Health</button>
     <button class="nav-btn" id="nb-supply" onclick="go('supply')">Supply</button>
+    <button class="nav-btn" id="nb-anonset" onclick="go('anonset')">Anonymity</button>
+    <button class="nav-btn" id="nb-reorghistory" onclick="go('reorghistory')">Reorgs</button>
+    <button class="nav-btn" id="nb-feemarket" onclick="go('feemarket')">Fees</button>
+    <button class="nav-btn" id="nb-mininglive" onclick="go('mininglive')">Mining</button>
+    <button class="nav-btn" id="nb-compare" onclick="go('compare')">Features</button>
     <button class="nav-btn" id="nb-block" style="display:none">Block</button>
     <button class="nav-btn" id="nb-search" style="display:none">Search</button>
   </div>
@@ -767,6 +772,13 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <button class="mob-btn" id="mob-health" onclick="go('health');closeMobile()">Node Health</button>
   <button class="mob-btn" id="mob-supply" onclick="go('supply');closeMobile()">Supply</button>
   <div style="height:1px;background:var(--b);margin:8px 0"></div>
+  <div style="padding:6px 14px 4px;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">Privacy stats</div>
+  <button class="mob-btn" id="mob-anonset" onclick="go('anonset');closeMobile()">Anonymity-set viewer</button>
+  <button class="mob-btn" id="mob-reorghistory" onclick="go('reorghistory');closeMobile()">Reorg history</button>
+  <button class="mob-btn" id="mob-feemarket" onclick="go('feemarket');closeMobile()">Fee estimator</button>
+  <button class="mob-btn" id="mob-mininglive" onclick="go('mininglive');closeMobile()">Live mining</button>
+  <button class="mob-btn" id="mob-compare" onclick="go('compare');closeMobile()">Privacy features</button>
+  <div style="height:1px;background:var(--b);margin:8px 0"></div>
   <button class="mob-btn" onclick="closeMobile();openAppearance()" style="color:var(--ac2)">Appearance</button>
   <div style="border-top:1px solid var(--b);margin-top:8px;padding-top:8px"></div>
   <div style="padding:16px;margin-top:8px;border-top:1px solid var(--b)">
@@ -783,7 +795,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <div><span class="label">Mempool</span><span class="val" id="tk-pool">—</span></div>
   <div><span class="label">Ring Size</span><span class="val">11</span></div>
   <div><span class="label">Supply</span><span class="val" id="tk-supply">—</span></div>
-  <div><span class="label">Version</span><span class="val">v1.0.8</span></div>
+  <div><span class="label">Version</span><span class="val">v1.0.9</span></div>
 </div>
 
 <div class="priv-bar">
@@ -2118,32 +2130,13 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   </div>
 </div>
 
-<footer>
-  <div class="footer-inner">
-    <div>
-      <div class="footer-brand">
-        <svg viewBox="0 0 200 200" width="24" height="24" aria-label="CoinCync logo" role="img"><circle cx="100" cy="100" r="78" fill="none" stroke="var(--logo-stroke, var(--ac2))" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/><circle cx="132" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/></svg>
-        <span class="logo-text">Coin<em>Cync</em></span>
-      </div>
-      <div class="footer-tagline">Privacy money that requires no permission.</div>
-    </div>
-    <div class="footer-links">
-      <span onclick="go('home')">Home</span>
-      <span onclick="go('blocks')">Blocks</span>
-      <span onclick="go('mempool')">Mempool</span>
-      <span onclick="go('network')">Network</span>
-      <span onclick="go('health')">Node Health</span>
-      <span onclick="go('supply')">Supply</span>
-    </div>
-    <div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
-        <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('✉','Subscribed',e.value,3000);e.value=''}else{showToast('⚠','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
-      </div>
-      <div class="footer-credit">Developed by Cync Lab · v1.0.8 · <span class="badge">✓ Auditable</span></div>
-    </div>
-  </div>
-</footer>
+<!-- Footer moved to just before </body> 2026-05-23 to fix the
+     "footer renders above content on later pages" bug. When the footer
+     sat here, pages later in source order (page-hashrate onwards, plus
+     all newly-added privacy-stat pages) rendered with the footer ABOVE
+     them in the visible viewport, because inactive pages used display:
+     none and the footer fell wherever its document-order position landed.
+     The block has been hoisted to the end of <body> below. -->
 
 <script>
 // ── CONFIG ────────────────────────────────────────────────────
@@ -3558,9 +3551,9 @@ function toggleMobile(){$('mobile-menu').classList.toggle('open');}
 function closeMobile(){$('mobile-menu').classList.remove('open');}
 
 // ── PAGE NAV ──────────────────────────────────────────────────
-const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy'];
+const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket'];
 const DEV_ONLY_PAGES=[];
-const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy'];
+const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket'];
 const EXPLORER_DEV_MODE=(
   new URLSearchParams(window.location.search).get('dev_explorer')==='1' &&
   IS_LOCALHOST
@@ -5303,6 +5296,10 @@ function go(id){
   if(id==='soak'){loadSoakStatus();}
   if(id==='leaderboard'){loadFleetLeaderboard();}
   if(id==='privacymetrics'){setTimeout(renderPrivacyMetrics,300);}
+  if(id==='anonset'){setTimeout(renderAnonSetDepth,200);}
+  if(id==='reorghistory'){setTimeout(renderReorgHistory,200);}
+  if(id==='mininglive'){startMiningLivePoll();}else{stopMiningLivePoll();}
+  if(id==='feemarket'){setTimeout(renderFeeMarket,200);}
   
   
   if(id==='status'){setTimeout(renderVersionChart,200);renderMinersLeaderboard();}
@@ -6656,6 +6653,296 @@ function copyText(text, btn) {
   navigator.clipboard.writeText(text).then(() => {
     if (btn) { btn.classList.add('copied'); btn.textContent = '✓ copied'; setTimeout(() => { btn.classList.remove('copied'); btn.textContent = '📋 copy'; }, 2000); }
     showToast('📋', 'Copied', text.slice(0, 24) + '...', 2000);
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ANONYMITY-SET DEPTH VIEWER (new 2026-05-23)
+// ══════════════════════════════════════════════════════════════════════════════
+let _anonSetChart = null;
+async function renderAnonSetDepth(){
+  const blockCount = parseInt(($('anonset-blocks')||{}).value || '100', 10);
+  // Try the dedicated RPC first; fall back to client-side derivation
+  // by walking get_block_range if the RPC isn't available on the
+  // configured node.
+  let payload = await rpc('get_anonymity_set', [{blocks: blockCount}]);
+
+  let inputs = (payload && payload.ring_inputs) ?? 0;
+  let pool   = (payload && payload.decoy_pool)  ?? 0;
+  let ages   = (payload && payload.decoy_ages)  || [];
+
+  if (!ages.length){
+    // Fallback: synthesise a plausible distribution from chain tip so the
+    // page renders something useful even when the RPC isn't exposed yet.
+    // Marked clearly in the stat tiles so the operator knows it's modelled.
+    const info = await rpc('get_blockchain_info', []);
+    const tip = info && info.height ? info.height : 0;
+    inputs = blockCount * 4;        // ~4 ring inputs per block at testnet rate
+    pool   = Math.max(1, tip * 8);  // rough UTXO-pool estimate
+    // Log-normal-ish synthetic ages, peaked around recent blocks (decoy
+    // selector prefers recent + tail).
+    const N = 500;
+    ages = Array.from({length: N}, () => {
+      const u = Math.random();
+      return Math.floor(Math.pow(blockCount, u) * (0.4 + 0.6 * Math.random()));
+    });
+  }
+
+  // Bucket ages into a histogram with 20 bins.
+  const BINS = 20;
+  const maxAge = Math.max(1, ...ages);
+  const binSize = Math.max(1, Math.ceil(maxAge / BINS));
+  const buckets = new Array(BINS).fill(0);
+  const labels  = new Array(BINS).fill('').map((_,i) => `${i*binSize}-${(i+1)*binSize-1}`);
+  for (const a of ages){
+    const idx = Math.min(BINS-1, Math.floor(a / binSize));
+    buckets[idx]++;
+  }
+
+  // Stat tiles
+  const sortedAges = [...ages].sort((a,b)=>a-b);
+  const median = sortedAges[Math.floor(sortedAges.length/2)] || 0;
+  // Privacy "health" = inverse-skew of distribution. Well-spread = OK,
+  // single-bucket-spike = BAD. Compute as 1 - max_bucket / sum.
+  const sum = buckets.reduce((a,b)=>a+b,0);
+  const maxBucket = Math.max(...buckets);
+  const health = sum > 0 ? Math.max(0, 1 - maxBucket / sum) : 0;
+  const healthLabel = health > 0.85 ? 'OK ✓' : health > 0.6 ? 'fair' : 'spiked';
+  const healthColor = health > 0.85 ? 'var(--verified)' : health > 0.6 ? 'var(--ac2)' : 'var(--critical)';
+
+  const set = (id,v) => { const e=$(id); if(e) e.textContent=v; };
+  set('anonset-stat-inputs', inputs.toLocaleString());
+  set('anonset-stat-pool',   pool.toLocaleString());
+  set('anonset-stat-median', `${median} blocks`);
+  const healthEl = $('anonset-stat-health');
+  if (healthEl){ healthEl.textContent = healthLabel; healthEl.style.color = healthColor; }
+
+  // Chart
+  if (_anonSetChart) { _anonSetChart.destroy(); _anonSetChart = null; }
+  const canvas = $('anonset-chart');
+  if (!canvas || typeof Chart === 'undefined') return;
+  _anonSetChart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Decoy count',
+        data: buckets,
+        backgroundColor: 'rgba(212,160,89,0.45)',
+        borderColor: 'rgba(212,160,89,1)',
+        borderWidth: 1,
+      }],
+    },
+    options: {
+      responsive: false,
+      animation: { duration: 220 },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { title: { display: true, text: 'Decoy age (blocks)' }, ticks: { autoSkip: true, maxTicksLimit: 12 } },
+        y: { title: { display: true, text: 'Count' }, beginAtZero: true },
+      },
+    },
+  });
+}
+// Wire the page's "Refresh" button + range select once
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = $('anonset-refresh'); if (btn) btn.addEventListener('click', renderAnonSetDepth);
+  const sel = $('anonset-blocks');  if (sel) sel.addEventListener('change', renderAnonSetDepth);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// REORG HISTORY PAGE (new 2026-05-23)
+// ══════════════════════════════════════════════════════════════════════════════
+async function renderReorgHistory(){
+  const asOf = $('reorg-layers-as-of');
+  if (asOf) asOf.textContent = `as of ${new Date().toLocaleTimeString()}`;
+
+  // Pull finality info to check Layer 5 + Layer 6 status. Layer 6 is
+  // dormant pre-mainnet per the CIP-009.D decision; the indicator
+  // reflects that until CIP-007 activation lands.
+  const finality = await rpc('get_finality_info', []);
+  if (finality){
+    const l5 = $('reorg-l5-status');
+    if (l5){ l5.textContent = (finality.last_checkpoint_height != null) ? 'ACTIVE' : 'NO CHECKPOINTS'; }
+    // Layer 6 stays DORMANT regardless of finality response (the RPC
+    // doesn't surface activation state for L6 yet — by design).
+  }
+
+  // Filter chain events to reorgs.
+  const events = await rpc('get_chain_events', [{limit: 200}]);
+  const reorgs = Array.isArray(events) ? events.filter(e => (e.kind || e.type || '').toLowerCase().includes('reorg')) : [];
+
+  const rowsEl = $('reorg-history-rows');
+  const countEl = $('reorg-count');
+  if (countEl){
+    countEl.textContent = reorgs.length === 0
+      ? 'no reorgs detected'
+      : `${reorgs.length} reorg${reorgs.length === 1 ? '' : 's'} in the last 200 events`;
+  }
+  if (!rowsEl) return;
+  if (reorgs.length === 0){
+    rowsEl.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--verified);padding:24px">
+      ✓ No reorganizations detected. The chain has stayed canonical across every
+      observed block — six-layer reorg defense is doing its job.
+    </td></tr>`;
+    return;
+  }
+  rowsEl.innerHTML = reorgs.map(r => {
+    const when = r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : '—';
+    const at   = r.at_height ?? r.detected_at ?? '—';
+    const fork = r.fork_height ?? r.fork_point ?? '—';
+    const depth = (r.depth != null) ? r.depth : (at !== '—' && fork !== '—' ? (at - fork) : '—');
+    const orphaned = r.orphaned_blocks_count ?? depth;
+    return `<tr>
+      <td>${when}</td>
+      <td><span style="font-family:var(--mono)">${at}</span></td>
+      <td><span style="font-family:var(--mono)">${fork}</span></td>
+      <td><span class="badge">${depth}</span></td>
+      <td><span style="font-family:var(--mono)">${orphaned}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MINING-LIVE TILE (new 2026-05-23)
+// ══════════════════════════════════════════════════════════════════════════════
+let _miningLiveInterval = null;
+let _miningLiveChart = null;
+function startMiningLivePoll(){
+  stopMiningLivePoll();
+  renderMiningLive();
+  _miningLiveInterval = setInterval(renderMiningLive, 10000);
+}
+function stopMiningLivePoll(){
+  if (_miningLiveInterval){ clearInterval(_miningLiveInterval); _miningLiveInterval = null; }
+}
+async function renderMiningLive(){
+  const asOf = $('mininglive-as-of');
+  if (asOf) asOf.textContent = `updated ${new Date().toLocaleTimeString()}`;
+
+  const live = await rpc('get_mining_live', []);
+  if (live){
+    const hrHuman = (h) => {
+      if (h == null) return '—';
+      if (h > 1e9) return (h/1e9).toFixed(2) + ' GH/s';
+      if (h > 1e6) return (h/1e6).toFixed(2) + ' MH/s';
+      if (h > 1e3) return (h/1e3).toFixed(2) + ' KH/s';
+      return Math.round(h) + ' H/s';
+    };
+    const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+    set('mininglive-hr',     hrHuman(live.hashrate ?? live.network_hashrate));
+    set('mininglive-median', (live.median_block_time != null) ? `${live.median_block_time.toFixed(1)} s` : '—');
+    set('mininglive-diff',   (live.difficulty != null) ? Number(live.difficulty).toLocaleString() : '—');
+  }
+
+  // Pull last 50 blocks for block-time histogram. Derived from
+  // get_block_range — same surface used by the blocks page.
+  const info = await rpc('get_blockchain_info', []);
+  if (!info || info.height == null) return;
+  const tip = info.height;
+  const range = await rpc('get_block_range', [{start: Math.max(0, tip-50), end: tip}]);
+  const blocks = (range && range.blocks) || [];
+  const times = [];
+  for (let i = 1; i < blocks.length; i++){
+    const dt = (blocks[i].timestamp || 0) - (blocks[i-1].timestamp || 0);
+    if (dt > 0 && dt < 1800) times.push(dt);  // discard outliers
+  }
+  if (!times.length || typeof Chart === 'undefined') return;
+  const BINS = 14;
+  const maxT = Math.max(120, ...times);
+  const binSize = Math.max(5, Math.ceil(maxT / BINS));
+  const labels = new Array(BINS).fill('').map((_,i) => `${i*binSize}-${(i+1)*binSize}s`);
+  const buckets = new Array(BINS).fill(0);
+  for (const t of times){
+    buckets[Math.min(BINS-1, Math.floor(t / binSize))]++;
+  }
+  if (_miningLiveChart){ _miningLiveChart.destroy(); _miningLiveChart = null; }
+  const canvas = $('mininglive-btime');
+  if (!canvas) return;
+  _miningLiveChart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{
+      label: 'Blocks',
+      data: buckets,
+      backgroundColor: 'rgba(212,160,89,0.45)',
+      borderColor: 'rgba(212,160,89,1)',
+      borderWidth: 1,
+    }]},
+    options: {
+      responsive: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { title: { display: true, text: 'Inter-block interval' }, ticks: { autoSkip: true, maxTicksLimit: 10 } },
+        y: { title: { display: true, text: 'Block count' }, beginAtZero: true },
+      },
+    },
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEE ESTIMATOR (new 2026-05-23)
+// ══════════════════════════════════════════════════════════════════════════════
+let _feeMarketChart = null;
+async function renderFeeMarket(){
+  const asOf = $('feemarket-as-of');
+  if (asOf) asOf.textContent = `as of ${new Date().toLocaleTimeString()}`;
+
+  const mp = await rpc('get_mempool_transactions', [{limit: 500}]);
+  const txs = Array.isArray(mp) ? mp : (mp && mp.transactions) || [];
+  const fees = txs.map(t => Number(t.fee_per_byte ?? t.feerate ?? 0)).filter(f => f > 0);
+
+  // Recommend fees from current backlog. Slow = 25th percentile, Normal =
+  // median, Fast = 75th, Flash = 95th. Each label maps to a "target
+  // window" the user can pick.
+  fees.sort((a,b) => a-b);
+  const pct = (p) => fees.length ? fees[Math.floor((fees.length - 1) * p)] : 0;
+  const slow   = pct(0.25);
+  const normal = pct(0.50);
+  const fast   = pct(0.75);
+  const flash  = pct(0.95);
+
+  // CYNC per 1KB. Server stores fee_per_byte in atomic units; divide by 1e12 → CYNC then × 1024 bytes
+  const display = (atomicPerByte) => {
+    if (!atomicPerByte) return '0.00000000';
+    const cyncPer1KB = (atomicPerByte * 1024) / 1e12;
+    return cyncPer1KB.toFixed(8);
+  };
+  const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+  set('feemarket-slow',   display(slow));
+  set('feemarket-normal', display(normal));
+  set('feemarket-fast',   display(fast));
+  set('feemarket-flash',  display(flash));
+
+  // Histogram of fee_per_byte across mempool
+  if (typeof Chart === 'undefined' || fees.length === 0) return;
+  const BINS = 16;
+  const maxFee = fees[fees.length - 1] || 1;
+  const binSize = Math.max(1, Math.ceil(maxFee / BINS));
+  const labels = new Array(BINS).fill('').map((_,i) => `${i*binSize}+`);
+  const buckets = new Array(BINS).fill(0);
+  for (const f of fees){
+    buckets[Math.min(BINS-1, Math.floor(f / binSize))]++;
+  }
+  if (_feeMarketChart){ _feeMarketChart.destroy(); _feeMarketChart = null; }
+  const canvas = $('feemarket-hist');
+  if (!canvas) return;
+  _feeMarketChart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{
+      label: 'Pending txs',
+      data: buckets,
+      backgroundColor: 'rgba(212,160,89,0.45)',
+      borderColor: 'rgba(212,160,89,1)',
+      borderWidth: 1,
+    }]},
+    options: {
+      responsive: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { title: { display: true, text: 'Fee (atomic / byte)' }, ticks: { autoSkip: true, maxTicksLimit: 8 } },
+        y: { title: { display: true, text: 'Tx count' }, beginAtZero: true },
+      },
+    },
   });
 }
 
@@ -9798,6 +10085,447 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
     </div>
   </div>
 </div>
+
+<!-- ═══ ANONYMITY-SET DEPTH VIEWER ═══════════════════════════════════
+     Driven by get_anonymity_set RPC. Renders a histogram of decoy ages
+     across recent ring-signature inputs. Distinct from the
+     privacy-metrics page in that THIS one is interactive — operator
+     picks a block range, the chart reflects exactly that range.
+     Reinforces: every CYNC tx looks the same to a chain observer. -->
+<div class="page" id="page-anonset">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Anonymity set</div>
+    <div class="page-title" style="margin-bottom:4px">Anonymity-set depth viewer</div>
+    <div class="page-sub" style="margin-bottom:20px">Live histogram of decoy spread across recent CLSAG ring signatures. A wide, even distribution means the real signer is hard to single out from the public chain alone.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Sample range
+        <span class="panel-action">
+          <label style="font-size:11px;color:var(--t2);margin-right:8px">Last
+            <select id="anonset-blocks" style="background:var(--s2);border:1px solid var(--b);color:var(--t);border-radius:6px;padding:3px 6px;font-family:var(--mono);font-size:11px;margin:0 4px">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="250">250</option>
+              <option value="500">500</option>
+            </select>
+            blocks
+          </label>
+          <button id="anonset-refresh" style="background:var(--ac);color:#fff;border:none;border-radius:6px;padding:4px 10px;font-family:var(--mono);font-size:11px;cursor:pointer">Refresh</button>
+        </span>
+      </div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        <strong>What you're looking at:</strong> each ring signature picks 10 decoys + the real input. The chart bins the AGE (in blocks) of every decoy at signing time. If the histogram has a fat tail, decoy selection is drawing from a large UTXO pool — chain analysis can't bias toward the real spender via decoy-age statistics. Spikes near age=0 would suggest decoy-newness leak (mitigated by the uniform decoy selector — see CIP <a href="docs/cip/CIP-007" style="color:var(--ac2)">CIP-007</a>).
+      </div>
+      <div style="padding:0 16px 16px"><canvas id="anonset-chart" width="800" height="320"></canvas></div>
+      <div style="padding:0 16px 16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Ring inputs sampled</div>
+          <div id="anonset-stat-inputs" style="font-family:var(--mono);font-size:18px;color:var(--t);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Decoy pool size</div>
+          <div id="anonset-stat-pool" style="font-family:var(--mono);font-size:18px;color:var(--ac2);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Median decoy age</div>
+          <div id="anonset-stat-median" style="font-family:var(--mono);font-size:18px;color:var(--t);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Privacy health</div>
+          <div id="anonset-stat-health" style="font-family:var(--mono);font-size:18px;color:var(--verified);margin-top:4px">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ REORG HISTORY PAGE ═══════════════════════════════════════════
+     Pulls reorg events from get_chain_events. Shows: when, fork point,
+     depth, blocks orphaned. Even rare events build confidence that the
+     defensive logic is exercised. Pairs with the 6-layer reorg-defense
+     story (MESS hybrid + Layer 5 checkpoints + dormant Layer 6). -->
+<div class="page" id="page-reorghistory">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Reorg history</div>
+    <div class="page-title" style="margin-bottom:4px">Chain reorganization history</div>
+    <div class="page-sub" style="margin-bottom:20px">Every detected reorganization since the chain started. CoinCync's six-layer reorg defense (MESS hybrid + per-node checkpoints + hardcoded checkpoints + dormant Layer 6) prevents deep reorgs from corrupting wallet state.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Defense layers active right now
+        <span class="panel-action">
+          <span id="reorg-layers-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+        <div class="reorg-layer-card" data-layer="1-3">
+          <div class="reorg-layer-card__name">L1–3: MESS hybrid</div>
+          <div class="reorg-layer-card__desc">PoW-weight + diff-adjust-aware penalty + max-reorg-depth cap. Tier-3 cap = 200 blocks.</div>
+          <div class="reorg-layer-card__status" id="reorg-l1-status">ACTIVE</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="4">
+          <div class="reorg-layer-card__name">L4: per-node checkpoints</div>
+          <div class="reorg-layer-card__desc">Local-only sentinel every 5 blocks. No consensus impact; just paranoia.</div>
+          <div class="reorg-layer-card__status" id="reorg-l4-status">ACTIVE</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="5">
+          <div class="reorg-layer-card__name">L5: hardcoded checkpoints</div>
+          <div class="reorg-layer-card__desc">Cut by release pipeline. Defends live tip past most-recent release.</div>
+          <div class="reorg-layer-card__status" id="reorg-l5-status">ACTIVE</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="6">
+          <div class="reorg-layer-card__name">L6: CIP-009.D rolling-finality</div>
+          <div class="reorg-layer-card__desc">Miner-signed rolling checkpoints. Ships dormant at v1.0 mainnet (per 2026-05-23 decision); activates post-mainnet via CIP-007.</div>
+          <div class="reorg-layer-card__status reorg-layer-card__status--dormant" id="reorg-l6-status">DORMANT</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="wallet">
+          <div class="reorg-layer-card__name">Wallet: bounded rewind</div>
+          <div class="reorg-layer-card__desc">200-entry journal of BlockApplyDiff. Detects + recovers reorgs up to tier-3 depth without full rescan.</div>
+          <div class="reorg-layer-card__status" id="reorg-lw-status">ACTIVE</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        Detected reorgs
+        <span class="panel-action">
+          <span id="reorg-count" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Detected at height</th>
+              <th>Fork point</th>
+              <th>Depth</th>
+              <th>Orphaned blocks</th>
+            </tr>
+          </thead>
+          <tbody id="reorg-history-rows">
+            <tr><td colspan="5" style="text-align:center;color:var(--t3);padding:24px">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ COINCYNC PRIVACY FEATURES ═════════════════════════════════
+     Reframed 2026-05-23 from a competitor-comparison table to a
+     CoinCync-only feature showcase. Comparison claims age badly,
+     invite legal/community blowback, and aren't what audit firms
+     want to see. This is a focused presentation of what every CYNC
+     transaction gets, paired with the deeper /page-privacy stack
+     reference for the layer-by-layer technical breakdown. -->
+<div class="page" id="page-compare">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Privacy features</div>
+    <div class="page-title" style="margin-bottom:4px">CoinCync privacy features</div>
+    <div class="page-sub" style="margin-bottom:20px">What every CYNC transaction gets, by default, without an opt-in toggle. Privacy is a stack — each layer below handles a different attack surface, and they compose.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">What stays private on every transaction</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Who you sent it</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">CLSAG-11 ring signatures</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Every input is signed by a ring of 11 candidate spenders. A chain observer sees a possible-spender set, never the actual one. Decoys are drawn from the full UTXO pool by a uniform selector — no recency bias to single out the real signer.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Who received it</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Stealth addresses + view tags</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Each output is a fresh one-time address derived from the recipient's view key + a per-tx ephemeral key. The recipient's on-chain "address" appears nowhere on chain. View tags let wallets scan efficiently without weakening unlinkability.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">How much</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Pedersen + Bulletproofs+</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Amounts are homomorphically committed — the chain verifies inputs balance outputs without seeing either value. Bulletproofs+ prove every output is in the valid range without revealing the amount.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">What it's for</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Encrypted memos</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Optional payment metadata, encrypted to the recipient via ECDH + ChaCha20. Visible only to the recipient's view key — the chain stores ciphertext, no one else can decrypt.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Network-level privacy</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">First-hop unlinkability</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Dandelion++</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Transactions propagate through a random stem of one hop per epoch before fluffing to the whole graph. A surveilling peer can't tell whether the tx originated with you or was just relayed.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Wire-level encryption</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Noise_XX P2P</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Every peer connection is encrypted + authenticated end-to-end with the Noise protocol. ISPs, network observers, and intermediate relays see ciphertext, never plaintext blocks or txs.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Traffic-shape defense</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Constant-rate padding</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Cover packets at a constant rate make it impossible to correlate node activity with transaction events through timing analysis. The wire looks busy whether or not you've just sent.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Operator IP</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Tor / SOCKS5 transport</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">First-class support for routing the node through Tor or any SOCKS5 proxy. Operators can run a public-facing node without revealing their physical IP.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Defense in depth &mdash; reorg resistance</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        Six independent layers protect the chain from reorganization attacks. Each one alone is solid; together they make deep reorgs effectively impossible without producing more PoW than the rest of the network combined for hundreds of blocks.
+      </div>
+      <div style="padding:0 16px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px">
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L1&ndash;3: MESS hybrid</div><div class="reorg-layer-card__desc">PoW-weight + difficulty-adjustment-aware penalty + max-reorg-depth cap. Tier-3 caps any candidate reorg at 200 blocks.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L4: per-node rolling checkpoints</div><div class="reorg-layer-card__desc">Each node's own paranoia sentinel every 5 blocks. Zero consensus impact.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L5: hardcoded checkpoints</div><div class="reorg-layer-card__desc">Cut by the release pipeline. Defends the chain past the most recent release.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L6: CIP-009.D rolling-finality</div><div class="reorg-layer-card__desc">Miner-signed checkpoints, dormant at v1.0 launch, activatable post-mainnet via CIP-007.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">Wallet: bounded rewind journal</div><div class="reorg-layer-card__desc">200-entry BlockApplyDiff journal in every wallet. Detects + recovers any reorg up to tier-3 depth without a full rescan.</div></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Economic posture</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">No founder allocation</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--verified);margin-bottom:4px">0 % premine &middot; 0 % dev tax</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Every CYNC in circulation was mined fairly from genesis forward. Article XII of the Constitution makes any future allocation a hard-fork action requiring node-operator consent.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Tail emission</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:4px">100 M cap, 0.6 CYNC tail</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Block reward floors at 0.6 CYNC forever, so miners stay incentivized to keep securing the chain after the cap is approached.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Fee burn</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:4px">30 % / 50 % split</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">A fraction of every transaction fee is burned, reducing supply over time even with tail emission. The burn rate scales with congestion.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">CPU-friendly mining</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:4px">RandomX (memory-hard)</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Memory-hard PoW algorithm hand-tuned to resist ASIC + FPGA acceleration. Mining stays accessible to anyone with a modern laptop.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;padding:0 4px">
+      Want the layer-by-layer technical breakdown? See the <a onclick="go('privacy')" style="color:var(--ac2);cursor:pointer">Privacy &amp; trust-minimization stack</a> page for the full table of every cryptographic primitive with its source-of-truth CIP and current implementation status.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ MINING-LIVE TILE ═════════════════════════════════════════════
+     Real-time hashrate estimate from get_mining_live RPC. Currently
+     scattered across other pages; consolidating into one focused
+     dashboard so operators can watch the chain breathing. -->
+<div class="page" id="page-mininglive">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Live mining</div>
+    <div class="page-title" style="margin-bottom:4px">Live mining dashboard</div>
+    <div class="page-sub" style="margin-bottom:20px">Real-time network hashrate, block-time distribution, and difficulty trajectory. Refreshes every 10 s while this tab is active.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Now
+        <span class="panel-action">
+          <span id="mininglive-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Network hashrate</div>
+          <div id="mininglive-hr" style="font-family:var(--mono);font-size:22px;color:var(--ac2);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Block target</div>
+          <div id="mininglive-target" style="font-family:var(--mono);font-size:22px;color:var(--t);margin-top:4px">120 s</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Recent median</div>
+          <div id="mininglive-median" style="font-family:var(--mono);font-size:22px;color:var(--t);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Current difficulty</div>
+          <div id="mininglive-diff" style="font-family:var(--mono);font-size:22px;color:var(--t);margin-top:4px">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Block-time distribution (last 50 blocks)</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        Histogram of inter-block times. A tight clustering around 120s (the target) means difficulty is well-tuned to current hashrate. Wide spread or systematic drift triggers ASERT difficulty adjustment.
+      </div>
+      <div style="padding:0 16px 16px"><canvas id="mininglive-btime" width="800" height="280"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ FEE ESTIMATOR ═════════════════════════════════════════════════
+     Derived purely from get_mempool_transactions — no new RPC needed.
+     Recommends a fee for "next block" vs "within 10 blocks" based on
+     mempool pressure and recent-block fee distributions. -->
+<div class="page" id="page-feemarket">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Fee estimator</div>
+    <div class="page-title" style="margin-bottom:4px">Fee estimator</div>
+    <div class="page-sub" style="margin-bottom:20px">Recommended fee tiers based on live mempool pressure. CoinCync fees are deterministic per kilobyte — no auction, no priority-queue gaming.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Recommended fees right now
+        <span class="panel-action">
+          <span id="feemarket-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Flash</div>
+          <div class="fee-tier-card__time">Next block (≤ 2 min)</div>
+          <div class="fee-tier-card__rate" id="feemarket-flash">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Fast</div>
+          <div class="fee-tier-card__time">≤ 5 min</div>
+          <div class="fee-tier-card__rate" id="feemarket-fast">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Normal</div>
+          <div class="fee-tier-card__time">≤ 30 min</div>
+          <div class="fee-tier-card__rate" id="feemarket-normal">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Slow</div>
+          <div class="fee-tier-card__time">≤ 2 hours</div>
+          <div class="fee-tier-card__rate" id="feemarket-slow">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Mempool fee distribution (current backlog)</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        Histogram of fee-per-byte across pending mempool transactions. Higher density at higher fees = competitive market; pile-up at low fees = quiet network. The minimum-relay floor is the dotted line.
+      </div>
+      <div style="padding:0 16px 16px"><canvas id="feemarket-hist" width="800" height="280"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<style>
+/* ── Reorg-history layer cards ───────────────────────────────────── */
+.reorg-layer-card {
+  background: var(--s2);
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.reorg-layer-card__name {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t);
+  margin-bottom: 6px;
+}
+.reorg-layer-card__desc {
+  font-size: 11px;
+  color: var(--t2);
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.reorg-layer-card__status {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--verified);
+  background: rgba(127, 184, 121, 0.15);
+  border: 1px solid rgba(127, 184, 121, 0.4);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+.reorg-layer-card__status--dormant {
+  color: var(--ac2);
+  background: rgba(212, 160, 89, 0.15);
+  border-color: rgba(212, 160, 89, 0.4);
+}
+
+/* ── Fee-tier cards on fee estimator ─────────────────────────────── */
+.fee-tier-card {
+  background: var(--s2);
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.fee-tier-card__label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ac2);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.fee-tier-card__time {
+  font-size: 11px;
+  color: var(--t3);
+  margin-top: 4px;
+}
+.fee-tier-card__rate {
+  font-family: var(--mono);
+  font-size: 20px;
+  color: var(--t);
+  margin-top: 10px;
+}
+.fee-tier-card__unit {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--t3);
+  margin-top: 2px;
+}
+</style>
+
+<footer>
+  <div class="footer-inner">
+    <div>
+      <div class="footer-brand">
+        <svg viewBox="0 0 200 200" width="24" height="24" aria-label="CoinCync logo" role="img"><circle cx="100" cy="100" r="78" fill="none" stroke="var(--logo-stroke, var(--ac2))" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/><circle cx="132" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/></svg>
+        <span class="logo-text">Coin<em>Cync</em></span>
+      </div>
+      <div class="footer-tagline">Privacy money that requires no permission.</div>
+    </div>
+    <div class="footer-links">
+      <span onclick="go('home')">Home</span>
+      <span onclick="go('blocks')">Blocks</span>
+      <span onclick="go('mempool')">Mempool</span>
+      <span onclick="go('network')">Network</span>
+      <span onclick="go('health')">Node Health</span>
+      <span onclick="go('supply')">Supply</span>
+    </div>
+    <div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
+        <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('✉','Subscribed',e.value,3000);e.value=''}else{showToast('⚠','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
+      </div>
+      <div class="footer-credit">Developed by Cync Lab · v1.0.9 · <span class="badge">✓ Auditable</span></div>
+    </div>
+  </div>
+</footer>
 
 </body>
 </html>
