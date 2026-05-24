@@ -1,7 +1,7 @@
 # CIP-009.D production posture at v1.0 genesis: dormant or active
 
 **Date:** 2026-05-23
-**Status:** Decision pending (this document is the framing; sign + dated decision goes at the bottom)
+**Status:** Decided — **Option A (dormant at genesis, CIP-007 activation later)**, see signed block below
 **Refers to:** [CIP-009.D — Miner-signed rolling checkpoints](../cip/CIP-009-D-miner-signed-rolling-checkpoints.md), [CIP-009 — Reorg defense decision](../cip/CIP-009-reorg-defense-decision.md), [docs/security/reorg-defense.md](../security/reorg-defense.md)
 
 ---
@@ -121,16 +121,25 @@ The only scenario where (B) wins decisively is if the audit firm signals they're
 
 ## Decision
 
-> **TODO: sign and date below when the decision is made.**
-
-```
-Decision:      [A — dormant] | [B — active]
-Made on:       2026-MM-DD
-Made by:       [name / handle]
-Activation date if (A): [target block height or CIP-007 timeline]
-Genesis signer set if (B): [9 entries, OR pointer to a separate doc]
+```text
+Decision:      A — dormant at genesis
+Made on:       2026-05-23
+Made by:       ghostrider1092 (maintainer)
+Activation date if (A): TBD post-mainnet via CIP-007 (no fixed block-height commitment;
+                        revisit when the network is large + organized enough to elect a
+                        credible 9-signer set)
+Genesis signer set if (B): n/a
 
 Rationale (one paragraph):
+The bootstrap signer-set problem is unresolved — there is no credible answer to "who are
+the 9?" that survives cypherpunk-purist scrutiny on day 1, and inventing an answer under
+pre-launch pressure is the kind of decision that ages badly. Trimming Layer 6 from the
+audit firm's October-1 engagement keeps the perimeter cleanly scoped (Layers 1-5 +
+the 73k LOC of base-chain code) and saves real timeline. Layer 5 hardcoded checkpoints
+carry genesis-day defense competently — Bitcoin has run on much less for 15+ years.
+Layer 6 code stays in the tree, gated behind `rolling-finality` off-by-default; the audit
+firm reviews it as documentation + dormant code, not as live consensus logic. CIP-007
+activation can happen post-mainnet when the signer-set question has an obvious answer.
 ```
 
 ---
