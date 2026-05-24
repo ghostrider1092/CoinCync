@@ -156,6 +156,12 @@ let state = {
   transactions: [],      // populated by get_transactions invoke
   address: "",           // populated by get_wallet_address invoke
   walletFilePath: "",    // populated by wallet_path invoke (shown in Settings → About)
+  // Task #7+#8: reorg-notification state. Null when no reorg has been
+  // detected since unlock (or since the user dismissed). Non-null
+  // values cause renderShell() to inject the reorg banner above the
+  // current page's main content.
+  lastReorgAtHeight: null,
+  lastReorgDepth: null,
 };
 
 // ─── Live chain-state subscription ────────────────────────────────
@@ -263,6 +269,20 @@ async function subscribeToWalletState() {
       if (typeof p.transactions_count === "number") {
         state.txCount = p.transactions_count;
       }
+      // Task #7+#8: reorg-notification fields. Stored on state so the
+      // banner stays visible across re-renders until the user clicks
+      // dismiss (which calls dismiss_reorg_notification → re-emits a
+      // wallet_state with both fields absent → these clear).
+      if (typeof p.lastReorgAtHeight === "number") {
+        state.lastReorgAtHeight = p.lastReorgAtHeight;
+      } else {
+        state.lastReorgAtHeight = null;
+      }
+      if (typeof p.lastReorgDepth === "number") {
+        state.lastReorgDepth = p.lastReorgDepth;
+      } else {
+        state.lastReorgDepth = null;
+      }
       // When the tx count changes, refresh the actual list so dashboard /
       // history show the new transactions. Fire-and-forget; the next
       // re-render will pick up state.transactions.
@@ -272,7 +292,10 @@ async function subscribeToWalletState() {
         else if (Array.isArray(txs)) state.transactions = txs;
       } catch (e) { /* leave state.transactions as-is on failure */ }
       // Dashboard + history both show balance; re-render when relevant.
-      if (state.page === "dashboard" || state.page === "history") {
+      // Always re-render on reorg-state change so the banner can appear
+      // or disappear regardless of which page is active.
+      if (state.page === "dashboard" || state.page === "history"
+          || state.lastReorgAtHeight !== null) {
         renderShell();
       }
     });
@@ -843,7 +866,7 @@ function renderShell() {
   app.innerHTML = `
     <div class="shell">
       ${sidebarHtml()}
-      <main class="main" id="mainContent">${pageHtml()}</main>
+      <main class="main" id="mainContent">${reorgBannerHtml()}${pageHtml()}</main>
     </div>
   `;
 
@@ -863,13 +886,61 @@ function renderShell() {
     });
   });
 
+  // Wire reorg-banner dismiss (Task #8). When present, calls back to
+  // Rust to clear AppState.last_reorg_* + re-emit wallet_state.
+  const dismissBtn = app.querySelector("[data-reorg-dismiss]");
+  if (dismissBtn) {
+    dismissBtn.addEventListener("click", async () => {
+      try {
+        await invoke("dismiss_reorg_notification");
+      } catch (e) {
+        console.warn("[reorgBanner] dismiss failed:", e);
+        // Local fallback so the user can still close it even if the
+        // backend call fails — re-emit will eventually re-clear.
+        state.lastReorgAtHeight = null;
+        state.lastReorgDepth = null;
+        renderShell();
+      }
+    });
+  }
+
   // Wire page-specific handlers
   if (state.page === "send")     wireSend();
+  if (state.page === "receive")  wireReceive();
   if (state.page === "swap")     wireSwap();
   if (state.page === "history")  wireHistory();
   if (state.page === "settings") wireSettings();
   if (state.page === "mining")   wireMining();
   if (state.page === "multisig") wireMultisig();
+}
+
+// Task #8: reorg-notification banner. Renders at the top of <main> on
+// every page while state.lastReorgAtHeight is non-null. Dismissible
+// via the X button (which invokes dismiss_reorg_notification on the
+// Rust side). The wording follows the design doc: "Chain reorg
+// detected at depth N — balance updated".
+function reorgBannerHtml() {
+  if (state.lastReorgAtHeight === null || state.lastReorgAtHeight === undefined) {
+    return "";
+  }
+  const depth = state.lastReorgDepth ?? 0;
+  const height = state.lastReorgAtHeight;
+  const depthWord = depth === 1 ? "block" : "blocks";
+  return `
+    <div class="reorg-banner" role="status" aria-live="polite">
+      <div class="reorg-banner__icon" aria-hidden="true">⟳</div>
+      <div class="reorg-banner__body">
+        <div class="reorg-banner__title">Chain reorganization detected</div>
+        <div class="reorg-banner__detail">
+          Rewound ${depth} ${depthWord} to block ${height.toLocaleString()}. Your balance has been updated.
+        </div>
+      </div>
+      <button class="reorg-banner__dismiss" data-reorg-dismiss
+              aria-label="Dismiss reorg notification">
+        ×
+      </button>
+    </div>
+  `;
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────
@@ -887,7 +958,10 @@ function dashboardHtml() {
         : "Sent",
       meta: tx.height ? `Block #${tx.height.toLocaleString()}` : (tx.date || "—"),
       amount: `${sign}${tx.amount || "0.000000"}`,
-      unit: "CYNC",
+      // tCYNC matches the hero-balance + history-page units. Mainnet
+      // will swap to "CYNC" via a network-aware constant once v1.0
+      // ships; testnet builds (the only ones live today) stay tCYNC.
+      unit: "tCYNC",
     };
   });
   const pending = Math.max(0, state.balance - state.balanceUnlocked);
@@ -935,8 +1009,11 @@ function dashboardHtml() {
         <button class="action-card" data-action="swap">
           <div class="action-card__icon-wrap is-secondary">${ICONS.swap}</div>
           <div>
-            <div class="action-card__label">Swap</div>
-            <div class="action-card__sub">Trade CYNC ↔ BTC</div>
+            <div class="action-card__label">
+              Swap
+              <span class="action-card__chip">v1.1</span>
+            </div>
+            <div class="action-card__sub">Trade CYNC ↔ BTC · preview</div>
           </div>
         </button>
         <button class="action-card" data-action="mining">
@@ -1071,15 +1148,15 @@ function sendHtml() {
         <div class="send-summary__title">Review</div>
         <div class="send-summary__row">
           <span>To</span>
-          <span style="color: var(--text-tertiary);">—</span>
+          <span id="summaryTo" style="color: var(--text-tertiary);">—</span>
         </div>
         <div class="send-summary__row">
           <span>Amount</span>
-          <span>0.000000 tCYNC</span>
+          <span id="summaryAmount">0.000000 tCYNC</span>
         </div>
         <div class="send-summary__row">
           <span>Network fee</span>
-          <span>0.000142 tCYNC</span>
+          <span id="summaryFee">0.000142 tCYNC</span>
         </div>
         <div class="send-summary__row">
           <span>Privacy</span>
@@ -1087,7 +1164,7 @@ function sendHtml() {
         </div>
         <div class="send-summary__total">
           <span class="send-summary__total-label">Total</span>
-          <span class="send-summary__total-value">0.000142<span>tCYNC</span></span>
+          <span class="send-summary__total-value" id="summaryTotal">0.000142<span>tCYNC</span></span>
         </div>
         <button class="primary-button" disabled>Send transaction</button>
       </aside>
@@ -1132,11 +1209,13 @@ function wireSend() {
           params: { to, amount: amt, memo: note || null, priority: fee },
         });
         const txid = result?.txid || "(no txid)";
-        alert(`Sent ✓\nTxid: ${txid}`);
+        // Truncate txid for toast (full id still in clipboard).
+        const shortTxid = txid.length > 16 ? `${txid.slice(0, 8)}…${txid.slice(-6)}` : txid;
+        showToast(`Sent ✓  ·  ${shortTxid}`, "success");
         amount.value = ""; address.value = ""; memo.value = "";
         updateSendButton();
       } catch (e) {
-        alert(`Send failed: ${e.message || e}`);
+        showToast(`Send failed: ${e.message || e}`, "error");
       }
       sendBtn.disabled = false;
       sendBtn.textContent = "Send transaction";
@@ -1146,7 +1225,52 @@ function wireSend() {
   function updateSendButton() {
     const valid = parseFloat(amount?.value || 0) > 0 && (address?.value || "").trim().length > 0;
     if (sendBtn) sendBtn.disabled = !valid;
+    updateSummary();
   }
+
+  // Reactive review pane (Task: v2 polish). Updates the right-side
+  // summary's To / Amount / Fee / Total fields whenever the form
+  // mutates. Without this the panel showed hardcoded zeros + dash
+  // regardless of user input — a confusing UX gap.
+  function updateSummary() {
+    const summaryTo     = document.getElementById("summaryTo");
+    const summaryAmount = document.getElementById("summaryAmount");
+    const summaryFee    = document.getElementById("summaryFee");
+    const summaryTotal  = document.getElementById("summaryTotal");
+
+    const amt    = parseFloat(amount?.value || 0);
+    const to     = (address?.value || "").trim();
+    const feeTier = app.querySelector(".fee-tier.is-active");
+    const feeTxt = feeTier?.querySelector(".fee-tier__cost")?.textContent || "0.000142 tCYNC";
+    const feeNum = parseFloat(feeTxt) || 0;
+    const total  = amt + feeNum;
+
+    if (summaryTo) {
+      if (to.length === 0) {
+        summaryTo.textContent = "—";
+        summaryTo.style.color = "var(--text-tertiary)";
+      } else {
+        // Truncate long addresses to fit the panel
+        summaryTo.textContent = to.length > 16
+          ? `${to.slice(0, 8)}…${to.slice(-6)}`
+          : to;
+        summaryTo.style.color = "var(--text-primary)";
+      }
+    }
+    if (summaryAmount) {
+      summaryAmount.textContent = `${(amt || 0).toFixed(6)} tCYNC`;
+    }
+    if (summaryFee) {
+      summaryFee.textContent = feeTxt;
+    }
+    if (summaryTotal) {
+      summaryTotal.innerHTML = `${total.toFixed(6)}<span>tCYNC</span>`;
+    }
+  }
+
+  // Prime the summary on first render so it reflects whatever may be
+  // in the inputs (e.g. after a navigate-away-and-back).
+  updateSummary();
 }
 
 // ─── Receive screen ───────────────────────────────────────────────
@@ -1227,11 +1351,11 @@ function receiveHtml() {
         <div class="receive-qr__frame">${qrSvg(addr)}</div>
         <div class="receive-qr__caption">
           <div class="receive-qr__caption-label">Your stealth address</div>
-          <div class="receive-qr__caption-value">Scan to pay</div>
+          <div class="receive-qr__caption-value">Copy address to share</div>
         </div>
         <div class="address-pill">
           <div class="address-pill__address">${addr}</div>
-          <button class="address-pill__copy">
+          <button class="address-pill__copy" id="receiveCopyBtn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             Copy
           </button>
@@ -1287,6 +1411,32 @@ function receiveHtml() {
       </aside>
     </div>
   `;
+}
+
+// Wire receive page interactions. Just the Copy button at the moment;
+// the "Generate new address" + "Request specific amount" cards in the
+// receive-options aside don't have backing commands yet (placeholder
+// surfaces — see option-card class on the receive page).
+function wireReceive() {
+  const copyBtn = document.getElementById("receiveCopyBtn");
+  if (!copyBtn) return;
+  copyBtn.addEventListener("click", async () => {
+    const addr = state.address;
+    if (!addr) return;
+    const original = copyBtn.innerHTML;
+    try {
+      await navigator.clipboard.writeText(addr);
+      copyBtn.innerHTML = "Copied ✓";
+      copyBtn.style.color = "var(--green)";
+    } catch (e) {
+      console.warn("[wireReceive] clipboard.writeText failed:", e);
+      copyBtn.innerHTML = "Press Ctrl+C to copy";
+    }
+    setTimeout(() => {
+      copyBtn.innerHTML = original;
+      copyBtn.style.color = "";
+    }, 1500);
+  });
 }
 
 // ─── Swap screen ──────────────────────────────────────────────────
@@ -1469,7 +1619,7 @@ function historyHtml() {
 
       ${filtered.length === 0 ? `
         <div class="activity-empty">
-          <div class="activity-empty__art">${ICONS.arrowDown}</div>
+          <div class="activity-empty__art">${ICONS.history}</div>
           <div class="activity-empty__title">${state.transactions.length === 0 ? "No transactions yet" : "No matches for this filter"}</div>
           <div class="activity-empty__body">
             ${state.transactions.length === 0
@@ -1937,8 +2087,11 @@ function setPref(key, value) {
   applyPrefs(prefs);
 }
 
-// Toast queue — used by block_found notifications.
-function showMiningToast(msg) {
+// Toast queue — used by block_found notifications + send-result feedback.
+// `kind`: omit for the default gold-tinted info style; "success" / "error"
+// tint via the `.is-success` / `.is-error` modifier classes (see shell.css).
+// Multi-line msgs OK — the toast wraps and grows vertically.
+function showToast(msg, kind) {
   const id = "miningToast";
   let toast = document.getElementById(id);
   if (!toast) {
@@ -1947,11 +2100,21 @@ function showMiningToast(msg) {
     toast.className = "mining-toast";
     document.body.appendChild(toast);
   }
+  // Reset modifier classes from any prior call.
+  toast.classList.remove("is-success", "is-error");
+  if (kind === "success") toast.classList.add("is-success");
+  if (kind === "error")   toast.classList.add("is-error");
   toast.textContent = msg;
   toast.classList.add("is-visible");
   clearTimeout(toast._hideTimer);
-  toast._hideTimer = setTimeout(() => toast.classList.remove("is-visible"), 4500);
+  // Errors stay up a little longer so the user can read what failed.
+  const dwellMs = kind === "error" ? 7000 : 4500;
+  toast._hideTimer = setTimeout(() => toast.classList.remove("is-visible"), dwellMs);
 }
+
+// Back-compat alias — `showMiningToast` is the prior name + still used
+// by the block_found subscription. Keep both pointing at the same impl.
+function showMiningToast(msg) { showToast(msg); }
 
 function miningHtml() {
   const hr = mining.on ? mining.hashrate : 0;
@@ -2070,7 +2233,7 @@ function wireMining() {
           // instead of silently sending blocks to a dead key.
           const addr = state.address || "";
           if (!addr || addr.startsWith("tCYNCxq8a4f1m12k7q4j") || addr.length < 16) {
-            alert("Unlock your wallet first — mining needs a real address loaded from your wallet, not the placeholder default.");
+            showToast("Unlock your wallet first — mining needs your real address loaded.", "error");
             btn.disabled = false;
             return;
           }
@@ -2083,7 +2246,7 @@ function wireMining() {
         }
         renderShell();
       } catch (e) {
-        alert(`Mining toggle failed: ${e.message || e}`);
+        showToast(`Mining toggle failed: ${e.message || e}`, "error");
       }
       btn.disabled = false;
     });

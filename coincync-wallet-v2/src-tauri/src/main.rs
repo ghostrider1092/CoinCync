@@ -130,6 +130,14 @@ struct AppState {
     active_rpc: Option<String>,
     failed_unlock_attempts: u32,
     unlock_blocked_until: u64,
+    /// Task #7: most-recent chain-reorg detection height + depth. The
+    /// wallet binary's scan output surfaces a `Reorg recovered:` line
+    /// when its background_sync layer applies a recovery; the Tauri
+    /// wrapper parses that line and stashes the values here. The UI
+    /// reads them via the `wallet_state` event and renders a banner
+    /// (Task #8). Cleared via `dismiss_reorg_notification`.
+    last_reorg_at_height: Option<u64>,
+    last_reorg_depth: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -628,6 +636,16 @@ struct WalletStateEvent {
     utxo_count: usize,
     scanned_height: u64,
     transactions_count: usize,
+    /// Task #7: most-recent reorg-recovery height. None when no reorg
+    /// has been detected since unlock or since the user dismissed the
+    /// banner via `dismiss_reorg_notification`.
+    #[serde(rename = "lastReorgAtHeight", skip_serializing_if = "Option::is_none")]
+    last_reorg_at_height: Option<u64>,
+    /// Task #7: depth of the most-recent reorg in blocks. Renders in
+    /// the UI banner as "Chain reorg detected at depth N — balance
+    /// updated".
+    #[serde(rename = "lastReorgDepth", skip_serializing_if = "Option::is_none")]
+    last_reorg_depth: Option<u64>,
 }
 
 /// Emit a `wallet_state` event with the current AppState snapshot.
@@ -643,6 +661,8 @@ fn emit_wallet_state(handle: &tauri::AppHandle, s: &AppState) {
         utxo_count: s.utxo_count,
         scanned_height: s.scanned_height,
         transactions_count: s.transactions.len(),
+        last_reorg_at_height: s.last_reorg_at_height,
+        last_reorg_depth: s.last_reorg_depth,
     };
     if let Err(e) = handle.emit_all("wallet_state", &payload) {
         tracing::debug!(error = %e, "wallet_state emit failed (window may be closing)");
@@ -931,6 +951,13 @@ fn scan_wallet(
     let mut utxos = 0usize;
     let mut tip = 0u64;
     let mut found = 0usize;
+    // Task #7: most-recent reorg recovery surfaced by the wallet binary.
+    // Format from background_sync.rs:
+    //   "Reorg recovered: rewound to <new_height> (depth <N>, ...)"
+    // OR (when via periodic poll):
+    //   "Reorg recovered via periodic poll: rewound to <new_height> (depth <N>)"
+    let mut reorg_at_height: Option<u64> = None;
+    let mut reorg_depth: Option<u64> = None;
     for line in out.lines() {
         if line.contains("Balance total:") {
             bal = line.split_whitespace().filter_map(|s| s.parse::<u64>().ok()).next().unwrap_or(0);
@@ -943,6 +970,21 @@ fn scan_wallet(
         }
         if line.contains("Found outputs:") {
             found = line.split_whitespace().filter_map(|s| s.parse::<usize>().ok()).next().unwrap_or(0);
+        }
+        if line.contains("Reorg recovered") {
+            // Extract new_height (post-rewind tip) — the canonical
+            // height the wallet UI should highlight in the banner.
+            // We surface new_height as `reorg_at_height` because the
+            // user-facing message is "your view of height N was
+            // reorged" which the wallet now sits at as canonical.
+            if let Some(rest) = line.split("rewound to ").nth(1) {
+                let h_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                reorg_at_height = h_str.parse().ok();
+            }
+            if let Some(rest) = line.split("depth ").nth(1) {
+                let d_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                reorg_depth = d_str.parse().ok();
+            }
         }
     }
 
@@ -975,6 +1017,15 @@ fn scan_wallet(
         s.utxo_count = utxos;
         s.scanned_height = tip;
         s.transactions = txs;
+        // Task #7: stash reorg metadata if this scan surfaced one.
+        // We don't clear existing values if the current scan saw no
+        // reorg — the UI clears via `dismiss_reorg_notification` when
+        // the user acks the banner. That way a quick follow-up scan
+        // doesn't make the banner disappear before the user notices.
+        if reorg_at_height.is_some() {
+            s.last_reorg_at_height = reorg_at_height;
+            s.last_reorg_depth = reorg_depth;
+        }
         // Emit wallet_state inside the lock so the JS sees a coherent
         // snapshot (balance + scanned-height + tx count all from the same
         // post-scan moment).
@@ -993,6 +1044,26 @@ fn scan_wallet(
 
     Ok(format!("Scanned to height {}. Found {} outputs. Balance: {:.12} CYNC.",
         tip, found, bal as f64 / 1e12))
+}
+
+/// Task #7: clear the most-recent reorg notification from AppState
+/// and re-emit `wallet_state` so the UI banner disappears. Called by
+/// the JS frontend when the user clicks the banner's dismiss button.
+///
+/// Re-emit is required because the JS subscribers to `wallet_state`
+/// only render the banner while `lastReorgAtHeight` is set; without
+/// the re-emit they'd keep showing the stale value until the next
+/// scan-driven event.
+#[tauri::command]
+fn dismiss_reorg_notification(
+    state: tauri::State<'_, State>,
+    app: tauri::AppHandle,
+) -> Result<(), WalletError> {
+    let mut s = state.lock()?;
+    s.last_reorg_at_height = None;
+    s.last_reorg_depth = None;
+    emit_wallet_state(&app, &s);
+    Ok(())
 }
 
 /// FIX #35: Parse tCYNC address into spend+view keys properly
@@ -1096,21 +1167,31 @@ struct MultisigGenParams {
 }
 
 #[tauri::command]
-fn multisig_gen(params: MultisigGenParams, state: tauri::State<'_, State>) -> Result<MultisigGenResult, String> {
-    let bin = state.lock().map_err(|e| e.to_string())?.wallet_bin.clone();
+fn multisig_gen(params: MultisigGenParams, state: tauri::State<'_, State>) -> Result<MultisigGenResult, WalletError> {
+    // Typed-error migration 2026-05-23 (recipe in
+    // coincync-wallet-v2/docs/typed-errors-migration.md):
+    //   - String error → WalletError variants
+    //   - PoisonError → LockPoisoned via existing From impl
+    //   - wallet_cli's String error → from_cli_error for the user-typo
+    //     branch + WalletError::CliFailed fallback
+    //   - "no shares produced" → WalletError::op (catch-all with msg)
+    let bin = state.lock()?.wallet_bin.clone();
     let out = wallet_cli(&bin, &[
         "multisig-gen",
         "--threshold", &params.threshold.to_string(),
         "--total", &params.total.to_string(),
         "--output-dir", &params.output_dir,
-    ], "")?;
+    ], "").map_err(WalletError::from_cli_error)?;
     // CLI prints "share file: <path>" for each generated share — parse them.
     let share_files: Vec<String> = out
         .lines()
         .filter_map(|l| l.strip_prefix("share file: ").map(|s| s.trim().to_string()))
         .collect();
     if share_files.is_empty() {
-        return Err(format!("multisig-gen produced no shares; CLI output:\n{}", out));
+        return Err(WalletError::op(format!(
+            "multisig-gen produced no shares; CLI output:\n{}",
+            out
+        )));
     }
     Ok(MultisigGenResult {
         share_files,
@@ -1132,9 +1213,10 @@ struct MultisigInfoParams {
 }
 
 #[tauri::command]
-fn multisig_info(params: MultisigInfoParams, state: tauri::State<'_, State>) -> Result<MultisigInfoResult, String> {
-    let bin = state.lock().map_err(|e| e.to_string())?.wallet_bin.clone();
-    let info = wallet_cli(&bin, &["multisig-info", "--share-file", &params.share_file], "")?;
+fn multisig_info(params: MultisigInfoParams, state: tauri::State<'_, State>) -> Result<MultisigInfoResult, WalletError> {
+    let bin = state.lock()?.wallet_bin.clone();
+    let info = wallet_cli(&bin, &["multisig-info", "--share-file", &params.share_file], "")
+        .map_err(WalletError::from_cli_error)?;
     Ok(MultisigInfoResult { info })
 }
 
@@ -1154,13 +1236,13 @@ struct MultisigRound1Result {
 }
 
 #[tauri::command]
-fn multisig_round1(params: MultisigRound1Params, state: tauri::State<'_, State>) -> Result<MultisigRound1Result, String> {
-    let bin = state.lock().map_err(|e| e.to_string())?.wallet_bin.clone();
+fn multisig_round1(params: MultisigRound1Params, state: tauri::State<'_, State>) -> Result<MultisigRound1Result, WalletError> {
+    let bin = state.lock()?.wallet_bin.clone();
     let out = wallet_cli(&bin, &[
         "multisig-round1",
         "--share-file", &params.share_file,
         "--output", &params.output,
-    ], "")?;
+    ], "").map_err(WalletError::from_cli_error)?;
     // CLI prints "nonce file: <path>" so the user knows which secret to keep.
     let nonce_file = out
         .lines()
@@ -1189,8 +1271,8 @@ struct MultisigRound2Result {
 }
 
 #[tauri::command]
-fn multisig_round2(params: MultisigRound2Params, state: tauri::State<'_, State>) -> Result<MultisigRound2Result, String> {
-    let bin = state.lock().map_err(|e| e.to_string())?.wallet_bin.clone();
+fn multisig_round2(params: MultisigRound2Params, state: tauri::State<'_, State>) -> Result<MultisigRound2Result, WalletError> {
+    let bin = state.lock()?.wallet_bin.clone();
     let mut args: Vec<String> = vec![
         "multisig-round2".into(),
         "--share-file".into(), params.share_file,
@@ -1201,7 +1283,7 @@ fn multisig_round2(params: MultisigRound2Params, state: tauri::State<'_, State>)
     ];
     args.extend(params.commitments);
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let _out = wallet_cli(&bin, &args_ref, "")?;
+    let _out = wallet_cli(&bin, &args_ref, "").map_err(WalletError::from_cli_error)?;
     Ok(MultisigRound2Result {
         sig_share_file: params.output,
     })
@@ -1224,8 +1306,8 @@ struct MultisigAggregateResult {
 }
 
 #[tauri::command]
-fn multisig_aggregate(params: MultisigAggregateParams, state: tauri::State<'_, State>) -> Result<MultisigAggregateResult, String> {
-    let bin = state.lock().map_err(|e| e.to_string())?.wallet_bin.clone();
+fn multisig_aggregate(params: MultisigAggregateParams, state: tauri::State<'_, State>) -> Result<MultisigAggregateResult, WalletError> {
+    let bin = state.lock()?.wallet_bin.clone();
     let mut args: Vec<String> = vec![
         "multisig-aggregate".into(),
         "--message".into(), params.message,
@@ -1237,7 +1319,7 @@ fn multisig_aggregate(params: MultisigAggregateParams, state: tauri::State<'_, S
     args.push("--key-shares".into());
     args.extend(params.key_shares);
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let raw = wallet_cli(&bin, &args_ref, "")?;
+    let raw = wallet_cli(&bin, &args_ref, "").map_err(WalletError::from_cli_error)?;
     let signature_hex = raw
         .lines()
         .find_map(|l| l.strip_prefix("signature: ").map(|s| s.trim().to_string()))
@@ -1262,8 +1344,8 @@ struct MultisigSendResult {
 }
 
 #[tauri::command]
-fn multisig_send(params: MultisigSendParams, state: tauri::State<'_, State>) -> Result<MultisigSendResult, String> {
-    let bin = state.lock().map_err(|e| e.to_string())?.wallet_bin.clone();
+fn multisig_send(params: MultisigSendParams, state: tauri::State<'_, State>) -> Result<MultisigSendResult, WalletError> {
+    let bin = state.lock()?.wallet_bin.clone();
     let node_url = active_node_url();
     let amount_str = params.amount.to_string();
     let mut args: Vec<String> = vec![
@@ -1276,7 +1358,7 @@ fn multisig_send(params: MultisigSendParams, state: tauri::State<'_, State>) -> 
     ];
     args.extend(params.key_shares);
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let out = wallet_cli(&bin, &args_ref, "")?;
+    let out = wallet_cli(&bin, &args_ref, "").map_err(WalletError::from_cli_error)?;
     let txid = out.lines()
         .find_map(|l| l.strip_prefix("Hash: ").map(|s| s.trim().to_string()))
         .unwrap_or_else(|| "submitted".to_string());
@@ -2204,6 +2286,8 @@ fn main() {
         active_rpc: None,
         failed_unlock_attempts: 0,
         unlock_blocked_until: 0,
+        last_reorg_at_height: None,
+        last_reorg_depth: None,
     }));
 
     // FIX #30: Check local first, then remote.
@@ -2308,6 +2392,7 @@ fn main() {
             get_network_info, validate_address,
             wallet_exists, wallet_path,
             create_wallet, restore_wallet, unlock_wallet, lock_wallet, scan_wallet, send_transaction,
+            dismiss_reorg_notification,
             check_binaries, start_mining, stop_mining, get_mining_stats,
             get_wallet_address,
             check_for_update,

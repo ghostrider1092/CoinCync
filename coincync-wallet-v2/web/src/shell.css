@@ -220,3 +220,83 @@
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
+
+/* ── Reorg-notification banner (Task #8) ─────────────────────────── */
+/* Surfaces at top of <main> on every page while state.lastReorgAtHeight
+   is non-null. Backed by the daemon-side reorg-detection machinery
+   (Tasks #1-#6). Uses the amber token rather than red — a recovered
+   reorg is a noteworthy event, not an error: the wallet has already
+   self-corrected by the time this renders. Pairs with the brand
+   palette via --gold-glow for warm tint. */
+.reorg-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-4);
+  border: 1px solid var(--glass-border-strong);
+  border-left: 2px solid var(--amber);
+  background:
+    linear-gradient(135deg, var(--gold-glow) 0%, transparent 70%),
+    var(--glass-light);
+  border-radius: var(--r-md);
+  animation: lift-in var(--t-base) var(--ease-out);
+}
+
+.reorg-banner__icon {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  background: var(--gold-glow);
+  color: var(--text-primary);
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+
+.reorg-banner__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.reorg-banner__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: var(--ls-normal);
+}
+
+.reorg-banner__detail {
+  margin-top: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  letter-spacing: var(--ls-wide);
+}
+
+.reorg-banner__dismiss {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--fs-xl);
+  line-height: 1;
+  cursor: pointer;
+  border-radius: var(--r-pill);
+  transition: background var(--t-fast) var(--ease-out),
+              color var(--t-fast) var(--ease-out);
+}
+
+.reorg-banner__dismiss:hover,
+.reorg-banner__dismiss:focus-visible {
+  background: var(--gold-glow);
+  color: var(--text-primary);
+  outline: none;
+}

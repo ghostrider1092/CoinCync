@@ -354,6 +354,21 @@ body {
   pointer-events: auto;
 }
 
+/* Generalized toast variants (Task: v2 polish 2026-05-23). The class
+   is still named `.mining-toast` for back-compat with existing usage;
+   the modifiers `.is-success` / `.is-error` retint the border + glow
+   so a "Sent ✓" toast reads visually distinct from a "Send failed"
+   toast. Without these, all toasts looked identical and the user had
+   to read the text carefully to know whether something succeeded. */
+.mining-toast.is-success {
+  border-color: var(--green);
+  box-shadow: var(--shadow-lg), 0 0 32px var(--green-glow);
+}
+.mining-toast.is-error {
+  border-color: var(--red);
+  box-shadow: var(--shadow-lg), 0 0 32px var(--red-glow);
+}
+
 /* ── Theme overrides ───────────────────────────────────────────────
  * Applied via classes on the <html> element. Set in Settings →
  * Appearance → Color scheme; persisted to localStorage; reapplied at

@@ -1,6 +1,6 @@
 # Wallet v2 typed-errors migration guide
 
-**Status:** in progress as of 2026-05-21. 8 of 33 Tauri commands migrated.
+**Status:** in progress as of 2026-05-23. 14 of 35 Tauri commands migrated (all multisig_* commands done; only swap_* feature-gating remains for v1.0).
 **Goal:** every command returns `Result<T, WalletError>` instead of `Result<T, String>`. JS pattern-matches on `err.code` rather than substring-matching message text.
 
 This document is the migration recipe so any remaining command can be ported without re-deriving the pattern. Each migration is mechanical and takes 5-15 minutes.
@@ -9,20 +9,44 @@ This document is the migration recipe so any remaining command can be ported wit
 
 ## What's migrated
 
-| Command | Status |
-| --- | --- |
-| `unlock_wallet` | ✅ |
-| `lock_wallet` | ✅ |
-| `create_wallet` | ✅ |
-| `restore_wallet` | ✅ |
-| `scan_wallet` | ✅ |
-| `send_transaction` | ✅ |
-| `start_mining` | ✅ |
-| `stop_mining` | ✅ |
+| Command | Status | Migrated date |
+| --- | --- | --- |
+| `unlock_wallet` | ✅ | 2026-05-21 |
+| `lock_wallet` | ✅ | 2026-05-21 |
+| `create_wallet` | ✅ | 2026-05-21 |
+| `restore_wallet` | ✅ | 2026-05-21 |
+| `scan_wallet` | ✅ | 2026-05-21 |
+| `send_transaction` | ✅ | 2026-05-21 |
+| `start_mining` | ✅ | 2026-05-21 |
+| `stop_mining` | ✅ | 2026-05-21 |
+| `multisig_gen` | ✅ | 2026-05-23 — recipe-pattern proof |
+| `multisig_info` | ✅ | 2026-05-23 |
+| `multisig_round1` | ✅ | 2026-05-23 |
+| `multisig_round2` | ✅ | 2026-05-23 |
+| `multisig_aggregate` | ✅ | 2026-05-23 |
+| `multisig_send` | ✅ | 2026-05-23 |
 
 ## What's left
 
-`get_balance`, `get_block_height`, `get_peer_count`, `get_fee_estimate`, `get_transactions`, `get_rsa_state`, `get_network_info`, `validate_address`, `get_wallet_address`, `get_mining_stats`, `check_binaries`, `check_for_update`, `multisig_*` (6), `swap_*` (7) — 25 commands.
+### Real migrations needed
+
+None. All `multisig_*` commands are migrated. The `swap_*` block below is feature-gate work, not migration.
+
+### Not migrations — feature-gate instead (7 commands)
+
+The 7 `swap_*` commands (`swap_init`, `swap_handshake`, `swap_lock`, `swap_claim`, `swap_abort`, `swap_list`, `swap_history`) **should not ship in v1.0** per the staged-mainnet decision ([docs/decisions/2026-05-20-staged-mainnet-and-cyncswap.md](../../docs/decisions/2026-05-20-staged-mainnet-and-cyncswap.md)). The right v1.0 move is to **feature-gate them behind a `cyncswap` cargo feature**, off by default — *not* migrate them to `WalletError`. Migration happens when cyncswap ships in v1.1.
+
+Tracked as a follow-up item in the v1.0 audit-prep punchlist.
+
+### Not migrations — return data not Result (12 commands)
+
+These commands return their data type directly (no `Result`), so there's nothing to migrate. They could be refactored to return errors on RPC failure, but that's a separate UX decision, not a typed-error migration:
+
+`get_balance`, `get_block_height`, `get_peer_count`, `get_fee_estimate`, `get_transactions`, `get_rsa_state`, `get_network_info`, `validate_address`, `get_wallet_address`, `get_mining_stats`, `check_binaries`, `check_for_update`
+
+### Already returning data via Tauri command primitives
+
+`wallet_exists`, `wallet_path` — built-ins.
 
 The `get_*` commands mostly return data (not Result) and don't need migration unless they're refactored to return errors. The `multisig_*` and `swap_*` commands DO need migration; they're the bulk of the remaining work.
 

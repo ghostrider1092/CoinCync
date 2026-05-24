@@ -207,6 +207,27 @@
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: var(--ls-snug);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* "v1.1" / "preview" / "beta" chip on action-card labels. Communicates
+   that the feature is real-but-not-yet-active without burying the
+   detail in body copy. Pairs with the future-banner pattern on the
+   destination screen so the messaging is consistent end-to-end. */
+.action-card__chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--ls-widest);
+  text-transform: uppercase;
+  color: var(--violet-200);
+  background: var(--violet-glow);
+  border: 1px solid var(--violet-300);
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  line-height: 1.3;
 }
 
 .action-card__sub {
