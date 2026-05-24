@@ -8,6 +8,18 @@
 #
 # When git.coincync.network goes live, this file becomes the single
 # source of truth Forgejo's branch protection reads.
+#
+# Operational roles (release manager, fleet operator, security inbox,
+# etc.) that don't map to a code path live in /MAINTAINERS.md instead.
+# When a backup is named there, add the same handle to the relevant
+# row(s) below so GitHub auto-requests review from both. The "Two-of-N
+# maintainer sign-offs for consensus rules" rule in CONTRIBUTING.md is
+# currently unenforceable with N=1; tighten branch protection to require
+# two reviews on consensus paths once N >= 2.
+#
+# Bus-factor inventory + recovery procedure:
+#   /docs/governance/bus-factor.md
+#   /docs/operations/MAINTAINER_RECOVERY.md
 
 # Default owner (catches everything not matched below).
 *                                   @ghostrider1092

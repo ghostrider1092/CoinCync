@@ -85,7 +85,26 @@ Non-consensus changes (wallet, RPC additions that aren't consensus-affecting, pe
 
 You may contribute under a pseudonym. You are not required to verify your identity to submit code, file bugs, propose CIPs, or hold any community role. This is Right V of the Bill of Rights and is not negotiable.
 
-Sign your commits with whatever GPG identity you maintain. We don't care whose real name maps to it.
+## Signed commits (required)
+
+Branch protection on `main` requires every commit to carry a verified signature. PRs with unsigned commits will be blocked by GitHub before review. You may sign with **either SSH or GPG** — we don't care which, and we don't care whose real name (if any) maps to the key.
+
+**SSH signing (easier, no extra tooling):**
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey <path-to-your-ssh-pubkey>      # e.g. ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+```
+
+Then add the **public key** at [github.com/settings/ssh/new](https://github.com/settings/ssh/new) with **Key type = Signing Key** (this is a separate slot from Authentication; missing this step is the most common cause of commits showing as "unverified" despite local signing working). See GitHub's [SSH commit signature verification guide](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#ssh-commit-signature-verification) for the full reference.
+
+**GPG signing (traditional):**
+
+Follow GitHub's [generating a GPG key](https://docs.github.com/en/authentication/managing-commit-signature-verification/generating-a-new-gpg-key) guide, then upload the public key under **GPG keys** in the same settings page.
+
+Verify with `git log --show-signature` locally and the green "Verified" badge on github.com after pushing.
 
 ---
 
@@ -120,8 +139,8 @@ Changes to files in `critical_files.lock` (Constitution, Bill of Rights, `src/co
 | --- | --- |
 | **Security vulnerability** (consensus, crypto, privacy break, supply integrity) | `security@coincync.network` with PGP-encrypted message. Public PGP key in `SECURITY.md`. **Never open a public issue.** |
 | **Non-security bug** | GitHub Issues |
-| **Question / setup help** | Discord — `#help` channel |
-| **CIP discussion** | The CIP file itself + Discord `#cip-discussion` |
+| **Question / setup help** | [Discord](https://discord.gg/5tYNSCsqzy) — `#help` channel |
+| **CIP discussion** | The CIP file itself + [Discord](https://discord.gg/5tYNSCsqzy) `#cip-discussion` |
 
 The 90-day coordinated-disclosure window for security issues is committed in Article XV of the Constitution. We will respond to security reports within 7 days; we will publish a fix or coordinated-disclosure plan within 90 days.
 
@@ -147,3 +166,6 @@ By contributing, you agree your contribution is released under the project's MIT
 - **CIP index:** [`docs/cip/`](docs/cip/)
 - **Critical files lockfile:** [`critical_files.lock`](critical_files.lock)
 - **Code of Conduct:** [`docs/CODE_OF_CONDUCT.md`](docs/CODE_OF_CONDUCT.md)
+- **Maintainers:** [`MAINTAINERS.md`](MAINTAINERS.md) — who reviews what, review SLAs, recruiting
+- **Bus-factor inventory:** [`docs/governance/bus-factor.md`](docs/governance/bus-factor.md) — single-point-of-failure map
+- **Maintainer recovery procedure:** [`docs/operations/MAINTAINER_RECOVERY.md`](docs/operations/MAINTAINER_RECOVERY.md) — if the primary is gone
