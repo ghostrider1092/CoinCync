@@ -33,7 +33,13 @@ jobs:
   test:
     name: ${{ matrix.shard.name }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 50
+    # Bumped from 50 to 75 on 2026-05-24: unit-lib-bins (`cargo test
+    # --release --workspace --lib --bins` over 600+ unit tests) was
+    # repeatedly hitting the 50-min cap even with warm Swatinem cache.
+    # The other 5 matrix shards finish in <2 min so they're unaffected
+    # by the higher cap. Longer-term fix is sharding unit-lib-bins the
+    # way the other matrix entries are — filed as a follow-up item.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
