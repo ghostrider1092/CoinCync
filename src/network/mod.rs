@@ -8,6 +8,7 @@ pub mod framing;
 pub mod compact_blocks;
 pub mod orphan;
 pub mod proxy;
+pub mod socks_dns;
 pub mod peer;
 pub mod block_filter;
 pub mod scoring;

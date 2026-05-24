@@ -1,6 +1,17 @@
 // src/lib.rs
 #![allow(unsafe_code)]
 #![allow(clippy::all)]
+// Raised from the default 128 to accommodate nightly's stricter HRTB
+// resolver evaluating the `for<'v> &'v Simd<_, _>: Add` chain in
+// tari_bulletproofs_plus 0.4.1 (called from src/crypto/bulletproofs.rs
+// at lines 470, 534, 576, 631). Stable 1.88 doesn't need this — but
+// fuzz CI uses nightly (cargo-fuzz requires `-Zsanitizer=address`),
+// and recent nightlies tightened HRTB inference enough to hit the
+// default limit on this 126-deep `Value<Value<...>>` chain. Reproduces
+// as `error[E0275]: overflow evaluating the requirement`; the compiler
+// itself suggests this fix. Remove once tari_bulletproofs_plus 0.5+
+// is adopted (blocked on utoipa-swagger-ui 9.0.2 compat).
+#![recursion_limit = "512"]
 #![doc = "CoinCync 1.0 — compliant privacy cryptocurrency with CPU-only proof of work."]
 
 // ── Foundation ──────────────────────────────────────────────
