@@ -329,6 +329,59 @@ impl TransactionHistory {
         }
     }
 
+    /// Drop incoming records whose `tx_hash` appears in `outputs`.
+    /// Returns the number of records removed.
+    ///
+    /// Used during reorg rewind: the scanner's `outputs_to_remove`
+    /// field names `(tx_hash, output_index)` pairs that were journaled
+    /// as ours in the now-orphaned blocks. Because all outputs of a
+    /// single tx live in the same block (txs are atomic), the
+    /// appearance of ANY `(tx_hash, _)` in the rewind list means the
+    /// entire incoming record for `tx_hash` belongs to an orphan and
+    /// must go. We dedupe by `tx_hash` up front since `outputs` may
+    /// list multiple `(h, i)` entries for the same `h`.
+    pub fn remove_incoming_outputs(&mut self, outputs: &[(Hash, u8)]) -> usize {
+        use std::collections::HashSet;
+        let affected: HashSet<Hash> = outputs.iter().map(|(h, _)| *h).collect();
+        let before = self.records.len();
+        self.records.retain(|r| {
+            !(r.direction == TxDirection::Incoming && affected.contains(&r.tx_hash))
+        });
+        before - self.records.len()
+    }
+
+    /// Reset every outgoing record confirmed above `new_height` back to
+    /// pending state (block_height = 0, status = Pending). Returns the
+    /// number of records updated.
+    ///
+    /// Used during reorg rewind alongside `remove_incoming_outputs`:
+    /// the scanner's `outputs_to_remove` only describes incoming outputs
+    /// we own, so outgoing txs we previously sent that landed in an
+    /// orphaned block need a complementary height-based pass. The tx
+    /// itself is presumed re-broadcastable (it stays in mempool until
+    /// TX_EXPIRY_BLOCKS); the rewind here just unrecords the
+    /// no-longer-real confirmation. The next canonical block that
+    /// includes the tx will re-set block_height + status via the
+    /// normal scan path.
+    ///
+    /// NOTE: this is a coarse pass — it cannot tell which outgoing
+    /// records had their tx actually re-broadcast and confirmed in a
+    /// canonical block versus those that were re-confirmed at the same
+    /// height during the same reorg window. Both cases are handled by
+    /// the subsequent rescan, which will idempotently re-set
+    /// block_height and status as it walks the canonical chain.
+    pub fn revert_outgoing_above_height(&mut self, new_height: u64) -> usize {
+        let mut count = 0;
+        for r in &mut self.records {
+            if r.direction == TxDirection::Outgoing && r.block_height > new_height {
+                r.block_height = 0;
+                r.status = TxStatus::Pending;
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Mark a transaction as spent by key image
     pub fn mark_spent_by_key_image(&mut self, key_image: &Hash) {
         for record in &mut self.records {
@@ -336,6 +389,22 @@ impl TransactionHistory {
                 record.mark_spent();
             }
         }
+    }
+
+    /// Inverse of `mark_spent_by_key_image`. Used during reorg rewind:
+    /// when the spend signal that marked a record came from a tx in a
+    /// now-orphaned block, the record needs `spent = false` so the UI
+    /// + balance derivations reflect the canonical chain state.
+    /// Returns the number of records actually updated.
+    pub fn unmark_spent_by_key_image(&mut self, key_image: &Hash) -> usize {
+        let mut count = 0;
+        for record in &mut self.records {
+            if record.key_image.as_ref() == Some(key_image) && record.spent {
+                record.spent = false;
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Set memo for a transaction
@@ -507,6 +576,125 @@ mod tests {
 
         let updated = history.get(&test_hash()).unwrap();
         assert_eq!(updated.memo, Some("Coffee payment".to_string()));
+    }
+
+    // === Reorg rewind tests (Task #3b: history side) ==================
+
+    /// `remove_incoming_outputs` drops the incoming record for every
+    /// distinct tx_hash mentioned in `outputs`, leaving outgoing
+    /// records and unrelated incoming records untouched.
+    #[test]
+    fn test_remove_incoming_outputs_drops_matched_incoming() {
+        let mut history = TransactionHistory::new();
+        let orphan_tx = Hash::from_bytes([0xAA; 32]);
+        let canonical_tx = Hash::from_bytes([0xBB; 32]);
+        let sent_tx = Hash::from_bytes([0xCC; 32]);
+
+        history.add(TransactionRecord::incoming(
+            orphan_tx, Amount::from_atomic(1000), 100, 1700000000, 0, None,
+        ));
+        history.add(TransactionRecord::incoming(
+            canonical_tx, Amount::from_atomic(2000), 90, 1700000000, 0, None,
+        ));
+        history.add(TransactionRecord::outgoing(
+            sent_tx, Amount::from_atomic(500), Amount::from_atomic(10), 95, 1700000000,
+        ));
+        assert_eq!(history.count(), 3);
+
+        let dropped = history.remove_incoming_outputs(&[(orphan_tx, 0)]);
+        assert_eq!(dropped, 1);
+        assert_eq!(history.count(), 2);
+        assert!(history.get(&orphan_tx).is_none());
+        assert!(history.get(&canonical_tx).is_some());
+        assert!(history.get(&sent_tx).is_some());
+    }
+
+    /// Two outputs of the same tx in the rewind list collapse to one
+    /// record removal (records are keyed by tx_hash + direction; the
+    /// `add` merge logic ensures one record per incoming tx_hash).
+    #[test]
+    fn test_remove_incoming_outputs_dedupes_by_tx_hash() {
+        let mut history = TransactionHistory::new();
+        let tx = Hash::from_bytes([0xAA; 32]);
+        let mut r = TransactionRecord::incoming(
+            tx, Amount::from_atomic(1000), 100, 1700000000, 0, None,
+        );
+        r.output_indices = vec![0, 1, 2];
+        history.add(r);
+
+        let dropped = history.remove_incoming_outputs(&[
+            (tx, 0),
+            (tx, 1),
+            (tx, 2),
+        ]);
+        assert_eq!(dropped, 1);
+        assert!(history.get(&tx).is_none());
+    }
+
+    /// `remove_incoming_outputs` is idempotent — re-running the same
+    /// removal returns 0 (the records are already gone). Defensive
+    /// for orchestrators that may double-apply on retry.
+    #[test]
+    fn test_remove_incoming_outputs_idempotent() {
+        let mut history = TransactionHistory::new();
+        let tx = Hash::from_bytes([0xAA; 32]);
+        history.add(TransactionRecord::incoming(
+            tx, Amount::from_atomic(1000), 100, 1700000000, 0, None,
+        ));
+        assert_eq!(history.remove_incoming_outputs(&[(tx, 0)]), 1);
+        assert_eq!(history.remove_incoming_outputs(&[(tx, 0)]), 0);
+        assert_eq!(history.count(), 0);
+    }
+
+    /// `revert_outgoing_above_height` resets outgoing records confirmed
+    /// above `new_height` to Pending state, leaves earlier ones alone.
+    #[test]
+    fn test_revert_outgoing_above_height_resets_orphaned() {
+        let mut history = TransactionHistory::new();
+        let tx_low = Hash::from_bytes([0x01; 32]);
+        let tx_high = Hash::from_bytes([0x02; 32]);
+
+        let mut r_low = TransactionRecord::outgoing(
+            tx_low, Amount::from_atomic(500), Amount::from_atomic(10), 90, 1700000000,
+        );
+        r_low.status = TxStatus::Confirmed;
+        let mut r_high = TransactionRecord::outgoing(
+            tx_high, Amount::from_atomic(700), Amount::from_atomic(10), 105, 1700000000,
+        );
+        r_high.status = TxStatus::Confirmed;
+        history.add(r_low);
+        history.add(r_high);
+
+        // Rewind to height 95: tx at 90 stays, tx at 105 reverts.
+        let updated = history.revert_outgoing_above_height(95);
+        assert_eq!(updated, 1);
+        let low = history.get(&tx_low).unwrap();
+        let high = history.get(&tx_high).unwrap();
+        assert_eq!(low.block_height, 90);
+        assert_eq!(low.status, TxStatus::Confirmed);
+        assert_eq!(high.block_height, 0);
+        assert_eq!(high.status, TxStatus::Pending);
+    }
+
+    /// `revert_outgoing_above_height` does NOT touch incoming records
+    /// confirmed above `new_height`. Those are handled by the
+    /// `remove_incoming_outputs` path, which is driven by the scanner's
+    /// explicit outputs_to_remove list (more precise than a height pass).
+    #[test]
+    fn test_revert_outgoing_does_not_touch_incoming() {
+        let mut history = TransactionHistory::new();
+        let tx = Hash::from_bytes([0x03; 32]);
+        let mut r = TransactionRecord::incoming(
+            tx, Amount::from_atomic(1000), 105, 1700000000, 0, None,
+        );
+        r.status = TxStatus::Confirmed;
+        history.add(r);
+
+        let updated = history.revert_outgoing_above_height(95);
+        assert_eq!(updated, 0);
+        let after = history.get(&tx).unwrap();
+        assert_eq!(after.block_height, 105);
+        assert_eq!(after.status, TxStatus::Confirmed);
     }
 
     #[test]

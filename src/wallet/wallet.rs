@@ -459,6 +459,13 @@ impl Wallet {
         self.balance.clone()
     }
 
+    /// Borrow the Balance tracker (cheap, no clone). Use this when the
+    /// caller only needs to query (e.g. `lookup_by_key_image`) and
+    /// would otherwise clone the entire UTXO set per scan iteration.
+    pub fn balance_ref(&self) -> &Balance {
+        &self.balance
+    }
+
     /// Get spendable balance
     pub fn spendable_balance(&self, current_height: u64) -> Amount {
         self.balance.spendable(current_height, MIN_OUTPUT_AGE)
@@ -491,6 +498,23 @@ impl Wallet {
         if let Some((tx_hash, output_index)) = self.balance.lookup_by_key_image(key_image) {
             self.balance.mark_spent(tx_hash, output_index);
         }
+    }
+
+    /// Inverse of `mark_spent_by_key_image`: restore a previously-spent
+    /// UTXO to spendable. Used during reorg rewind (Task #1b) when the
+    /// only spend signal was a tx in a now-orphaned block.
+    ///
+    /// Updates both Balance (flips `UTXO.spent`) and TransactionHistory
+    /// (flips record.spent on any outgoing record holding this
+    /// key_image). The two layers track related-but-distinct state:
+    /// Balance's flag drives spendable() / available_utxos(); history's
+    /// flag drives the UI's spent-marker display.
+    pub fn unmark_spent_by_key_image(&mut self, key_image: &KeyImage) {
+        self.balance.unmark_spent_by_key_image(key_image);
+        // History uses Hash not KeyImage for its key_image field (legacy
+        // shape); reinterpret the bytes — the field is opaque to history.
+        let key_image_hash = Hash::from_bytes(*key_image.as_bytes());
+        self.history.unmark_spent_by_key_image(&key_image_hash);
     }
 
     // === Reservation API (Item 1: in-flight UTXO tracking) =============

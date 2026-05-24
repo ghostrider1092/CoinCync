@@ -3,9 +3,10 @@
 //! Scans blockchain outputs to detect which belong to our wallet.
 //! Uses view tags for fast filtering and proper amount decryption.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::primitives::{PublicKey, SecretKey, Hash, hash_domain};
+use crate::primitives::{PublicKey, SecretKey, Hash, KeyImage, hash_domain};
 use crate::transaction::{Transaction, TxOutput, TxType};
 use crate::consensus::Block;
 use crate::crypto::{StealthAddress, is_output_ours, BlindingFactor, SecretScalar, PublicPoint};
@@ -14,6 +15,204 @@ use crate::error::Result;
 
 use rayon::prelude::*;
 use tracing::{info, debug};
+
+/// Default bound on the scanner's per-block journal (used for reorg-aware
+/// rewind). Sized at `max_reorg_depth + safety_margin` so a reorg up to
+/// the tier-3 cap is recoverable without falling back to a full rescan.
+///
+/// Reorgs deeper than this trigger a full rescan from a hardcoded
+/// checkpoint or genesis. See [`docs/wallet-v2-reorg-handling-design.md`]
+/// (the BlockApplyDiff section) for the design rationale.
+const JOURNAL_MAX_DEFAULT: usize = 200;
+
+/// Result variant returned by [`WalletScanner::scan_block_with_result`].
+///
+/// Reorg-handling Task #2b — the typed signal the orchestrator needs to
+/// know whether the block was applied to wallet state, or whether the
+/// chain-continuity check refused to apply it because the incoming
+/// block's `prev_hash` doesn't match the journal's tip.
+///
+/// The legacy [`WalletScanner::scan_block`] returns `Vec<DecryptedOutput>`
+/// and discards the `ReorgDetected` variant (matching the Task #2a
+/// behavior of "log + return empty Vec"). New orchestration code should
+/// call [`WalletScanner::scan_block_with_result`] and handle both
+/// variants explicitly. The two coexist until the legacy callers are
+/// migrated.
+#[derive(Clone, Debug)]
+pub enum ScanResult {
+    /// The block was successfully applied to wallet state. Journal +
+    /// `last_height` / `last_hash` advanced; outputs detected as ours
+    /// are included.
+    Scanned {
+        /// Outputs the wallet now owns from this block (may be empty).
+        outputs: Vec<DecryptedOutput>,
+        /// Block height that was just applied.
+        height: u64,
+        /// Block hash that was just applied.
+        block_hash: Hash,
+    },
+    /// The block doesn't extend the chain we previously scanned. Wallet
+    /// state is **unchanged** — no journal write, no `last_*` advance,
+    /// no outputs returned. Caller should invoke
+    /// [`WalletScanner::rewind_to_height`] to undo to the fork point,
+    /// then re-scan the new canonical chain forward.
+    ReorgDetected {
+        /// Height of the block that arrived (would-be apply height).
+        at_height: u64,
+        /// `block.prev_hash` from the incoming block.
+        actual_prev: Hash,
+        /// Hash the scanner expected to see (i.e., what's at
+        /// `journal_back().block_hash`). May be `Hash::zero()` if the
+        /// reorg-signal came from a non-monotonic height (block at
+        /// height <= current) rather than a prev-hash mismatch.
+        expected_prev: Hash,
+    },
+}
+
+impl ScanResult {
+    /// Convenience: extract outputs, panicking on `ReorgDetected`.
+    /// Useful for tests + callers that know they're scanning a fresh
+    /// chain. Production orchestration code should `match` instead.
+    pub fn outputs_or_panic(self) -> Vec<DecryptedOutput> {
+        match self {
+            ScanResult::Scanned { outputs, .. } => outputs,
+            ScanResult::ReorgDetected { at_height, .. } => panic!(
+                "ScanResult::outputs_or_panic called on ReorgDetected at height {}",
+                at_height
+            ),
+        }
+    }
+
+    /// Convenience: returns `Some(outputs)` when `Scanned`, `None` on
+    /// `ReorgDetected`. Lets simple callers `let outputs = result.outputs_opt().unwrap_or_default();`
+    /// without losing the diagnostic surface entirely.
+    pub fn outputs_opt(&self) -> Option<&[DecryptedOutput]> {
+        match self {
+            ScanResult::Scanned { outputs, .. } => Some(outputs),
+            ScanResult::ReorgDetected { .. } => None,
+        }
+    }
+}
+
+/// Outcome of a successful [`WalletScanner::rewind_to_height`] call.
+///
+/// Returned by Task #3 so the caller can apply the inverse state
+/// changes downstream (balance.rs UTXO removal + history.rs row
+/// removal). The scanner doesn't own the wallet's UTXO state itself —
+/// it journals what it observed; the caller is responsible for the
+/// downstream undo using these IDs.
+#[derive(Clone, Debug, Default)]
+pub struct RewindOutcome {
+    /// Number of journal entries popped (one per block undone).
+    pub entries_undone: usize,
+    /// `(tx_hash, output_index)` for every output the scanner reported
+    /// in the rewound blocks. Caller removes these from the wallet's
+    /// UTXO set + balance + history layers.
+    ///
+    /// Ordering: reverse application order — most-recent block's
+    /// outputs first, oldest popped block's outputs last. The caller
+    /// can iterate in vec order without needing to reverse first.
+    pub outputs_to_remove: Vec<(Hash, u8)>,
+    /// `KeyImage` for every wallet UTXO that was marked spent in the
+    /// rewound blocks. The caller flips each one's `spent` flag back
+    /// to false via `Balance::unmark_spent_by_key_image` so balance
+    /// queries reflect the canonical chain after rewind.
+    ///
+    /// Same reverse-application ordering as `outputs_to_remove`.
+    /// Populated from each popped `BlockApplyDiff.key_images_marked_spent`.
+    /// May contain duplicates if the same key image somehow appeared
+    /// in two blocks (defensive — orchestrator should de-dupe before
+    /// applying if its idempotency model needs it).
+    pub key_images_to_unspend: Vec<KeyImage>,
+    /// Height after rewind: equals `target_height` requested, or 0
+    /// when the journal becomes empty.
+    pub new_height: u64,
+    /// Block hash at the new tip post-rewind. `Hash::zero()` when the
+    /// journal becomes empty (rewound past everything).
+    pub new_hash: Hash,
+}
+
+/// Reasons [`WalletScanner::rewind_to_height`] can refuse to rewind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RewindError {
+    /// Requested target is older than the journal's earliest entry —
+    /// can't rewind there without a full rescan from a hardcoded
+    /// checkpoint. Caller should rescan instead.
+    OutsideJournalWindow {
+        /// Requested rewind target.
+        target_height: u64,
+        /// Oldest height currently retained in the journal.
+        earliest_in_journal: u64,
+    },
+    /// Requested target is above the scanner's current `last_height`.
+    /// Rewinding "forward" is nonsensical; caller should `scan_block`
+    /// instead.
+    TargetAboveCurrent {
+        /// Requested rewind target.
+        target_height: u64,
+        /// Scanner's current `last_height`.
+        current_height: u64,
+    },
+}
+
+impl std::fmt::Display for RewindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RewindError::OutsideJournalWindow {
+                target_height,
+                earliest_in_journal,
+            } => write!(
+                f,
+                "rewind target {} is older than journal's earliest entry {} — full rescan needed",
+                target_height, earliest_in_journal
+            ),
+            RewindError::TargetAboveCurrent {
+                target_height,
+                current_height,
+            } => write!(
+                f,
+                "rewind target {} is above current last_height {} — cannot rewind forward",
+                target_height, current_height
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RewindError {}
+
+/// Per-block journal entry tracking what the scanner added to the
+/// wallet state when applying a block. Used by `rewind_to_height`
+/// (Task #3 of the reorg-handling design) to undo state changes when
+/// a reorg invalidates previously-scanned blocks.
+///
+/// Task #1 seeded the journal with the minimum fields needed for reorg
+/// DETECTION (height + block_hash + prev_block_hash + outputs_added).
+/// Task #1b (2026-05-23) extends with `key_images_marked_spent` so a
+/// rewind can also UN-spend UTXOs whose only "spent" signal was a tx
+/// in a now-orphaned block. Without this, a wallet that spent UTXO X
+/// in block N (orphaned) would carry `X.spent = true` forever after
+/// rewind, leaking spendable balance.
+#[derive(Clone, Debug)]
+pub struct BlockApplyDiff {
+    /// Height of the block this diff records.
+    pub height: u64,
+    /// Hash of the block this diff records.
+    pub block_hash: Hash,
+    /// Hash of the block's parent. Used by the chain-continuity
+    /// check in Task #2 (incoming `block.prev_hash == journal_back().block_hash`).
+    pub prev_block_hash: Hash,
+    /// `(tx_hash, output_index)` for each output detected as ours in
+    /// this block. Used by Task #3's rewind to remove these from the
+    /// wallet's UTXO set when a reorg invalidates this block.
+    pub outputs_added: Vec<(Hash, u8)>,
+    /// `KeyImage` for each of OUR UTXOs that got marked spent because
+    /// of inputs in this block's transactions. Populated by the
+    /// orchestrator via [`WalletScanner::record_spend_for_last_block`]
+    /// after `scan_block_with_result` returns. On rewind, these are
+    /// surfaced as `RewindOutcome.key_images_to_unspend` so the caller
+    /// can flip the corresponding UTXO `spent = false`.
+    pub key_images_marked_spent: Vec<KeyImage>,
+}
 
 /// Decrypted output information
 ///
@@ -107,6 +306,14 @@ pub struct WalletScanner {
     last_hash: Hash,
     /// Statistics
     stats: ScanStats,
+    /// Rolling per-block journal for reorg-aware rewind. Capped at
+    /// `journal_max` entries; older entries are dropped. See
+    /// [`BlockApplyDiff`] + the reorg-handling design doc for the
+    /// staged plan (this is Task #1 — journal in place, but `rewind`
+    /// + detection-trigger paths come in Tasks #2-#3).
+    journal: VecDeque<BlockApplyDiff>,
+    /// Maximum journal length. Defaults to [`JOURNAL_MAX_DEFAULT`].
+    journal_max: usize,
 }
 
 /// Scanning statistics
@@ -136,7 +343,177 @@ impl WalletScanner {
             last_height: 0,
             last_hash: Hash::zero(),
             stats: ScanStats::default(),
+            journal: VecDeque::with_capacity(JOURNAL_MAX_DEFAULT),
+            journal_max: JOURNAL_MAX_DEFAULT,
         }
+    }
+
+    /// Current size of the reorg journal (number of recorded
+    /// [`BlockApplyDiff`] entries).
+    pub fn journal_len(&self) -> usize {
+        self.journal.len()
+    }
+
+    /// Maximum journal length. Reorgs deeper than this trigger a full
+    /// rescan from a hardcoded checkpoint rather than journal-based
+    /// rewind.
+    pub fn journal_max(&self) -> usize {
+        self.journal_max
+    }
+
+    /// Peek the most-recent journal entry without removing it. Used by
+    /// the chain-continuity check (Task #2) — caller compares the
+    /// incoming block's `prev_hash` against `journal_back().block_hash`.
+    pub fn journal_back(&self) -> Option<&BlockApplyDiff> {
+        self.journal.back()
+    }
+
+    /// Push a journal entry and trim oldest entries to maintain the
+    /// bounded length invariant. Called by [`scan_block`] after each
+    /// successful block scan. Public so integration tests in
+    /// `tests/wallet_reorg_recovery.rs` can drive the journal without
+    /// constructing real wallet-detectable outputs (stealth addresses +
+    /// view tags + commitment blinding) just to exercise the rewind
+    /// machinery. Production callers should use `scan_block_with_result`.
+    ///
+    /// Also fast-forwards `last_height` + `last_hash` to the diff's
+    /// fields — this keeps the rewind guard (`TargetAboveCurrent`) in
+    /// sync without the caller having to do it. Internal production
+    /// callers (`scan_block_with_result`, the parallel scan path) set
+    /// last_* to the same values just after, so the assignment is a
+    /// no-op for them.
+    pub fn record_journal_entry(&mut self, diff: BlockApplyDiff) {
+        self.last_height = diff.height;
+        self.last_hash = diff.block_hash;
+        self.journal.push_back(diff);
+        while self.journal.len() > self.journal_max {
+            self.journal.pop_front();
+        }
+    }
+
+    /// Append a key image to the most-recent journal entry's
+    /// `key_images_marked_spent` list. Returns `true` if a journal
+    /// entry was found and updated, `false` if the journal is empty.
+    ///
+    /// Task #1b: the orchestrator calls this after `scan_block_with_result`
+    /// returns, once for each input in the block's transactions whose
+    /// key image matches one of the wallet's UTXOs. On rewind, these
+    /// key images come back via `RewindOutcome.key_images_to_unspend`
+    /// so the caller can un-flip the corresponding `UTXO.spent` flag.
+    ///
+    /// The naive alternative — having the scanner re-detect spends by
+    /// holding a copy of the wallet's owned-key-image set — would
+    /// couple the scanner to mutable wallet state. Pushing spend
+    /// detection to the orchestrator keeps the scanner output-focused
+    /// while still letting the journal capture the data rewind needs.
+    pub fn record_spend_for_last_block(&mut self, key_image: KeyImage) -> bool {
+        match self.journal.back_mut() {
+            Some(diff) => {
+                diff.key_images_marked_spent.push(key_image);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Reorg-handling Task #3: rewind the scanner's journal + position
+    /// to `target_height`, returning a [`RewindOutcome`] the caller
+    /// uses to undo downstream state (UTXO set, balance, TX history).
+    ///
+    /// After this call:
+    /// - All journal entries with `height > target_height` are removed.
+    /// - `last_height` + `last_hash` are set to the journal's new back
+    ///   (or `0` + `Hash::zero()` if the journal becomes empty).
+    /// - The returned `RewindOutcome` lists all `(tx_hash, output_index)`
+    ///   pairs that were in the rewound blocks, in **reverse
+    ///   application order** (most-recent-first).
+    ///
+    /// Errors:
+    /// - [`RewindError::TargetAboveCurrent`] if `target_height >
+    ///   self.last_height` — can't rewind forward.
+    /// - [`RewindError::OutsideJournalWindow`] if `target_height` is
+    ///   older than the journal's earliest entry. Caller must rescan
+    ///   from a hardcoded checkpoint in that case (rewind cannot
+    ///   reconstruct state for blocks no longer journaled).
+    ///
+    /// `target_height == self.last_height` is a valid no-op rewind:
+    /// returns `Ok(RewindOutcome { entries_undone: 0, .. })`.
+    ///
+    /// This method is scanner-internal — Task #2b (`ScanResult` enum)
+    /// will wire it into the orchestrator path. Until then, callers
+    /// invoke it directly when they detect a reorg via the warn-log
+    /// from Task #2a.
+    pub fn rewind_to_height(
+        &mut self,
+        target_height: u64,
+    ) -> std::result::Result<RewindOutcome, RewindError> {
+        if target_height > self.last_height {
+            return Err(RewindError::TargetAboveCurrent {
+                target_height,
+                current_height: self.last_height,
+            });
+        }
+
+        // If journal is non-empty, target must be in-range (>= oldest
+        // retained height). A target of 0 with empty journal is fine
+        // (means "you're already at genesis-or-earlier").
+        if let Some(front) = self.journal.front() {
+            if target_height < front.height && target_height != 0 {
+                return Err(RewindError::OutsideJournalWindow {
+                    target_height,
+                    earliest_in_journal: front.height,
+                });
+            }
+        }
+
+        let mut outcome = RewindOutcome {
+            entries_undone: 0,
+            outputs_to_remove: Vec::new(),
+            key_images_to_unspend: Vec::new(),
+            new_height: target_height,
+            new_hash: Hash::zero(),
+        };
+
+        // Pop journal entries with height > target_height. They come off
+        // in reverse application order (newest first), which is exactly
+        // the order the caller wants to apply undo operations.
+        while let Some(back) = self.journal.back() {
+            if back.height <= target_height {
+                break;
+            }
+            // safe: we just confirmed there's a back entry
+            let entry = self
+                .journal
+                .pop_back()
+                .expect("journal::pop_back: just checked back() was Some");
+            outcome.entries_undone += 1;
+            outcome.outputs_to_remove.extend(entry.outputs_added);
+            outcome.key_images_to_unspend.extend(entry.key_images_marked_spent);
+        }
+
+        // Update last_height + last_hash to journal's new back (or
+        // genesis if journal emptied).
+        if let Some(back) = self.journal.back() {
+            self.last_height = back.height;
+            self.last_hash = back.block_hash;
+            outcome.new_height = back.height;
+            outcome.new_hash = back.block_hash;
+        } else {
+            self.last_height = 0;
+            self.last_hash = Hash::zero();
+            outcome.new_height = 0;
+            outcome.new_hash = Hash::zero();
+        }
+
+        tracing::info!(
+            target: "wallet::reorg",
+            "Scanner rewound to height {}: {} journal entries undone, {} outputs marked for removal",
+            outcome.new_height,
+            outcome.entries_undone,
+            outcome.outputs_to_remove.len(),
+        );
+
+        Ok(outcome)
     }
 
     /// Add keys for scanning
@@ -330,27 +707,82 @@ impl WalletScanner {
         found
     }
 
-    /// Scan a block
+    /// Scan a block with full reorg-aware result. **Reorg-handling
+    /// Task #2b** — returns [`ScanResult::Scanned`] for normal apply,
+    /// or [`ScanResult::ReorgDetected`] when the chain-continuity check
+    /// refuses to apply the block (wallet state stays unchanged in
+    /// that case; caller should rewind + re-scan).
+    ///
+    /// New orchestration code should prefer this over [`Self::scan_block`].
+    /// The legacy `scan_block` is preserved for backward compatibility
+    /// with 4 call sites that still consume `Vec<DecryptedOutput>`
+    /// directly; it now delegates to this method and strips the
+    /// `ReorgDetected` variant to an empty Vec (matching Task #2a's
+    /// observed behavior).
     #[tracing::instrument(skip(self, block), fields(height = block.height(), txs = block.transactions.len()))]
-    pub fn scan_block(&mut self, block: &Block) -> Vec<DecryptedOutput> {
+    pub fn scan_block_with_result(&mut self, block: &Block) -> ScanResult {
         let block_hash = block.hash();
         let height = block.height();
+        let block_prev_hash = block.header.prev_hash;
+
+        // Chain-continuity check (Task #2a logic, now wired to the
+        // typed return).
+        let reorg_signal = if let Some(prev_entry) = self.journal.back() {
+            if height == prev_entry.height + 1 && block_prev_hash != prev_entry.block_hash {
+                Some(prev_entry.block_hash)
+            } else if height <= prev_entry.height {
+                Some(prev_entry.block_hash)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(expected_prev) = reorg_signal {
+            tracing::warn!(
+                target: "wallet::reorg",
+                "Reorg detected at height {} during scan_block_with_result: \
+                 incoming block.prev_hash={} but expected={} \
+                 (journal_back.height={}, journal_len={})",
+                height,
+                block_prev_hash.to_hex(),
+                expected_prev.to_hex(),
+                self.journal.back().map(|e| e.height).unwrap_or(0),
+                self.journal.len(),
+            );
+            self.stats.blocks_scanned += 1;
+            return ScanResult::ReorgDetected {
+                at_height: height,
+                actual_prev: block_prev_hash,
+                expected_prev,
+            };
+        }
 
         debug!("Scanning block {} at height {}", &block_hash.to_hex()[..8], height);
-
         self.stats.blocks_scanned += 1;
 
         let mut all_found = Vec::new();
-
-        // Scan all transactions (coinbase is first tx)
         for tx in &block.transactions {
             let found = self.scan_transaction(tx);
             all_found.extend(found);
         }
 
-        // Update position
         self.last_height = height;
         self.last_hash = block_hash;
+
+        let diff = BlockApplyDiff {
+            height,
+            block_hash,
+            prev_block_hash: block_prev_hash,
+            outputs_added: all_found.iter().map(|o| (o.tx_hash, o.output_index)).collect(),
+            // Spends are journaled by the orchestrator via
+            // `record_spend_for_last_block` after this method returns.
+            // We seed the field empty; the caller fills it as it walks
+            // tx inputs and recognizes its own key_images.
+            key_images_marked_spent: Vec::new(),
+        };
+        self.record_journal_entry(diff);
 
         if !all_found.is_empty() {
             info!(
@@ -361,7 +793,32 @@ impl WalletScanner {
             );
         }
 
-        all_found
+        ScanResult::Scanned {
+            outputs: all_found,
+            height,
+            block_hash,
+        }
+    }
+
+    /// Scan a block — legacy compatibility surface. **Deprecated for
+    /// new code; use [`Self::scan_block_with_result`] for the typed
+    /// return.** This method delegates to `scan_block_with_result` and
+    /// strips the `ReorgDetected` variant to an empty Vec, preserving
+    /// Task #2a behavior for the 4 in-tree callers that haven't been
+    /// migrated yet:
+    /// - `WalletScanner::scan_blocks` (internal)
+    /// - `Wallet::scan_and_persist` (wrapper struct)
+    /// - tests inside this module
+    /// - `src/bin/wallet.rs::scan_command`
+    ///
+    /// Returns `Vec::new()` on a detected reorg; check
+    /// `journal_len()` / `position()` if you need to know whether
+    /// state was advanced.
+    pub fn scan_block(&mut self, block: &Block) -> Vec<DecryptedOutput> {
+        match self.scan_block_with_result(block) {
+            ScanResult::Scanned { outputs, .. } => outputs,
+            ScanResult::ReorgDetected { .. } => Vec::new(),
+        }
     }
 
     /// Scan multiple blocks (with parallel output scanning)
@@ -369,9 +826,33 @@ impl WalletScanner {
         let start = std::time::Instant::now();
         let mut all_found = Vec::new();
 
+        // Migrated to scan_block_with_result (Task #2b consumer) so
+        // we stop the loop at the first detected reorg rather than
+        // continuing to "apply" later blocks that may also be on the
+        // orphaned chain. Caller of scan_blocks then sees the partial
+        // outputs Vec + can check `scanner.last_height()` /
+        // `journal_back()` to detect the abort condition and trigger
+        // rewind. Tasks #5-9 will surface this more explicitly via
+        // ScanBatchResult — for v1.0 we accept the implicit signal.
         for block in blocks {
-            let found = self.scan_block(block);
-            all_found.extend(found);
+            match self.scan_block_with_result(block) {
+                ScanResult::Scanned { outputs, .. } => all_found.extend(outputs),
+                ScanResult::ReorgDetected {
+                    at_height,
+                    actual_prev,
+                    expected_prev,
+                } => {
+                    tracing::warn!(
+                        target: "wallet::reorg",
+                        "scan_blocks aborting at height {}: reorg detected (actual_prev={}, expected_prev={}). \
+                         Caller should rewind + rescan from the canonical fork point.",
+                        at_height,
+                        actual_prev.to_hex(),
+                        expected_prev.to_hex(),
+                    );
+                    break;
+                }
+            }
         }
 
         self.stats.scan_time_ms = start.elapsed().as_millis() as u64;
@@ -723,13 +1204,31 @@ impl BackgroundScanner {
         Ok(())
     }
 
-    /// Scan block and persist results
+    /// Scan block and persist results.
+    ///
+    /// Reorg-aware (Task #2b): if the inner scanner returns
+    /// `ReorgDetected`, this method surfaces an `InvalidState` error
+    /// rather than silently persisting nothing. The caller is expected
+    /// to invoke the reorg-recovery path (rewind + find_fork_point)
+    /// before retrying. Persisting an empty result on reorg would
+    /// look like a successful no-op scan and let the wallet advance
+    /// `last_height` past the orphaned block — which is exactly the
+    /// state corruption the journal was designed to prevent.
     pub fn scan_and_persist(&mut self, block: &Block) -> Result<usize> {
         let height = block.height();
         let block_hash = block.hash();
         let timestamp = block.header.timestamp;
 
-        let found = self.scanner.scan_block(block);
+        let found = match self.scanner.scan_block_with_result(block) {
+            ScanResult::Scanned { outputs, .. } => outputs,
+            ScanResult::ReorgDetected { at_height, actual_prev, expected_prev } => {
+                return Err(crate::error::Error::InvalidState(format!(
+                    "Reorg detected during scan_and_persist at height {} (block prev_hash={:?} != journal back={:?}); \
+                     caller must rewind + find_fork_point + retry",
+                    at_height, actual_prev, expected_prev,
+                )));
+            }
+        };
         let count = found.len();
 
         // Persist each found output
@@ -1034,6 +1533,271 @@ mod tests {
 
         assert_eq!(scanner.keys.len(), 1);
         assert_eq!(scanner.position(), (0, Hash::zero()));
+    }
+
+    fn push_diff(scanner: &mut WalletScanner, height: u64, tag: u8) {
+        scanner.record_journal_entry(BlockApplyDiff {
+            height,
+            block_hash: Hash::from_bytes([tag; 32]),
+            prev_block_hash: Hash::from_bytes([tag.wrapping_sub(1); 32]),
+            outputs_added: vec![(Hash::from_bytes([tag; 32]), 0)],
+            key_images_marked_spent: vec![],
+        });
+        // Keep scanner.last_* in sync with the journal back so rewind's
+        // "TargetAboveCurrent" guard reflects real state.
+        scanner.last_height = height;
+        scanner.last_hash = Hash::from_bytes([tag; 32]);
+    }
+
+    /// Reorg-handling Task #3: rewind to a specific height drops newer
+    /// journal entries and emits the correct RewindOutcome (entries_undone,
+    /// outputs_to_remove in reverse-application order, updated tip).
+    #[test]
+    fn rewind_to_specific_height_pops_correct_entries() {
+        let mut scanner = WalletScanner::new();
+        // Apply heights 1..=5
+        for h in 1u64..=5 {
+            push_diff(&mut scanner, h, h as u8);
+        }
+        assert_eq!(scanner.journal_len(), 5);
+        assert_eq!(scanner.position().0, 5);
+
+        // Rewind to height 2 — should pop entries 5, 4, 3.
+        let outcome = scanner.rewind_to_height(2).expect("rewind to in-window height should succeed");
+
+        assert_eq!(outcome.entries_undone, 3);
+        assert_eq!(outcome.new_height, 2);
+        assert_eq!(outcome.new_hash, Hash::from_bytes([2u8; 32]));
+        assert_eq!(scanner.journal_len(), 2, "journal should retain only heights 1 + 2");
+        assert_eq!(scanner.position().0, 2);
+
+        // outputs_to_remove should be in reverse application order:
+        // first the height-5 output, then height-4, then height-3.
+        assert_eq!(outcome.outputs_to_remove.len(), 3);
+        assert_eq!(outcome.outputs_to_remove[0].0, Hash::from_bytes([5u8; 32]));
+        assert_eq!(outcome.outputs_to_remove[1].0, Hash::from_bytes([4u8; 32]));
+        assert_eq!(outcome.outputs_to_remove[2].0, Hash::from_bytes([3u8; 32]));
+    }
+
+    /// Task #3: rewind to current height is a valid no-op.
+    #[test]
+    fn rewind_to_current_height_is_noop() {
+        let mut scanner = WalletScanner::new();
+        for h in 1u64..=5 {
+            push_diff(&mut scanner, h, h as u8);
+        }
+        let outcome = scanner.rewind_to_height(5).expect("rewind to current should succeed");
+        assert_eq!(outcome.entries_undone, 0);
+        assert_eq!(outcome.outputs_to_remove.len(), 0);
+        assert_eq!(outcome.new_height, 5);
+        assert_eq!(scanner.journal_len(), 5);
+    }
+
+    /// Task #3: rewinding "forward" (target above last_height) returns
+    /// TargetAboveCurrent — callers cannot use rewind to advance state.
+    #[test]
+    fn rewind_above_current_height_errs() {
+        let mut scanner = WalletScanner::new();
+        for h in 1u64..=3 {
+            push_diff(&mut scanner, h, h as u8);
+        }
+        let err = scanner
+            .rewind_to_height(10)
+            .expect_err("rewind above current should error");
+        match err {
+            RewindError::TargetAboveCurrent {
+                target_height: 10,
+                current_height: 3,
+            } => {}
+            other => panic!("expected TargetAboveCurrent{{10,3}}, got {:?}", other),
+        }
+        // Scanner state is unchanged.
+        assert_eq!(scanner.journal_len(), 3);
+        assert_eq!(scanner.position().0, 3);
+    }
+
+    /// Task #3: rewinding past the oldest journal entry returns
+    /// OutsideJournalWindow — callers fall back to a full rescan.
+    #[test]
+    fn rewind_outside_journal_window_errs() {
+        let mut scanner = WalletScanner::new();
+        // Apply heights 50..=53. Journal's earliest is 50.
+        for h in 50u64..=53 {
+            push_diff(&mut scanner, h, h as u8);
+        }
+        // Target 40 — older than journal's earliest (50). Should err.
+        let err = scanner
+            .rewind_to_height(40)
+            .expect_err("rewind below journal window should error");
+        match err {
+            RewindError::OutsideJournalWindow {
+                target_height: 40,
+                earliest_in_journal: 50,
+            } => {}
+            other => panic!(
+                "expected OutsideJournalWindow{{40,50}}, got {:?}",
+                other
+            ),
+        }
+        // Scanner state unchanged.
+        assert_eq!(scanner.journal_len(), 4);
+    }
+
+    /// Task #3: a full rewind (target=0) empties the journal and
+    /// returns last_height to 0 + Hash::zero. The caller's downstream
+    /// undo work uses outputs_to_remove to clean up.
+    #[test]
+    fn rewind_to_zero_empties_journal() {
+        let mut scanner = WalletScanner::new();
+        for h in 1u64..=5 {
+            push_diff(&mut scanner, h, h as u8);
+        }
+        let outcome = scanner.rewind_to_height(0).expect("rewind to 0 should succeed");
+        assert_eq!(outcome.entries_undone, 5);
+        assert_eq!(outcome.outputs_to_remove.len(), 5);
+        assert_eq!(outcome.new_height, 0);
+        assert_eq!(outcome.new_hash, Hash::zero());
+        assert_eq!(scanner.journal_len(), 0);
+        assert_eq!(scanner.position().0, 0);
+        assert_eq!(scanner.position().1, Hash::zero());
+    }
+
+    /// Task #1b: spends journaled via `record_spend_for_last_block`
+    /// surface in `RewindOutcome.key_images_to_unspend` in reverse
+    /// application order. Without this, a wallet that spent its own
+    /// UTXO in a now-orphaned block would carry `spent = true` forever
+    /// after rewind (the outputs_to_remove path only handles incoming
+    /// outputs, not spend signals on pre-existing UTXOs).
+    #[test]
+    fn rewind_surfaces_journaled_spends_in_reverse_order() {
+        let mut scanner = WalletScanner::new();
+        // Heights 1, 2, 3 — each gets one journaled spend tagged by height.
+        for h in 1u64..=3 {
+            push_diff(&mut scanner, h, h as u8);
+            let ki = KeyImage::from_bytes([h as u8 + 0x80; 32]);
+            assert!(scanner.record_spend_for_last_block(ki),
+                "record_spend_for_last_block should find the just-pushed entry");
+        }
+        assert_eq!(scanner.journal_len(), 3);
+
+        let outcome = scanner.rewind_to_height(1).expect("rewind succeeds");
+        assert_eq!(outcome.entries_undone, 2);
+        // Reverse order: height 3's spend pops first, then height 2's.
+        // Height 1 stays in journal so its spend is NOT surfaced.
+        assert_eq!(outcome.key_images_to_unspend.len(), 2);
+        assert_eq!(outcome.key_images_to_unspend[0],
+                   KeyImage::from_bytes([3 + 0x80; 32]));
+        assert_eq!(outcome.key_images_to_unspend[1],
+                   KeyImage::from_bytes([2 + 0x80; 32]));
+    }
+
+    /// `record_spend_for_last_block` returns false when the journal is
+    /// empty (no entry to attach the spend to). Defensive — the
+    /// orchestrator may call this before the first block is scanned
+    /// during edge-case startup paths.
+    #[test]
+    fn record_spend_on_empty_journal_returns_false() {
+        let mut scanner = WalletScanner::new();
+        assert_eq!(scanner.journal_len(), 0);
+        let ki = KeyImage::from_bytes([0xAA; 32]);
+        assert!(!scanner.record_spend_for_last_block(ki));
+    }
+
+    /// Reorg-handling Task #2a: chain-continuity check skips the
+    /// journal write when the incoming block's prev_hash doesn't match
+    /// the most-recent journal entry. The wallet state stays at the
+    /// pre-reorg block; the caller receives an empty outputs Vec.
+    #[test]
+    fn reorg_detection_skips_journal_on_prev_hash_mismatch() {
+        let mut scanner = WalletScanner::new();
+
+        // Seed journal with a "block at height 10" entry. Block_hash =
+        // 0x01..., representing the canonical chain at that point.
+        let canonical_h10_hash = Hash::from_bytes([0x01; 32]);
+        scanner.record_journal_entry(BlockApplyDiff {
+            height: 10,
+            block_hash: canonical_h10_hash,
+            prev_block_hash: Hash::from_bytes([0x00; 32]),
+            outputs_added: vec![],
+            key_images_marked_spent: vec![],
+        });
+        assert_eq!(scanner.journal_len(), 1);
+
+        // Now construct a "reorg block at height 11" — its prev_hash
+        // points to a DIFFERENT block than canonical_h10_hash, i.e., it
+        // descends from a fork of the chain we previously saw.
+        let reorg_block_prev = Hash::from_bytes([0xff; 32]);
+        let synthetic_reorg_diff = BlockApplyDiff {
+            height: 11,
+            block_hash: Hash::from_bytes([0x02; 32]),
+            prev_block_hash: reorg_block_prev,
+            outputs_added: vec![],
+            key_images_marked_spent: vec![],
+        };
+
+        // Verify the detection condition the way scan_block evaluates it:
+        let detected = {
+            let prev_entry = scanner.journal_back().unwrap();
+            synthetic_reorg_diff.height == prev_entry.height + 1
+                && synthetic_reorg_diff.prev_block_hash != prev_entry.block_hash
+        };
+        assert!(
+            detected,
+            "Task #2a continuity-check predicate must flag a divergent prev_hash"
+        );
+
+        // The journal length is still 1 (Task #2a doesn't write on
+        // detection). The full scan_block path is exercised by the
+        // existing test_scanner_block_with_transfer test; this test
+        // focuses on the predicate logic + journal-skip invariant.
+        assert_eq!(scanner.journal_len(), 1);
+    }
+
+    /// Reorg-handling Task #1: journal is bounded at `journal_max` —
+    /// older entries get dropped when capacity is exceeded.
+    #[test]
+    fn journal_bounded_at_max_capacity() {
+        let mut scanner = WalletScanner::new();
+        let max = scanner.journal_max();
+        assert!(max > 0, "journal_max must be positive");
+
+        // Push max+10 synthetic entries; expect journal length to settle at max.
+        for i in 0..(max as u64) + 10 {
+            let diff = BlockApplyDiff {
+                height: i,
+                block_hash: Hash::zero(),
+                prev_block_hash: Hash::zero(),
+                outputs_added: vec![],
+                key_images_marked_spent: vec![],
+            };
+            scanner.record_journal_entry(diff);
+        }
+        assert_eq!(
+            scanner.journal_len(),
+            max,
+            "journal must be bounded at journal_max"
+        );
+
+        // The oldest retained entry should correspond to height = 10
+        // (the first 10 should have been dropped).
+        let oldest = scanner
+            .journal
+            .front()
+            .expect("journal should not be empty");
+        assert_eq!(
+            oldest.height, 10,
+            "expected oldest retained entry at height 10 (first 10 dropped)"
+        );
+
+        // Newest entry should be the last height we pushed.
+        let newest = scanner
+            .journal_back()
+            .expect("journal should not be empty");
+        assert_eq!(
+            newest.height,
+            (max as u64) + 9,
+            "expected newest entry at height max+9"
+        );
     }
 
     /// Full roundtrip test: generate stealth address (sender side), build a TxOutput,

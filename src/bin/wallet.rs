@@ -840,7 +840,28 @@ async fn cmd_scan(
                     let block: Block = borsh::from_slice(&block_bytes)
                         .map_err(|e| format!("bad block decode: {}", e))?;
 
-                    let outs = scanner.scan_block(&block);
+                    // Reorg-aware scan (Tasks #2b + #1b). If the
+                    // scanner detects the incoming block doesn't extend
+                    // its journal cleanly (prev_hash mismatch or non-
+                    // monotonic height), it returns ReorgDetected and
+                    // the caller MUST stop applying further blocks from
+                    // this batch — they'd be on the orphaned chain.
+                    // Full recovery (find_fork_point + rewind) is a
+                    // CLI-level concern that's out of scope for this
+                    // function; we surface the signal and abort so the
+                    // operator can re-run with a fresh sync.
+                    use coincync::wallet::scanner::ScanResult;
+                    let outs = match scanner.scan_block_with_result(&block) {
+                        ScanResult::Scanned { outputs, .. } => outputs,
+                        ScanResult::ReorgDetected { at_height, actual_prev, expected_prev } => {
+                            eprintln!(
+                                "WARN: reorg detected at height {} (block prev_hash={:?} != wallet's last hash={:?}); \
+                                 stopping scan. Re-run after node settles or full-rescan to recover.",
+                                at_height, actual_prev, expected_prev,
+                            );
+                            break;
+                        }
+                    };
                     for decrypted in &outs {
                         let utxo = decrypted_to_utxo(
                             decrypted,
@@ -872,8 +893,18 @@ async fn cmd_scan(
                     // by key_image in the wallet's UTXO set, mark spent.
                     // mark_spent_by_key_image is a no-op if the key image
                     // isn't ours, so iterating every block tx is cheap.
+                    //
+                    // Task #1b: ALSO journal the spend in the scanner so
+                    // a later rewind can un-mark spent on this UTXO if
+                    // the current block ends up orphaned.
                     for tx in &block.transactions {
                         for ki in tx.key_images() {
+                            // Only journal the spend if it actually
+                            // belongs to us — otherwise we'd pollute
+                            // the journal with every chain key_image.
+                            if wallet.balance_ref().lookup_by_key_image(&ki).is_some() {
+                                scanner.record_spend_for_last_block(ki.clone());
+                            }
                             wallet.mark_spent_by_key_image(&ki);
                         }
                     }

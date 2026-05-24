@@ -142,6 +142,34 @@ impl Balance {
         }
     }
 
+    /// Drop a set of outputs from the wallet's UTXO state. Returns the
+    /// number of UTXOs actually removed (silently skips entries the wallet
+    /// no longer has, which is the expected path when a rewind retargets
+    /// a height that the wallet had already processed partially or whose
+    /// outputs were spent and pruned).
+    ///
+    /// Used during reorg rewind: when `WalletScanner::rewind_to_height`
+    /// returns a `RewindOutcome`, its `outputs_to_remove` field lists
+    /// the `(tx_hash, output_index)` pairs the scanner journaled as
+    /// "ours" in the now-orphaned blocks. Applying that list here:
+    ///   - drops the UTXOs from `self.utxos`
+    ///   - clears each UTXO's `key_image` from `self.key_image_index`
+    ///     (the reverse-lookup index would otherwise hold a dead pointer)
+    ///   - removes any in-flight reservation on the dropped UTXO (an
+    ///     orphaned UTXO cannot be the input to a canonical-chain tx,
+    ///     so the reservation is moot regardless of by_tx's state).
+    pub fn remove_outputs(&mut self, outputs: &[(Hash, u8)]) -> usize {
+        let mut removed = 0;
+        for key in outputs {
+            if let Some(utxo) = self.utxos.remove(key) {
+                self.key_image_index.remove(&utxo.key_image);
+                self.reservations.remove(key);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Mark a UTXO as confirmed-spent on chain.
     /// Also releases any in-flight reservation on this UTXO (the reservation
     /// has been "consumed" by chain confirmation, no longer needed).
@@ -153,6 +181,37 @@ impl Balance {
         // Reservation is now satisfied by the actual on-chain spend. Drop it
         // so subsequent expiry sweeps don't re-emit log noise about it.
         self.reservations.remove(&key);
+    }
+
+    /// Inverse of `mark_spent_by_key_image`: flip the spent flag on the
+    /// UTXO this key image identifies back to `false`. Returns true if
+    /// a UTXO was found and updated, false otherwise.
+    ///
+    /// Used during reorg rewind for the Task #1b case: when the only
+    /// reason a UTXO was marked spent is a tx in a now-orphaned block,
+    /// the rewind needs to restore that UTXO to spendable state. The
+    /// scanner journals such key images via `record_spend_for_last_block`
+    /// and surfaces them via `RewindOutcome.key_images_to_unspend`.
+    ///
+    /// Looks up via `key_image_index` even when the UTXO is currently
+    /// spent — `lookup_by_key_image` filters those out by design, so we
+    /// reach into the underlying maps here. The reverse index entry was
+    /// preserved across `mark_spent` precisely to support this path.
+    pub fn unmark_spent_by_key_image(&mut self, ki: &KeyImage) -> bool {
+        let key = match self.key_image_index.get(ki) {
+            Some(k) => *k,
+            None => return false,
+        };
+        match self.utxos.get_mut(&key) {
+            Some(u) if u.spent => {
+                u.spent = false;
+                true
+            }
+            // UTXO is present but already unspent — caller may be
+            // double-applying; report no-op rather than panic.
+            Some(_) => false,
+            None => false,
+        }
     }
 
     /// Total confirmed balance (including immature + locked, AND including
@@ -486,6 +545,100 @@ mod tests {
         let released = balance.release_expired_reservations(100 + RESERVATION_EXPIRY_BLOCKS);
         assert_eq!(released, 2);
         assert_eq!(balance.all_reservations().len(), 0);
+    }
+
+    // === Reorg rewind tests (Task #3b: balance side) ==================
+
+    /// `remove_outputs` drops the UTXO AND clears its `key_image_index`
+    /// entry. Without the index cleanup, `lookup_by_key_image` would
+    /// return a dead pointer after a reorg.
+    #[test]
+    fn test_remove_outputs_drops_utxo_and_key_image() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        balance.add_utxo(make_utxo_at_idx(200, 0, 2));
+        let ki_dropped = KeyImage::from_bytes([1; 32]);
+        let ki_kept = KeyImage::from_bytes([2; 32]);
+
+        let removed = balance.remove_outputs(&[(Hash::from_bytes([1; 32]), 1)]);
+        assert_eq!(removed, 1);
+        assert_eq!(balance.unspent_utxos().len(), 1);
+        assert!(balance.lookup_by_key_image(&ki_dropped).is_none());
+        // Other UTXO untouched.
+        assert!(balance.lookup_by_key_image(&ki_kept).is_some());
+    }
+
+    /// `remove_outputs` returns 0 when none of the keys are present.
+    /// Idempotent under repeat calls — the reorg orchestrator may
+    /// double-apply on retry without corrupting state.
+    #[test]
+    fn test_remove_outputs_missing_keys_silently_skip() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        let removed = balance.remove_outputs(&[
+            (Hash::from_bytes([0xAA; 32]), 0),
+            (Hash::from_bytes([0xBB; 32]), 0),
+        ]);
+        assert_eq!(removed, 0);
+        // Re-applying the same removal again is still safe.
+        let again = balance.remove_outputs(&[(Hash::from_bytes([1; 32]), 1)]);
+        assert_eq!(again, 1);
+        let third = balance.remove_outputs(&[(Hash::from_bytes([1; 32]), 1)]);
+        assert_eq!(third, 0);
+    }
+
+    /// `unmark_spent_by_key_image` restores a previously-spent UTXO to
+    /// spendable. Used during reorg rewind for the Task #1b case
+    /// (orphaned tx spent one of our pre-existing UTXOs).
+    #[test]
+    fn test_unmark_spent_by_key_image_restores_utxo() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        let ki = KeyImage::from_bytes([1; 32]);
+        balance.mark_spent(Hash::from_bytes([1; 32]), 1);
+
+        // After mark_spent, lookup_by_key_image returns None (filters spent).
+        assert!(balance.lookup_by_key_image(&ki).is_none());
+        // Balance total reflects the spent state.
+        assert_eq!(balance.total(), Amount::ZERO);
+
+        // Unmark — UTXO becomes spendable again.
+        assert!(balance.unmark_spent_by_key_image(&ki));
+        assert!(balance.lookup_by_key_image(&ki).is_some());
+        assert_eq!(balance.total(), Amount::from_atomic(100));
+    }
+
+    /// `unmark_spent_by_key_image` returns false on unknown key images
+    /// and on already-unspent UTXOs — both are no-ops, never errors,
+    /// so the orchestrator can double-apply safely.
+    #[test]
+    fn test_unmark_spent_by_key_image_noop_paths() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        let known_ki = KeyImage::from_bytes([1; 32]);
+        let unknown_ki = KeyImage::from_bytes([0xFF; 32]);
+
+        // Already unspent — no-op, returns false.
+        assert!(!balance.unmark_spent_by_key_image(&known_ki));
+        // Unknown key image — no-op, returns false.
+        assert!(!balance.unmark_spent_by_key_image(&unknown_ki));
+    }
+
+    /// `remove_outputs` also releases any reservation on the removed
+    /// UTXO. The in-flight tx that held the reservation is itself dead
+    /// (its inputs are now invalid), so the reservation is moot.
+    #[test]
+    fn test_remove_outputs_releases_reservation() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        let tx = Hash::from_bytes([0xDE; 32]);
+        balance.reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx, 100).unwrap();
+        assert_eq!(balance.all_reservations().len(), 1);
+
+        balance.remove_outputs(&[(Hash::from_bytes([1; 32]), 1)]);
+        assert_eq!(balance.all_reservations().len(), 0);
+        // UTXO is gone too.
+        assert_eq!(balance.unspent_utxos().len(), 0);
     }
 
     /// `restore_reservations` skips already-expired entries: persistence

@@ -32,6 +32,13 @@ pub struct SyncProgress {
     pub is_paused: bool,
     /// Last error message
     pub last_error: Option<String>,
+    /// Height at which the most recent reorg was detected, if any.
+    /// Set by the orchestrator (Task #5) after a successful reorg
+    /// recovery. Surfaced to the UI for the reorg-notification banner.
+    pub last_reorg_at_height: Option<u64>,
+    /// Number of blocks rewound in the most recent reorg recovery.
+    /// `last_reorg_at_height - new_height` post-recovery.
+    pub last_reorg_depth: Option<u64>,
 }
 
 impl Default for SyncProgress {
@@ -46,6 +53,8 @@ impl Default for SyncProgress {
             is_complete: false,
             is_paused: false,
             last_error: None,
+            last_reorg_at_height: None,
+            last_reorg_depth: None,
         }
     }
 }
@@ -80,6 +89,13 @@ pub struct BackgroundSyncConfig {
     pub parallel: bool,
     /// Number of parallel workers
     pub workers: usize,
+    /// Task #6: how often to poll the node for the block hash at the
+    /// scanner's current tip. Mismatch triggers reorg recovery — this
+    /// is the only signal the wallet has for a reorg that happened
+    /// while it was offline (scan_block_v2 only fires when a new block
+    /// arrives). 30s is a balance between recovery latency and RPC
+    /// load. Set to 0 to disable the poll entirely.
+    pub tip_check_interval_secs: u64,
 }
 
 impl Default for BackgroundSyncConfig {
@@ -91,6 +107,7 @@ impl Default for BackgroundSyncConfig {
             rate_limit: 0,
             parallel: true,
             workers: num_cpus::get().max(1),
+            tip_check_interval_secs: 30,
         }
     }
 }
@@ -223,6 +240,10 @@ pub struct BackgroundSyncManager {
     /// `msg` argument on the floor and the operator saw only "Error"
     /// with no explanation.
     last_error: Option<String>,
+    /// Most-recent reorg-recovery stats. Surfaced via `SyncProgress`
+    /// so the UI can display the reorg-notification banner. Cleared
+    /// when the user dismisses the banner (`clear_reorg_stats`).
+    last_reorg: Option<ReorgRecoveryStats>,
 }
 
 /// Sync statistics
@@ -269,6 +290,7 @@ impl BackgroundSyncManager {
             stats: SyncStats::default(),
             is_running: Arc::new(AtomicBool::new(false)),
             last_error: None,
+            last_reorg: None,
         }
     }
 
@@ -346,6 +368,8 @@ impl BackgroundSyncManager {
             is_complete: self.state == SyncState::Complete,
             is_paused: self.state == SyncState::Paused,
             last_error: self.last_error.clone(),
+            last_reorg_at_height: self.last_reorg.as_ref().map(|r| r.reorg_at_height),
+            last_reorg_depth: self.last_reorg.as_ref().map(|r| r.depth),
         }
     }
 
@@ -388,6 +412,81 @@ impl BackgroundSyncManager {
     pub fn clear_error(&mut self) {
         self.last_error = None;
     }
+
+    /// Rewind the manager's view of `current_height` to `new_height`
+    /// after a successful reorg recovery. Resets state to `Syncing` so
+    /// the loop continues from `new_height + 1` toward the existing
+    /// target. Used by the orchestrator (Task #5) after
+    /// `BlockScanner::handle_reorg_recovery` resolves.
+    pub fn rewind_to(&mut self, new_height: u64) {
+        if new_height < self.current_height {
+            self.current_height = new_height;
+        }
+        // A reorg recovery should resume sync regardless of prior state
+        // (could have been Complete if reorg arrived after we caught up).
+        self.state = SyncState::Syncing;
+        self.is_running.store(true, Ordering::Relaxed);
+    }
+
+    /// Stash reorg-recovery stats so the next `progress()` call surfaces
+    /// them through `SyncProgress::last_reorg_*`. The UI uses these to
+    /// render the reorg-notification banner.
+    pub fn record_reorg_stats(&mut self, stats: ReorgRecoveryStats) {
+        self.last_reorg = Some(stats);
+    }
+
+    /// Clear the stashed reorg stats (call after the UI banner has
+    /// been dismissed by the user or after a configurable display
+    /// window has elapsed).
+    pub fn clear_reorg_stats(&mut self) {
+        self.last_reorg = None;
+    }
+}
+
+/// Outcome of a single block scan. Task #5 (reorg-aware orchestrator)
+/// adds `ReorgDetected` so the sync loop can branch into the recovery
+/// path: query `find_fork_point`, rewind the wallet state, restart sync.
+#[derive(Clone, Debug)]
+pub enum ScanBlockOutcome {
+    /// Normal scan path. Same counts the legacy `scan_block` returned.
+    Scanned {
+        outputs: u64,
+        txs: u64,
+    },
+    /// The wallet scanner detected a chain reorg while applying this
+    /// block. Carries the wallet's most-recent canonical `(height, hash)`
+    /// — the orchestrator passes this pair to `BlockFetcher::find_fork_point`
+    /// to learn the height at which the wallet's view diverged from the
+    /// chain's current view.
+    ReorgDetected {
+        /// Height the incoming block claimed (one past the wallet's
+        /// last-known canonical block — that's why the prev-hash check
+        /// failed).
+        at_height: u64,
+        /// Wallet's most-recent canonical height.
+        known_height: u64,
+        /// Wallet's most-recent canonical block hash.
+        known_hash: Hash,
+    },
+}
+
+/// Statistics from a successful reorg-recovery pass. Surfaced through
+/// `SyncProgress` (Task #7) so the wallet UI can render the
+/// reorg-notification banner with the right depth + height.
+#[derive(Clone, Debug, Default)]
+pub struct ReorgRecoveryStats {
+    /// Height at which the reorg was detected (= `ScanBlockOutcome::ReorgDetected.at_height`).
+    pub reorg_at_height: u64,
+    /// New canonical height after rewind. The next block to scan is `new_height + 1`.
+    pub new_height: u64,
+    /// Depth of the reorg = `reorg_at_height - new_height`. The UI's
+    /// banner reads this for "Chain reorg detected at depth N — balance
+    /// updated". Stored explicitly to avoid arithmetic in callers.
+    pub depth: u64,
+    /// Number of UTXOs the wallet dropped during rewind.
+    pub utxos_removed: u64,
+    /// Number of UTXOs the wallet unspent (from orphaned outgoing txs).
+    pub utxos_unspent: u64,
 }
 
 /// Trait for fetching blocks during sync (implemented by RPC clients, direct DB access, etc.)
@@ -397,6 +496,31 @@ pub trait BlockFetcher: Send + Sync {
     async fn fetch_block(&self, height: u64) -> std::result::Result<Option<Block>, String>;
     /// Get the current chain tip height.
     async fn get_chain_height(&self) -> std::result::Result<u64, String>;
+    /// Get the block hash at `height` (used by the periodic tip-hash
+    /// poll in Task #6 to catch reorgs the wallet missed while offline).
+    /// Default impl returns Err — implementors that opt into reorg
+    /// recovery override this.
+    async fn get_block_hash_at(&self, _height: u64) -> std::result::Result<Option<Hash>, String> {
+        Err("get_block_hash_at not implemented".into())
+    }
+    /// Ask the node whether the wallet's `(known_hash, known_height)`
+    /// pair is still on the canonical chain. Returns:
+    ///   - `Ok(Some(fork_height))` — last common-ancestor height (the
+    ///     wallet should rewind down to this height and resume scanning
+    ///     from `fork_height + 1`)
+    ///   - `Ok(None)` — no fork point found in the searchable window;
+    ///     wallet must fall back to a full rescan from the most recent
+    ///     hardcoded checkpoint
+    ///   - `Err(_)` — RPC transport / node error
+    ///
+    /// Default impl returns Err — RPC-backed implementors override.
+    async fn find_fork_point(
+        &self,
+        _known_hash: Hash,
+        _known_height: u64,
+    ) -> std::result::Result<Option<u64>, String> {
+        Err("find_fork_point not implemented for this BlockFetcher".into())
+    }
 }
 
 /// Trait for processing scanned blocks (wallet-specific scanning logic)
@@ -405,6 +529,82 @@ pub trait BlockScanner: Send {
     fn scan_block(&mut self, block: &Block, height: u64) -> (u64, u64);
     /// Persist current wallet state (called periodically).
     fn persist_state(&mut self, height: u64) -> Result<()>;
+    /// Reorg-aware extension to `scan_block`. Default delegates and
+    /// always returns `Scanned`. Implementors that route through a
+    /// reorg-aware scanner (one with `BlockApplyDiff` journal +
+    /// `scan_block_with_result`) override this to surface
+    /// `ReorgDetected` so the sync loop can trigger recovery.
+    fn scan_block_v2(&mut self, block: &Block, height: u64) -> ScanBlockOutcome {
+        let (outputs, txs) = self.scan_block(block, height);
+        ScanBlockOutcome::Scanned { outputs, txs }
+    }
+    /// Apply a reorg rewind to all wallet state layers (scanner journal +
+    /// balance UTXOs + history records). Called by the sync loop after
+    /// `find_fork_point` resolves the rewind target. Returns the stats
+    /// used to populate `SyncProgress::last_reorg_*` for the UI.
+    ///
+    /// Default impl returns Err — only implementors that have wired
+    /// the full Task #3b + #1b machinery should override.
+    fn handle_reorg_recovery(
+        &mut self,
+        fork_height: u64,
+    ) -> std::result::Result<ReorgRecoveryStats, String> {
+        Err(format!(
+            "handle_reorg_recovery not implemented; cannot rewind to fork_height={}",
+            fork_height
+        ))
+    }
+
+    /// The scanner's most-recent canonical `(height, hash)` pair. Used
+    /// by the periodic tip-hash poll (Task #6) to ask the node "is the
+    /// block at MY current tip height still your block at that height?"
+    /// — catches the offline-during-reorg case that scan_block_v2 alone
+    /// would miss (since scan_block_v2 only fires on incoming blocks,
+    /// and an offline wallet doesn't receive any).
+    ///
+    /// Default returns `(0, Hash::zero())` so legacy scanners that
+    /// don't track per-block state simply opt out of the periodic
+    /// check (the wallet will fall back to `scan_block_v2` detection
+    /// when sync resumes).
+    fn current_position(&self) -> (u64, Hash) {
+        (0, Hash::zero())
+    }
+}
+
+/// Shared reorg-recovery dispatch used by both Task #5 (scan-detected)
+/// and Task #6 (periodic tip-hash poll). Asks the node for the fork
+/// point, then asks the scanner to rewind to it. Returns:
+///   - `Ok(Some(stats))` — recovery succeeded; caller applies
+///     `manager.rewind_to(stats.new_height)` + `record_reorg_stats(stats)`
+///   - `Ok(None)` — fork point is below the searchable window; caller
+///     must surface as error and prompt full rescan
+///   - `Err(_)` — RPC transport / scanner-side error
+async fn try_reorg_recovery(
+    fetcher: &dyn BlockFetcher,
+    scanner: &mut Box<dyn BlockScanner>,
+    known_hash: Hash,
+    known_height: u64,
+    at_height: u64,
+) -> std::result::Result<Option<ReorgRecoveryStats>, String> {
+    match fetcher.find_fork_point(known_hash, known_height).await {
+        Ok(Some(fork_height)) => match scanner.handle_reorg_recovery(fork_height) {
+            Ok(mut stats) => {
+                // Backfill the detection-height from the caller, since
+                // the scanner can't know it (the journal entry it just
+                // rewound from didn't capture the "incoming block that
+                // tripped detection" height — only the wallet's own
+                // last-canonical height).
+                stats.reorg_at_height = at_height;
+                Ok(Some(stats))
+            }
+            Err(e) => Err(format!(
+                "handle_reorg_recovery failed at fork_height {}: {}",
+                fork_height, e
+            )),
+        },
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("find_fork_point failed: {}", e)),
+    }
 }
 
 /// Spawn background sync and return a controller for managing it.
@@ -433,8 +633,93 @@ pub fn spawn_background_sync(
     tokio::spawn(async move {
         let mut persist_counter: u64 = 0;
         let scan_start = std::time::Instant::now();
+        // Task #6: track last tip-hash poll. Initial value is "now" so
+        // the first poll fires after the configured interval, not
+        // immediately on startup (the scanner has nothing useful at
+        // height 0 to compare anyway).
+        let mut last_tip_check = std::time::Instant::now();
+        let tip_check_interval = if config.tip_check_interval_secs > 0 {
+            Some(std::time::Duration::from_secs(config.tip_check_interval_secs))
+        } else {
+            None
+        };
 
         loop {
+            // Task #6: periodic tip-hash poll. Fires regardless of sync
+            // state (Syncing / Complete / Paused) — the offline-during-
+            // reorg case is precisely when the wallet sat at Complete
+            // with no new blocks arriving. Disabled when interval == 0.
+            if let Some(interval) = tip_check_interval {
+                if last_tip_check.elapsed() >= interval {
+                    last_tip_check = std::time::Instant::now();
+                    let (known_h, known_hash) = scanner.current_position();
+                    if known_h > 0 {
+                        match fetcher.get_block_hash_at(known_h).await {
+                            Ok(Some(chain_hash)) if chain_hash != known_hash => {
+                                tracing::warn!(
+                                    target: "wallet::reorg",
+                                    "Periodic tip-hash check: wallet hash mismatch at height {} (wallet={}, chain={})",
+                                    known_h, known_hash, chain_hash,
+                                );
+                                match try_reorg_recovery(
+                                    fetcher.as_ref(),
+                                    &mut scanner,
+                                    known_hash,
+                                    known_h,
+                                    known_h,
+                                ).await {
+                                    Ok(Some(stats)) => {
+                                        tracing::info!(
+                                            target: "wallet::reorg",
+                                            "Reorg recovered via periodic poll: rewound to {} (depth {})",
+                                            stats.new_height, stats.depth,
+                                        );
+                                        manager.rewind_to(stats.new_height);
+                                        manager.record_reorg_stats(stats);
+                                        let _ = progress_tx.send(manager.progress());
+                                        continue;
+                                    }
+                                    Ok(None) => {
+                                        manager.record_error(format!(
+                                            "Periodic poll detected reorg at height {}; deeper than journal window (full rescan required)",
+                                            known_h,
+                                        ));
+                                        let _ = progress_tx.send(manager.progress());
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        // Transient RPC failure — log + carry on,
+                                        // we'll retry on next tick.
+                                        tracing::warn!(
+                                            target: "wallet::reorg",
+                                            "Periodic reorg recovery RPC failed (will retry): {}",
+                                            e,
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(Some(_)) => {
+                                // Match — wallet's view is canonical.
+                            }
+                            Ok(None) => {
+                                tracing::debug!(
+                                    target: "wallet::reorg",
+                                    "Periodic tip-hash check: node has no block at height {}",
+                                    known_h,
+                                );
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "wallet::reorg",
+                                    "Periodic tip-hash check RPC failed: {}",
+                                    e,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check for commands (non-blocking)
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
@@ -492,14 +777,85 @@ pub fn spawn_background_sync(
             let mut batch_txs = 0u64;
             let mut batch_count = 0u64;
             let mut had_error = false;
+            // Task #5: when scan_block_v2 returns ReorgDetected, we break
+            // out of the inner block loop AND skip the
+            // update_progress(batch_count) call below so current_height
+            // isn't advanced past the orphaned block. The recovery path
+            // then rewinds current_height down to the fork point.
+            let mut reorg_recovery_done = false;
 
             for height in batch_start..batch_end {
                 match fetcher.fetch_block(height).await {
                     Ok(Some(block)) => {
-                        let (outputs, txs) = scanner.scan_block(&block, height);
-                        batch_outputs += outputs;
-                        batch_txs += txs;
-                        batch_count += 1;
+                        match scanner.scan_block_v2(&block, height) {
+                            ScanBlockOutcome::Scanned { outputs, txs } => {
+                                batch_outputs += outputs;
+                                batch_txs += txs;
+                                batch_count += 1;
+                            }
+                            ScanBlockOutcome::ReorgDetected {
+                                at_height,
+                                known_height,
+                                known_hash,
+                            } => {
+                                tracing::warn!(
+                                    target: "wallet::reorg",
+                                    "Reorg detected at height {} (wallet at known_height={}); recovery path A",
+                                    at_height,
+                                    known_height,
+                                );
+                                // Path A (Task #5): same dispatch helper
+                                // that Task #6's periodic poll uses, so
+                                // both paths produce identical state
+                                // transitions on success.
+                                match try_reorg_recovery(
+                                    fetcher.as_ref(),
+                                    &mut scanner,
+                                    known_hash,
+                                    known_height,
+                                    at_height,
+                                ).await {
+                                    Ok(Some(stats)) => {
+                                        tracing::info!(
+                                            target: "wallet::reorg",
+                                            "Reorg recovered: rewound to {} (depth {}, {} UTXOs removed, {} UTXOs unspent)",
+                                            stats.new_height,
+                                            stats.depth,
+                                            stats.utxos_removed,
+                                            stats.utxos_unspent,
+                                        );
+                                        manager.rewind_to(stats.new_height);
+                                        manager.record_reorg_stats(stats);
+                                        reorg_recovery_done = true;
+                                    }
+                                    Ok(None) => {
+                                        tracing::error!(
+                                            target: "wallet::reorg",
+                                            "Reorg at height {} deeper than searchable window; full rescan required",
+                                            at_height,
+                                        );
+                                        manager.record_error(format!(
+                                            "Reorg at height {} deeper than journal window — full rescan required (not yet automated)",
+                                            at_height,
+                                        ));
+                                        had_error = true;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "wallet::reorg",
+                                            "Reorg recovery failed: {}", e,
+                                        );
+                                        manager.record_error(format!(
+                                            "Reorg recovery failed: {}", e,
+                                        ));
+                                        had_error = true;
+                                    }
+                                }
+                                // Whatever the outcome, the rest of this
+                                // batch is on the orphaned chain — drop it.
+                                break;
+                            }
+                        }
                     }
                     Ok(None) => {
                         // Block not available yet — update target and pause
@@ -513,6 +869,15 @@ pub fn spawn_background_sync(
                         break;
                     }
                 }
+            }
+
+            if reorg_recovery_done {
+                // current_height has been rewound; next iteration will
+                // pick up the next batch from the new position. Push the
+                // updated progress (with last_reorg_* fields) to the UI
+                // before looping.
+                let _ = progress_tx.send(manager.progress());
+                continue;
             }
 
             if batch_count > 0 {
@@ -609,5 +974,327 @@ mod tests {
         // Progress should retain what was scanned
         let progress = manager.progress();
         assert_eq!(progress.current_height, 100);
+    }
+
+    // === Reorg-handling tests (Task #5) =================================
+
+    /// Minimal Block used only as a placeholder reference in tests
+    /// whose stub scanners ignore the block content. The real chain
+    /// constructs Block via Block::new(header, txs); we go through
+    /// the struct literal because there's no Default impl and the
+    /// header has many fields we don't care about for these tests.
+    fn empty_block() -> Block {
+        use crate::consensus::BlockHeader;
+        use crate::primitives::PublicKey;
+        Block::new(
+            BlockHeader {
+                network_magic: [0u8; 4],
+                version: 0,
+                height: 0,
+                timestamp: 0,
+                prev_hash: Hash::zero(),
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0,
+                nonce: 0,
+                target: Hash::zero(),
+                miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            },
+            Vec::new(),
+        )
+    }
+
+
+    /// `rewind_to` pulls current_height back to the recovery target and
+    /// re-arms the state machine to Syncing. The next batch_range will
+    /// then start at the new position.
+    #[test]
+    fn test_rewind_to_moves_current_height_and_resumes() {
+        let config = BackgroundSyncConfig::default();
+        let mut manager = BackgroundSyncManager::new(config);
+        manager.start(0, 1000);
+        manager.update_progress(500, 10, 250);
+        assert_eq!(manager.progress().current_height, 500);
+
+        manager.rewind_to(450);
+        assert_eq!(manager.progress().current_height, 450);
+        assert_eq!(manager.state(), SyncState::Syncing);
+    }
+
+    /// `rewind_to` from a Complete state re-arms back to Syncing (a
+    /// reorg arriving after the wallet caught up is the realistic
+    /// trigger — we must not stay Complete).
+    #[test]
+    fn test_rewind_to_unsticks_complete_state() {
+        let config = BackgroundSyncConfig::default();
+        let mut manager = BackgroundSyncManager::new(config);
+        manager.start(0, 100);
+        manager.update_progress(100, 1, 10);
+        assert_eq!(manager.state(), SyncState::Complete);
+
+        manager.rewind_to(95);
+        assert_eq!(manager.state(), SyncState::Syncing);
+        assert_eq!(manager.progress().current_height, 95);
+    }
+
+    /// `rewind_to` with a target greater than current_height is a no-op
+    /// on the height field (you can't rewind forward) but still resumes
+    /// the state machine. Defensive — shouldn't happen in practice, but
+    /// silently corrupting current_height would be worse.
+    #[test]
+    fn test_rewind_to_forward_is_height_noop() {
+        let config = BackgroundSyncConfig::default();
+        let mut manager = BackgroundSyncManager::new(config);
+        manager.start(0, 1000);
+        manager.update_progress(100, 1, 10);
+
+        manager.rewind_to(500);
+        assert_eq!(manager.progress().current_height, 100);
+    }
+
+    /// `record_reorg_stats` populates the `SyncProgress` fields the UI
+    /// reads for the reorg-notification banner (Tasks #7 + #8).
+    #[test]
+    fn test_record_reorg_stats_surfaces_via_progress() {
+        let config = BackgroundSyncConfig::default();
+        let mut manager = BackgroundSyncManager::new(config);
+        manager.start(0, 1000);
+
+        let stats = ReorgRecoveryStats {
+            reorg_at_height: 105,
+            new_height: 100,
+            depth: 5,
+            utxos_removed: 2,
+            utxos_unspent: 1,
+        };
+        manager.record_reorg_stats(stats);
+        let progress = manager.progress();
+        assert_eq!(progress.last_reorg_at_height, Some(105));
+        assert_eq!(progress.last_reorg_depth, Some(5));
+
+        manager.clear_reorg_stats();
+        let progress = manager.progress();
+        assert_eq!(progress.last_reorg_at_height, None);
+        assert_eq!(progress.last_reorg_depth, None);
+    }
+
+    /// Stub BlockScanner that emits ReorgDetected on a configurable
+    /// height, then on the next call simulates successful recovery.
+    /// Used to exercise the orchestrator's reorg branch without needing
+    /// a real chain.
+    struct StubReorgScanner {
+        emit_reorg_at: u64,
+        scanned_calls: u64,
+        recovery_calls: u64,
+    }
+
+    impl BlockScanner for StubReorgScanner {
+        fn scan_block(&mut self, _block: &Block, _height: u64) -> (u64, u64) {
+            self.scanned_calls += 1;
+            (1, 1)
+        }
+        fn scan_block_v2(&mut self, _block: &Block, height: u64) -> ScanBlockOutcome {
+            if height == self.emit_reorg_at && self.recovery_calls == 0 {
+                ScanBlockOutcome::ReorgDetected {
+                    at_height: height,
+                    known_height: height - 1,
+                    known_hash: Hash::from_bytes([0xAB; 32]),
+                }
+            } else {
+                self.scanned_calls += 1;
+                ScanBlockOutcome::Scanned { outputs: 1, txs: 1 }
+            }
+        }
+        fn handle_reorg_recovery(
+            &mut self,
+            fork_height: u64,
+        ) -> std::result::Result<ReorgRecoveryStats, String> {
+            self.recovery_calls += 1;
+            Ok(ReorgRecoveryStats {
+                reorg_at_height: fork_height + 1,
+                new_height: fork_height,
+                depth: 1,
+                utxos_removed: 0,
+                utxos_unspent: 0,
+            })
+        }
+        fn persist_state(&mut self, _height: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `scan_block_v2` default impl wraps `scan_block` in `Scanned`,
+    /// so existing legacy scanners stay compatible without modification.
+    #[test]
+    fn test_scan_block_v2_default_wraps_legacy_scan() {
+        struct LegacyOnly;
+        impl BlockScanner for LegacyOnly {
+            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) { (3, 7) }
+            fn persist_state(&mut self, _h: u64) -> Result<()> { Ok(()) }
+        }
+        let mut s = LegacyOnly;
+        let dummy_block = empty_block();
+        match s.scan_block_v2(&dummy_block, 0) {
+            ScanBlockOutcome::Scanned { outputs, txs } => {
+                assert_eq!(outputs, 3);
+                assert_eq!(txs, 7);
+            }
+            ScanBlockOutcome::ReorgDetected { .. } => {
+                panic!("legacy default should never emit ReorgDetected");
+            }
+        }
+    }
+
+    /// `handle_reorg_recovery` default impl returns Err with a message
+    /// containing the fork_height — so legacy scanners can't silently
+    /// "succeed" a recovery they aren't actually performing.
+    #[test]
+    fn test_handle_reorg_recovery_default_is_err() {
+        struct LegacyOnly;
+        impl BlockScanner for LegacyOnly {
+            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) { (0, 0) }
+            fn persist_state(&mut self, _h: u64) -> Result<()> { Ok(()) }
+        }
+        let mut s = LegacyOnly;
+        let res = s.handle_reorg_recovery(42);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("42"));
+    }
+
+    /// `find_fork_point` default impl returns Err — legacy fetchers
+    /// can't claim a fork point exists. Symmetric guard to the scanner
+    /// side: both defaults must surface absence-of-impl loudly.
+    #[tokio::test]
+    async fn test_find_fork_point_default_is_err() {
+        struct LegacyFetcher;
+        #[async_trait::async_trait]
+        impl BlockFetcher for LegacyFetcher {
+            async fn fetch_block(&self, _h: u64)
+                -> std::result::Result<Option<Block>, String> {
+                Ok(None)
+            }
+            async fn get_chain_height(&self)
+                -> std::result::Result<u64, String> {
+                Ok(0)
+            }
+        }
+        let f = LegacyFetcher;
+        let res = f.find_fork_point(Hash::zero(), 0).await;
+        assert!(res.is_err());
+    }
+
+    /// `current_position` default returns (0, Hash::zero()) so legacy
+    /// scanners opt out of the periodic tip-hash poll cleanly. The
+    /// periodic check (Task #6) skips the RPC call when known_h == 0,
+    /// so this default is effectively a no-op gate.
+    #[test]
+    fn test_current_position_default_is_zero() {
+        struct LegacyOnly;
+        impl BlockScanner for LegacyOnly {
+            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) { (0, 0) }
+            fn persist_state(&mut self, _h: u64) -> Result<()> { Ok(()) }
+        }
+        let s = LegacyOnly;
+        assert_eq!(s.current_position(), (0, Hash::zero()));
+    }
+
+    /// `try_reorg_recovery` round-trip: a fetcher that resolves a fork
+    /// point + a scanner that succeeds recovery produces stats with
+    /// `reorg_at_height` backfilled from the caller's `at_height` arg.
+    /// This is the path both Task #5 and Task #6 share.
+    #[tokio::test]
+    async fn test_try_reorg_recovery_round_trip() {
+        struct StubFetcher;
+        #[async_trait::async_trait]
+        impl BlockFetcher for StubFetcher {
+            async fn fetch_block(&self, _h: u64) -> std::result::Result<Option<Block>, String> {
+                Ok(None)
+            }
+            async fn get_chain_height(&self) -> std::result::Result<u64, String> {
+                Ok(10)
+            }
+            async fn find_fork_point(
+                &self, _kh: Hash, _kheight: u64,
+            ) -> std::result::Result<Option<u64>, String> {
+                Ok(Some(4))
+            }
+        }
+        let fetcher = StubFetcher;
+        let mut scanner: Box<dyn BlockScanner> = Box::new(StubReorgScanner {
+            emit_reorg_at: 5,
+            scanned_calls: 0,
+            recovery_calls: 0,
+        });
+        let result = try_reorg_recovery(
+            &fetcher, &mut scanner,
+            Hash::from_bytes([0xAB; 32]),
+            5, // known_height
+            5, // at_height — the height the reorg was detected at
+        ).await;
+        let stats = result.expect("recovery should not error")
+            .expect("fork point should resolve to Some");
+        // Stub returns depth=1 + new_height=fork_height=4; helper
+        // backfills reorg_at_height=at_height=5.
+        assert_eq!(stats.new_height, 4);
+        assert_eq!(stats.depth, 1);
+        assert_eq!(stats.reorg_at_height, 5);
+    }
+
+    /// `try_reorg_recovery` returns Ok(None) when find_fork_point
+    /// resolves to None (reorg deeper than searchable window).
+    /// The orchestrator surfaces this as an error to the operator
+    /// (full rescan needed).
+    #[tokio::test]
+    async fn test_try_reorg_recovery_no_fork_point() {
+        struct NoForkFetcher;
+        #[async_trait::async_trait]
+        impl BlockFetcher for NoForkFetcher {
+            async fn fetch_block(&self, _h: u64) -> std::result::Result<Option<Block>, String> {
+                Ok(None)
+            }
+            async fn get_chain_height(&self) -> std::result::Result<u64, String> { Ok(0) }
+            async fn find_fork_point(
+                &self, _kh: Hash, _kheight: u64,
+            ) -> std::result::Result<Option<u64>, String> {
+                Ok(None)
+            }
+        }
+        let fetcher = NoForkFetcher;
+        let mut scanner: Box<dyn BlockScanner> = Box::new(StubReorgScanner {
+            emit_reorg_at: 99,
+            scanned_calls: 0,
+            recovery_calls: 0,
+        });
+        let result = try_reorg_recovery(&fetcher, &mut scanner, Hash::zero(), 10, 10).await;
+        assert!(matches!(result, Ok(None)));
+    }
+
+    /// Smoke test for the StubReorgScanner: confirms it switches from
+    /// emitting ReorgDetected to emitting Scanned after a recovery call.
+    /// This is what the orchestrator loop relies on for restart.
+    #[test]
+    fn test_stub_reorg_scanner_switches_after_recovery() {
+        let mut s = StubReorgScanner {
+            emit_reorg_at: 5,
+            scanned_calls: 0,
+            recovery_calls: 0,
+        };
+        let block = empty_block();
+        // Before recovery: emits ReorgDetected at the target height.
+        assert!(matches!(
+            s.scan_block_v2(&block, 5),
+            ScanBlockOutcome::ReorgDetected { .. }
+        ));
+        // Simulate orchestrator calling recovery.
+        s.handle_reorg_recovery(4).expect("recovery");
+        // After recovery: same height now emits Scanned.
+        assert!(matches!(
+            s.scan_block_v2(&block, 5),
+            ScanBlockOutcome::Scanned { .. }
+        ));
     }
 }

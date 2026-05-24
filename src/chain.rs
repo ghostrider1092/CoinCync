@@ -1617,8 +1617,19 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
             if fork_cumulative > current_total_difficulty {
                 // Fork has more work - perform chain reorganization (standard Nakamoto rule)
 
-                // Find the common ancestor (fork point)
-                let fork_point = self.find_fork_point(&block);
+                // Find the common ancestor (fork point). `None` means DB
+                // corruption (cycle or missing parent during walk); reject
+                // the reorg attempt outright rather than masking it as a
+                // ReorgTooDeep — the log inside find_fork_point already
+                // explains the corruption with diagnostic context.
+                let fork_point = match self.find_fork_point(&block) {
+                    Some(h) => h,
+                    None => {
+                        return Err(Error::Corruption(
+                            "fork-point search aborted by DB corruption (cycle or missing parent); reorg rejected".into(),
+                        ));
+                    }
+                };
 
                 // SECURITY (H-16 FIX): Hybrid reorg defense — three tiers.
                 // Tier 1 (≤10): unconditional. Tier 2 (11-100): MESS exponential cost.
@@ -2499,30 +2510,55 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
 
     /// Find the common ancestor (fork point) between the current main chain
     /// and a fork block.
-    fn find_fork_point(&self, fork_block: &Block) -> u64 {
+    ///
+    /// Returns `Some(height)` for a real common ancestor (including the
+    /// legitimate "fork point is genesis" case → `Some(0)`).
+    ///
+    /// Returns `None` when DB corruption is detected:
+    /// - Cycle in `prev_hash` chain (the walk would loop forever
+    ///   without the visited-set guard).
+    /// - A `prev_hash` references a block that isn't in storage.
+    ///
+    /// The caller (chain reorganization in [`Self::add_block`]) MUST
+    /// treat `None` as a corruption-class rejection — not as "fork
+    /// point is genesis". Previously this function returned `0` for
+    /// both genesis and corruption, which masked corruption as a
+    /// legitimate deep-reorg attempt: `evaluate_reorg_acceptability`
+    /// then rejected it as "ReorgTooDeep" with a misleading
+    /// diagnostic. Audit-prep fix 2026-05-23.
+    fn find_fork_point(&self, fork_block: &Block) -> Option<u64> {
         let mut current_hash = fork_block.header.prev_hash;
-        // Guard against infinite loops from DB corruption (cyclic prev_hash references)
         let mut visited = std::collections::HashSet::new();
 
         loop {
             if !visited.insert(current_hash) {
-                tracing::error!("Cycle detected in block chain during fork point search");
-                return 0;
+                tracing::error!(
+                    "DB corruption: cycle detected during fork-point search; \
+                     starting from fork_block height={} hash={}",
+                    fork_block.header.height,
+                    fork_block.hash().to_hex(),
+                );
+                return None;
             }
-            // Check if this block is on the main chain
             if let Some(parent) = self.get_block(&current_hash) {
                 let height = parent.header.height;
                 if let Some(main_hash) = self.get_block_hash(height) {
                     if main_hash == current_hash {
-                        return height; // Found common ancestor
+                        return Some(height);
                     }
                 }
                 if height == 0 {
-                    return 0; // Genesis is always common
+                    return Some(0);
                 }
                 current_hash = parent.header.prev_hash;
             } else {
-                return 0; // Can't find parent, assume genesis
+                tracing::error!(
+                    "DB corruption: prev_hash {} not in storage during fork-point search; \
+                     fork_block height={}",
+                    current_hash.to_hex(),
+                    fork_block.header.height,
+                );
+                return None;
             }
         }
     }
