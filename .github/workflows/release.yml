@@ -41,7 +41,7 @@ jobs:
           name: coincync-linux-x86_64
           path: coincync-linux-x86_64.tar.gz
       - name: Attest Linux artifact provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: coincync-linux-x86_64.tar.gz
 
@@ -68,7 +68,7 @@ jobs:
           name: coincync-windows-x64
           path: coincync-windows-x64.tar.gz
       - name: Attest Windows artifact provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: coincync-windows-x64.tar.gz
 
@@ -99,7 +99,7 @@ jobs:
           name: coincync-macos-x64
           path: coincync-macos-x64.tar.gz
       - name: Attest macOS x64 artifact provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: coincync-macos-x64.tar.gz
 
@@ -130,6 +130,6 @@ jobs:
           name: coincync-macos-arm64
           path: coincync-macos-arm64.tar.gz
       - name: Attest macOS arm64 artifact provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: coincync-macos-arm64.tar.gz
