@@ -45,6 +45,10 @@ struct Cli {
 enum Command {
     /// Create a new wallet with a fresh seed phrase.
     Create {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Overwrite existing wallet file.
@@ -59,42 +63,70 @@ enum Command {
     Restore {
         #[arg(env = "COINCYNC_SEED_PHRASE", hide_env_values = true)]
         seed: Option<String>,
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
 
     /// Open an existing wallet (just checks the password).
     Open {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
 
     /// Show wallet status + chain info from the node.
     Info {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
 
     /// Show the spend public key (receive pubkey for this wallet).
     Address {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
 
     /// Show balance snapshot from the wallet file (does NOT resync).
     Balance {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
 
     /// Print the master seed as hex (requires password).
     ShowSeed {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
 
     /// Scan blocks from the node for owned outputs.
     Scan {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Starting block height (default: wallet's last scanned height).
@@ -110,6 +142,10 @@ enum Command {
 
     /// Build and submit a privacy transaction to the node.
     Send {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Recipient spend public key (64-hex).
@@ -222,6 +258,10 @@ enum Command {
     /// Set a dead man's switch recovery address for future transactions.
     /// If this wallet doesn't sign for --timeout blocks, the recovery address can sweep.
     SetRecovery {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Recovery address (64-hex spend public key of backup wallet).
@@ -234,6 +274,10 @@ enum Command {
 
     /// Check if any UTXOs have recovery metadata and their recovery status.
     CheckRecovery {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Node RPC URL.
@@ -244,6 +288,10 @@ enum Command {
     /// Enable auto-churn: automatic self-sends at random intervals to poison
     /// the transaction graph. Runs as a background loop until stopped.
     AutoChurn {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Minimum seconds between churns (default 1800 = 30 min).
@@ -302,6 +350,10 @@ enum Command {
     /// to the recipient's view key and round-trip through chain
     /// untouched. Only the recipient (this wallet) can read them.
     ShowMemo {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Index of the UTXO in the wallet's UTXO list (0-based).
@@ -318,6 +370,10 @@ enum DiscloseAction {
     /// without revealing the actual amount. Useful for
     /// proof-of-funds at a counterparty without exposing balance.
     Balance {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Index of the UTXO in the wallet's UTXO list (0-based).
@@ -350,12 +406,20 @@ enum SubaddressAction {
     /// Always includes the main address (0/0). Subaddresses generated
     /// in past sessions are persisted in the wallet file.
     List {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
     /// Generate the next subaddress in `--account` (default 0) and
     /// persist it to the wallet file. Prints the new address.
     Create {
+        /// Wallet password. Use `-` to read from stdin (recommended for
+        /// piped automation: `echo $pw | wallet ... --password -`).
+        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
+        /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
         /// Account index. Different accounts give independent
@@ -502,6 +566,37 @@ fn prompt_password(confirm: bool) -> Result<String, String> {
     Ok(pw)
 }
 
+/// Resolve a password from a CLI option, with stdin support via `-`.
+///
+/// Three cases:
+/// - `Some("-")` reads one line from stdin (the password). Trailing CR/LF
+///   stripped. Empty line is an error. Use when piping a password from an
+///   automation context — keeps the secret out of argv (process list) and
+///   out of env vars (visible to children, persistent across shells).
+/// - `Some(s)` for any other s returns s as the password. Argv exposure
+///   tradeoff is the caller's choice; we still accept it for human use.
+/// - `None` falls back to interactive `prompt_password(confirm)`.
+///
+/// `confirm` only applies to the interactive path — piping is assumed to
+/// be deliberate, and re-typing for confirmation is hostile to automation.
+fn resolve_password(opt: Option<String>, confirm: bool) -> Result<String, String> {
+    match opt {
+        Some(s) if s == "-" => {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            let mut pw = String::new();
+            stdin.lock().read_line(&mut pw).map_err(|e| e.to_string())?;
+            let pw = pw.trim_end_matches(['\r', '\n']).to_string();
+            if pw.is_empty() {
+                return Err("password must not be empty when reading from stdin".into());
+            }
+            Ok(pw)
+        }
+        Some(s) => Ok(s),
+        None => prompt_password(confirm),
+    }
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -538,10 +633,7 @@ async fn cmd_create(
     let password = if no_encrypt {
         None
     } else {
-        Some(match password {
-            Some(p) => p,
-            None => prompt_password(true)?,
-        })
+        Some(resolve_password(password, true)?)
     };
 
     let (mnemonic, seed) = generate_mnemonic();
@@ -597,10 +689,7 @@ async fn cmd_restore(
     let seed_bytes =
         mnemonic_to_seed(&seed_str).map_err(|e| format!("invalid seed phrase: {}", e))?;
 
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(true)?,
-    };
+    let password = resolve_password(password, true)?;
 
     let data = WalletData {
         seed: seed_bytes,
@@ -628,10 +717,7 @@ async fn cmd_open(path: &PathBuf, password: Option<String>) -> Result<(), String
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let _data = load_wallet(path, Some(password.as_str()))
         .map_err(|e| format!("unlock failed: {}", e))?;
     println!("Wallet unlocked successfully.");
@@ -697,10 +783,7 @@ async fn cmd_address(
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let data = load_wallet(path, Some(password.as_str()))
         .map_err(|e| format!("unlock failed: {}", e))?;
 
@@ -725,10 +808,7 @@ async fn cmd_address(
 }
 
 async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), String> {
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let data = load_wallet(path, Some(password.as_str()))
         .map_err(|e| format!("unlock failed: {}", e))?;
 
@@ -742,10 +822,7 @@ async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), Str
 }
 
 async fn cmd_show_seed(path: &PathBuf, password: Option<String>) -> Result<(), String> {
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let data = load_wallet(path, Some(password.as_str()))
         .map_err(|e| format!("unlock failed: {}", e))?;
 
@@ -780,10 +857,7 @@ async fn cmd_scan(
     use coincync::wallet::{Wallet, WalletScanner, KeyEpoch};
     use coincync::wallet::scanner::decrypted_to_utxo;
 
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
 
     // Open + unlock the real Wallet struct so we persist UTXOs into it.
     let mut wallet = Wallet::open(path.clone())
@@ -997,10 +1071,7 @@ async fn cmd_send(
     }
 
     // Unlock wallet
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let mut wallet = Wallet::open(path.clone())
         .map_err(|e| format!("open wallet: {}", e))?;
     wallet.unlock(&password)
@@ -1622,10 +1693,7 @@ async fn cmd_set_recovery(
     meta.validate(1).map_err(|e| format!("invalid recovery config: {}", e))?;
 
     // Verify wallet opens
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
@@ -1661,10 +1729,7 @@ async fn cmd_check_recovery(
 ) -> Result<(), String> {
     
 
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
@@ -1708,10 +1773,7 @@ async fn cmd_auto_churn(
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
@@ -1770,10 +1832,7 @@ async fn cmd_subaddress_list(
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let data = load_wallet(path, Some(password.as_str()))
         .map_err(|e| format!("unlock failed: {}", e))?;
 
@@ -1830,10 +1889,7 @@ async fn cmd_subaddress_create(
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let mut data = load_wallet(path, Some(password.as_str()))
         .map_err(|e| format!("unlock failed: {}", e))?;
 
@@ -1898,10 +1954,7 @@ async fn cmd_disclose_balance(
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let mut wallet = Wallet::open(path.clone())
         .map_err(|e| format!("open wallet: {}", e))?;
     wallet.unlock(&password)
@@ -2003,10 +2056,7 @@ async fn cmd_show_memo(
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let password = match password {
-        Some(p) => p,
-        None => prompt_password(false)?,
-    };
+    let password = resolve_password(password, false)?;
     let mut wallet = Wallet::open(path.clone())
         .map_err(|e| format!("open wallet: {}", e))?;
     wallet.unlock(&password)
