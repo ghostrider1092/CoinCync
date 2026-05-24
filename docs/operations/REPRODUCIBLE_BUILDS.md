@@ -58,47 +58,44 @@ This doc plus `scripts/verify-build.sh` close those gaps.
 
 ## Build environment
 
-The reproducible build is performed inside a fixed Docker image:
-`coincync/builder:1.0.0`. Pinning to an image hash means the
-toolchain, system libs, and build tools are byte-identical
-across every builder.
+The reproducible build is performed inside a Rust slim-bookworm image,
+pinned to the same toolchain version as the workspace's `rust-toolchain.toml`
+(currently **1.88.0**). The Dockerfile parameterises this via
+`ARG RUST_VERSION=1.88.0`; override with `--build-arg RUST_VERSION=...`
+or the wrapper script's `--rust` flag.
 
-### `Dockerfile` (in repo at `docker/builder.Dockerfile`):
+The 1.88.0 floor is dictated by transitive deps (`cpufeatures 0.3.0` needs
+edition2024 = 1.85+; `time 0.3.47` / `time-core` / `time-macros` need 1.88+).
+The workspace's stated `rust-version = "1.75"` in `Cargo.toml` is a
+source-level promise (our own code stays compatible with 1.75), not a
+guarantee any given Cargo.lock resolution compiles on 1.75. See
+`docker/builder.Dockerfile`'s header comment for the full reasoning.
+
+### Authoritative source
+
+See [`docker/builder.Dockerfile`](../../docker/builder.Dockerfile) — that
+file is the source of truth. The snippet below is illustrative only and
+may lag the real Dockerfile after dep bumps.
 
 ```dockerfile
-FROM rust:1.75.0-slim-bookworm@sha256:<digest>
+ARG RUST_VERSION=1.88.0
+FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
-# System libraries pinned to versions in Debian Bookworm.
-RUN apt-get update && apt-get install -y \
-    pkg-config=1.8.1-1 \
-    libssl-dev=3.0.x-x \
-    cmake=3.25.1-1 \
-    clang=1:14.0-55.7~deb12u1 \
-    lld=1:14.0-55.7~deb12u1 \
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev libclang-dev clang cmake make \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
 
-# SOURCE_DATE_EPOCH controls timestamps in the binary. Set from the
-# committer date of HEAD so two checkouts of the same commit get the
-# same value.
-ENV SOURCE_DATE_EPOCH=1714838400
+# SOURCE_DATE_EPOCH is set at build time from the committer date of HEAD
+# so two checkouts of the same commit get the same value. The wrapper
+# script (scripts/build-in-docker.sh) computes and passes it.
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
-# Build.
 RUN cargo build --release --workspace --locked
-
-# Strip absolute paths from debug info that survives `strip = true`.
-# (The release profile already strips, but this is a belt-and-
-# suspenders pass for the rare debug strings that linger.)
-RUN find target/release -maxdepth 1 -type f -executable \
-    | xargs -I{} sh -c 'objcopy --strip-all {} || true'
 ```
-
-The pinned digest in `FROM rust:1.75.0-slim-bookworm@sha256:<...>`
-is the linchpin. When the Rust team publishes a new patch release,
-the digest changes; we explicitly do NOT auto-update — every change
-to the build environment is a deliberate commit, reviewed.
 
 ### How to build reproducibly
 
@@ -215,6 +212,9 @@ deeper layers, see the security audit policy and the
 | `.dockerignore` keeping the build context lean | ✅ shipped |
 | `scripts/verify-build.sh` | ✅ shipped (testnet) |
 | Published manifest format | ✅ shipped (this doc) |
+| End-to-end Docker build verified working | ✅ verified 2026-05-24 — fresh build on `a7f0a6d` produced all 5 binaries (`coincync-node`, `coincync-wallet`, `coincync-rig`, `coord`, `coord-cli`); `sha256sum -c SHA256SUMS` passed for all 5 inside the container. |
+| Host-side artifact extraction on Windows | ✅ fixed 2026-05-24 — wrapper script now sets `MSYS_NO_PATHCONV=1` to prevent Git Bash from translating the container-side `/out` mount path |
+| Two-builder byte-identical comparison | ⏳ requires a second machine — single-machine reproducibility verified, cross-machine pending |
 | First repro-verified release | ⏳ blocks on release process — pre-mainnet |
 | OSS-Fuzz / cosign / sigstore integration | ⏳ post-launch |
 

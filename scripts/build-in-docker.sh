@@ -73,7 +73,11 @@ docker build \
 
 echo ""
 echo "==> docker run (extracts artifacts to $OUT_DIR)"
-docker run --rm \
+# MSYS_NO_PATHCONV stops Git Bash on Windows from translating the
+# container-side path `/out` to `C:/Program Files/Git/out`, which would
+# silently break the bind mount and leave the host-side $OUT_DIR empty
+# despite a successful in-container build. No-op on Linux/macOS.
+MSYS_NO_PATHCONV=1 docker run --rm \
   -v "$OUT_DIR:/out" \
   "$IMAGE_TAG"
 
