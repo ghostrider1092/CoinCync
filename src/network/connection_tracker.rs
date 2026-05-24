@@ -73,8 +73,33 @@ impl ConnectionTracker {
     }
 
     /// HARDENING (Layer 4): Extract /16 subnet key from an IP address.
-    /// For IPv4 a.b.c.d, returns (a << 8 | b) — the /16 prefix.
-    /// For IPv6, uses the first 16 bits of the address.
+    ///
+    /// For IPv4 a.b.c.d, returns `(a << 8) | b` — the /16 prefix.
+    ///
+    /// For IPv6, uses the first 16 bits of the address (`segments[0]`).
+    /// This means an IPv6 /16 covers an entire **routing prefix** —
+    /// significantly broader than IPv4's /16 (which is a single
+    /// ISP/enterprise block). The asymmetry is intentional:
+    /// - IPv4 /16 = ~65k addresses, typical of a small ISP / hosted
+    ///   provider — a reasonable per-attacker boundary.
+    /// - IPv6 /16 = top 16 bits = a /16 allocation from a Regional
+    ///   Internet Registry. Most consumer + corporate IPv6 sits in a
+    ///   handful of these (2001::/16, 2620::/16, fc00::/7 link-local
+    ///   under /16=0xfc/0xfd, etc.). Using the same numeric width
+    ///   gives more aggressive grouping for IPv6 — appropriate
+    ///   because IPv6 attackers can trivially mint addresses from a
+    ///   single /64 they control, so a finer bucket would just enable
+    ///   the attack we're trying to prevent.
+    ///
+    /// Link-local IPv6 (`fe80::/10`) maps to `0xfe80 / 0xfebf` —
+    /// indistinguishable from the global-unicast bucket at /16, which
+    /// is fine for our purposes: link-local peers shouldn't be
+    /// hitting our P2P listener except in misconfigured deployments,
+    /// and if they are, treating them as same-bucket is the safe
+    /// default.
+    ///
+    /// See `docs/security/peer-rate-limits.md` for the threat-model
+    /// derivation if/when that doc lands.
     fn subnet_key(ip: &IpAddr) -> u16 {
         match ip {
             IpAddr::V4(v4) => {
