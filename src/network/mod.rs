@@ -1,6 +1,7 @@
 // src/network/mod.rs
 pub mod bootstrap;
 pub mod dns_seeds;
+pub mod socks_dns;
 
 // Ported from CoinCync (copy as-is):
 pub mod dandelion;
@@ -8,7 +9,6 @@ pub mod framing;
 pub mod compact_blocks;
 pub mod orphan;
 pub mod proxy;
-pub mod socks_dns;
 pub mod peer;
 pub mod block_filter;
 pub mod scoring;
@@ -32,7 +32,7 @@ pub mod hardening;
 pub mod block_aggregation;
 
 pub use bootstrap::initial_peers;
-pub use dns_seeds::resolve_seeds;
+pub use dns_seeds::{resolve_seeds, resolve_seeds_with_proxy};
 pub use node::P2PNode;
 pub use peer::{PeerId, PeerInfo, generate_peer_id};
 pub use dandelion::DandelionRouter;

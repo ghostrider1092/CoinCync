@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use crate::error::{Error, Result};
 use crate::testnet::{TESTNET_DNS_SEEDS, TESTNET_SEED_NODES, TESTNET_P2P_PORT};
+use crate::network::socks_dns;
 
 /// Bootstrap configuration
 #[derive(Clone, Debug)]
@@ -56,23 +57,41 @@ impl Bootstrapper {
     /// bypasses SOCKS5 / Tor entirely, leaking the user's real IP to whoever
     /// runs their ISP's DNS resolver. To prevent that:
     ///
-    ///   - `onion_only=true`           → skip DNS (Tor-only mode)
-    ///   - `proxy_active=true`         → ALSO skip DNS even if not onion-only,
-    ///                                   because the user clearly intended their
-    ///                                   network traffic to be proxied. The
-    ///                                   trade-off: bootstrap relies entirely on
-    ///                                   hardcoded seed nodes + peer exchange.
-    ///                                   That's a deliberate, narrow loss of
-    ///                                   reachability in exchange for not
-    ///                                   exfiltrating "I am about to connect to
-    ///                                   the CoinCync network" to the user's ISP.
-    ///   - both false (clearnet)       → DNS proceeds as usual.
+    ///   - `onion_only=true`           → skip OS DNS; if `proxy` is also
+    ///                                   supplied (the supported case), route
+    ///                                   DNS queries *through* the proxy via
+    ///                                   DNS-over-TCP — see [`socks_dns`].
+    ///                                   Without a proxy the only safe move
+    ///                                   is to skip DNS entirely.
+    ///   - `proxy_active=true`         → ALSO skip OS DNS, but use proxy-DNS
+    ///                                   when `proxy` is available. The
+    ///                                   trade-off the old code accepted —
+    ///                                   "bootstrap relies entirely on
+    ///                                   hardcoded seed nodes + peer
+    ///                                   exchange" — is no longer the only
+    ///                                   option; the SOCKS DNS path
+    ///                                   preserves anonymity AND
+    ///                                   reachability.
+    ///   - both false (clearnet)       → OS DNS proceeds as usual.
     ///
-    /// A future enhancement could add SOCKS5 UDP-ASSOCIATE-based DNS so that
-    /// proxied bootstrap can still query DNS over the proxy, but that's a
-    /// non-trivial implementation. The conservative fix is to skip DNS when
-    /// any proxy is active.
+    /// Roadmap item #9 (SOCKS5 UDP-ASSOCIATE DNS) was originally framed as
+    /// UDP-ASSOCIATE, but Tor doesn't implement that command — see the
+    /// design note in [`socks_dns`]. The shipped fix is DNS-over-TCP via
+    /// SOCKS5 CONNECT to a configurable resolver (default 1.1.1.1:53,
+    /// override via `COINCYNC_SOCKS_DNS_RESOLVER`).
     pub async fn get_peers(&self, onion_only: bool, proxy_active: bool) -> Vec<SocketAddr> {
+        self.get_peers_with_proxy(onion_only, proxy_active, None).await
+    }
+
+    /// Same as [`get_peers`] but with an optional proxy. When supplied
+    /// AND the caller is in proxied or onion-only mode, DNS queries are
+    /// routed through the proxy via DNS-over-TCP rather than skipped.
+    pub async fn get_peers_with_proxy(
+        &self,
+        onion_only: bool,
+        proxy_active: bool,
+        proxy: Option<&crate::config::ProxyConfig>,
+    ) -> Vec<SocketAddr> {
         let mut peers = HashSet::new();
         let force_disable_dns = env_bool("COINCYNC_BOOTSTRAP_DISABLE_DNS");
         let allowlist = seed_allowlist();
@@ -82,22 +101,58 @@ impl Bootstrapper {
             peers.insert(*addr);
         }
 
-        // SECURITY: skip DNS if onion-only OR any proxy is active.
-        let skip_dns = onion_only || proxy_active || force_disable_dns;
-        if skip_dns {
+        // DNS routing decision tree:
+        //
+        //   force_disable_dns       → no DNS at all (kill switch).
+        //   proxy supplied + active → DNS-over-TCP through the proxy.
+        //                             Preserves IP anonymity AND
+        //                             keeps bootstrap reachability.
+        //   onion_only without proxy→ skip DNS (no safe path exists).
+        //   proxy_active without
+        //     a proxy reference     → skip DNS (legacy callers; same
+        //                             posture as before #9 fix).
+        //   plain clearnet          → OS resolver (hickory).
+        let use_proxy_dns = proxy
+            .map(|p| p.is_active())
+            .unwrap_or(false)
+            && !force_disable_dns;
+
+        if force_disable_dns {
+            info!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
+        } else if use_proxy_dns {
+            let proxy = proxy.expect("use_proxy_dns implies Some(proxy)");
+            info!(
+                "Proxy active: routing {} DNS seed queries through SOCKS5 (DNS-over-TCP)",
+                self.config.dns_seeds.len()
+            );
+            for seed in &self.config.dns_seeds {
+                match socks_dns::resolve_via_socks5(seed, proxy, self.config.dns_timeout).await {
+                    Ok(ips) => {
+                        info!(
+                            "Got {} addresses from DNS seed {} (via SOCKS5)",
+                            ips.len(),
+                            seed
+                        );
+                        for ip in ips {
+                            peers.insert(SocketAddr::new(ip, TESTNET_P2P_PORT));
+                        }
+                    }
+                    Err(e) => {
+                        warn!("SOCKS5 DNS failed for seed {}: {}", seed, e);
+                    }
+                }
+            }
+        } else if onion_only || proxy_active {
             if onion_only {
-                info!("Onion-only mode: skipping DNS seed queries to prevent IP leak");
-            } else if force_disable_dns {
-                info!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
+                info!("Onion-only mode without proxy reference: skipping DNS seed queries to prevent IP leak");
             } else {
                 info!(
-                    "Proxy active: skipping clearnet DNS seed queries to prevent IP leak. \
-                     Bootstrap will use hardcoded seed nodes + peer exchange only. \
-                     (Set --no-skip-proxy-dns to override at your own risk.)"
+                    "Proxy active but no proxy reference threaded through: skipping DNS to prevent IP leak. \
+                     Pass the proxy to get_peers_with_proxy() to enable DNS-over-SOCKS5."
                 );
             }
         } else {
-            // Query DNS seeds
+            // Plain clearnet — OS resolver.
             for seed in &self.config.dns_seeds {
                 match self.query_dns_seed(seed).await {
                     Ok(addrs) => {
@@ -497,7 +552,7 @@ mod tests {
 // 1.0 CLI (bin/node.rs) calls when starting up.
 
 use crate::config::{Network, NodeConfig};
-use super::dns_seeds::resolve_seeds;
+use super::dns_seeds::resolve_seeds_with_proxy;
 
 const BOOTSTRAP_MANIFEST_DOMAIN: &[u8] = b"coincync/bootstrap-manifest/v1";
 
@@ -695,7 +750,15 @@ pub async fn initial_peers(config: &NodeConfig) -> Vec<SocketAddr> {
     }
 
     if !manifest_only && !force_disable_dns {
-        let mut seed_peers = resolve_seeds(config.network).await;
+        // Pass the proxy reference so resolve_seeds_with_proxy routes DNS
+        // through SOCKS5 (DNS-over-TCP) when a proxy is active rather than
+        // leaking queries to the user's ISP via the OS resolver. The
+        // proxy=None path is identical to the legacy clearnet behaviour.
+        let mut seed_peers = resolve_seeds_with_proxy(
+            config.network,
+            config.p2p.proxy.as_ref(),
+        )
+        .await;
         peers.append(&mut seed_peers);
     } else if force_disable_dns {
         tracing::warn!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
