@@ -548,6 +548,42 @@ async fn start_node(
         }
     }
 
+    // Mirror init for the other two Phase 2 stores — same light wire-up
+    // posture: observation-only, no consensus integration in v1.0. The
+    // /privacy-pools explorer page reads all three through get_privacy_stats.
+    match coincync::storage::ShieldedStore::open_with_db(&db) {
+        Ok(store) => {
+            info!("Shielded tree loaded ({} notes)", store.tree_size());
+            chain.shielded_store = Some(Arc::new(store));
+        }
+        Err(e) => {
+            warn!(
+                "Shielded store init failed: {} — get_privacy_stats will show \
+                 zeros for shielded_root/shielded_tree_size",
+                e
+            );
+        }
+    }
+    match coincync::storage::KernelStore::open_with_db(&db) {
+        Ok(store) => {
+            info!("Kernel store loaded");
+            chain.kernel_store = Some(Arc::new(store));
+        }
+        Err(e) => {
+            warn!(
+                "Kernel store init failed: {} — get_privacy_stats will show \
+                 zeros for mw_kernel_root",
+                e
+            );
+        }
+    }
+    // CutThroughEngine is in-memory only (no disk-backed state); init
+    // unconditionally so MW cut-through stats are non-zero from the moment
+    // the node starts accepting blocks.
+    chain.cut_through = Some(Arc::new(parking_lot::Mutex::new(
+        coincync::crypto::mw_cutthrough::CutThroughEngine::new(),
+    )));
+
     if let Err(e) = chain.load_from_database() {
         warn!("load_from_database: {} (will init genesis)", e);
         let _ = chain.init_genesis();
