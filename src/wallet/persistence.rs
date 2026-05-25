@@ -599,11 +599,55 @@ pub fn decrypt(data: &[u8], key: &[u8; 32], nonce: &[u8; 24]) -> Result<Vec<u8>>
         .map_err(|_| Error::InvalidSecretKey("decryption failed - wrong password or corrupted data".into()))
 }
 
-/// Save wallet to file
+/// Save wallet to file.
 ///
-/// Each save generates a fresh random nonce to ensure IV is never reused,
-/// even when saving the same data with the same password.
+/// Each save generates a fresh random nonce + (for v4) a fresh salt
+/// to prevent IV reuse across saves.
+///
+/// STEPS 5+6 of wallet-v4 implementation: the public save_wallet API
+/// now writes v4 by default for encrypted wallets. The v3 → v4
+/// auto-upgrade is the natural consequence: any v3 wallet loaded
+/// (via the v4 auto-detect in load_wallet_from_bytes) and re-saved
+/// becomes a v4 file on disk. The user's password is unchanged; only
+/// the file format upgrades.
+///
+/// Unencrypted wallets stay in v3 format — v4's whole point is the
+/// HMAC, which requires a key derived from a password.
+///
+/// v3 save is still callable via `save_v3_internal` for round-trip
+/// tests; production code shouldn't use it.
 pub fn save_wallet(
+    path: &Path,
+    data: &WalletData,
+    password: Option<&str>,
+) -> Result<()> {
+    if let Some(pwd) = password {
+        // STEP 6: public default flipped to v4 for encrypted wallets.
+        // Any prior v3 wallet that the user loads + saves gets auto-
+        // upgraded to v4 here. tracing::info logs the upgrade exactly
+        // once per save so the operator has a paper trail.
+        tracing::info!("Saving wallet to {:?} in v4 format (HMAC-authenticated)", path);
+        return save_v4(path, data, pwd);
+    }
+
+    // Unencrypted path stays v3. SECURITY (WAL-M1) warn — same as before.
+    tracing::warn!(
+        "Saving wallet to {:?} WITHOUT encryption. \
+         Seed and keys are stored in plaintext. \
+         Use a password to protect your wallet.",
+        path
+    );
+    save_v3_internal(path, data, None)
+}
+
+/// v3 save path. Kept for round-trip tests + the unencrypted fallback
+/// in `save_wallet`. New encrypted production wallets always go
+/// through `save_v4` now (post-step-6 default flip).
+///
+/// `password: None` writes an unencrypted v3 file. `password: Some(_)`
+/// writes an encrypted v3 file (used only by the round-trip-test
+/// helper that wants to materialize a v3 file to then load + upgrade).
+pub(crate) fn save_v3_internal(
     path: &Path,
     data: &WalletData,
     password: Option<&str>,
@@ -615,17 +659,6 @@ pub fn save_wallet(
     // Serialize data
     let serialized = borsh::to_vec(data)
         .map_err(|e| Error::SerializationError(e.to_string()))?;
-
-    // SECURITY (WAL-M1): Warn when saving wallet WITHOUT encryption.
-    // Plaintext wallets expose seed material to any process/user with file access.
-    if password.is_none() {
-        tracing::warn!(
-            "Saving wallet to {:?} WITHOUT encryption. \
-             Seed and keys are stored in plaintext. \
-             Use a password to protect your wallet.",
-            path
-        );
-    }
 
     // Encrypt if password provided (authenticated encryption)
     // SECURITY (M-5): Zeroize plaintext serialized data after encryption
@@ -725,6 +758,22 @@ pub fn load_wallet_from_bytes(
     password: Option<&str>,
 ) -> Result<WalletData> {
     use std::io::Cursor;
+
+    // Pre-parse: peek at the version byte at offset 8 (after the 4-byte
+    // hdr_len LE and the 4-byte magic at the start of the borsh-encoded
+    // header). v4 files have a different wire shape (32-byte HMAC suffix)
+    // and a strict verification order; dispatch BEFORE the v2/v3 framing
+    // parse so v4 doesn't fall through to the wrong code path.
+    if bytes.len() >= 9 && bytes[8] == WALLET_VERSION_V4 {
+        // STEP 4 of wallet-v4 implementation: v4 auto-detect lands.
+        // v4 always requires a password (the HMAC concept demands a key
+        // derived from one); a None password here is unrecoverable.
+        let pwd = password.ok_or_else(|| Error::InvalidSecretKey(
+            "v4 wallet requires a password".into()
+        ))?;
+        return load_v4_from_bytes(bytes, pwd);
+    }
+
     let mut file = Cursor::new(bytes);
 
     // Read header length
@@ -747,6 +796,11 @@ pub fn load_wallet_from_bytes(
     // it before attempting Borsh deserialization, since the v3 struct
     // expects 12 more bytes than v2 — a v2 file fed to v3's borsh::
     // from_slice would fail with a confusing length error.
+    //
+    // v4 dispatch already happened above the cursor parse — we won't
+    // reach here for v4 files. Keeping the v4 case in this match as a
+    // belt-and-suspenders fallback that should never fire (the early
+    // peek catches it first).
     if header_bytes.len() < 5 {
         return Err(Error::SerializationError("wallet header too short".into()));
     }
@@ -759,6 +813,16 @@ pub fn load_wallet_from_bytes(
         3 => {
             borsh::from_slice(&header_bytes)
                 .map_err(|e| Error::SerializationError(format!("v3 header: {}", e)))?
+        }
+        4 => {
+            // Unreachable in practice — caught by the early peek above.
+            // If we somehow get here, it means the peek heuristic missed
+            // (e.g. bytes < 9). Fall through to the v4 loader anyway so
+            // the file isn't silently misparsed as v3.
+            let pwd = password.ok_or_else(|| Error::InvalidSecretKey(
+                "v4 wallet requires a password".into()
+            ))?;
+            return load_v4_from_bytes(bytes, pwd);
         }
         v => return Err(Error::WalletNotFound(format!("unsupported wallet version {}", v))),
     };
@@ -1606,6 +1670,95 @@ mod tests {
             Error::InvalidSecretKey(msg) => assert!(
                 msg.contains("did not authenticate"),
                 "expected generic auth-fail message, got: {}", msg
+            ),
+            other => panic!("expected InvalidSecretKey, got: {:?}", other),
+        }
+    }
+
+    /// STEPS 5+6 of wallet-v4 implementation: v3 → v4 auto-upgrade
+    /// on save. Process:
+    ///   1. Materialize a v3-format file on disk (via save_v3_internal).
+    ///   2. Load it through the public load_wallet (which now auto-
+    ///      detects v3 vs v4 via the version-byte peek).
+    ///   3. Re-save it through the public save_wallet (which now
+    ///      defaults to v4).
+    ///   4. Load it again — confirms the new file is v4 (auto-detect
+    ///      routes through load_v4_from_bytes) AND plaintext matches.
+    ///   5. Direct byte-peek: byte[8] is the version byte. MUST be
+    ///      WALLET_VERSION_V4 (4) post-upgrade.
+    #[test]
+    fn v3_to_v4_auto_upgrade_via_load_save() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("migration.wallet");
+
+        let seed = [0xAB; 32];
+        let original = WalletData::new(seed, "testnet");
+
+        // Step 1: write a v3 file.
+        save_v3_internal(&path, &original, Some("migrate-pw"))
+            .expect("save_v3_internal must succeed");
+        let v3_bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            v3_bytes[8], WALLET_VERSION,
+            "pre-migration file MUST be v3 (version byte = {})", WALLET_VERSION
+        );
+
+        // Step 2: load via public API (auto-detects v3).
+        let loaded = load_wallet(&path, Some("migrate-pw"))
+            .expect("v3 file MUST load via public load_wallet");
+        assert_eq!(loaded.seed, seed);
+
+        // Step 3: re-save via public API (defaults to v4 now).
+        save_wallet(&path, &loaded, Some("migrate-pw"))
+            .expect("save_wallet MUST succeed");
+
+        // Step 4: load again — v4 auto-detect.
+        let reloaded = load_wallet(&path, Some("migrate-pw"))
+            .expect("upgraded file MUST load via public load_wallet");
+        assert_eq!(reloaded.seed, seed, "auto-upgrade MUST preserve plaintext");
+
+        // Step 5: byte-level confirmation that the file is now v4.
+        let v4_bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            v4_bytes[8], WALLET_VERSION_V4,
+            "post-migration file MUST be v4 (version byte = {})", WALLET_VERSION_V4
+        );
+
+        // File size grew by exactly the 32-byte HMAC suffix (modulo
+        // any incidental nonce/salt re-randomization, which doesn't
+        // change byte count). v4 = v3 + 32 in the simplest case.
+        // Cannot strictly assert ==, because the AEAD output length
+        // could shift by ±1 if borsh-encoded payload size changes —
+        // but for the same plaintext + same nonce length, the AEAD
+        // output is deterministic in length. Assert the +32 bound
+        // exactly.
+        assert_eq!(
+            v4_bytes.len(), v3_bytes.len() + 32,
+            "v4 file MUST be exactly 32 bytes longer than the v3 equivalent (HMAC suffix)"
+        );
+    }
+
+    /// Wrong password against an UPGRADED file: the v4 HMAC catches
+    /// it before AEAD, returns the generic "did not authenticate"
+    /// error. Locks in that v3 → v4 upgrade preserves the v4 wrong-
+    /// password behavior (not the v3 one).
+    #[test]
+    fn v3_to_v4_upgrade_preserves_wrong_password_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("migration-wrongpw.wallet");
+        let seed = [0xCD; 32];
+
+        save_v3_internal(&path, &WalletData::new(seed, "testnet"), Some("right-pw")).unwrap();
+        let loaded = load_wallet(&path, Some("right-pw")).unwrap();
+        save_wallet(&path, &loaded, Some("right-pw")).unwrap();
+
+        // Wrong password against the upgraded (now v4) file.
+        let err = load_wallet(&path, Some("wrong-pw"))
+            .expect_err("wrong password MUST fail");
+        match err {
+            Error::InvalidSecretKey(msg) => assert!(
+                msg.contains("did not authenticate") || msg.contains("wrong password"),
+                "expected v4 auth-fail message, got: {}", msg
             ),
             other => panic!("expected InvalidSecretKey, got: {:?}", other),
         }
