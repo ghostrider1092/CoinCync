@@ -11,10 +11,10 @@
   truth.
 
   Files updated:
-    1. Cargo.toml                                — workspace root
-    2. coincync-wallet-v2/src-tauri/Cargo.toml   — desktop wallet (Rust)
-    3. coincync-wallet-v2/package.json           — desktop wallet (JS)
-    4. src/explorer/index.html                   — explorer footer + ticker
+    1. Cargo.toml                                -- workspace root
+    2. coincync-wallet-v2/src-tauri/Cargo.toml   -- desktop wallet (Rust)
+    3. coincync-wallet-v2/package.json           -- desktop wallet (JS)
+    4. src/explorer/index.html                   -- explorer footer + ticker
 
 .PARAMETER NewVersion
   Target version string, e.g. "1.0.10" (no leading "v"). Must match the
@@ -62,13 +62,13 @@ $targets = @(
   @{
     Path     = Join-Path $repoRoot "src\explorer\index.html"
     Label    = "explorer ticker/footer"
-    # Matches: v1.0.9, v1.0.10, etc. across multiple sites — footer + ticker
+    # Matches: v1.0.9, v1.0.10, etc. across multiple sites -- footer + ticker
     Pattern  = 'v\d+\.\d+\.\d+'
     Replace  = "v$NewVersion"
   }
 )
 
-# ─── Pre-flight: check all files exist ─────────────────────────────────
+# --- Pre-flight: check all files exist ---------------------------------
 $missing = $targets | Where-Object { -not (Test-Path $_.Path) }
 if ($missing.Count -gt 0) {
   Write-Host "ERROR: missing files:" -ForegroundColor Red
@@ -76,7 +76,7 @@ if ($missing.Count -gt 0) {
   exit 1
 }
 
-# ─── For each file: snapshot current version, plan the diff ───────────
+# --- For each file: snapshot current version, plan the diff -----------
 $results = @()
 foreach ($t in $targets) {
   $content = Get-Content $t.Path -Raw
@@ -88,7 +88,7 @@ foreach ($t in $targets) {
     exit 1
   }
 
-  # All matches in a single file should be the same current version — sanity check.
+  # All matches in a single file should be the same current version -- sanity check.
   $currentValues = $matches | ForEach-Object { $_.Value } | Sort-Object -Unique
   if ($currentValues.Count -gt 1) {
     Write-Host "ERROR: $($t.Label) contains multiple distinct version strings:" -ForegroundColor Red
@@ -109,28 +109,28 @@ foreach ($t in $targets) {
   }
 }
 
-# ─── Report ───────────────────────────────────────────────────────────
+# --- Report -----------------------------------------------------------
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════════════"
-Write-Host "  VERSION BUMP → $NewVersion" -ForegroundColor Yellow
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
+Write-Host "  VERSION BUMP -> $NewVersion" -ForegroundColor Yellow
+Write-Host "===================================================================="
 foreach ($r in $results) {
   $sites = if ($r.SiteCount -gt 1) { " ($($r.SiteCount) sites)" } else { "" }
   Write-Host "  $($r.Label)$sites"
-  Write-Host "    $($r.Current)  →  $($r.New)" -ForegroundColor Gray
+  Write-Host "    $($r.Current)  ->  $($r.New)" -ForegroundColor Gray
 }
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
 Write-Host ""
 
 if ($DryRun) {
-  Write-Host "DRY RUN — no files written. Run without -DryRun to apply." -ForegroundColor Yellow
+  Write-Host "DRY RUN -- no files written. Run without -DryRun to apply." -ForegroundColor Yellow
   exit 0
 }
 
-# ─── Write ────────────────────────────────────────────────────────────
+# --- Write ------------------------------------------------------------
 foreach ($r in $results) {
   [IO.File]::WriteAllText($r.Path, $r.NewContent, [Text.UTF8Encoding]::new($false))
-  Write-Host "  ✓ $($r.Label) updated" -ForegroundColor Green
+  Write-Host "  [OK] $($r.Label) updated" -ForegroundColor Green
 }
 
 Write-Host ""

@@ -9,7 +9,7 @@
   Designed for the morning-of-tag run: paste, eyeball, decide.
 
   What it checks:
-    1. Git tree state — uncommitted changes, ahead of origin, etc.
+    1. Git tree state -- uncommitted changes, ahead of origin, etc.
     2. Critical-files lockfile integrity (cargo build succeeds = OK)
     3. Full lib test suite (default features)
     4. Consensus test suite (--features randomx)
@@ -22,7 +22,7 @@
     - Reproducible Docker build sha matches (separate script)
     - Fuzz overnight cleared in CI (operator checks GH Actions)
     - Real testnet self-send dogfood passed (operator runs separately)
-    - ≥80% fleet upgrade % (peer-versions.ps1 is its own gate)
+    - >=80% fleet upgrade % (peer-versions.ps1 is its own gate)
 
 .PARAMETER ExpectVersion
   Version string that should appear consistently across all
@@ -30,7 +30,7 @@
 
 .PARAMETER SkipTests
   Skip the cargo test runs (fast preview mode). Don't ship from a
-  -SkipTests run — only use for quick iteration.
+  -SkipTests run -- only use for quick iteration.
 
 .EXAMPLE
   .\pretag-check.ps1
@@ -64,24 +64,24 @@ function Add-Check {
     default { 'Gray' }
   }
   $marker = switch ($Status) {
-    'PASS' { '  ✓ ' }
-    'FAIL' { '  ✗ ' }
+    'PASS' { '  [OK] ' }
+    'FAIL' { '  [X] ' }
     'WARN' { '  ! ' }
-    default { '  · ' }
+    default { '  . ' }
   }
   Write-Host "$marker$($Name.PadRight(48)) $Status" -ForegroundColor $color
   if ($Detail) { Write-Host "        $Detail" -ForegroundColor Gray }
 }
 
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════════════"
-Write-Host "  v1.0.10 PRE-TAG CHECK — target version v$ExpectVersion" -ForegroundColor Yellow
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
+Write-Host "  v1.0.10 PRE-TAG CHECK -- target version v$ExpectVersion" -ForegroundColor Yellow
+Write-Host "===================================================================="
 Write-Host ""
 
 try {
 
-# ─── 1. Git tree state ────────────────────────────────────────────────
+# --- 1. Git tree state ------------------------------------------------
 Write-Host "Git tree state" -ForegroundColor Cyan
 $gitStatus = git status --porcelain 2>&1
 $dirty = $gitStatus -split "`n" | Where-Object { $_ -match '^[MA?]' -and $_ -notmatch '^\?\? ' }
@@ -95,10 +95,10 @@ $ahead = (git rev-list --count origin/main..HEAD 2>&1) -as [int]
 if ($ahead -eq 0) {
   Add-Check "no commits ahead of origin/main" "PASS"
 } else {
-  Add-Check "no commits ahead of origin/main" "WARN" "$ahead unpushed commit(s) — push before tagging or tag will be on a stale base"
+  Add-Check "no commits ahead of origin/main" "WARN" "$ahead unpushed commit(s) -- push before tagging or tag will be on a stale base"
 }
 
-# ─── 2. Critical-files lockfile + cargo build clean ──────────────────
+# --- 2. Critical-files lockfile + cargo build clean ------------------
 Write-Host ""
 Write-Host "Critical-files integrity" -ForegroundColor Cyan
 Write-Host "  Running cargo check --lib (touches build.rs integrity check)..."
@@ -107,10 +107,10 @@ if ($LASTEXITCODE -eq 0) {
   Add-Check "cargo check --lib clean" "PASS" "build.rs integrity check passed = lockfile consistent"
 } else {
   $hashLine = ($check -split "`n" | Where-Object { $_ -match 'CHANGED:|actual:' }) -join "; "
-  Add-Check "cargo check --lib clean" "FAIL" "build failed — $hashLine"
+  Add-Check "cargo check --lib clean" "FAIL" "build failed -- $hashLine"
 }
 
-# ─── 3. Full lib test suite ───────────────────────────────────────────
+# --- 3. Full lib test suite -------------------------------------------
 Write-Host ""
 Write-Host "Test suites" -ForegroundColor Cyan
 if ($SkipTests) {
@@ -138,7 +138,7 @@ if ($SkipTests) {
   }
 }
 
-# ─── 5. Version-string consistency ────────────────────────────────────
+# --- 5. Version-string consistency ------------------------------------
 Write-Host ""
 Write-Host "Version-string consistency (target: v$ExpectVersion)" -ForegroundColor Cyan
 $versionFiles = @(
@@ -165,25 +165,25 @@ foreach ($vf in $versionFiles) {
   if ($found -eq $ExpectVersion) {
     Add-Check "$($vf.Label)" "PASS" "v$found"
   } else {
-    Add-Check "$($vf.Label)" "FAIL" "found v$found, expected v$ExpectVersion — run bump-version.ps1"
+    Add-Check "$($vf.Label)" "FAIL" "found v$found, expected v$ExpectVersion -- run bump-version.ps1"
     $allConsistent = $false
   }
 }
 
-# ─── 6. Activation-height armed ───────────────────────────────────────
+# --- 6. Activation-height armed ---------------------------------------
 Write-Host ""
 Write-Host "MIN_OUTPUT_AGE activation guard" -ForegroundColor Cyan
 $constants = Get-Content "src\constants.rs" -Raw
 if ($constants -match 'MIN_OUTPUT_AGE_HARDFORK_HEIGHT:\s*u64\s*=\s*u64::MAX') {
-  Add-Check "activation height armed" "FAIL" "still u64::MAX — run arm-min-output-age-fork.ps1 before tagging"
+  Add-Check "activation height armed" "FAIL" "still u64::MAX -- run arm-min-output-age-fork.ps1 before tagging"
 } elseif ($constants -match 'MIN_OUTPUT_AGE_HARDFORK_HEIGHT:\s*u64\s*=\s*(\d+)') {
   $armedHeight = $Matches[1]
   Add-Check "activation height armed" "PASS" "set to $armedHeight"
 } else {
-  Add-Check "activation height armed" "WARN" "couldn't parse MIN_OUTPUT_AGE_HARDFORK_HEIGHT line — manual check"
+  Add-Check "activation height armed" "WARN" "couldn't parse MIN_OUTPUT_AGE_HARDFORK_HEIGHT line -- manual check"
 }
 
-# ─── 7. Required artifacts ────────────────────────────────────────────
+# --- 7. Required artifacts --------------------------------------------
 Write-Host ""
 Write-Host "Release artifacts" -ForegroundColor Cyan
 $artifacts = @(
@@ -196,7 +196,7 @@ $artifacts = @(
 )
 foreach ($a in $artifacts) {
   if (Test-Path $a) { Add-Check "artifact: $a" "PASS" }
-  else              { Add-Check "artifact: $a" "FAIL" "missing — create before tagging" }
+  else              { Add-Check "artifact: $a" "FAIL" "missing -- create before tagging" }
 }
 
 # Check the Discord post no longer has placeholder
@@ -209,41 +209,41 @@ if (Test-Path "out\discord-release-post-v1.0.10.txt") {
   }
 }
 
-# ─── Summary ──────────────────────────────────────────────────────────
+# --- Summary ----------------------------------------------------------
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
 $passCount = ($results | Where-Object { $_.Status -eq 'PASS' }).Count
 $warnCount = ($results | Where-Object { $_.Status -eq 'WARN' }).Count
 $failCount = ($results | Where-Object { $_.Status -eq 'FAIL' }).Count
 Write-Host "  Summary: $passCount pass / $warnCount warn / $failCount fail" -ForegroundColor $(if ($failCount -gt 0) { 'Red' } elseif ($warnCount -gt 0) { 'Yellow' } else { 'Green' })
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
 
 if ($failCount -gt 0) {
   Write-Host ""
-  Write-Host "  ✗ NOT READY TO TAG. Fix the failures above and re-run." -ForegroundColor Red
+  Write-Host "  [X] NOT READY TO TAG. Fix the failures above and re-run." -ForegroundColor Red
   Write-Host ""
   Write-Host "  Operator-side items NOT covered by this script (verify separately):" -ForegroundColor Yellow
-  Write-Host "    • 5-day soak completed cleanly with the activation height armed"
-  Write-Host "    • Reproducible Docker build hash matches local release build"
-  Write-Host "    • Fuzz overnight run cleared in CI"
-  Write-Host "    • Real testnet self-send dogfood passed"
-  Write-Host "    • peer-versions.ps1 reports ≥80% fleet upgrade"
+  Write-Host "    * 5-day soak completed cleanly with the activation height armed"
+  Write-Host "    * Reproducible Docker build hash matches local release build"
+  Write-Host "    * Fuzz overnight run cleared in CI"
+  Write-Host "    * Real testnet self-send dogfood passed"
+  Write-Host "    * peer-versions.ps1 reports >=80% fleet upgrade"
   Pop-Location
   exit 1
 }
 
 if ($warnCount -gt 0) {
   Write-Host ""
-  Write-Host "  ! TAG WITH CAUTION. Warnings above — read each and decide." -ForegroundColor Yellow
+  Write-Host "  ! TAG WITH CAUTION. Warnings above -- read each and decide." -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "  Mechanical checks pass. Operator-side items still required:" -ForegroundColor Cyan
-Write-Host "    • 5-day soak completed cleanly with the activation height armed"
-Write-Host "    • Reproducible Docker build hash matches local release build"
-Write-Host "    • Fuzz overnight run cleared in CI"
-Write-Host "    • Real testnet self-send dogfood passed"
-Write-Host "    • peer-versions.ps1 reports ≥80% fleet upgrade"
+Write-Host "    * 5-day soak completed cleanly with the activation height armed"
+Write-Host "    * Reproducible Docker build hash matches local release build"
+Write-Host "    * Fuzz overnight run cleared in CI"
+Write-Host "    * Real testnet self-send dogfood passed"
+Write-Host "    * peer-versions.ps1 reports >=80% fleet upgrade"
 Write-Host ""
 Write-Host "  When all of the above are green: proceed to §7 (Launch coordination)." -ForegroundColor Green
 Pop-Location

@@ -6,7 +6,7 @@
 .DESCRIPTION
   Before activating the MIN_OUTPUT_AGE hard fork, we need to know
   what fraction of the seed/miner fleet has upgraded to v1.0.10. If
-  <80% have upgraded, the activation should be postponed — forking off
+  <80% have upgraded, the activation should be postponed -- forking off
   20% of the network damages the testnet metrics and operator trust.
 
   This script queries each seed in the operator-supplied list via the
@@ -19,7 +19,7 @@
     Peers behind NAT that have only outbound connections aren't visible
     here. The seeds themselves should be a representative cross-section.
   - Some peers may not expose JSON-RPC publicly; those count as
-    "unreachable" rather than "running old version" — adjust your
+    "unreachable" rather than "running old version" -- adjust your
     threshold mental model accordingly.
 
 .PARAMETER Seeds
@@ -53,7 +53,7 @@
 param(
   [string[]]$Seeds = @(
     "https://api.coincync.network/rpc/testnet"
-    # Add additional seeds as they come online — diversity reduces seed-set bias
+    # Add additional seeds as they come online -- diversity reduces seed-set bias
   ),
 
   [ValidatePattern('^\d+\.\d+\.\d+$')]
@@ -68,7 +68,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ─── Helpers ──────────────────────────────────────────────────────────
+# --- Helpers ----------------------------------------------------------
 function Invoke-RpcCall {
   param(
     [string]$Url,
@@ -99,9 +99,9 @@ function Compare-Versions {
 
 function Parse-VersionFromString {
   # Pull "X.Y.Z" out of a peer's version string. Examples:
-  #   "coincync 1.0.9"           → "1.0.9"
-  #   "coincync-node/v1.0.10"    → "1.0.10"
-  #   "1.0.9-testnet-pre-audit"  → "1.0.9"
+  #   "coincync 1.0.9"           -> "1.0.9"
+  #   "coincync-node/v1.0.10"    -> "1.0.10"
+  #   "1.0.9-testnet-pre-audit"  -> "1.0.9"
   param([string]$s)
   if ($null -eq $s) { return $null }
   $m = [regex]::Match($s, '\d+\.\d+\.\d+')
@@ -109,7 +109,7 @@ function Parse-VersionFromString {
   return $null
 }
 
-# ─── Discover the peer set ────────────────────────────────────────────
+# --- Discover the peer set --------------------------------------------
 Write-Host "Discovering peers from $($Seeds.Count) seed(s)..." -ForegroundColor Cyan
 
 $peerSet = [System.Collections.Generic.HashSet[string]]::new()
@@ -149,7 +149,7 @@ if ($peerSet.Count -lt 10) {
   Write-Host "WARNING: peer set is small (<10). Statistical confidence is poor; treat results as advisory only." -ForegroundColor Yellow
 }
 
-# ─── Query each peer's version ────────────────────────────────────────
+# --- Query each peer's version ----------------------------------------
 Write-Host ""
 Write-Host "Querying version from each peer (timeout ${TimeoutSec}s each)..." -ForegroundColor Cyan
 Write-Host "  This may take up to $($peerSet.Count * $TimeoutSec) seconds in the worst case."
@@ -163,7 +163,7 @@ $peerVersions = @{}
 foreach ($peerAddr in $peerSet) {
   # Peers report host:port for P2P, but JSON-RPC is on a different port.
   # Assume the standard RPC port (28081 testnet) and HTTPS isn't there
-  # on most operator nodes — try plain HTTP first.
+  # on most operator nodes -- try plain HTTP first.
   $host_part = ($peerAddr -split ':')[0]
   $rpcUrl = "http://${host_part}:28081"
 
@@ -198,10 +198,10 @@ $pctUpgraded = if ($totalReachable -gt 0) {
   [math]::Round(($upgraded / $totalReachable) * 100.0, 1)
 } else { 0 }
 
-# ─── Report ───────────────────────────────────────────────────────────
-Write-Host "════════════════════════════════════════════════════════════════════"
-Write-Host "  FLEET UPGRADE STATUS — target ≥ v$TargetVersion" -ForegroundColor Yellow
-Write-Host "════════════════════════════════════════════════════════════════════"
+# --- Report -----------------------------------------------------------
+Write-Host "===================================================================="
+Write-Host "  FLEET UPGRADE STATUS -- target >= v$TargetVersion" -ForegroundColor Yellow
+Write-Host "===================================================================="
 Write-Host "  Peers discovered:           $($peerSet.Count)"
 Write-Host "  Peers reachable on RPC:     $totalReachable"
 Write-Host "  Peers RPC-unreachable:      $unreachable" -ForegroundColor $(if ($unreachable -gt $peerSet.Count / 2) { 'Yellow' } else { 'Gray' })
@@ -218,14 +218,14 @@ if ($outdated.Count -gt 0) {
   Write-Host ""
 }
 
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
 if ($pctUpgraded -ge $Threshold) {
-  Write-Host "  ✓ ACTIVATION SAFE: ${pctUpgraded}% upgraded ≥ ${Threshold}% threshold" -ForegroundColor Green
-  Write-Host "════════════════════════════════════════════════════════════════════"
+  Write-Host "  [OK] ACTIVATION SAFE: ${pctUpgraded}% upgraded >= ${Threshold}% threshold" -ForegroundColor Green
+  Write-Host "===================================================================="
   exit 0
 } else {
-  Write-Host "  ✗ DO NOT ACTIVATE: ${pctUpgraded}% upgraded < ${Threshold}% threshold" -ForegroundColor Red
-  Write-Host "════════════════════════════════════════════════════════════════════"
+  Write-Host "  [X] DO NOT ACTIVATE: ${pctUpgraded}% upgraded < ${Threshold}% threshold" -ForegroundColor Red
+  Write-Host "===================================================================="
   Write-Host ""
   Write-Host "Recommended action:" -ForegroundColor Yellow
   Write-Host "  1. Postpone activation height per docs/launch/v1.0.10-CHECKLIST.md §8" -ForegroundColor Yellow

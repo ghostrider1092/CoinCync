@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Arm the MIN_OUTPUT_AGE 10 → 100 hard-fork activation height for the
+  Arm the MIN_OUTPUT_AGE 10 -> 100 hard-fork activation height for the
   v1.0.10-testnet tag cut.
 
 .DESCRIPTION
@@ -12,7 +12,7 @@
   build-error trick (compile, capture the new hash from the failure
   message, paste it into the lockfile).
 
-  This script is the LAST step of the pre-tag PR — run it the
+  This script is the LAST step of the pre-tag PR -- run it the
   morning of cut, after the soak window has passed cleanly.
 
 .PARAMETER SeedRpc
@@ -21,7 +21,7 @@
 
 .PARAMETER Buffer
   Block buffer between current tip and activation height. Default 5000
-  blocks (~7 days at 120s block time). Don't go below 3000 — operators
+  blocks (~7 days at 120s block time). Don't go below 3000 -- operators
   need a real upgrade window.
 
 .PARAMETER DryRun
@@ -34,11 +34,11 @@
 
 .EXAMPLE
   .\arm-min-output-age-fork.ps1 -DryRun
-  # Same calculation, but no file edits — preview only
+  # Same calculation, but no file edits -- preview only
 
 .EXAMPLE
   .\arm-min-output-age-fork.ps1 -Buffer 10000
-  # Twice the standard buffer — use if you anticipate a slow operator
+  # Twice the standard buffer -- use if you anticipate a slow operator
   # upgrade window (holiday weeks, etc.)
 #>
 
@@ -51,7 +51,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ─── Sanity ───────────────────────────────────────────────────────────
+# --- Sanity -----------------------------------------------------------
 if ($Buffer -lt 3000) {
   Write-Host "ERROR: Buffer < 3000 blocks gives operators <5 days to upgrade." -ForegroundColor Red
   Write-Host "       Either pass -Buffer with a higher value, or accept the risk explicitly." -ForegroundColor Red
@@ -69,7 +69,7 @@ foreach ($f in @($constantsPath, $lockfilePath)) {
   }
 }
 
-# ─── Pull current testnet tip ────────────────────────────────────────
+# --- Pull current testnet tip ----------------------------------------
 Write-Host "Querying tip from $SeedRpc ..." -ForegroundColor Cyan
 $body = '{"jsonrpc":"2.0","id":1,"method":"get_info"}'
 
@@ -99,23 +99,23 @@ $hoursToActivation = [math]::Round($secsToActivation / 3600.0, 1)
 $daysToActivation  = [math]::Round($secsToActivation / 86400.0, 2)
 
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════════════"
-Write-Host "  MIN_OUTPUT_AGE 10 → 100 HARD-FORK ACTIVATION PLAN" -ForegroundColor Yellow
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
+Write-Host "  MIN_OUTPUT_AGE 10 -> 100 HARD-FORK ACTIVATION PLAN" -ForegroundColor Yellow
+Write-Host "===================================================================="
 Write-Host "  Current testnet tip:        $tip"
 Write-Host "  Buffer:                     $Buffer blocks"
 Write-Host "  Activation height:          $activation"
 Write-Host "  Estimated wallclock:        $hoursToActivation hours ($daysToActivation days)"
 Write-Host "  Seed used:                  $SeedRpc"
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
 Write-Host ""
 
 if ($DryRun) {
-  Write-Host "DRY RUN — no files edited. Run without -DryRun to apply." -ForegroundColor Yellow
+  Write-Host "DRY RUN -- no files edited. Run without -DryRun to apply." -ForegroundColor Yellow
   exit 0
 }
 
-# ─── Edit src/constants.rs ───────────────────────────────────────────
+# --- Edit src/constants.rs -------------------------------------------
 Write-Host "Editing $constantsPath ..." -ForegroundColor Cyan
 
 $constantsContent = Get-Content $constantsPath -Raw
@@ -136,9 +136,9 @@ if ($constantsContent -notmatch [regex]::Escape($oldLine)) {
 
 $constantsNew = $constantsContent.Replace($oldLine, $newLine)
 [IO.File]::WriteAllText($constantsPath, $constantsNew, [Text.UTF8Encoding]::new($false))
-Write-Host "  ✓ constants.rs armed to activation height $activation" -ForegroundColor Green
+Write-Host "  [OK] constants.rs armed to activation height $activation" -ForegroundColor Green
 
-# ─── Refresh critical_files.lock via the build-error trick ───────────
+# --- Refresh critical_files.lock via the build-error trick -----------
 Write-Host ""
 Write-Host "Refreshing critical_files.lock (build will fail intentionally to surface the new hash)..." -ForegroundColor Cyan
 
@@ -175,9 +175,9 @@ if ($lockNew -eq $lockContent) {
   exit 1
 }
 [IO.File]::WriteAllText($lockfilePath, $lockNew, [Text.UTF8Encoding]::new($false))
-Write-Host "  ✓ critical_files.lock refreshed" -ForegroundColor Green
+Write-Host "  [OK] critical_files.lock refreshed" -ForegroundColor Green
 
-# ─── Final sanity build ──────────────────────────────────────────────
+# --- Final sanity build ----------------------------------------------
 Write-Host ""
 Write-Host "Re-running cargo check to confirm clean compile..." -ForegroundColor Cyan
 Push-Location $repoRoot
@@ -193,13 +193,13 @@ if ($exitCode -ne 0) {
   Write-Host "       Revert with: git checkout -- src/constants.rs critical_files.lock" -ForegroundColor Red
   exit 1
 }
-Write-Host "  ✓ cargo check clean" -ForegroundColor Green
+Write-Host "  [OK] cargo check clean" -ForegroundColor Green
 
-# ─── Final report ────────────────────────────────────────────────────
+# --- Final report ----------------------------------------------------
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
 Write-Host "  ARMED. Next steps:" -ForegroundColor Yellow
-Write-Host "════════════════════════════════════════════════════════════════════"
+Write-Host "===================================================================="
 Write-Host "  1. Review the diff:"
 Write-Host "       git diff src/constants.rs critical_files.lock"
 Write-Host ""

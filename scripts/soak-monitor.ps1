@@ -70,7 +70,7 @@ $signals = @{}
 $verdict = 'PASS'
 $notes = @()
 
-# ─── Chain health ────────────────────────────────────────────────────
+# --- Chain health ----------------------------------------------------
 $info = Invoke-RpcCall -Url $NodeRpc -Method 'get_info'
 if ($null -eq $info) {
   Write-Host "FAIL: sandbox node $NodeRpc unreachable" -ForegroundColor Red
@@ -86,10 +86,10 @@ if ($null -eq $info) {
   $signals['mempool_size']     = [int]($info.mempool_size ?? 0)
 
   if ($signals['tip_age_secs'] -gt 1800) {
-    $verdict = 'FAIL'; $notes += "tip age >30min ($($signals['tip_age_secs'])s) — sandbox out of sync"
+    $verdict = 'FAIL'; $notes += "tip age >30min ($($signals['tip_age_secs'])s) -- sandbox out of sync"
   } elseif ($signals['tip_age_secs'] -gt 600) {
     if ($verdict -eq 'PASS') { $verdict = 'WARN' }
-    $notes += "tip age >10min ($($signals['tip_age_secs'])s) — transient or beginning of trouble"
+    $notes += "tip age >10min ($($signals['tip_age_secs'])s) -- transient or beginning of trouble"
   }
 
   if ($signals['peer_count'] -lt 5) {
@@ -102,7 +102,7 @@ if ($null -eq $info) {
   }
 }
 
-# ─── Mempool oldest entry age ────────────────────────────────────────
+# --- Mempool oldest entry age ----------------------------------------
 $mempool = Invoke-RpcCall -Url $NodeRpc -Method 'get_mempool'
 if ($null -ne $mempool) {
   $oldestAge = if ($mempool.entries -and $mempool.entries.Count -gt 0) {
@@ -113,7 +113,7 @@ if ($null -ne $mempool) {
   $signals['mempool_oldest_age_secs'] = $oldestAge
 
   if ($oldestAge -gt 21600) {       # 6h
-    $verdict = 'FAIL'; $notes += "mempool oldest entry > 6h — stuck-tx bug"
+    $verdict = 'FAIL'; $notes += "mempool oldest entry > 6h -- stuck-tx bug"
   } elseif ($oldestAge -gt 14400) { # 4h
     if ($verdict -eq 'PASS') { $verdict = 'WARN' }
     $notes += "mempool oldest entry > 4h"
@@ -124,7 +124,7 @@ if ($null -ne $mempool) {
   $notes += "get_mempool unreachable"
 }
 
-# ─── Reorg counter ───────────────────────────────────────────────────
+# --- Reorg counter ---------------------------------------------------
 $reorgStats = Invoke-RpcCall -Url $NodeRpc -Method 'get_reorg_stats'
 if ($null -ne $reorgStats) {
   $signals['reorg_count']      = [int]($reorgStats.total_reorgs ?? 0)
@@ -141,7 +141,7 @@ if ($null -ne $reorgStats) {
   $signals['deepest_reorg'] = $null
 }
 
-# ─── MIN_OUTPUT_AGE activation distance ──────────────────────────────
+# --- MIN_OUTPUT_AGE activation distance ------------------------------
 # Pull the armed activation height by reading constants.rs locally
 # (this assumes monitor runs on the same machine as the source tree;
 # remove this check if it's not your setup).
@@ -161,7 +161,7 @@ if (Test-Path $constantsPath) {
       } elseif ($blocksToActivation -lt 100) {
         $signals['activation_status'] = 'imminent'
         if ($verdict -eq 'PASS') { $verdict = 'WARN' }
-        $notes += "activation imminent — $blocksToActivation blocks; monitor closely"
+        $notes += "activation imminent -- $blocksToActivation blocks; monitor closely"
       } elseif ($blocksToActivation -lt 500) {
         $signals['activation_status'] = 'approaching'
       } else {
@@ -171,11 +171,11 @@ if (Test-Path $constantsPath) {
   } elseif ($c -match 'MIN_OUTPUT_AGE_HARDFORK_HEIGHT:\s*u64\s*=\s*u64::MAX') {
     $signals['activation_status'] = 'placeholder-u64max'
     if ($verdict -eq 'PASS') { $verdict = 'WARN' }
-    $notes += "activation guard still at u64::MAX placeholder — this soak isn't testing the armed rule"
+    $notes += "activation guard still at u64::MAX placeholder -- this soak isn't testing the armed rule"
   }
 }
 
-# ─── Wallet check (optional) ─────────────────────────────────────────
+# --- Wallet check (optional) -----------------------------------------
 if (-not $SkipWalletCheck) {
   $balance = Invoke-RpcCall -Url $NodeRpc -Method 'get_wallet_balance'
   if ($null -ne $balance) {
@@ -185,7 +185,7 @@ if (-not $SkipWalletCheck) {
   }
 }
 
-# ─── Process memory (Linux/Windows differ; do best-effort) ────────────
+# --- Process memory (Linux/Windows differ; do best-effort) ------------
 try {
   $proc = Get-Process -Name 'coincync-node' -ErrorAction Stop
   $signals['process_rss_mb'] = [math]::Round($proc.WorkingSet64 / 1MB, 0)
@@ -193,7 +193,7 @@ try {
   $signals['process_rss_mb'] = $null
 }
 
-# ─── RandomX mode (read from latest log line if available) ────────────
+# --- RandomX mode (read from latest log line if available) ------------
 # Look in the standard log location; this is a best-effort signal.
 $logPaths = @(
   "$env:LOCALAPPDATA\coincync\coincync-node.log"
@@ -207,23 +207,23 @@ foreach ($lp in $logPaths) {
       $signals['randomx_mode'] = $Matches[1]
       if ($Matches[1] -eq 'INTERPRETED') {
         $verdict = 'FAIL'
-        $notes += "RandomX in INTERPRETED mode — soak is testing wrong perf path"
+        $notes += "RandomX in INTERPRETED mode -- soak is testing wrong perf path"
       } elseif ($Matches[1] -ne 'full-mem' -and $Matches[1] -ne 'light-jit') {
         if ($verdict -eq 'PASS') { $verdict = 'WARN' }
-        $notes += "RandomX mode: $($Matches[1]) — soak may underestimate prod perf"
+        $notes += "RandomX mode: $($Matches[1]) -- soak may underestimate prod perf"
       }
     }
     break
   }
 }
 
-# ─── Report ───────────────────────────────────────────────────────────
+# --- Report -----------------------------------------------------------
 if ([string]::IsNullOrEmpty($CsvAppend)) {
   # Stdout pretty-print
   Write-Host ""
-  Write-Host "════════════════════════════════════════════════════════════════════"
-  Write-Host "  SOAK MONITOR — $timestamp" -ForegroundColor Yellow
-  Write-Host "════════════════════════════════════════════════════════════════════"
+  Write-Host "===================================================================="
+  Write-Host "  SOAK MONITOR -- $timestamp" -ForegroundColor Yellow
+  Write-Host "===================================================================="
   Write-Host "  Verdict:                       $verdict" -ForegroundColor $(if ($verdict -eq 'PASS') { 'Green' } elseif ($verdict -eq 'WARN') { 'Yellow' } else { 'Red' })
   Write-Host ""
   Write-Host "  Chain health:"
@@ -256,7 +256,7 @@ if ([string]::IsNullOrEmpty($CsvAppend)) {
   Write-Host ""
   if ($notes.Count -gt 0) {
     Write-Host "  Notes:" -ForegroundColor Yellow
-    $notes | ForEach-Object { Write-Host "    • $_" -ForegroundColor Yellow }
+    $notes | ForEach-Object { Write-Host "    * $_" -ForegroundColor Yellow }
     Write-Host ""
   }
 } else {
@@ -283,10 +283,10 @@ if ([string]::IsNullOrEmpty($CsvAppend)) {
   }
   ($values -join ',') | Out-File -FilePath $CsvAppend -Encoding utf8 -Append
 
-  Write-Host "$timestamp  $verdict  tip=$($signals['tip_height'])  blocks_to_activation=$($signals['blocks_to_activation'])  $(if ($notes) { '— ' + ($notes -join '; ') })"
+  Write-Host "$timestamp  $verdict  tip=$($signals['tip_height'])  blocks_to_activation=$($signals['blocks_to_activation'])  $(if ($notes) { '-- ' + ($notes -join '; ') })"
 }
 
-# ─── Exit code ────────────────────────────────────────────────────────
+# --- Exit code --------------------------------------------------------
 switch ($verdict) {
   'PASS' { exit 0 }
   'WARN' { exit 1 }
