@@ -9,7 +9,22 @@ days), **L** (two to five days), **XL** (more than a week).
 
 ---
 
-## Recently shipped — v1.0.8 (May 12–15, 2026 batch)
+## Most recently shipped — v1.0.9-testnet-pre-audit
+
+The v1.0.9 release is tagged and binaries are published at <https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.9-testnet-pre-audit>. Non-consensus, audit-prep-focused cut. **No protocol break** — operators upgrade at their own pace. Headline content:
+
+- **Reorg-handling track complete** — 9 wallet tasks shipped end-to-end (BlockApplyDiff detection journal, `scan_block_with_result` returning `Scanned`|`ReorgDetected`, `rewind_to_height` with `RewindOutcome`, `find_fork_point` MVP RPC, orchestrator recovery paths A (scan-detected) + B (periodic 30s tip-poll), Tauri `WalletStateEvent` for the wallet UI, in-app reorg banner). **59 unit + integration tests + 9 proptest properties × 256 cases = 2,304 generated cases, all green.**
+- **Wallet v2 polish** — history page empty-state icon, dashboard `tCYNC` consistency + Swap v1.1 chip, reactive Send review pane (was hardcoded zeros + dash), Receive copy button wired, `alert()` → toast across multiple flows, reorg banner CSS using the real design tokens.
+- **Explorer 5 new privacy-stat pages** — `/?p=anonset`, `/?p=reorghistory`, `/?p=compare` (features showcase), `/?p=mininglive`, `/?p=feemarket`. Plus a footer-position bug fix that was rendering the footer mid-page on ~16 prior pages.
+- **Multisig typed-error migration complete** — `multisig_{info,round1,round2,aggregate,send}` ported `Result<T, String>` → `Result<T, WalletError>` per the recipe. Closes the v1.0 typed-error track at 14/35 commands (swap_* defers to v1.1; 12 get_* return data not Result).
+- **Decision records signed** — CIP-009.D production posture (Option A: dormant at genesis), reorg-handling v1.0 scope (Option B: finish for v1.0), genesis-defaults worksheet (5 defaults adopted including coinbase = burn, initial difficulty 0.5×, CIP-009.D dormant).
+- **`rust-toolchain.toml`** pinned to 1.88.0 — workspace floor, matches the Dockerfile pin. Closes the SIMD/HRTB compile issues that affected Rust 1.92.
+
+Detailed work since the v1.0.9 tag continues on `main` and is queued for **v1.0.10** (see "Near-term" section below).
+
+---
+
+## Earlier — v1.0.8 (May 12–15, 2026 batch)
 
 Cleanup release, no consensus break. Operators upgrade at their own
 pace. Six commits on top of the v1.0.7 base.
@@ -74,18 +89,26 @@ pace. Six commits on top of the v1.0.7 base.
   `jsonwebtoken` removed closing CVE-2026-25537; fuzz lockfile
   refreshed closing `libsecp256k1` overflow.
 
-### Carried forward to v1.0.9
+### Carried forward to v1.0.10
 
 - **`MIN_OUTPUT_AGE` 10 → 100** — consensus hard fork, deferred from
-  v1.0.8 specifically so it gets a real soak window. Code preserved at
-  [out/v1.0.9-slice1.patch](../out/v1.0.9-slice1.patch) with applier
-  instructions at [out/v1.0.9-slice1-instructions.md](../out/v1.0.9-slice1-instructions.md).
+  v1.0.8 (and skipped over v1.0.9-testnet-pre-audit since that was a
+  non-consensus audit-prep cut) so it gets a real soak window. Code
+  preserved at [out/v1.0.9-slice1.patch](../out/v1.0.9-slice1.patch)
+  with applier instructions at
+  [out/v1.0.9-slice1-instructions.md](../out/v1.0.9-slice1-instructions.md)
+  — filenames retain the original `v1.0.9` slug as historical
+  artifacts from when this was first staged; the contents apply
+  unchanged to the v1.0.10 release.
 
 ---
 
-## Near-term — v1.0.9 (target: 3rd week of June 2026)
+## Near-term — v1.0.10 (target: 3rd week of June 2026)
 
 The first consensus break since launch. Coordinated upgrade required.
+v1.0.9-testnet-pre-audit (now shipped) was deliberately non-consensus
+so the hard-fork content got its own dedicated release window with no
+unrelated soak risk.
 
 1. **`MIN_OUTPUT_AGE` 10 → 100 hard fork** — **M** (~1 week incl.
    soak). Pre-flight: pick activation height (current tip + 5,000
@@ -93,7 +116,9 @@ The first consensus break since launch. Coordinated upgrade required.
    `#announcements`, add activation guard in
    `src/wallet/history.rs` and any consensus call site, sandbox-soak
    ≥5 days. Full checklist in
-   [out/v1.0.9-plan.md](../out/v1.0.9-plan.md).
+   [out/v1.0.9-plan.md](../out/v1.0.9-plan.md) (filename retains the
+   original `v1.0.9` slug as a historical artifact; contents apply
+   unchanged to v1.0.10).
 2. **CIP-010 ring-bump rehearsal** — **M**. Bump `BOOTSTRAP_MIN_RING_SIZE`
    11→13 as a planned CIP-007 Mode A exercise. Validates the
    activation policy works end-to-end before relying on it for the real
@@ -295,9 +320,9 @@ So they don't keep being re-suggested.
 ## Sequencing notes — what depends on what
 
 ```
-                 v1.0.8 cut  ────────►  v1.0.9 cut  ────────►  v1.1.x mainnet-prep
-                 (this batch)           (MIN_OUTPUT_AGE)        (rolling-finality test
-                                                                 + ring rehearsal)
+                 v1.0.9 cut          ──►  v1.0.10 cut         ──►  v1.1.x mainnet-prep
+                 (testnet-pre-audit)      (MIN_OUTPUT_AGE         (rolling-finality test
+                                           hard fork)              + ring rehearsal)
                        │                       │
                        │                       │
                        ▼                       ▼
@@ -380,7 +405,7 @@ process:
    node against live testnet ≥5 days, deploy to fleet, monitor
    through the activation block, document outcome.
 
-The current "MIN_OUTPUT_AGE 10 → 100" hard fork (v1.0.9) is the
+The current "MIN_OUTPUT_AGE 10 → 100" hard fork (v1.0.10) is the
 first real exercise of this pattern. CIP-010 (the ring-bump
 rehearsal) is queued as a deliberate second rehearsal so the
 process is exercised twice before atomic swaps or Phase-2 ride it.
