@@ -490,11 +490,22 @@ mod tests {
         )
         .unwrap();
 
-        // Run 100 picks and verify bounds
+        // Use a realistic spendable balance — 1 CYNC = 1e12 atomic.
+        // The 1_000_000 (= 1 µCYNC) the old test used was smaller
+        // than the realistic privacy-tx fee reserve (~3.75M atomic
+        // for a 2.5KB CLSAG+bulletproof tx at MIN_FEE_PER_BYTE=1000
+        // with ×1.5 congestion headroom), so every pick clamped to
+        // 0 after the fee-reserve fix landed. Scaling the balance
+        // up keeps the bounds-check intent (10-50% of spendable)
+        // testable.
+        const BALANCE: u64 = 1_000_000_000_000; // 1 CYNC
         for _ in 0..100 {
-            let amount = engine.pick_churn_amount(1_000_000);
-            assert!(amount >= 90_000, "amount {} too low", amount); // ~10% minus fee reserve
-            assert!(amount <= 500_000, "amount {} too high", amount); // 50%
+            let amount = engine.pick_churn_amount(BALANCE);
+            // 10% of 1e12 = 1e11. Fee reserve (~3.75e6) is rounding
+            // error at this scale, so the lower bound is essentially
+            // the pct calc.
+            assert!(amount >= BALANCE / 10, "amount {} too low", amount);
+            assert!(amount <= BALANCE / 2, "amount {} too high", amount); // 50%
         }
     }
 
