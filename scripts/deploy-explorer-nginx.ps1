@@ -25,7 +25,7 @@ $ErrorActionPreference = 'Stop'
 
 $KeyPath    = "$env:USERPROFILE\.ssh\coincync_fleet"
 $ExplorerIP = '207.148.6.50'
-$RepoRoot   = "C:\Users\unkno\OneDrive\coincync 1.0"
+$RepoRoot   = "C:\dev\coincync"
 
 # ─── 1. Bundle the explorer assets into a tarball ────────────────────────
 $tar = "$env:TEMP\explorer-bundle.tar.gz"
@@ -245,7 +245,14 @@ if ($LASTEXITCODE -ne 0) { throw "scp bundle failed" }
 
 $tmp = [IO.Path]::GetTempFileName()
 try {
-  [IO.File]::WriteAllText($tmp, $installScript, [Text.UTF8Encoding]::new($false))
+  # Normalize CRLF -> LF: PowerShell here-strings on Windows use CRLF
+  # line endings, and bash on the remote interprets the trailing CR as
+  # part of the last token on each line — `set -euo pipefail\r` becomes
+  # "set -o pipefail<CR>", and bash reports "pipefail: invalid option name"
+  # (it's looking up "pipefail\r"). This is the bash equivalent of
+  # `dos2unix` happening at write time so we don't depend on a tool on
+  # the remote host.
+  [IO.File]::WriteAllText($tmp, $installScript.Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
   & scp -i $KeyPath -q $tmp "root@${ExplorerIP}:/tmp/install-explorer.sh"
   if ($LASTEXITCODE -ne 0) { throw "scp script failed" }
 
