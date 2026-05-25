@@ -325,7 +325,15 @@ pub fn clsag_verify(
         return false;
     }
 
-    // Parse responses
+    // SECURITY: Parse responses, silently dropping any non-canonical
+    // scalars (those whose byte representation exceeds the curve order ℓ
+    // — RFC 8032 §5.1.7). The `len() != n` check on the next line then
+    // rejects the whole signature if even one was dropped. This prevents
+    // signature-malleability attacks where an adversary substitutes an
+    // unreduced byte form of a valid scalar to mint a second on-chain
+    // signature that hashes/verifies to the same logical signature but
+    // differs bit-for-bit (would otherwise enable double-spend via
+    // tx-id confusion or break uniqueness invariants downstream).
     let responses: Vec<Scalar> = signature.responses.iter()
         .filter_map(|b| {
             let opt: Option<Scalar> = Scalar::from_canonical_bytes(*b).into();
