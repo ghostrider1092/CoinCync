@@ -179,7 +179,19 @@ async fn query_one(
         .into_inner();
 
     // RFC 7766: DNS-over-TCP is a 2-byte big-endian length prefix +
-    // raw DNS message bytes.
+    // raw DNS message bytes. Validate the outbound length the same way
+    // we validate the inbound `resp_len` below — silent `as u16` cast
+    // would wrap a >65535-byte query to a smaller value and corrupt the
+    // framing, and a zero-length query is malformed DNS that some
+    // resolvers will hang on rather than reject. `build_query` already
+    // bounds its output via the per-label limit (RFC 1035 §2.3.4), so
+    // this is defense-in-depth, not an exploit-today path.
+    if query.is_empty() || query.len() > MAX_DNS_RESPONSE {
+        return Err(Error::ConnectionFailed(format!(
+            "DNS-over-TCP query length out of range: {}",
+            query.len()
+        )));
+    }
     let len = query.len() as u16;
     stream
         .write_all(&len.to_be_bytes())
