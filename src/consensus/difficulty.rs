@@ -162,6 +162,13 @@ fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyB
     if clamped_int >= 0 {
         adjusted.checked_shl(clamped_int as u32).unwrap_or(u128::MAX)
     } else {
+        // SAFETY: `clamped_int` is bounded to [-MAX_INT_EXPONENT,
+        // MAX_INT_EXPONENT] by the `.clamp(...)` on the previous block,
+        // so in this `< 0` branch `-clamped_int` is in (0, MAX_INT_EXPONENT]
+        // — never overflows the i32 negation, never wraps on the `as u32`
+        // cast (MAX_INT_EXPONENT fits in i32 by construction; the
+        // const is asserted elsewhere). The `>= 128` guard then caps
+        // the shift amount before it could exceed u128's width.
         let neg = (-clamped_int) as u32;
         if neg >= 128 { 1 } else { adjusted >> neg }
     }.max(1)

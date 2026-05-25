@@ -814,6 +814,14 @@ fn validate_header(
     // intentionally carries a future-dated activation timestamp (the launch
     // date) and must not be rejected on pre-launch clock comparisons.
     // Non-genesis blocks are still bounded by `MAX_TIMESTAMP_DRIFT`.
+    //
+    // SPEC: the bound is INCLUSIVE — `timestamp == current_time +
+    // MAX_TIMESTAMP_DRIFT` is accepted, only strictly-greater is
+    // rejected. Matches Bitcoin Core's `nMaxFutureBlockTime` semantics
+    // (pow.cpp) and the NTP/RFC 5905 convention where the drift bound
+    // IS the tolerable window, not one tick less. Switching to `>=`
+    // would reject legitimate blocks whose timestamp exactly hits the
+    // boundary, with no security gain.
     if header.height > 0 && header.timestamp > current_time + MAX_TIMESTAMP_DRIFT {
         result.add_error("Block timestamp too far in future");
     }

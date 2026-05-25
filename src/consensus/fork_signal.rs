@@ -158,7 +158,16 @@ impl ForkSignaler {
         let window_start = self.window_start(current_height);
         let count = signal_count_fn(window_start, current_height, deployment.bit);
         let total = current_height.saturating_sub(window_start).max(1);
-        let pct = (count * 100 / total) as u32;
+        // INVARIANT: `count <= total` under normal operation, since
+        // signal_count_fn returns the count of blocks in the
+        // [window_start, current_height) range that signaled. But if
+        // we land here at the start of a window with `total` clamped
+        // to 1 by `.max(1)` above (current_height == window_start,
+        // no blocks in the window yet), a non-zero count would
+        // produce a nonsensical >100% pct. `.min(100)` clamps the
+        // UI-facing value so explorers/dashboards never see "500%
+        // signaling" briefly during window transitions.
+        let pct = ((count * 100 / total) as u32).min(100);
 
         if count >= SIGNAL_THRESHOLD {
             DeploymentState::LockedIn { at_height: self.next_window_start(current_height) }
