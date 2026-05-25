@@ -23,3 +23,10 @@ rand = "0.8"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Cyncswap (CIP-001 atomic swap) commands. Off by default — they ship
+# in v1.1 behind their own dedicated audit per the staged-mainnet
+# decision (see docs/decisions/2026-05-20-staged-mainnet-and-cyncswap.md).
+# v1.0 wallet ships without the swap_* Tauri commands at all so the
+# audit firm doesn't see them on the v1.0 attack surface. Enable with
+# `cargo build --features cyncswap` once cyncswap clears its own audit.
+cyncswap = []

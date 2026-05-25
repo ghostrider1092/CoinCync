@@ -1378,6 +1378,7 @@ fn multisig_send(params: MultisigSendParams, state: tauri::State<'_, State>) -> 
 // Once those land, replace the `Err(...)` returns with `wallet_cli`
 // invocations following the multisig_gen pattern above.
 
+#[cfg(feature = "cyncswap")]
 #[derive(Deserialize)]
 struct SwapInitParams {
     role: String,
@@ -1387,6 +1388,7 @@ struct SwapInitParams {
     listen: Option<String>,
 }
 
+#[cfg(feature = "cyncswap")]
 #[derive(Serialize)]
 struct SwapInitResult {
     id: String,
@@ -1395,6 +1397,7 @@ struct SwapInitResult {
     invite_hex: String,
 }
 
+#[cfg(feature = "cyncswap")]
 #[tauri::command]
 fn swap_init(params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<SwapInitResult, String> {
     if params.role != "alice" {
@@ -1445,12 +1448,14 @@ fn swap_init(params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<
     })
 }
 
+#[cfg(feature = "cyncswap")]
 #[derive(Deserialize)]
 struct SwapHandshakeParams {
     invite_hex: String,
     btc_address: Option<String>,
 }
 
+#[cfg(feature = "cyncswap")]
 #[tauri::command]
 fn swap_handshake(params: SwapHandshakeParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
     if params.invite_hex.trim().is_empty() {
@@ -1472,12 +1477,14 @@ fn swap_handshake(params: SwapHandshakeParams, _state: tauri::State<'_, State>) 
         .map_err(|e| format!("cyncswap output not JSON: {}\n---output---\n{}", e, out))
 }
 
+#[cfg(feature = "cyncswap")]
 #[derive(Deserialize)]
 struct SwapIdParams { swap_id: String }
 
 /// Determine the role of the active swap from the state file via
 /// `cyncswap wallet-status`. Returns "Alice", "Bob", or an Err
 /// describing why (no swap, bad path, parse failure).
+#[cfg(feature = "cyncswap")]
 fn active_swap_role(bin: &str) -> Result<(String, String), String> {
     let path = default_swap_state_path();
     let path_str = path.to_string_lossy().to_string();
@@ -1498,6 +1505,7 @@ fn active_swap_role(bin: &str) -> Result<(String, String), String> {
     Ok((role, path_str))
 }
 
+#[cfg(feature = "cyncswap")]
 #[derive(Deserialize)]
 struct SwapBroadcastParams {
     /// Operator-constructed signed tx hex. v0.1 expects the wallet
@@ -1517,6 +1525,7 @@ struct SwapBroadcastParams {
     api_key: Option<String>,
 }
 
+#[cfg(feature = "cyncswap")]
 #[tauri::command]
 fn swap_lock(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
     if params.signed_tx_hex.trim().is_empty() {
@@ -1577,6 +1586,7 @@ fn swap_lock(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Re
     Ok(serde_json::json!({ "output": out, "role": role }))
 }
 
+#[cfg(feature = "cyncswap")]
 #[tauri::command]
 fn swap_claim(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
     if params.signed_tx_hex.trim().is_empty() {
@@ -1637,6 +1647,7 @@ fn swap_claim(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> R
     Ok(serde_json::json!({ "output": out, "role": role }))
 }
 
+#[cfg(feature = "cyncswap")]
 #[tauri::command]
 fn swap_abort(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
     let bin = resolve_binary("cyncswap");
@@ -1649,6 +1660,7 @@ fn swap_abort(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<
     Ok(serde_json::json!({ "output": out }))
 }
 
+#[cfg(feature = "cyncswap")]
 #[derive(Serialize)]
 struct SwapListResult { swaps: Vec<serde_json::Value> }
 
@@ -1656,6 +1668,7 @@ struct SwapListResult { swaps: Vec<serde_json::Value> }
 /// `resolve_state_path(None)` fallback). The wallet maintains exactly
 /// one active swap at the default path today; multi-swap support
 /// awaits a follow-up slice with a directory-iteration design.
+#[cfg(feature = "cyncswap")]
 fn default_swap_state_path() -> std::path::PathBuf {
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
         std::path::PathBuf::from(home).join(".coincync").join("swap.json")
@@ -1664,6 +1677,7 @@ fn default_swap_state_path() -> std::path::PathBuf {
     }
 }
 
+#[cfg(feature = "cyncswap")]
 #[tauri::command]
 fn swap_list(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> {
     let bin = resolve_binary("cyncswap");
@@ -1692,6 +1706,7 @@ fn swap_list(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> 
     }
 }
 
+#[cfg(feature = "cyncswap")]
 #[tauri::command]
 fn swap_history(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> {
     // Mirror of swap_list but for terminal states. A future slice
@@ -2386,21 +2401,48 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_balance, get_block_height, get_peer_count,
-            get_fee_estimate, get_transactions, get_rsa_state,
-            get_network_info, validate_address,
-            wallet_exists, wallet_path,
-            create_wallet, restore_wallet, unlock_wallet, lock_wallet, scan_wallet, send_transaction,
-            dismiss_reorg_notification,
-            check_binaries, start_mining, stop_mining, get_mining_stats,
-            get_wallet_address,
-            check_for_update,
-            multisig_gen, multisig_info, multisig_round1, multisig_round2,
-            multisig_aggregate, multisig_send,
-            swap_init, swap_handshake, swap_lock, swap_claim,
-            swap_abort, swap_list, swap_history,
-        ])
+        .invoke_handler({
+            // Dual-list keyed on the `cyncswap` feature so v1.0 (default)
+            // wallet doesn't expose the swap_* Tauri commands at all.
+            // Once cyncswap clears its own audit in v1.1, build with
+            // `--features cyncswap` to include them. The two arms must
+            // stay in sync for the non-swap commands; only the trailing
+            // swap_* block differs.
+            #[cfg(feature = "cyncswap")]
+            {
+                tauri::generate_handler![
+                    get_balance, get_block_height, get_peer_count,
+                    get_fee_estimate, get_transactions, get_rsa_state,
+                    get_network_info, validate_address,
+                    wallet_exists, wallet_path,
+                    create_wallet, restore_wallet, unlock_wallet, lock_wallet, scan_wallet, send_transaction,
+                    dismiss_reorg_notification,
+                    check_binaries, start_mining, stop_mining, get_mining_stats,
+                    get_wallet_address,
+                    check_for_update,
+                    multisig_gen, multisig_info, multisig_round1, multisig_round2,
+                    multisig_aggregate, multisig_send,
+                    swap_init, swap_handshake, swap_lock, swap_claim,
+                    swap_abort, swap_list, swap_history,
+                ]
+            }
+            #[cfg(not(feature = "cyncswap"))]
+            {
+                tauri::generate_handler![
+                    get_balance, get_block_height, get_peer_count,
+                    get_fee_estimate, get_transactions, get_rsa_state,
+                    get_network_info, validate_address,
+                    wallet_exists, wallet_path,
+                    create_wallet, restore_wallet, unlock_wallet, lock_wallet, scan_wallet, send_transaction,
+                    dismiss_reorg_notification,
+                    check_binaries, start_mining, stop_mining, get_mining_stats,
+                    get_wallet_address,
+                    check_for_update,
+                    multisig_gen, multisig_info, multisig_round1, multisig_round2,
+                    multisig_aggregate, multisig_send,
+                ]
+            }
+        })
         .on_window_event(move |event| {
             if let tauri::WindowEvent::Destroyed = event.event() {
                 tracing::info!("Shutting down...");
