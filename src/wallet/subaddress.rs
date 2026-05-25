@@ -29,10 +29,25 @@ use borsh::{BorshSerialize, BorshDeserialize};
 use crate::primitives::{PublicKey, SecretKey, Address, Network, hash_domain};
 use crate::crypto::{SecretScalar, PublicPoint};
 
-/// Maximum number of subaddresses per account (to prevent DoS)
+/// Maximum number of subaddresses per account (to prevent DoS).
+///
+/// Hard limit at 10,000 keeps the lookahead scan O(10K) per account in the
+/// worst case (see `extend_lookahead` at line ~287). Wallet UI typically
+/// stays below 100 indices per account; 10K is ~100× headroom.
+///
+/// NOTE: this is a WALLET-INTERNAL bound, not a consensus constant — the
+/// chain has no knowledge of subaddress indices, only stealth addresses.
+/// If a future format negotiates higher caps over the wallet wire protocol,
+/// this can be raised without a hard fork. Coupled lock-step with
+/// MAX_ACCOUNTS below.
 pub const MAX_SUBADDRESSES_PER_ACCOUNT: u32 = 10_000;
 
-/// Maximum number of accounts
+/// Maximum number of accounts.
+///
+/// Wallet-internal cap (see notes on MAX_SUBADDRESSES_PER_ACCOUNT). 100
+/// accounts × 10,000 subaddresses = 1,000,000 max derivations per wallet,
+/// which bounds the in-memory subaddress index size at ~64 MB worst case
+/// (each entry ≈ 64 bytes for the (account, index) → spend_pub map).
 pub const MAX_ACCOUNTS: u32 = 100;
 
 /// A subaddress index (account, index within account)

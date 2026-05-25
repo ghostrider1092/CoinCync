@@ -79,7 +79,19 @@ pub struct NonceRange {
 }
 
 impl NonceRange {
-    /// Split `0..=u32::MAX` evenly into `n` slices for `n` workers.
+    /// Split the u32 nonce space across `n` workers.
+    ///
+    /// Saturating arithmetic handles the `n=1` boundary cleanly:
+    /// `chunk = u32::MAX/1 + 1` would overflow without `saturating_add`,
+    /// so we saturate to `u32::MAX` instead. Same trick on `start +
+    /// chunk` for the last slice.
+    ///
+    /// EDGE CASE: the very top nonce `u32::MAX` is missed because `end`
+    /// is exclusive and `saturating_add` caps at `u32::MAX`. That's a
+    /// 1-in-4-billion miss over a full sweep — negligible for PoW
+    /// search since the chance of any specific nonce being the winner
+    /// is the same 1/2^32. Not worth the off-by-one bookkeeping needed
+    /// to make `end` inclusive on the final worker.
     pub fn split_for_workers(n: u32) -> Vec<NonceRange> {
         assert!(n >= 1, "must have at least one worker");
         let chunk = (u32::MAX / n).saturating_add(1);

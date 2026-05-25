@@ -308,9 +308,17 @@ impl ShieldedStore {
         let mut cps = self.checkpoints.write();
         cps.push(ShieldedCheckpoint { height, entries_len });
         // Mirror the BridgeTree's bounded checkpoint retention so the
-        // two stacks never desync at the old end either.
+        // two stacks never desync at the old end either. Emit a debug
+        // event when the cap is hit so an operator chasing a deep-reorg
+        // failure can correlate it with the oldest reachable checkpoint
+        // height (silent eviction was hard to diagnose post-mortem).
         if cps.len() > MAX_CHECKPOINTS {
-            cps.remove(0);
+            let dropped = cps.remove(0);
+            tracing::debug!(
+                "ShieldedStore: evicted oldest checkpoint (height {}) — cap {} reached; \
+                 deepest available rollback is now height {}",
+                dropped.height, MAX_CHECKPOINTS, cps.first().map_or(0, |c| c.height)
+            );
         }
     }
 

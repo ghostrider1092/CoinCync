@@ -54,14 +54,22 @@ pub struct BalanceInfo {
     pub pending_out: String,
 }
 
-/// Address information
+/// Address information.
+///
+/// SECURITY (Article IX): the historical `balance: String` field has been
+/// removed. CoinCync's privacy policy forbids balance-by-address endpoints
+/// (the stealth address scheme makes per-address balances structurally
+/// undefined anyway — outputs land at one-time stealth addresses derived
+/// from the recipient's view key, not at their published address). The
+/// struct is currently never constructed in the codebase (kept as a
+/// scaffold for future address-listing endpoints that don't violate the
+/// privacy contract).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressInfo {
     pub address: String,
     pub label: String,
     pub address_index: u32,
     pub used: bool,
-    pub balance: String,
 }
 
 /// Transfer destination

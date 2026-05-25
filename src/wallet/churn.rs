@@ -177,8 +177,17 @@ impl ChurnEngine {
         let mut rng = rand::thread_rng();
         let pct = rng.gen_range(self.config.min_amount_pct..=self.config.max_amount_pct) as u64;
         let amount = spendable_balance * pct / 100;
-        // Ensure we leave enough for the fee
-        let min_fee_reserve = 10_000; // 10k atomic units for fee
+        // Reserve enough for the fee. A typical privacy CLSAG transaction
+        // is ~2.5 KB with bulletproof + ring signatures; multiply by
+        // MIN_FEE_PER_BYTE and add 50% headroom for congestion multiplier
+        // ×1.5 (the punchlist's prior hardcoded 10_000 was ~250× too low
+        // and would silently let pick_churn_amount return a value that
+        // can't actually pay the on-chain fee, causing the tx-builder to
+        // reject the churn attempt).
+        const TYPICAL_PRIV_TX_BYTES: u64 = 2_500;
+        let min_fee_reserve = TYPICAL_PRIV_TX_BYTES
+            .saturating_mul(crate::constants::MIN_FEE_PER_BYTE)
+            .saturating_mul(3) / 2; // ×1.5 congestion headroom
         if amount + min_fee_reserve > spendable_balance {
             spendable_balance.saturating_sub(min_fee_reserve)
         } else {

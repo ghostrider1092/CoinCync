@@ -25,6 +25,12 @@ pub struct BootstrapConfig {
     pub dns_timeout: Duration,
     /// Maximum addresses to return
     pub max_addresses: usize,
+    /// P2P port to assume for DNS-resolved seed IPs (which return just
+    /// the address, not the port). Previously hardcoded as
+    /// `TESTNET_P2P_PORT` at every call site; lifting it onto the
+    /// config makes the bootstrapper reusable for mainnet without
+    /// editing the resolver code paths.
+    pub p2p_port: u16,
 }
 
 impl Default for BootstrapConfig {
@@ -36,6 +42,7 @@ impl Default for BootstrapConfig {
                 .collect(),
             dns_timeout: Duration::from_secs(5),
             max_addresses: 100,
+            p2p_port: TESTNET_P2P_PORT,
         }
     }
 }
@@ -134,7 +141,7 @@ impl Bootstrapper {
                             seed
                         );
                         for ip in ips {
-                            peers.insert(SocketAddr::new(ip, TESTNET_P2P_PORT));
+                            peers.insert(SocketAddr::new(ip, self.config.p2p_port));
                         }
                     }
                     Err(e) => {
@@ -196,7 +203,7 @@ impl Bootstrapper {
 
         let addrs: Vec<SocketAddr> = lookup
             .iter()
-            .map(|ip| SocketAddr::new(ip, TESTNET_P2P_PORT))
+            .map(|ip| SocketAddr::new(ip, self.config.p2p_port))
             .collect();
 
         Ok(addrs)
@@ -661,6 +668,27 @@ fn load_signed_manifest_peers(network: Network) -> Vec<SocketAddr> {
         }
     };
 
+    // SECURITY: bound the manifest size BEFORE reading the whole file into
+    // memory. A misconfigured operator could point COINCYNC_BOOTSTRAP_SIGNED_MANIFEST
+    // at a multi-GB file and OOM the node at startup. Real signed manifests
+    // are <10 KB (a few dozen seed addrs); 10 MB ceiling is ~1000× headroom.
+    const MAX_MANIFEST_BYTES: u64 = 10 * 1024 * 1024;
+    match std::fs::metadata(&manifest_path) {
+        Ok(meta) if meta.len() > MAX_MANIFEST_BYTES => {
+            warn!(
+                "Bootstrap manifest {} is {} bytes (over the {} MB ceiling); refusing to load",
+                manifest_path.display(),
+                meta.len(),
+                MAX_MANIFEST_BYTES / (1024 * 1024)
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            warn!("Unable to stat bootstrap manifest {}: {}", manifest_path.display(), e);
+            return Vec::new();
+        }
+        Ok(_) => {}
+    }
     let manifest_bytes = match std::fs::read(&manifest_path) {
         Ok(v) => v,
         Err(e) => {

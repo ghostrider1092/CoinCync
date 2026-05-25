@@ -2477,11 +2477,33 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
     ///
     /// Walks backwards from the block through its parents, summing difficulty
     /// until reaching the genesis block or a block not in our storage.
+    ///
+    /// SECURITY: bounded by `block.header.height + 1` (max walk = genesis →
+    /// block, plus the starting block itself). A corrupt DB with a cycle
+    /// in `prev_hash` would otherwise loop forever consuming CPU. Matching
+    /// the visited-set pattern in `find_fork_point` (lines 2533+) would
+    /// also catch cycles but costs an allocation; the height-derived cap
+    /// is allocation-free and serves the same purpose because the walk
+    /// can only legitimately visit at most `block.height` distinct heights.
     fn calculate_fork_cumulative_work(&self, block: &Block) -> u128 {
         let mut total_work = calculate_difficulty_from_target(&block.header.target);
         let mut current_hash = block.header.prev_hash;
+        // +1 covers the starting block; +100 absorbs height-key off-by-one
+        // edge cases and is still vanishingly cheap if exercised.
+        let max_steps = block.header.height.saturating_add(100);
+        let mut steps: u64 = 0;
 
         loop {
+            steps = steps.saturating_add(1);
+            if steps > max_steps {
+                tracing::error!(
+                    "calculate_fork_cumulative_work walked {} steps from block height {} \
+                     without reaching genesis — possible prev_hash cycle in DB. Returning \
+                     partial work; caller's IronConsensus classifier will reject the fork.",
+                    steps, block.header.height
+                );
+                break;
+            }
             if let Some(parent) = self.get_block(&current_hash) {
                 let prev_work = total_work;
                 total_work = total_work.saturating_add(

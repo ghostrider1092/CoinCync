@@ -258,6 +258,20 @@ impl Tree {
             .expect("column family missing — open_tree should have created it")
     }
 
+    /// Insert key→value, returning the previous value if any.
+    ///
+    /// SEMANTICS: matches sled's `Tree::insert` contract (return old
+    /// value) so callers ported from sled compile unchanged. The
+    /// underlying RocksDB pattern is get_cf + put_cf as two separate
+    /// operations — atomicity holds at the single-key column-family
+    /// level, but the get-then-put window is NOT a transaction. If a
+    /// concurrent writer mutates the same key between our `get_cf` and
+    /// `put_cf`, our returned `Option<IVec>` is stale (it reflects the
+    /// value at `get_cf` time, not at `put_cf` time). All current
+    /// callers either (a) don't inspect the returned value, or (b)
+    /// hold an external write lock that serializes inserts on the key.
+    /// Switching to `WriteBatchWithIndex` for true read-your-write
+    /// atomicity is available if a future caller needs it.
     pub fn insert<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
         key: K,

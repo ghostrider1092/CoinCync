@@ -322,6 +322,17 @@ impl Database {
     /// height removals, state update, and tx_index changes land together or
     /// not at all. Called from `chain.rs` after in-memory UTXO set is already
     /// updated and all fork blocks are validated.
+    ///
+    /// LOCKING CONTRACT (caller MUST satisfy): the caller MUST hold
+    /// `Blockchain.inner.write()` for the entire window from gathering the
+    /// reorg diff through to the return of this function. The implementation
+    /// does a pre-transaction "already present" read against committed state
+    /// (line ~349) to implement oldest-wins on output_index — that read is
+    /// only race-free under the chain write lock, because sled's shim TxTree
+    /// reads pass through to committed state (not the pending batch). Without
+    /// the caller's write lock, a concurrent apply_block could insert into
+    /// output_index between the pre-read and the transaction commit, and
+    /// the oldest-wins decision would silently flip.
     pub fn apply_reorg_atomic(
         &self,
         // Output index entries to remove (disconnected blocks' output stealth keys)

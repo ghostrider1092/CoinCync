@@ -238,7 +238,15 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
         // already validated the header on the prior call.)
         if !self.reading_payload {
             if header.magic != self.magic {
-                tracing::warn!(
+                // SECURITY: invalid magic is the textbook scan/probe signature
+                // (HTTP GET, TLS hello, kid-script port-scanners). At `warn`
+                // level with a full hex-dump it floods operator logs every
+                // time a port scan runs against the public P2P port. Drop to
+                // `debug` so it's still capturable for investigation but
+                // doesn't dominate steady-state log output. Connection close
+                // alone (returned via Err below) is the operator-visible
+                // signal.
+                tracing::debug!(
                     "framing: invalid magic, got_header_buf={} expected_magic={}",
                     hex::encode(&self.header_buf[..]),
                     hex::encode(self.magic)

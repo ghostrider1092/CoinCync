@@ -321,6 +321,29 @@ mod tests {
         assert_eq!(fee_congested.as_atomic(), 0);
     }
 
+    /// `calculate_fee` uses chained `saturating_mul`. Verify the saturating
+    /// path is reachable AND saturates cleanly (no panic, no negative,
+    /// no wrap) at extreme inputs. Order matters: `base_fee = tx_size *
+    /// MIN_FEE_PER_BYTE` saturates first, then `base_fee * multiplier`
+    /// saturates again, then `/100` divides the saturated value. The
+    /// final result is bounded at `u64::MAX / 100`.
+    #[test]
+    fn test_calculate_fee_saturating_extremes() {
+        // tx_size at usize::MAX (the worst input we can construct).
+        // Even multiplied by MIN_FEE_PER_BYTE and the max ×3 multiplier,
+        // the chained saturating ops must not panic and must return a
+        // value ≤ u64::MAX/100.
+        let fee = calculate_fee(usize::MAX, 100);
+        assert!(fee.as_atomic() <= u64::MAX / 100);
+        // Single-byte tx at zero congestion: exact MIN_FEE_PER_BYTE
+        // (the ×100/100 round-trip cancels).
+        assert_eq!(calculate_fee(1, 0).as_atomic(), MIN_FEE_PER_BYTE);
+        // congestion_pct ≥100 (above table top) collapses to the ×3 bucket
+        // — confirm no out-of-table panic.
+        let _ = calculate_fee(1000, 200);
+        let _ = calculate_fee(1000, u64::MAX);
+    }
+
     /// Verify that distribute_fee produces an exact sum for every edge case.
     /// Because to_protocol is computed as the remainder, the sum must be exact
     /// (tolerance 0) regardless of rounding in the miner/burn buckets.
