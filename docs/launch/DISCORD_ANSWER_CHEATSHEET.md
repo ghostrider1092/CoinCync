@@ -247,10 +247,10 @@ Update the height / build / dates before launch week. Numbers in this file are c
 > Not yet. Third-party audit of the consensus + privacy stack is a hard mainnet-launch blocker (see SECURITY.md). Currently: 1093 internal tests in CI, fmt + clippy + cargo audit on every PR, hash-locked critical files.
 
 **Q: Is there a bug bounty?**
-> No paid program yet — solo-dev, testnet-stage, no funding to back payouts honorably. Funded program will launch alongside the third-party audit before mainnet. In the meantime: responsible disclosure to security@coincync.network (PGP `2CAA 920F 8B96 1772`) — public credit on disclosure with your consent.
+> No paid program yet — solo-dev, testnet-stage, no funding to back payouts honorably. Funded program will launch alongside the third-party audit before mainnet. In the meantime: responsible disclosure to CyncLabs@proton.me (Proton auto-publishes a PGP key at the address; plaintext is fine for non-critical reports) — public credit on disclosure with your consent.
 
 **Q: I found a security vulnerability.**
-> **DO NOT** post it publicly. Email **security@coincync.network**. Use PGP if it's anything serious — fingerprint `2CAA 920F 8B96 1772`. We'll respond within 24h, work out a coordinated disclosure timeline, and credit you publicly when the fix lands (with your consent).
+> **DO NOT** post it publicly. Email **CyncLabs@proton.me**. Use PGP if it's anything serious — Proton auto-publishes a key at the address (fetch from inbox profile or keys.openpgp.org). We'll respond within 24h, work out a coordinated disclosure timeline, and credit you publicly when the fix lands (with your consent).
 
 ## Reproducible builds
 
@@ -291,7 +291,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 **Q: I found a bug. Where do I report it?**
 > Non-security: open an issue on **github.com/ghostrider1092/Coincync-Testnet-** with the bug-report template (auto-fills environment + repro). The template asks for node version, OS, repro steps, last 200 lines of logs.
 >
-> Security-sensitive (consensus, privacy, key handling, wallet integrity): email **security@coincync.network**, NOT a public issue. PGP `2CAA 920F 8B96 1772`.
+> Security-sensitive (consensus, privacy, key handling, wallet integrity): email **CyncLabs@proton.me**, NOT a public issue. Proton auto-publishes a PGP key at the address; plaintext fine for non-critical reports.
 
 **Q: Can I fix the bug myself and PR?**
 > Yes please. Read CONTRIBUTING.md first — it's short. PRs land on `main` via fast-forward / rebase / squash; merge commits are blocked by the ruleset. Tests must pass; signed commits required.
@@ -379,7 +379,7 @@ For when you don't have time to type anything custom:
 |---|---|
 | "Pinned message in this channel covers this." | Read-the-pins prompt |
 | "Testnet coins have zero monetary value — please stop trying to trade them." | Anyone shilling pump-and-dump nonsense |
-| "Email security@coincync.network for that, not a public channel." | Security-flavored question |
+| "Email CyncLabs@proton.me for that, not a public channel." | Security-flavored question |
 | "That's in the Constitution — read CONSTITUTION.md, it's 10 minutes." | Governance / commitment questions |
 | "Open an issue with the bug-report template." | Bug reports posted in chat |
 | "Solo dev, response time best-effort. I'll get to it." | When pinged for fast response |

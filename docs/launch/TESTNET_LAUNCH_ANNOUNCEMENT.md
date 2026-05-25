@@ -54,7 +54,7 @@ The most valuable thing you can do during testnet:
 - **Run a node.** Even a single home node strengthens the testnet's geographic distribution and helps surface the synchronization issues that only show up in real-world network conditions.
 - **Mine.** Even a few hours of CPU time. It validates the mining flow, exercises the CLSAG signature path, and gives us real-world hashrate data for difficulty tuning.
 - **Send transactions.** The wallet ships with everything needed to send and receive testnet CYNC. Stress-test the privacy primitives by actually using them.
-- **Report bugs.** Anything weird, anything slow, anything wrong — file it. Discord `#bugs` for non-security issues; `security@coincync.network` for anything that touches consensus or privacy.
+- **Report bugs.** Anything weird, anything slow, anything wrong — file it. Discord `#bugs` for non-security issues; `CyncLabs@proton.me` for anything that touches consensus or privacy.
 
 ### What testnet is not
 
@@ -125,7 +125,7 @@ START HERE
 🌐 Explorer: explorer.coincync.network
 📜 Constitution: docs.coincync.network/governance/constitution
 🛠️  Source: git.coincync.network/coincync/cync-protocol
-🐛 Bugs: this channel #bugs (or security@coincync.network for vulns)
+🐛 Bugs: this channel #bugs (or CyncLabs@proton.me for vulns)
 
 This is what privacy-first money looks like when nobody is selling
 you anything. Welcome.
@@ -312,7 +312,7 @@ Testnet coins have zero monetary value and never will. Anyone trading them is wa
 
 [b]Why I posted here[/b]
 
-BitcoinTalk's altcoin ANN section is where serious crypto devs still go for the canonical thread on a project. I want this thread to be the permanent reference link the dev community can come back to as the testnet matures. Happy to answer technical questions in this thread; bug reports go on Discord (#bugs) or security@coincync.network for anything consensus-related.
+BitcoinTalk's altcoin ANN section is where serious crypto devs still go for the canonical thread on a project. I want this thread to be the permanent reference link the dev community can come back to as the testnet matures. Happy to answer technical questions in this thread; bug reports go on Discord (#bugs) or CyncLabs@proton.me for anything consensus-related.
 ```
 
 ---

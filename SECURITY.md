@@ -23,7 +23,7 @@ in response, and what protections we extend to good-faith researchers.
 
 ## Reporting a vulnerability
 
-**Email:** `security@coincync.network`
+**Email:** `CyncLabs@proton.me`
 
 If you believe you have found a security issue, send the report to
 that address. The mailbox is monitored daily.
@@ -35,7 +35,7 @@ required.
 
 **PGP key:** _to be published in a `SECURITY-PGP.asc` file alongside
 this document before public testnet announcement. Until that file
-lands, plaintext email to `security@coincync.network` is acceptable
+lands, plaintext email to `CyncLabs@proton.me` is acceptable
 and will be triaged the same day._
 
 ## What to include
@@ -160,7 +160,7 @@ operating systems, or pivot from these systems to anything else.
 If you would like to discuss a potential vulnerability before
 sending a formal report (e.g., to confirm scope, ask about
 methodology, or request the PGP key out of band), the best initial
-contact is `security@coincync.network` itself with a subject line
+contact is `CyncLabs@proton.me` itself with a subject line
 like `[QUESTION] re: <topic>`. We'll route appropriately.
 
 For genuine emergencies (e.g., active exploitation observed),

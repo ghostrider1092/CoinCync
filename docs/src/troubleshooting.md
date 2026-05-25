@@ -242,7 +242,7 @@ revert. Possibly a CRLF-vs-LF line-ending corruption — see
 You're not in the project root. `cd` to where the project lives:
 
 ```powershell
-cd "C:\Users\unkno\OneDrive\coincync 1.0"
+cd C:\dev\coincync
 ```
 
 ### CRLF vs LF line endings
@@ -292,7 +292,7 @@ in `#bug-reports`.
 
 Most often a Cloudflare-level block. Try the same URL with a
 different IP (mobile hotspot, VPN). If only your IP is blocked,
-contact `security@coincync.network` — we'll add an exception.
+contact `CyncLabs@proton.me` — we'll add an exception.
 
 ### `git.coincync.network` redirects to GitHub
 
@@ -308,7 +308,7 @@ Forgejo (and `git.coincync.network` will be the canonical source).
 | What | Where |
 |---|---|
 | Bug in the protocol / wallet / node | <https://github.com/ghostrider1092/Coincync-Testnet-/issues> with the bug-report template |
-| Security vulnerability (consensus, privacy, key handling) | `security@coincync.network` (PGP `2CAA 920F 8B96 1772`) — DO NOT file publicly |
+| Security vulnerability (consensus, privacy, key handling) | `CyncLabs@proton.me` (Proton auto-publishes a PGP key at the address — fetch from inbox profile or keys.openpgp.org; plaintext fine for non-critical reports) — DO NOT file publicly |
 | "Just a question" | Discord `#faq` (read pins first) |
 | Reproducibility check failure | Open an issue with both your `sha256sum` and the published hash |
 | Operational problem (network down, faucet broken) | Discord `#network-health` channel |

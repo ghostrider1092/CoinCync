@@ -11,11 +11,13 @@ blank_issues_enabled: false
 
 contact_links:
   - name: Security vulnerability (consensus, privacy, wallet integrity)
-    url: mailto:security@coincync.network
+    url: mailto:CyncLabs@proton.me
     about: |
-      Do NOT open a public issue. Email security@coincync.network with
-      a description of the vulnerability. PGP fingerprint 2CAA 920F 8B96 1772.
-      See SECURITY.md for disclosure policy and bounty status.
+      Do NOT open a public issue. Email CyncLabs@proton.me with
+      a description of the vulnerability. Proton auto-publishes a
+      PGP key at the address — fetch from the inbox profile or
+      from keys.openpgp.org. Plaintext is fine for non-critical
+      reports. See SECURITY.md for disclosure policy and bounty status.
 
   - name: General question or discussion
     url: https://discord.gg/5tYNSCsqzy

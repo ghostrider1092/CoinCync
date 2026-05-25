@@ -18,7 +18,7 @@ If you're a contributor who needs a PR reviewed and the listed reviewer hasn't r
 | **Network + mempool reviewer** — PRs touching `src/network/`, `src/mempool.rs` | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | Discord `@ghostrider1092` |
 | **Release manager** — cuts tags, signs artifacts, publishes binaries | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | n/a |
 | **Fleet operator** — SSH access to seed/explorer/api nodes; deploys + incident response | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | n/a |
-| **Security inbox** — reads `security@coincync.network`, triages disclosures | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | `security@coincync.network` |
+| **Security inbox** — reads `CyncLabs@proton.me`, triages disclosures | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | `CyncLabs@proton.me` |
 | **Community + Discord moderation** | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | Discord `@ghostrider1092` |
 
 **Every role currently lists the same primary.** That is the bus-factor problem [`docs/governance/bus-factor.md`](docs/governance/bus-factor.md) was written to surface. The goal between now and the v1.0 mainnet date (2026-10-01) is to fill at least one `_unfilled_` per row.

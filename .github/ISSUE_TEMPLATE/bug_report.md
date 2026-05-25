@@ -54,6 +54,6 @@ Strip any IPs, addresses, or keys you don't want public.
 ## Privacy / security note
 <!--
 If this bug has security implications (consensus, key handling, leak of shielded data),
-DO NOT file it here. Email security@coincync.network instead — see SECURITY.md.
+DO NOT file it here. Email CyncLabs@proton.me instead — see SECURITY.md.
 -->
 - [ ] I have confirmed this is not a security-sensitive issue.

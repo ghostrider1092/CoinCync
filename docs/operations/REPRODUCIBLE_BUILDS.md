@@ -178,7 +178,7 @@ A reproducibility mismatch means one of three things:
 For case 1: file an issue, identify the source of variation, fix.
 
 For case 2 or 3: this is an emergency. Notify operators via the
-status page, Discord, and `security@coincync.network`. Pull the bad
+status page, Discord, and `CyncLabs@proton.me`. Pull the bad
 release from official channels. Investigate.
 
 The verifier script's PASS/FAIL output is what makes case 2 vs 3

@@ -63,7 +63,7 @@ Welcome to CoinCync — privacy-first proof-of-work, constitutionally locked.
 📋  RULES
    • No price talk on testnet — testnet coins have no value, period
    • No referral / mining-pool / shilling links without prior approval
-   • Bug reports → #bugs (or security@coincync.network for consensus/privacy bugs)
+   • Bug reports → #bugs (or CyncLabs@proton.me for consensus/privacy bugs)
    • Be patient with the solo dev — answers come, sometimes slowly
 
 This is what privacy-first money looks like when nobody is selling you anything.
@@ -83,10 +83,10 @@ Edit each channel → "Edit Channel" → "Topic":
 | `#node-ops` | Running your own node — sync, peer count, RPC, systemd, builds. seed1/2/3.coincync.network are the public DNS seeds. |
 | `#mining` | RandomX CPU mining. Solo or pool. testnet mining target ~250 H/s network. No GPU/ASIC advantage by design. |
 | `#wallet-help` | Wallet setup, restore-from-seed, send/receive, address types. tCYNC = testnet, CYNC = mainnet (later). |
-| `#bugs` | Public bug reports. Anything weird, slow, or wrong. Consensus/privacy bugs → security@coincync.network instead. |
+| `#bugs` | Public bug reports. Anything weird, slow, or wrong. Consensus/privacy bugs → CyncLabs@proton.me instead. |
 | `#dev` | Implementation discussion — Rust, cryptography, protocol, CIPs. Read the Constitution before proposing changes. |
 | `#research` | Cryptography papers, privacy theory, adversarial analysis. Long-form welcome. |
-| `#security` | Public coordination of disclosed vulns post-fix. Embargoed reports → security@coincync.network with PGP. |
+| `#security` | Public coordination of disclosed vulns post-fix. Embargoed reports → CyncLabs@proton.me with PGP. |
 | `#faq` | Pinned answers to repeated questions. Read pins before asking. |
 | `#status` | Live operational status. Webhook posts incidents. Don't @ me here unless something is on fire. |
 
@@ -305,7 +305,7 @@ A: Because privacy coins die from one of two failure modes: regulatory
    commit.
 
 Q: Where do I file bugs?
-A: #bugs for non-security issues. security@coincync.network for anything
+A: #bugs for non-security issues. CyncLabs@proton.me for anything
    touching consensus, privacy, or wallet integrity. PGP welcomed.
 
 Q: Block explorer?
@@ -344,7 +344,7 @@ INCIDENT HISTORY (last 7 days)
 
 EMERGENCY CONTACT
    • Solo dev: response time best-effort, typically <12 h
-   • For consensus/privacy emergencies: security@coincync.network
+   • For consensus/privacy emergencies: CyncLabs@proton.me
    • For chain-split / suspected attack: post here AND email security@
 ```
 

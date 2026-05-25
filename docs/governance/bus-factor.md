@@ -35,7 +35,7 @@ This is not a hypothetical pre-mainnet, but it becomes load-bearing post-mainnet
 | Domain registrar (for `coincync.network`, `coincync.org`) | primary | none | If domain renewal fails during primary's absence, the network's user-facing URL stops resolving. | **Critical** if outage spans renewal date |
 | GitHub admin (repo, branch protection, secrets) | primary | none | Cannot adjust CI, cannot rotate Actions secrets, cannot grant access to a new maintainer. | **Medium** |
 | Release-signing key (used for binary artifact signatures) | primary | none | Cannot cut signed releases. Users have no trusted artifact path. | **High** post-mainnet |
-| `security@coincync.network` mailbox | primary | none | Vuln reports go unread. The 24-hour SLA in [SECURITY.md](../../SECURITY.md) silently breaks. | **Critical** post-mainnet |
+| `CyncLabs@proton.me` mailbox | primary | none | Vuln reports go unread. The 24-hour SLA in [SECURITY.md](../../SECURITY.md) silently breaks. | **Critical** post-mainnet |
 
 **Recommended near-term mitigations** (each is independent and cheap):
 

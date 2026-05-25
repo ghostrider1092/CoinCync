@@ -13,7 +13,7 @@ If you're scanning: skip to **Quick Start** below.
 - **Welcome:** privacy improvements, performance optimizations, UX polish, wallet work, network-stack improvements, audit fixes, documentation, test coverage.
 - **Out of scope:** see [docs/explicitly-not-doing.md](docs/explicitly-not-doing.md) for the canonical "we will not add this" list. Quick summary: stablecoins, smart-contract VMs, cross-chain bridges beyond cyncswap/CyncHub, NFTs / name services, governance tokens, admin keys, fee redirects, KYC integration. Asking again in 6 months will get the same answer.
 - **Pseudonymous participation is a Right** (Right V). Use whatever name you want.
-- **Security bugs:** email `security@coincync.network` with a PGP-encrypted message. Do not open a public issue. See [SECURITY.md](SECURITY.md).
+- **Security bugs:** email `CyncLabs@proton.me` with a PGP-encrypted message. Do not open a public issue. See [SECURITY.md](SECURITY.md).
 - **Roadmap commitments:** only what's in [docs/roadmap.md](docs/roadmap.md) is committed. CIPs marked `Sketch` are research, not commitments — see [docs/cip/README.md](docs/cip/README.md) for the legend.
 - **Everything else:** open a PR.
 
@@ -137,7 +137,7 @@ Changes to files in `critical_files.lock` (Constitution, Bill of Rights, `src/co
 
 | Type | Where |
 | --- | --- |
-| **Security vulnerability** (consensus, crypto, privacy break, supply integrity) | `security@coincync.network` with PGP-encrypted message. Public PGP key in `SECURITY.md`. **Never open a public issue.** |
+| **Security vulnerability** (consensus, crypto, privacy break, supply integrity) | `CyncLabs@proton.me` with PGP-encrypted message. Public PGP key in `SECURITY.md`. **Never open a public issue.** |
 | **Non-security bug** | GitHub Issues |
 | **Question / setup help** | [Discord](https://discord.gg/5tYNSCsqzy) — `#help` channel |
 | **CIP discussion** | The CIP file itself + [Discord](https://discord.gg/5tYNSCsqzy) `#cip-discussion` |
