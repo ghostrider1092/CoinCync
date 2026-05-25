@@ -41,6 +41,46 @@ const WALLET_MAGIC: &[u8; 4] = b"CYWL";
 ///   current default is.
 const WALLET_VERSION: u8 = 3;
 
+/// Wallet format v4: same WalletHeader struct as v3, but the wire
+/// format adds a 32-byte BLAKE3-keyed HMAC suffix that authenticates
+/// every byte of the file before it. This closes the v3 header-
+/// tampering timing channel where an attacker with file-write access
+/// could weaken the on-disk KDF params (lowering m_cost from 256 MiB
+/// to 8 KiB) and turn the user's machine into a fast-unlock oracle
+/// against their password.
+///
+/// Full design at docs/security/wallet-file-v4-design.md. Brief
+/// summary of the additions vs v3:
+///   - Two keys (enc_key, mac_key) derived from the password+salt
+///     via Argon2id → HKDF-BLAKE3, so observing one key reveals
+///     nothing about the other.
+///   - The HMAC is verified BEFORE AEAD decryption is attempted —
+///     a tampered header fails fast at HMAC time, with no key-
+///     material leakage.
+///   - File grows by exactly V4_HMAC_BYTES = 32 bytes vs the v3
+///     equivalent.
+///
+/// As of 2026-05-25 this constant is defined but the public
+/// `save_wallet` API still writes v3. v4 save/load is reached via
+/// the internal `save_v4` / `load_v4` paths (round-trip tests).
+/// Step 6 of the implementation plan flips the public default;
+/// until then v4 is opt-in.
+const WALLET_VERSION_V4: u8 = 4;
+
+/// Length in bytes of the BLAKE3-keyed-hash output used as the v4
+/// HMAC. blake3::keyed_hash returns a 32-byte digest.
+const V4_HMAC_BYTES: usize = 32;
+
+/// HKDF context strings for v4 key derivation. The two keys
+/// (encryption + MAC) are derived from the same Argon2-output ikm
+/// via blake3::derive_key with these distinct context labels. The
+/// longer "domain-separation tag" form is preferred over short
+/// labels (per design doc Open Question #2) — these are constants
+/// that don't affect performance and the readability win matters at
+/// audit time.
+const V4_HKDF_CONTEXT_ENC: &str = "coincync/wallet-file/v4/enc-key";
+const V4_HKDF_CONTEXT_MAC: &str = "coincync/wallet-file/v4/mac-key";
+
 /// Argon2id parameters for memory-hard KDF — current default.
 ///
 /// Rationale (Item 22 audit, 2026-05-08):
@@ -186,11 +226,45 @@ impl WalletHeader {
         }
     }
 
+    /// Create a v4 wallet header. Identical to `new()` except the
+    /// `version` byte is `WALLET_VERSION_V4` instead of
+    /// `WALLET_VERSION`. The wire format adds a 32-byte BLAKE3-keyed
+    /// HMAC suffix appended after the ciphertext by `save_v4`.
+    ///
+    /// As of step-1 of the wallet-v4 implementation, this constructor
+    /// is only reached via the internal `save_v4` / `load_v4` round-
+    /// trip tests; the public `save_wallet` API still writes v3.
+    /// Step 6 of the plan flips the public default; until then v4 is
+    /// opt-in via the round-trip paths.
+    pub fn new_v4(encrypted: bool) -> Self {
+        let mut salt = [0u8; 32];
+        let mut nonce = [0u8; 24];
+        let mut rng = OsRng;
+        rng.fill_bytes(&mut salt);
+        rng.fill_bytes(&mut nonce);
+
+        WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION_V4,
+            encrypted,
+            kdf_salt: salt,
+            nonce,
+            checksum: [0u8; 4],
+            kdf_m_cost: ARGON2_M_COST,
+            kdf_t_cost: ARGON2_T_COST,
+            kdf_p_cost: ARGON2_P_COST,
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if &self.magic != WALLET_MAGIC {
             return Err(Error::WalletNotFound("invalid wallet magic".into()));
         }
-        if self.version > WALLET_VERSION {
+        // Accept v3 (current default write) and v4 (opt-in via the
+        // wallet-v4 round-trip paths). v2 is handled separately via
+        // WalletHeaderV2 + the legacy load branch. Anything beyond v4
+        // is a future format this binary doesn't know how to read.
+        if self.version > WALLET_VERSION_V4 {
             return Err(Error::WalletNotFound("unsupported wallet version".into()));
         }
 
@@ -414,6 +488,47 @@ pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_c
 /// wallet — for that, use the params stored in the wallet's header).
 pub fn derive_key_default(password: &str, salt: &[u8; 32]) -> [u8; 32] {
     derive_key(password, salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)
+}
+
+/// Derive the two v4 keys (encryption + MAC) from a password.
+///
+/// The flow is: Argon2id(password, salt, params) → ikm (32 bytes) →
+/// HKDF-Expand via `blake3::derive_key` with distinct context labels
+/// → (enc_key, mac_key). The two keys are independent because each
+/// derive_key call hashes the ikm with a different context string,
+/// so observing one key reveals nothing about the other.
+///
+/// SECURITY: re-uses `derive_key` (which is rigorously param-bounded
+/// via the WalletHeader::validate() invariant) for the Argon2id step,
+/// so the v4 path inherits the same protection against malformed-
+/// header-induced KDF panics as v3. The HKDF step is constant-time
+/// post-Argon2.
+///
+/// Pure function: no I/O, no logging, no global state. Unit-tested
+/// independently for stability (test_v4_keys_distinct_and_stable).
+pub fn derive_v4_keys(
+    password: &str,
+    salt: &[u8; 32],
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> ([u8; 32], [u8; 32]) {
+    // Step 1: Argon2id → 32-byte ikm. Reuses the existing `derive_key`
+    // so the validated-bounds invariant continues to hold.
+    let mut ikm = derive_key(password, salt, m_cost, t_cost, p_cost);
+
+    // Step 2: HKDF-Expand via blake3::derive_key with two distinct
+    // context strings. Each call returns 32 bytes; the two outputs
+    // are computationally independent because the context strings
+    // differ.
+    let enc_key = blake3::derive_key(V4_HKDF_CONTEXT_ENC, &ikm);
+    let mac_key = blake3::derive_key(V4_HKDF_CONTEXT_MAC, &ikm);
+
+    // Zero the Argon2 output before returning. ikm is no longer
+    // needed; only the two derived keys are.
+    ikm.zeroize();
+
+    (enc_key, mac_key)
 }
 
 /// Decrypt a sidecar (utxos / history / reservations) ciphertext, trying
@@ -775,6 +890,247 @@ pub fn change_password(
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Wallet file v4 — HMAC-authenticated save/load
+// =============================================================================
+//
+// v4 closes the v3 header-tampering timing channel: an attacker with
+// file-write access could otherwise weaken the on-disk Argon2id
+// params (lower m_cost from 256 MiB to 8 KiB) and turn the user's
+// machine into a fast-unlock oracle against their password. v4 adds
+// a BLAKE3-keyed HMAC suffix that authenticates every byte of the
+// file before AEAD decryption is attempted; a tampered header fails
+// fast at HMAC time, with no key-material leakage.
+//
+// Full design at docs/security/wallet-file-v4-design.md.
+//
+// As of step-3 implementation (2026-05-25): these functions are
+// internal and reached only via the round-trip test below. The
+// public save_wallet/load_wallet still default to v3 writes; v3 reads
+// continue to work. Step 4 of the plan adds v3-or-v4 auto-detect to
+// the public load path; step 6 flips the public save default. Until
+// then v4 is opt-in.
+
+/// Save a wallet in v4 format. Required-password — the HMAC concept
+/// doesn't apply to unencrypted wallets.
+///
+/// Wire format:
+///
+/// ```text
+///   u32 hdr_len LE | borsh(WalletHeader{version=4, ...})
+///   u32 ct_len  LE | ciphertext (XChaCha20-Poly1305 over plaintext)
+///                  | hmac 32B (BLAKE3-keyed over all bytes before)
+/// ```
+///
+/// Compared to v3, the only difference is the 32-byte HMAC suffix and
+/// the `version=4` byte inside the header.
+pub fn save_v4(path: &Path, data: &WalletData, password: &str) -> Result<()> {
+    // Fresh header with new random salt + nonce + version=4.
+    let mut header = WalletHeader::new_v4(true);
+
+    // Serialize plaintext.
+    let serialized = borsh::to_vec(data)
+        .map_err(|e| Error::SerializationError(e.to_string()))?;
+
+    // Argon2id → ikm → HKDF-Expand to two distinct 32-byte keys.
+    let (enc_key, mac_key) = derive_v4_keys(
+        password, &header.kdf_salt,
+        header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost,
+    );
+
+    // AEAD-encrypt the plaintext under enc_key. v3 uses XChaCha20-
+    // Poly1305 too; per the design doc Open Question #3 we keep the
+    // same AEAD for migration simplicity (one less moving piece to
+    // diff against v3).
+    let encrypt_result = encrypt(&serialized, &enc_key, &header.nonce);
+    let mut enc_key_mut = enc_key;
+    enc_key_mut.zeroize();
+    let mut serialized_mut = serialized;
+    serialized_mut.zeroize();
+    let ciphertext = encrypt_result?;
+
+    // Checksum for the ciphertext (informational; AEAD tag is the real
+    // integrity check on the ciphertext, and the HMAC below covers the
+    // whole file). Keeping the same field as v3 so the header layout
+    // is unchanged.
+    let checksum_hash = hash_data(&ciphertext);
+    header.checksum.copy_from_slice(&checksum_hash.as_bytes()[..4]);
+
+    let header_bytes = borsh::to_vec(&header)
+        .map_err(|e| Error::SerializationError(e.to_string()))?;
+
+    // Concatenate the pre-HMAC byte sequence in memory so we can hash
+    // it in one pass via blake3::keyed_hash. The file is bounded
+    // (<100 KB typical wallet, with the AEAD tag), so the alloc is
+    // cheap; this avoids the API gymnastics of an incremental hasher.
+    let mut prelude = Vec::with_capacity(
+        4 + header_bytes.len() + 4 + ciphertext.len()
+    );
+    prelude.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
+    prelude.extend_from_slice(&header_bytes);
+    prelude.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
+    prelude.extend_from_slice(&ciphertext);
+
+    // HMAC = BLAKE3-keyed(mac_key, prelude). Returns blake3::Hash;
+    // its .as_bytes() is the 32-byte digest.
+    let hmac = blake3::keyed_hash(&mac_key, &prelude);
+    let mut mac_key_mut = mac_key;
+    mac_key_mut.zeroize();
+
+    // Write the file atomically (same temp-then-rename dance as v3).
+    let temp_path = path.with_extension("tmp");
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true)
+            .mode(0o600)
+            .open(&temp_path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = File::create(&temp_path)?;
+
+    let write_result = (|| -> Result<()> {
+        file.write_all(&prelude)?;
+        file.write_all(hmac.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    drop(file);
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    harden_secret_file_permissions(&temp_path);
+    if let Err(e) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e.into());
+    }
+    harden_secret_file_permissions(path);
+
+    Ok(())
+}
+
+/// Load a wallet from a v4-format file. Required-password.
+///
+/// The verification order is intentional:
+///   1. Parse framing — catches truncation, missing HMAC suffix, etc.
+///   2. WalletHeader::validate() — catches malformed KDF params BEFORE
+///      paying for Argon2.
+///   3. Argon2id → ikm → HKDF-Expand → (enc_key, mac_key).
+///   4. **HMAC verify (constant-time)** — the new gate. A tampered
+///      header here means the attacker forged a valid HMAC, which
+///      they can't do without the password.
+///   5. Only if HMAC matches: AEAD-decrypt the ciphertext.
+///
+/// The "HMAC before AEAD" order is the whole point of v4 — see design
+/// doc §3 for the threat-model rationale.
+pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
+    use std::io::{Cursor, Read};
+
+    let total = bytes.len();
+    if total < V4_HMAC_BYTES + 8 {
+        return Err(Error::WalletNotFound(
+            "v4 wallet file too short (missing framing or HMAC)".into(),
+        ));
+    }
+
+    // The HMAC is the last V4_HMAC_BYTES bytes; everything before is
+    // the prelude that's HMAC'd.
+    let prelude_len = total - V4_HMAC_BYTES;
+    let prelude = &bytes[..prelude_len];
+    let file_hmac = &bytes[prelude_len..];
+
+    // Parse the prelude framing: hdr_len | header | ct_len | ciphertext.
+    let mut cursor = Cursor::new(prelude);
+
+    let mut hdr_len_bytes = [0u8; 4];
+    cursor.read_exact(&mut hdr_len_bytes)
+        .map_err(|e| Error::WalletNotFound(e.to_string()))?;
+    let hdr_len = u32::from_le_bytes(hdr_len_bytes) as usize;
+    if hdr_len > prelude_len.saturating_sub(8) {
+        return Err(Error::WalletNotFound(
+            "v4 wallet header length implausibly large".into(),
+        ));
+    }
+
+    let mut header_bytes = vec![0u8; hdr_len];
+    cursor.read_exact(&mut header_bytes)
+        .map_err(|e| Error::WalletNotFound(e.to_string()))?;
+
+    let header: WalletHeader = borsh::from_slice(&header_bytes)
+        .map_err(|e| Error::SerializationError(e.to_string()))?;
+
+    // Step 2: validate header BEFORE Argon2. Catches malformed KDF
+    // params (fuzz crash-class) cheaply.
+    header.validate()?;
+
+    if header.version != WALLET_VERSION_V4 {
+        return Err(Error::WalletNotFound(format!(
+            "load_v4 called on a non-v4 wallet (version byte = {})",
+            header.version
+        )));
+    }
+    if !header.encrypted {
+        return Err(Error::WalletNotFound(
+            "v4 wallet must be encrypted (HMAC requires a key)".into(),
+        ));
+    }
+
+    let mut ct_len_bytes = [0u8; 4];
+    cursor.read_exact(&mut ct_len_bytes)
+        .map_err(|e| Error::WalletNotFound(e.to_string()))?;
+    let ct_len = u32::from_le_bytes(ct_len_bytes) as usize;
+
+    let mut ciphertext = vec![0u8; ct_len];
+    cursor.read_exact(&mut ciphertext)
+        .map_err(|e| Error::WalletNotFound(e.to_string()))?;
+
+    // Step 3: derive both keys.
+    let (enc_key, mac_key) = derive_v4_keys(
+        password, &header.kdf_salt,
+        header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost,
+    );
+
+    // Step 4: HMAC verify — constant-time compare via subtle.
+    let computed = blake3::keyed_hash(&mac_key, prelude);
+    let mut mac_key_mut = mac_key;
+    mac_key_mut.zeroize();
+
+    use subtle::ConstantTimeEq;
+    if computed.as_bytes().ct_eq(file_hmac).unwrap_u8() != 1 {
+        // Zero the still-live enc_key before returning (no leakage
+        // even if the caller mishandles the error).
+        let mut enc_key_mut = enc_key;
+        enc_key_mut.zeroize();
+        // Generic message — don't leak whether the password is wrong
+        // vs the file is tampered. The warn-level log surfaces the
+        // distinction for the operator without leaking to the
+        // attacker's reachable code path.
+        tracing::warn!(
+            "v4 HMAC mismatch on wallet load — file may be tampered, \
+             or password is incorrect"
+        );
+        return Err(Error::InvalidSecretKey(
+            "wallet file did not authenticate (wrong password or tampered file)".into(),
+        ));
+    }
+
+    // Step 5: AEAD-decrypt. This is belt-and-suspenders against an
+    // HMAC-implementation bug — if HMAC said the file is intact, the
+    // AEAD tag MUST also check out.
+    let decrypt_result = decrypt(&ciphertext, &enc_key, &header.nonce);
+    let mut enc_key_mut = enc_key;
+    enc_key_mut.zeroize();
+    let plaintext = decrypt_result?;
+
+    let data: WalletData = borsh::from_slice(&plaintext)
+        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    Ok(data)
 }
 
 /// Check if wallet file exists
@@ -1157,6 +1513,127 @@ mod tests {
         // New password should work
         let loaded = load_wallet(&path, Some("new_pass")).unwrap();
         assert_eq!(loaded.seed, seed);
+    }
+
+    // =========================================================================
+    // Wallet file v4 — step-1/2/3 tests
+    // =========================================================================
+    //
+    // These tests gate the v4 implementation per docs/security/wallet-file-
+    // v4-design.md §6 (test plan). Steps 4-7 (auto-detect, auto-upgrade,
+    // default switch, fuzz harness extension) live in follow-up PRs; the
+    // tests below cover the bits we've shipped:
+    //   - derive_v4_keys is stable + the two keys are distinct
+    //   - v4 round-trip (save_v4 → load_v4_from_bytes → assert plaintext)
+    //   - v4 HMAC tamper rejection (flip a byte in the header)
+    //   - v4 truncation rejection (drop the HMAC suffix)
+
+    #[test]
+    fn v4_keys_distinct_and_stable() {
+        let password = "soak-test";
+        let salt = [0xA1u8; 32];
+        let (e1, m1) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST);
+        let (e2, m2) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST);
+
+        // Stability: same inputs → same outputs (no hidden randomness
+        // in the v4 KDF path).
+        assert_eq!(e1, e2, "enc_key must be deterministic for fixed (pw, salt, params)");
+        assert_eq!(m1, m2, "mac_key must be deterministic for fixed (pw, salt, params)");
+
+        // Independence: enc_key MUST differ from mac_key. If they
+        // matched, the two HKDF context strings collided (or the
+        // derive_v4_keys implementation regressed), which would
+        // break the separation principle the design relies on.
+        assert_ne!(
+            e1, m1,
+            "enc_key MUST differ from mac_key — independence is the whole point of the HKDF split"
+        );
+
+        // Different password → different keys.
+        let (e3, m3) = derive_v4_keys("different-password", &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST);
+        assert_ne!(e1, e3);
+        assert_ne!(m1, m3);
+    }
+
+    #[test]
+    fn v4_save_load_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("v4-roundtrip.wallet");
+
+        let seed = [0x42u8; 32];
+        let data = WalletData::new(seed, "testnet");
+
+        save_v4(&path, &data, "roundtrip-pw").expect("save_v4 must succeed on a fresh path");
+
+        let bytes = std::fs::read(&path).expect("v4 file must be readable post-save");
+        let loaded = load_v4_from_bytes(&bytes, "roundtrip-pw")
+            .expect("load_v4 must succeed with the same password");
+
+        assert_eq!(loaded.seed, seed, "round-trip plaintext must match");
+        assert_eq!(loaded.network, "testnet");
+
+        // Sanity: the wrong password must fail with the generic
+        // "did not authenticate" error (HMAC catches it before AEAD).
+        let wrong = load_v4_from_bytes(&bytes, "wrong-password");
+        assert!(wrong.is_err(), "wrong password must fail");
+    }
+
+    #[test]
+    fn v4_rejects_header_tamper() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("v4-tamper.wallet");
+        save_v4(&path, &WalletData::new([0x11; 32], "testnet"), "tamper-pw").unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Flip a byte inside the header region. The first 4 bytes are
+        // hdr_len LE; the borsh header starts at offset 4. Flipping
+        // any byte from offset 4 through hdr_len+4 corrupts the header
+        // (validate() may or may not catch it depending on which byte,
+        // but the HMAC MUST always catch it because the HMAC covers
+        // the header). We flip a byte deep enough to be inside the
+        // borsh-encoded WalletHeader's nonce field, which validate()
+        // does NOT check — so this MUST surface as HMAC failure, not
+        // a header-validation failure.
+        let flip_at = 4 + 4 + 1 + 1 + 32 + 5; // hdr_len + magic + version + encrypted + salt + into-nonce
+        bytes[flip_at] ^= 0x01;
+
+        let err = load_v4_from_bytes(&bytes, "tamper-pw")
+            .expect_err("tampered header MUST fail to load");
+        // The error must be the generic "did not authenticate" — we
+        // don't want to leak "header tamper" vs "wrong password" to
+        // the attacker.
+        match err {
+            Error::InvalidSecretKey(msg) => assert!(
+                msg.contains("did not authenticate"),
+                "expected generic auth-fail message, got: {}", msg
+            ),
+            other => panic!("expected InvalidSecretKey, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn v4_rejects_truncated_hmac() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("v4-trunc.wallet");
+        save_v4(&path, &WalletData::new([0x22; 32], "testnet"), "trunc-pw").unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Drop the last 16 bytes — splits the 32-byte HMAC in half.
+        // The file_hmac portion is now 16 ciphertext-tail bytes + 16
+        // hmac bytes, which cannot match the computed HMAC over the
+        // (now-short) prelude.
+        let new_len = bytes.len() - 16;
+        bytes.truncate(new_len);
+
+        let err = load_v4_from_bytes(&bytes, "trunc-pw")
+            .expect_err("truncated file MUST fail to load");
+        // Truncation surfaces as either a framing error OR an HMAC
+        // mismatch (depending on whether the ct_len lands within the
+        // remaining bytes). Both are valid rejections.
+        match err {
+            Error::WalletNotFound(_) | Error::InvalidSecretKey(_) | Error::SerializationError(_) => {}
+            other => panic!("expected framing/auth/parse error, got: {:?}", other),
+        }
     }
 }
 
