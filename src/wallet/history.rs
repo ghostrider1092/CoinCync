@@ -138,7 +138,19 @@ impl TransactionRecord {
             payment_id: None,
             memo: None,
             recipient_address: None,
-            unlock_height: block_height.saturating_add(10), // MIN_OUTPUT_AGE
+            // CONSENSUS-COUPLED: maturity floor flips at MIN_OUTPUT_AGE
+            // hard-fork height. Compute the unlock height using the rule
+            // that will be in force when this output is first eligible to
+            // spend — pessimistic (uses the landed-block's rule, which
+            // matches what the user sees today). At the activation
+            // boundary the rule strictly tightens, so a UI showing
+            // unlock = landed + 10 for pre-fork outputs is correct even
+            // if the spend happens post-fork (the validator's rule at
+            // spend time uses the spend-block's height, which already
+            // sees age >= 10 + (fork_height - landed) >= 100 by the time
+            // it matters).
+            unlock_height: block_height
+                .saturating_add(crate::constants::min_output_age_at_height(block_height)),
             output_indices: vec![output_index],
             spent: false,
             key_image: None,
@@ -484,18 +496,26 @@ mod tests {
 
     #[test]
     fn test_incoming_record() {
+        let block_height = 100u64;
         let record = TransactionRecord::incoming(
             test_hash(),
             Amount::from_atomic(1_000_000_000_000), // 1 CYNC
-            100,
+            block_height,
             1700000000,
             0,
             None,
         );
 
         assert_eq!(record.direction, TxDirection::Incoming);
-        assert_eq!(record.block_height, 100);
-        assert_eq!(record.unlock_height, 110);
+        assert_eq!(record.block_height, block_height);
+        // unlock_height = block_height + min_output_age_at_height(block_height).
+        // Pre-fork (testnet placeholder MIN_OUTPUT_AGE_HARDFORK_HEIGHT=u64::MAX)
+        // this is 100 + 10 = 110. Mainnet (HARDFORK_HEIGHT=0) it's 100 + 100 = 200.
+        // Computing from the helper keeps the test correct on both feature
+        // configurations and on whatever activation height we eventually set.
+        let expected_unlock = block_height
+            + crate::constants::min_output_age_at_height(block_height);
+        assert_eq!(record.unlock_height, expected_unlock);
         assert!(!record.spent);
     }
 

@@ -10,7 +10,6 @@ use rand::RngCore;
 use zeroize::Zeroize;
 use crate::primitives::{Hash, Amount, KeyImage};
 use crate::error::{Error, Result};
-use crate::constants::MIN_OUTPUT_AGE;
 
 use super::wallet_keys::WalletKeys;
 use super::key_epoch::KeyEpoch;
@@ -468,12 +467,18 @@ impl Wallet {
 
     /// Get spendable balance
     pub fn spendable_balance(&self, current_height: u64) -> Amount {
-        self.balance.spendable(current_height, MIN_OUTPUT_AGE)
+        // CONSENSUS-COUPLED: maturity floor flips at the
+        // MIN_OUTPUT_AGE hard-fork height. Read via the height-keyed
+        // helper so the wallet shows the SAME spendable set the
+        // validator would accept at this height.
+        let min_age = crate::constants::min_output_age_at_height(current_height);
+        self.balance.spendable(current_height, min_age)
     }
 
     /// Get available UTXOs for spending
     pub fn available_utxos(&self, current_height: u64) -> Vec<&UTXO> {
-        self.balance.available_utxos(current_height, MIN_OUTPUT_AGE)
+        let min_age = crate::constants::min_output_age_at_height(current_height);
+        self.balance.available_utxos(current_height, min_age)
     }
 
     /// Add a UTXO to balance
@@ -1127,7 +1132,11 @@ impl SharedWallet {
         // Get decoy outputs from the chain
         // We need (ring_size - 1) decoys per input, estimate we need up to 5 inputs max
         let decoy_count = (ring_size - 1) * 5;
-        let decoys = chain.get_decoy_outputs(decoy_count, MIN_OUTPUT_AGE);
+        // CONSENSUS-COUPLED: maturity floor flips at the hard-fork
+        // height. Decoy selection must match the validator's rule or
+        // the wallet will pick decoys the validator rejects.
+        let min_age = crate::constants::min_output_age_at_height(current_height);
+        let decoys = chain.get_decoy_outputs(decoy_count, min_age);
 
         // SECURITY (A6-RING): Check for sufficient decoys. Without enough ring members,
         // the real spend becomes trivially identifiable, destroying privacy.
@@ -1188,7 +1197,10 @@ impl SharedWallet {
         let current_height = wallet.scanned_height;
         let ring_size = crate::constants::ring_size_at_height(current_height);
         let decoy_count = (ring_size - 1) * 5;
-        let decoys = chain.get_decoy_outputs(decoy_count, crate::constants::MIN_OUTPUT_AGE);
+        // CONSENSUS-COUPLED: see comment at the matching site in
+        // create_transfer above (decoy maturity must match validator).
+        let min_age = crate::constants::min_output_age_at_height(current_height);
+        let decoys = chain.get_decoy_outputs(decoy_count, min_age);
 
         let mut rng = rand::rngs::OsRng;
         super::send::create_vesting_transaction(

@@ -346,8 +346,69 @@ pub const MIN_RELAY_FEE_RATE: f64 = 1.0;
 /// Minimum output amount in atomic units (dust threshold)
 pub const MIN_OUTPUT_AMOUNT: u64 = 1_000_000; // 0.000001 CYNC
 
-/// Minimum output age for spending (blocks)
+/// Minimum output age for spending (blocks), PRE-activation.
+///
+/// CONSENSUS: this is the pre-hard-fork value. Used unconditionally
+/// by all wallet selection / send / validation paths BEFORE block
+/// height `MIN_OUTPUT_AGE_HARDFORK_HEIGHT`. After that height, the
+/// `MIN_OUTPUT_AGE_POST_FORK` value applies. Always read this via
+/// `min_output_age_at_height(height)` — never reference the const
+/// directly in a code path that has a current height available, or
+/// the chain will fork at the activation height.
 pub const MIN_OUTPUT_AGE: u64 = 10;
+
+/// Minimum output age for spending (blocks), POST-activation.
+///
+/// CONSENSUS: applies at heights ≥ `MIN_OUTPUT_AGE_HARDFORK_HEIGHT`.
+/// The 10× increase from the pre-fork value tightens the maturity
+/// window to ~3.3 hours of confirmations at 120s blocks (vs ~20 min
+/// pre-fork). Closes the practical-attack window where a deep-reorg
+/// adversary could double-spend a 10-block-confirmed output by
+/// privately mining a 11-block sidechain — at 100 blocks that
+/// adversary needs ~2 hours of >50% hashpower instead of ~20 min.
+pub const MIN_OUTPUT_AGE_POST_FORK: u64 = 100;
+
+/// Block height at which the `MIN_OUTPUT_AGE` 10 → 100 hard fork
+/// activates. Heights STRICTLY BELOW this value use the pre-fork
+/// value (`MIN_OUTPUT_AGE` = 10); heights AT OR ABOVE this value
+/// use `MIN_OUTPUT_AGE_POST_FORK` = 100.
+///
+/// **TESTNET — `u64::MAX` is a placeholder.** The actual activation
+/// height is picked in the pre-tag PR for the v1.0.10-testnet cut.
+/// Per `docs/launch/v1.0.10-CHECKLIST.md` §0, the height should be
+/// the current testnet tip + ~5,000 blocks (≈7 days at 120s) so
+/// operators have a real window to upgrade before the rule changes
+/// under them. While the placeholder is `u64::MAX`, behavior is
+/// strictly identical to pre-fork — `min_output_age_at_height` always
+/// returns 10 — so this guard ships safely in pre-cut commits and
+/// only "turns on" when the height is set.
+///
+/// **MAINNET — `0`.** The new value is active from genesis; there's
+/// no behavior to migrate because mainnet hasn't launched yet (target
+/// 2026-10-01 per `project_staged_mainnet`). New mainnet wallets see
+/// 100 as the maturity floor from block 1.
+#[cfg(feature = "testnet")]
+pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = u64::MAX;
+#[cfg(not(feature = "testnet"))]
+pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = 0;
+
+/// Get the minimum output age (in blocks) required for an output to
+/// be spendable at the given block height.
+///
+/// CONSENSUS-CRITICAL: this is the single source of truth. Every
+/// call site that previously read `MIN_OUTPUT_AGE` directly must use
+/// this helper with the relevant height (chain tip for wallet
+/// selection, block-being-validated height for the consensus
+/// validator). Bypassing the helper at a single call site will fork
+/// the chain at the activation height.
+#[inline]
+pub fn min_output_age_at_height(height: u64) -> u64 {
+    if height < MIN_OUTPUT_AGE_HARDFORK_HEIGHT {
+        MIN_OUTPUT_AGE
+    } else {
+        MIN_OUTPUT_AGE_POST_FORK
+    }
+}
 
 // =============================================================================
 // Fee Distribution (Normal Conditions)
@@ -1042,6 +1103,63 @@ mod tests {
         assert_eq!(ring_size_at_height(9_999), BOOTSTRAP_MIN_RING_SIZE);
         assert_eq!(ring_size_at_height(10_000), 16);
         assert_eq!(ring_size_at_height(100_000), DEFAULT_RING_SIZE);
+    }
+
+    /// Lock in the activation-boundary semantics of the MIN_OUTPUT_AGE
+    /// 10 → 100 hard fork. The contract is: heights STRICTLY BELOW
+    /// `MIN_OUTPUT_AGE_HARDFORK_HEIGHT` use the pre-fork value (10);
+    /// heights AT OR ABOVE use the post-fork value (100). Off-by-one
+    /// errors at this boundary would split the chain at activation,
+    /// so the boundary case is asserted explicitly.
+    #[test]
+    fn test_min_output_age_activation_boundary() {
+        // Pre-fork value is what the helper returns at every height
+        // BELOW activation, regardless of which network we built for.
+        assert_eq!(MIN_OUTPUT_AGE, 10);
+        assert_eq!(MIN_OUTPUT_AGE_POST_FORK, 100);
+        assert!(MIN_OUTPUT_AGE_POST_FORK > MIN_OUTPUT_AGE,
+            "post-fork value must be strictly larger — the hard fork tightens, never loosens");
+
+        // The boundary contract: `<` returns pre, `>=` returns post.
+        // We only assert this when the activation height is finite
+        // AND non-zero (testnet placeholder is u64::MAX, in which
+        // case `< u64::MAX` is always true and the boundary is
+        // unreachable; mainnet is 0 so there's no "one before
+        // activation" — fork is genesis-active). Use saturating_*
+        // and method-call boundary arithmetic so const-eval of the
+        // mainnet `0` doesn't trip the arithmetic_overflow lint.
+        if MIN_OUTPUT_AGE_HARDFORK_HEIGHT > 0 && MIN_OUTPUT_AGE_HARDFORK_HEIGHT < u64::MAX {
+            // One block before activation: still pre-fork.
+            assert_eq!(
+                min_output_age_at_height(MIN_OUTPUT_AGE_HARDFORK_HEIGHT.saturating_sub(1)),
+                MIN_OUTPUT_AGE,
+                "block immediately before activation MUST use pre-fork value"
+            );
+            // Exactly at activation: post-fork (the rule activates AT
+            // this height, not after).
+            assert_eq!(
+                min_output_age_at_height(MIN_OUTPUT_AGE_HARDFORK_HEIGHT),
+                MIN_OUTPUT_AGE_POST_FORK,
+                "activation-height block MUST use post-fork value"
+            );
+            // One block after activation: still post-fork.
+            assert_eq!(
+                min_output_age_at_height(MIN_OUTPUT_AGE_HARDFORK_HEIGHT.saturating_add(1)),
+                MIN_OUTPUT_AGE_POST_FORK
+            );
+        }
+
+        // Far-future and far-past sanity: with the testnet u64::MAX
+        // placeholder, every reasonable height returns pre-fork.
+        // With the mainnet 0 setting, every height returns post-fork.
+        // Either way, the helper is total and never panics on any u64.
+        for h in [0u64, 1, 100, 10_000, 1_000_000, u64::MAX / 2, u64::MAX - 1] {
+            let v = min_output_age_at_height(h);
+            assert!(
+                v == MIN_OUTPUT_AGE || v == MIN_OUTPUT_AGE_POST_FORK,
+                "helper returned unexpected value {} at height {}", v, h
+            );
+        }
     }
 
     #[test]

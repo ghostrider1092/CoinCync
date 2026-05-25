@@ -18,7 +18,8 @@ use crate::crypto::{
     OutputRef as RingOutputRef,
 };
 use crate::constants::{
-    BOOTSTRAP_MIN_RING_SIZE, ring_size_at_height, effective_ring_size, MIN_OUTPUT_AGE, MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT,
+    BOOTSTRAP_MIN_RING_SIZE, ring_size_at_height, effective_ring_size,
+    min_output_age_at_height, MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT,
     UNIFORM_TX_SHAPE_HEIGHT, STANDARD_INPUT_COUNT, STANDARD_OUTPUT_COUNT,
 };
 use crate::error::{Error, Result};
@@ -94,9 +95,13 @@ pub fn create_transaction(
     recipients: &[(Address, Amount)],
     current_height: u64,
 ) -> Result<Transaction> {
+    // CONSENSUS-COUPLED: maturity floor flips at the MIN_OUTPUT_AGE
+    // hard-fork height. Use the helper so wallet selection agrees
+    // with the validator at every height.
+    let min_age = min_output_age_at_height(current_height);
     // Calculate totals
     let total_send: Amount = recipients.iter().map(|(_, a)| *a).sum();
-    let available = balance.spendable(current_height, MIN_OUTPUT_AGE);
+    let available = balance.spendable(current_height, min_age);
 
     let ring_size = ring_size_at_height(current_height);
     let estimated_size = estimate_tx_size(1, recipients.len() + 1, ring_size);
@@ -111,7 +116,7 @@ pub fn create_transaction(
     }
 
     // Select UTXOs
-    let utxos = balance.available_utxos(current_height, MIN_OUTPUT_AGE);
+    let utxos = balance.available_utxos(current_height, min_age);
     // SECURITY: UTXO selection ordering is a privacy signal — always OsRng,
     // even on the legacy convenience path. Defence in depth: if a test caller
     // ever promotes this helper to non-test use, the privacy boundary is safe.
@@ -209,8 +214,13 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     extra: Vec<u8>,
     rng: &mut R,
 ) -> Result<Transaction> {
+    // CONSENSUS-COUPLED: maturity floor flips at MIN_OUTPUT_AGE
+    // hard-fork height. Resolve once per call so every downstream
+    // path (spendable, pending-maturity error, decoy filter) reads
+    // the same value.
+    let min_age = min_output_age_at_height(current_height);
     let total_send: Amount = recipients.iter().map(|(_, _, a)| *a).sum();
-    let available = balance.spendable(current_height, MIN_OUTPUT_AGE);
+    let available = balance.spendable(current_height, min_age);
 
     // Uniform 2-in/2-out: post-activation, Transfer txs must have exactly 2 inputs
     // and 2 outputs. There are TWO valid shapes that satisfy this:
@@ -282,18 +292,18 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
         let total = balance.total();
         if total >= initial_needed {
             // We have it; it's just not mature. Find the youngest unspent
-            // UTXO that's currently below MIN_OUTPUT_AGE — its
+            // UTXO that's currently below `min_age` — its
             // earliest-spendable height is the upper bound on how long the
             // user has to wait. (More precise would be "the youngest UTXO
             // whose maturation tips us over the threshold", but this
             // bound is correct and simple.)
             let pending_utxos: Vec<&UTXO> = balance.unspent_utxos()
                 .into_iter()
-                .filter(|u| current_height < u.height.saturating_add(MIN_OUTPUT_AGE))
+                .filter(|u| current_height < u.height.saturating_add(min_age))
                 .collect();
             let pending_atomic: u64 = pending_utxos.iter().map(|u| u.amount.as_atomic()).sum();
             // Latest pending UTXO height = the most-recently-confirmed pending one.
-            // earliest_full_maturity = max(pending heights) + MIN_OUTPUT_AGE.
+            // earliest_full_maturity = max(pending heights) + min_age.
             // blocks_to_wait = earliest_full_maturity - current_height.
             // (Subset coverage might mature earlier, but reporting the
             // pessimistic full-maturity bound never under-promises.)
@@ -301,7 +311,7 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
                 .map(|u| u.height)
                 .max()
                 .unwrap_or(current_height);
-            let earliest_full_maturity = latest_pending_height.saturating_add(MIN_OUTPUT_AGE);
+            let earliest_full_maturity = latest_pending_height.saturating_add(min_age);
             let blocks_to_wait = earliest_full_maturity.saturating_sub(current_height);
             let seconds_to_wait = blocks_to_wait.saturating_mul(crate::constants::TARGET_BLOCK_TIME);
             return Err(Error::BalancePendingMaturity {
@@ -322,7 +332,7 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     // SECURITY: Filter to native CYNC UTXOs only. available_utxos() returns ALL
     // assets, so a CYNC transfer could accidentally select non-native UTXOs,
     // creating an invalid transaction or burning user assets.
-    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, MIN_OUTPUT_AGE);
+    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
     let mut selected = if uniform {
         select_utxos_uniform(&utxos, initial_needed, rng)?
     } else {
@@ -495,7 +505,9 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
     current_height: u64,
     rng: &mut R,
 ) -> Result<Transaction> {
-    let available = balance.spendable(current_height, MIN_OUTPUT_AGE);
+    // CONSENSUS-COUPLED: see comment in create_privacy_transaction_with_options.
+    let min_age = min_output_age_at_height(current_height);
+    let available = balance.spendable(current_height, min_age);
 
     let mut dedup_seen = std::collections::HashSet::new();
     let deduped_pool: Vec<DecoyOutput> = decoy_pool.iter()
@@ -519,7 +531,7 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
     // SECURITY (BUG-13): Filter to native CYNC UTXOs only. Previously used
     // available_utxos() which returns ALL asset types, potentially burning
     // non-native asset tokens in a CYNC vesting transaction.
-    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, MIN_OUTPUT_AGE);
+    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
     let selected = select_utxos(&utxos, total_needed, CoinSelection::OldestFirst, rng)?;
 
     // Re-estimate fee based on actual input count (may be > 1)
@@ -609,7 +621,9 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
     current_height: u64,
     rng: &mut R,
 ) -> Result<Transaction> {
-    let available = balance.spendable(current_height, MIN_OUTPUT_AGE);
+    // CONSENSUS-COUPLED: see comment in create_privacy_transaction_with_options.
+    let min_age = min_output_age_at_height(current_height);
+    let available = balance.spendable(current_height, min_age);
     if available.as_atomic() == 0 {
         return Err(Error::InsufficientBalance { have: 0, need: 1 });
     }
@@ -628,7 +642,7 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
     let uniform = current_height >= UNIFORM_TX_SHAPE_HEIGHT;
 
     // SECURITY (BUG-13): Filter to native CYNC UTXOs only for churn transactions.
-    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, MIN_OUTPUT_AGE);
+    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
     let selected = if uniform {
         // Uniform mode: exactly 2 inputs
         let est_size = estimate_tx_size(STANDARD_INPUT_COUNT, STANDARD_OUTPUT_COUNT, ring_size);

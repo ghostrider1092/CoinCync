@@ -1099,15 +1099,27 @@ pub fn validate_transaction(
                             input_idx, member_idx
                         )));
                     }
-                    // Check coinbase maturity
+                    // Check coinbase maturity.
+                    //
+                    // CONSENSUS HARD FORK (MIN_OUTPUT_AGE 10 → 100,
+                    // activates at `MIN_OUTPUT_AGE_HARDFORK_HEIGHT`):
+                    // read the required age via the height-keyed
+                    // helper so blocks BEFORE activation still validate
+                    // against the old 10-block floor, and blocks AT OR
+                    // AFTER activation enforce the new 100-block floor.
+                    // The validator's `current_height` here is the
+                    // height of the block being validated — that's the
+                    // right input because activation is "applies to
+                    // blocks at this height and later".
                     if output_ref.is_coinbase {
                         let age = current_height.saturating_sub(output_ref.height);
-                        if age < crate::constants::MIN_OUTPUT_AGE {
+                        let required = crate::constants::min_output_age_at_height(current_height);
+                        if age < required {
                             return Err(Error::InvalidTransaction(format!(
                                 "Input {} ring member {} references immature coinbase output \
                                  (height {}, age {} < required {})",
                                 input_idx, member_idx, output_ref.height,
-                                age, crate::constants::MIN_OUTPUT_AGE
+                                age, required
                             )));
                         }
                     }
