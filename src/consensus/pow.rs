@@ -265,29 +265,71 @@ const RANDOMX_KEY_EPOCH: u64 = 2048;
 #[cfg(feature = "randomx")]
 mod randomx_cache {
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
-    use parking_lot::Mutex;
-    use std::sync::atomic::Ordering;
+    use parking_lot::RwLock;
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    struct SendSyncVm {
+    /// Shared dataset entry — cache + (optional) dataset + flags for
+    /// the current epoch key. Cache and Dataset are `Arc<*Inner>`
+    /// internally (verified against randomx_rs v1.4.1) so `.clone()`
+    /// is a refcount bump — every thread builds its VM from these
+    /// shared building blocks rather than duplicating the 256 MB
+    /// cache or 2 GB dataset per thread.
+    struct DatasetEntry {
+        key: [u8; 32],
+        cache: RandomXCache,
+        dataset: Option<RandomXDataset>,
+        flags: RandomXFlag,
+    }
+
+    // SAFETY: RandomXCache and RandomXDataset wrap Arc<inner>; both
+    // are Send + Sync via their derive. Marking the entry Send + Sync
+    // makes the wrapping struct usable inside a static. The actual
+    // thread-safety guarantee is "no two threads ever share a single
+    // RandomXVM instance" — enforced by the thread_local! VM cache
+    // below.
+    #[allow(unsafe_code)]
+    unsafe impl Send for DatasetEntry {}
+    #[allow(unsafe_code)]
+    unsafe impl Sync for DatasetEntry {}
+
+    static DATASET_CACHE: RwLock<Option<DatasetEntry>> = RwLock::new(None);
+    static RETRY_AFTER: AtomicU64 = AtomicU64::new(0);
+
+    thread_local! {
+        /// Per-thread RandomX VM. Each thread builds its own VM from
+        /// the shared `DatasetEntry` on first hash (or on epoch
+        /// boundary when the key rotates) and reuses it thereafter
+        /// without any locking. RandomXVM does NOT impl Clone and is
+        /// NOT thread-safe for concurrent calls — keeping it
+        /// thread-local satisfies the library's threading contract by
+        /// construction.
+        static THREAD_VM: RefCell<Option<ThreadVm>> = const { RefCell::new(None) };
+    }
+
+    struct ThreadVm {
         key: [u8; 32],
         vm: RandomXVM,
     }
 
-    // SAFETY: RandomX VM is thread-safe when each thread uses its own VM instance.
-    // The VM_CACHE holds a single instance protected by a Mutex, ensuring exclusive
-    // access. The RandomX C library documentation confirms that randomx_calculate_hash()
-    // is safe to call from any thread as long as the VM is not shared concurrently.
-    // The Mutex guarantees this invariant.
-    #[allow(unsafe_code)]
-    unsafe impl Send for SendSyncVm {}
-    #[allow(unsafe_code)]
-    unsafe impl Sync for SendSyncVm {}
-
-    static VM_CACHE: Mutex<Option<SendSyncVm>> = Mutex::new(None);
-
-    use std::sync::atomic::AtomicU64;
-    static RETRY_AFTER: AtomicU64 = AtomicU64::new(0);
-
+    /// Hash dispatch — Phase 2 architecture.
+    ///
+    /// **Hot path** (steady state, no epoch flip):
+    ///   1. THREAD_VM.with(...) — zero contention, thread-local
+    ///   2. vm.calculate_hash(input) — the actual work
+    ///
+    /// **Epoch boundary** (seed changes ~every 2048 blocks):
+    ///   - First thread to notice takes DATASET_CACHE.write() and
+    ///     rebuilds the shared cache + (optional) dataset. Pays the
+    ///     ~30-60s dataset build cost ONCE on its own thread.
+    ///   - Every other thread sees the new key via DATASET_CACHE.read()
+    ///     and Arc-clones the cache + dataset into a freshly-built
+    ///     thread-local VM (~ms cost — the dataset is already built,
+    ///     just attaching a new VM head to it).
+    ///   - 2026-05-25 Phase 2 refactor: before this change there was a
+    ///     single global VM behind a `parking_lot::Mutex`, so N mining
+    ///     threads serialized through one VM. With per-thread VMs,
+    ///     aggregate hashrate now scales linearly with `--threads`.
     pub fn compute_hash(seed: &[u8; 32], input: &[u8]) -> std::result::Result<[u8; 32], crate::error::Error> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -300,65 +342,156 @@ mod randomx_cache {
             ));
         }
 
-        let mut guard = VM_CACHE.lock();
-
-        let needs_new_vm = match &*guard {
-            Some(cached) => cached.key != *seed,
-            None => true,
+        // 1. Ensure the global dataset matches the current seed.
+        //    Fast path: read lock + matching key (no allocation).
+        //    Slow path: write lock + rebuild (only on epoch boundary or
+        //    first hash ever).
+        let (cache, dataset, flags) = match ensure_dataset(seed, now_secs) {
+            Ok(triple) => triple,
+            Err(e) => return Err(e),
         };
 
-        if needs_new_vm {
-            match create_vm(seed) {
-                Ok(vm) => {
-                    *guard = Some(SendSyncVm { key: *seed, vm });
-                    RETRY_AFTER.store(0, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    RETRY_AFTER.store(now_secs + 60, Ordering::Relaxed);
-                    return Err(e);
+        // 2. Per-thread VM. If the thread's local VM matches the seed,
+        //    we hash through it directly — no global lock involvement at
+        //    all. Otherwise rebuild from the shared cache + dataset
+        //    (cheap given dataset is already built).
+        THREAD_VM.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let needs_new = match &*guard {
+                Some(tvm) => tvm.key != *seed,
+                None => true,
+            };
+            if needs_new {
+                // Drop the stale VM before building the new one so
+                // peak memory during epoch flip is one VM, not two.
+                *guard = None;
+                let vm = RandomXVM::new(flags, Some(cache.clone()), dataset.clone())
+                    .map_err(|e| crate::error::Error::Internal(
+                        format!("per-thread RandomX VM init: {}", e)
+                    ))?;
+                *guard = Some(ThreadVm { key: *seed, vm });
+            }
+            let tvm = guard.as_ref().expect("thread VM was just installed");
+            let hash = tvm.vm.calculate_hash(input)
+                .map_err(|e| crate::error::Error::Internal(format!("RandomX hash failed: {}", e)))?;
+            let mut output = [0u8; 32];
+            output.copy_from_slice(&hash[..32]);
+            Ok(output)
+        })
+    }
+
+    /// Ensure `DATASET_CACHE` contains an entry for `seed`. Returns
+    /// (cache, dataset, flags) cloned (Arc-bump cheap) for the caller
+    /// to build a per-thread VM from.
+    fn ensure_dataset(
+        seed: &[u8; 32],
+        now_secs: u64,
+    ) -> std::result::Result<(RandomXCache, Option<RandomXDataset>, RandomXFlag), crate::error::Error> {
+        // Fast path: read-only check.
+        {
+            let guard = DATASET_CACHE.read();
+            if let Some(entry) = guard.as_ref() {
+                if entry.key == *seed {
+                    return Ok((entry.cache.clone(), entry.dataset.clone(), entry.flags));
                 }
             }
         }
 
-        let cached = guard.as_ref().ok_or_else(|| {
-            crate::error::Error::Internal("RandomX VM not initialized after successful creation".into())
-        })?;
-        let hash = cached.vm.calculate_hash(input)
-            .map_err(|e| crate::error::Error::Internal(format!("RandomX hash failed: {}", e)))?;
-
-        let mut output = [0u8; 32];
-        output.copy_from_slice(&hash[..32]);
-        Ok(output)
+        // Slow path: build a new entry. Take the write lock; another
+        // thread may have raced ahead and built it first — re-check.
+        let mut guard = DATASET_CACHE.write();
+        if let Some(entry) = guard.as_ref() {
+            if entry.key == *seed {
+                return Ok((entry.cache.clone(), entry.dataset.clone(), entry.flags));
+            }
+        }
+        match create_dataset_entry(seed) {
+            Ok(entry) => {
+                let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
+                *guard = Some(entry);
+                RETRY_AFTER.store(0, Ordering::Relaxed);
+                Ok(triple)
+            }
+            Err(e) => {
+                RETRY_AFTER.store(now_secs + 60, Ordering::Relaxed);
+                Err(e)
+            }
+        }
     }
 
-    fn create_vm(seed: &[u8; 32]) -> std::result::Result<RandomXVM, crate::error::Error> {
+    /// Build the shared `DatasetEntry` for `seed` using the 4-tier
+    /// fallback ladder (full-mem → light-jit → jit-only → interpreted).
+    ///
+    /// This is called from `ensure_dataset` under the DATASET_CACHE
+    /// write lock — only ONE thread runs this per epoch boundary,
+    /// even with N parallel mining threads. Every other thread
+    /// arrives at the read lock, sees the new entry, and Arc-clones
+    /// the cache + dataset for its own VM construction (~ms, not
+    /// 30-60s).
+    fn create_dataset_entry(seed: &[u8; 32]) -> std::result::Result<DatasetEntry, crate::error::Error> {
         let start = std::time::Instant::now();
-
         let recommended = RandomXFlag::get_recommended_flags();
 
-        // FLAG_FULL_MEM is not yet supported here — it requires a separate
-        // RandomXDataset (2 GB) instead of the current Cache-only wiring,
-        // and the library returns "No dataset and FLAG_FULL_MEM set" if
-        // we just OR it into the flags. Strip it unconditionally until we
-        // add dataset support. Light-mode RandomX with JIT + HARD_AES is
-        // already fast enough for testnet mining (~500-2000 H/s on Intel
-        // vCPUs vs the ~10 H/s pure-interpreted fallback).
-        let active_flags = recommended & !RandomXFlag::FLAG_FULL_MEM;
+        // Memory budget: full-mode RandomX needs ~2.5 GB total (cache
+        // + 2 GB dataset, both shared across all threads via Arc).
+        // Operators on low-RAM systems can opt out via env var; we
+        // then fall straight to light mode (cache-only, ~256 MB
+        // total, 5-10× slower per hash).
+        let light_mode_forced = std::env::var("COINCYNC_RANDOMX_LIGHT_MODE")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false);
 
+        // Tier 1: full-memory mode. JIT + AES + the 2 GB dataset.
+        // Skipped if the operator opted out.
+        if !light_mode_forced {
+            let full_flags = recommended | RandomXFlag::FLAG_FULL_MEM;
+            tracing::info!(
+                "Building RandomX dataset (mode: full-mem): active={:?}, key={}... \
+                 (one-time ~30-60s build per epoch; subsequent thread VMs are ~ms)",
+                full_flags,
+                hex::encode(&seed[..4])
+            );
+            match try_build_entry(full_flags, seed) {
+                Ok(entry) => {
+                    tracing::info!(
+                        "RandomX dataset ready in {:.2}s (mode: full-mem, flags: {:?})",
+                        start.elapsed().as_secs_f64(),
+                        full_flags
+                    );
+                    return Ok(entry);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "RandomX full-mem init failed: {}. Falling back to light mode. \
+                         Common cause: insufficient RAM for the 2 GB dataset, or \
+                         randomx_rs build without full-mem support. Set \
+                         COINCYNC_RANDOMX_LIGHT_MODE=1 to skip this attempt next time.",
+                        e
+                    );
+                }
+            }
+        } else {
+            tracing::info!(
+                "Skipping full-mem RandomX (COINCYNC_RANDOMX_LIGHT_MODE=1 set); \
+                 using light mode directly"
+            );
+        }
+
+        // Tier 2: light mode (cache-only).
+        let active_flags = recommended & !RandomXFlag::FLAG_FULL_MEM;
         tracing::info!(
-            "Creating RandomX VM: active={:?}, key={}...",
+            "Building RandomX cache (mode: light-jit): active={:?}, key={}...",
             active_flags,
             hex::encode(&seed[..4])
         );
-
-        match try_create_vm(active_flags, seed) {
-            Ok(vm) => {
+        match try_build_entry(active_flags, seed) {
+            Ok(entry) => {
                 tracing::info!(
-                    "RandomX VM created in {:.2}s (mode: light-jit, flags: {:?})",
+                    "RandomX cache ready in {:.2}s (mode: light-jit, flags: {:?})",
                     start.elapsed().as_secs_f64(),
                     active_flags
                 );
-                return Ok(vm);
+                return Ok(entry);
             }
             Err(e) => {
                 tracing::warn!(
@@ -368,18 +501,13 @@ mod randomx_cache {
             }
         }
 
-        // First fallback: keep JIT but drop everything else. Much faster
-        // than FLAG_DEFAULT (interpreted), which does ~10-100x worse.
+        // Tier 3: JIT-only fallback.
         let jit_only = RandomXFlag::FLAG_JIT;
-        tracing::info!("Creating RandomX VM with JIT-only fallback...");
-        match try_create_vm(jit_only, seed) {
-            Ok(vm) => {
-                // Reduced-mode success: still operator-visible because the
-                // hashrate impact is real (~30-50% of native light-jit).
-                // Print to stderr too so operators not capturing tracing
-                // output still see the warning.
+        tracing::info!("Building RandomX cache with JIT-only fallback...");
+        match try_build_entry(jit_only, seed) {
+            Ok(entry) => {
                 tracing::warn!(
-                    "RandomX VM created in {:.2}s (mode: jit-only, DEGRADED ~30-50% of normal)",
+                    "RandomX cache ready in {:.2}s (mode: jit-only, DEGRADED ~30-50% of normal)",
                     start.elapsed().as_secs_f64()
                 );
                 eprintln!(
@@ -387,23 +515,19 @@ mod randomx_cache {
                        Likely cause: AES/SSSE3 instruction set unavailable, or antivirus\n\
                        blocking some JIT features. Mining will continue but slower.\n"
                 );
-                return Ok(vm);
+                return Ok(entry);
             }
             Err(e) => {
                 tracing::warn!("JIT-only also failed: {}. Falling to interpreted.", e);
             }
         }
 
-        tracing::info!("Creating RandomX VM with FLAG_DEFAULT (interpreted mode)...");
-        match try_create_vm(RandomXFlag::FLAG_DEFAULT, seed) {
-            Ok(vm) => {
-                // Disaster-mode success: this is ~100× slower than normal.
-                // Operators who don't notice this will sit at ~10-50 H/s for
-                // hours wondering why their hashrate is so low. Make it
-                // impossible to miss — error-level tracing + a big stderr
-                // banner with the most common fix.
+        // Tier 4: interpreted (disaster mode).
+        tracing::info!("Building RandomX cache in FLAG_DEFAULT (interpreted mode)...");
+        match try_build_entry(RandomXFlag::FLAG_DEFAULT, seed) {
+            Ok(entry) => {
                 tracing::error!(
-                    "RandomX VM created in {:.2}s (mode: INTERPRETED, ~100× SLOWER than normal)",
+                    "RandomX cache ready in {:.2}s (mode: INTERPRETED, ~100× SLOWER than normal)",
                     start.elapsed().as_secs_f64()
                 );
                 eprintln!(
@@ -423,48 +547,226 @@ mod randomx_cache {
                        ║  that the process isn't sandboxed without W^X relaxation.          ║\n\
                        ╚════════════════════════════════════════════════════════════════════╝\n"
                 );
-                Ok(vm)
+                Ok(entry)
             }
             Err(e) => {
-                tracing::error!("RandomX VM creation failed with all flag combinations: {}", e);
+                tracing::error!("RandomX init failed with all flag combinations: {}", e);
                 Err(crate::error::Error::Internal(format!(
-                    "RandomX VM creation failed: {}",
+                    "RandomX init failed: {}",
                     e
                 )))
             }
         }
     }
 
-    fn try_create_vm(flags: RandomXFlag, seed: &[u8; 32]) -> std::result::Result<RandomXVM, String> {
+    /// Build a `DatasetEntry` for the given flag set. Returns Err
+    /// (with operator-visible context) on cache or dataset alloc
+    /// failure so the caller's tier ladder can retry with weaker
+    /// flags.
+    fn try_build_entry(flags: RandomXFlag, seed: &[u8; 32]) -> std::result::Result<DatasetEntry, String> {
         let cache = RandomXCache::new(flags, seed)
             .map_err(|e| format!("cache init: {}", e))?;
 
-        // If FULL_MEM is requested, build the 2GB dataset from the cache.
-        // This takes 30-60s but hashing is 5-10x faster afterward.
         let dataset = if flags.contains(RandomXFlag::FLAG_FULL_MEM) {
-            tracing::info!("Building RandomX dataset (2 GB) — this takes 30-60s...");
+            tracing::info!(
+                "Building RandomX dataset (~2 GB, ~30-60s, one-time per epoch)..."
+            );
+            let ds_start = std::time::Instant::now();
             match RandomXDataset::new(flags, cache.clone(), 0) {
                 Ok(ds) => {
-                    tracing::info!("RandomX dataset built successfully");
+                    tracing::info!(
+                        "RandomX dataset built in {:.2}s",
+                        ds_start.elapsed().as_secs_f64()
+                    );
                     Some(ds)
                 }
                 Err(e) => {
-                    tracing::warn!("Dataset allocation failed: {} — falling back to light mode", e);
-                    None
+                    return Err(format!(
+                        "dataset alloc failed (likely insufficient RAM for 2 GB): {}",
+                        e
+                    ));
                 }
             }
         } else {
             None
         };
 
-        RandomXVM::new(flags, Some(cache), dataset)
+        Ok(DatasetEntry { key: *seed, cache, dataset, flags })
+    }
+
+    /// Test helper: build a single VM for the given flag set. The
+    /// production hot path no longer goes through this — VMs live in
+    /// `thread_local!` cells, built from a shared dataset entry — but
+    /// the equivalence test still uses this to assemble two VMs side
+    /// by side and compare their hash output.
+    #[cfg(test)]
+    fn try_create_vm(flags: RandomXFlag, seed: &[u8; 32]) -> std::result::Result<RandomXVM, String> {
+        let entry = try_build_entry(flags, seed)?;
+        RandomXVM::new(flags, Some(entry.cache), entry.dataset)
             .map_err(|e| format!("VM init: {}", e))
     }
 
+    /// Drop the global dataset cache. Used by tests and tooling that
+    /// need to force a rebuild on the next hash. Note: thread-local
+    /// VMs in OTHER threads can't be cleared from here — they'll
+    /// rebuild themselves on their next hash call when they see the
+    /// new (or absent) dataset key. Within the calling thread, the
+    /// thread-local VM is also cleared so the rebuild path is
+    /// exercised on the next call here.
     #[allow(dead_code)]
     pub fn clear_cache() {
-        let mut guard = VM_CACHE.lock();
+        let mut guard = DATASET_CACHE.write();
         *guard = None;
+        THREAD_VM.with(|cell| { *cell.borrow_mut() = None; });
+    }
+
+    /// Consensus-equivalence test: full-mem mode and light mode MUST
+    /// produce bit-identical hashes for the same seed + input. This is
+    /// guaranteed by the RandomX spec (the whole point of the two
+    /// modes is that verifiers run light, miners run fast, and they
+    /// must agree) — this test catches *our* wiring bugs that would
+    /// break the guarantee (e.g. accidentally building the dataset
+    /// from a different seed than the cache).
+    ///
+    /// Marked `#[ignore]` because building the 2 GB dataset takes
+    /// 30-60s and uses ~2.5 GB RAM; not appropriate for default
+    /// `cargo test` runs. Run explicitly with:
+    ///
+    ///   cargo test --release --features randomx -- --ignored \
+    ///     randomx_cache::tests::fast_light_equivalence
+    #[cfg(test)]
+    #[allow(unsafe_code)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        #[ignore]
+        fn fast_light_equivalence() {
+            let seed = [0xA1u8; 32];
+            let input = b"coincync randomx fast-vs-light equivalence test";
+
+            // Light mode — recommended flags minus FULL_MEM.
+            let light_flags = RandomXFlag::get_recommended_flags()
+                & !RandomXFlag::FLAG_FULL_MEM;
+            let light_vm = try_create_vm(light_flags, &seed)
+                .expect("light-mode VM build must succeed on test host");
+            let light_hash = light_vm.calculate_hash(input)
+                .expect("light-mode hash must succeed");
+
+            // Full mode — recommended flags including FULL_MEM. This
+            // is the 30-60s init.
+            let full_flags = RandomXFlag::get_recommended_flags()
+                | RandomXFlag::FLAG_FULL_MEM;
+            let full_vm = try_create_vm(full_flags, &seed)
+                .expect("full-mem VM build must succeed on test host with ~3 GB free");
+            let full_hash = full_vm.calculate_hash(input)
+                .expect("full-mem hash must succeed");
+
+            assert_eq!(
+                light_hash, full_hash,
+                "RandomX fast and light modes MUST produce identical hashes — \
+                 if this fails, our cache/dataset wiring has a seed mismatch \
+                 and the chain will fork between full-mem miners and light-mode verifiers"
+            );
+        }
+
+        /// Phase 2 invariant: N mining threads hashing the same
+        /// (seed, input) MUST all produce the same hash. If the
+        /// per-thread VM design has a cross-thread sharing bug,
+        /// one or more threads will see corrupted state and return
+        /// a different hash.
+        ///
+        /// Marked `#[ignore]` because it touches the global
+        /// DATASET_CACHE and would race with other tests in the
+        /// same process. Run explicitly with:
+        ///
+        ///   cargo test --release --features randomx -- --ignored \
+        ///     randomx_cache::tests::concurrent_threads_consistent_hashes
+        #[test]
+        #[ignore]
+        fn concurrent_threads_consistent_hashes() {
+            use std::thread;
+
+            // Use light mode to keep the test cheap (~ms not 30-60s
+            // for dataset build). The per-thread VM path being tested
+            // is the same in both modes — only the underlying
+            // dataset/cache differs.
+            std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+            super::clear_cache();
+
+            let seed = [0xC0u8; 32];
+            let input = b"coincync randomx phase-2 concurrent-threads consistency test";
+
+            // Single-thread baseline: what the hash SHOULD be.
+            let baseline = super::compute_hash(&seed, input)
+                .expect("baseline hash must succeed");
+
+            // Fan out: each thread hashes the same input and reports.
+            const N_THREADS: usize = 8;
+            let mut handles = Vec::with_capacity(N_THREADS);
+            for tid in 0..N_THREADS {
+                let seed = seed;
+                handles.push(thread::spawn(move || {
+                    // Run several rounds per thread to maximize
+                    // opportunity for any racy/shared state to
+                    // corrupt the output.
+                    let mut hashes = Vec::with_capacity(32);
+                    for _ in 0..32 {
+                        let h = super::compute_hash(&seed, input)
+                            .unwrap_or_else(|e| panic!("thread {tid} hash failed: {e}"));
+                        hashes.push(h);
+                    }
+                    hashes
+                }));
+            }
+
+            // Every thread × every round MUST match the baseline.
+            for (tid, h) in handles.into_iter().enumerate() {
+                let results = h.join().expect("thread panicked");
+                for (round, hash) in results.iter().enumerate() {
+                    assert_eq!(
+                        hash, &baseline,
+                        "thread {tid} round {round} produced a different hash than the \
+                         single-thread baseline — the per-thread VM design has a \
+                         cross-thread sharing bug; mining nodes would produce invalid \
+                         shares and consensus would split"
+                    );
+                }
+            }
+        }
+
+        /// Phase 2 invariant: changing the seed forces every thread
+        /// to rebuild its VM, and the new hash output reflects the
+        /// new seed. Catches a stale-thread-local bug where a thread
+        /// keeps hashing through a VM bound to a previous epoch's key
+        /// after the global dataset has rotated.
+        #[test]
+        #[ignore]
+        fn epoch_rotation_rebuilds_thread_vms() {
+            std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+            super::clear_cache();
+
+            let input = b"coincync randomx epoch-rotation test";
+            let seed_a = [0xAAu8; 32];
+            let seed_b = [0xBBu8; 32];
+
+            let hash_a_1 = super::compute_hash(&seed_a, input).unwrap();
+            let hash_b_1 = super::compute_hash(&seed_b, input).unwrap();
+            assert_ne!(
+                hash_a_1, hash_b_1,
+                "different seeds MUST produce different hashes — \
+                 if they don't, the seed isn't reaching the VM and \
+                 epoch rotation is broken"
+            );
+
+            // Round-trip back to seed_a: same output as before.
+            let hash_a_2 = super::compute_hash(&seed_a, input).unwrap();
+            assert_eq!(
+                hash_a_1, hash_a_2,
+                "re-using a seed MUST give the same hash — \
+                 the cache key check is comparing the wrong bytes"
+            );
+        }
     }
 }
 
