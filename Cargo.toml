@@ -185,7 +185,7 @@ ordered-float = "4"
 # ── CLI ──────────────────────────────────────────────────────
 colored   = "2"
 indicatif = { version = "0.18", features = ["tokio"] }
-dialoguer = { version = "0.11", features = ["password"], optional = true }
+dialoguer = { version = "0.12", features = ["password"], optional = true }
 console   = "0.15"
 rustyline = "13"
 strsim    = "0.11"
