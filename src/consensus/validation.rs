@@ -19,7 +19,7 @@ use crate::constants::{
     block_version_at_height, MAX_TIMESTAMP_DRIFT,
     MIN_FEE_PER_BYTE,
 };
-use super::fee_market::distribute_fee;
+use super::fee_market::{congestion_multiplier, distribute_fee};
 
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -605,16 +605,22 @@ pub fn validate_block_with_checkpoint_for_network(
         // architectures, risking consensus forks at boundary values.
         // Congestion thresholds: <50% → 1x, <75% → 1.5x, <90% → 2x, >=90% → 3x
         // Expressed as size * 100 / MAX_BLOCK_SIZE (percent, integer).
+        //
+        // CONSENSUS-DEDUP (2026-05-24): the multiplier is now sourced from
+        // `fee_market::congestion_multiplier` rather than an inlined
+        // duplicate table. Both the validator and the wallet/RPC fee
+        // estimators MUST agree on the bucket boundaries — any divergent
+        // edit would manifest as the validator rejecting every transaction
+        // in blocks near a congestion boundary while wallets thought their
+        // fees were sufficient (a consensus-fork-flavored failure mode).
+        // The returned value is multiplier × 100 (100/150/200/300); the
+        // prior inlined table used × 10 (10/15/20/30). The arithmetic is
+        // bit-identical because `q * (mul*10) / 10` and `q * (mul*100) / 100`
+        // produce the same floor-divided integer for any q where the
+        // multiplication doesn't approach u64::MAX (the `checked_mul`
+        // chain catches that case identically).
         let congestion_pct: u64 = ((size as u128 * 100) / MAX_BLOCK_SIZE as u128) as u64;
-        let multiplier_x10: u64 = if congestion_pct < 50 {
-            10
-        } else if congestion_pct < 75 {
-            15
-        } else if congestion_pct < 90 {
-            20
-        } else {
-            30
-        };
+        let multiplier_x100: u64 = congestion_multiplier(congestion_pct);
 
         for (idx, tx) in block.transactions.iter().enumerate().skip(1) {
             let tx_size = tx.size() as u64;
@@ -626,8 +632,8 @@ pub fn validate_block_with_checkpoint_for_network(
             // oversized-transaction error surfaces the real problem.
             let dynamic_min = match tx_size
                 .checked_mul(MIN_FEE_PER_BYTE)
-                .and_then(|v| v.checked_mul(multiplier_x10))
-                .map(|v| v / 10)
+                .and_then(|v| v.checked_mul(multiplier_x100))
+                .map(|v| v / 100)
             {
                 Some(v) => v,
                 None => {
@@ -640,9 +646,9 @@ pub fn validate_block_with_checkpoint_for_network(
             };
             if tx.fee.as_atomic() < dynamic_min {
                 result.add_error(format!(
-                    "Transaction {} fee too low for congestion: {} < {} (congestion {}%, multiplier {}x/10)",
+                    "Transaction {} fee too low for congestion: {} < {} (congestion {}%, multiplier {}x/100)",
                     idx, tx.fee.as_atomic(), dynamic_min,
-                    congestion_pct, multiplier_x10
+                    congestion_pct, multiplier_x100
                 ));
             }
         }
