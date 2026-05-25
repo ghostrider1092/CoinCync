@@ -191,12 +191,27 @@ impl SparkStore {
     pub fn checkpoint_at_height(&self, height: u64) {
         let coins_len = self.coins.read().len();
         let mut cps = self.checkpoints.write();
+        // INVARIANT: heights are strictly monotonic. Checkpoints are
+        // taken before each block applies, so out-of-order calls
+        // (height N then N-1) indicate a chain-orchestrator bug —
+        // the reorg path should call `rewind` to pop, not push a
+        // lower-height checkpoint on top.
+        debug_assert!(
+            cps.last().map_or(true, |prev| height > prev.height),
+            "SparkStore: checkpoint height regression: prev={} new={}",
+            cps.last().map(|p| p.height).unwrap_or(0),
+            height
+        );
         cps.push(SparkCheckpoint { height, coins_len });
         // Bound the stack — checkpoints deeper than the chain's reorg
         // cap can never be a rewind target.
         if cps.len() > MAX_REORG_CHECKPOINTS {
             cps.remove(0);
         }
+        // INVARIANT: post-trim length never exceeds the cap. Cheap
+        // assertion that catches any off-by-one in MAX_REORG_CHECKPOINTS
+        // logic (e.g., `>` vs `>=` slip).
+        debug_assert!(cps.len() <= MAX_REORG_CHECKPOINTS);
     }
 
     /// Rewind one checkpoint — i.e. disconnect the most recently
