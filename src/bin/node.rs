@@ -56,6 +56,27 @@ struct Cli {
     #[arg(long)]
     no_peers: bool,
 
+    /// SOCKS5 proxy address (e.g. `127.0.0.1:9050` for a local Tor
+    /// daemon). When set, P2P connections AND DNS-seed queries route
+    /// through the proxy. DNS uses DNS-over-TCP via the proxy (default
+    /// resolver `1.1.1.1:53`; override with `COINCYNC_SOCKS_DNS_RESOLVER`)
+    /// so the OS resolver never sees the seed hostnames.
+    #[arg(long, value_name = "HOST:PORT")]
+    proxy: Option<String>,
+
+    /// Convenience shortcut for `--proxy 127.0.0.1:9050` — the default
+    /// Tor SOCKS5 listener. Ignored if `--proxy` is also set.
+    #[arg(long)]
+    tor: bool,
+
+    /// Refuse to connect to clearnet peers — only `.onion` addresses
+    /// accepted. Implies a proxy (`--tor` is added automatically if
+    /// neither `--proxy` nor `--tor` is set). Use this when you require
+    /// strict Tor-only operation; the node will reject any peer whose
+    /// address isn't a `.onion` host.
+    #[arg(long)]
+    onion_only: bool,
+
     /// Mount the embedded block explorer at GET / on the REST port.
     ///
     /// LOCAL DEVELOPMENT ONLY. For public deployment, run the
@@ -177,6 +198,9 @@ async fn main() {
                 cli.addnode,
                 cli.no_peers,
                 cli.explorer,
+                cli.proxy,
+                cli.tor,
+                cli.onion_only,
             ).await {
                 error!("node start failed: {}", e);
                 std::process::exit(1);
@@ -378,6 +402,9 @@ async fn start_node(
     addnodes: Vec<String>,
     no_peers: bool,
     serve_explorer: bool,
+    proxy_arg: Option<String>,
+    tor_shortcut: bool,
+    onion_only: bool,
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
@@ -419,6 +446,64 @@ async fn start_node(
         p2p_config.bootstrap.dns_seeds.clear();
         p2p_config.bootstrap.seed_nodes.clear();
         p2p_config.max_outbound = 0;
+    }
+
+    // --proxy / --tor / --onion-only wire-up.
+    //
+    // Resolution order (CLI flags only — config-file path lands separately):
+    //
+    //   1. `--proxy HOST:PORT`  — explicit address; takes priority
+    //   2. `--tor`               — shortcut for 127.0.0.1:9050
+    //   3. `--onion-only` alone  — implies --tor (no clear-net DNS path
+    //                              exists otherwise; without a proxy the
+    //                              bootstrapper would just skip DNS)
+    //
+    // The resulting `ProxyConfig` is plumbed through `p2p_config.proxy`;
+    // bootstrap.rs's `get_peers_with_proxy()` / `initial_peers()` route
+    // DNS-seed queries via DNS-over-TCP through the proxy automatically
+    // when this is set (landed in commit 86eee87).
+    let proxy_cfg = if let Some(addr) = proxy_arg.as_deref() {
+        // Parse "host:port" — accepts ipv4, ipv6 in [brackets], or
+        // hostname. The bootstrap layer pipes the string straight to
+        // tokio_socks::Socks5Stream::connect(), which does its own
+        // resolution.
+        match addr.rsplit_once(':') {
+            Some((host, port_str)) => match port_str.parse::<u16>() {
+                Ok(port) => Some(coincync::config::ProxyConfig {
+                    enabled: true,
+                    address: host.trim_matches(|c| c == '[' || c == ']').to_string(),
+                    port,
+                    onion_only,
+                    ..Default::default()
+                }),
+                Err(_) => {
+                    error!("--proxy port is not a valid u16: {:?}", port_str);
+                    std::process::exit(1);
+                }
+            },
+            None => {
+                error!("--proxy must be HOST:PORT, got {:?}", addr);
+                std::process::exit(1);
+            }
+        }
+    } else if tor_shortcut || onion_only {
+        // Both shortcuts converge on the local Tor SOCKS5 default.
+        let mut tor = coincync::config::ProxyConfig::tor();
+        tor.onion_only = onion_only;
+        Some(tor)
+    } else {
+        None
+    };
+
+    if let Some(cfg) = proxy_cfg {
+        info!(
+            "Proxy enabled: {}:{} ({}{})",
+            cfg.address,
+            cfg.port,
+            if cfg.onion_only { "onion-only" } else { "clearnet+onion" },
+            if cfg.username.is_some() { ", authenticated" } else { "" },
+        );
+        p2p_config.proxy = Some(cfg);
     }
 
     // Open database
