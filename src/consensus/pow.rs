@@ -354,7 +354,7 @@ mod randomx_cache {
         match try_create_vm(active_flags, seed) {
             Ok(vm) => {
                 tracing::info!(
-                    "RandomX VM created in {:.2}s (flags: {:?})",
+                    "RandomX VM created in {:.2}s (mode: light-jit, flags: {:?})",
                     start.elapsed().as_secs_f64(),
                     active_flags
                 );
@@ -374,9 +374,18 @@ mod randomx_cache {
         tracing::info!("Creating RandomX VM with JIT-only fallback...");
         match try_create_vm(jit_only, seed) {
             Ok(vm) => {
-                tracing::info!(
-                    "RandomX VM created in {:.2}s (JIT-only)",
+                // Reduced-mode success: still operator-visible because the
+                // hashrate impact is real (~30-50% of native light-jit).
+                // Print to stderr too so operators not capturing tracing
+                // output still see the warning.
+                tracing::warn!(
+                    "RandomX VM created in {:.2}s (mode: jit-only, DEGRADED ~30-50% of normal)",
                     start.elapsed().as_secs_f64()
+                );
+                eprintln!(
+                    "\n⚠️  RandomX fell back to JIT-only mode. Hashrate will be reduced.\n\
+                       Likely cause: AES/SSSE3 instruction set unavailable, or antivirus\n\
+                       blocking some JIT features. Mining will continue but slower.\n"
                 );
                 return Ok(vm);
             }
@@ -388,9 +397,31 @@ mod randomx_cache {
         tracing::info!("Creating RandomX VM with FLAG_DEFAULT (interpreted mode)...");
         match try_create_vm(RandomXFlag::FLAG_DEFAULT, seed) {
             Ok(vm) => {
-                tracing::info!(
-                    "RandomX VM created in {:.2}s (interpreted mode)",
+                // Disaster-mode success: this is ~100× slower than normal.
+                // Operators who don't notice this will sit at ~10-50 H/s for
+                // hours wondering why their hashrate is so low. Make it
+                // impossible to miss — error-level tracing + a big stderr
+                // banner with the most common fix.
+                tracing::error!(
+                    "RandomX VM created in {:.2}s (mode: INTERPRETED, ~100× SLOWER than normal)",
                     start.elapsed().as_secs_f64()
+                );
+                eprintln!(
+                    "\n╔════════════════════════════════════════════════════════════════════╗\n\
+                       ║  ⚠️  RandomX fell back to INTERPRETED MODE.                         ║\n\
+                       ║                                                                    ║\n\
+                       ║  Your hashrate will be ~100× SLOWER than normal                    ║\n\
+                       ║  (expect ~10-50 H/s instead of 500-2000 H/s per thread).           ║\n\
+                       ║                                                                    ║\n\
+                       ║  Most common cause on Windows: antivirus blocking JIT memory       ║\n\
+                       ║  pages. Fix:                                                       ║\n\
+                       ║    • Add the coincync-rig binary to Windows Defender exclusions    ║\n\
+                       ║    • Or temporarily disable third-party AV and restart the miner   ║\n\
+                       ║    • Or run the miner as Administrator                             ║\n\
+                       ║                                                                    ║\n\
+                       ║  On Linux: ensure /proc/sys/kernel/perf_event_paranoid <= 2 and    ║\n\
+                       ║  that the process isn't sandboxed without W^X relaxation.          ║\n\
+                       ╚════════════════════════════════════════════════════════════════════╝\n"
                 );
                 Ok(vm)
             }
