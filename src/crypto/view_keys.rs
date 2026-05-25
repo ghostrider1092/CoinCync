@@ -11,11 +11,23 @@ pub enum ViewKeyScope { EpochOnly(u64), TimeRange { start: u64, end: u64 }, Amou
 ///
 /// SECURITY (A6-VIEWKEY): `key_data` is excluded from `Serialize` to prevent
 /// accidental exposure in logs, RPC responses, or JSON dumps. The field is
-/// zeroed on drop via `ZeroizeOnDrop`.
+/// zeroed on drop via `ZeroizeOnDrop` — `key_data` deliberately does NOT
+/// carry `#[zeroize(skip)]` so the `[u8; 32]` Zeroize impl wipes it; the
+/// non-secret metadata below carry `skip` only as a micro-optimization
+/// (zeroing a u64 epoch is harmless but pointless).
+///
+/// HISTORICAL BUG: prior to 2026-05-24 this field had `#[zeroize(skip)]`
+/// with an in-line comment claiming "skip only applies to non-secret
+/// fields; key_data IS zeroized via the struct derive." The comment was
+/// wrong — `zeroize_derive` v1.4.x explicitly excludes `skip`ped fields
+/// from the generated `Zeroize::zeroize` impl (see zeroize_derive's
+/// `zeroize_with_skip` test). The skip attribute on the secret meant the
+/// claimed forward-secrecy guarantee was not enforced. Removing it
+/// restores the documented behavior.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct ViewKey {
     /// EXCLUDED from Serialize — never leaves process memory unless explicitly exported.
-    #[zeroize(skip)] // skip only applies to non-secret fields; key_data IS zeroized via the struct derive
+    /// Zeroed on Drop via the struct's `ZeroizeOnDrop` derive (no `skip` attribute).
     pub key_data: [u8; 32],
     #[zeroize(skip)]
     pub epoch: u64,
