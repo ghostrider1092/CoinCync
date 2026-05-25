@@ -906,8 +906,12 @@ async fn process_stratum_request(
                         miner.difficulty = miner.difficulty.saturating_mul(3) / 2; // *1.5 without float
                         miner.difficulty = miner.difficulty.min(config.max_difficulty);
                     } else if shares_per_minute < config.target_shares_per_minute as f64 * 0.5 {
-                        // Too few shares, decrease difficulty
-                        miner.difficulty = miner.difficulty * 7 / 10; // *0.7 without float
+                        // Too few shares, decrease difficulty.
+                        // SAFETY: saturating_mul protects against u64 overflow when difficulty
+                        // > u64::MAX/7 (~2.6e18). Plain `* 7` would panic in debug / wrap in
+                        // release; the subsequent .max(min_difficulty) catches wrap-to-near-zero
+                        // but NOT wrap-to-medium, so the saturate-then-divide form is required.
+                        miner.difficulty = miner.difficulty.saturating_mul(7) / 10; // *0.7 without float
                         miner.difficulty = miner.difficulty.max(config.min_difficulty);
                     }
 

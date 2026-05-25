@@ -36,6 +36,12 @@ use crate::wallet::lightsync::BlockDigest;
 use crate::primitives::PublicKey;
 
 /// Hard cap on number of candidate outputs returned per scan request.
+///
+/// Unlike `MAX_SCAN_BLOCKS_PER_REQ`, hitting this cap is NOT an error
+/// — the scan returns early with `has_more = true` and the partial
+/// outputs collected so far. The caller MUST advance `start_height`
+/// past the highest `output.height` it received and re-issue to keep
+/// going. Wallets that ignore `has_more` will silently miss outputs.
 const MAX_SCAN_OUTPUTS: usize = 10_000;
 
 /// Hard cap on the block range a single scan request may sweep. A
@@ -137,7 +143,14 @@ pub struct ScanResponse {
     pub chain_height: u64,
     /// Detected outputs belonging to this wallet
     pub outputs: Vec<DetectedOutput>,
-    /// Whether there are more blocks to scan
+    /// True when the caller must paginate to get the rest. Set in two
+    /// cases: (1) `scanned_to_height < chain_height` — the requested
+    /// range didn't reach the tip; (2) the output cap fired mid-scan
+    /// — `MAX_SCAN_OUTPUTS` candidates were collected and the scan
+    /// stopped early. In case (2), some outputs at `scanned_to_height`
+    /// may still be unreturned; resume at `scanned_to_height` (not
+    /// `scanned_to_height + 1`) so the next request re-covers that
+    /// block and picks up any remainder.
     pub has_more: bool,
     /// True only when outputs are cryptographically ownership-verified.
     /// Current public scan endpoint returns candidate matches only.
@@ -221,8 +234,14 @@ impl LightWalletServer {
         let mut detected = Vec::new();
         let mut blocks_scanned = 0u64;
         let mut capped = false;
+        // When the output cap fires mid-block we must report the
+        // partially-scanned block as the resume point, not end_height.
+        // A caller advancing past end_height would skip every block
+        // between the cap-block and end_height.
+        let mut last_h = req.start_height;
 
         for h in req.start_height..=end_height {
+            last_h = h;
             if let Some(block) = self.chain.get_block_by_height(h) {
                 let digest = BlockDigest::from_block(&block);
 
@@ -265,9 +284,10 @@ impl LightWalletServer {
             }
         }
 
+        let scanned_to_height = if capped { last_h } else { end_height };
         Ok(ScanResponse {
             blocks_scanned,
-            scanned_to_height: end_height,
+            scanned_to_height,
             chain_height,
             outputs: detected,
             has_more: capped || end_height < chain_height,
