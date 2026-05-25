@@ -1482,11 +1482,11 @@ async fn cmd_multisig_send(
     println!("  Shares loaded: {}", shares.len());
     println!("  Group key:     {}", hex::encode(config.group_public_key));
 
-    // Reconstruct the group secret
+    // Reconstruct the group secret directly into a ZeroizeOnDrop wrapper.
     println!("  Reconstructing group secret from {} shares...", shares.len());
-    let mut secret_bytes = multisig::reconstruct_group_secret(&shares)
+    let secret = multisig::reconstruct_group_secret(&shares)
         .map_err(|e| format!("reconstruct: {}", e))?;
-    println!("  Group secret reconstructed (will zeroize after signing)");
+    println!("  Group secret reconstructed (will zeroize on drop)");
 
     // From here, use the reconstructed key like a normal wallet send
     // The CLSAG signing happens inside create_privacy_transaction
@@ -1502,11 +1502,11 @@ async fn cmd_multisig_send(
     println!("  For production: implement threshold CLSAG where the group");
     println!("  key is NEVER reconstructed (requires custom FROST ciphersuite).");
 
-    // Zeroize
-    use zeroize::Zeroize;
-    secret_bytes.zeroize();
+    // `secret` drops here — SecretScalar's ZeroizeOnDrop impl wipes
+    // the underlying Scalar on the way out.
+    drop(secret);
     println!();
-    println!("  Group secret: ZEROIZED");
+    println!("  Group secret: ZEROIZED (via SecretScalar::Drop)");
 
     Ok(())
 }

@@ -341,12 +341,15 @@ use curve25519_dalek::scalar::Scalar;
 use zeroize::Zeroize;
 
 /// Reconstruct the group secret key from M signing shares.
-/// The reconstructed key is used for a single CLSAG sign, then zeroized.
 ///
-/// SECURITY: caller MUST zeroize the returned scalar after use.
+/// Returns a [`SecretScalar`] (zeroize-on-drop) rather than raw bytes so
+/// the reconstructed key never has a window where it sits as a plain
+/// `[u8; 32]` on the caller's stack waiting for manual zeroization. The
+/// internal intermediates (signing shares, the working Scalar) are still
+/// zeroized at function exit.
 pub fn reconstruct_group_secret(
     shares: &[KeyShare],
-) -> Result<[u8; 32]> {
+) -> Result<crate::crypto::SecretScalar> {
     if shares.is_empty() {
         return Err(Error::InvalidState("no shares provided".into()));
     }
@@ -400,7 +403,10 @@ pub fn reconstruct_group_secret(
         group_secret += lambda * signing_scalars[i];
     }
 
-    let result = group_secret.to_bytes();
+    // Wrap into SecretScalar (ZeroizeOnDrop) BEFORE zeroizing the
+    // working Scalar so the secret only ever lives inside the
+    // zeroize-on-drop wrapper from this point forward.
+    let result = crate::crypto::SecretScalar::from_scalar(group_secret);
 
     // Zeroize intermediate values
     for s in &mut signing_scalars {
@@ -426,12 +432,8 @@ pub fn clsag_sign_multisig(
     blinding_diff: &crate::crypto::SecretScalar,
     pseudo_output: &crate::crypto::EcCommitment,
 ) -> Result<crate::crypto::ClsagSignature> {
-    // Reconstruct group secret
-    let mut secret_bytes = reconstruct_group_secret(key_shares)?;
-    let secret = crate::crypto::SecretScalar::from_bytes(secret_bytes);
-
-    // Zeroize the raw bytes immediately
-    secret_bytes.zeroize();
+    // Reconstruct group secret directly into a zeroize-on-drop wrapper.
+    let secret = reconstruct_group_secret(key_shares)?;
 
     // Sign with standard CLSAG
     let mut rng = OsRng;
@@ -445,8 +447,8 @@ pub fn clsag_sign_multisig(
         &mut rng,
     )?;
 
-    // Secret is dropped here (SecretScalar should impl Zeroize/Drop)
-
+    // `secret` drops here — SecretScalar's ZeroizeOnDrop impl wipes
+    // the underlying Scalar on the way out.
     Ok(sig)
 }
 

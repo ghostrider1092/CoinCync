@@ -123,6 +123,14 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
                     // SECURITY: Don't pre-allocate full buffer to prevent memory exhaustion attacks.
                     // An attacker could send headers claiming large payloads but never send the data.
                     // Instead, start with a reasonable initial allocation and grow as data arrives.
+                    //
+                    // PERF TRADE-OFF: For a worst-case 16 MB payload, this incremental
+                    // strategy triggers ~8 reallocs (Vec doubles: 64K → 128K → … → 16M)
+                    // and a final ~8 MB memcpy when growing from 8M to 16M. Per peer-
+                    // connection cost; pooled-buffer reuse across messages would amortize
+                    // this if/when throughput becomes a measured bottleneck. Currently
+                    // accepted because memory-exhaustion safety dominates on a fresh peer
+                    // (attacker claims 16M, never sends → we only commit 64K not 16M).
                     let initial_capacity = std::cmp::min(self.expected_len, 64 * 1024); // Max 64KB initial
                     self.payload_buf = Vec::with_capacity(initial_capacity);
                 }

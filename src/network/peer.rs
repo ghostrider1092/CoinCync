@@ -252,6 +252,17 @@ impl PeerConnection {
     ///
     /// SECURITY: Implements message size limits to prevent memory exhaustion attacks.
     /// Messages larger than MAX_MESSAGE_SIZE are rejected and the connection is closed.
+    ///
+    /// PERF / DOS NOTE: `reader.read()` returns as soon as ≥1 byte is available,
+    /// so a peer sending 1-byte TCP frames forces this loop to iterate once per
+    /// byte. Per-connection cost is bounded by MAX_BYTES_PER_SECOND (10 MB/s) +
+    /// WINDOW_BYTE_LIMIT (100 MB / 60s), so worst-case ~10 M loop iterations/sec
+    /// per attacker connection. The framing layer (framing.rs) reassembles
+    /// bytes into messages downstream — this layer just forwards raw bytes. If
+    /// loop-overhead-per-iteration becomes a measured bottleneck, switching
+    /// to `reader.read_exact(N)` for known frame-header sizes (12 bytes) would
+    /// amortize the syscall storm; deferred until profiled, because the rate
+    /// limits already cap the per-connection CPU cost.
     pub async fn run(mut self, msg_tx: mpsc::Sender<(PeerId, Vec<u8>)>, peer_id: PeerId) -> Result<()> {
         let (reader, writer) = self.stream.split();
         let mut reader = BufReader::new(reader);
