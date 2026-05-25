@@ -2062,6 +2062,40 @@ fn get_wallet_address(state: tauri::State<'_, State>) -> String {
     }
 }
 
+/// Generate an SVG QR code for the given payload (typically a wallet
+/// address). Server-side rendering via the `qrcode` crate — keeps the
+/// JS bundle small and uses the same Rust toolchain we audit. Returns
+/// a self-contained SVG string the frontend can drop into `innerHTML`.
+///
+/// Min 200×200 / max 400×400 viewBox-scaled — the receive page CSS
+/// constrains the actual rendered size so the qrcode crate just needs
+/// to produce a clean readable code.
+#[tauri::command]
+fn generate_qr_svg(payload: String) -> Result<String, WalletError> {
+    use qrcode::{render::svg, QrCode};
+    if payload.is_empty() {
+        return Err(WalletError::op("qr payload empty"));
+    }
+    if payload.len() > 4296 {
+        // QR version 40-L max alphanumeric capacity. Beyond this the
+        // qrcode crate will fail; surface the friendly error.
+        return Err(WalletError::op(format!(
+            "qr payload too long: {} bytes (max ~4296)",
+            payload.len()
+        )));
+    }
+    let code = QrCode::new(payload.as_bytes())
+        .map_err(|e| WalletError::op(format!("qr encode: {}", e)))?;
+    Ok(code
+        .render::<svg::Color>()
+        .min_dimensions(200, 200)
+        .max_dimensions(400, 400)
+        .quiet_zone(true)
+        .dark_color(svg::Color("#0a0a0a"))
+        .light_color(svg::Color("#ffffff"))
+        .build())
+}
+
 #[tauri::command]
 fn stop_mining(
     state: tauri::State<'_, State>,
@@ -2418,7 +2452,7 @@ fn main() {
                     create_wallet, restore_wallet, unlock_wallet, lock_wallet, scan_wallet, send_transaction,
                     dismiss_reorg_notification,
                     check_binaries, start_mining, stop_mining, get_mining_stats,
-                    get_wallet_address,
+                    get_wallet_address, generate_qr_svg,
                     check_for_update,
                     multisig_gen, multisig_info, multisig_round1, multisig_round2,
                     multisig_aggregate, multisig_send,
@@ -2436,7 +2470,7 @@ fn main() {
                     create_wallet, restore_wallet, unlock_wallet, lock_wallet, scan_wallet, send_transaction,
                     dismiss_reorg_notification,
                     check_binaries, start_mining, stop_mining, get_mining_stats,
-                    get_wallet_address,
+                    get_wallet_address, generate_qr_svg,
                     check_for_update,
                     multisig_gen, multisig_info, multisig_round1, multisig_round2,
                     multisig_aggregate, multisig_send,

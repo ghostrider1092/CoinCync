@@ -20,6 +20,10 @@ keyring = "2"
 # first launch. Pinned to 0.8 to match the workspace-wide version
 # elsewhere (root Cargo.toml + crates/coincync-rig/Cargo.toml).
 rand = "0.8"
+# QR code rendering for the Receive page. SVG output keeps the bundle
+# small and scales cleanly. Same version as the workspace-wide pin in
+# the root Cargo.toml.
+qrcode = "0.14"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

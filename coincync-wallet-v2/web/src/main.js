@@ -66,6 +66,39 @@ async function mockInvoke(cmd, params) {
     case "swap_list":
       return { swaps: [] };
 
+    case "generate_qr_svg": {
+      // Browser-preview fallback (no Tauri = no qrcode crate). Returns
+      // a decorative-grid SVG that LOOKS like a QR for design purposes.
+      // The real Tauri build returns a scannable code via the workspace's
+      // qrcode crate.
+      const payload = (params && params.payload) || "";
+      const seed = [...payload].reduce((a, c) => a * 31 + c.charCodeAt(0), 0);
+      const size = 25;
+      const cells = [];
+      let s = Math.abs(seed);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const inCorner =
+            (x < 7 && y < 7) || (x >= size - 7 && y < 7) || (x < 7 && y >= size - 7);
+          const inCornerInner =
+            (x >= 1 && x < 6 && y >= 1 && y < 6) ||
+            (x >= size - 6 && x < size - 1 && y >= 1 && y < 6) ||
+            (x >= 1 && x < 6 && y >= size - 6 && y < size - 1);
+          const inCornerInnerInner =
+            (x >= 2 && x < 5 && y >= 2 && y < 5) ||
+            (x >= size - 5 && x < size - 2 && y >= 2 && y < 5) ||
+            (x >= 2 && x < 5 && y >= size - 5 && y < size - 2);
+          let dark;
+          if (inCorner && !inCornerInner) dark = true;
+          else if (inCorner && inCornerInner && !inCornerInnerInner) dark = false;
+          else if (inCorner && inCornerInnerInner) dark = true;
+          else { s = (s * 1103515245 + 12345) >>> 0; dark = (s & 1) === 1; }
+          if (dark) cells.push(`<rect x="${x}" y="${y}" width="1" height="1" fill="#0a0a0a"/>`);
+        }
+      }
+      return `<svg viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">${cells.join("")}</svg>`;
+    }
+
     default:
       console.warn(`[mock] no canned response for "${cmd}"`);
       return null;
@@ -870,6 +903,11 @@ function renderShell() {
     </div>
   `;
 
+  // Async post-mount: fill in any .qr-placeholder elements via the
+  // Rust `generate_qr_svg` Tauri command. Fire-and-forget — errors
+  // surface inline in the placeholder.
+  mountQrCodes();
+
   // Wire nav clicks
   app.querySelectorAll("[data-page]").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -1274,39 +1312,43 @@ function wireSend() {
 }
 
 // ─── Receive screen ───────────────────────────────────────────────
+//
+// QR rendering pipeline:
+//   1. qrSvg() returns a placeholder div with the payload in a data
+//      attribute. The placeholder gets injected into the page HTML
+//      synchronously (template literals only support sync values).
+//   2. After renderShell() injects the HTML, mountQrCodes() runs,
+//      finds every .qr-placeholder[data-payload] in the DOM, and
+//      invokes the Rust `generate_qr_svg` Tauri command for each.
+//      The command uses the workspace's `qrcode` crate to produce
+//      real scannable SVG output, which replaces the placeholder.
+//
+// Browser-preview (no Tauri) uses mockInvoke's `generate_qr_svg`
+// case which returns the same decorative-grid pattern the old
+// implementation produced — keeps the design preview meaningful
+// without bundling a JS QR encoder for the preview-only path.
+//
+// Wallet addresses are bech32 (`[a-z0-9]` + one `1` separator) so
+// they're safe to inline directly into a data attribute — no HTML
+// escape needed.
 function qrSvg(payload) {
-  // Decorative placeholder QR — visual rhythm of QR cells, not a real
-  // encoder. In Tauri build, swap for a real QR library output.
-  // Generate a deterministic pattern from the payload hash so it
-  // LOOKS like a QR but doesn't pretend to scan.
-  const seed = [...payload].reduce((a, c) => a * 31 + c.charCodeAt(0), 0);
-  const size = 25;
-  const cells = [];
-  let s = Math.abs(seed);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      // Corners always black (the QR "finder" pattern look)
-      const inCorner =
-        (x < 7 && y < 7) || (x >= size - 7 && y < 7) || (x < 7 && y >= size - 7);
-      const inCornerInner =
-        (x >= 1 && x < 6 && y >= 1 && y < 6) ||
-        (x >= size - 6 && x < size - 1 && y >= 1 && y < 6) ||
-        (x >= 1 && x < 6 && y >= size - 6 && y < size - 1);
-      const inCornerInnerInner =
-        (x >= 2 && x < 5 && y >= 2 && y < 5) ||
-        (x >= size - 5 && x < size - 2 && y >= 2 && y < 5) ||
-        (x >= 2 && x < 5 && y >= size - 5 && y < size - 2);
+  return `<div class="qr-placeholder" data-payload="${payload}">Generating QR…</div>`;
+}
 
-      let dark;
-      if (inCorner && !inCornerInner) dark = true;
-      else if (inCorner && inCornerInner && !inCornerInnerInner) dark = false;
-      else if (inCorner && inCornerInnerInner) dark = true;
-      else { s = (s * 1103515245 + 12345) >>> 0; dark = (s & 1) === 1; }
-
-      if (dark) cells.push(`<rect x="${x}" y="${y}" width="1" height="1" fill="#0a0a0a"/>`);
+async function mountQrCodes() {
+  const placeholders = document.querySelectorAll(".qr-placeholder[data-payload]");
+  for (const el of placeholders) {
+    const payload = el.getAttribute("data-payload");
+    if (!payload) continue;
+    try {
+      const svg = await invoke("generate_qr_svg", { payload });
+      // The qrcode crate's svg renderer returns a complete <svg>...</svg>
+      // string. Replace the placeholder wholesale.
+      el.outerHTML = svg;
+    } catch (e) {
+      el.textContent = `QR error: ${e}`;
     }
   }
-  return `<svg viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">${cells.join("")}</svg>`;
 }
 
 function receiveHtml() {
