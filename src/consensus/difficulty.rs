@@ -48,6 +48,16 @@ use crate::constants::{
 /// nothing — every existing block above difficulty 500 still validates.
 pub const MIN_DIFFICULTY: u128 = 500;
 
+// Compile-time invariant: MIN_DIFFICULTY is the divisor in
+// `u128_max_target() / MIN_DIFFICULTY` at the cap computation in
+// calculate_difficulty(). A zero divisor would panic on division;
+// while the literal 500 is obviously nonzero, this `const assert`
+// makes the invariant unmissable to anyone touching the constant.
+const _: () = assert!(
+    MIN_DIFFICULTY > 0,
+    "MIN_DIFFICULTY must be nonzero — used as divisor in calculate_difficulty",
+);
+
 // Fixed-point constants for integer 2^x approximation
 const RBITS: u32 = 16;
 const RADIX: u128 = 1u128 << RBITS;

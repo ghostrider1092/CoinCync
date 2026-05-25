@@ -176,6 +176,16 @@ impl BatchVerifier {
             let is_valid = if let Some(v) = cached {
                 *v
             } else {
+                // SECURITY: unwrap_or(false) is the conservative default
+                // here — a missing entry in `results_map` means the batch
+                // verifier didn't get a result for this signature (e.g.,
+                // a length-mismatch panic was swallowed upstream or the
+                // batch was sliced wrong). Treating "no result" as
+                // "invalid" rejects the signature rather than silently
+                // accepting it. Caller's invariant: every index in
+                // `cached_results` that wasn't cache-hit MUST appear in
+                // `results_map` after the batch run; this fallback is
+                // defense-in-depth, not the expected path.
                 let result = results_map.get(&i).copied().unwrap_or(false);
 
                 // Cache the result
