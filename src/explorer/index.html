@@ -637,6 +637,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
     <button class="nav-btn" id="nb-feemarket" onclick="go('feemarket')">Fees</button>
     <button class="nav-btn" id="nb-mininglive" onclick="go('mininglive')">Mining</button>
     <button class="nav-btn" id="nb-compare" onclick="go('compare')">Features</button>
+    <button class="nav-btn" id="nb-privacypools" onclick="go('privacypools')">Pools</button>
     <button class="nav-btn" id="nb-block" style="display:none">Block</button>
     <button class="nav-btn" id="nb-search" style="display:none">Search</button>
   </div>
@@ -778,6 +779,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <button class="mob-btn" id="mob-feemarket" onclick="go('feemarket');closeMobile()">Fee estimator</button>
   <button class="mob-btn" id="mob-mininglive" onclick="go('mininglive');closeMobile()">Live mining</button>
   <button class="mob-btn" id="mob-compare" onclick="go('compare');closeMobile()">Privacy features</button>
+  <button class="mob-btn" id="mob-privacypools" onclick="go('privacypools');closeMobile()">Privacy pools (Phase 2)</button>
   <div style="height:1px;background:var(--b);margin:8px 0"></div>
   <button class="mob-btn" onclick="closeMobile();openAppearance()" style="color:var(--ac2)">Appearance</button>
   <div style="border-top:1px solid var(--b);margin-top:8px;padding-top:8px"></div>
@@ -3551,9 +3553,9 @@ function toggleMobile(){$('mobile-menu').classList.toggle('open');}
 function closeMobile(){$('mobile-menu').classList.remove('open');}
 
 // ── PAGE NAV ──────────────────────────────────────────────────
-const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket'];
+const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket','privacypools'];
 const DEV_ONLY_PAGES=[];
-const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket'];
+const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket','privacypools'];
 const EXPLORER_DEV_MODE=(
   new URLSearchParams(window.location.search).get('dev_explorer')==='1' &&
   IS_LOCALHOST
@@ -5300,6 +5302,7 @@ function go(id){
   if(id==='reorghistory'){setTimeout(renderReorgHistory,200);}
   if(id==='mininglive'){startMiningLivePoll();}else{stopMiningLivePoll();}
   if(id==='feemarket'){setTimeout(renderFeeMarket,200);}
+  if(id==='privacypools'){setTimeout(renderPrivacyPools,200);}
   
   
   if(id==='status'){setTimeout(renderVersionChart,200);renderMinersLeaderboard();}
@@ -6944,6 +6947,82 @@ async function renderFeeMarket(){
       },
     },
   });
+}
+
+// ── Privacy pools (Phase 2) ─────────────────────────────────────
+// Reads the node's `get_privacy_stats` RPC, which is the single
+// source of truth for Spark / Shielded / MW kernel accumulator state.
+// All three stores got production-init in commit ecea1f3+follow-ups;
+// before that they returned zeros even when functional.
+async function renderPrivacyPools() {
+  const asOf = $('privacypools-as-of');
+  if (asOf) asOf.textContent = `as of ${new Date().toLocaleTimeString()}`;
+
+  const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+  const setTitle = (id, t) => { const e = $(id); if (e) e.title = t; };
+
+  // Truncate 64-hex roots to a readable head…tail form. Full hex
+  // remains in the element's `title` for hover.
+  const shortHex = (h) => {
+    if (!h || typeof h !== 'string') return '—';
+    if (h === '0'.repeat(h.length)) return 'inactive';
+    return h.length > 16 ? `${h.slice(0, 8)}…${h.slice(-8)}` : h;
+  };
+
+  let stats;
+  try {
+    stats = await rpc('get_privacy_stats', []);
+  } catch (e) {
+    console.warn('get_privacy_stats failed', e);
+    set('privacypools-spark-root', '—');
+    set('privacypools-shielded-root', '—');
+    set('privacypools-mw-root', '—');
+    return;
+  }
+
+  // Spark
+  set('privacypools-spark-root', shortHex(stats.spark_root));
+  setTitle('privacypools-spark-root', stats.spark_root || '');
+  set('privacypools-spark-size', (stats.spark_accumulator_size ?? 0).toLocaleString());
+
+  // Shielded
+  set('privacypools-shielded-root', shortHex(stats.shielded_root));
+  setTitle('privacypools-shielded-root', stats.shielded_root || '');
+  set('privacypools-shielded-size', (stats.shielded_tree_size ?? 0).toLocaleString());
+
+  // MW kernels
+  set('privacypools-mw-root', shortHex(stats.mw_kernel_root));
+  setTitle('privacypools-mw-root', stats.mw_kernel_root || '');
+  set('privacypools-mw-kept', (stats.mw_kernels_kept ?? 0).toLocaleString());
+  set('privacypools-mw-pending', (stats.mw_pending_candidates ?? 0).toLocaleString());
+
+  // bytes_saved → human-friendly KB/MB
+  const bytes = Number(stats.mw_bytes_saved ?? 0);
+  const humanBytes = bytes >= 1048576
+    ? `${(bytes / 1048576).toFixed(2)} MB`
+    : bytes >= 1024
+      ? `${(bytes / 1024).toFixed(1)} KB`
+      : `${bytes} B`;
+  set('privacypools-mw-saved', humanBytes);
+
+  // compression_ratio is a fraction (0.0–1.0); display as percent kept
+  const ratio = Number(stats.mw_compression ?? 0);
+  set('privacypools-mw-compression', ratio > 0 ? `${(ratio * 100).toFixed(1)}%` : '—');
+
+  // Consensus-mandated privacy booleans
+  const mandateEl = (id, enforced) => {
+    const e = $(id);
+    if (!e) return;
+    if (enforced) {
+      e.textContent = 'ENFORCED';
+      e.className = 'privacy-mandate-card__status privacy-mandate-card__status--enforced';
+    } else {
+      e.textContent = 'OPTIONAL';
+      e.className = 'privacy-mandate-card__status privacy-mandate-card__status--optional';
+    }
+  };
+  mandateEl('privacypools-mandate-confidential', !!stats.mandatory_confidential);
+  mandateEl('privacypools-mandate-stealth', !!stats.mandatory_stealth);
 }
 
 </script>
@@ -10427,7 +10506,163 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
   </div>
 </div>
 
+<div class="page" id="page-privacypools">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Privacy pools (Phase 2)</div>
+    <div class="page-title" style="margin-bottom:4px">Privacy pools (Phase 2)</div>
+    <div class="page-sub" style="margin-bottom:20px">Live read of CoinCync's Phase 2 cryptographic state — the three accumulators that back privacy-pool transactions. All counters increment as users transact; roots advance per block. Zero values mean the pool hasn't accepted activity yet on this network.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Phase 2 accumulator state
+        <span class="panel-action">
+          <span id="privacypools-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+        <div class="privacy-pool-card">
+          <div class="privacy-pool-card__name">Lelantus Spark</div>
+          <div class="privacy-pool-card__desc">Sketch implementation (CIP-005). Single-curve accumulator over coin commitments + spent-serial set.</div>
+          <div class="privacy-pool-card__stats">
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Accumulator root</span><span class="privacy-pool-card__value" id="privacypools-spark-root" title="—">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Coins accumulated</span><span class="privacy-pool-card__value" id="privacypools-spark-size">—</span></div>
+          </div>
+        </div>
+        <div class="privacy-pool-card">
+          <div class="privacy-pool-card__name">Shielded pool</div>
+          <div class="privacy-pool-card__desc">BridgeTree-backed note commitment tree. Anchors `spend` proofs at the current Merkle root.</div>
+          <div class="privacy-pool-card__stats">
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Tree root</span><span class="privacy-pool-card__value" id="privacypools-shielded-root" title="—">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Notes committed</span><span class="privacy-pool-card__value" id="privacypools-shielded-size">—</span></div>
+          </div>
+        </div>
+        <div class="privacy-pool-card">
+          <div class="privacy-pool-card__name">MimbleWimble kernels</div>
+          <div class="privacy-pool-card__desc">Cut-through engine. Spent inputs are pruned when matched against later outputs — chain footprint shrinks as the kernel set compresses.</div>
+          <div class="privacy-pool-card__stats">
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Kernel root</span><span class="privacy-pool-card__value" id="privacypools-mw-root" title="—">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Kernels kept</span><span class="privacy-pool-card__value" id="privacypools-mw-kept">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Pending candidates</span><span class="privacy-pool-card__value" id="privacypools-mw-pending">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Bytes saved</span><span class="privacy-pool-card__value" id="privacypools-mw-saved">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Compression</span><span class="privacy-pool-card__value" id="privacypools-mw-compression">—</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Consensus-mandated privacy</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(2,1fr);gap:14px">
+        <div class="privacy-mandate-card">
+          <div class="privacy-mandate-card__label">Confidential amounts</div>
+          <div class="privacy-mandate-card__desc">Every transaction output value is hidden behind a Pedersen commitment. The chain validates a Bulletproofs+ range proof per output, but only the prover and recipient learn the actual amount.</div>
+          <div class="privacy-mandate-card__status" id="privacypools-mandate-confidential">—</div>
+        </div>
+        <div class="privacy-mandate-card">
+          <div class="privacy-mandate-card__label">Stealth addresses</div>
+          <div class="privacy-mandate-card__desc">Recipients publish a (view, spend) pubkey pair; senders derive a one-time output key per transaction. No on-chain link between sender and recipient address.</div>
+          <div class="privacy-mandate-card__status" id="privacypools-mandate-stealth">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">What you're looking at</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        These pools coexist with CoinCync's always-on per-tx privacy (CLSAG ring signatures + Bulletproofs+ + stealth addresses, all mandatory at consensus). They're <em>additional</em> surfaces planned for Phase 2 of the privacy stack:
+        <ul style="margin:8px 0 0;padding-left:18px">
+          <li><strong>Spark</strong> (CIP-005) — single-curve shielded coin scheme; transactions ship post-mainnet. The accumulator is live for observability today.</li>
+          <li><strong>Shielded pool</strong> — zk-SNARK style note commitment tree (Halo2 lineage). Storage layer in place; full spend/verify queued.</li>
+          <li><strong>MW cut-through</strong> — MimbleWimble-style kernel compression. Engine is live and accumulating state.</li>
+        </ul>
+        Per the staged-mainnet decision, full transaction flow for each pool ships behind its own dedicated audit. This page exists so users can <em>see</em> the cryptographic state before, during, and after each pool's full activation.
+      </div>
+    </div>
+  </div>
+</div>
+
 <style>
+/* ── Privacy-pool cards (page-privacypools) ─────────────────────── */
+.privacy-pool-card {
+  background: var(--s2);
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.privacy-pool-card__name {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ac);
+  margin-bottom: 6px;
+}
+.privacy-pool-card__desc {
+  font-size: 11px;
+  color: var(--t2);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.privacy-pool-card__stats {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.privacy-pool-card__row {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.privacy-pool-card__label {
+  color: var(--t3);
+}
+.privacy-pool-card__value {
+  color: var(--t);
+  font-weight: 600;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.privacy-mandate-card {
+  background: var(--s2);
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.privacy-mandate-card__label {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--t);
+  margin-bottom: 6px;
+}
+.privacy-mandate-card__desc {
+  font-size: 11px;
+  color: var(--t2);
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.privacy-mandate-card__status {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+.privacy-mandate-card__status--enforced {
+  color: var(--verified);
+  background: rgba(127, 184, 121, 0.15);
+  border: 1px solid rgba(127, 184, 121, 0.4);
+}
+.privacy-mandate-card__status--optional {
+  color: var(--t3);
+  background: var(--s);
+  border: 1px solid var(--b);
+}
+
 /* ── Reorg-history layer cards ───────────────────────────────────── */
 .reorg-layer-card {
   background: var(--s2);
