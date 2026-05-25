@@ -796,6 +796,13 @@ pub async fn start_rpc_server(
                     state.mempool.restore_orphaned(orphaned_txs, &state.chain);
                 }
                 state.mempool.set_height(state.chain.height());
+                // Shadow-evict mempool txs that no longer validate
+                // against the new chain state. Catches the cases
+                // remove_confirmed can't (hard-fork rule transition,
+                // reorg-induced input-coinbase maturity changes).
+                // Belt-and-suspenders for the miner-side filter in
+                // mining/template.rs:70-95.
+                state.mempool.shadow_evict_invalid(state.chain.as_ref());
 
                 // Fire-and-forget P2P announcement so the block reaches
                 // other nodes; without this, locally-mined blocks stay

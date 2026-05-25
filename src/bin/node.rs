@@ -684,6 +684,12 @@ async fn start_node(
                                 event_mempool.restore_orphaned(orphaned_txs, &event_chain);
                             }
                             event_mempool.set_height(event_chain.height());
+                            // Shadow-evict mempool txs that no longer
+                            // validate. Catches hard-fork rule
+                            // transitions + reorg-induced maturity
+                            // changes. Belt-and-suspenders for the
+                            // miner-side filter in mining/template.rs.
+                            event_mempool.shadow_evict_invalid(event_chain.as_ref());
 
                             // Notify IBD sync manager so it advances its
                             // local_height cursor and releases the next

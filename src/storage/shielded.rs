@@ -322,6 +322,18 @@ impl ShieldedStore {
         }
     }
 
+    /// Number of checkpoints currently in the side-table rollback
+    /// stack. Used by the chain's cross-store invariant check (the
+    /// three Phase-2 stores must agree on stack length at all times —
+    /// see `KernelStore::checkpoint_count` for the rationale). Note:
+    /// this is the SIDE-TABLE count, NOT the BridgeTree's internal
+    /// checkpoint count — they're kept in sync by the
+    /// `tree_checkpointed` gate above, so this number is the right
+    /// one to compare against `SparkStore` / `KernelStore`.
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.read().len()
+    }
+
     /// Rewind one checkpoint — disconnect the most recently applied
     /// block during a reorg. Rewinds the `BridgeTree` **and**, in
     /// lock-step, the `entries` side-table, the `nullifiers` set, and

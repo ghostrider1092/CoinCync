@@ -460,6 +460,24 @@ impl Blockchain {
     /// `height`. Call **before** the block's state is applied to the
     /// chain, so a later `rewind_phase2_stores` rolls each store back
     /// to exactly this pre-block boundary.
+    ///
+    /// CROSS-STORE INVARIANT (Phase-2 only): after this returns, all
+    /// THREE initialized stores must report the same `checkpoint_count`.
+    /// They were checkpointed in lock-step under the chain's write
+    /// lock, with the same height, so their stack lengths must agree.
+    /// If they diverge, a later reorg would unwind them unevenly and
+    /// the chain would end up with one store at height H and another
+    /// at height H ± k — a fatal state divergence that's hard to
+    /// detect after the fact. Catching it here at the moment of
+    /// divergence makes the bug class shallow.
+    ///
+    /// The check is `debug_assert!` because in production the only
+    /// way it could fire is a programming bug (one of the stores
+    /// silently no-op'd, or a developer added a fourth store without
+    /// updating the cross-store walk). debug_assert is dead in
+    /// release. Also gated on "all three stores initialized" because
+    /// during the v1.0 ship → Phase 2 activation window some stores
+    /// will be `None`; that's expected, not a bug.
     fn checkpoint_phase2_stores(&self, height: u64) {
         if let Some(ref s) = self.shielded_store {
             s.checkpoint_at_height(height);
@@ -469,6 +487,34 @@ impl Blockchain {
         }
         if let Some(ref s) = self.kernel_store {
             s.checkpoint_at_height(height);
+        }
+
+        // Cross-store invariant — only meaningful when all three are
+        // initialized (Phase 2 activated). The shielded store's
+        // checkpoint may have been skipped if the BridgeTree declined
+        // it (non-monotonic height; warned in storage::shielded), in
+        // which case our cross-store count check would fail — but
+        // that's exactly the bug class this assertion is meant to
+        // surface, so we don't suppress it.
+        #[cfg(debug_assertions)]
+        if let (Some(sh), Some(sp), Some(kr)) =
+            (&self.shielded_store, &self.spark_store, &self.kernel_store)
+        {
+            let (n_sh, n_sp, n_kr) =
+                (sh.checkpoint_count(), sp.checkpoint_count(), kr.checkpoint_count());
+            if !(n_sh == n_sp && n_sp == n_kr) {
+                debug_assert_eq!(
+                    (n_sh, n_sp, n_kr),
+                    (n_sh, n_sh, n_sh),
+                    "Phase-2 stores diverged at height {}: shielded={} spark={} kernel={} \
+                     — the three stores were checkpointed in lock-step but their stack \
+                     lengths disagree, meaning one of them silently skipped (likely a \
+                     BridgeTree-declined checkpoint or a code path that bypassed \
+                     checkpoint_phase2_stores). A reorg from this state would unwind \
+                     the stores unevenly.",
+                    height, n_sh, n_sp, n_kr
+                );
+            }
         }
     }
 

@@ -15,6 +15,22 @@ use crate::consensus::{
     verify_output_range_proofs, verify_balance_proof, verify_ring_signature,
 };
 
+/// Minimal chain interface for `shadow_evict_invalid`. Defined as a
+/// trait so the mempool doesn't take a hard `&Blockchain` dependency
+/// (avoids tying the mempool's API to the concrete chain type and
+/// keeps unit tests easy — a test fake can implement this in a few
+/// lines without standing up a full Blockchain). Blanket-impl'd for
+/// `Blockchain` below.
+pub trait ShadowEvictChain {
+    fn validate_transaction(&self, tx: &Transaction) -> Result<()>;
+}
+
+impl ShadowEvictChain for crate::chain::Blockchain {
+    fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
+        crate::chain::Blockchain::validate_transaction(self, tx)
+    }
+}
+
 // ── Fee estimation ──────────────────────────────────────────────────────────
 
 /// Mempool fee percentile snapshot for fee estimation.
@@ -671,6 +687,76 @@ impl Mempool {
         }
     }
 
+    /// Re-validate every remaining mempool tx against the current chain
+    /// state and evict any that no longer pass. Called by the chain
+    /// orchestrator after `remove_confirmed` + `set_height` on every
+    /// successful block apply.
+    ///
+    /// **What this catches that `remove_confirmed` doesn't:**
+    /// `remove_confirmed` drops mined txs and shadow-conflicts (same
+    /// key image as a confirmed tx). It does NOT catch txs whose
+    /// CONSENSUS VALIDITY changed without a mined-tx collision.
+    /// Two scenarios make this matter:
+    ///
+    /// 1. **Hard-fork rule transition** — at the activation height of
+    ///    the `MIN_OUTPUT_AGE` 10 → 100 fork (v1.0.10), every mempool
+    ///    tx whose input coinbase was age 10-99 just became invalid.
+    ///    `remove_confirmed` wouldn't catch these because no confirmed
+    ///    tx shares their key images.
+    ///
+    /// 2. **Reorg** — `AcceptedReorg` changes which UTXOs exist and
+    ///    at what heights. A mempool tx whose input coinbase landed
+    ///    in an orphaned block may now reference a non-existent
+    ///    output, OR may reference a coinbase that's now at a
+    ///    different (younger) height under the reorg branch. The
+    ///    `restore_orphaned` path re-admits txs that orphaned-block
+    ///    miners had, but doesn't revalidate already-mempool txs.
+    ///
+    /// **Belt-and-suspenders.** `src/mining/template.rs:70-95` does
+    /// the same filter at template-build time, so a tx that escaped
+    /// this evict path wouldn't poison a mined block — but it'd sit
+    /// in the mempool burning memory + propagating to peers who'd
+    /// also waste cycles validating it. Evicting at admission time
+    /// is the cheaper place to do this work.
+    ///
+    /// **Cost.** O(N_mempool_txs) × cost-of-validate_transaction
+    /// (~5ms per CLSAG tx). For a healthy mempool ≤1000 txs, ~5s
+    /// per block worst case — well under the 120s block budget.
+    /// For larger mempools this could matter; revisit with a
+    /// dirty-set / changed-context optimization if it shows up in
+    /// profiles.
+    pub fn shadow_evict_invalid<C>(&mut self, chain: &C)
+    where
+        C: ShadowEvictChain,
+    {
+        let now = unix_now();
+        let mut invalid_hashes: Vec<(Hash, String)> = Vec::new();
+
+        for (hash, entry) in &self.transactions {
+            if let Err(e) = chain.validate_transaction(&entry.tx) {
+                invalid_hashes.push((*hash, format!("{}", e)));
+            }
+        }
+
+        if invalid_hashes.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "shadow-evict: dropping {} mempool tx(s) that no longer validate against chain state",
+            invalid_hashes.len()
+        );
+        for (hash, reason) in invalid_hashes {
+            tracing::debug!("  shadow-evict {}: {}", hash, reason);
+            self.audit(AuditEvent::TxRemoved {
+                hash,
+                reason: EvictReason::DoubleSpend, // closest existing variant
+                timestamp: now,
+            });
+            self.remove(&hash);
+        }
+    }
+
     /// Check if a key image is in the mempool
     pub fn contains_key_image(&self, ki: &KeyImage) -> bool {
         self.key_images.contains(ki)
@@ -1071,6 +1157,17 @@ impl SharedMempool {
 
     pub fn remove_confirmed(&self, txs: &[Transaction]) {
         self.write_lock().remove_confirmed(txs)
+    }
+
+    /// Re-validate remaining mempool txs against the chain and evict
+    /// any that no longer pass. See `Mempool::shadow_evict_invalid`
+    /// for the full rationale + cost analysis. Call after
+    /// `remove_confirmed` + `set_height` on every block apply.
+    pub fn shadow_evict_invalid<C>(&self, chain: &C)
+    where
+        C: ShadowEvictChain,
+    {
+        self.write_lock().shadow_evict_invalid(chain)
     }
 
     pub fn set_height(&self, height: u64) {

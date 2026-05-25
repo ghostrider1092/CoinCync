@@ -231,6 +231,14 @@ impl SparkStore {
         debug_assert!(cps.len() <= MAX_REORG_CHECKPOINTS);
     }
 
+    /// Number of checkpoints currently in the rollback stack. Used by
+    /// the chain's cross-store invariant check (the three Phase-2
+    /// stores must agree on stack length at all times — see
+    /// `KernelStore::checkpoint_count` for the rationale).
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.read().len()
+    }
+
     /// Rewind one checkpoint — i.e. disconnect the most recently
     /// applied block during a reorg. Pops the most recent checkpoint
     /// and restores `coins`, `spent_serials`, the accumulator root,

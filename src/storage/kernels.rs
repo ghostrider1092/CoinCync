@@ -150,6 +150,15 @@ impl KernelStore {
         }
     }
 
+    /// Number of checkpoints currently in the rollback stack. Used by
+    /// the chain's cross-store invariant check — the three Phase-2
+    /// stores (shielded / spark / kernel) must agree on stack length
+    /// at all times, or a reorg would unwind them unevenly and leave
+    /// the chain with stores at different effective heights.
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.read().len()
+    }
+
     /// Rewind one checkpoint — disconnect the most recently applied
     /// block during a reorg. Pops the most recent checkpoint and
     /// truncates `kernels` back to the pre-block boundary that
