@@ -151,8 +151,10 @@ frost-core = "3"
 bip39        = "2"
 
 # ── Big int ──────────────────────────────────────────────────
-primitive-types = "0.12"
 uint            = "0.9"
+# `primitive-types` was declared here but never imported in src/ —
+# removed via issue #44 to stop generating weekly Dependabot PRs for
+# an unused dep and shrink audit surface.
 
 # ── Merkle ───────────────────────────────────────────────────
 rs_merkle = "1"
@@ -166,7 +168,9 @@ tracing-appender   = "0.2"
 chrono     = { version = "0.4", features = ["serde"] }
 clap       = { version = "4", features = ["derive", "env"] }
 dirs-next  = "2.0"
-directories = "5"
+# `directories = "5"` was declared here but never imported in src/ —
+# removed via issue #44. `dirs-next` covers the actual home/config-dir
+# usage in the codebase.
 parking_lot = "0.12"
 dashmap    = "5"
 num_cpus   = "1"
