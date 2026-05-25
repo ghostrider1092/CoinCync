@@ -520,7 +520,34 @@ async fn start_node(
     let db = Arc::new(db);
 
     // Initialize blockchain
-    let chain = Blockchain::with_database(db.clone(), network);
+    let mut chain = Blockchain::with_database(db.clone(), network);
+
+    // Light Spark wire-up (CIP-005 sketch, read-only observability for v1.0).
+    // `chain.spark_store` defaults to `None` ("Phase 2 stores: None until
+    // Phase 2 activation" per chain.rs comment). Without initializing it
+    // here the `get_privacy_stats` RPC returns spark_root=zeros and
+    // spark_accumulator_size=0 even though the storage layer is fully
+    // functional. We initialize the persistent SparkStore so users
+    // running the node can SEE the accumulator state via
+    // `coincync-wallet privacy-stats`. This is observation-only — full
+    // Spark transaction validation in consensus is CIP-005's complete
+    // implementation, queued post-mainnet (see project_staged_mainnet
+    // memory + the "wire up sparks" decision recorded 2026-05-24:
+    // light wire-up only, no consensus integration).
+    match coincync::storage::SparkStore::open_with_db(&db) {
+        Ok(store) => {
+            info!("Spark accumulator loaded ({} coins)", store.size());
+            chain.spark_store = Some(Arc::new(store));
+        }
+        Err(e) => {
+            warn!(
+                "Spark store init failed: {} — get_privacy_stats will show \
+                 zeros for spark_root/spark_accumulator_size",
+                e
+            );
+        }
+    }
+
     if let Err(e) = chain.load_from_database() {
         warn!("load_from_database: {} (will init genesis)", e);
         let _ = chain.init_genesis();
