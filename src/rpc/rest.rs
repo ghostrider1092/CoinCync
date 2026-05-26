@@ -216,6 +216,7 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     "get_peers",
     // Mempool
     "get_mempool_info",
+    "get_mempool_transactions",
     // Stub-but-public methods. They return -32601 NotImplemented
     // with a labelled message, which is safer than 403-blocking
     // them — a `MethodNotFound` from the backend tells the
@@ -665,21 +666,23 @@ async fn get_transaction(
 
 /// GET /api/v1/mempool — pending transactions
 async fn get_mempool(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let pool = jsonrpc_call(&st, "get_tx_pool", Value::Array(vec![])).await?;
+    let pool = jsonrpc_call(&st, "get_mempool_transactions", Value::Array(vec![])).await?;
     Ok(Json(pool))
 }
 
 /// GET /api/v1/mempool/stats — mempool statistics without full tx list
 async fn get_mempool_stats(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let pool = jsonrpc_call(&st, "get_tx_pool", Value::Array(vec![])).await?;
-    let count = pool.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-    let returned = pool.get("returned").and_then(|v| v.as_u64()).unwrap_or(0);
-    let truncated = pool.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+    let info = jsonrpc_call(&st, "get_mempool_info", Value::Array(vec![])).await?;
+    let size = info.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let bytes = info.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_fees = info.get("total_fees").and_then(|v| v.as_u64()).unwrap_or(0);
+    let max_size = info.get("max_size").and_then(|v| v.as_u64()).unwrap_or(0);
 
     Ok(Json(serde_json::json!({
-        "count": count,
-        "returned": returned,
-        "truncated": truncated,
+        "count": size,
+        "bytes": bytes,
+        "total_fees": total_fees,
+        "max_size": max_size,
     })))
 }
 

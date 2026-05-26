@@ -110,15 +110,29 @@ pub fn rpc_methods_doc() -> serde_json::Value {
                 "auth": false
             },
             {
-                "name": "get_tx_pool",
-                "description": "Get mempool transaction list",
+                "name": "get_mempool_info",
+                "description": "Get mempool statistics (size, bytes, total fees, max size)",
+                "params": [],
+                "result": {
+                    "type": "object",
+                    "fields": {
+                        "size": "number - tx count",
+                        "bytes": "number - total bytes",
+                        "total_fees": "number - sum of atomic fees",
+                        "max_size": "number - mempool byte cap"
+                    }
+                },
+                "auth": false
+            },
+            {
+                "name": "get_mempool_transactions",
+                "description": "Get mempool transaction details (up to 500 entries)",
                 "params": [],
                 "result": {
                     "type": "object",
                     "fields": {
                         "count": "number",
-                        "size": "number",
-                        "transactions": "array of tx hashes"
+                        "transactions": "array of {hash, kind, inputs, outputs, fee, size}"
                     }
                 },
                 "auth": false
