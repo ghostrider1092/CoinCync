@@ -34,7 +34,16 @@ Remove-Item -Force -ErrorAction SilentlyContinue $tar
 Write-Host "Bundling explorer assets..."
 Push-Location $RepoRoot
 try {
-  & tar -czf $tar `
+  # Git Bash's GNU tar interprets `C:\foo` as host C, path \foo (SSH-style
+  # remote spec). Setting MSYS_NO_PATHCONV in PowerShell's $env doesn't
+  # always propagate cleanly to the child process — explicitly use the
+  # Windows-bundled BSD tar instead, which has no MSYS path conventions.
+  # (BSD tar ships with Windows 10/11 at System32\tar.exe.)
+  $bsdTar = "$env:SystemRoot\System32\tar.exe"
+  if (-not (Test-Path $bsdTar)) {
+    throw "Windows BSD tar not found at $bsdTar -- install via 'Manage Optional Features' or use WSL"
+  }
+  & $bsdTar -czf $tar `
     'src/explorer/index.html' `
     'src/explorer/assets' `
     'src/explorer/static' `
@@ -105,8 +114,14 @@ server {
 
     proxy_http_version 1.1;
     proxy_connect_timeout 3s;
-    proxy_read_timeout    8s;
-    proxy_send_timeout    8s;
+    # Timeouts bumped 8s -> 15s on 2026-05-25. The wider window doesn't
+    # change steady-state behavior (every observed RPC responds in <300ms
+    # against the current backend); it just buffers against future
+    # heavier endpoints (histogram queries, multi-block summaries) so a
+    # slow path doesn't surface to the user as a silent "stalled" panel
+    # when nginx 504s under the prior 8s ceiling.
+    proxy_read_timeout    15s;
+    proxy_send_timeout    15s;
 
     # JSON-RPC endpoints — explorer frontend posts to these.
     location = /api/testnet {
@@ -148,6 +163,34 @@ server {
     location = /health/seed3    { rewrite ^ / break; proxy_pass http://207.148.111.76:28081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
     location = /health/explorer { rewrite ^ / break; proxy_pass http://127.0.0.1:28081;      proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
     location = /health/api      { rewrite ^ / break; proxy_pass http://95.179.165.225:28081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+
+    # REST API proxy. The explorer's `rest()` helper calls
+    # /api/v1/<network>/<path>; rewrite into the backend's /v1/<path>
+    # form and target the daemon's REST port (28082, which is
+    # rpc_port + 1 in our convention). Used by future panels (the
+    # current code has the helper defined but no calls yet — adding the
+    # proxy now so the location is in place when the JS starts using it,
+    # rather than discovering the 405/HTML-fallthrough at the moment a
+    # new feature ships).
+    location ~ ^/api/v1/(testnet|mainnet)/(.*)$ {
+        set $rest_path $2;
+        rewrite ^ /v1/$rest_path break;
+        proxy_pass http://127.0.0.1:28082;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Authorization "Bearer $coincync_rpc_key";
+    }
+
+    # Catch-all for any /api/* path that didn't match a specific block
+    # above. Returns 404 JSON instead of falling through to the
+    # static-file catch-all below (which would return /index.html — the
+    # HTML SPA shell — and the explorer's fetch().json() would throw on
+    # the unexpected text/html response, leaving the panel "stalled"
+    # with no visible error). 2026-05-25 hardening.
+    location ~ ^/api/ {
+        default_type application/json;
+        return 404 '{"jsonrpc":"2.0","error":{"code":-32601,"message":"unknown api path"},"id":null}';
+    }
 
     # Static files for everything else.
     location / {

@@ -1183,6 +1183,53 @@ mod tests {
         }
     }
 
+    /// CIP-007 hard-fork registry MUST be empty at mainnet genesis.
+    ///
+    /// Per the staged-mainnet decision (`docs/decisions/2026-05-20-staged-
+    /// mainnet-and-cyncswap.md`), CIP-007 activation is deferred to post-
+    /// mainnet. v1.0 ships with NO scheduled activations on either
+    /// network. The `activation_height()` table being empty + the
+    /// `is_activated()` helper returning false for any unknown name is
+    /// the dormant gate.
+    ///
+    /// This test locks in that dormant state — any future accidental
+    /// addition (e.g., a developer wiring up a "ring_bump_v2" entry
+    /// without updating the staged-mainnet plan) fails CI before the
+    /// activation can ship. To intentionally schedule a CIP-007
+    /// activation, this test gets removed in the same PR that adds the
+    /// entry — explicit two-place change.
+    #[test]
+    fn cip_007_registry_is_dormant_at_genesis() {
+        // Probe a basket of names a future developer might use. None
+        // should return Some(_) because the table is empty.
+        for name in [
+            "",
+            "ring_bump_v2",
+            "min_output_age_v2",
+            "spark_activation",
+            "orchard_activation",
+            "any-random-string",
+        ] {
+            assert!(
+                activation_height(name).is_none(),
+                "CIP-007 activation '{}' is registered — staged-mainnet plan says \
+                 NO activations ship in v1.0. Either remove the entry, or remove \
+                 this test in the same PR that schedules it (deliberate two-place \
+                 change).",
+                name
+            );
+        }
+
+        // And every height returns false for any name.
+        for h in [0u64, 1, 100, 1_000_000, u64::MAX / 2] {
+            assert!(
+                !is_activated("any-name", h),
+                "is_activated MUST return false for unregistered names at every \
+                 height — the fail-safe semantics CIP-007 depends on"
+            );
+        }
+    }
+
     #[test]
     fn test_no_surveillance_hooks() {
         assert!(!ADDRESS_BLACKLIST_ENABLED);

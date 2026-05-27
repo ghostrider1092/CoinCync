@@ -214,6 +214,29 @@ impl LightWalletServer {
     /// The server does NOT learn the amounts (they're encrypted). It only
     /// learns which outputs belong to this view key — this is the privacy
     /// tradeoff of using a light wallet server.
+    ///
+    /// # Pagination contract (read this before integrating)
+    ///
+    /// Two distinct ways the scan can return early — wallet integrators
+    /// MUST handle both via `has_more`:
+    ///
+    /// 1. **Block-range cap** — `max_blocks` (default 1000, hard limit
+    ///    `MAX_SCAN_BLOCKS_PER_REQ = 5000`). Requesting more is rejected
+    ///    with `max_blocks too large` Err. To continue: advance
+    ///    `start_height` past `scanned_to_height` and re-issue.
+    ///
+    /// 2. **Output-count cap** — `MAX_SCAN_OUTPUTS = 10_000` candidate
+    ///    matches per response. Hitting this cap is NOT an error; the
+    ///    response returns successfully with `has_more = true` and the
+    ///    partial outputs collected so far. To continue: resume at
+    ///    `scanned_to_height` (NOT `+1`) so the next request re-covers
+    ///    the cap-block and picks up any remainder. A wallet that
+    ///    advances past `scanned_to_height` after a cap-stop will
+    ///    silently lose outputs.
+    ///
+    /// Both pagination modes use the same `(start_height, max_blocks,
+    /// has_more, scanned_to_height)` 4-tuple — wallets don't need
+    /// different code paths.
     pub fn scan(&self, req: &ScanRequest) -> std::result::Result<ScanResponse, String> {
         // Parse keys
         let view_pub = parse_public_key(&req.view_public)
