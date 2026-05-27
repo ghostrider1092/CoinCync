@@ -543,6 +543,45 @@ async fn get_supply(State(st): State<RestState>) -> Result<Json<Value>, (StatusC
     Ok(Json(supply))
 }
 
+/// GET /api/v1/supply/circulating — circulating supply in CYNC, plain text.
+///
+/// CoinMarketCap and several exchange-listing pipelines poll a public
+/// endpoint that returns the current circulating supply as a bare
+/// decimal number with no JSON wrapping. Format is whole.micro
+/// (6 fractional digits, matching the conventional display precision).
+///
+/// Uses integer arithmetic — the f64 cast that appeared in earlier
+/// drafts loses precision above 2^53, and atomic supply (u64 * COIN
+/// = up to 10^20) sits well above that range.
+async fn get_supply_circulating(
+    State(st): State<RestState>,
+) -> Result<String, (StatusCode, String)> {
+    let info = jsonrpc_call(&st, "get_supply_info", Value::Array(vec![]))
+        .await
+        .map_err(|(code, body)| (code, body.0.to_string()))?;
+    let atomic = info
+        .get("total_emitted")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let coin: u64 = crate::constants::COIN;
+    let micro_per_coin: u64 = coin / 1_000_000; // 12 - 6 = 6 decimal trim
+    let whole = atomic / coin;
+    let frac_micro = (atomic % coin) / micro_per_coin;
+    Ok(format!("{}.{:06}", whole, frac_micro))
+}
+
+/// GET /api/v1/supply/max — supply target in CYNC, plain text.
+///
+/// CoinMarketCap "max supply" field. CoinCync has a 100M asymptotic
+/// target (Constitution Article I) approached but never reached, plus
+/// a 0.6 CYNC/block tail emission. By the convention CMC and CoinGecko
+/// use for similar asymptotic chains (Monero etc.), the target is
+/// reported as the max-supply figure and the tail is documented in
+/// the long-form description.
+async fn get_supply_max() -> String {
+    crate::constants::TOTAL_SUPPLY_TARGET.to_string()
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // HANDLERS — Blocks
 // ═════════════════════════���═════════════════════��═══════════════════════════════
@@ -1376,6 +1415,8 @@ pub async fn run_rest_api(
         .route("/api/v1/health", get(health))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/supply", get(get_supply))
+        .route("/api/v1/supply/circulating", get(get_supply_circulating))
+        .route("/api/v1/supply/max", get(get_supply_max))
         // ─── Blocks ──────────────────────────────────────────
         .route("/api/v1/blocks/recent", get(get_recent_blocks))
         .route("/api/v1/block/hash/{hash}", get(get_block_by_hash))
