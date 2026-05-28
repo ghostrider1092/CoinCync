@@ -1,0 +1,64 @@
+[Unit]
+# Baseline testnet miner — runs continuously on the api node to
+# guarantee a steady block producer on the public testnet. The point
+# is NOT performance (1 thread, ~5% CPU) -- it's chain liveness.
+# Without a guaranteed always-on miner, block time drifts above
+# target during community-mining lulls and ASERT difficulty has
+# nothing stable to converge against.
+#
+# This service is intentionally SCOPED:
+#   * 1 thread only (won't compete with nginx + node for cycles)
+#   * No --tui (systemd needs a real TTY for ratatui; we don't want
+#     one)
+#   * No --metrics-port (we already get RandomX metrics via the
+#     daemon's get_info endpoint; an extra Prom endpoint is noise)
+#   * Restart on failure with 10s backoff (same pattern as the
+#     coincync-node service)
+#
+# To pause without uninstalling:
+#   systemctl stop coincync-baseline-miner
+# To uninstall completely:
+#   systemctl disable --now coincync-baseline-miner
+#   rm /etc/systemd/system/coincync-baseline-miner.service
+#   systemctl daemon-reload
+Description=CoinCync testnet baseline miner (1 thread, chain-liveness floor)
+After=network-online.target coincync-node.service
+Wants=network-online.target
+Requires=coincync-node.service
+
+[Service]
+EnvironmentFile=/etc/coincync/coincync.env
+Type=simple
+User=coincync
+Group=coincync
+# Mines to a fixed testnet address (loaded from env) against the
+# local node's loopback RPC. Loopback avoids the Cloudflare path
+# and the bearer-auth dance — local mining is the simplest path.
+ExecStart=/usr/local/bin/coincync-rig run-solo \
+    --node http://127.0.0.1:28081 \
+    --address ${BASELINE_MINER_ADDRESS} \
+    --network testnet \
+    --threads 1 \
+    --poll-interval-secs 60
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+# Sandbox the service (RandomX needs JIT but everything else can be
+# locked down). The node service uses similar hardening; matching
+# here for consistency.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/coincync
+
+# Log lines from the rig go to the systemd journal. View with:
+#   journalctl -u coincync-baseline-miner -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
