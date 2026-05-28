@@ -99,6 +99,18 @@ Three DNS-resolved seed nodes: `seed1.coincync.network` (New Jersey), `seed2` (A
 
 ---
 
+## Versioning
+
+`v1.0.x-testnet` releases are the stable codebase for the pre-mainnet testnet. Breaking consensus changes during this sequence are coordinated via documented hard forks (e.g., `MIN_OUTPUT_AGE` 10 → 100 in v1.0.10) so node operators have explicit activation-height-gated upgrade windows. v1.0 mainnet ships **October 1, 2026** — at that point the codebase is frozen against breaking changes per strict SemVer. Anything that requires a breaking change post-mainnet becomes v2.0.
+
+**Tag-cut discipline:**
+
+- Every release passes through a release candidate (`v1.0.X-rcN-testnet`) before the headline tag, with at least 24-72h of soak before promotion. This is what saved the v1.0.9 release from a Windows-only-binaries regression (the auto-publish workflow was added after).
+- Pre-release qualifiers (`-testnet`, `-pre-audit`, `-rcN`) are SemVer-compliant and signal what's NOT yet finished. Read them as load-bearing, not decoration.
+- A tag without a qualifier means "audited, mainnet-ready, no known regressions." We don't have one of those yet.
+
+---
+
 ## Security
 
 - Comprehensive test suite (700+ tests) including historical attack reproductions
