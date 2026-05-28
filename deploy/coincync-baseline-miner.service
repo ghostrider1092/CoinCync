@@ -28,6 +28,15 @@ Requires=coincync-node.service
 
 [Service]
 EnvironmentFile=/etc/coincync/coincync.env
+# Light-mode RandomX: 256 MB cache instead of 2 GB dataset. Trades
+# per-hash speed for memory footprint. Required on the api box
+# because the 2 GB dataset competes with coincync-node + nginx for
+# the 4 GB RAM ceiling, dropping throughput to ~0.4 H/s. Light mode
+# is dramatically faster on this hardware even though it's slower
+# per-hash in absolute terms -- the swap thrashing dominated.
+# Remove this line on a box with ≥4 GB free RAM to get the
+# full-mem fast path back.
+Environment=COINCYNC_RANDOMX_LIGHT_MODE=1
 Type=simple
 User=coincync
 Group=coincync
