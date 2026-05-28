@@ -110,8 +110,15 @@ impl VerificationCache {
 
     /// Evict old bulletproof entries (LRU)
     fn evict_old_entries_bulletproof(&self) {
-        let threshold = Instant::now() - Duration::from_secs(3600); // 1 hour
-        self.bulletproof_cache.retain(|_, entry| entry.last_access > threshold);
+        // `Instant::now() - Duration::from_secs(3600)` panics with
+        // "overflow when subtracting duration from instant" if the
+        // process has been alive < 1 hour (monotonic clock origin is
+        // process start on some platforms). Use checked_sub and skip
+        // the age-based pass when not yet representable -- the size-
+        // based pass below still fires.
+        if let Some(threshold) = Instant::now().checked_sub(Duration::from_secs(3600)) {
+            self.bulletproof_cache.retain(|_, entry| entry.last_access > threshold);
+        }
 
         // If still too large, remove 10% oldest
         if self.bulletproof_cache.len() >= MAX_CACHE_SIZE {
@@ -129,8 +136,11 @@ impl VerificationCache {
 
     /// Evict old ring signature entries (LRU)
     fn evict_old_entries_ring_sig(&self) {
-        let threshold = Instant::now() - Duration::from_secs(3600);
-        self.ring_sig_cache.retain(|_, entry| entry.last_access > threshold);
+        // Same checked_sub guard as the bulletproof eviction above --
+        // a freshly-started node would panic in its first hour.
+        if let Some(threshold) = Instant::now().checked_sub(Duration::from_secs(3600)) {
+            self.ring_sig_cache.retain(|_, entry| entry.last_access > threshold);
+        }
 
         if self.ring_sig_cache.len() >= MAX_CACHE_SIZE {
             let to_remove = MAX_CACHE_SIZE / 10;

@@ -161,7 +161,7 @@ don't warn about unexpected configuration.
 
 ## What's currently proved
 
-As of 2026-05-27, 14 proof harnesses across three modules:
+As of 2026-05-28, 15 proof harnesses across three modules (full suite runs in ~156s):
 
 **Emission curve** (4 proofs):
 
