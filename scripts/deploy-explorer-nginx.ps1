@@ -328,7 +328,11 @@ Start-Sleep -Seconds 5
 
 Write-Host ""
 Write-Host "=== HTTPS probes through Cloudflare ==="
-foreach ($url in @('https://explorer.coincync.network/','https://explorer.coincync.org/','https://explorer.coincync.network/api/testnet')) {
+# .org is intentionally NOT routed to the explorer at the Cloudflare
+# layer; only .network is. nginx still listens for both server_names
+# (harmless dead-code branch) but probing .org returns 403 from
+# Cloudflare and adds spurious FAIL noise to every deploy log.
+foreach ($url in @('https://explorer.coincync.network/','https://explorer.coincync.network/api/testnet')) {
   try {
     if ($url -like '*api/testnet*') {
       $r = Invoke-WebRequest -Uri $url -Method POST -Body '{"jsonrpc":"2.0","id":1,"method":"get_info"}' -ContentType 'application/json' -TimeoutSec 12 -UseBasicParsing
