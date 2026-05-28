@@ -47,18 +47,37 @@ T+7 days (2026-10-08)    → First incident-or-no-incident retrospective.
 
 **Goal:** ≥5 mainnet seed nodes online + DNS-resolvable ≥ 7 days pre-genesis, distributed across ≥3 continents.
 
+**Hosting decision (made 2026-05-27):** **Dedicated mainnet Vultr boxes** (NOT shared with the testnet fleet). Rationale: clean trust boundary for the audit firm (testnet incidents can't cascade to mainnet), risk-isolated (single Vultr outage doesn't take down both networks), and ~$30-60/mo extra is well below the cost of one incident-response cycle. The 5 existing Vultr testnet boxes (`66.135.23.193`, `140.82.57.168`, `207.148.111.76`, `207.148.6.50`, `95.179.165.225`) stay testnet-only.
+
+**Current state of `src/mainnet.rs`:** the `MAINNET_SEED_NODES` constant contains 5 stale DigitalOcean IPs (`138.68.x`, `64.227.x`, `170.64.x`, `45.55.x`, `143.110.x`) from a prior infra config. These MUST be replaced with the new Vultr mainnet IPs before the v1.0 tag. Until then, treat them as placeholders.
+
 | Sub-task | Status | Notes |
 | --- | --- | --- |
-| 1.1 Decide hosting model (VPS / dedicated / hybrid) | TODO | Recommend: 5× Hetzner / OVH / Vultr VPS, $5-10/mo each. ~3 continents represented. |
-| 1.2 Pick 5 host candidates with hard public IPs | TODO | Need: 1× North America, 1× South America, 1× Europe, 1× Asia, 1× Oceania. Pinned IPs (no DHCP). |
-| 1.3 Procure VPS instances | TODO | Single account is fine. Pay ~$30/mo total. Provision: 4GB RAM, 2 vCPU, 80GB SSD each. |
-| 1.4 Install + configure `coincyncd` mainnet binary | TODO | `--network mainnet --listen 0.0.0.0:NN`. Firewall: only the listen port + SSH. |
+| 1.1 Decide hosting model (VPS / dedicated / hybrid) | DONE 2026-05-27 | **Dedicated mainnet Vultr boxes**, separate from testnet fleet. |
+| 1.2 Pick 5 host candidates with hard public IPs | TODO | Vultr regions for ≥3 continents: NA (NJ/SFO/Dallas), EU (Frankfurt/Amsterdam), AS (Tokyo/Singapore), OC (Sydney). Match the geographic spread of testnet for continuity. |
+| 1.3 Procure VPS instances | TODO | Existing `scripts/provision-vultr-fleet.ps1` is the template — fork it to a new `provision-mainnet-fleet.ps1` with mainnet IPs + `--network mainnet` flag. 4 GB / 2 vCPU / 80 GB ≈ $24/mo per box. 5 boxes ≈ $120/mo. |
+| 1.4 Install + configure `coincyncd` mainnet binary | TODO | `--network mainnet --p2p-bind 0.0.0.0:19080`. Firewall: 19080 P2P public, 19081 RPC loopback. systemd unit in `deploy/coincync-node.service`. |
 | 1.5 Generate seed-node identity keys + persist | TODO | Each node's persistent identity key goes into operator-tracked vault. Lose these = lose the node's seed-list slot. |
-| 1.6 Test inbound P2P from external IPs | TODO | `nmap` from a separate IP, confirm port open. Try a `coincync-node connect <ip:port>` smoke from a clean box. |
-| 1.7 Bake seed-list into mainnet binary (DNS-bootstrapped + IP-fallback) | TODO | `src/network/dns_seeds.rs` already supports this — add the mainnet seed entries. |
+| 1.6 Test inbound P2P from external IPs | TODO | `nmap` from a separate IP, confirm 19080 open. Try `coincync-node connect <ip>:19080` smoke from a clean box. |
+| 1.7 Update `MAINNET_SEED_NODES` in `src/mainnet.rs` + add DNS records | TODO | Replace the 5 stale DigitalOcean IPs with the new Vultr mainnet IPs. Add A/AAAA records: `seed{1,2,3}.coincync.org` + `seed{1,2,3}.coincync.network`. Re-run `cargo test --features mainnet-genesis` to recompute `MAINNET_GENESIS_HASH` if anything that feeds the genesis block changes. |
 | 1.8 Confirm seed-discovery works in fresh mainnet binary | TODO | Spin a 6th node from scratch with only the bin + seed list. Should bootstrap to the other 5 within 60 sec. |
 
 **Owner:** [self] for VPS procurement + config. Volunteer testnet ops for 2-3 of the slots may be willing to host — ask in #dev-updates ~T-45 days.
+
+**Suggested provisioning script starter** (extend `scripts/provision-vultr-fleet.ps1`):
+
+```powershell
+# scripts/provision-mainnet-fleet.ps1 — same shape as testnet provisioner,
+# pointing at new Vultr mainnet IPs and --network mainnet.
+$Fleet = @(
+  @{ Role='seed'; Name='mainnet-seed1'; IP='<TBD-NA>';   Region='ewr' },
+  @{ Role='seed'; Name='mainnet-seed2'; IP='<TBD-EU>';   Region='fra' },
+  @{ Role='seed'; Name='mainnet-seed3'; IP='<TBD-AS>';   Region='nrt' },
+  @{ Role='seed'; Name='mainnet-seed4'; IP='<TBD-OC>';   Region='syd' },
+  @{ Role='seed'; Name='mainnet-seed5'; IP='<TBD-NA2>';  Region='sjc' }
+)
+# ExecStart line: --network mainnet --p2p-bind 0.0.0.0:19080 --rpc-bind 0.0.0.0:19081
+```
 
 ### 2. Initial checkpoint set (Layer 5)
 

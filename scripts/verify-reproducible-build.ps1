@@ -116,10 +116,15 @@ function Compare-LocalToPublishedRelease {
   }
 
   # Parse 'sha256sum -c' format: "<hash>  <filename>" per line.
+  # Handles BOMs at file start, \r\n line endings, optional '*' prefix
+  # (sha256sum binary-mode), and lines with leading whitespace.
   function Parse-Hashes([string]$raw) {
     $h = @{}
-    foreach ($line in ($raw -split "`n")) {
-      if ($line.Trim() -match '^([0-9a-fA-F]{64})\s+\*?(\S.+)$') {
+    # Strip BOM if present, normalize line endings.
+    $raw = $raw -replace '^\xEF\xBB\xBF',''
+    foreach ($line in ($raw -split "\r?\n")) {
+      $trimmed = $line.Trim()
+      if ($trimmed -match '([0-9a-fA-F]{64})\s+\*?(\S[^\r\n]*)') {
         $h[$matches[2].Trim()] = $matches[1].ToLower()
       }
     }
