@@ -212,11 +212,13 @@ pub async fn run_solo(
                     m.record_per_thread_hashrate(per_thread_hps);
                     m.blocks_found_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
+                let (hr_digits, hr_unit) = crate::tui_blockfont::format_hashrate(hps.round() as u64);
                 info!(
                     height,
                     nonce = format!("{:#018x}", n),
                     attempts = total_attempts,
                     hashrate_hps = format!("{:.0}", hps),
+                    hashrate = format!("{} {}", hr_digits, hr_unit),
                     "orchestrator: BLOCK FOUND, submitting"
                 );
 
@@ -252,10 +254,12 @@ pub async fn run_solo(
                     m.record_hashrate_sample(hps as u64);
                     m.record_per_thread_hashrate(per_thread_hps);
                 }
+                let (hr_digits, hr_unit) = crate::tui_blockfont::format_hashrate(hps.round() as u64);
                 info!(
                     height,
                     attempts = total_attempts,
                     hashrate_hps = format!("{:.0}", hps),
+                    hashrate = format!("{} {}", hr_digits, hr_unit),
                     "orchestrator: poll interval elapsed without finding a nonce, refreshing template"
                 );
             }

@@ -375,11 +375,20 @@ fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
     let total = total_hashes.load(Ordering::Relaxed);
     let hps = total as f64 / elapsed.as_secs_f64();
 
+    // Use the same auto-scaling formatter the TUI uses so bench output
+    // matches what an operator sees mid-mining. Without this, a Phase-2
+    // box hitting 163000 H/s renders as "163000 H/s" which a tired
+    // operator misreads as 163 H/s -- the exact "explorer says 163 hs"
+    // confusion the community has been hitting.
+    let (hps_digits, hps_unit) = tui_blockfont::format_hashrate(hps.round() as u64);
+    let per_thread = hps / n_threads as f64;
+    let (pt_digits, pt_unit) = tui_blockfont::format_hashrate(per_thread.round() as u64);
+
     println!("Results:");
     println!("  Total hashes:  {}", total);
     println!("  Elapsed:       {:.2}s", elapsed.as_secs_f64());
-    println!("  Hashrate:      {:.0} H/s", hps);
-    println!("  Per thread:    {:.0} H/s avg", hps / n_threads as f64);
+    println!("  Hashrate:      {} {}", hps_digits, hps_unit);
+    println!("  Per thread:    {} {} avg", pt_digits, pt_unit);
     Ok(())
 }
 

@@ -1802,7 +1802,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
           <div class="dl">Height</div><div class="dv" id="net-h" style="color:var(--ac2);font-weight:600">—</div>
           <div class="dl">Top hash</div><div class="dv" id="net-hash" style="font-size:10px">—</div>
           <div class="dl">Difficulty</div><div class="dv" id="net-d">—</div>
-          <div class="dl">Hashrate</div><div class="dv" id="net-hr" style="color:var(--ac2)">—</div>
+          <div class="dl" title="Network hashrate implied by current difficulty (= difficulty / 120s). Tracks ~10-20 min behind sudden hashrate changes because ASERT difficulty adjustment caps at 2× per block. If you just joined with a much higher hashrate than the network had before, your miner's reported H/s will be larger than this value until difficulty catches up.">Hashrate <span style="color:var(--t3);font-size:10px">(diff-implied, ASERT-lagged)</span></div><div class="dv" id="net-hr" style="color:var(--ac2)">—</div>
           <div class="dl">Synced</div><div class="dv" id="net-s">—</div>
           <div class="dl">Mempool</div><div class="dv" id="net-m">—</div>
           <div class="dl">Outputs</div><div class="dv" id="net-o">—</div>
