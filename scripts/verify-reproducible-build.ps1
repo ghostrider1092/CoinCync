@@ -201,7 +201,19 @@ Write-Host ""
 
 $runStart = Get-Date
 $env:MSYS_NO_PATHCONV = "1"  # prevents Git Bash from rewriting /out -> C:/Program Files/Git/out
-& $GitBashPath -c "cd '$($repoRoot -replace '\\','/')' && ./scripts/build-in-docker.sh"
+# PS5.1 + native command stderr trap: Docker writes progress to stderr
+# ("#0 building with desktop-linux instance..."). With
+# $ErrorActionPreference='Stop' globally, PowerShell 5.1 sees that as a
+# NativeCommandError and terminates BEFORE the $LASTEXITCODE check below
+# can fire. Switching to Continue around the native call lets stderr
+# stream through normally; we still check $LASTEXITCODE explicitly.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & $GitBashPath -c "cd '$($repoRoot -replace '\\','/')' && ./scripts/build-in-docker.sh" 2>&1 | ForEach-Object { Write-Host $_ }
+} finally {
+  $ErrorActionPreference = $prevEAP
+}
 if ($LASTEXITCODE -ne 0) {
   Write-Host "ERROR: run-1 Docker build failed (exit $LASTEXITCODE)" -ForegroundColor Red
   Pop-Location
@@ -268,7 +280,14 @@ Write-Host "Clearing Docker build cache (forces fresh compile)..." -ForegroundCo
 & docker builder prune --filter "label=coincync-build" --force 2>&1 | Out-Null
 
 $runStart = Get-Date
-& $GitBashPath -c "cd '$($repoRoot -replace '\\','/')' && ./scripts/build-in-docker.sh"
+# Same PS5.1 native-stderr workaround as run-1 above.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & $GitBashPath -c "cd '$($repoRoot -replace '\\','/')' && ./scripts/build-in-docker.sh" 2>&1 | ForEach-Object { Write-Host $_ }
+} finally {
+  $ErrorActionPreference = $prevEAP
+}
 if ($LASTEXITCODE -ne 0) {
   Write-Host "ERROR: run-2 Docker build failed (exit $LASTEXITCODE)" -ForegroundColor Red
   Pop-Location
