@@ -1,17 +1,32 @@
 name: Build Release Binaries
 
+# Two ways to fire this workflow:
+#
+#   1. Automatic on tag push (v* — any tag starting with v):
+#      `git tag -s v1.0.10-testnet -m "..."`
+#      `git push origin v1.0.10-testnet`
+#      Triggers a full build for all 4 platforms AND publishes the
+#      binaries + SHA256SUMS to the matching GitHub Release.
+#
+#   2. Manual via workflow_dispatch with an explicit version input.
+#      Use for re-running a release if the auto-publish job failed,
+#      or for back-filling binaries on an older tag that shipped
+#      Windows-only (this is what got v1.0.9-testnet-pre-audit into
+#      a Windows-only state).
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: Version tag
+        description: Version tag (must match an existing release)
         required: true
-        default: v1.0.2-testnet
+        default: v1.0.10-testnet
 
 permissions:
-  contents: read
-  id-token: write
-  attestations: write
+  contents: write       # required by publish-release to upload assets
+  id-token: write       # required by attest-build-provenance (Sigstore)
+  attestations: write   # same
 
 jobs:
   build-linux:
@@ -133,3 +148,67 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: coincync-macos-arm64.tar.gz
+
+  # ─── Publish ─────────────────────────────────────────────────────
+  #
+  # Without this job the 4 platform builds produce artifacts that
+  # live in workflow scratch for 90 days, then expire silently.
+  # Operators had to manually download and re-upload each per-
+  # release — which is why v1.0.9-testnet-pre-audit shipped with
+  # Windows binaries only (Linux + macOS jobs succeeded but the
+  # operator only downloaded one). This job downloads all 4
+  # platform tarballs, generates a combined SHA256SUMS across
+  # them, and attaches everything to the matching GitHub Release.
+  #
+  # Runs only when triggered by a tag push OR when workflow_dispatch
+  # provides an existing tag in the `version` input.
+  publish-release:
+    needs: [build-linux, build-windows, build-macos-intel, build-macos-arm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ inputs.version }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing release for tag: $TAG"
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate combined SHA256SUMS.txt
+        run: |
+          mkdir -p release-bundle
+          # Move each platform tarball up one level, alongside SHA256SUMS.
+          for d in artifacts/*/; do
+            cp "$d"/*.tar.gz release-bundle/
+          done
+          cd release-bundle
+          # Cross-platform SHA file the verify-reproducible-build.ps1
+          # script consumes. One line per tarball; reproducible across
+          # operator boxes since sha256sum is deterministic.
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          echo "--- SHA256SUMS.txt ---"
+          cat SHA256SUMS.txt
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            release-bundle/*.tar.gz
+            release-bundle/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          # If the release doesn't exist yet (rare — usually the tag
+          # push has already created it via GitHub's auto-release),
+          # create it. Body is intentionally empty here; release notes
+          # are authored manually post-publish to allow per-release
+          # narrative + breaking-change callouts.
+          generate_release_notes: false
+          append_body: false

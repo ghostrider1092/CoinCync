@@ -161,7 +161,7 @@ don't warn about unexpected configuration.
 
 ## What's currently proved
 
-As of 2026-05-26, 7 proof harnesses across two modules:
+As of 2026-05-27, 14 proof harnesses across three modules:
 
 **Emission curve** (4 proofs):
 
@@ -175,6 +175,16 @@ As of 2026-05-26, 7 proof harnesses across two modules:
 - `min_output_age_at_height` returns one of exactly two values
 - Post-fork branch reached at and above the activation height
 - `activity_bonus_rate` bounded in [100, 1000] bps for all inputs
+
+**Consensus helpers — fee market + difficulty** (7 proofs):
+
+- `congestion_multiplier` returns one of exactly {100, 150, 200, 300}
+- `congestion_multiplier` is monotonically non-decreasing in congestion
+- `calculate_fee` never panics for any (tx_size, congestion) pair
+- `calculate_fee(0, _)` returns zero (boundary case)
+- `distribute_fee`: `to_miner + burned + to_protocol == total` for all inputs (Article II conservation)
+- `distribute_fee`: `to_protocol == 0` always (Constitution Article II)
+- `max_target()` maps to difficulty 1 (difficulty-scale anchor)
 
 ---
 

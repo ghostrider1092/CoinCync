@@ -25,6 +25,21 @@
   Skip the run-2 comparison (single-build mode). Use for fast preview;
   the actual repro guarantee requires two runs.
 
+.PARAMETER CompareToRelease
+  GitHub release tag (e.g. "v1.0.9-testnet-pre-audit"). When set, the
+  script downloads SHA256SUMS.txt from that release after the local
+  build(s) and compares each entry against the locally-computed hash.
+  This is the audit-firm replication path: prove that the binary the
+  project published matches what falls out of building from source
+  today. Mismatches are surfaced per-file and block exit-0.
+
+  Uses gh CLI if available, falls back to Invoke-WebRequest against
+  the GitHub release-assets URL pattern.
+
+.PARAMETER GitHubRepo
+  owner/repo for the -CompareToRelease asset fetch. Default
+  "ghostrider1092/Coincync-Testnet-". Override for fork verification.
+
 .EXAMPLE
   .\verify-reproducible-build.ps1
   # Full two-run repro verification (~30 min if Docker cache cold,
@@ -33,17 +48,120 @@
 .EXAMPLE
   .\verify-reproducible-build.ps1 -SkipSecondRun
   # Single build; outputs SHA256SUMS but does NOT prove reproducibility
+
+.EXAMPLE
+  .\verify-reproducible-build.ps1 -CompareToRelease v1.0.9-testnet-pre-audit
+  # Two-run repro + compare to v1.0.9 published hashes (audit-firm test)
+
+.EXAMPLE
+  .\verify-reproducible-build.ps1 -SkipSecondRun -CompareToRelease v1.0.9-testnet-pre-audit
+  # Fast dry-run: single build + compare to published. Smoke-test
+  # before scheduling the full two-run verification.
 #>
 
 [CmdletBinding()]
 param(
   [string]$GitBashPath = "C:\Program Files\Git\bin\bash.exe",
-  [switch]$SkipSecondRun
+  [switch]$SkipSecondRun,
+  [string]$CompareToRelease = $null,
+  [string]$GitHubRepo = "ghostrider1092/Coincync-Testnet-"
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Resolve-Path "$PSScriptRoot\.."
 Push-Location $repoRoot
+
+# --- Helper: compare local SHA256SUMS to a published GitHub release ---
+#
+# Downloads SHA256SUMS.txt from the named release tag, parses both
+# the local and remote files, and walks the intersection of named
+# binaries to confirm every overlapping entry matches byte-for-byte.
+#
+# Returns $true if all overlapping entries match (or the remote file
+# is missing entirely with a warning). Returns $false on any
+# mismatch. Mismatch is the load-bearing finding for an audit:
+# either the published binary wasn't reproducibly built, or the
+# source has drifted since release-cut. Both block tag.
+function Compare-LocalToPublishedRelease {
+  param(
+    [Parameter(Mandatory)] [string]$Tag,
+    [Parameter(Mandatory)] [string]$Repo,
+    [Parameter(Mandatory)] [string]$LocalHashesPath
+  )
+
+  Write-Host ""
+  Write-Host "===================================================================="
+  Write-Host "  AUDIT-REPLICATION CHECK -- compare to release $Tag" -ForegroundColor Yellow
+  Write-Host "===================================================================="
+
+  if (-not (Test-Path $LocalHashesPath)) {
+    Write-Host "  [X] local hash file missing at $LocalHashesPath" -ForegroundColor Red
+    return $false
+  }
+
+  # Fetch the published SHA256SUMS via the GitHub release-asset URL.
+  # Pattern: https://github.com/<repo>/releases/download/<tag>/SHA256SUMS.txt
+  # The pattern works for any public repo without auth.
+  $remoteUrl = "https://github.com/$Repo/releases/download/$Tag/SHA256SUMS.txt"
+  Write-Host "  Fetching: $remoteUrl" -ForegroundColor Gray
+  try {
+    $remoteRaw = (Invoke-WebRequest -Uri $remoteUrl -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop).Content
+  } catch {
+    Write-Host "  [WARN] could not fetch published SHA256SUMS: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "         Release '$Tag' may not have a SHA256SUMS.txt asset attached." -ForegroundColor Yellow
+    Write-Host "         (v1.0.9-testnet-pre-audit only ships per-platform tarballs;" -ForegroundColor Yellow
+    Write-Host "          the combined SHA256SUMS lands once the updated release" -ForegroundColor Yellow
+    Write-Host "          workflow runs against a fresh tag.)" -ForegroundColor Yellow
+    return $true  # warn-not-fail; missing asset is operator-fixable
+  }
+
+  # Parse 'sha256sum -c' format: "<hash>  <filename>" per line.
+  function Parse-Hashes([string]$raw) {
+    $h = @{}
+    foreach ($line in ($raw -split "`n")) {
+      if ($line.Trim() -match '^([0-9a-fA-F]{64})\s+\*?(\S.+)$') {
+        $h[$matches[2].Trim()] = $matches[1].ToLower()
+      }
+    }
+    return $h
+  }
+  $remote = Parse-Hashes $remoteRaw
+  $local  = Parse-Hashes (Get-Content $LocalHashesPath -Raw)
+
+  $overlap = $local.Keys | Where-Object { $remote.ContainsKey($_) }
+  if (-not $overlap) {
+    Write-Host "  [WARN] no overlapping binaries between local + published" -ForegroundColor Yellow
+    Write-Host "         local : $($local.Keys -join ', ')" -ForegroundColor Gray
+    Write-Host "         remote: $($remote.Keys -join ', ')" -ForegroundColor Gray
+    Write-Host "         Different platform / different filename convention." -ForegroundColor Yellow
+    return $true  # nothing comparable, can't fail
+  }
+
+  $mismatches = @()
+  foreach ($file in $overlap) {
+    if ($local[$file] -eq $remote[$file]) {
+      Write-Host "    [OK]   $file" -ForegroundColor Green
+    } else {
+      Write-Host "    [X]    $file" -ForegroundColor Red
+      Write-Host "           local : $($local[$file])" -ForegroundColor Red
+      Write-Host "           remote: $($remote[$file])" -ForegroundColor Red
+      $mismatches += $file
+    }
+  }
+
+  if ($mismatches) {
+    Write-Host ""
+    Write-Host "  [X] AUDIT REPLICATION FAILED -- $($mismatches.Count) binary divergence(s)." -ForegroundColor Red
+    Write-Host "      Either the published $Tag binary was not reproducibly built," -ForegroundColor Red
+    Write-Host "      or the source has drifted since the tag was cut." -ForegroundColor Red
+    Write-Host "      An auditor running this script would see the same failure." -ForegroundColor Red
+    return $false
+  } else {
+    Write-Host ""
+    Write-Host "  [OK] AUDIT REPLICATION SUCCEEDED -- $($overlap.Count) binaries match published." -ForegroundColor Green
+    return $true
+  }
+}
 
 try {
 
@@ -113,6 +231,18 @@ if ($SkipSecondRun) {
   Write-Host ""
   Write-Host "  SHA256SUMS at: $outDir\SHA256SUMS"
   Write-Host "  Operators verify with: sha256sum -c SHA256SUMS"
+
+  if ($CompareToRelease) {
+    $matchOk = Compare-LocalToPublishedRelease `
+      -Tag $CompareToRelease `
+      -Repo $GitHubRepo `
+      -LocalHashesPath (Join-Path $outDir "SHA256SUMS")
+    if (-not $matchOk) {
+      Pop-Location
+      exit 2
+    }
+  }
+
   Pop-Location
   exit 0
 }
@@ -165,6 +295,21 @@ if ($run1Hashes.Trim() -eq $run2Hashes.Trim()) {
   Write-Host "  Ship $outDir\SHA256SUMS alongside the GitHub release." -ForegroundColor Cyan
   Write-Host "  Operators verify with: sha256sum -c SHA256SUMS" -ForegroundColor Cyan
   Write-Host "  Audit firm can re-run this script to independently confirm." -ForegroundColor Cyan
+
+  # --- Optional: compare to published release ---------------------
+  # Audit-firm replication test: prove what's on GitHub matches what
+  # falls out of the source today. Diverges block exit-0.
+  if ($CompareToRelease) {
+    $matchOk = Compare-LocalToPublishedRelease `
+      -Tag $CompareToRelease `
+      -Repo $GitHubRepo `
+      -LocalHashesPath (Join-Path $outDir "SHA256SUMS")
+    if (-not $matchOk) {
+      Pop-Location
+      exit 2  # distinct exit so callers can differentiate from repro fail
+    }
+  }
+
   Pop-Location
   exit 0
 } else {

@@ -22,6 +22,12 @@ pub mod privacy_policy;
 #[cfg(feature = "rolling-finality")]
 pub mod rolling_finality;
 
+// Kani proof harnesses for the pure consensus helpers used by
+// validate_block / validate_transaction. Compiled only under
+// cfg(kani); see docs/security/KANI_SETUP.md.
+#[cfg(kani)]
+mod kani_proofs;
+
 pub use block::Block;
 pub use header::BlockHeader;
 pub use pow::{
