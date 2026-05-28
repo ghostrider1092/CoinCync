@@ -50,6 +50,12 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=PROFILE");
 
+    // Register cfg(kani) so the compiler doesn't warn when it sees
+    // `#[cfg(kani)]` gated proof modules in src/. Kani itself sets
+    // this cfg when it runs; normal cargo builds leave it unset and
+    // the gated code never compiles.
+    println!("cargo:rustc-check-cfg=cfg(kani)");
+
     emit_build_metadata();
 
     // ── Load the lockfile ────────────────────────────────────────────

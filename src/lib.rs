@@ -17,6 +17,11 @@
 // ── Foundation ──────────────────────────────────────────────
 pub mod constants;
 pub mod error;
+
+// Kani proof harnesses for top-level helpers in constants.rs.
+// Compiled only under cfg(kani); see docs/security/KANI_SETUP.md.
+#[cfg(kani)]
+mod kani_proofs;
 pub mod config;
 pub mod helpers;
 pub mod build_info;

@@ -10,6 +10,12 @@
 pub mod curve;
 pub mod supply;
 
+// Kani proof harnesses. Compiled only when targeting kani (cfg(kani)).
+// Lives in a sibling file so changes don't touch the lockfile-locked
+// curve.rs. See docs/security/KANI_SETUP.md.
+#[cfg(kani)]
+mod kani_proofs;
+
 pub use curve::{base_reward, base_reward_from_supply, block_reward, emission_phase, EmissionPhase};
 pub use supply::{SupplyStats, calculate_supply_commitment};
 
