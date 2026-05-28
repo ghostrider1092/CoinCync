@@ -300,7 +300,21 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "scp script failed" }
 
   Write-Host "Running install on remote..."
-  & ssh -i $KeyPath "root@${ExplorerIP}" "bash /tmp/install-explorer.sh; ec=`$?; rm -f /tmp/install-explorer.sh; exit `$ec"
+  # PS5.1 native-stderr trap: ssh's tar emits benign stderr warnings
+  # ("Ignoring unknown extended header keyword 'SCHILY.fflags'" when
+  # extracting a BSD-tar tarball with Linux tar) which PowerShell sees
+  # as NativeCommandError under $ErrorActionPreference='Stop' and bails
+  # BEFORE the explicit $LASTEXITCODE check. Same fix as in
+  # verify-reproducible-build.ps1 (commit 54cebaa): drop EAP to
+  # Continue around the call, merge stderr into stdout, then check
+  # $LASTEXITCODE explicitly.
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & ssh -i $KeyPath "root@${ExplorerIP}" "bash /tmp/install-explorer.sh; ec=`$?; rm -f /tmp/install-explorer.sh; exit `$ec" 2>&1 | ForEach-Object { Write-Host $_ }
+  } finally {
+    $ErrorActionPreference = $prevEAP
+  }
   if ($LASTEXITCODE -ne 0) { throw "Remote install failed with exit $LASTEXITCODE" }
 } finally {
   Remove-Item -Force -ErrorAction SilentlyContinue $tmp
