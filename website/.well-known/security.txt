@@ -1,0 +1,19 @@
+# CoinCync security.txt
+#
+# RFC 9116 format. Serve this file at:
+#   https://coincync.network/.well-known/security.txt
+#   https://coincync.org/.well-known/security.txt
+#
+# Update the Expires: date AT LEAST annually. An expired security.txt
+# is treated as no security.txt by most scanners. The PGP key file
+# referenced below must exist before this file is published.
+
+Contact: mailto:CyncLabs@proton.me
+Expires: 2027-05-26T00:00:00.000Z
+Encryption: https://coincync.network/.well-known/pgp-key.asc
+Preferred-Languages: en
+Canonical: https://coincync.network/.well-known/security.txt
+Policy: https://coincync.network/SECURITY.md
+Acknowledgments: https://coincync.network/security/credits
+
+# Hiring is not currently advertised here.
