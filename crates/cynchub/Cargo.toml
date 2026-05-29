@@ -1,0 +1,83 @@
+[package]
+name         = "cynchub"
+version      = "0.0.1"
+edition      = "2021"
+rust-version = "1.75"
+authors      = ["CoinCync 1.0 Contributors"]
+description  = "CyncHub — merge-mined PoW liquidity layer for trustless CYNC↔BTC trading (skeleton — see CIP-002)."
+license      = "MIT"
+publish      = false
+
+# Status: SKELETON. No working chain is shipped yet. This crate exists
+# to provide the module structure, type signatures, and CLI surface
+# that the eventual implementation will fill in. See CIP-002 in the
+# docs/ tree for the protocol spec, and the "Status" section of
+# src/lib.rs for current implementation state.
+#
+# Post-mainnet phase-2 product per CIP-002 §"V1 Scope":
+#   - V1 ships CYNC↔BTC only, CLOB-only, HTLCs/adaptor-sigs only.
+#   - V1 depends on `coincync-swap` (CIP-001 atomic swap crate) for
+#     both legs of every swap; CyncHub adds: chain consensus,
+#     orderbook + match logic, merge-mining commitment scheme,
+#     embedded BTC + CYNC SPV light clients, watchtower hooks.
+#   - V2+ add other coins (LTC, DOGE, BCH, Lightning, then ETH/USDT).
+
+[lib]
+name = "cynchub"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cynchubd"
+path = "src/bin/cynchubd.rs"
+
+[dependencies]
+# Error types — same crate the parent `coincync` and `coincync-swap`
+# workspace members use, so the resolver gets a single tree.
+thiserror = "1"
+
+# Serde for the on-wire transaction + block types. JSON is not the
+# eventual wire format (borsh is more likely, matching the CYNC node)
+# but having serde derives in place lets us write tests + tooling
+# against stable types before the wire format is finalized.
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The atomic-swap primitives every CyncHub trade reuses, per CIP-002
+# §"Reuse of coincync-swap". V1 does NOT reimplement the cryptographic
+# core; it imports it as a workspace dependency.
+coincync-swap = { path = "../coincync-swap" }
+
+# Constant-time comparison for any opaque 32-byte identifiers
+# (CyncHub block hashes, lock-refs, adaptor pubkey-tweak points).
+# Same crate the swap crate uses, same posture.
+subtle = "2.5"
+
+# Hex encoding for human-readable lock-refs and block hashes in the
+# `cynchubd` CLI output and in test fixtures.
+hex = "0.4"
+
+# Daemon CLI argument parsing — matches the same clap version the
+# rest of the workspace pins.
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# (none yet — added as the first integration tests land)
+
+# ── Cargo features ────────────────────────────────────────────────────
+#
+# `mergemining-strict` enables strict validation of CYNC coinbase
+# merge-mining commitments: rejects commits whose position in the
+# coinbase scriptSig isn't the canonical first position (defends
+# against accidental dual-commitment ambiguity). Off by default so
+# the alignment audit can evaluate the relaxed-vs-strict tradeoff
+# explicitly. See `src/mergemining.rs` for the rationale.
+#
+# Currently has no effect — gated module is skeleton — but the
+# feature is declared so downstream consumers can opt in early.
+[features]
+default            = []
+mergemining-strict = []
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "allow"
