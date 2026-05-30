@@ -68,6 +68,14 @@ echo ""
 #   .git/         — fuzz workspace doesn't need git history
 #   *.swp         — editor scratch
 echo "Syncing source (skipping target/, preserving fuzz corpus + artifacts)..."
+# Windows file-handle locks on Tauri's node_modules + nested build
+# artifacts have killed this rsync three times in a row (2026-05-29):
+#   "cannot delete non-empty directory: coincync-wallet/src-tauri"
+#   rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20)
+# Excluding the Tauri / node_modules paths up front lets rsync skip
+# the problematic directories instead of trying (and failing) to
+# delete files Windows has open. The fuzz pass doesn't touch the
+# wallet GUI anyway -- it operates on the chain crates.
 rsync -a --delete \
   --exclude='target/' \
   --exclude='fuzz/target/' \
@@ -79,6 +87,11 @@ rsync -a --delete \
   --exclude='.vscode/' \
   --exclude='out/' \
   --exclude='release-artifacts/' \
+  --exclude='**/node_modules/' \
+  --exclude='coincync-wallet/src-tauri/target/' \
+  --exclude='coincync-wallet-v2/src-tauri/target/' \
+  --exclude='coincync-wallet/dist/' \
+  --exclude='coincync-wallet-v2/dist/' \
   "$WIN_SRC/" "$WSL_DST/"
 
 echo "  Sync complete."
