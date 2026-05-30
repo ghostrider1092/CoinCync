@@ -29,8 +29,15 @@ chmod +x coincync-node
 ## Quick start
 
 ```bash
-./coincync-node --network testnet --data-dir ~/.coincync
+./coincync-node --network testnet --data-dir ~/.coincync \
+    --addnode 66.135.23.193:28080 \
+    --addnode 140.82.57.168:28080 \
+    --addnode 207.148.111.76:28080 \
+    --addnode 207.148.6.50:28080 \
+    --addnode 95.179.165.225:28080
 ```
+
+The `--addnode` flags are the project's 5 Vultr fleet IPs — explicit fallbacks for the case where DNS seed resolution silently fails. **Use them for first sync.** Without peers reachable, your node starts at genesis (height 0), mines its own divergent chain, then hits the hardcoded checkpoint mismatch at ~height 250 and rejects its own blocks ("WARN block submit rejected ... reason=Hardcoded checkpoint mismatch"). Once your node is fully synced to the public tip, you can drop the addnode flags on subsequent restarts and rely on DNS.
 
 That's it. The node will:
 
@@ -38,9 +45,31 @@ That's it. The node will:
 2. Initialize the genesis block if the database is empty (and verify its hash against the hardcoded constant in `src/testnet.rs`)
 3. Start the P2P listener on `0.0.0.0:28080`
 4. Start the JSON-RPC server on `127.0.0.1:28081`
-5. Connect to the public testnet seed nodes and begin syncing
+5. Connect to the explicit seed IPs (and DNS seeds if those resolve), then begin syncing
+
+Sync from genesis takes 30-60 min depending on bandwidth — public testnet tip is currently around height 13,700. Watch `journalctl -u coincync-node -f` or the stdout log for `Imported block at height N` lines climbing toward the tip.
 
 Stop the node with `Ctrl-C`. Restart it later — chain state is on disk; it picks up where it left off.
+
+### Recovery: stuck-at-low-height + checkpoint mismatch
+
+If you see `WARN block submit rejected ... reason=Hardcoded checkpoint mismatch at height N` your node mined its own private chain because it never reached the public seeds. The wrong-fork chain has no value — wipe it and restart with explicit `--addnode` flags above:
+
+```bash
+# Stop everything
+killall coincync-node coincync-rig 2>/dev/null
+
+# Wipe the local (wrong-fork) chain data — wallet at ~/.coincync/testnet/wallets/ stays
+rm -rf ~/.coincync/testnet/chain ~/.coincync/testnet/blocks
+
+# Restart with explicit peers, wait for sync to ~13,700+ before mining
+./coincync-node --network testnet --data-dir ~/.coincync \
+    --addnode 66.135.23.193:28080 \
+    --addnode 140.82.57.168:28080 \
+    --addnode 207.148.111.76:28080 \
+    --addnode 207.148.6.50:28080 \
+    --addnode 95.179.165.225:28080
+```
 
 ## What success looks like
 

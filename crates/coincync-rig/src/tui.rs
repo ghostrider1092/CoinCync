@@ -317,10 +317,16 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
     }
     constraints.push(Constraint::Length(4));    // stat cards
     constraints.push(Constraint::Length(3));    // ETA gauge
+    // Log pane: only push the constraint when the user has it
+    // visible. Previously this branch fell through to
+    // `Constraint::Min(0)` which DOES allocate non-zero space on
+    // terminals with extra rows (Min means "≥ N, flex to fill") --
+    // then nothing draws into the slot, so the terminal's previous
+    // buffer bleeds through as "random pixels behind the TUI."
+    // Reported by a community tester on Ubuntu 2026-05-30.
+    // Use the same conditional-push pattern as the `stale` banner.
     if ui.show_log {
         constraints.push(Constraint::Min(5));   // log
-    } else {
-        constraints.push(Constraint::Min(0));   // collapsed
     }
     constraints.push(Constraint::Length(2));    // ticker / blocks-timeline
     constraints.push(Constraint::Length(1));    // footer
@@ -343,8 +349,8 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
     draw_eta_gauge(f, chunks[idx], metrics, theme, ui); idx += 1;
     if ui.show_log {
         draw_logs(f, chunks[idx], logs, theme);
+        idx += 1;
     }
-    idx += 1;
     draw_blocks_timeline_and_ticker(f, chunks[idx], metrics, theme, ui); idx += 1;
     draw_footer(f, chunks[idx], theme, metrics);
 
