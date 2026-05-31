@@ -125,14 +125,29 @@ while [ "$(date +%s)" -lt "$SOAK_END" ]; do
   # 1) wslpath -w on the script path,
   # 2) capture EXIT via PIPESTATUS so the powershell.exe exit code is what
   #    we read, not tail's.
+  # 3) wrap with `timeout 300` — soak-monitor.ps1 already sets per-call
+  #    -TimeoutSec=8 on every Invoke-WebRequest, but on 2026-05-30 a
+  #    powershell.exe instance still hung for 22+ hours (suspected TLS /
+  #    Cloudflare keep-alive stall not bounded by the per-call timeout).
+  #    A bash-level hard timeout guarantees the wrapper recovers no
+  #    matter what hung inside the PS process: SIGTERM at 300s, SIGKILL
+  #    at 310s (--kill-after). 300s >> the script's own ~30s worst-case
+  #    runtime, so this only fires on a genuine hang.
   SOAK_SCRIPT_WIN=$(wslpath -w /mnt/c/dev/coincync/scripts/soak-monitor.ps1)
   CSV_WIN=$(wslpath -w "$SOAK_CSV")
-  powershell.exe -ExecutionPolicy Bypass -File "$SOAK_SCRIPT_WIN" \
-    -NodeRpc "$RPC" \
-    -CsvAppend "$CSV_WIN" \
-    2>&1 | tail -3
+  timeout --kill-after=10 300 \
+    powershell.exe -ExecutionPolicy Bypass -File "$SOAK_SCRIPT_WIN" \
+      -NodeRpc "$RPC" \
+      -CsvAppend "$CSV_WIN" \
+      2>&1 | tail -3
   EXIT=${PIPESTATUS[0]}
-  echo "  monitor exit: $EXIT (0=PASS, 1=WARN, 2=FAIL, other=script error)"
+  if [ "$EXIT" -eq 124 ]; then
+    echo "  monitor exit: 124 (TIMEOUT — powershell.exe hung >300s, SIGTERM'd)"
+  elif [ "$EXIT" -eq 137 ]; then
+    echo "  monitor exit: 137 (TIMEOUT — powershell.exe hung >310s, SIGKILL'd)"
+  else
+    echo "  monitor exit: $EXIT (0=PASS, 1=WARN, 2=FAIL, other=script error)"
+  fi
 
   if [ "$EXIT" -eq 2 ]; then
     echo "  [!] soak FAIL signal — investigate via $SOAK_CSV"
