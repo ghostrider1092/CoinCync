@@ -25,6 +25,20 @@ If you're a contributor who needs a PR reviewed and the listed reviewer hasn't r
 
 ---
 
+## Release validators
+
+Named contributors who agreed to validate a specific release candidate cycle. They are **not** operational maintainers — they do not hold release-signing keys, do not have commit access, do not read the security inbox, do not appear in CODEOWNERS. They commit to running the rc binary, mining or syncing for a defined window, and reporting any bugs they hit. Pure recognition role.
+
+Naming them publicly is also a real bus-factor signal: it demonstrates the project has external testers who would notice if the primary maintainer vanished mid-release.
+
+| Release | Validator | Scope | Recognition |
+|---|---|---|---|
+| **v1.0.10-testnet** (cutting ~2026-06-04) | `barns1253` (Discord) | Run `v1.0.10-rc1-testnet` binary on Ubuntu, mine + sync for ≥48h of the 72h rc1 window, report any regressions to the maintainer | Named in v1.0.10 release notes, custom Discord role |
+
+**Promoting a validator to backup-maintainer:** validators who want to take on a backup-maintainer role for a row above go through the standard `[backup-applicant]` process documented in the [Recruiting](#recruiting) section below. Release-validator status is a credible-precursor signal (catches real bugs, shows up consistently) but is not automatic promotion. Trust still transfers slowly.
+
+---
+
 ## Review SLAs
 
 These are the response windows contributors and security reporters can expect. If a window slips, escalate to the role backup (when one exists) or to the project lead.
