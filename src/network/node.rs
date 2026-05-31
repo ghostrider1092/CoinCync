@@ -891,9 +891,24 @@ impl P2PNode {
                         let lo = (*k & 0xff) as u8;
                         format!("{}.{}/16={}", hi, lo, v)
                     }).collect();
-                    if snap_sum != outbound_count {
+                    // Off-by-one drift between subnet_sum and outbound_count
+                    // is a cosmetic bookkeeping artifact, not a connection
+                    // problem: the actual per-/16 cap is enforced atomically
+                    // by ConnectionTracker::try_track_outbound_subnet_owned
+                    // (see comment below), so a drift of 1 cannot cause an
+                    // eclipse. Demoted from warn! to debug! because new
+                    // operators (2026-05-31 barns1253 report) read the WARN
+                    // as a bug and worry. A drift of >=2 is genuinely worth
+                    // surfacing — that suggests multiple leaked slots.
+                    let drift = (snap_sum as i64 - outbound_count as i64).abs();
+                    if drift >= 2 {
                         warn!(
-                            "eclipse-defense: drift detected — subnet_sum={} but outbound_count={} :: {}",
+                            "eclipse-defense: significant drift — subnet_sum={} but outbound_count={} (diff={}) :: {}",
+                            snap_sum, outbound_count, drift, pretty.join(", ")
+                        );
+                    } else if drift == 1 {
+                        debug!(
+                            "eclipse-defense: minor drift (cosmetic) — subnet_sum={} but outbound_count={} :: {}",
                             snap_sum, outbound_count, pretty.join(", ")
                         );
                     } else {
