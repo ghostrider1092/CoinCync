@@ -25,6 +25,7 @@
 # Operations
 
 - [Deploying a node](./operations/deployment.md)
+- [Bootstrap from snapshot](./operations/bootstrap-from-snapshot.md)
 - [Signed bootstrap manifest](./operations/bootstrap-signed-manifest.md)
 - [Block explorer](./operations/explorer.md)
 - [Public RPC API](./operations/api-host.md)
