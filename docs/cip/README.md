@@ -61,6 +61,7 @@ These are design-space captures *only*. They are explicitly **not** on any commi
 | [CIP-003](CIP-003-cut-through-and-aggregation.md) | Sketch | Cut-through + block aggregation. Post-mainnet research. |
 | [CIP-004](CIP-004-kernel-offsets.md) | Sketch | Kernel offsets. Post-mainnet research. |
 | [CIP-005](CIP-005-lelantus-spark.md) | Sketch | Lelantus Spark integration. Post-mainnet research. |
+| [CIP-015](CIP-015-warp-sync-utxo-snapshot.md) | Sketch | Warp sync via UTXO-set state snapshots. v2.0 destination, replaces today's stopgap chaindata-tarball bootstrap. Trustless under honest-majority PoW. |
 
 ## How to read a CIP
 
