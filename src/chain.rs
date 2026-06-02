@@ -672,6 +672,15 @@ impl Blockchain {
                         inner.stats.total_supply = Amount::from_atomic(state.total_supply);
                         inner.stats.tip_hash = state.tip_hash;
                         inner.stats.total_difficulty = state.total_difficulty;
+                        // Sync stats.difficulty with the loaded tip. Without this,
+                        // stats.difficulty stays at ChainStats::default() (= 0) until
+                        // a new block lands via the main-chain add path (chain.rs:1490).
+                        // The RPC `get_info` "difficulty" field reads from
+                        // stats.difficulty (src/rpc/server.rs:511), so the bug surfaces
+                        // as `"difficulty":"0"` in get_info after every node restart
+                        // until the first non-fork block arrives. Observed on the
+                        // testnet api box 2026-06-01 after the fleet upgrade.
+                        inner.stats.difficulty = difficulty;
                     }
                     tracing::info!("Loaded chain state: height={}, tip={}", state.height, state.tip_hash.to_hex());
 
