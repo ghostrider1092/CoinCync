@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "coincync"
-version = "1.0.8"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "argon2",

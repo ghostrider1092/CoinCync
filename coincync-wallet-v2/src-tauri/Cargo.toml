@@ -2,7 +2,7 @@
 
 [package]
 name = "coincync-wallet-v2"
-version = "2.0.0"
+version = "1.0.10"
 edition = "2021"
 [build-dependencies]
 tauri-build = { version = "1.5", features = [] }
@@ -27,7 +27,7 @@ qrcode = "0.14"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-# Cyncswap (CIP-001 atomic swap) commands. Off by default — they ship
+# Cyncswap (CIP-001 atomic swap) commands. Off by default â€” they ship
 # in v1.1 behind their own dedicated audit per the staged-mainnet
 # decision (see docs/decisions/2026-05-20-staged-mainnet-and-cyncswap.md).
 # v1.0 wallet ships without the swap_* Tauri commands at all so the

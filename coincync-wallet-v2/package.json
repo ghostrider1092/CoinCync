@@ -1,7 +1,7 @@
 {
   "name": "coincync-wallet-v2",
-  "version": "2.0.0",
-  "description": "CoinCync Wallet v2 — Apple-aesthetic redesign.",
+  "version": "1.0.10",
+  "description": "CoinCync Wallet v2 â€” Apple-aesthetic redesign.",
   "private": true,
   "scripts": {
     "tauri": "tauri",
