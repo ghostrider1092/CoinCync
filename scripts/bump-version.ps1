@@ -88,13 +88,92 @@ foreach ($t in $targets) {
     exit 1
   }
 
-  # All matches in a single file should be the same current version -- sanity check.
-  $currentValues = $matches | ForEach-Object { $_.Value } | Sort-Object -Unique
+  # All matches in a single file should be the same current version -- sanity
+  # check. Exception: the explorer HTML routinely contains forward-references
+  # like "Coming in v1.0.10" alongside the current-version label "v1.0.9".
+  # Those forward refs are intentional copy and should not block the bump.
+  #
+  # Heuristic: for each match, look at the 30 chars BEFORE it. If that context
+  # contains "Coming in" or "Upcoming" or "in vX.Y.Z (", classify the match as
+  # a forward-reference and exclude it from the distinct-values check. The
+  # actual replacement at line 100 still rewrites all matches (forward refs
+  # too — once v1.0.10 ships, the explorer can carry a new "Coming in v1.0.11"
+  # forward ref instead). This keeps the bump idempotent while letting normal
+  # release copy mention upcoming versions.
+  # Two classes of matches we want to EXEMPT from the distinct-values check:
+  #   (a) Forward references: "Coming in v1.0.10", "Upcoming v1.0.10",
+  #       "in version v1.0.10" — intentional preview text
+  #   (b) Historical / comment references: "v1.0.8 NETWORK STATUS PANEL"
+  #       (HTML comment), "Removed in v1.0.8" (JS comment), "the v1.0.8
+  #       status panel" — descriptions of when a feature was introduced,
+  #       NOT current-version labels. Should not be rewritten on bump.
+  #
+  # Both (a) and (b) get classified as "exempt" and excluded from the
+  # uniqueness check; the actual regex replacement at the bottom still
+  # rewrites all matches (forward refs become the next forward ref;
+  # historical refs become the next historical ref). If the operator
+  # wants to preserve true historical accuracy in comments, they can
+  # post-edit; the common case is that this churn is acceptable.
+  $contextChars = 80
+  $currentMatchTexts = @()
+  $exemptTexts       = @()
+  foreach ($m in $matches) {
+    $startContext = [Math]::Max(0, $m.Index - $contextChars)
+    $contextLen   = $m.Index - $startContext
+    $context      = $content.Substring($startContext, $contextLen)
+
+    # Forward-ref patterns
+    $isForwardRef = ($context -match 'Coming in\s*$' -or
+                     $context -match 'Upcoming\s*[:\-]?\s*$' -or
+                     $context -match 'in version\s*$')
+
+    # Historical / comment patterns. We look at the LAST line of context
+    # (a version string buried in a multi-line block comment counts if
+    # the line it sits on starts with a comment marker).
+    $lastLineStart = $context.LastIndexOfAny([char[]]@("`n", "`r"))
+    $lastLine = if ($lastLineStart -ge 0) { $context.Substring($lastLineStart + 1) } else { $context }
+    $isInComment = ($lastLine -match '^\s*<!--' -or
+                    $lastLine -match '^\s*//' -or
+                    $lastLine -match '^\s*\*' -or       # JS block-comment continuation line
+                    $lastLine -match '^\s*/\*' -or
+                    $lastLine -match '<!--[^>]*$' -or   # HTML comment opened earlier in line
+                    $lastLine -match '/\*[^*]*$')       # JS block comment opened earlier in line
+
+    # Phrasing that describes a past introduction: "Removed in", "Added in",
+    # "Introduced in", "Renamed in", "Deprecated in"
+    $isHistoricalPhrasing = ($context -match '(Removed|Added|Introduced|Renamed|Deprecated|Shipped|Landed)\s+in\s*$')
+
+    if ($isForwardRef -or $isInComment -or $isHistoricalPhrasing) {
+      $exemptTexts += $m.Value
+    } else {
+      $currentMatchTexts += $m.Value
+    }
+  }
+
+  # Backward compat with the prior naming
+  $forwardRefTexts = $exemptTexts
+
+  if ($currentMatchTexts.Count -eq 0) {
+    Write-Host "ERROR: $($t.Label) has no non-forward-reference version strings - every match looks like 'Coming in vX.Y.Z'." -ForegroundColor Red
+    Write-Host "       The file probably needs at least one current-version label that isn't a forward ref." -ForegroundColor Red
+    exit 1
+  }
+
+  $currentValues = $currentMatchTexts | Sort-Object -Unique
   if ($currentValues.Count -gt 1) {
-    Write-Host "ERROR: $($t.Label) contains multiple distinct version strings:" -ForegroundColor Red
+    Write-Host "ERROR: $($t.Label) contains multiple distinct CURRENT version strings (forward refs are exempt):" -ForegroundColor Red
     $currentValues | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    if ($forwardRefTexts.Count -gt 0) {
+      $fwdSummary = ($forwardRefTexts | Sort-Object -Unique) -join ", "
+      Write-Host "       (Forward references identified + exempted: $fwdSummary)" -ForegroundColor DarkGray
+    }
     Write-Host "       Manual reconcile before re-running." -ForegroundColor Red
     exit 1
+  }
+
+  if ($forwardRefTexts.Count -gt 0) {
+    $fwdSummary = ($forwardRefTexts | Sort-Object -Unique) -join ", "
+    Write-Host "INFO: $($t.Label) - forward refs detected + exempted: $fwdSummary" -ForegroundColor DarkGray
   }
 
   $newContent = [regex]::Replace($content, $t.Pattern, $t.Replace)
