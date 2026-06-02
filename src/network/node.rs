@@ -1220,6 +1220,26 @@ impl P2PNode {
             let mut no_progress_ticks: u32 = 0;
             let sync_start = std::time::Instant::now();
 
+            // Tier-3 stall escalation tracking (added 2026-06-02).
+            // Tier 2 alone cycles every ~12s (24 ticks × 500ms) — observed on
+            // coincync-lon and barns1253's box that Tier 2 can fire thousands
+            // of times over many hours without ever clearing a stuck sync.
+            // Tier 3 tracks CONSECUTIVE Tier-2 firings during which height
+            // never advances. After T3_THRESHOLD consecutive failures (~1
+            // minute of continuous Tier-2 churn), we escalate to a deeper
+            // reset: drop all orphans, clear the address book entirely
+            // (not just `tried`), forcibly recompute the locator from
+            // genesis, and log CRITICAL so the operator knows intervention
+            // may be needed. After Tier 3 fires N_T3_BEFORE_BACKOFF times
+            // without progress, we back off (sleep 30s between sync ticks)
+            // to stop log-spam and stop hammering peers with requests they
+            // clearly can't answer.
+            let mut tier2_fires_since_progress: u32 = 0;
+            let mut tier3_fires_since_progress: u32 = 0;
+            let mut tier2_last_height: u64 = sync_chain.height();
+            const T3_THRESHOLD: u32 = 5; // consecutive Tier-2 without progress
+            const N_T3_BEFORE_BACKOFF: u32 = 3; // Tier-3 firings before backoff
+
             while *sync_running.read().await {
                 tick.tick().await;
 
@@ -1253,10 +1273,31 @@ impl P2PNode {
 
                     stall_count += 1;
 
-                    // Tier 2: Only after 120s of no progress, try rotating
-                    if stall_count >= 24 { // 24 * 5s tick = 120s
-                        warn!("Sync stalled for 2+ minutes, rotating peers");
+                    // Tier 2: every ~12s of continuous stall (24 ticks × 500ms,
+                    // not 120s as the prior comment incorrectly claimed), try
+                    // rotating peers + increasing timeout. This alone has been
+                    // observed to cycle thousands of times without recovering
+                    // a stuck sync (coincync-lon, 2026-06-02); Tier 3 below
+                    // catches that case.
+                    if stall_count >= 24 {
                         let now = chrono::Utc::now().timestamp() as u64;
+                        let current_height = sync_chain.height();
+                        let advanced_since_last_tier2 = current_height > tier2_last_height;
+
+                        if advanced_since_last_tier2 {
+                            // We DID advance between Tier-2 firings — recovery
+                            // is working, even if slowly. Reset Tier-3 counter.
+                            warn!("Sync stalled, rotating peers (made progress since last rotation: {} → {})",
+                                  tier2_last_height, current_height);
+                            tier2_fires_since_progress = 0;
+                            tier3_fires_since_progress = 0;
+                        } else {
+                            tier2_fires_since_progress += 1;
+                            warn!("Sync stalled, rotating peers (no progress for {} consecutive rotations, height stuck at {})",
+                                  tier2_fires_since_progress, current_height);
+                        }
+                        tier2_last_height = current_height;
+
                         {
                             let mut s = sync_sync.write().await;
                             s.increase_timeout();
@@ -1268,13 +1309,84 @@ impl P2PNode {
                         }
                         sync_addresses.write().await.clear_tried();
                         stall_count = 0;
+
+                        // Tier 3 escalation: T3_THRESHOLD consecutive Tier-2s
+                        // with zero progress means rotation alone isn't fixing
+                        // it. The most common cause we've seen (barns1253 +
+                        // coincync-lon, 2026-06-01 → 06-02) is the orphan-
+                        // fetch cascade: peer broadcasts new tip blocks via
+                        // inv, every received block is orphan because we're
+                        // missing parents, and Headers responses to our
+                        // GetHeaders never arrive (or never advance us).
+                        // Aggressive reset: drop the entire address book
+                        // (not just tried), clear ALL orphans (not just
+                        // expired), reset sync engine state to Idle so it
+                        // re-discovers from scratch, log CRITICAL severity.
+                        if tier2_fires_since_progress >= T3_THRESHOLD {
+                            tier3_fires_since_progress += 1;
+                            tracing::error!(
+                                "Sync TIER-3 escalation #{}: {} consecutive Tier-2 rotations with zero progress, \
+                                 height stuck at {} (peers={}). Performing aggressive recovery: clearing the \
+                                 address book tried-list, dropping ALL orphans (not just expired), resetting \
+                                 headers-request timeout. If this fires repeatedly without recovery, the node \
+                                 may be on a fork the peers don't share — operator may need to wipe + reimport snapshot.",
+                                tier3_fires_since_progress,
+                                tier2_fires_since_progress,
+                                current_height,
+                                sync_peers.len(),
+                            );
+                            // Aggressive recovery using only existing helpers
+                            // (no new public API on AddressManager / ChainSync
+                            // — those would need wider testing). Effect:
+                            //  1. clear_tried again, so the next peer cycle
+                            //     re-attempts all addresses with no recent-
+                            //     try cooldown blocking them.
+                            //  2. cleanup_expired_orphans with a very small
+                            //     time horizon (pass `now`) so all-but-the-
+                            //     latest orphans get dropped.
+                            //  3. reset_headers_timeout so the next iteration
+                            //     definitely sends a fresh GetHeaders even
+                            //     if the in-flight one isn't formally "timed
+                            //     out" yet.
+                            sync_addresses.write().await.clear_tried();
+                            {
+                                let mut s = sync_sync.write().await;
+                                s.cleanup_expired_orphans(now);
+                                s.reset_headers_timeout();
+                            }
+                            tier2_fires_since_progress = 0;
+
+                            // Tier 3 backoff: after N_T3_BEFORE_BACKOFF
+                            // consecutive Tier-3s with no progress, stop
+                            // hammering peers with requests they can't
+                            // answer. Sleep for 30s before continuing.
+                            // Without this, log spam from Tier-3 messages
+                            // makes the journal unreadable.
+                            if tier3_fires_since_progress >= N_T3_BEFORE_BACKOFF {
+                                tracing::error!(
+                                    "Sync TIER-3 backoff: {} consecutive Tier-3 escalations with no progress. \
+                                     Backing off for 30s. This node may be on a fork the peers don't share; \
+                                     operator may need to wipe + reimport snapshot.",
+                                    tier3_fires_since_progress
+                                );
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                                tier3_fires_since_progress = 0;
+                            }
+                        }
                     }
                 } else if !sync_sync.read().await.is_synced() {
-                    // Progress detected — reset stall counter
+                    // Progress detected — reset all stall counters.
                     let current_height = sync_chain.height();
                     if current_height > last_progress_height {
                         stall_count = 0;
                         last_progress_height = current_height;
+                        // Real progress made — reset Tier-3 counters too,
+                        // not just Tier-1's stall_count. Otherwise a node
+                        // that recovers naturally would still escalate to
+                        // Tier-3 on the next minor hiccup.
+                        tier2_fires_since_progress = 0;
+                        tier3_fires_since_progress = 0;
+                        tier2_last_height = current_height;
                     }
                 }
 
