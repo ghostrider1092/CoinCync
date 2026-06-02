@@ -1976,6 +1976,16 @@ impl P2PNode {
         self.peer_scorer.read().await.stats()
     }
 
+    /// Snapshot of currently-connected peers, with the heights they
+    /// each reported in their version handshake. Operators use this
+    /// via the `get_peer_info` RPC to spot fleet divergence — if some
+    /// nodes report height N and others report height M >> N, one
+    /// side has a fork or a stall. Cheap enough to call frequently
+    /// (iterates the live DashMap, clones each entry).
+    pub fn peer_snapshot(&self) -> Vec<PeerInfo> {
+        self.peers.iter().map(|kv| kv.value().clone()).collect()
+    }
+
     /// Get network statistics
     pub fn network_stats(&self) -> NetworkStats {
         let mut total_recv = 0u64;

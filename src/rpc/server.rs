@@ -546,6 +546,86 @@ pub async fn start_rpc_server(
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_peer_info ──────────────────────────────────────────
+    // Returns each currently-connected peer with the chain tip they
+    // most recently reported (height + tip_hash via their version
+    // handshake). Operators use this to spot fleet divergence: poll
+    // get_peer_info on every fleet node, compare reported tips, and
+    // any deviation > 1 block is a sign of a stuck node, a fork, or
+    // a P2P stall (the exact bug class barns1253 hit on 2026-06-01
+    // and coincync-lon hit on 2026-06-02). Cheap to call: iterates
+    // the live peer DashMap, no I/O. Useful as a periodic poll from
+    // a monitoring dashboard, NOT as a hot-path query.
+    module.register_method("get_peer_info", |_params, state, _ext| {
+        let now = std::time::Instant::now();
+        let peers: Vec<Value> = match state.p2p.as_ref() {
+            Some(p2p) => p2p
+                .peer_snapshot()
+                .into_iter()
+                .map(|p| {
+                    let last_seen_secs = now
+                        .checked_duration_since(p.last_seen)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let connected_for_secs = now
+                        .checked_duration_since(p.connected_at)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    json!({
+                        // Identity. We deliberately do NOT echo the full
+                        // PeerId for inbound peers — even a 16-byte
+                        // identifier is a correlator across observations.
+                        // First 8 bytes are enough for operator triage.
+                        "peer_id_prefix":      hex::encode(&p.id[..8]),
+                        "addr":                p.addr.to_string(),
+                        "outbound":            p.outbound,
+                        // Reported chain tip — the actually-useful field.
+                        // Defaults to 0 if the peer never sent a Version
+                        // (still mid-handshake).
+                        "reported_height":     p.height,
+                        "reported_tip_hash":   hex::encode(p.tip_hash.as_bytes()),
+                        // Identity / protocol
+                        "protocol_version":    p.version,
+                        "user_agent":          p.user_agent.clone(),
+                        "encrypted":           p.encrypted,
+                        // Health-ish
+                        "reputation":          p.reputation,
+                        "last_seen_secs_ago":  last_seen_secs,
+                        "connected_for_secs":  connected_for_secs,
+                        "bytes_recv":          p.bytes_recv,
+                        "bytes_sent":          p.bytes_sent,
+                        // State (Connecting / Connected / Disconnected)
+                        "state":               format!("{:?}", p.state),
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        // Summary for monitoring dashboards that just want the
+        // divergence signal, not the full per-peer detail.
+        let local_tip = state.chain.tip();
+        let reported_heights: Vec<u64> = peers
+            .iter()
+            .filter_map(|p| p.get("reported_height").and_then(|h| h.as_u64()))
+            .filter(|&h| h > 0)
+            .collect();
+        let max_peer_height = reported_heights.iter().copied().max().unwrap_or(0);
+        let min_peer_height = reported_heights.iter().copied().min().unwrap_or(0);
+        let divergence_from_max = max_peer_height.saturating_sub(local_tip.height);
+
+        Ok::<_, ErrorObjectOwned>(json!({
+            "local_height":         local_tip.height,
+            "local_tip_hash":       hex::encode(local_tip.hash.as_bytes()),
+            "peer_count":           peers.len(),
+            "peers":                peers,
+            // Quick-glance divergence summary
+            "max_peer_height":      max_peer_height,
+            "min_peer_height":      min_peer_height,
+            "divergence_from_max":  divergence_from_max,
+        }))
+    }).map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_blockchain_info (alias with more fields) ───────────
     module.register_method("get_blockchain_info", |_params, state, _ext| {
         let tip = state.chain.tip();
