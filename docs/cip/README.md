@@ -62,6 +62,7 @@ These are design-space captures *only*. They are explicitly **not** on any commi
 | [CIP-004](CIP-004-kernel-offsets.md) | Sketch | Kernel offsets. Post-mainnet research. |
 | [CIP-005](CIP-005-lelantus-spark.md) | Sketch | Lelantus Spark integration. Post-mainnet research. |
 | [CIP-015](CIP-015-warp-sync-utxo-snapshot.md) | Sketch | Warp sync via UTXO-set state snapshots. v2.0 destination, replaces today's stopgap chaindata-tarball bootstrap. Trustless under honest-majority PoW. |
+| [CIP-016](CIP-016-randomx-xmrig-parity.md) | Sketch | RandomX hashrate parity with xmrig. v2.0+ research. coincync-rig currently ~5-25% of xmrig per-thread depending on CPU tier. Phase 2 (per-thread VMs) already shipped 2026-05-25 — remaining gap is xmrig's micro-optimizations (JIT variants, prefetch, hugepages). Bounded difficulty, unbounded calendar risk; research track only. |
 
 ## How to read a CIP
 
