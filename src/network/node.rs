@@ -1240,6 +1240,27 @@ impl P2PNode {
             const T3_THRESHOLD: u32 = 5; // consecutive Tier-2 without progress
             const N_T3_BEFORE_BACKOFF: u32 = 3; // Tier-3 firings before backoff
 
+            // Emergency progress-time Tier-3 (added 2026-06-02 follow-on,
+            // for v1.0.11). The standard Tier-3 above only fires when
+            // is_stalled() returns true. The orphan-fetch cascade observed
+            // 2026-06-02 (coincync-lon stuck for 22+h with 4 connected
+            // peers receiving block broadcasts but never advancing height)
+            // does NOT trigger is_stalled — the sync engine internally
+            // looks busy (constantly receiving + rejecting orphans, sending
+            // GetHeaders) so its own stall predicate stays false.
+            //
+            // Belt-and-suspenders fix: track wall-clock time since the
+            // last actual height advance, totally independent of any
+            // sync-engine state. If chain hasn't advanced for >5 minutes
+            // while the node believes it's not synced, fire emergency
+            // recovery regardless of what is_stalled says. This is the
+            // operator-perspective definition of "stuck": the height
+            // number isn't moving.
+            let mut last_progress_time_secs: u64 = sync_start.elapsed().as_secs();
+            let mut emergency_t3_fires: u32 = 0;
+            const EMERGENCY_T3_NO_PROGRESS_SECS: u64 = 300; // 5 minutes
+            const EMERGENCY_T3_REPEAT_SECS: u64 = 120;      // re-fire every 2 min if still stuck
+
             while *sync_running.read().await {
                 tick.tick().await;
 
@@ -1254,6 +1275,80 @@ impl P2PNode {
 
                 // Clean up expired sync bans periodically
                 sync_sync.write().await.cleanup_sync_bans(now);
+
+                // ── PROGRESS-TIME STALL TRACKING (runs every tick) ────
+                // Unconditionally track when height last advanced. This
+                // is the ground truth for "is the chain actually moving."
+                // Don't conflate with the sync-engine's internal is_stalled
+                // predicate — that predicate failed to fire on the 2026-
+                // 06-02 orphan-fetch cascade because the engine was busy
+                // doing internal work (just no useful work).
+                {
+                    let current_height_for_progress = sync_chain.height();
+                    if current_height_for_progress > last_progress_height {
+                        last_progress_time_secs = monotonic_now;
+                        emergency_t3_fires = 0;
+                        // last_progress_height itself is updated by the
+                        // existing else-branch below, kept there for
+                        // back-compat with the Tier-2 counter-reset path.
+                    }
+                }
+
+                // ── EMERGENCY TIER-3 (progress-time-based) ────────────
+                // If chain hasn't advanced for EMERGENCY_T3_NO_PROGRESS_SECS
+                // while we believe we're not synced, fire deep recovery
+                // regardless of what is_stalled() thinks. Re-fires every
+                // EMERGENCY_T3_REPEAT_SECS until something works.
+                let secs_since_progress = monotonic_now.saturating_sub(last_progress_time_secs);
+                let should_fire_emergency = !sync_sync.read().await.is_synced()
+                    && monotonic_now >= EMERGENCY_T3_NO_PROGRESS_SECS
+                    && secs_since_progress >= EMERGENCY_T3_NO_PROGRESS_SECS
+                    && {
+                        let elapsed_since_last_fire = if emergency_t3_fires == 0 {
+                            u64::MAX // first fire: no rate-limit
+                        } else {
+                            // we re-fire every REPEAT_SECS; track this via
+                            // last_progress_time_secs which we artificially
+                            // advance below so the next fire-check waits
+                            // REPEAT_SECS instead of immediately.
+                            monotonic_now.saturating_sub(last_progress_time_secs)
+                                .saturating_sub(EMERGENCY_T3_NO_PROGRESS_SECS)
+                        };
+                        elapsed_since_last_fire >= EMERGENCY_T3_REPEAT_SECS
+                            || emergency_t3_fires == 0
+                    };
+
+                if should_fire_emergency {
+                    emergency_t3_fires += 1;
+                    let current_height = sync_chain.height();
+                    tracing::error!(
+                        "Sync EMERGENCY-TIER-3 #{}: chain has not advanced past height {} \
+                         for {}s (>= {}s threshold) despite sync engine reporting non-stalled \
+                         state. This indicates an orphan-fetch cascade or similar pathology \
+                         where the engine is internally busy but making no real progress. \
+                         Forcing aggressive reset: clear address tried-list, drop expired \
+                         orphans, reset headers-request timeout. If this fires repeatedly, \
+                         operator may need to wipe + reimport snapshot.",
+                        emergency_t3_fires,
+                        current_height,
+                        secs_since_progress,
+                        EMERGENCY_T3_NO_PROGRESS_SECS,
+                    );
+                    sync_addresses.write().await.clear_tried();
+                    {
+                        let mut s = sync_sync.write().await;
+                        s.cleanup_expired_orphans(now);
+                        s.reset_headers_timeout();
+                    }
+                    // Artificially advance last_progress_time_secs so the
+                    // next emergency-fire check waits REPEAT_SECS instead
+                    // of firing immediately on the next tick. Without
+                    // this, we'd hit the >= threshold every tick = log
+                    // flood at 2 Hz.
+                    last_progress_time_secs = monotonic_now
+                        .saturating_sub(EMERGENCY_T3_NO_PROGRESS_SECS)
+                        .saturating_add(EMERGENCY_T3_REPEAT_SECS);
+                }
 
                 // Bitcoin-style three-tier stall detection:
                 // Tier 1 (scaled per peer): Re-request stalled blocks from another peer.
