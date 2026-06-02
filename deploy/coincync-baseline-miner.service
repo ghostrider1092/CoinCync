@@ -23,8 +23,15 @@
 #   systemctl daemon-reload
 Description=CoinCync testnet baseline miner (1 thread, chain-liveness floor)
 After=network-online.target coincync-node.service
-Wants=network-online.target
-Requires=coincync-node.service
+Wants=network-online.target coincync-node.service
+# After=, not Requires=. With Requires=, systemd stops this miner whenever
+# coincync-node restarts (observed 2026-06-02 during the v1.0.10 rolling
+# deploy — every node restart killed the baseline miner and required a
+# manual restart). With Wants= the miner stays running; the rig has its
+# own retry/backoff loop and will pick up the node again once it's back.
+# The 10-15s of failed `get_block_template` calls during the node restart
+# window are harmless — rig retries with exponential backoff and resumes
+# mining as soon as the local RPC is back up.
 
 [Service]
 EnvironmentFile=/etc/coincync/coincync.env
