@@ -593,12 +593,18 @@ impl P2PNode {
         *self.running.write().await = true;
         info!("Starting P2P node on {}", self.config.listen_addr);
 
-        // Setup UPnP if enabled
+        // Setup UPnP if enabled. UPnP is opportunistic — many home routers
+        // refuse the request, ISPs block it, and the node works fine without
+        // it (manual port-forwarding or accept-inbound-only-from-peers-that-
+        // dial-us are both fine fallbacks). New community operators were
+        // reading the WARN as "my node is broken" — demoted to debug! so it
+        // only surfaces when explicitly looking at trace output. Reported by
+        // barns1253 on 2026-06-01 alongside getheaders + noise issues.
         if self.config.upnp {
             let port = self.config.listen_addr.port();
             tokio::spawn(async move {
                 if let Err(e) = super::bootstrap::setup_upnp(port, port).await {
-                    warn!("UPnP setup failed: {}", e);
+                    debug!("UPnP setup failed (non-fatal — node works without it): {}", e);
                 }
             });
         }
@@ -1972,7 +1978,21 @@ async fn noise_bridge_reader(
             match s.read_encrypted(&mut tcp_reader).await {
                 Ok(pt) => pt,
                 Err(e) => {
-                    warn!("Noise bridge reader: {}", e);
+                    // Classify the disconnect. The two common patterns on a
+                    // thin testnet mesh are (a) the peer closed cleanly mid-
+                    // stream — shows up as "unexpected end of file" from
+                    // tokio's read_exact and is unactionable noise, and
+                    // (b) a real protocol/decrypt error which IS worth a
+                    // WARN. New operators (barns1253, 2026-06-01) read every
+                    // clean disconnect as a bug; the demotion to info! for
+                    // the EOF case keeps the log calm without losing real
+                    // signal.
+                    let msg = e.to_string();
+                    if msg.contains("unexpected end of file") || msg.contains("UnexpectedEof") {
+                        info!("Peer disconnected (noise stream closed): {}", e);
+                    } else {
+                        warn!("Noise bridge reader error: {}", e);
+                    }
                     return;
                 }
             }

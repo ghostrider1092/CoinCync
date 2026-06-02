@@ -146,10 +146,34 @@ impl DaemonClient {
             .with_context(|| format!("POST {method} to {}", self.base_url))?;
 
         let status = resp.status();
-        let envelope: JsonRpcEnvelope = resp
-            .json()
+
+        // Read the body as raw text first so we can include it verbatim in
+        // any parse-failure error. Previous code went straight to .json::<T>(),
+        // and when the daemon returned non-JSON (a Cloudflare 502 HTML page,
+        // an empty body during a flap, or any other unexpected shape) the
+        // operator saw the cryptic
+        //   "parsing JSON-RPC response for submit_block"
+        // with NO indication of what the server actually said. Reported by
+        // barns1253 / observed locally on 2026-06-01 during fleet upgrade.
+        // Now they see the actual response body, truncated to 512 chars so
+        // a 1 MB HTML error page doesn't flood the log.
+        let body_text = resp
+            .text()
             .await
-            .with_context(|| format!("parsing JSON-RPC response for {method}"))?;
+            .with_context(|| format!("reading response body for {method} (http {})", status))?;
+
+        let envelope: JsonRpcEnvelope = serde_json::from_str(&body_text)
+            .with_context(|| {
+                let preview = if body_text.len() > 512 {
+                    format!("{}... [{}B total]", &body_text[..512], body_text.len())
+                } else {
+                    body_text.clone()
+                };
+                format!(
+                    "parsing JSON-RPC response for {method} (http {}); body: {}",
+                    status, preview
+                )
+            })?;
 
         if !envelope.error.is_null() {
             return Err(anyhow!(
