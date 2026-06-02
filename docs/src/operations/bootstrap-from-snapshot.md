@@ -135,7 +135,8 @@ coincync-node --network testnet \
   --addnode 140.82.57.168:28080 \
   --addnode 207.148.111.76:28080 \
   --addnode 207.148.6.50:28080 \
-  --addnode 95.179.165.225:28080
+  --addnode 95.179.165.225:28080 \
+  --addnode 192.248.151.16:28080
 ```
 
 (The `--addnode` flags are the standard fleet seeds — same list as in
@@ -205,7 +206,8 @@ coincync-node --network testnet `
   --addnode 140.82.57.168:28080 `
   --addnode 207.148.111.76:28080 `
   --addnode 207.148.6.50:28080 `
-  --addnode 95.179.165.225:28080
+  --addnode 95.179.165.225:28080 `
+  --addnode 192.248.151.16:28080
 ```
 
 ## FAQ

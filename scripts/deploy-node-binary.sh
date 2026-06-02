@@ -27,7 +27,7 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/coincync_fleet}"
 SERVICE="${SERVICE:-coincync-node}"
 INSTALL="${INSTALL:-/usr/local/bin/coincync-node}"
 SLEEP_S="${SLEEP_S:-8}"
-FLEET="${FLEET:-root@66.135.23.193 root@140.82.57.168 root@207.148.111.76 root@207.148.6.50 root@95.179.165.225}"
+FLEET="${FLEET:-root@66.135.23.193 root@140.82.57.168 root@207.148.111.76 root@207.148.6.50 root@95.179.165.225 root@192.248.151.16}"
 
 [ -f "$BINARY" ] || { echo "BINARY not found: $BINARY" >&2; exit 1; }
 [ -f "$SSH_KEY" ] || { echo "SSH_KEY not found: $SSH_KEY" >&2; exit 1; }

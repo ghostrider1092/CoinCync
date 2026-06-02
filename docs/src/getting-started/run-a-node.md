@@ -34,10 +34,11 @@ chmod +x coincync-node
     --addnode 140.82.57.168:28080 \
     --addnode 207.148.111.76:28080 \
     --addnode 207.148.6.50:28080 \
-    --addnode 95.179.165.225:28080
+    --addnode 95.179.165.225:28080 \
+    --addnode 192.248.151.16:28080
 ```
 
-The `--addnode` flags are the project's 5 Vultr fleet IPs — explicit fallbacks for the case where DNS seed resolution silently fails. **Use them for first sync.** Without peers reachable, your node starts at genesis (height 0), mines its own divergent chain, then hits the hardcoded checkpoint mismatch at ~height 250 and rejects its own blocks ("WARN block submit rejected ... reason=Hardcoded checkpoint mismatch"). Once your node is fully synced to the public tip, you can drop the addnode flags on subsequent restarts and rely on DNS.
+The `--addnode` flags are the project's 6 fleet IPs (5 Vultr + 1 London seed for EU operators) — explicit fallbacks for the case where DNS seed resolution silently fails. **Use them for first sync.** Without peers reachable, your node starts at genesis (height 0), mines its own divergent chain, then hits the hardcoded checkpoint mismatch at ~height 250 and rejects its own blocks ("WARN block submit rejected ... reason=Hardcoded checkpoint mismatch"). Once your node is fully synced to the public tip, you can drop the addnode flags on subsequent restarts and rely on DNS.
 
 That's it. The node will:
 
@@ -68,7 +69,8 @@ rm -rf ~/.coincync/testnet/chain ~/.coincync/testnet/blocks
     --addnode 140.82.57.168:28080 \
     --addnode 207.148.111.76:28080 \
     --addnode 207.148.6.50:28080 \
-    --addnode 95.179.165.225:28080
+    --addnode 95.179.165.225:28080 \
+    --addnode 192.248.151.16:28080
 ```
 
 ## What success looks like
