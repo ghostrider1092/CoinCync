@@ -1070,10 +1070,27 @@ pub fn validate_transaction(
         }
     }
 
-    // Check for double-spend (key image already used)
+    // Check for double-spend (key image already used in the chain)
+    // AND for in-tx duplicate key_images (two inputs of the SAME tx sharing a
+    // key_image). 2026-06-03 bug found during code review: the previous code
+    // only checked against `utxos.contains_key_image()` — which is empty for
+    // the current tx's own inputs since they're not committed yet. So a tx
+    // with inputs [K, K, X] would pass mempool admission (waste capacity)
+    // and only fail at block-validation time (validate_block has its own
+    // cross-tx duplicate check at validation.rs:582). DoS vector, not a
+    // theft vector (the block-level check still catches it), but worth
+    // closing at admission to stop wasting mempool space + miner cycles.
+    let mut seen_in_tx = std::collections::HashSet::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
+        // In-tx duplicate check (NEW, 2026-06-03)
+        if !seen_in_tx.insert(input.key_image) {
+            // SECURITY (M-18 echo): Generic error to avoid revealing the
+            // duplicated key_image to the submitter. The attacker either
+            // already knows (they made the tx) or shouldn't learn from us.
+            return Err(Error::DuplicateKeyImage("duplicate key image detected".into()));
+        }
+        // Chain-level double-spend check (existing)
         if utxos.contains_key_image(&input.key_image) {
-            // SECURITY (M-18): Generic error to avoid revealing which key image is spent
             return Err(Error::DuplicateKeyImage("duplicate key image detected".into()));
         }
     }
