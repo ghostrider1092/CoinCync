@@ -93,6 +93,18 @@ pub async fn run_solo(
 
     let mut last_get_info: Option<Instant> = None;
 
+    // Sync gate state (added 2026-06-03 in response to barns1253 report).
+    // Mining against an out-of-sync local node produces blocks on a
+    // private fork — the rest of the network rejects them, the operator
+    // sees coinbase rewards in their local wallet, but the coins are
+    // worthless to anyone else. The fix is simply to refuse mining when
+    // the local node reports !synced. Cached for SYNC_CACHE_SECS so a
+    // long unsynced period doesn't hammer the daemon on every iteration.
+    let mut last_sync_check: Option<Instant> = None;
+    let mut cached_synced: bool = false;
+    const SYNC_CACHE_SECS: u64 = 30;
+    const SYNC_WAIT_SECS: u64 = 30; // sleep this long when unsynced before re-checking
+
     loop {
         // 0. Honor TUI-driven pause flag — don't poll the daemon, don't
         // mine. Wake every 250 ms to re-check (cheap, never hits the
@@ -136,6 +148,67 @@ pub async fn run_solo(
                 }
                 last_get_info = Some(Instant::now());
             }
+        }
+
+        // 0.7. Sync gate — refuse to mine when the local node is not
+        // synced to the network. Without this guard, the rig will
+        // happily build templates against the local node's stale tip
+        // and submit valid-but-orphan blocks that fork off the
+        // canonical chain. Operator sees coinbase rewards in their
+        // local wallet (because their local node accepts the blocks
+        // it served the template for), but the network rejects every
+        // one. Caught in production by barns1253 on 2026-06-02 —
+        // confused-looking situation where his node was unsynced,
+        // his wallet showed rewards from mined blocks, but those
+        // blocks never propagated to peers.
+        //
+        // Cached for SYNC_CACHE_SECS to avoid hammering get_info when
+        // unsynced state is persistent. Recheck rate of every 30s
+        // means up to 30s of mining wasted after sync is achieved
+        // (we'll re-check then proceed), which is negligible cost.
+        let synced_now = {
+            let stale = match last_sync_check {
+                None => true,
+                Some(t) => t.elapsed() >= Duration::from_secs(SYNC_CACHE_SECS),
+            };
+            if stale {
+                match daemon.get_info().await {
+                    Ok(info) => {
+                        let s = info
+                            .get("synced")
+                            .and_then(|v| v.as_bool())
+                            .or_else(|| info.get("is_synced").and_then(|v| v.as_bool()))
+                            .unwrap_or(false);
+                        cached_synced = s;
+                        last_sync_check = Some(Instant::now());
+                        s
+                    }
+                    Err(e) => {
+                        // Daemon unreachable for get_info — assume unsynced
+                        // (same backoff treatment as get_block_template
+                        // failure below). Conservative: don't mine into
+                        // a daemon we can't talk to.
+                        warn!(
+                            error = %e,
+                            "orchestrator: sync-gate get_info failed, treating as unsynced"
+                        );
+                        cached_synced = false;
+                        last_sync_check = Some(Instant::now());
+                        false
+                    }
+                }
+            } else {
+                cached_synced
+            }
+        };
+        if !synced_now {
+            warn!(
+                sleep_secs = SYNC_WAIT_SECS,
+                "orchestrator: local node is NOT synced — refusing to mine to avoid \
+                 producing blocks on a private fork. Will recheck after sleep."
+            );
+            tokio::time::sleep(Duration::from_secs(SYNC_WAIT_SECS)).await;
+            continue;
         }
 
         // 1. Get current template (with backoff on failure)

@@ -33,7 +33,7 @@ Naming them publicly is also a real bus-factor signal: it demonstrates the proje
 
 | Release | Validator | Scope | Recognition |
 |---|---|---|---|
-| **v1.0.10-testnet** (cutting ~2026-06-04) | `barns1253` (Discord) | Run `v1.0.10-rc1-testnet` binary on Ubuntu, mine + sync for ≥48h of the 72h rc1 window, report any regressions to the maintainer | Named in v1.0.10 release notes, custom Discord role |
+| **v1.0.10-testnet** (cut 2026-06-02, validating 2026-06-03 → 06-06) | `barns1253` (Discord) | Run `v1.0.10-rc1-testnet` binary on Ubuntu, mine + sync for ≥48h of the 72h rc1 window, report any regressions to the maintainer | Named in v1.0.10 release notes; assigned `Testnet Tester` + `Miner` Discord roles |
 
 **Promoting a validator to backup-maintainer:** validators who want to take on a backup-maintainer role for a row above go through the standard `[backup-applicant]` process documented in the [Recruiting](#recruiting) section below. Release-validator status is a credible-precursor signal (catches real bugs, shows up consistently) but is not automatic promotion. Trust still transfers slowly.
 
