@@ -396,17 +396,25 @@ impl Mempool {
         self.admit_after_checks(tx, tx_hash)
     }
 
-    /// Legacy alias — calls add_skip_signatures.
+    /// Legacy alias for [`add_skip_signatures`]. Same test-only contract,
+    /// same test-only cfg gate.
+    ///
+    /// SECURITY (2026-06-03 critical-file review): previously this alias
+    /// was a `pub fn` with NO cfg attribute — it leaked the signature-skip
+    /// admission path into production builds. No production caller used
+    /// it (confirmed via repo-wide grep), but the absence of the gate
+    /// meant any future caller — including a malicious extension or an
+    /// accidental refactor — could bypass ring-sig + range-proof +
+    /// balance-proof verification by name alone. The Cargo.toml comment
+    /// at the `test-utilities` feature explicitly stated the intent
+    /// ("cfg-gated test-only helpers"); the gate was just omitted on the
+    /// alias when add_skip_signatures was renamed in for C-8. Defense
+    /// in depth: gate it, delegate to the cfg-gated implementation, and
+    /// the surface disappears in release builds.
+    #[cfg(any(test, feature = "test-utilities"))]
     #[doc(hidden)]
     pub fn add_skip_crypto(&mut self, tx: Transaction) -> Result<Hash> {
-        let tx_hash = tx.hash();
-        if let Err(e) = self.preflight_check(&tx) {
-            return Err(self.reject(tx_hash, e));
-        }
-        if self.transactions.contains_key(&tx_hash) {
-            return Ok(tx_hash);
-        }
-        self.admit_after_checks(tx, tx_hash)
+        self.add_skip_signatures(tx)
     }
 
     /// Pre-flight checks shared by both `add` and `add_skip_crypto`:
