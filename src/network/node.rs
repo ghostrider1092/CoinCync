@@ -2493,11 +2493,32 @@ async fn handle_connection(
         handle.abort();
     }
 
-    // BUG 2 FIX: Only remove peer/sender entries if they still belong to THIS
-    // connection. If a reconnection happened, the new connection already
-    // overwrote our entries — removing them would break the new connection.
-    // We check if the sender channel is closed (our tx was dropped when
-    // the new connection overwrote it in the senders map).
+    // BUG 2 FIX (original): only remove peer/sender entries if they still
+    // belong to THIS connection. If a reconnection happened with the same
+    // peer_id (Noise gives stable per-remote-key IDs after handshake), the
+    // new connection's senders.insert(peer_id, tx_new) already overwrote
+    // our entry — removing it would break the new connection.
+    //
+    // BUG 2 FIX (additional, 2026-06-03 eclipse-defense slot leak):
+    // the is_closed() check below only works correctly if OUR rx is dropped
+    // first. As written before this patch, `rx` was still in scope at this
+    // point, so our own tx (still in the map) reported is_closed() = false,
+    // should_remove = false, and we SKIPPED CLEANUP on every normal
+    // disconnect. That orphaned the PeerInfo entry — and crucially its
+    // eclipse_slot Arc — in the peers map, leaking one /16 subnet counter
+    // slot per disconnect. Observed in production on coincync-lon as
+    // `subnet_sum=N but outbound_count=M` drift, growing from 1 → 2 → 4
+    // across an evening of repeated reconnections.
+    //
+    // The fix is to drop our rx FIRST: if no reconnection happened, our
+    // tx in the map then has no rx (we held the only one) and is_closed()
+    // correctly returns true → should_remove = true → cleanup runs →
+    // eclipse_slot Arc drops cleanly. If a reconnection DID happen, the
+    // map has the new tx (with the new connection's rx still alive), so
+    // is_closed() returns false → should_remove = false → we correctly
+    // skip cleanup (the new connection's entries are intact).
+    drop(rx);
+
     let should_remove = senders.get(&peer_id)
         .map(|s| s.is_closed())
         .unwrap_or(true);
