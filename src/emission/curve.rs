@@ -115,7 +115,24 @@ fn estimate_supply_at_height(height: u64) -> u128 {
 
     while h < height {
         let remaining = cap_atomic.saturating_sub(supply);
-        let reward = (remaining / EMISSION_DIVISOR as u128).max(TAIL_EMISSION as u128);
+        let asymptotic_reward = remaining / EMISSION_DIVISOR as u128;
+        let reward = asymptotic_reward.max(TAIL_EMISSION as u128);
+
+        // Fast path: once the asymptotic curve drops below the TAIL
+        // floor, every subsequent block pays exactly TAIL — there's
+        // no point iterating block-by-block through the tail regime.
+        // Without this, `estimate_supply_at_height(u64::MAX)` loops
+        // for ~1.8e15 iterations (DoS surface if a height is ever
+        // routed in from RPC without bounds). With it, the tail
+        // contribution is computed in a single multiply + return.
+        // Discovered during 2026-06-03 critical-file review.
+        if asymptotic_reward < TAIL_EMISSION as u128 {
+            let remaining_blocks = (height - h) as u128;
+            supply = supply.saturating_add(
+                (TAIL_EMISSION as u128).saturating_mul(remaining_blocks),
+            );
+            break;
+        }
 
         let blocks_in_step = ((height - h) as u128).min(step as u128);
         supply += reward * blocks_in_step;
