@@ -135,10 +135,21 @@ enum Command {
 // 1-vCPU hardware this is just kernel time-slicing (no real parallelism
 // added), but it converts a permanent freeze into a transient slowdown.
 //
-// The deeper fix (Layer 2) is to route every blocking DB call through
-// `tokio::task::spawn_blocking` so it never lands on a worker thread at
-// all. That's a larger refactor queued for the post-launch campaign.
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+// 2026-06-03 BUMP 4 → 8: production observation on coincync-lon hit the
+// "all workers blocked on chain.inner.read()" pathology — 4 workers all
+// queued behind a sync-side inner.write() during sustained IBD-cascade
+// activity, RPC silently hung for 37+ minutes. 8 workers buys real
+// breathing room for the case where 2-4 are blocked on chain reads
+// while others handle RPC. Also see Layer 2 below — every RPC handler
+// that touches chain state should be using `register_blocking_method`
+// (the hot ones — get_info, get_peer_info, get_blockchain_info — were
+// converted in the same patch).
+//
+// Layer 2 fix in progress: hot-path RPC handlers converted to
+// register_blocking_method so they run on the blocking thread pool,
+// not on tokio workers. Larger sweep of all 41 handlers is queued
+// for v1.0.11 — for now we covered the highest-traffic three.
+#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let cli = Cli::parse();
 

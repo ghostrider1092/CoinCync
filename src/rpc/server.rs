@@ -435,7 +435,17 @@ pub async fn start_rpc_server(
     // `process_count_available`). Consumers must distinguish
     // "we couldn't measure" from "the value is zero" — silent
     // zeros mask stuck-clock and eclipse incidents.
-    module.register_method("get_info", |_params, state, _ext| {
+    // register_blocking_method (not register_method) — the closure
+    // takes parking_lot read-locks on chain state which BLOCK the
+    // calling thread. Running this on a tokio worker means a single
+    // sync-side write-lock contention can starve the entire runtime
+    // (4-8 workers all stuck on inner.read()). Blocking method runs
+    // on the much larger blocking pool (default 512 threads) so
+    // worker availability for genuinely-async work is preserved.
+    // See src/bin/node.rs:120 BUMP 4 → 8 comment for full context.
+    // 2026-06-03 fix for the silent RPC-hang pathology observed
+    // three times on coincync-lon under sustained IBD activity.
+    module.register_blocking_method("get_info", |_params, state, _ext| {
         let tip = state.chain.tip();
         let stats = state.chain.stats();
         let height = tip.height;
@@ -556,7 +566,10 @@ pub async fn start_rpc_server(
     // and coincync-lon hit on 2026-06-02). Cheap to call: iterates
     // the live peer DashMap, no I/O. Useful as a periodic poll from
     // a monitoring dashboard, NOT as a hot-path query.
-    module.register_method("get_peer_info", |_params, state, _ext| {
+    // register_blocking_method — same rationale as get_info above.
+    // Also touches parking_lot state (peer DashMap iteration + chain
+    // tip read), should not run on tokio workers.
+    module.register_blocking_method("get_peer_info", |_params, state, _ext| {
         let now = std::time::Instant::now();
         let peers: Vec<Value> = match state.p2p.as_ref() {
             Some(p2p) => p2p
@@ -627,7 +640,8 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_blockchain_info (alias with more fields) ───────────
-    module.register_method("get_blockchain_info", |_params, state, _ext| {
+    // register_blocking_method — same rationale as get_info above.
+    module.register_blocking_method("get_blockchain_info", |_params, state, _ext| {
         let tip = state.chain.tip();
         let stats = state.chain.stats();
         Ok::<_, ErrorObjectOwned>(json!({
