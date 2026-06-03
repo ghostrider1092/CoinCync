@@ -985,6 +985,31 @@ pub fn validate_transaction(
     utxos: &UtxoSet,
     current_height: u64,
 ) -> Result<()> {
+    // ── Version range enforcement ──────────────────────────────────────
+    // Reject tx.version == 0 and tx.version > MAX_TX_VERSION.
+    //
+    // 2026-06-03 bug found during critical-file review: previously this
+    // function only checked the V2 *activation* gate (below). The upper
+    // bound and the version==0 reject lived ONLY in
+    // `validate_transaction_basic`, which runs on mempool admission — not
+    // on block validation. A miner could therefore include a tx with
+    // version=0 or version=255 directly in a mined block; block
+    // validation calls `validate_transaction` (see validate_block at
+    // line ~698), which would let any future / unknown version through
+    // as long as the crypto held.
+    //
+    // Why this matters for future hard forks: a v1.0 node receiving a
+    // version=3 tx in a v1.1 block must NOT accept it (the on-wire shape
+    // could differ across versions, and silent acceptance would split
+    // consensus at the fork). With this gate, a future hard fork that
+    // introduces version=3 must explicitly bump MAX_TX_VERSION in the
+    // upgraded code — a flag-day rejection on stale nodes is the correct
+    // behaviour. Coinbase included: a coinbase with version=99 was
+    // previously waved through by the `is_coinbase()` early-return.
+    if tx.version == 0 || tx.version > MAX_TX_VERSION {
+        return Err(Error::InvalidTxVersion(tx.version));
+    }
+
     // Coinbase has no inputs to validate
     if tx.is_coinbase() {
         return Ok(());
