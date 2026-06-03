@@ -25,43 +25,71 @@ use parking_lot::Mutex;
 /// Maximum cache entries to prevent unbounded memory growth.
 const SEQ_PAD_CACHE_MAX: usize = 10_000;
 
-struct SeqPadCacheEntry {
-    key: (Hash, u64, u64),
-    anchor: Anchor,
-    seq: usize,
-}
-
+/// FIFO-evicting cache for sequential-padding anchors keyed by
+/// `(prev_hash, height, timestamp)`.
+///
+/// ## Design
+///
+/// Two-structure design for O(1) on every operation:
+///
+/// - `anchors`: `HashMap<key, Anchor>` for O(1) lookup
+/// - `insertion_order`: `VecDeque<key>` for O(1) FIFO eviction
+///
+/// On insert: push key onto the back of `insertion_order`, insert
+/// into `anchors`. When `anchors.len() >= MAX`, pop_front the
+/// oldest key from `insertion_order` and `anchors.remove()` it.
+///
+/// On get: just hit `anchors` directly. O(1).
+///
+/// ## Why this changed (2026-06-03)
+///
+/// The previous design stored `Vec<(key, anchor, seq)>` in a VecDeque
+/// and used a parallel HashMap mapping `key → seq`. The lookup path
+/// was `index.get(key).and_then(|seq| entries.iter().find(|e| e.seq == seq))`
+/// — that `.find()` linearly scans every entry to match the seq number.
+/// With the cache at its 10,000-entry cap, each cache lookup was
+/// ~10,000 comparisons. This hits the hot path: every PoW verification
+/// calls `compute_full_anchor` which checks this cache first.
+///
+/// Restructuring to two parallel collections keyed by the actual key
+/// (not a synthetic seq) makes lookup truly O(1) without changing the
+/// semantics or the FIFO eviction order.
 struct SeqPadCache {
-    entries: VecDeque<SeqPadCacheEntry>,
-    index: std::collections::HashMap<(Hash, u64, u64), usize>,
-    next_seq: usize,
+    anchors: std::collections::HashMap<(Hash, u64, u64), Anchor>,
+    insertion_order: VecDeque<(Hash, u64, u64)>,
 }
 
 impl SeqPadCache {
     fn new() -> Self {
         SeqPadCache {
-            entries: VecDeque::new(),
-            index: std::collections::HashMap::new(),
-            next_seq: 0,
+            anchors: std::collections::HashMap::with_capacity(SEQ_PAD_CACHE_MAX),
+            insertion_order: VecDeque::with_capacity(SEQ_PAD_CACHE_MAX),
         }
     }
 
+    /// O(1) lookup by key.
     fn get(&self, key: &(Hash, u64, u64)) -> Option<&Anchor> {
-        self.index.get(key).and_then(|&seq| {
-            self.entries.iter().find(|e| e.seq == seq).map(|e| &e.anchor)
-        })
+        self.anchors.get(key)
     }
 
+    /// O(1) amortized insert with FIFO eviction.
+    ///
+    /// If the key is already present, this is a no-op — preserves the
+    /// existing entry's insertion-order position. (A re-insert with
+    /// the same key but different value would corrupt the FIFO order,
+    /// but anchors are deterministic from the key so the value would
+    /// be the same anyway.)
     fn insert(&mut self, key: (Hash, u64, u64), anchor: Anchor) {
-        if self.entries.len() >= SEQ_PAD_CACHE_MAX {
-            if let Some(oldest) = self.entries.pop_front() {
-                self.index.remove(&oldest.key);
+        if self.anchors.contains_key(&key) {
+            return;
+        }
+        if self.anchors.len() >= SEQ_PAD_CACHE_MAX {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.anchors.remove(&oldest);
             }
         }
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(1);
-        self.index.insert(key, seq);
-        self.entries.push_back(SeqPadCacheEntry { key, anchor, seq });
+        self.insertion_order.push_back(key);
+        self.anchors.insert(key, anchor);
     }
 }
 
@@ -958,7 +986,10 @@ mod tests {
             cache.insert(key, dummy_anchor.clone());
         }
 
-        assert!(cache.entries.len() <= SEQ_PAD_CACHE_MAX);
+        assert!(cache.anchors.len() <= SEQ_PAD_CACHE_MAX);
+        assert!(cache.insertion_order.len() <= SEQ_PAD_CACHE_MAX);
+        assert_eq!(cache.anchors.len(), cache.insertion_order.len(),
+            "anchors and insertion_order must stay in lockstep");
 
         let oldest_key = (Hash::from_bytes([0u8; 32]), 0u64, 0u64);
         assert!(cache.get(&oldest_key).is_none(), "oldest entry should be evicted");

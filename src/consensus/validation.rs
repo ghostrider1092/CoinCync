@@ -833,21 +833,51 @@ fn validate_header(
     }
 }
 
-// M-16: This function is strictly looser than the canonical ASERT check in chain.rs.
-// TODO: Delete once confirmed no callers depend on it.
-/// Validate that block's difficulty target is correct
+/// Validate that block's difficulty target is correct — INTENTIONALLY LOOSE
+/// sanity gate, paired with the strict ASERT check at the chain level.
 ///
-/// SECURITY (M-3): This is a sanity-check gate using the previous block only.
-/// Full ASERT validation requires block history (short window: 8 blocks, long
-/// window: 144 blocks) and MUST be performed at the chain level when accepting
-/// blocks. This function catches gross manipulation; the chain-level check
-/// enforces exact ASERT targets.
+/// ## Two-layer difficulty-validation design
 ///
-/// Checks performed:
-/// 1. Target must not be easier than max_target (minimum difficulty)
-/// 2. Target must be non-zero
-/// 3. Target-to-value ratio vs previous must be within [0.25, 4.0] (normal)
-///    or [0.0625, 16.0] (emergency, when block time > 5x expected)
+/// CoinCync validates a block's difficulty target in two independent passes:
+///
+/// 1. **Sanity gate (this function)** — runs inside
+///    `validate_block_with_checkpoint_for_network` with access to only
+///    `block` and `prev_block`. Catches gross manipulation (~32x swing
+///    normal, ~256x emergency) that no legitimate ASERT step could
+///    produce. Bounds are intentionally LOOSE because ASERT's own 2x
+///    per-block clamp can produce apparent inter-block ratios up to
+///    ~16x when consecutive blocks both sit at clamp boundaries — a
+///    tighter sanity check here would false-reject those legitimate
+///    edge cases.
+///
+/// 2. **Strict ASERT enforcement (chain.rs, `Blockchain::add_block`)** —
+///    runs WITH access to the full difficulty window (8 short, 144 long
+///    blocks of history). Computes the exact canonical target and
+///    requires bit-for-bit equality. This is the authoritative
+///    enforcement.
+///
+/// Removing this function — or weakening it — leaves only the chain-
+/// level check. That's structurally fine for security (chain-level
+/// enforces exact ASERT) but loses defense-in-depth: a bug in the
+/// chain-level path would have nothing catching it. Keep both layers.
+///
+/// A previous "TODO: Delete" comment on this function was misleading;
+/// the function isn't dead code, it's a defense-in-depth sanity check
+/// by design. (2026-06-03 critical-file-review clarification.)
+///
+/// ## Checks performed
+///
+/// 1. Target must not be easier than `max_target` (effectively dead
+///    code today because `max_target = [0xFF; 32]`, but kept as a
+///    forward-compat assertion in case the constant tightens).
+/// 2. Target must be non-zero (would mean impossibly hard, which is
+///    not a legitimate ASERT output).
+/// 3. Target-to-prev-target ratio is within sanity bounds: ~32x normal,
+///    ~256x emergency (when block time > 5x expected).
+///
+/// Compared to the strict ASERT check this is approximately 16x looser
+/// — that gap is intentional, sized to never false-reject a legitimate
+/// boundary-clamped sequence.
 fn validate_difficulty_target(
     block: &Block,
     prev_block: Option<&Block>,
