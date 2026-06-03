@@ -757,14 +757,32 @@ impl Blockchain {
                             prev_hash.to_hex()[..16].to_string(),
                             height - 1
                         );
-                        // Fix: truncate the tip to the last good height
+                        // Fix: truncate the tip to the last good height.
+                        //
+                        // 2026-06-03 bug fix: previously the tip-restore branch
+                        // only ran if `height_to_hash.get(&good_height)`
+                        // returned Some — but that in-memory map is populated
+                        // only for blocks in the cache window (last ~200
+                        // heights, see line ~803-806). For corruption detected
+                        // at any height BELOW the cache window, the lookup
+                        // returned None and `inner.tip` was never reset. The
+                        // node would restart looking healthy (stats.height
+                        // dropped to good_height, but tip.height stayed at the
+                        // state-claimed pre-corruption value), then reject
+                        // every subsequent new block with "invalid height:
+                        // expected <state_tip+1>, got <good_height+1>", and
+                        // the chain would be stuck until manual intervention.
+                        //
+                        // `prev_hash` already holds the hash of the previous
+                        // good block (set at line ~796-797 each iteration), so
+                        // use it directly — no cache dependency. stats.height,
+                        // tip.height, and tip.hash now ALWAYS move together.
                         let good_height = height - 1;
+                        let good_hash = prev_hash;
                         inner.stats.height = good_height;
-                        if let Some(&good_hash) = inner.height_to_hash.get(&good_height) {
-                            inner.tip.height = good_height;
-                            inner.tip.hash = good_hash;
-                            inner.stats.tip_hash = good_hash;
-                        }
+                        inner.tip.height = good_height;
+                        inner.tip.hash = good_hash;
+                        inner.stats.tip_hash = good_hash;
                         // Remove broken height entries from DB
                         for h in height..=tip_height {
                             let _ = db.blocks.remove_height_hash(h);
