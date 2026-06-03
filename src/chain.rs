@@ -1143,9 +1143,39 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                 inner.height_to_hash.remove(&h);
             }
 
-            // Update tip to the block at target_height
-            if let Some(new_tip_hash) = inner.height_to_hash.get(&target_height).copied() {
-                if let Some(tip_block) = inner.blocks.get(&new_tip_hash) {
+            // Update tip to the block at target_height.
+            //
+            // 2026-06-03 robustness fix (parity with rebuild_utxo_set Bug
+            // #8 at chain.rs:751): the in-memory `height_to_hash` map is
+            // bounded by the cache window (~200 blocks). For deep
+            // rollbacks where `target_height` falls outside the cache
+            // (theoretically bounded by CHECKPOINT_INTERVAL=144 + the
+            // finality check above, but only as long as last_checkpoint
+            // recording is healthy), the lookup misses and we never reset
+            // `inner.tip`. That leaves `stats.height` and `tip.height`
+            // pointing at different values — the same split-state bug
+            // pattern Bug #8 fixed in rebuild_utxo_set.
+            //
+            // Cascade lookup: in-memory cache → DB by height (single
+            // sled get, cheap even under inner.write()) → genesis
+            // fallback for h=0 → log + leave tip alone. tip.height,
+            // tip.hash, stats.height, stats.tip_hash now ALL move
+            // together in every branch.
+            let cached_hash = inner.height_to_hash.get(&target_height).copied();
+            let db_hash = cached_hash.or_else(|| {
+                self.db.as_ref()
+                    .and_then(|db| db.blocks.get_hash_by_height(target_height).ok().flatten())
+            });
+            if let Some(new_tip_hash) = db_hash {
+                // Pull the block for difficulty/timestamp where possible;
+                // a cache miss is non-fatal (tip moves on hash + height
+                // alone, difficulty/timestamp recompute on next block).
+                let cached_block = inner.blocks.get(&new_tip_hash).cloned();
+                let db_block = cached_block.or_else(|| {
+                    self.db.as_ref()
+                        .and_then(|db| db.blocks.get(&new_tip_hash).ok().flatten())
+                });
+                if let Some(tip_block) = db_block {
                     inner.tip = ChainTip {
                         hash: new_tip_hash,
                         height: target_height,
@@ -1153,20 +1183,30 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                         timestamp: tip_block.header.timestamp,
                     };
                 } else {
-                    // Block not in memory cache, just update height/hash
                     inner.tip.hash = new_tip_hash;
                     inner.tip.height = target_height;
                 }
                 inner.stats.height = target_height;
                 inner.stats.tip_hash = new_tip_hash;
             } else if target_height == 0 {
-                // Genesis fallback — height_to_hash may not have it
+                // Genesis fallback — DB may have been pruned of height 0
                 if let Some(genesis) = inner.genesis_hash {
                     inner.tip.hash = genesis;
                     inner.tip.height = 0;
                     inner.stats.height = 0;
                     inner.stats.tip_hash = genesis;
                 }
+            } else {
+                // Truly nothing found — neither cache nor DB nor genesis.
+                // Log loudly; leaving tip unchanged is safer than guessing.
+                tracing::error!(
+                    "rollback_to_height: could not locate block at target {} \
+                     in cache OR DB. Tip left unchanged at {} (h={}). \
+                     Manual intervention required; chain may need full resync.",
+                    target_height,
+                    inner.tip.hash.to_hex()[..16].to_string(),
+                    inner.tip.height,
+                );
             }
         }
 

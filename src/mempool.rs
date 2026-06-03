@@ -1241,25 +1241,24 @@ impl SharedMempool {
         self.write_lock().load_from_disk(data_dir)
     }
 
-    /// Revalidate mempool transactions after a chain reorganization
-    /// This removes any transactions that are now double-spending
-    pub fn revalidate_on_reorg(&self, chain: &crate::chain::SharedBlockchain) {
-        let mut mempool = self.write_lock();
-        let tx_hashes: Vec<Hash> = mempool.transactions.keys().cloned().collect();
-
-        for tx_hash in tx_hashes {
-            if let Some(entry) = mempool.transactions.get(&tx_hash) {
-                // Check if any key images are now spent in the chain
-                let key_images = entry.tx.key_images();
-                let is_double_spend = key_images.iter().any(|ki| chain.is_spent(ki));
-
-                if is_double_spend {
-                    tracing::info!("Removing double-spend tx {} after reorg", tx_hash);
-                    mempool.remove(&tx_hash);
-                }
-            }
-        }
-    }
+    // ------------------------------------------------------------------
+    // Removed 2026-06-03: `revalidate_on_reorg`.
+    //
+    // Was dead code (zero callers via repo-wide grep) AND weaker than the
+    // active reorg path. The real flow is restore_orphaned + shadow_evict
+    // _invalid (wired in node.rs:695-703 and rpc/server.rs:890-899):
+    //   * re-admits orphaned-block txs with full crypto verification, and
+    //   * re-validates every remaining mempool tx via
+    //     chain.validate_transaction — catching V2 activation flips, ring-
+    //     member integrity, and lock-height changes, not just spends.
+    //
+    // The removed function only checked `chain.is_spent(ki)` per tx, so a
+    // future engineer reaching for it by name would silently get the
+    // inferior revalidation. Deleting eliminates the footgun without
+    // changing any caller. If a chain.is_spent-only fast path is ever
+    // wanted, add a narrower-named replacement (e.g. evict_double_spends
+    // _only) so the contract is unambiguous.
+    // ------------------------------------------------------------------
 }
 
 impl Default for SharedMempool {
