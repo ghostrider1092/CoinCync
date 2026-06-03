@@ -28,21 +28,31 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
 /// These are PURE SEED hosts: their only job is to accept inbound P2P,
 /// hand out a peer list, and serve the chain to bootstrapping nodes.
 /// They do NOT run app workloads (landing page, explorer, API) — those
-/// live on separate hosts (NYC3, LON, TOR) which are deliberately
-/// excluded from this list so a public-app DDoS doesn't take out the
-/// bootstrap layer too.
+/// either live on separate hosts OR (for `api.coincync.network`) live
+/// as nginx-only proxies that forward to one of these seeds. So an
+/// app-layer DDoS does not take out the bootstrap layer.
 ///
-/// Six entries across three continents (US, Europe, Australia) mirrors
-/// Monero's `MIN_WANTED_SEED_NODES = 12` posture but at half the count
-/// (we run a smaller fleet during testnet). Add community-run seeds as
-/// volunteers come online; never remove an entry without a paired add.
+/// Five entries spanning US + EU. Asia/Oceania coverage is intentionally
+/// deferred until v1.0 mainnet when budget for additional fleet boxes
+/// is committed. Add community-run seeds as volunteers come online;
+/// never remove an entry without a paired add.
+///
+/// 2026-06-03 REFRESH: the previous list referenced legacy DigitalOcean
+/// hosts that were decommissioned during the 2026-05 Vultr migration.
+/// Operators bootstrapping with that list could not reach a live seed
+/// without supplying `--addnode` explicitly — observed multiple times
+/// during 2026-06-01 → 06-03 community testing. The correct deployed
+/// fleet is enumerated in `docs/src/getting-started/run-a-node.md`
+/// and `scripts/deploy-node-binary.sh` (which both reference these IPs).
+/// `95.179.165.225` (the former api node) is intentionally excluded —
+/// see `docs/operations/api-role-architecture.md` for that node's
+/// migration to nginx-only.
 pub const TESTNET_SEED_NODES: &[&str] = &[
-    "192.34.59.42:28080",     // NYC1 — mempool + relay (US-East)
-    "46.101.138.120:28080",   // FRA  — mempool + relay (Europe)
-    "165.245.161.62:28080",   // RIC  — relay (US-East)
-    "165.245.140.113:28080",  // ATL  — relay (US-South)
-    "164.92.153.24:28080",    // AMS  — relay (Europe) + DNS seed3
-    "170.64.142.146:28080",   // SYD  — relay (Asia-Pacific)
+    "66.135.23.193:28080",    // Vultr — seed (US)
+    "140.82.57.168:28080",    // Vultr — seed (US, Atlanta)
+    "207.148.111.76:28080",   // Vultr — seed (US)
+    "207.148.6.50:28080",     // Vultr — seed (US)
+    "192.248.151.16:28080",   // Vultr London — seed + baseline miner (EU)
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;
