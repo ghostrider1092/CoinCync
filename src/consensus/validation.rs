@@ -1168,14 +1168,28 @@ pub fn validate_transaction(
                                 )));
                             }
                             // Check coinbase maturity
+                            //
+                            // BUG FIX 2026-06-03: previously used the raw
+                            // `MIN_OUTPUT_AGE` constant (always 10) instead
+                            // of the height-keyed helper. That meant for
+                            // SPENT coinbase outputs referenced as decoys,
+                            // the post-fork 100-block floor was never
+                            // enforced — only the live-UTXO branch above
+                            // got the helper. Now both branches use the
+                            // same height-keyed read, so the
+                            // MIN_OUTPUT_AGE 10 → 100 hard fork actually
+                            // applies uniformly at the activation height.
+                            // Verified the live-UTXO branch at line 1133
+                            // uses the same call.
                             if idx_entry.is_coinbase {
                                 let age = current_height.saturating_sub(idx_entry.height);
-                                if age < crate::constants::MIN_OUTPUT_AGE {
+                                let required = crate::constants::min_output_age_at_height(current_height);
+                                if age < required {
                                     return Err(Error::InvalidTransaction(format!(
                                         "Input {} ring member {} references immature coinbase \
                                          output (height {}, age {} < required {})",
                                         input_idx, member_idx, idx_entry.height,
-                                        age, crate::constants::MIN_OUTPUT_AGE
+                                        age, required
                                     )));
                                 }
                             }
