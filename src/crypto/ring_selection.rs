@@ -214,47 +214,63 @@ impl RingSelector {
 
         stats.selection_retries = 0; // uniform never retries
 
-        // If we couldn't get enough with gamma, handle based on strict mode
-        // SECURITY: Uniform selection has different statistical properties than gamma,
-        // which can potentially leak information about the real signer.
+        // 2026-06-03 docs-correctness fix: the prior version of this function
+        // used a gamma distribution for decoy selection. CoinCync switched to
+        // uniform shuffle (see the module-level comment at line ~3-22 for the
+        // 4th-Amendment / Möser-attack rationale). The Fisher-Yates shuffle
+        // above is the actual selection mechanism; "fallback" here means the
+        // shuffle exhausted the eligible pool without filling the ring,
+        // which can only happen when `eligible.len() < decoy_count + duplicates`
+        // (the duplicate filter at line ~209 reads from `global_index`).
+        //
+        // The strict-mode error and the privacy-audit log previously
+        // referenced "Gamma distribution could only select…" — stale text
+        // inherited from the gamma-era code that mis-described why
+        // selection failed and pointed engineers at the wrong fix. The
+        // failure cause is *eligible pool too small*, not a distribution
+        // problem. Messages updated accordingly.
         let fallback_needed = selected_decoys.len() < decoy_count;
         let fallback_count = decoy_count.saturating_sub(selected_decoys.len());
 
         if fallback_needed {
-            // SECURITY: In strict mode, refuse to proceed with degraded privacy
+            // SECURITY: In strict mode, refuse to proceed with degraded privacy.
             if self.config.strict_privacy_mode {
                 return Err(Error::Internal(format!(
-                    "PRIVACY CRITICAL: Ring selection failed. Gamma distribution could only select \
-                     {}/{} decoys. Refusing to fall back to uniform random in strict privacy mode. \
+                    "PRIVACY CRITICAL: Ring selection failed. Uniform shuffle could only fill \
+                     {}/{} decoys from the eligible pool (after dedup by global_index). \
+                     Refusing to retry with looser constraints in strict privacy mode — that \
+                     would reduce the anonymity set without surfacing it to the operator. \
                      Solutions: \
                      1. Wait for more outputs to mature in the blockchain \
-                     2. Increase output pool diversity \
+                     2. Increase output pool diversity by raising max_decoy_age \
                      3. If this is a test environment, use RingSelector::with_ring_size() instead",
                     selected_decoys.len(),
                     decoy_count
                 )));
             }
 
-            // Non-strict mode: log at ERROR level since this is a privacy degradation
-            // This should be extremely visible in production logs
+            // Non-strict mode: log at ERROR level since this is a privacy degradation.
+            // This should be extremely visible in production logs.
             tracing::error!(
-                "PRIVACY DEGRADATION: Ring selection falling back to uniform random for {} decoys \
-                 (gamma selected {}/{}). Uniform selection has different statistical properties \
-                 that may allow transaction graph analysis. This transaction's sender may be \
-                 more identifiable than normal. Cause: insufficient eligible outputs in pool.",
-                fallback_count,
+                "PRIVACY DEGRADATION: Ring selection eligible-pool shortfall — \
+                 uniform shuffle filled {}/{} decoy slots; retrying with replacement \
+                 sampling for the remaining {} slots. The retry MAY reuse outputs \
+                 already present elsewhere in the same eligible pool, which can \
+                 reduce anonymity-set diversity. Cause: insufficient eligible \
+                 outputs in pool (raise max_decoy_age or wait for chain to mature).",
                 selected_decoys.len(),
-                decoy_count
+                decoy_count,
+                fallback_count
             );
 
-            // Also emit a structured event for privacy monitoring systems
+            // Also emit a structured event for privacy monitoring systems.
             tracing::warn!(
                 target: "privacy_audit",
                 event = "ring_selection_fallback",
-                gamma_selected = selected_decoys.len(),
+                shuffle_selected = selected_decoys.len(),
                 fallback_needed = fallback_count,
                 total_decoys = decoy_count,
-                "Privacy-degraded ring selection"
+                "Privacy-degraded ring selection (eligible-pool shortfall)"
             );
         }
 
