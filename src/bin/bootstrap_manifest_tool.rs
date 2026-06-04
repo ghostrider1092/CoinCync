@@ -79,16 +79,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             secret_out,
             public_out,
         } => {
-            let secret_bytes = rand::random::<[u8; 32]>();
+            // 2026-06-03 hardening: use OsRng explicitly so the entropy
+            // source is the OS CSPRNG (not whatever rand::random()
+            // happens to dispatch to in a future rand-crate version).
+            // Bootstrap-manifest signing keys are durable assets — the
+            // public key gets baked into every fresh CoinCync binary as
+            // a trust anchor, so the secret outliving its file is the
+            // common case. Generating with the most defensible source
+            // is the only addition that costs nothing and removes a
+            // future-regression class.
+            use rand::RngCore;
+            let mut secret_bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
             let signing_key = SigningKey::from_bytes(&secret_bytes);
             let verify_key = signing_key.verifying_key();
 
             fs::write(&secret_out, secret_bytes)?;
+            // 2026-06-03 bug fix: previously `fs::write` left the
+            // secret-key file at the OS default permission (typically
+            // 0644 — world-readable — on Unix with the standard
+            // umask 022). On a multi-user host (shared dev box, CI
+            // runner, container with multiple service accounts) any
+            // other local user could read the bootstrap-manifest
+            // signing key and forge their own signed manifest, which
+            // every fresh CoinCync node would then trust as authentic
+            // and use to populate its address book. Fix: chmod 0o600
+            // on Unix, set_readonly on Windows — same restrictive-
+            // permissions hardening pattern that
+            // wallet/persistence.rs and network/noise.rs already use
+            // for their long-lived secret material. Public key is left
+            // at default permissions — it's meant to be distributed.
+            harden_secret_file_permissions(&secret_out);
             fs::write(&public_out, hex::encode(verify_key.to_bytes()))?;
 
             println!("Wrote secret key: {}", secret_out.display());
             println!("Wrote public key: {}", public_out.display());
             println!("Public key hex: {}", hex::encode(verify_key.to_bytes()));
+            // Zero the in-memory copy so a crash dump can't recover it
+            // after the file write. SigningKey itself takes a copy
+            // internally; we control the original.
+            use zeroize::Zeroize;
+            secret_bytes.zeroize();
         }
         Command::Create { out, peers } => {
             let manifest = SignedSeedManifest { peers };
@@ -132,6 +163,38 @@ fn signing_message(manifest_bytes: &[u8]) -> Vec<u8> {
     msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);
     msg.extend_from_slice(manifest_bytes);
     msg
+}
+
+/// Set restrictive file permissions (owner-only read/write).
+/// Mirror of `wallet/persistence.rs::harden_secret_file_permissions`
+/// and `network/noise.rs::harden_secret_file_permissions`. Kept
+/// inlined rather than reusing the lib copies because this is a
+/// standalone binary that already takes care to depend on as little
+/// of the crate's internals as it needs to.
+fn harden_secret_file_permissions(path: &PathBuf) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+            eprintln!(
+                "warning: could not set 0600 on secret-key file {}: {}",
+                path.display(), e
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(meta) = fs::metadata(path) {
+            let mut perms = meta.permissions();
+            perms.set_readonly(true);
+            if let Err(e) = fs::set_permissions(path, perms) {
+                eprintln!(
+                    "warning: could not set read-only on secret-key file {}: {}",
+                    path.display(), e
+                );
+            }
+        }
+    }
 }
 
 fn load_32(path: &PathBuf) -> Result<[u8; 32], Box<dyn std::error::Error>> {
