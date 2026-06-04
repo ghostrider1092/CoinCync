@@ -46,16 +46,43 @@ pub fn generate_self_signed_cert(
         rcgen::SanType::IpAddress(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
     );
 
-    // Dynamic 10-year validity from current time
+    // 2026-06-03 bug fix: the previous date calculation used
+    //
+    //   let days_since_epoch = secs / 86400;
+    //   let year  = 1970 + (days_since_epoch / 365) as i32;
+    //   let month = ((days_since_epoch % 365) / 30 + 1) as u8;
+    //   let day   = ((days_since_epoch % 365) % 30 + 1) as u8;
+    //
+    // which ignores leap years (and approximates a month as exactly 30
+    // days). At ~56 years from epoch the cumulative drift is on the
+    // order of 14 days, so `not_before` could be computed as a date
+    // in the FUTURE — at which point the freshly-generated cert is
+    // rejected by every verifier with "certificate not yet valid"
+    // for the first ~2 weeks of its lifetime. A fresh node startup
+    // would silently fail TLS until the drift caught up. The
+    // approximation also made `not_after` drift further each year,
+    // so the effective validity period was not actually 10 years.
+    //
+    // Fix: use `chrono` (already a direct dependency) for the
+    // current-year math, set `not_before` to a safely-past January 1
+    // so we never publish a future start date even if a future
+    // clock-drift bug surfaces, and compute `not_after` as
+    // `January 1, current_year + 11` (the +1 covers the partial
+    // current year so the validity bound is at least 10 years out).
+    //
+    // Hardcoding (1, 1) for month+day is intentional: it sidesteps
+    // every leap-year and month-length question, and a cert whose
+    // calendar boundaries land on January 1 of round years is also
+    // the standard CA-issuer convention.
     {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let days_since_epoch = secs / 86400;
-        let year = 1970 + (days_since_epoch / 365).min(i32::MAX as u64) as i32;
-        let month = ((days_since_epoch % 365) / 30 + 1).min(12) as u8;
-        let day = ((days_since_epoch % 365) % 30 + 1).min(28) as u8;
-        params.not_before = rcgen::date_time_ymd(year, month, day);
-        params.not_after = rcgen::date_time_ymd(year + 10, month, day);
+        use chrono::Datelike;
+        let now_year = chrono::Utc::now().year();
+        // Safely-past start date (last January 1) — guaranteed in the past.
+        params.not_before = rcgen::date_time_ymd(now_year, 1, 1);
+        // +11 so we always cover at least 10 full years from the
+        // moment the cert was generated, including the rest of the
+        // current calendar year.
+        params.not_after = rcgen::date_time_ymd(now_year + 11, 1, 1);
     }
 
     let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
