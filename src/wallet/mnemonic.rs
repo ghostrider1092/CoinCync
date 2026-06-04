@@ -227,15 +227,28 @@ impl DerivationPath {
         }
     }
 
-    /// Spend key derivation path
+    /// Spend key derivation path. All components hardened to match the
+    /// behaviour of `derive_child_key` (which always forces the hardened
+    /// bit), `DerivationPath::coincync`, and the sibling `view_key`.
+    ///
+    /// 2026-06-03 correctness fix: the previous variant left the last
+    /// two components (3 and 0) unhardened in the path representation.
+    /// `derive_child_key` still hardened them at derivation time, so
+    /// the actual keys produced were correct — but `to_string()`
+    /// rendered the path as `m/44'/888'/account'/3/0`, which is
+    /// misleading both to humans reading logs and to any external
+    /// BIP32-compatible tool that parses the path. The function is
+    /// currently unused in production (verified via repo-wide grep),
+    /// so this is purely a representational fix to prevent a future
+    /// wiring from producing inconsistent diagnostics.
     pub fn spend_key(account: u32) -> Self {
         DerivationPath {
             components: vec![
                 44 | 0x80000000,
                 888 | 0x80000000,
                 account | 0x80000000,
-                3,  // special: spend key
-                0,
+                3 | 0x80000000,  // special: spend key (hardened)
+                0 | 0x80000000,  // (hardened)
             ],
         }
     }

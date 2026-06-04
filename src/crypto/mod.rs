@@ -66,7 +66,15 @@ pub use bulletproofs::{
 };
 
 pub use stealth::{
-    StealthAddress, generate_stealth_address, is_output_ours,
+    // 2026-06-03: `generate_stealth_address` removed from the public re-
+    // export. It was the legacy `.expect()`-on-invalid-curve-point variant
+    // that panics on malformed input — the new code uses
+    // `generate_stealth_address_checked` (Result-returning), and no
+    // production caller still references the panicking form (repo-wide
+    // grep shows only internal tests). Keeping it cfg(test)-gated inside
+    // stealth.rs preserves the test fixtures without exposing a
+    // panic-on-RPC-input surface to downstream crates.
+    StealthAddress, is_output_ours,
     generate_stealth_address_for, generate_stealth_address_checked,
     generate_stealth_outputs, is_output_ours_with_epoch,
     compute_one_time_secret, scan_outputs,

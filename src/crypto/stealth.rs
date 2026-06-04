@@ -818,7 +818,13 @@ pub fn generate_stealth_address_checked<R: RngCore + CryptoRng>(
     Ok((stealth, SecretKey::from_bytes(tx_secret_bytes)))
 }
 
-/// Generate a stealth address for a recipient (legacy API - kept for compatibility)
+/// Generate a stealth address for a recipient (legacy API - test-only).
+///
+/// 2026-06-03 hardening: visibility narrowed from `pub` to
+/// `pub(crate)` + `#[cfg(test)]` so this panicking variant cannot
+/// reach production code paths. The public surface kept by
+/// `crypto/mod.rs` re-exports only `generate_stealth_address_checked`
+/// (Result-returning) and `generate_stealth_address_for` (Address-typed).
 ///
 /// Prefer `generate_stealth_address_for` or `generate_stealth_address_checked`
 /// for new code.
@@ -826,7 +832,8 @@ pub fn generate_stealth_address_checked<R: RngCore + CryptoRng>(
 /// # Panics
 /// Panics if the provided public keys are not valid curve points.
 /// Use `generate_stealth_address_checked` for proper error handling.
-pub fn generate_stealth_address<R: RngCore + CryptoRng>(
+#[cfg(test)]
+pub(crate) fn generate_stealth_address<R: RngCore + CryptoRng>(
     spend_pub: &PublicKey,
     view_pub: &PublicKey,
     output_idx: u8,
