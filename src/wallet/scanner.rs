@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::primitives::{PublicKey, SecretKey, Hash, KeyImage, hash_domain};
 use crate::transaction::{Transaction, TxOutput, TxType};
 use crate::consensus::Block;
-use crate::crypto::{StealthAddress, is_output_ours, BlindingFactor, SecretScalar, PublicPoint};
+use crate::crypto::{StealthAddress, is_output_ours, BlindingFactor, SecretScalar, PublicPoint, PedersenCommitment};
 use crate::db::{WalletDb, OwnedOutput, ScanState};
 use crate::error::Result;
 
@@ -662,6 +662,48 @@ impl WalletScanner {
                     &output.encrypted_amount,
                     &shared_secret,
                 );
+
+                // 2026-06-03 ghost-balance defense: recompute the
+                // Pedersen commitment from the decrypted (amount,
+                // blinding) and refuse to claim the output if it
+                // doesn't match the on-chain `output.commitment`.
+                //
+                // Why this matters: an honest sender derives the
+                // blinding factor from the ECDH shared secret (see
+                // transaction/builder.rs:333-344, the CRIT-R7-1 fix),
+                // and the on-chain commitment binds (amount, blinding).
+                // A malicious sender could craft an `encrypted_amount`
+                // that decrypts to a value the recipient cannot prove
+                // — the homomorphic balance equation at chain level
+                // doesn't constrain what the recipient *thinks* the
+                // amount is, only that the sum balances. Without this
+                // check the wallet would show a ghost balance the user
+                // cannot spend; the spend attempt would later fail
+                // (CLSAG can't sign over a commitment mismatch) with
+                // a cryptic crypto error.
+                //
+                // Defense: rebuild commit(amount, blinding) and
+                // byte-compare against the on-chain commitment. If
+                // it doesn't match we silently drop the output and
+                // move to the next key set — same effect as
+                // is_output_ours returning false, but catches the
+                // narrow class of attacks where stealth ownership
+                // matches but the encrypted amount is forged.
+                let expected_commitment = PedersenCommitment::commit(
+                    amount,
+                    &blinding_factor,
+                ).to_bytes();
+                if expected_commitment != output.commitment {
+                    tracing::debug!(
+                        "scanner: stealth match but commitment recompute mismatch \
+                         (tx={}, output_idx={}, claimed amount {}). \
+                         Likely malicious sender or corrupted output — skipping.",
+                        tx_hash.to_hex(),
+                        output_index,
+                        amount,
+                    );
+                    continue;
+                }
 
                 return Some(DecryptedOutput {
                     tx_hash,
@@ -1841,11 +1883,18 @@ mod tests {
         // Sender computes view tag
         let view_tag = generate_view_tag(&bob_view_public, &tx_secret, output_index);
 
+        // Derive the blinding factor exactly as the production builder does
+        // (transaction/builder.rs:333-344) so the scanner's commit-recompute
+        // check (added 2026-06-03 for ghost-balance defense) passes.
+        let blinding_hash = hash_domain(b"COINCYNC_BLINDING", &sender_shared_secret);
+        let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes());
+        let commitment = PedersenCommitment::commit(send_amount, &blinding).to_bytes();
+
         // Build a TxOutput as the sender would
         let tx_output = TxOutput {
             stealth_address: stealth.public_key,
             tx_public_key: stealth.tx_public_key,
-            commitment: [0u8; 32], // simplified for test
+            commitment,
             encrypted_amount,
             view_tag,
             lock_height: None,
@@ -1933,15 +1982,22 @@ mod tests {
             &[shared_point.to_bytes().as_slice(), &[0u8]].concat(),
         );
         let sender_shared: [u8; 32] = *shared_hash.as_bytes();
-        let encrypted_amount = encrypt_amount(5_000_000_000, &sender_shared);
+        let send_amount: u64 = 5_000_000_000;
+        let encrypted_amount = encrypt_amount(send_amount, &sender_shared);
         let view_tag = generate_view_tag(&view_public, &tx_secret, 0);
+
+        // Real commitment so scanner's commit-recompute check passes
+        // (matches the production builder's blinding derivation).
+        let blinding_hash = hash_domain(b"COINCYNC_BLINDING", &sender_shared);
+        let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes());
+        let commitment = PedersenCommitment::commit(send_amount, &blinding).to_bytes();
 
         let tx = Transaction {
             version: 1, tx_type: TxType::Transfer, inputs: vec![],
             outputs: vec![TxOutput {
                 stealth_address: stealth.public_key,
                 tx_public_key: stealth.tx_public_key,
-                commitment: [0u8; 32], encrypted_amount, view_tag,
+                commitment, encrypted_amount, view_tag,
                                                 lock_height: None, encrypted_memo: vec![],
             }],
             fee: Amount::from_atomic(0), range_proof: vec![], extra: vec![],
@@ -1997,6 +2053,12 @@ mod tests {
         let encrypted_amount = encrypt_amount(send_amount, &sender_shared_secret);
         let view_tag = generate_view_tag(&bob_view_public, &tx_secret, output_index);
 
+        // Real commitment so scanner's commit-recompute check passes
+        // (matches the production builder's blinding derivation).
+        let blinding_hash = hash_domain(b"COINCYNC_BLINDING", &sender_shared_secret);
+        let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes());
+        let transfer_commitment = PedersenCommitment::commit(send_amount, &blinding).to_bytes();
+
         let transfer_tx = Transaction {
             version: 1,
             tx_type: TxType::Transfer,
@@ -2004,7 +2066,7 @@ mod tests {
             outputs: vec![TxOutput {
                 stealth_address: stealth.public_key,
                 tx_public_key: stealth.tx_public_key,
-                commitment: [0u8; 32],
+                commitment: transfer_commitment,
                 encrypted_amount,
                 view_tag,
                 lock_height: None,
