@@ -449,7 +449,8 @@ mod double_spend_resistance {
 
 mod eae_attack_resistance {
     
-    use coincync::crypto::{generate_stealth_address, StealthAddress};
+    // 2026-06-03 audit pass: see crypto_properties.rs for the rationale.
+    use coincync::crypto::{generate_stealth_address_checked, StealthAddress};
     use coincync::wallet::WalletKeys;
 
     /// Eve sends to Alice twice. The two stealth addresses must be
@@ -461,12 +462,12 @@ mod eae_attack_resistance {
 
         let mut rng = rand::rngs::OsRng;
 
-        let (stealth1, _secret1) = generate_stealth_address(
+        let (stealth1, _secret1) = generate_stealth_address_checked(
             &alice.spend_public, &alice.view_public, 0, &mut rng,
-        );
-        let (stealth2, _secret2) = generate_stealth_address(
+        ).expect("test fixtures pass valid curve points");
+        let (stealth2, _secret2) = generate_stealth_address_checked(
             &alice.spend_public, &alice.view_public, 0, &mut rng,
-        );
+        ).expect("test fixtures pass valid curve points");
 
         assert_ne!(
             stealth1.public_key.as_bytes(),
@@ -489,9 +490,9 @@ mod eae_attack_resistance {
 
         let addresses: Vec<StealthAddress> = (0..10)
             .map(|_| {
-                let (stealth, _) = generate_stealth_address(
+                let (stealth, _) = generate_stealth_address_checked(
                     &alice.spend_public, &alice.view_public, 0, &mut rng,
-                );
+                ).expect("test fixtures pass valid curve points");
                 stealth
             })
             .collect();
@@ -513,12 +514,12 @@ mod eae_attack_resistance {
         let bob = bob_keys.current().unwrap();
         let mut rng = rand::rngs::OsRng;
 
-        let (stealth_alice, _) = generate_stealth_address(
+        let (stealth_alice, _) = generate_stealth_address_checked(
             &alice.spend_public, &alice.view_public, 0, &mut rng,
-        );
-        let (stealth_bob, _) = generate_stealth_address(
+        ).expect("test fixtures pass valid curve points");
+        let (stealth_bob, _) = generate_stealth_address_checked(
             &bob.spend_public, &bob.view_public, 0, &mut rng,
-        );
+        ).expect("test fixtures pass valid curve points");
 
         assert_ne!(
             stealth_alice.public_key.as_bytes(),

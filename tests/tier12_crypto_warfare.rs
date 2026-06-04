@@ -14,7 +14,8 @@ use coincync::crypto::{
     SecretScalar, PublicPoint, BlindingFactor, PedersenCommitment, ClsagRingMember, EcCommitment,
     clsag_sign, clsag_verify,
     create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, RangeProof,
-    generate_stealth_address,
+    // 2026-06-03 audit pass: see crypto_properties.rs for the rationale.
+    generate_stealth_address_checked,
 };
 use coincync::primitives::{Amount, PublicKey};
 use rand::rngs::OsRng;
@@ -211,9 +212,9 @@ fn attack_stealth_addresses_unlinkable() {
 
     // 200 payments to the same recipient (each uses output_idx 0)
     for _ in 0..200 {
-        let (stealth, _tx_secret) = generate_stealth_address(
+        let (stealth, _tx_secret) = generate_stealth_address_checked(
             &spend_pub, &view_pub, 0, &mut OsRng,
-        );
+        ).expect("test fixtures pass valid curve points");
         let bytes = stealth.public_key.as_bytes().to_owned();
         assert!(
             stealth_set.insert(bytes),

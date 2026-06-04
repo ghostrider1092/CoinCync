@@ -10,7 +10,12 @@
 use coincync::primitives::{PublicKey, SecretKey, Amount};
 use coincync::crypto::{
     SecretScalar, KeyImage as CryptoKeyImage,
-    generate_stealth_address, is_output_ours,
+    // 2026-06-03: switched to `generate_stealth_address_checked`
+    // after the audit pass narrowed the legacy panic-on-bad-input
+    // variant to `#[cfg(test)] pub(crate)`. Test fixtures here always
+    // pass valid curve points so the `.expect()` on the Result is a
+    // never-fires assertion documenting the test contract.
+    generate_stealth_address_checked, is_output_ours,
     coinbase_stealth_address,
     RecipientKeys, Subaddress,
     BlindingFactor, PedersenCommitment,
@@ -99,12 +104,12 @@ fn test_regression_scanner_view_tag_gate() {
 
     // Generate a stealth address for this wallet (simulates a sender creating an output)
     let output_idx = 0u8;
-    let (stealth, _tx_secret) = generate_stealth_address(
+    let (stealth, _tx_secret) = generate_stealth_address_checked(
         &spend_pk,
         &view_pk,
         output_idx,
         &mut OsRng,
-    );
+    ).expect("test fixtures pass valid curve points");
 
     // The core fix: is_output_ours must detect the output via ECDH alone,
     // without any view_tag pre-filter
@@ -347,12 +352,12 @@ fn test_regression_subaddress_scanner_detection() {
 
     // Create a stealth address targeting the SUBADDRESS (not the primary address)
     let output_idx = 0u8;
-    let (stealth, _tx_secret) = generate_stealth_address(
+    let (stealth, _tx_secret) = generate_stealth_address_checked(
         &subaddr.spend_public,
         &view_pk,
         output_idx,
         &mut OsRng,
-    );
+    ).expect("test fixtures pass valid curve points");
 
     // The output must NOT match the primary spend key
     // (this was the only thing the old scanner checked)
@@ -381,12 +386,12 @@ fn test_regression_subaddress_scanner_detection() {
     for idx in 1..5u32 {
         let sub = Subaddress::generate(&spend_pk, &view_sk, idx)
             .expect("subaddress generation");
-        let (sub_stealth, _) = generate_stealth_address(
+        let (sub_stealth, _) = generate_stealth_address_checked(
             &sub.spend_public,
             &view_pk,
             output_idx,
             &mut OsRng,
-        );
+        ).expect("test fixtures pass valid curve points");
         assert!(
             is_output_ours(&sub_stealth, &view_sk, &sub.spend_public, output_idx),
             "Subaddress {} output must be detectable", idx

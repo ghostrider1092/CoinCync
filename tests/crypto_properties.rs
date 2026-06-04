@@ -17,7 +17,11 @@ use coincync::crypto::{
     PedersenCommitment, BlindingFactor,
     create_range_proof_for_height, verify_range_proof_dispatch,
     create_aggregated_range_proof_for_height, verify_range_proofs_dispatch,
-    generate_stealth_address,
+    // 2026-06-03 audit pass narrowed the legacy `generate_stealth_address`
+    // to `#[cfg(test)] pub(crate)` inside stealth.rs (removed from the
+    // public re-export). Test fixtures here pass valid curve points, so
+    // the .expect() on the Result is a never-fires assertion.
+    generate_stealth_address_checked,
 };
 use coincync::primitives::{PublicKey, Amount};
 use rand::rngs::OsRng;
@@ -76,7 +80,8 @@ fn stealth_addresses_for_same_recipient_are_all_different() {
 
     let mut addresses = HashSet::new();
     for _ in 0..500 {
-        let (stealth, _tx_secret) = generate_stealth_address(&spend_pub, &view_pub, 0, &mut OsRng);
+        let (stealth, _tx_secret) = generate_stealth_address_checked(&spend_pub, &view_pub, 0, &mut OsRng)
+            .expect("test fixtures pass valid curve points");
         let addr_bytes = *stealth.public_key.as_bytes();
         let inserted = addresses.insert(addr_bytes);
         assert!(inserted, "stealth address collision — two derivations produced the same address");
@@ -96,7 +101,8 @@ fn stealth_addresses_for_different_recipients_are_different() {
         });
         let sp = PublicKey::from_bytes(spend.to_public().to_bytes());
         let vp = PublicKey::from_bytes(view.to_public().to_bytes());
-        let (stealth, _) = generate_stealth_address(&sp, &vp, 0, &mut OsRng);
+        let (stealth, _) = generate_stealth_address_checked(&sp, &vp, 0, &mut OsRng)
+            .expect("test fixtures pass valid curve points");
         addresses.insert(stealth.public_key.as_bytes().clone());
     }
     assert_eq!(addresses.len(), 100, "stealth addresses for 100 different recipients should all be unique");
