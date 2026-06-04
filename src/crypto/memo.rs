@@ -16,6 +16,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
+use rand::{RngCore, rngs::OsRng};
 
 use crate::primitives::hash_domain;
 use crate::crypto::{SecretScalar, PublicPoint};
@@ -36,13 +37,14 @@ pub const MEMO_OVERHEAD: usize = MEMO_NONCE_SIZE + MEMO_TAG_SIZE;
 /// Maximum encrypted memo size on the wire
 pub const MAX_ENCRYPTED_MEMO_SIZE: usize = MAX_MEMO_SIZE + MEMO_OVERHEAD;
 
-/// Derive ChaCha20-Poly1305 key and nonce from ECDH shared point.
-fn derive_memo_key_and_nonce(shared_point_bytes: &[u8]) -> ([u8; 32], [u8; 12]) {
+/// Derive the ChaCha20-Poly1305 key from the ECDH shared point.
+///
+/// The nonce is NOT derived here — it is generated freshly per encryption
+/// (random 12 bytes) and placed on the wire so the recipient can read it
+/// back. See the long-form comment on `encrypt_memo` for the rationale.
+fn derive_memo_key(shared_point_bytes: &[u8]) -> [u8; 32] {
     let key_hash = hash_domain(b"COINCYNC_MEMO_v1", shared_point_bytes);
-    let nonce_hash = hash_domain(b"COINCYNC_MEMO_NONCE_v1", shared_point_bytes);
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&nonce_hash.as_bytes()[..12]);
-    (*key_hash.as_bytes(), nonce)
+    *key_hash.as_bytes()
 }
 
 /// Encrypt a memo for a specific recipient.
@@ -75,7 +77,47 @@ pub fn encrypt_memo(
         .ok_or(Error::CryptoError("invalid view public key for memo encryption".into()))?;
     let shared_point = view_point.mul(&tx_scalar);
 
-    let (key_bytes, nonce_bytes) = derive_memo_key_and_nonce(shared_point.to_bytes().as_slice());
+    let key_bytes = derive_memo_key(shared_point.to_bytes().as_slice());
+
+    // 2026-06-03 nonce-reuse defense: generate a fresh random nonce per
+    // encryption instead of deriving it deterministically from the ECDH
+    // shared point. The previous derivation was
+    //
+    //   nonce = H("COINCYNC_MEMO_NONCE_v1", shared_point)[..12]
+    //
+    // which means TWO calls to encrypt_memo with the same (tx_secret,
+    // recipient_view_public) pair would produce identical (key, nonce)
+    // pairs. ChaCha20-Poly1305 nonce reuse is catastrophic — observing
+    // both ciphertexts lets an attacker XOR them to recover
+    // plaintext_a ⊕ plaintext_b, and the Poly1305 MAC is forgeable.
+    //
+    // In the current production wallet flow this never happens — the
+    // builder attaches at most one memo per tx (see transaction/
+    // builder.rs:516-529, `break` after the first recipient match), and
+    // each tx has a fresh random tx_secret. So this was a *latent* API-
+    // misuse hazard, not an active exploit: a future caller (a multi-
+    // memo extension, a library user who reuses tx_secret across memos,
+    // a test that loops calling encrypt_memo) would silently produce
+    // catastrophically broken ciphertexts.
+    //
+    // The wire format already carries the nonce explicitly (next 12
+    // bytes after the prefix), and decryption reads it directly from
+    // the wire (see decrypt_memo at line ~122 — note the underscore
+    // on the unused derived nonce). So switching to a random nonce on
+    // the sender side is a pure-improvement change: existing memos
+    // already on the chain decrypt unchanged because they carry their
+    // own nonce on the wire; new memos get a per-encryption-fresh
+    // nonce that eliminates the reuse class entirely.
+    //
+    // 12 bytes from OsRng: probability of collision across all CoinCync
+    // memos ever sent is bounded by birthday √(2^96) ≈ 2^48 memos
+    // before a single collision is expected. The actual quantity will
+    // be many orders of magnitude lower, and even a collision only
+    // matters within the same (key) — i.e. within memos to the same
+    // recipient from the same tx_secret, which is already at most-one
+    // by the builder convention above. Safe by overwhelming margin.
+    let mut nonce_bytes = [0u8; MEMO_NONCE_SIZE];
+    OsRng.fill_bytes(&mut nonce_bytes);
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -117,7 +159,10 @@ pub fn decrypt_memo(
         .ok_or(Error::CryptoError("invalid tx public key for memo decryption".into()))?;
     let shared_point = tx_point.mul(&view_scalar);
 
-    let (key_bytes, _) = derive_memo_key_and_nonce(shared_point.to_bytes().as_slice());
+    // Key derived from shared point; nonce read from the wire — see the
+    // long-form comment in `encrypt_memo` for why the nonce is sender-
+    // chosen (random) rather than deterministically derived.
+    let key_bytes = derive_memo_key(shared_point.to_bytes().as_slice());
 
     let nonce_bytes = &encrypted[..MEMO_NONCE_SIZE];
     let ciphertext = &encrypted[MEMO_NONCE_SIZE..];
