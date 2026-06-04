@@ -328,6 +328,29 @@ impl LightWalletSync {
                     &shared_secret,
                 );
 
+                // 2026-06-03 ghost-balance defense (parity with
+                // wallet/scanner.rs::scan_output): verify the decrypted
+                // (amount, blinding) reconstructs to output.commitment.
+                // See the long-form rationale in scanner.rs commit
+                // 0894835. Light-sync path needs the same check —
+                // otherwise a malicious sender's forged encrypted_amount
+                // shows up as ghost balance in light wallets too.
+                let expected_commitment = crate::crypto::PedersenCommitment::commit(
+                    amount,
+                    &blinding_factor,
+                ).to_bytes();
+                if expected_commitment != output.commitment {
+                    tracing::debug!(
+                        "lightsync: stealth match but commitment recompute mismatch \
+                         (tx={}, output_idx={}, claimed amount {}). \
+                         Likely malicious sender or corrupted digest — skipping.",
+                        output.tx_hash.to_hex(),
+                        output.output_index,
+                        amount,
+                    );
+                    continue;
+                }
+
                 // Reconstruct TxOutput for DecryptedOutput compatibility
                 let tx_output = TxOutput {
                     stealth_address: output.stealth_address,
@@ -496,6 +519,23 @@ fn scan_output_digest_with_keys(
                 &output.encrypted_amount,
                 &shared_secret,
             );
+
+            // 2026-06-03 ghost-balance defense (parity with
+            // wallet/scanner.rs::scan_output). See commit 0894835.
+            let expected_commitment = crate::crypto::PedersenCommitment::commit(
+                amount,
+                &blinding_factor,
+            ).to_bytes();
+            if expected_commitment != output.commitment {
+                tracing::debug!(
+                    "lightsync (free fn): stealth match but commitment recompute mismatch \
+                     (tx={}, output_idx={}, claimed amount {}). Skipping.",
+                    output.tx_hash.to_hex(),
+                    output.output_index,
+                    amount,
+                );
+                continue;
+            }
 
             let tx_output = TxOutput {
                 stealth_address: output.stealth_address,
