@@ -1029,39 +1029,32 @@ pub fn supply_cap_burn_rate(current_supply: u64) -> u64 {
     }
 }
 
-/// Protocol split percentage of fees (0-100)
-pub const PROTOCOL_SPLIT_PERCENT: u64 = 10;
-
-/// Bonus split percentage (0-100)
-pub const BONUS_SPLIT_PERCENT: u64 = 30;
-
 // =============================================================================
-// Miner Bans & Reputation
+// Removed 2026-06-03: dead reputation/ban/protocol-split constants.
+//
+// The following constants existed here but had ZERO references in the
+// rest of the codebase (verified via repo-wide grep):
+//
+//   PROTOCOL_SPLIT_PERCENT, BONUS_SPLIT_PERCENT
+//   DOUBLE_SIGN_BAN, REPUTATION_{ELDER,VETERAN,ESTABLISHED}_BLOCKS
+//   GRACE_PERIOD_BLOCKS, CRITICAL_GRACE_BLOCKS
+//   EVIDENCE_CHAIN_DOMAIN, FINGERPRINT_SIMILARITY_THRESHOLD
+//
+// They were leftover from a miner-reputation/evidence-chain subsystem
+// that was designed but never wired into consensus. The /100 fee split
+// in active use is FEE_MINER_NORMAL_PERCENT / FEE_BURN_NORMAL_PERCENT
+// (see fee_market.rs); the protocol fee in this codebase is permanently
+// 0 (Constitution Article II — no dev tax). The reputation block-count
+// constants additionally carried stale "30s blocks" comments inherited
+// from an earlier TARGET_BLOCK_TIME — at the current 120s block time
+// they meant 4x the documented duration, which would have misled any
+// future engineer who tried to re-introduce them.
+//
+// Deleting eliminates audit noise + footgun surface. Any future
+// reputation subsystem should declare its own constants alongside
+// the wiring code, with comments derived from the current
+// TARGET_BLOCK_TIME (not hard-coded against a stale value).
 // =============================================================================
-
-/// Double sign ban duration in blocks (~35 days with 30s blocks)
-pub const DOUBLE_SIGN_BAN: u64 = 100_800;
-
-/// Blocks to reach elder reputation
-pub const REPUTATION_ELDER_BLOCKS: u64 = 525_600; // ~1 year
-
-/// Blocks to reach veteran reputation
-pub const REPUTATION_VETERAN_BLOCKS: u64 = 175_200; // ~4 months
-
-/// Blocks to reach established reputation
-pub const REPUTATION_ESTABLISHED_BLOCKS: u64 = 43_800; // ~1 month
-
-/// Grace period blocks for forgivable double-signs
-pub const GRACE_PERIOD_BLOCKS: u64 = 2400; // ~4 hours
-
-/// Critical grace blocks (short grace for veterans)
-pub const CRITICAL_GRACE_BLOCKS: u64 = 300; // ~30 minutes
-
-/// Evidence chain domain for hashing
-pub const EVIDENCE_CHAIN_DOMAIN: &[u8] = b"COINCYNC_EVIDENCE_v1";
-
-/// Fingerprint similarity threshold for detection (0-100)
-pub const FINGERPRINT_SIMILARITY_THRESHOLD: u64 = 80;
 
 // =============================================================================
 // Initial Ring Size
