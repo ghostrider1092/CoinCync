@@ -38,18 +38,29 @@ pub const MAINNET_FALLBACK: &[&str] = &[
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
-    // Pure-seed hosts only — keep in sync with TESTNET_SEED_NODES in
-    // src/testnet.rs. App hosts (NYC3 landing/docs, LON explorer,
+    // Pure-seed hosts only — must stay in sync with TESTNET_SEED_NODES
+    // in src/testnet.rs. App hosts (NYC3 landing/docs, LON explorer,
     // TOR api.coincync.network) are intentionally NOT in this list:
     // the bootstrap layer must stay isolated from public-facing app
     // surface so a DDoS or TOS event on the apps doesn't blackhole
     // new-user IBD.
-    "192.34.59.42:28080",      // NYC1 — mempool + relay (US-East)
-    "46.101.138.120:28080",    // FRA  — mempool + relay (Europe)
-    "165.245.161.62:28080",    // RIC  — relay (US-East)
-    "165.245.140.113:28080",   // ATL  — relay (US-South)
-    "164.92.153.24:28080",     // AMS  — relay (Europe)
-    "170.64.142.146:28080",    // SYD  — relay (Asia-Pacific)
+    //
+    // 2026-06-03 sync with TESTNET_SEED_NODES (Bug #4 follow-up,
+    // commit d4d93e9): the previous DigitalOcean IPs (192.34.59.42,
+    // 46.101.138.120, 165.245.161.62, 165.245.140.113, 164.92.153.24,
+    // 170.64.142.146) were the legacy 2.0 fleet and have been
+    // unreachable since the migration to Vultr. A fresh node whose
+    // DNS lookups failed would dial dead IPs forever instead of
+    // reaching the live network. `TESTNET_SEED_NODES` in src/testnet.rs
+    // was updated to the current Vultr fleet but this parallel
+    // fallback list was missed — same bug class, second instance.
+    // `95.179.165.225` (former api node) is intentionally excluded
+    // for the same reason as testnet.rs.
+    "66.135.23.193:28080",    // Vultr — seed (US)
+    "140.82.57.168:28080",    // Vultr — seed (US, Atlanta)
+    "207.148.111.76:28080",   // Vultr — seed (US)
+    "207.148.6.50:28080",     // Vultr — seed (US)
+    "192.248.151.16:28080",   // Vultr London — seed + baseline miner (EU)
 ];
 
 /// Resolve DNS seeds and return a deduplicated list of socket addresses.
