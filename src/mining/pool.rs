@@ -178,6 +178,14 @@ pub struct MinerConnection {
     pub authorized: bool,
     /// Current extra nonce
     pub extra_nonce1: String,
+
+    /// 2026-06-03 anti-replay: per-job dedup set of submitted
+    /// `(extra_nonce2, nonce)` tuples. A repeated tuple under the same
+    /// job_id is rejected as a duplicate share — see the long-form
+    /// rationale on the mining.submit handler. Cleared each time the
+    /// miner's `current_job_id` rotates.
+    pub current_job_id: String,
+    pub submitted_shares: std::collections::HashSet<(String, String)>,
 }
 
 impl MinerConnection {
@@ -198,6 +206,8 @@ impl MinerConnection {
             subscribed: false,
             authorized: false,
             extra_nonce1: format!("{:08x}", miner_id),
+            current_job_id: String::new(),
+            submitted_shares: std::collections::HashSet::new(),
         }
     }
 }
@@ -724,6 +734,42 @@ async fn process_stratum_request(
                         };
                     }
                 };
+
+                // 2026-06-03 anti-replay duplicate-share defense.
+                //
+                // Previously this reference pool had NO per-job dedup of
+                // submitted `(extra_nonce2, nonce)` tuples — a malicious
+                // miner could submit the same valid share repeatedly to
+                // inflate `valid_shares`, which directly drives PPLNS
+                // payout share. The chain ignores duplicates (a block
+                // can only be mined once) but the pool's reward
+                // accounting was being defrauded.
+                //
+                // The active production Stratum server (stratum.rs:836-855)
+                // already had this defense; this reference template was
+                // missing it, so any pool operator who built on the
+                // template inherited the replay vulnerability. Closes
+                // the footgun at the template level.
+                //
+                // Dedup is per-job: when the miner's `current_job_id`
+                // rotates, the set is wiped (old shares are stale anyway,
+                // and the set would grow unbounded otherwise).
+                if miner.current_job_id != job_id {
+                    miner.submitted_shares.clear();
+                    miner.current_job_id = job_id.to_string();
+                }
+                let dedup_key = (extra_nonce2.to_string(), nonce.to_string());
+                if !miner.submitted_shares.insert(dedup_key) {
+                    miner.invalid_shares += 1;
+                    return StratumResponse {
+                        id: request.id,
+                        result: serde_json::json!(false),
+                        error: Some(StratumError {
+                            code: 22,
+                            message: "Duplicate share".into(),
+                        }),
+                    };
+                }
 
                 // Verify the share by computing PoW hash and checking difficulty
                 miner.shares_submitted += 1;
