@@ -1956,6 +1956,40 @@ impl P2PNode {
         let mut closed: usize = 0;
         // Hot path is lock-free; we collect victims and process them after.
         let mut to_disconnect: Vec<(PeerId, u32)> = Vec::new();
+        // 2026-06-03 sync-stall bug fix: when a peer's mpsc sender
+        // returns Closed, the peer-connection task already exited
+        // (TCP disconnect, Noise handshake collapse, channel
+        // explicitly dropped by handle_connection). Previously the
+        // stale `peer_senders` / `peers` entry was left in place
+        // until the maintenance task's `cleanup_interval` (60s tick)
+        // saw `last_seen.elapsed() > PEER_TIMEOUT` (300s) and
+        // garbage-collected it — up to 360 seconds of latency.
+        //
+        // During those minutes EVERY broadcast (block announce, tx
+        // announce, headers reply — frequently >10/sec during sync)
+        // re-attempted try_send on the same dead channel, returned
+        // Closed, and re-emitted the warn-level "broadcast_raw
+        // partial delivery sent=N full=0 closed=M" log line. That
+        // line matches the testnet operator's report at 2026-06-03
+        // 20:28:39 — identical sent=4/full=0/closed=1 repeating
+        // every ~10ms, fast enough to monopolise the broadcast hot
+        // path until enough peers eventually got cleaned up by the
+        // 5-minute maintenance sweep.
+        //
+        // The sync engine reported "non-stalled" the whole time
+        // (it WAS doing work), so the EMERGENCY-TIER-3 stall
+        // detector — which fires when chain advance lags despite a
+        // non-stalled engine — was the only signal the operator
+        // received that something was wrong. The "wipe + restart"
+        // workaround worked because it cleared all peer_senders
+        // state from process memory.
+        //
+        // Fix: when try_send returns Closed, the peer is already
+        // gone. Collect the peer_id and clean up the stale entries
+        // OFF the hot path (after the loop, like to_disconnect).
+        // No banning — the peer disconnected normally, so they
+        // should be able to reconnect.
+        let mut to_remove_closed: Vec<PeerId> = Vec::new();
 
         for entry in self.peer_senders.iter() {
             let peer_id = *entry.key();
@@ -1987,9 +2021,10 @@ impl P2PNode {
                 }
                 Err(TrySendError::Closed(_)) => {
                     closed += 1;
+                    to_remove_closed.push(peer_id);
                     tracing::trace!(
                         peer_id = ?peer_id,
-                        "broadcast_raw: peer channel closed (peer disconnected)"
+                        "broadcast_raw: peer channel closed (peer disconnected) — cleaning up"
                     );
                 }
             }
@@ -2019,6 +2054,42 @@ impl P2PNode {
                 );
             }
             self.ban_peer(&peer_id).await;
+        }
+
+        // Clean up peers whose channels closed normally (TCP fin, handler
+        // task exited). Same cleanup the maintenance task at the
+        // cleanup_interval tick does on stale peers, but immediate —
+        // closes the 360-second window during which a dead peer caused
+        // every subsequent broadcast to log "closed=N partial delivery"
+        // and burn CPU spinning on dead channels.
+        //
+        // NOT calling `ban_peer` deliberately: a Closed channel is not
+        // misbehaviour. The peer either disconnected for legitimate
+        // operational reasons (process restart, network blip, planned
+        // maintenance) or already got banned through a different path
+        // and we're just chasing the leftover state. Banning here would
+        // both penalise innocent peers AND double-count for already-
+        // banned ones.
+        if !to_remove_closed.is_empty() {
+            let count = to_remove_closed.len();
+            for peer_id in &to_remove_closed {
+                // Untrack connection so the per-IP / per-/16 slot is
+                // freed. ConnectionTracker is idempotent — if the
+                // handler task already untracked, this is a no-op.
+                if let Some(peer) = self.peers.get(peer_id) {
+                    self.conn_tracker.untrack_connection(&peer.addr);
+                }
+                self.peer_senders.remove(peer_id);
+                self.peers.remove(peer_id);
+                self.dandelion.write().await.remove_outbound_peer(peer_id);
+                self.sync.write().await.on_peer_disconnected(peer_id);
+                let _ = self.event_tx.send(NodeEvent::PeerDisconnected(*peer_id));
+            }
+            tracing::info!(
+                cleaned = count,
+                "broadcast_raw: cleaned up {} closed-channel peer(s) (sync-stall fix)",
+                count
+            );
         }
 
         Ok(())
