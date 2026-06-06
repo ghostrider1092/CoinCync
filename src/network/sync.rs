@@ -140,11 +140,32 @@ impl ChainSync {
     }
 
     pub fn update_peer_height_for(&mut self, peer_id: PeerId, height: u64) {
+        // 2026-06-06 hotfix: peers advertising heights more than 10_000
+        // above our local view are rejected outright. The previous
+        // implementation CLAMPED such claims to `local_height + 10_000`
+        // and stored them as the peer's "known" height — which then
+        // propagated through `refresh_best_known()` into
+        // `best_known_height` (the field surfaced as `target_height` in
+        // the RPC `get_info` response). When even one bogus peer
+        // connected briefly, every fleet box on the receive path stored
+        // the same clamped value, then re-advertised it to each other
+        // on the next handshake, perpetuating a phantom
+        // `target = local + 10_000` across the fleet indefinitely until
+        // a manual coordinated wipe broke the cycle. The
+        // `Sync EMERGENCY-TIER-3` recovery path further down in this
+        // file was the code's own admission that this state could not
+        // be recovered from within a running node — its operator-facing
+        // message reads "operator may need to wipe + reimport snapshot."
+        // Now we reject the bogus claim before it can poison
+        // `best_known_height`. Post-mortem at
+        // `docs/operations/incidents/2026-06-06-sync-clamp-phantom.md`.
         let max = self.local_height.saturating_add(10_000);
-        let h = height.min(max);
-        self.peer_heights.insert(peer_id, h);
+        if height > max {
+            return;
+        }
+        self.peer_heights.insert(peer_id, height);
         self.refresh_best_known();
-        if h > self.local_height && matches!(self.state, SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced) {
+        if height > self.local_height && matches!(self.state, SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced) {
             self.state = SyncState::Headers;
             self.headers_request_time = None;
             self.headers_received_this_cycle = false;
@@ -152,8 +173,14 @@ impl ChainSync {
     }
 
     pub fn update_peer_height(&mut self, height: u64) {
-        let h = height.min(self.local_height.saturating_add(10_000));
-        if h > self.best_known_height { self.best_known_height = h; }
+        // 2026-06-06 hotfix: same reject-don't-clamp policy as
+        // `update_peer_height_for` above. See that function for the
+        // full rationale and incident post-mortem reference.
+        let max = self.local_height.saturating_add(10_000);
+        if height > max {
+            return;
+        }
+        if height > self.best_known_height { self.best_known_height = height; }
     }
 
     fn refresh_best_known(&mut self) {
@@ -683,5 +710,73 @@ mod tests {
         sync.mark_block_failed(&hash);
         assert!(!sync.downloading.contains(&hash));
         assert_eq!(sync.pending_headers.len(), 1);
+    }
+
+    /// Regression test for the 2026-06-06 "phantom +10_000" fleet-wedge.
+    ///
+    /// A peer that advertises a height more than 10,000 above our local
+    /// tip MUST be rejected outright. The pre-hotfix implementation
+    /// clamped such claims to `local_height + 10_000` and stored that
+    /// clamped value as the peer's "known" height, then propagated it
+    /// into `best_known_height` (surfaced as `target_height` in the RPC
+    /// `get_info` response). The clamped value then re-advertised to
+    /// other peers on subsequent handshakes, perpetuating a phantom
+    /// `target = local + 10_000` across the fleet — observable as a
+    /// consistent +10_000 offset between actual height and reported
+    /// target_height, surviving node restarts because peers
+    /// re-poisoned each other on reconnect.
+    ///
+    /// This test exercises the exact behaviour change: the peer height
+    /// table must NOT contain a clamped substitute for an oversized
+    /// claim, AND `best_known_height` must not be bumped to the clamped
+    /// value.
+    #[test]
+    fn regression_2026_06_06_phantom_plus_10k() {
+        let mut sync = ChainSync::new(2_776, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+
+        // Bogus claim — 100× our local height. Pre-hotfix would have
+        // stored peer's height as 2_776 + 10_000 = 12_776 and bumped
+        // best_known_height to 12_776. Post-hotfix: reject.
+        sync.update_peer_height_for(peer, 277_600);
+
+        // Peer height table must not contain a clamped substitute.
+        assert!(
+            !sync.peer_heights.contains_key(&peer),
+            "rejected peer height must not appear in peer_heights at all \
+             (pre-hotfix bug stored a clamped 12_776 here)"
+        );
+
+        // best_known_height must NOT have absorbed the clamped value.
+        assert!(
+            sync.best_known_height < 12_776,
+            "rejected peer height must not bump best_known_height to the \
+             clamped value (pre-hotfix bug bumped this to local + 10_000 \
+             which then propagated through gossip and surfaced as the \
+             phantom target_height in RPC get_info)"
+        );
+
+        // Legitimate-but-aggressive claim (right at the edge of the
+        // cap) should still be accepted — this is the case the cap
+        // was originally designed to allow (fresh-IBD peers slightly
+        // ahead of us).
+        let legit_peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(legit_peer, 2_776 + 10_000);
+        assert_eq!(
+            sync.peer_heights.get(&legit_peer).copied(),
+            Some(12_776),
+            "claim at exactly local + 10_000 is still legitimate and \
+             must be stored verbatim"
+        );
+
+        // And the `update_peer_height` variant (no peer_id) must
+        // exhibit the same reject behaviour.
+        let mut sync2 = ChainSync::new(2_776, Hash::zero());
+        sync2.update_peer_height(277_600);
+        assert!(
+            sync2.best_known_height < 12_776,
+            "update_peer_height must reject oversized claims same as \
+             update_peer_height_for"
+        );
     }
 }
