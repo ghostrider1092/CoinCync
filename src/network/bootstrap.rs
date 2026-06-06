@@ -733,12 +733,14 @@ fn load_signed_manifest_peers(network: Network) -> Vec<SocketAddr> {
 }
 
 pub const TESTNET_NODES: &[(&str, &str)] = &[
-    ("45.55.32.13:28333",      "NYC relay"),
-    ("165.245.161.62:28333",   "RIC relay"),
-    ("143.110.218.99:28333",   "TOR relay"),
-    ("165.245.140.113:28333",  "ATL miner"),
-    ("64.227.49.44:28333",     "SFO relay + faucet"),
-    ("138.68.172.80:28333",    "LON relay + monitoring"),
+    // 2026-06-06: rewritten to the live Vultr fleet (port 28080,
+    // not 28333 — the previous 28333 entries were Bitcoin testnet
+    // leftovers that never resolved to a real CoinCync peer).
+    // Earlier NYC/LON/RIC/TOR/ATL/SFO entries are decommissioned.
+    ("66.135.23.193:28080",    "seed1 — New York"),
+    ("140.82.57.168:28080",    "seed2 — Amsterdam"),
+    ("207.148.111.76:28080",   "seed3 — Tokyo"),
+    ("207.148.6.50:28080",     "explorer — Dallas"),
 ];
 
 pub const MAINNET_NODES: &[(&str, &str)] = &[

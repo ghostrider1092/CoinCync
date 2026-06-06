@@ -12,7 +12,7 @@
 # Usage:
 #   ./coincync-verify-chain.sh                          # Level 3, last 100 blocks
 #   ./coincync-verify-chain.sh --level 4 --blocks 0    # Full chain audit
-#   ./coincync-verify-chain.sh --level 1 --node http://138.68.172.80:28081
+#   ./coincync-verify-chain.sh --level 1 --node http://66.135.23.193:28081
 
 set -uo pipefail
 
@@ -145,7 +145,7 @@ if [ "$LEVEL" -ge 4 ]; then
 
     if [ "$COMPARE" = true ]; then
         info "Cross-node comparison..."
-        for other in "http://64.227.49.44:28081" "http://45.55.32.13:28081" "http://143.110.218.99:28081"; do
+        for other in "http://66.135.23.193:28081" "http://140.82.57.168:28081" "http://207.148.6.50:28081"; do
             OI=$(coincync_curl_rpc -sf -m 5 -X POST "$other" -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' 2>/dev/null)
             if [ -n "$OI" ]; then
                 OH=$(jget "height" "$OI"); DF=$((CH-OH)); [ "$DF" -lt 0 ] && DF=$((-DF))

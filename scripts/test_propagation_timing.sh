@@ -14,8 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib/coincync_rpc_auth.sh"
 coincync_rpc_load_env
 
-NODES=("138.68.172.80" "64.227.49.44" "192.34.59.42" "46.101.138.120" "45.55.32.13" "143.110.218.99" "165.245.161.62" "165.245.140.113" "164.92.153.24" "170.64.142.146")
-LABELS=("LON" "SFO" "NYC1" "FRA" "NYC3" "TOR" "RIC" "ATL" "AMS" "SYD")
+NODES=("66.135.23.193" "140.82.57.168" "207.148.111.76" "207.148.6.50" "95.179.165.225")
+LABELS=("seed1-NYC" "seed2-AMS" "seed3-TYO" "explorer-DAL" "api-FRA")
 RPC_PORT=28081
 
 echo ""

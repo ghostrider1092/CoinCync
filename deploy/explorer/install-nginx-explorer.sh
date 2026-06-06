@@ -92,17 +92,14 @@ server {
         proxy_set_header Authorization "Bearer \$coincync_rpc_key";
     }
 
-    # Node Health dashboard fan-out routes.
-    location = /health/lon  { proxy_pass http://138.68.172.80:28081;  proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/sfo  { proxy_pass http://64.227.49.44:28081;   proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/nyc1 { proxy_pass http://192.34.59.42:28081;   proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/fra  { proxy_pass http://46.101.138.120:28081; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/nyc3 { proxy_pass http://45.55.32.13:28081;    proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/tor  { proxy_pass http://143.110.218.99:28081; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/ric  { proxy_pass http://165.245.161.62:28081; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/atl  { proxy_pass http://165.245.140.113:28081; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/ams  { proxy_pass http://164.92.153.24:28081;  proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/syd  { proxy_pass http://170.64.142.146:28081; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
+    # Node Health dashboard fan-out routes — 2026-06-06 rewritten to
+    # live Vultr fleet. Old routes (lon, sfo, nyc1, fra, nyc3, tor, ric,
+    # atl, ams, syd) pointed at decommissioned boxes.
+    location = /health/seed1    { proxy_pass http://66.135.23.193:28081;   proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
+    location = /health/seed2    { proxy_pass http://140.82.57.168:28081;   proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
+    location = /health/seed3    { proxy_pass http://207.148.111.76:28081;  proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
+    location = /health/explorer { proxy_pass http://207.148.6.50:28081;    proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
+    location = /health/api      { proxy_pass http://95.179.165.225:28081;  proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
 
     # Keep legacy endpoints alive if external tools still call these.
     location = /api {

@@ -14,15 +14,10 @@ rpc-bind = 127.0.0.1:28081
 p2p-bind = 0.0.0.0:28080
 
 # Seed nodes (testnet) — optional extras; built-in DNS + seeds match src/testnet.rs
-# addnode = 138.68.172.80:28080
-# addnode = 64.227.49.44:28080
-# addnode = 192.34.59.42:28080
-# addnode = 46.101.138.120:28080
-# addnode = 45.55.32.13:28080
-# addnode = 143.110.218.99:28080
-# addnode = 165.245.161.62:28080
-# addnode = 165.245.140.113:28080
-# addnode = 164.92.153.24:28080
+# addnode = 66.135.23.193:28080    # seed1 — New York
+# addnode = 140.82.57.168:28080    # seed2 — Amsterdam
+# addnode = 207.148.111.76:28080   # seed3 — Tokyo
+# addnode = 207.148.6.50:28080     # explorer — Dallas
 
 # Mining (uncomment to mine)
 # mining-threads = 4

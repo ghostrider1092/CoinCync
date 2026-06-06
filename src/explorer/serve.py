@@ -16,17 +16,15 @@ LOCAL_RPC = os.environ.get('COINCYNC_EXPLORER_RPC', 'http://127.0.0.1:28081').st
 LOCAL_REST = os.environ.get('COINCYNC_EXPLORER_REST', 'http://127.0.0.1:28083').strip() or 'http://127.0.0.1:28083'
 HEALTH = {}
 if ALLOW_LIVE_HEALTH:
+    # 2026-06-06: rewritten to live Vultr fleet. Old routes (lon,
+    # nyc1, fra, nyc3, ams, syd, ric, tor, atl, sfo) pointed at boxes
+    # that no longer exist.
     HEALTH = {
-        '/health/lon': 'http://138.68.172.80:28081',
-        '/health/sfo': 'http://64.227.49.44:28081',
-        '/health/nyc1': 'http://192.34.59.42:28081',
-        '/health/fra': 'http://46.101.138.120:28081',
-        '/health/nyc3': 'http://45.55.32.13:28081',
-        '/health/tor': 'http://143.110.218.99:28081',
-        '/health/ric': 'http://165.245.161.62:28081',
-        '/health/atl': 'http://165.245.140.113:28081',
-        '/health/ams': 'http://164.92.153.24:28081',
-        '/health/syd': 'http://170.64.142.146:28081',
+        '/health/seed1': 'http://66.135.23.193:28081',     # New York
+        '/health/seed2': 'http://140.82.57.168:28081',     # Amsterdam
+        '/health/seed3': 'http://207.148.111.76:28081',    # Tokyo
+        '/health/explorer': 'http://207.148.6.50:28081',   # Dallas
+        '/health/api': 'http://95.179.165.225:28081',      # Frankfurt
     }
 
 class H(http.server.BaseHTTPRequestHandler):

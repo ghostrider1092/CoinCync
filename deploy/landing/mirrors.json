@@ -13,8 +13,8 @@
   "explorer": {
     "primary": {
       "url": "https://explorer.coincync.network",
-      "host": "RIC",
-      "ipv4": "165.245.161.62",
+      "host": "Dallas",
+      "ipv4": "207.148.6.50",
       "operator": "coincync-core",
       "status": "live",
       "capabilities": ["testnet", "mainnet-pre-launch"]
@@ -25,8 +25,8 @@
   "api": {
     "primary": {
       "url": "https://api.coincync.network",
-      "host": "Toronto",
-      "ipv4": "143.110.218.99",
+      "host": "Frankfurt",
+      "ipv4": "95.179.165.225",
       "operator": "coincync-core",
       "status": "live",
       "capabilities": ["json-rpc", "rest-v1", "testnet", "mainnet-pre-launch"]
@@ -37,22 +37,22 @@
   "seeds": [
     {
       "hostname": "seed1.coincync.network",
-      "host": "Toronto",
-      "ipv4": "143.110.218.99",
+      "host": "New York",
+      "ipv4": "66.135.23.193",
       "p2p_port_testnet": 28080,
       "p2p_port_mainnet": 19080
     },
     {
       "hostname": "seed2.coincync.network",
-      "host": "ATL",
-      "ipv4": "165.245.140.113",
+      "host": "Amsterdam",
+      "ipv4": "140.82.57.168",
       "p2p_port_testnet": 28080,
       "p2p_port_mainnet": 19080
     },
     {
       "hostname": "seed3.coincync.network",
-      "host": "SFO",
-      "ipv4": "64.227.49.44",
+      "host": "Tokyo",
+      "ipv4": "207.148.111.76",
       "p2p_port_testnet": 28080,
       "p2p_port_mainnet": 19080
     }
@@ -60,14 +60,16 @@
 
   "docs": {
     "url": "https://docs.coincync.network",
-    "host": "NYC",
-    "ipv4": "45.55.32.13"
+    "host": null,
+    "ipv4": null,
+    "note": "2026-06-06: backend IP scrubbed — was 45.55.32.13 (NYC, decommissioned). Refresh when canonical docs host is re-established."
   },
 
   "landing": {
     "url": "https://coincync.network",
-    "host": "NYC",
-    "ipv4": "45.55.32.13"
+    "host": null,
+    "ipv4": null,
+    "note": "2026-06-06: backend IP scrubbed — was 45.55.32.13 (NYC, decommissioned). Refresh when canonical landing host is re-established."
   },
 
   "onion": {

@@ -29,12 +29,12 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
 /// `src/constants.rs`. The previous values (18333 / 28333) were Bitcoin
 /// testnet leftovers that never resolved to a real CoinCync peer.
 pub const MAINNET_FALLBACK: &[&str] = &[
-    "45.55.32.13:19080",       // NYC
-    "165.245.161.62:19080",    // RIC
-    "143.110.218.99:19080",    // Toronto
-    "165.245.140.113:19080",   // ATL
-    "64.227.49.44:19080",      // SFO
-    "138.68.172.80:19080",     // LON
+    // 2026-06-06: rewritten to the live Vultr fleet. The previous
+    // table (NYC, LON, RIC, TOR, ATL, SFO) referenced DO + dead-LON
+    // boxes that no longer exist. Mainnet ports — see MAINNET_P2P_PORT.
+    "66.135.23.193:19080",    // seed1 — New York
+    "140.82.57.168:19080",    // seed2 — Amsterdam
+    "207.148.111.76:19080",   // seed3 — Tokyo
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
