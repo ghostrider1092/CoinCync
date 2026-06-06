@@ -30,7 +30,7 @@ DOCS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOK_DIR="$DOCS_DIR/book"
 
 # Deploy target — change these if your host layout differs.
-DEPLOY_HOST="${COINCYNC_DOCS_HOST:-root@45.55.32.13}"
+DEPLOY_HOST="${COINCYNC_DOCS_HOST:-root@docs.coincync.network}"
 DEPLOY_PATH="${COINCYNC_DOCS_PATH:-/var/www/docs/}"
 
 # ── Color output ───────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ Usage: $0 [--deploy|--serve]
              http://localhost:3000 (uses 'mdbook serve').
 
 Environment variables (--deploy mode):
-  COINCYNC_DOCS_HOST   ssh target          (default: root@45.55.32.13)
+  COINCYNC_DOCS_HOST   ssh target          (default: root@docs.coincync.network)
   COINCYNC_DOCS_PATH   remote dir          (default: /var/www/docs/)
 EOF
         exit 0

@@ -12,7 +12,7 @@
 #
 # Deploy (from a dev machine):
 #   cd docs && mdbook build && \
-#     rsync -avz --delete book/ root@45.55.32.13:/var/www/docs/
+#     rsync -avz --delete book/ root@docs.coincync.network:/var/www/docs/
 
 [book]
 title       = "CoinCync Documentation"

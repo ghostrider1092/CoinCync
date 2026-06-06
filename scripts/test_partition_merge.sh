@@ -20,9 +20,10 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Partition groups
-GROUP_A=("138.68.172.80" "64.227.49.44" "192.34.59.42" "46.101.138.120" "45.55.32.13")
-GROUP_B=("143.110.218.99" "165.245.161.62" "165.245.140.113" "164.92.153.24" "170.64.142.146")
+# Partition groups (5-node Vultr fleet split as 3+2 for partition tests).
+# 2026-06-06 rewrite — previous IPs were decommissioned DO/LON boxes.
+GROUP_A=("66.135.23.193" "140.82.57.168" "207.148.6.50")
+GROUP_B=("207.148.111.76" "95.179.165.225")
 RPC_PORT=28081
 P2P_PORT=28080
 

@@ -416,18 +416,14 @@ fn start_node(state: &mut AppState) -> Result<(), String> {
     let data = state.data_dir.join("data");
     let _ = std::fs::create_dir_all(&data);
 
-    // Current testnet fleet (post-2026-05-02 redeploy). SFO excluded
-    // (divergent local history); ATL demoted to seed-only.
+    // Current testnet fleet (2026-06-06 rewrite — the previous list
+    // referenced DO + dead-LON boxes that no longer exist).
     let seeds = [
-        "45.55.32.13",     // NYC3 — active miner + landing
-        "138.68.172.80",   // LON — explorer host
-        "143.110.218.99",  // TOR — public API
-        "165.245.161.62",  // RIC — mirror explorer
-        "192.34.59.42",    // NYC1 — mempool
-        "46.101.138.120",  // FRA — mempool
-        "165.245.140.113", // ATL — seed
-        "164.92.153.24",   // AMS — seed
-        "170.64.142.146",  // SYD — relay
+        "66.135.23.193",   // seed1 — New York
+        "140.82.57.168",   // seed2 — Amsterdam
+        "207.148.6.50",    // explorer — Dallas
+        "207.148.111.76",  // seed3 — Tokyo
+        "95.179.165.225",  // api — Frankfurt
     ];
 
     let mut cmd = Command::new(&state.node_bin);

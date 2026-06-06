@@ -38,11 +38,12 @@ pub const MAINNET_DNS_SEEDS: &[&str] = &[
 /// L-6: These will be replaced with dedicated mainnet IPs before October 2026 launch.
 /// For now, they point to the existing infrastructure on mainnet ports.
 pub const MAINNET_SEED_NODES: &[&str] = &[
-    "138.68.172.80:19080",   // LON
-    "64.227.49.44:19080",    // SFO
-    "170.64.142.146:19080",  // SYD
-    "45.55.32.13:19080",     // NYC3
-    "143.110.218.99:19080",  // TOR
+    // 2026-06-06: rewritten to the live Vultr fleet. Previous LON,
+    // SYD, NYC3, SFO, TOR entries referenced boxes that no longer
+    // exist. Re-populate pre-mainnet with the launch fleet.
+    "66.135.23.193:19080",    // seed1 — New York
+    "140.82.57.168:19080",    // seed2 — Amsterdam
+    "207.148.111.76:19080",   // seed3 — Tokyo
 ];
 
 /// Mainnet minimum ring size (same as testnet — constitutional minimum)

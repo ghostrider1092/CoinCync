@@ -275,7 +275,7 @@ Curve: Ristretto255 (prime-order group on Curve25519)
 - **Explorer:** https://explorer.coincync.network
 - **Faucet:** https://explorer.coincync.network (embedded, click "Faucet" tab)
 - **RPC endpoint:** Any node on port 28081
-- **Seed nodes:** 45.55.32.13, 165.245.161.62, 143.110.218.99, 165.245.140.113, 64.227.49.44, 138.68.172.80
+- **Seed nodes:** 66.135.23.193 (NYC), 140.82.57.168 (Amsterdam), 207.148.111.76 (Tokyo), 207.148.6.50 (Dallas), 95.179.165.225 (Frankfurt)
 
 ---
 
