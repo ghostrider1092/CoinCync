@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock, broadcast};
 use tokio::time::interval;
 #[allow(unused_imports)]
@@ -84,8 +84,6 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PING_INTERVAL: Duration = Duration::from_secs(120);
 /// Peer timeout (no activity)
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(300);
-/// Global memory budget for P2P buffers (50 MB)
-pub const MEMORY_BUDGET_BYTES: usize = 50 * 1024 * 1024;
 /// Per-peer send queue size (with backpressure)
 pub const PEER_QUEUE_SIZE: usize = 100;
 /// Global message queue size
@@ -283,7 +281,7 @@ impl P2PNode {
             event_tx,
             cmd_tx,
             running: Arc::new(RwLock::new(false)),
-            conn_tracker: Arc::new(ConnectionTracker::new(MEMORY_BUDGET_BYTES)),
+            conn_tracker: Arc::new(ConnectionTracker::new()),
             peer_scorer: Arc::new(RwLock::new(PeerScorer::new())),
             orphan_flood: Arc::new(RwLock::new(super::scoring::OrphanFloodTracker::new())),
             version_nonce: rand::random::<u64>(),
@@ -375,14 +373,6 @@ impl P2PNode {
     /// Add a seed/manual peer address
     pub async fn add_seed_address(&self, addr: std::net::SocketAddr) {
         self.addresses.write().await.add(PeerAddress::new(addr));
-    }
-
-    /// Get connection tracker statistics
-    pub fn connection_stats(&self) -> ConnectionStats {
-        ConnectionStats {
-            memory_used: self.conn_tracker.memory_usage(),
-            memory_budget: MEMORY_BUDGET_BYTES,
-        }
     }
 
     /// Get our peer ID
@@ -670,16 +660,94 @@ impl P2PNode {
         ).map_err(|e| Error::ConnectionFailed(format!("socket create: {e}")))?;
         socket.set_reuse_address(true)
             .map_err(|e| Error::ConnectionFailed(format!("SO_REUSEADDR: {e}")))?;
-        socket.set_nonblocking(true)
-            .map_err(|e| Error::ConnectionFailed(format!("set_nonblocking: {e}")))?;
+        // 2026-06-05 dedicated-accept-thread fix: the socket stays in
+        // BLOCKING mode because the accept loop now runs on its own
+        // dedicated OS thread (see below). std::net::TcpListener::accept
+        // blocks the thread until a connection arrives, which is exactly
+        // what we want — the kernel parks the thread on the listen
+        // queue and wakes it the instant any connection lands. No
+        // tokio worker is ever involved in accepting connections.
+        //
+        // This is the Solana solana-streamer pattern adapted to our
+        // smaller fleet: the architectural property is that no amount
+        // of P2P handler work, RPC handler work, or block validation
+        // can starve the accept loop, because the accept thread is on
+        // a dedicated OS thread that does NOTHING but accept.
+        //
+        // Pre-fix (with set_nonblocking(true) + tokio TcpListener):
+        // accept ran on a shared tokio worker. When workers were
+        // saturated with Noise handshakes / message decoding, accept
+        // got CPU-starved and the kernel accept queue overflowed (see
+        // `LISTEN 387 1024` observation 2026-06-05 21:09 UTC).
+        socket.set_nonblocking(false)
+            .map_err(|e| Error::ConnectionFailed(format!("set_blocking: {e}")))?;
         socket.bind(&self.config.listen_addr.into())
             .map_err(|e| Error::ConnectionFailed(format!("bind {}: {e}", self.config.listen_addr)))?;
-        socket.listen(128)
+        // 2026-06-05: backlog bumped 128 → 1024. The previous value was
+        // saturating under any thundering-herd condition (fleet restart,
+        // simultaneous peer reconnects after deploy, IBD burst). Observed
+        // `LISTEN 129 128` (Recv-Q over backlog) on coincync-lon multiple
+        // times during the 2026-06-04 fleet rollout. With backlog=1024 the
+        // OS can buffer connection attempts while the accept loop catches
+        // up. Cost: kernel memory for pending SYN-ACK state, ~256 bytes
+        // per slot = ~1 MB worst case. Negligible vs the cost of dropped
+        // accepts.
+        socket.listen(1024)
             .map_err(|e| Error::ConnectionFailed(format!("listen: {e}")))?;
-        let listener = TcpListener::from_std(socket.into())
-            .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
+        let std_listener: std::net::TcpListener = socket.into();
 
-        info!("P2P node listening on {}", self.config.listen_addr);
+        // Bounded channel from the dedicated accept thread to the main
+        // tokio runtime. 256 is a generous buffer: the producer can park
+        // 256 accepted connections waiting for the main runtime to
+        // dequeue and run pre-checks. In practice the consumer task
+        // drains this near-instantly (its work is just async checks +
+        // tokio::spawn). Capacity exists to absorb a brief consumer
+        // delay under heavy load. If the consumer falls behind beyond
+        // this, the accept thread's send blocks, and the kernel
+        // listen-queue absorbs further connections up to its own 1024
+        // backlog — both layers compose.
+        let (accept_tx, mut accept_rx) =
+            tokio::sync::mpsc::channel::<(std::net::TcpStream, std::net::SocketAddr)>(256);
+
+        // Spawn the dedicated accept thread. This is a plain OS thread
+        // (NOT a tokio task) so it cannot be starved by any tokio
+        // worker contention. Its only job is `std_listener.accept()`
+        // in a tight loop, forwarding each result to the main runtime.
+        std::thread::Builder::new()
+            .name("p2p-accept".to_string())
+            .spawn(move || {
+                tracing::info!("p2p-accept thread started on dedicated OS thread");
+                loop {
+                    match std_listener.accept() {
+                        Ok((stream, addr)) => {
+                            // blocking_send: park this OS thread if the
+                            // consumer hasn't drained yet. If the
+                            // consumer is GONE (main runtime shut down,
+                            // channel closed), we exit cleanly.
+                            if accept_tx.blocking_send((stream, addr)).is_err() {
+                                tracing::info!(
+                                    "p2p-accept: consumer channel closed, exiting"
+                                );
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            // EINTR / transient errors: brief sleep and
+                            // retry. EBADF (listener closed) will keep
+                            // returning errors; cap with a sleep to
+                            // avoid a busy loop in that case. Process
+                            // shutdown via SIGTERM will kill the thread
+                            // before this matters in practice.
+                            tracing::warn!("p2p-accept: accept error: {}", e);
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                }
+                tracing::info!("p2p-accept thread exited");
+            })
+            .map_err(|e| Error::ConnectionFailed(format!("p2p-accept thread spawn: {e}")))?;
+
+        info!("P2P node listening on {} (accept on dedicated OS thread)", self.config.listen_addr);
 
         // ── Phase 2: constant-rate cover-traffic loop ──────────────────
         //
@@ -750,15 +818,45 @@ impl P2PNode {
         let acceptor_encryption = encryption_config.clone();
 
         tokio::spawn(async move {
+            // Consume accepted connections from the dedicated p2p-accept
+            // thread. This task runs on the main tokio runtime and does
+            // the cheap pre-checks (banned-peer lookup, per-IP limit,
+            // max-inbound check) before spawning a handler task. The
+            // expensive work (Noise handshake, message processing) is
+            // in the handler task — but even if all tokio workers are
+            // tied up running handler work, the kernel accept queue
+            // stays at zero because the p2p-accept thread keeps draining.
             while *acceptor_running.read().await {
-                match listener.accept().await {
-                    Ok((stream, addr)) => {
-                        // SECURITY (M-9): In onion-only mode, reject non-localhost
-                        // inbound connections to prevent clearnet IP exposure.
-                        if onion_only && !addr.ip().is_loopback() {
-                            debug!("Rejecting non-local inbound in onion-only mode from {}", addr);
-                            continue;
-                        }
+                let (std_stream, addr) = match accept_rx.recv().await {
+                    Some(pair) => pair,
+                    None => {
+                        info!("p2p-accept channel closed by sender; shutting down");
+                        break;
+                    }
+                };
+
+                // Convert std::net::TcpStream → tokio::net::TcpStream.
+                // The stream came from a blocking listener; tokio needs
+                // it nonblocking for its async I/O driver.
+                if let Err(e) = std_stream.set_nonblocking(true) {
+                    warn!("set_nonblocking on accepted conn from {} failed: {}", addr, e);
+                    continue;
+                }
+                let stream = match TcpStream::from_std(std_stream) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("TcpStream::from_std failed for {}: {}", addr, e);
+                        continue;
+                    }
+                };
+
+                {
+                    // SECURITY (M-9): In onion-only mode, reject non-localhost
+                    // inbound connections to prevent clearnet IP exposure.
+                    if onion_only && !addr.ip().is_loopback() {
+                        debug!("Rejecting non-local inbound in onion-only mode from {}", addr);
+                        continue;
+                    }
 
                         // Check if peer is banned by scorer
                         if acceptor_scorer.read().await.is_banned(&addr) {
@@ -814,10 +912,6 @@ impl P2PNode {
                                 warn!("Inbound connection error: {}", e);
                             }
                         });
-                    }
-                    Err(e) => {
-                        warn!("Accept error: {}", e);
-                    }
                 }
             }
         });
@@ -1843,6 +1937,21 @@ impl P2PNode {
                         scorer.decay_all(50); // Decay toward neutral
                         scorer.auto_ban_bad_peers(); // Ban peers with very low scores
                         scorer.cleanup_bans(); // Remove expired bans
+                        drop(scorer);
+
+                        // AUDIT 2026-06-05 (seam #1) — reap leaked per-IP
+                        // tracking entries. untrack_connection runs on every
+                        // peer close, but if a connection drops without
+                        // hitting that path (panic, abrupt close, race with
+                        // the accept thread) the counter can leak.
+                        // cleanup_stale_entries drops zero-count rows and,
+                        // if the map exceeds MAX_TRACKED_IPS, culls anything
+                        // not in the currently-active peer set — bounding
+                        // memory growth under sustained DoS / IP-rotation.
+                        let active_ips: Vec<std::net::IpAddr> = maint_peers.iter()
+                            .map(|p| p.addr.ip())
+                            .collect();
+                        maint_tracker.cleanup_stale_entries(&active_ips);
                     }
                 }
             }
@@ -2208,13 +2317,6 @@ pub struct NetworkStats {
     pub inbound: usize,
     pub bytes_recv: u64,
     pub bytes_sent: u64,
-}
-
-/// Connection statistics
-#[derive(Clone, Debug)]
-pub struct ConnectionStats {
-    pub memory_used: usize,
-    pub memory_budget: usize,
 }
 
 /// Bridge tasks: shuttles data between the encrypted TCP stream and the
@@ -3129,12 +3231,25 @@ async fn process_message(
                 let estimated_peer_height = our_h + 1;
                 sync.write().await.update_peer_height_for(peer_id, estimated_peer_height);
 
-                let mut needed = Vec::new();
-                for inv in &inv_msg.inventory {
-                    if chain.get_block(&inv.hash).is_none() {
-                        needed.push(inv.hash);
-                    }
-                }
+                // 2026-06-05: wrap inv-filter in block_in_place. Inventory
+                // can hold up to MAX_INV_SIZE=500 hashes; each chain.get_block
+                // does a parking_lot read + potential sled disk hit. Without
+                // block_in_place this iterates synchronously on the worker
+                // thread for the full message, contributing to accept-loop
+                // starvation under fleet-wide IBD bursts. Last unwrapped
+                // chain DB call site in node.rs (the other 7 were already
+                // wrapped per the 2026-06-03 Layer-2 sweep).
+                let needed: Vec<Hash> = tokio::task::block_in_place(|| {
+                    inv_msg.inventory.iter()
+                        .filter_map(|inv| {
+                            if chain.get_block(&inv.hash).is_none() {
+                                Some(inv.hash)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                });
                 if !needed.is_empty() {
                     if needed.len() <= 4 {
                         // Small number of missing blocks — request them directly
@@ -3911,7 +4026,7 @@ mod tests {
     /// and correctly tracks/untracks connections.
     #[test]
     fn test_connection_tracker_per_ip_limit() {
-        let tracker = ConnectionTracker::new(MEMORY_BUDGET_BYTES);
+        let tracker = ConnectionTracker::new();
         let addr: SocketAddr = "192.168.1.1:12345".parse().unwrap();
         let ip = addr.ip();
 
@@ -3964,10 +4079,5 @@ mod tests {
         assert_eq!(stats.inbound, 0);
         assert_eq!(stats.bytes_recv, 0);
         assert_eq!(stats.bytes_sent, 0);
-
-        // Connection stats should show zero memory used
-        let conn_stats = node.connection_stats();
-        assert_eq!(conn_stats.memory_used, 0);
-        assert_eq!(conn_stats.memory_budget, MEMORY_BUDGET_BYTES);
     }
 }

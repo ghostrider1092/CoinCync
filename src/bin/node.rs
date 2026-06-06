@@ -149,7 +149,18 @@ enum Command {
 // register_blocking_method so they run on the blocking thread pool,
 // not on tokio workers. Larger sweep of all 41 handlers is queued
 // for v1.0.11 — for now we covered the highest-traffic three.
-#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
+//
+// 2026-06-05 BUMP 8 → 16: even after the architectural snapshot fix
+// (chain.rs lock-free reads via ArcSwap) AND the full register_blocking_method
+// sweep (all 41 RPC handlers off workers), London still hit accept-queue
+// saturation during a fleet upgrade thundering-herd. The accept loop runs
+// on a worker; under sustained P2P load (Noise handshakes, GetHeaders,
+// GetBlocks responses) all 8 workers were busy enough that .accept() got
+// CPU-starved. 16 workers gives accept ~2x more chance to schedule. Cost
+// on 2-vCPU hardware is just kernel scheduling overhead — no real added
+// parallelism but smoother distribution. Pair this with the listen
+// backlog bump 128 → 1024 in network/node.rs.
+#[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() {
     let cli = Cli::parse();
 
@@ -616,6 +627,16 @@ async fn start_node(
     let mempool = SharedMempool::new();
     mempool.set_height(tip.height);
 
+    // AUDIT 2026-06-05 #14 — restore mempool from disk so unconfirmed
+    // txs survive a restart. The persistence file is written by the
+    // shutdown handler below; absence (first start, wipe) is not an
+    // error.
+    match mempool.load_from_disk(&data_dir) {
+        Ok(0) => {}
+        Ok(n) => info!("Mempool: restored {} txs from disk", n),
+        Err(e) => warn!("Mempool: load_from_disk failed: {} (continuing with empty mempool)", e),
+    }
+
     // Start P2P node
     let listen_addr = p2p_config.listen_addr;
     let p2p = Arc::new(P2PNode::new(p2p_config, chain_arc.clone(), mempool.clone()));
@@ -923,5 +944,15 @@ async fn start_node(
         .expect("failed to install ctrl-c handler");
 
     info!("Shutdown signal received, stopping node...");
+
+    // AUDIT 2026-06-05 #14 — persist mempool before exit so unconfirmed
+    // txs survive the restart. Failure is logged but not fatal — the
+    // node still needs to release the chain DB lock and exit.
+    match mempool.save_to_disk(&data_dir) {
+        Ok(0) => {}
+        Ok(n) => info!("Mempool: saved {} txs to disk", n),
+        Err(e) => error!("Mempool: save_to_disk failed: {}", e),
+    }
+
     Ok(())
 }

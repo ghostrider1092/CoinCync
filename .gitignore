@@ -1,11 +1,36 @@
 # ── Build artifacts ─────────────────────────────────────────────────
 /target/
+# Catch Cargo target dirs nested anywhere (audit-suite/sketches/*,
+# crates/*/target, etc.). The `/target/` rule above only matches root.
+**/target/
 **/*.rs.bk
 *.pdb
 *.exe
 *.dll
 *.so
 *.dylib
+
+# ── Release / binary archive directories (not source) ──────────────
+# `out/` and `release/` and `release-artifacts/` accumulate compiled
+# release archives from past testnet cuts. Distribution belongs in
+# GitHub releases (or wherever), not source-tracked git.
+/out/
+/release/
+/release-artifacts/
+
+# ── Local experiment / scratch dirs ─────────────────────────────────
+# Heavy out-of-tree workspaces and test-state dirs that shouldn't
+# travel with source commits. `audit-suite/` in particular accumulates
+# ~15 GB of build artifacts from its own Cargo workspaces.
+/audit-suite/
+/mutants.cync/
+/testnet-scratch/
+/future-update/
+
+# ── File-rewrite backups ────────────────────────────────────────────
+# Editor or sed-based rewrites sometimes leave `.before-<label>`
+# alongside the file. Useful locally, never wanted in commits.
+*.before-*
 # Cargo.lock — COMMITTED for reproducible builds (binary project, not library)
 # See: https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control
 

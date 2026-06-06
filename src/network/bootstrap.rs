@@ -2,7 +2,7 @@
 //!
 //! DNS seeds, peer discovery, and network bootstrapping.
 
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
+use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, IpAddr};
 use std::time::Duration;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -262,8 +262,24 @@ pub struct AddressManager {
     known_addrs: HashSet<SocketAddr>,
     /// Tried addresses (failed connections)
     tried: HashSet<SocketAddr>,
-    /// Self-addresses (detected via nonce match) — never connect to these
+    /// Self-addresses (detected via nonce match) — never connect to these.
+    /// Kept for exact-SocketAddr matches (e.g. the destination port we dialed).
     self_addresses: HashSet<SocketAddr>,
+    /// Self-IPs (detected via nonce match) — never connect to ANY port on these IPs.
+    ///
+    /// 2026-06-05 fix: previously only `self_addresses` (full SocketAddr) was
+    /// tracked, which is insufficient. When the inbound side of a self-loop
+    /// detects the nonce match, `peer_info.addr` carries the random TCP
+    /// source port the outbound dialer used — not the listen port (28080).
+    /// So banning `192.248.151.16:54321` does nothing for the next outbound
+    /// dial which targets `192.248.151.16:28080`. Plus the address is
+    /// continuously re-discovered via the hardcoded TESTNET_FALLBACK list
+    /// in `dns_seeds.rs` (which includes London's own IP) and via PEX from
+    /// any other node whose --addnode includes us. Result: London accumulated
+    /// 12 self-handshakes in a 37-min window, starving real peers of outbound
+    /// slots and stalling IBD. Banning by IP closes the door regardless of
+    /// which port the address was discovered under.
+    self_ips: HashSet<IpAddr>,
     /// Maximum addresses to store
     max_addresses: usize,
 }
@@ -275,6 +291,7 @@ impl AddressManager {
             known_addrs: HashSet::new(),
             tried: HashSet::new(),
             self_addresses: HashSet::new(),
+            self_ips: HashSet::new(),
             max_addresses,
         }
     }
@@ -291,6 +308,13 @@ impl AddressManager {
 
         // Don't add if already known or tried
         if self.tried.contains(&addr.addr) {
+            return;
+        }
+
+        // Don't re-add an IP we've previously detected as ourselves.
+        // Closes the loop where dns_seeds fallback / PEX kept reintroducing
+        // our own listen address after every mark_self_address ban.
+        if self.self_ips.contains(&addr.addr.ip()) {
             return;
         }
 
@@ -316,12 +340,17 @@ impl AddressManager {
     }
 
     /// Mark an address as our own (detected via self-connection nonce match).
-    /// These addresses are permanently skipped by get_next().
+    /// These addresses (and ANY address sharing the IP) are permanently
+    /// skipped by get_next() and rejected by add().
     pub fn mark_self_address(&mut self, addr: SocketAddr) {
         self.self_addresses.insert(addr);
-        // Also remove from the address list entirely
-        self.addresses.retain(|a| a.addr != addr);
-        self.known_addrs.remove(&addr);
+        // Ban by IP too — see the `self_ips` field comment for why the
+        // SocketAddr-only ban was insufficient.
+        let self_ip = addr.ip();
+        self.self_ips.insert(self_ip);
+        // Remove every address sharing this IP, not just the exact one.
+        self.addresses.retain(|a| a.addr.ip() != self_ip);
+        self.known_addrs.retain(|a| a.ip() != self_ip);
     }
 
     /// Get next address to try connecting
@@ -329,9 +358,13 @@ impl AddressManager {
         // Sort by last_seen (most recent first)
         self.addresses.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
 
-        // Find first address not in tried set and not a self-address
+        // Find first address not in tried set, not a self-address, and
+        // not sharing an IP with any address we've detected as self.
         for addr in &self.addresses {
-            if !self.tried.contains(&addr.addr) && !self.self_addresses.contains(&addr.addr) {
+            if !self.tried.contains(&addr.addr)
+                && !self.self_addresses.contains(&addr.addr)
+                && !self.self_ips.contains(&addr.addr.ip())
+            {
                 return Some(addr.addr);
             }
         }

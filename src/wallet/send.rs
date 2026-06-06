@@ -153,8 +153,9 @@ pub fn create_transaction(
     builder.build()
 }
 
-/// Create a full privacy transaction with all cryptographic operations
-#[allow(dead_code)]
+/// Create a full privacy transaction with all cryptographic operations.
+///
+/// Called from `wallet::wallet::SharedWallet::create_transfer` (wallet.rs:1161).
 pub fn create_privacy_transaction<R: RngCore + CryptoRng>(
     balance: &Balance,
     recipients: &[(PublicKey, PublicKey, Amount)], // (spend_pub, view_pub, amount)
@@ -173,7 +174,8 @@ pub fn create_privacy_transaction<R: RngCore + CryptoRng>(
 /// `wallet::churn` and other callers that don't need a memo or recovery
 /// metadata. New callers that DO need either should call
 /// `create_privacy_transaction_with_options` directly.
-#[allow(dead_code)]
+///
+/// Called from `wallet::churn` (churn.rs:348).
 pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
     balance: &Balance,
     recipients: &[(PublicKey, PublicKey, Amount)],
@@ -202,7 +204,8 @@ pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
 /// `send --recovery-address X --recovery-timeout Y` produces the
 /// 42-byte encoding, and the chain validator persists it so the
 /// recovery wallet can detect expiry and sweep.
-#[allow(dead_code)]
+///
+/// Called from `bin::wallet::send_command` (wallet.rs:1202).
 pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     balance: &Balance,
     recipients: &[(PublicKey, PublicKey, Amount)], // (spend_pub, view_pub, amount)
@@ -493,7 +496,8 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
 ///
 /// The recipient cannot spend the output until `unlock_height` is reached.
 /// The amount remains hidden behind a Pedersen commitment.
-#[allow(dead_code)]
+///
+/// Called from `wallet::wallet::SharedWallet::create_vesting_transfer` (wallet.rs:1206).
 pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
     balance: &Balance,
     recipient_spend: PublicKey,
@@ -608,174 +612,14 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
 
 /// Create a churn transaction (self-send) for graph analysis resistance
 ///
-/// Sends all spendable funds back to the wallet using fresh stealth addresses
-/// and new ring members. This breaks transaction graph links by making the
-/// outputs appear as a transfer to a new recipient.
-///
-/// Uses `TxType::Churn` and random coin selection for maximum unlinkability.
-#[allow(dead_code)]
-pub fn create_churn_transaction<R: RngCore + CryptoRng>(
-    balance: &Balance,
-    keys: &KeyEpoch,
-    decoy_pool: &[DecoyOutput],
-    current_height: u64,
-    rng: &mut R,
-) -> Result<Transaction> {
-    // CONSENSUS-COUPLED: see comment in create_privacy_transaction_with_options.
-    let min_age = min_output_age_at_height(current_height);
-    let available = balance.spendable(current_height, min_age);
-    if available.as_atomic() == 0 {
-        return Err(Error::InsufficientBalance { have: 0, need: 1 });
-    }
 
-    // Deduplicate the decoy pool by public_key (same as create_privacy_transaction).
-    let mut dedup_seen = std::collections::HashSet::new();
-    let deduped_pool: Vec<DecoyOutput> = decoy_pool.iter()
-        .filter(|d| dedup_seen.insert(*d.public_key.as_bytes()))
-        .cloned()
-        .collect();
+// ─── Internal helpers ────────────────────────────────────────────────────────
+//
+// (A previous `create_asset_transaction` for confidential asset transfers
+// lived here before being removed. Its doc-comment block had been left
+// orphaned above the `select_utxos` helper that follows; cleaned up
+// 2026-06-05 audit.)
 
-    // Use effective_ring_size to handle young chains with few unique outputs
-    let ring_size = effective_ring_size(current_height, deduped_pool.len() + 1);
-    enforce_wallet_privacy_policy(ring_size, deduped_pool.len())?;
-
-    let uniform = current_height >= UNIFORM_TX_SHAPE_HEIGHT;
-
-    // SECURITY (BUG-13): Filter to native CYNC UTXOs only for churn transactions.
-    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
-    let selected = if uniform {
-        // Uniform mode: exactly 2 inputs
-        let est_size = estimate_tx_size(STANDARD_INPUT_COUNT, STANDARD_OUTPUT_COUNT, ring_size);
-        let est_fee = Amount::from_atomic(est_size as u64 * MIN_FEE_PER_BYTE);
-        let min_target = Amount::from_atomic(est_fee.as_atomic().saturating_add(MIN_OUTPUT_AMOUNT));
-        select_utxos_uniform(&utxos, min_target, rng)?
-    } else {
-        // Pre-activation: pick a small random batch (not all UTXOs).
-        // Churning all at once links every UTXO in one tx — terrible for privacy.
-        // Small batches (2-4 inputs) are stealthier; run churn repeatedly to
-        // consolidate more. Cap at 4 to keep the tx size reasonable.
-        const CHURN_BATCH_SIZE: usize = 4;
-        let batch_count = CHURN_BATCH_SIZE.min(utxos.len());
-        use rand::seq::SliceRandom;
-        let mut shuffled: Vec<&UTXO> = utxos.to_vec();
-        shuffled.shuffle(rng);
-        shuffled.truncate(batch_count);
-        shuffled
-    };
-
-    // Compute fee based on actual input count (2 outputs: self-send + change)
-    let actual_input_count = selected.len();
-    let estimated_size = estimate_tx_size(actual_input_count, 2, ring_size);
-    let fee = Amount::from_atomic(estimated_size as u64 * MIN_FEE_PER_BYTE);
-
-    let input_sum: Amount = selected.iter().map(|u| u.amount).sum();
-    let churn_amount = Amount::from_atomic(input_sum.as_atomic().saturating_sub(fee.as_atomic()));
-    if churn_amount.as_atomic() < MIN_OUTPUT_AMOUNT {
-        return Err(Error::InsufficientBalance {
-            have: available.as_atomic(),
-            need: fee.as_atomic().saturating_add(MIN_OUTPUT_AMOUNT),
-        });
-    }
-
-    // Validate ring size
-    if ring_size == 0 {
-        return Err(Error::InvalidRingSize { expected: 1, got: 0 });
-    }
-    if deduped_pool.len() < ring_size - 1 {
-        return Err(Error::InvalidRingSize {
-            expected: ring_size,
-            got: deduped_pool.len() + 1,
-        });
-    }
-
-    let mut builder = TransactionBuilder::new(TxType::Churn)
-        .with_target_height(current_height);
-
-    // Add inputs with ring signatures
-    for utxo in &selected {
-        let stealth = StealthAddress {
-            public_key: utxo.tx_public_key,
-            tx_public_key: utxo.tx_public_key,
-        };
-        let one_time_secret = compute_one_time_secret(
-            &stealth, &keys.view_secret, &keys.spend_secret, utxo.output_index,
-        )?;
-        let real_pubkey = one_time_secret.public_key();
-        let input = SpendableInput {
-            tx_hash: utxo.tx_hash,
-            output_index: utxo.output_index,
-            amount: utxo.amount,
-            one_time_secret,
-            blinding: BlindingFactor::from_bytes(utxo.amount_blinding_bytes),
-            height: utxo.height,
-        };
-        let (decoys, real_position) = select_ring_decoys(
-            &real_pubkey, utxo.height, &deduped_pool, ring_size, current_height, rng,
-        )?;
-        builder.add_input(input, decoys, real_position)?;
-    }
-
-    // Single output to self with fresh stealth address
-    let recipient = Recipient {
-        spend_public: keys.spend_public,
-        view_public: keys.view_public,
-        amount: churn_amount,
-        lock_height: None,
-    };
-    builder.add_output(&recipient, 0, rng)?;
-
-    // Handle change (input_sum - churn_amount - fee)
-    let output_total = churn_amount.as_atomic().saturating_add(fee.as_atomic());
-    let change = input_sum.as_atomic().saturating_sub(output_total);
-    let final_fee = if uniform {
-        // Uniform 2-in/2-out: always exactly 2 outputs (self-send + change/dummy)
-        if change >= MIN_OUTPUT_AMOUNT {
-            builder.add_change(
-                &keys.spend_public, &keys.view_public,
-                Amount::from_atomic(change), 1, rng,
-            )?;
-            fee
-        } else {
-            let _ = builder.add_dummy_output(rng);
-            Amount::from_atomic(fee.as_atomic().saturating_add(change))
-        }
-    } else {
-        // Pre-activation: variable outputs
-        let f = if change >= MIN_OUTPUT_AMOUNT {
-            builder.add_change(
-                &keys.spend_public, &keys.view_public,
-                Amount::from_atomic(change), 1, rng,
-            )?;
-            fee
-        } else {
-            Amount::from_atomic(fee.as_atomic().saturating_add(change))
-        };
-        // Add dummy outputs for count uniformity
-        let dummy_count = rng.gen_range(0..=2usize);
-        for _ in 0..dummy_count {
-            let _ = builder.add_dummy_output(rng);
-        }
-        f
-    };
-
-    builder.set_fee(final_fee);
-    builder.build(rng)
-}
-
-// ─── Asset transaction creation ──────────────────────────────────────────────
-
-/// Create a confidential asset transfer transaction.
-///
-/// Builds a transaction that sends `asset_amount` of `asset_id` tokens to
-/// `recipient`, paying the fee in native CYNC.  Both the asset type and amount
-/// are kept hidden on-chain through blinded asset commitments and Asset
-/// Surjection Proofs.
-///
-/// # Requirements
-/// - `cync_balance` must contain spendable CYNC UTXOs for fee payment.
-/// - `asset_balance` must contain spendable asset UTXOs of the given `asset_id`.
-/// - If `asset_id.is_native()`, use `create_privacy_transaction_with_fee` instead.
-#[allow(dead_code)]
 
 /// Select UTXOs to cover the required amount
 ///
@@ -1065,17 +909,6 @@ pub fn estimate_tx_size(input_count: usize, output_count: usize, ring_size: usiz
     (base + inputs_total + outputs_total + range_proof) * 2
 }
 
-/// Calculate recommended fee for a transaction.
-///
-/// Returns the estimated fee without building the transaction or generating proofs.
-/// Useful for previewing fees before committing to a send.
-#[allow(dead_code)]
-pub fn calculate_fee(input_count: usize, output_count: usize, current_height: u64) -> Amount {
-    let ring_size = ring_size_at_height(current_height);
-    let size = estimate_tx_size(input_count, output_count, ring_size);
-    Amount::from_atomic(size as u64 * MIN_FEE_PER_BYTE)
-}
-
 /// Estimate fee with a fee multiplier applied.
 ///
 /// `fee_multiplier` defaults to 1.0 for normal priority.
@@ -1109,9 +942,13 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_fee() {
-        let fee = calculate_fee(1, 2, 0);
+    fn test_estimate_fee_with_multiplier() {
+        // 1× multiplier = base fee; > 0 for any non-trivial tx size.
+        let fee = estimate_fee_with_multiplier(1, 2, 0, 1.0);
         assert!(fee.as_atomic() > 0);
+        // 2× multiplier must scale by approximately 2.
+        let fee2x = estimate_fee_with_multiplier(1, 2, 0, 2.0);
+        assert!(fee2x.as_atomic() >= fee.as_atomic() * 19 / 10);
     }
 
     #[test]

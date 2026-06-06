@@ -85,6 +85,39 @@ pub async fn run_solo(
     let mut blocks_found: u64 = 0;
     let mut backoff = BackoffState::new();
 
+    // 2026-06-05 STARTUP BANNER: print a high-visibility configuration
+    // summary at mining-loop start. This catches the "I pointed it at
+    // testnet but meant mainnet" / "I'm mining to the wrong address"
+    // class of misconfiguration that's otherwise invisible until the
+    // operator realises the wallet got nothing. ASCII @-border so it
+    // survives systemd-journald, tail, less, and the GitHub Actions log
+    // viewer — same posture as the OpenSSH host-key warning.
+    //
+    // Printed to stderr directly so the borders aren't broken up by the
+    // tracing per-line prefix. If you're scripting against the rig
+    // output, grep for `BLOCKS_FOUND=` (emitted later) instead of this.
+    let banner_address = address_str;  // full address — operator must verify
+    let banner_url = daemon.url();
+    let banner_network = match network {
+        NetworkType::Mainnet => "MAINNET (REAL FUNDS)",
+        NetworkType::Testnet => "testnet (no value)",
+        NetworkType::Regtest => "regtest (local dev)",
+    };
+    eprintln!();
+    eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+    eprintln!("@    COINCYNC-RIG: MINING LOOP STARTING                   @");
+    eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+    eprintln!("  Network:  {}", banner_network);
+    eprintln!("  Node URL: {}", banner_url);
+    eprintln!("  Threads:  {}", threads);
+    eprintln!("  Payout address (verify this is yours and on the right network):");
+    eprintln!("    {}", banner_address);
+    eprintln!();
+    eprintln!("  If any of the above is wrong, Ctrl-C now and restart with");
+    eprintln!("  corrected args. Coinbase rewards land at the address above —");
+    eprintln!("  there is no recovery if you mine to an address you don't own.");
+    eprintln!();
+
     info!(
         address = %short_hex(addr.spend_public_key.as_bytes()),
         threads,
@@ -166,7 +199,26 @@ pub async fn run_solo(
         // unsynced state is persistent. Recheck rate of every 30s
         // means up to 30s of mining wasted after sync is achieved
         // (we'll re-check then proceed), which is negligible cost.
-        let synced_now = {
+        // 2026-06-04 operational bypass: COINCYNC_RIG_SKIP_SYNC_CHECK=1
+        // disables the sync gate. Use ONLY when the operator has manually
+        // verified the local daemon is on the canonical chain, but the
+        // `synced` field flaps false because peers keep advertising a
+        // higher target_height faster than IBD ingests it (happens at
+        // floor difficulty with many tip producers — the case here was
+        // testnet difficulty collapsing to 500 with 3rd-party miners
+        // producing blocks every few seconds). The barns1253 incident
+        // this gate was designed for is still real — the bypass is for
+        // operators who can prove their daemon is on heavy chain.
+        let synced_now = if std::env::var("COINCYNC_RIG_SKIP_SYNC_CHECK")
+            .as_deref() == Ok("1")
+        {
+            warn!(
+                "orchestrator: COINCYNC_RIG_SKIP_SYNC_CHECK=1 — sync gate \
+                 bypassed by operator. Verify local daemon is on canonical \
+                 chain or you will produce orphan blocks."
+            );
+            true
+        } else {
             let stale = match last_sync_check {
                 None => true,
                 Some(t) => t.elapsed() >= Duration::from_secs(SYNC_CACHE_SECS),
@@ -314,7 +366,47 @@ pub async fn run_solo(
                         if let Some(m) = metrics.as_ref() {
                             m.blocks_rejected_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        warn!(error = %e, "orchestrator: block submit rejected (likely lost race)");
+                        // 2026-06-05: classify the rejection. Some are expected
+                        // (race lost to another miner, transient RPC blip);
+                        // others mean we built a malformed/invalid block and
+                        // the operator MUST notice. Keywords below match
+                        // the daemon's submit_block error texts.
+                        let err_str = e.to_string();
+                        let lower = err_str.to_lowercase();
+                        let is_transient_or_race = lower.contains("stale")
+                            || lower.contains("tip changed")
+                            || lower.contains("race")
+                            || lower.contains("504")
+                            || lower.contains("gateway timeout")
+                            || lower.contains("timed out")
+                            || lower.contains("connection")
+                            || lower.contains("orphan");
+                        if is_transient_or_race {
+                            warn!(error = %e, "orchestrator: block submit rejected (likely lost race or transient RPC)");
+                        } else {
+                            // Real rejection: the daemon actively refused our block
+                            // as invalid. This is rare and high-signal — fire a
+                            // banner so the operator stops scrolling and reads.
+                            eprintln!();
+                            eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+                            eprintln!("@    BLOCK REJECTED AS INVALID                            @");
+                            eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+                            eprintln!("  The daemon refused our submitted block as invalid.");
+                            eprintln!("  This is NOT a normal race-lost rejection.");
+                            eprintln!();
+                            eprintln!("  Daemon error: {}", err_str);
+                            eprintln!();
+                            eprintln!("  Possible causes:");
+                            eprintln!("    - Rig and daemon disagree on consensus rules (version skew)");
+                            eprintln!("    - Rig built a malformed template (bug)");
+                            eprintln!("    - Daemon corruption (try restarting the daemon)");
+                            eprintln!("    - Wrong network (rig on mainnet target, daemon on testnet, or vice versa)");
+                            eprintln!();
+                            eprintln!("  If this fires more than a few times in a row, stop the rig");
+                            eprintln!("  and investigate before you produce a long chain of bad blocks.");
+                            eprintln!();
+                            warn!(error = %e, "orchestrator: BLOCK REJECTED AS INVALID — see banner on stderr");
+                        }
                     }
                 }
             }

@@ -11,6 +11,7 @@ If you're scanning: skip to **Quick Start** below.
 ## TL;DR
 
 - **Welcome:** privacy improvements, performance optimizations, UX polish, wallet work, network-stack improvements, audit fixes, documentation, test coverage.
+- **Not a coder but want to help?** Join **[The Crucible](CRUCIBLE.md)** — the recognized testing track. Run a node, capture logs, file what you see. Real-world adversarial testing surfaces bugs that unit tests can't.
 - **Out of scope:** see [docs/explicitly-not-doing.md](docs/explicitly-not-doing.md) for the canonical "we will not add this" list. Quick summary: stablecoins, smart-contract VMs, cross-chain bridges beyond cyncswap/CyncHub, NFTs / name services, governance tokens, admin keys, fee redirects, KYC integration. Asking again in 6 months will get the same answer.
 - **Pseudonymous participation is a Right** (Right V). Use whatever name you want.
 - **Security bugs:** email `CyncLabs@proton.me` with a PGP-encrypted message. Do not open a public issue. See [SECURITY.md](SECURITY.md).

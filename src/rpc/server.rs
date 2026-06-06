@@ -669,7 +669,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_mempool_info ───────────────────────────────────────
-    module.register_method("get_mempool_info", |_params, state, _ext| {
+    module.register_blocking_method("get_mempool_info", |_params, state, _ext| {
         let mp = state.mempool.stats();
         Ok::<_, ErrorObjectOwned>(json!({
             "size":       mp.tx_count,
@@ -683,7 +683,7 @@ pub async fn start_rpc_server(
     //
     // Returns individual transaction details from the mempool so
     // the explorer can render them in a table (like the blocks page).
-    module.register_method("get_mempool_transactions", |_params, state, _ext| {
+    module.register_blocking_method("get_mempool_transactions", |_params, state, _ext| {
         // Layer 2: mempool iteration up to 500 txs under block_in_place
         // keeps the worker thread reusable during the fetch.
         let txs = tokio::task::block_in_place(|| {
@@ -714,7 +714,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_supply_info ───────────────────────────────────────
-    module.register_method("get_supply_info", |_params, state, _ext| {
+    module.register_blocking_method("get_supply_info", |_params, state, _ext| {
         let stats = state.chain.stats();
         let height = stats.height;
         let reward = crate::emission::calculate_block_reward(height);
@@ -737,7 +737,7 @@ pub async fn start_rpc_server(
     // the explorer only displays a list of txids and their kind,
     // and full tx bodies require a tx-index that doesn't exist
     // yet (see `get_transaction` below).
-    module.register_method("get_block_by_height", |params, state, _ext| {
+    module.register_blocking_method("get_block_by_height", |params, state, _ext| {
         let (h,): (u64,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -758,7 +758,7 @@ pub async fn start_rpc_server(
     // bar (line ~2455 of `src/explorer/index.html`) calls this
     // with a 64-char hex string; we accept that and fall back to
     // a 32-byte raw form if the input isn't hex.
-    module.register_method("get_block", |params, state, _ext| {
+    module.register_blocking_method("get_block", |params, state, _ext| {
         let (hash_hex,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -799,7 +799,7 @@ pub async fn start_rpc_server(
     // Accepts either `[]` or `[address_string]` for forward
     // compat with the 2.0 miner CLI; the address parameter is
     // ignored.
-    module.register_method("get_block_template", |_params, state, _ext| {
+    module.register_blocking_method("get_block_template", |_params, state, _ext| {
         // SECURITY (runtime resilience, Layer 2): build_template_json iterates
         // mempool and runs `chain.validate_transaction()` for every candidate
         // (full ring sig + range proof verify). On a busy mempool this is the
@@ -815,7 +815,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── submit_block ──────────────────────────────────────────
-    module.register_method("submit_block", |params, state, _ext| {
+    module.register_blocking_method("submit_block", |params, state, _ext| {
         let (hex_block,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -978,7 +978,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── send_raw_transaction ──────────────────────────────────
-    module.register_method("send_raw_transaction", |params, state, _ext| {
+    module.register_blocking_method("send_raw_transaction", |params, state, _ext| {
         let (hex_tx,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -1021,7 +1021,7 @@ pub async fn start_rpc_server(
 
     // ── get_privacy_stats ─────────────────────────────────────
     // Aggregate view of the Phase 2 privacy stores.
-    module.register_method("get_privacy_stats", |_params, state, _ext| {
+    module.register_blocking_method("get_privacy_stats", |_params, state, _ext| {
         let cut_through = state.chain.cut_through_stats();
         Ok::<_, ErrorObjectOwned>(json!({
             "shielded_root":      hex::encode(state.chain.shielded_root()),
@@ -1041,7 +1041,7 @@ pub async fn start_rpc_server(
     // ── get_shielded_anchor ───────────────────────────────────
     // Light wallets query this to get the current Merkle root they
     // should anchor their spend proofs against.
-    module.register_method("get_shielded_anchor", |_params, state, _ext| {
+    module.register_blocking_method("get_shielded_anchor", |_params, state, _ext| {
         Ok::<_, ErrorObjectOwned>(json!({
             "anchor": hex::encode(state.chain.shielded_root()),
             "tree_size": state.chain.shielded_store.as_ref().map(|s| s.tree_size()).unwrap_or(0),
@@ -1051,7 +1051,7 @@ pub async fn start_rpc_server(
     // ── get_burn_stats ────────────────────────────────────────
     //
     // Returns fee burn statistics for the explorer burn page.
-    module.register_method("get_burn_stats", |_params, state, _ext| {
+    module.register_blocking_method("get_burn_stats", |_params, state, _ext| {
         let stats = state.chain.stats();
         let height = stats.height;
         let is_active = height >= crate::constants::FEE_DISTRIBUTION_HEIGHT;
@@ -1089,7 +1089,7 @@ pub async fn start_rpc_server(
     // ── get_finality_info ────────────────────────────────────
     //
     // Returns checkpoint finality status for the explorer.
-    module.register_method("get_finality_info", |_params, state, _ext| {
+    module.register_blocking_method("get_finality_info", |_params, state, _ext| {
         let stats = state.chain.stats();
         let height = stats.height;
         let last_checkpoint = height - (height % 5); // every 5 blocks
@@ -1112,7 +1112,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_spark_anchor ──────────────────────────────────────
-    module.register_method("get_spark_anchor", |_params, state, _ext| {
+    module.register_blocking_method("get_spark_anchor", |_params, state, _ext| {
         Ok::<_, ErrorObjectOwned>(json!({
             "root": hex::encode(state.chain.spark_root()),
             "size": state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
@@ -1122,7 +1122,7 @@ pub async fn start_rpc_server(
     // ── is_nullifier_spent ────────────────────────────────────
     // Wallet calls before building a shielded spend to make sure it
     // won't be rejected as a double-spend.
-    module.register_method("is_nullifier_spent", |params, state, _ext| {
+    module.register_blocking_method("is_nullifier_spent", |params, state, _ext| {
         let (hex_nf,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -1143,7 +1143,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── is_spark_serial_spent ─────────────────────────────────
-    module.register_method("is_spark_serial_spent", |params, state, _ext| {
+    module.register_blocking_method("is_spark_serial_spent", |params, state, _ext| {
         let (hex_s,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -1166,7 +1166,7 @@ pub async fn start_rpc_server(
     // ── get_decoys ────────────────────────────────────────────
     // Wallet calls this when building a CLSAG ring signature to
     // get decoy outputs for the ring. Params: (count, min_age).
-    module.register_method("get_decoys", |params, state, _ext| {
+    module.register_blocking_method("get_decoys", |params, state, _ext| {
         let (count, min_age): (usize, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -1202,7 +1202,7 @@ pub async fn start_rpc_server(
     // doesn't surface the split yet — returning `null` rather
     // than `0` is the honest signal, per the silent-stub fix
     // in `rpc::node_api::get_network_info`.
-    module.register_method("get_network_info", |_params, state, _ext| {
+    module.register_blocking_method("get_network_info", |_params, state, _ext| {
         let connections = state
             .p2p
             .as_ref()
@@ -1221,7 +1221,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_sync_status ───────────────────────────────────────
-    module.register_method("get_sync_status", |_params, state, _ext| {
+    module.register_blocking_method("get_sync_status", |_params, state, _ext| {
         let target = state.chain.target_height();
         let height = state.chain.height();
         let peers = state
@@ -1248,7 +1248,7 @@ pub async fn start_rpc_server(
     // The single most important privacy metric: every unspent
     // output is a potential decoy, so the size of this set is
     // the size of every future spend's anonymity set.
-    module.register_method("get_anonymity_set", |_params, state, _ext| {
+    module.register_blocking_method("get_anonymity_set", |_params, state, _ext| {
         let count = state.chain.available_output_count();
         let height = state.chain.height();
         let outputs_per_block = if height > 0 {
@@ -1268,7 +1268,7 @@ pub async fn start_rpc_server(
     // Recent chain convergence events (reorgs, forks, rejects,
     // checkpoints) for the explorer timeline. `limit` is
     // clamped server-side to 500.
-    module.register_method("get_chain_events", |params, state, _ext| {
+    module.register_blocking_method("get_chain_events", |params, state, _ext| {
         // Accept either [] (defaults) or [limit].
         let limit: usize = match params.parse::<Vec<usize>>() {
             Ok(v) => v.into_iter().next().unwrap_or(100),
@@ -1297,7 +1297,7 @@ pub async fn start_rpc_server(
     // sidecar that pushes live samples to a shared buffer) can
     // overwrite these values — the shape is fixed so the TUI
     // doesn't need to change.
-    module.register_method("get_mining_live", |_params, state, _ext| {
+    module.register_blocking_method("get_mining_live", |_params, state, _ext| {
         let tip = state.chain.tip();
         let height = tip.height;
         // The ChainTip struct doesn't carry the target directly —
@@ -1342,7 +1342,7 @@ pub async fn start_rpc_server(
     // On nodes started without a `P2PNode` (e.g. RPC-only test
     // harness), we honestly return an empty list rather than
     // synthesising fake peers.
-    module.register_method("get_peers", |_params, state, _ext| {
+    module.register_blocking_method("get_peers", |_params, state, _ext| {
         let peers_json: Vec<Value> = match state.p2p.as_ref() {
             Some(p2p) => p2p
                 .connected_peers()
@@ -1368,7 +1368,7 @@ pub async fn start_rpc_server(
     // labelled "not yet wired" error rather than silently
     // returning empty results, so the missing index is visible
     // and tracked.
-    module.register_method("get_transaction", |params, state, _ext| {
+    module.register_blocking_method("get_transaction", |params, state, _ext| {
         let (tx_hash_hex,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -1480,7 +1480,7 @@ pub async fn start_rpc_server(
     // match a block hash or txid. Returning an explicit error
     // makes the missing surface obvious instead of silently
     // returning empty results.
-    module.register_method("get_asset_info", |_params, _state, _ext| {
+    module.register_blocking_method("get_asset_info", |_params, _state, _ext| {
         Err::<Value, _>(ErrorObjectOwned::owned(
             -32601,
             "get_asset_info is not implemented: CoinCync 1.0 has no \
@@ -1500,7 +1500,7 @@ pub async fn start_rpc_server(
     // that bit `Transaction::signing_hash` in an earlier audit.
     // The server caps the range to MAX_RANGE blocks per call to
     // prevent huge responses.
-    module.register_method("get_block_range", |params, state, _ext| {
+    module.register_blocking_method("get_block_range", |params, state, _ext| {
         let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -1539,7 +1539,7 @@ pub async fn start_rpc_server(
     // Range capped to 100 blocks per request to bound response
     // size; the same bound applies at the network layer
     // (`MessageType::GetOutputDigests`).
-    module.register_method("get_output_digests", |params, state, _ext| {
+    module.register_blocking_method("get_output_digests", |params, state, _ext| {
         let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
@@ -1583,7 +1583,7 @@ pub async fn start_rpc_server(
     //
     // Params: optional [stride: u64] — emit one checkpoint every
     // `stride` blocks. Default 10000 (~14 days at 120s).
-    module.register_method("get_sync_checkpoints", |params, state, _ext| {
+    module.register_blocking_method("get_sync_checkpoints", |params, state, _ext| {
         let stride: u64 = params.parse::<(u64,)>().map(|(s,)| s).unwrap_or(10_000);
         let stride = stride.max(1).min(50_000);
         let chain_height = state.chain.height();
@@ -1619,7 +1619,7 @@ pub async fn start_rpc_server(
     // HARDENING (Layer 7): Prometheus-compatible metrics endpoint.
     // Returns key node metrics in a flat JSON format that can be
     // scraped by monitoring tools or displayed in the explorer.
-    module.register_method("get_metrics", |_params, state, _ext| {
+    module.register_blocking_method("get_metrics", |_params, state, _ext| {
         let stats = state.chain.stats();
         let mp_stats = state.mempool.stats();
         let peer_count = state.p2p.as_ref().map(|p| p.peer_count()).unwrap_or(0);
@@ -1653,7 +1653,7 @@ pub async fn start_rpc_server(
     // HARDENING (Layer 7): Simple health check endpoint.
     // Returns 200 OK if the node is running. Used by load balancers,
     // monitoring tools, and the explorer status page.
-    module.register_method("get_health", |_params, state, _ext| {
+    module.register_blocking_method("get_health", |_params, state, _ext| {
         let stats = state.chain.stats();
         let synced = state.chain.is_synced();
         let peer_count = state.p2p.as_ref().map(|p| p.peer_count()).unwrap_or(0);
@@ -1676,7 +1676,7 @@ pub async fn start_rpc_server(
     // ── get_state_snapshot ─────────────────────────────────────
     // Returns a compact chain state summary for fast sync verification.
     // New nodes can compare their state against this to detect divergence.
-    module.register_method("get_state_snapshot", |_params, state, _ext| {
+    module.register_blocking_method("get_state_snapshot", |_params, state, _ext| {
         let stats = state.chain.stats();
         let tip = state.chain.tip_hash();
 
@@ -1697,7 +1697,7 @@ pub async fn start_rpc_server(
     // ── get_blocks_batch ─────────────────────────────────────
     // Returns up to 100 serialized blocks in a single RPC call for fast sync.
     // Clients request a height range and get back hex-encoded blocks.
-    module.register_method("get_blocks_batch", |params, state, _ext| {
+    module.register_blocking_method("get_blocks_batch", |params, state, _ext| {
         let (from_height, count): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("params: [from_height, count]: {}", e), None::<()>)
         })?;
@@ -1727,7 +1727,7 @@ pub async fn start_rpc_server(
     // ═══════════════════════════════════════════════════════════════
 
     // ── get_expected_reward ──────────────────────────────────────
-    module.register_method("get_expected_reward", |params, _state, _ext| {
+    module.register_blocking_method("get_expected_reward", |params, _state, _ext| {
         let (height,): (u64,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("params: [height]: {}", e), None::<()>)
         })?;
@@ -1740,7 +1740,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_keyimage_uniqueness ──────────────────────────────
-    module.register_method("verify_keyimage_uniqueness", |_params, state, _ext| {
+    module.register_blocking_method("verify_keyimage_uniqueness", |_params, state, _ext| {
         let chain_height = state.chain.height();
         if chain_height > MAX_RPC_KEYIMAGE_SCAN_CHAIN_HEIGHT {
             return Err(ErrorObjectOwned::owned(
@@ -1778,7 +1778,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── check_zero_commitments_in_range ─────────────────────────
-    module.register_method("check_zero_commitments_in_range", |params, state, _ext| {
+    module.register_blocking_method("check_zero_commitments_in_range", |params, state, _ext| {
         let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
         })?;
@@ -1820,7 +1820,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_signatures_in_range ──────────────────────────────
-    module.register_method("verify_signatures_in_range", |params, state, _ext| {
+    module.register_blocking_method("verify_signatures_in_range", |params, state, _ext| {
         let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
         })?;
@@ -1856,7 +1856,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_range_proofs_in_range ────────────────────────────
-    module.register_method("verify_range_proofs_in_range", |params, state, _ext| {
+    module.register_blocking_method("verify_range_proofs_in_range", |params, state, _ext| {
         let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
         })?;
@@ -1890,7 +1890,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_commitment_balance_in_range ──────────────────────
-    module.register_method("verify_commitment_balance_in_range", |params, state, _ext| {
+    module.register_blocking_method("verify_commitment_balance_in_range", |params, state, _ext| {
         let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
         })?;
@@ -1924,7 +1924,7 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── full_chain_audit ────────────────────────────────────────
-    module.register_method("full_chain_audit", |params, state, _ext| {
+    module.register_blocking_method("full_chain_audit", |params, state, _ext| {
         let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
         })?;
@@ -2004,13 +2004,57 @@ pub async fn start_rpc_server(
         },
     };
 
+    // 2026-06-05: build the listener ourselves with a 1024 backlog
+    // instead of jsonrpsee's `.build(addr).await` which uses libc's
+    // SOMAXCONN default (128 on the build container's libc, ignoring
+    // the kernel's net.core.somaxconn). The 128 default was saturating
+    // during fleet-restart thundering-herd events — observed
+    // `LISTEN 129 128` (Recv-Q over backlog) on coincync-lon multiple
+    // times during the 2026-06-04 fleet rollout. 1024 absorbs a fleet-
+    // wide reconnect burst without dropping accepts. jsonrpsee 0.24's
+    // `build_from_tcp(listener)` accepts a pre-built socket; the doc
+    // example shows exactly this pattern.
+    let listener_socket = socket2::Socket::new(
+        socket2::Domain::for_address(config.listen_addr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    ).map_err(|e| Error::RpcError(format!("rpc socket create: {}", e)))?;
+    listener_socket.set_reuse_address(true)
+        .map_err(|e| Error::RpcError(format!("rpc SO_REUSEADDR: {}", e)))?;
+    listener_socket.set_nonblocking(true)
+        .map_err(|e| Error::RpcError(format!("rpc set_nonblocking: {}", e)))?;
+    listener_socket.bind(&config.listen_addr.into())
+        .map_err(|e| Error::RpcError(format!("rpc bind {}: {}", config.listen_addr, e)))?;
+    listener_socket.listen(1024)
+        .map_err(|e| Error::RpcError(format!("rpc listen: {}", e)))?;
+    let std_listener: std::net::TcpListener = listener_socket.into();
+
+    // 2026-06-05 audit hardening: set explicit request/response body
+    // size limits instead of relying on the jsonrpsee default (10 MB
+    // in 0.24.x — silently a moving target across crate versions).
+    // Rationale:
+    //   - submit_block is the largest legitimate request; a full
+    //     CoinCync block tops out at ~1 MB even with a saturated
+    //     coinbase + many txs. 32 MiB gives a 30× safety margin and
+    //     matches Bitcoin Core's MAX_PROTOCOL_MESSAGE_LENGTH so an
+    //     operator porting tooling from a Bitcoin context gets the
+    //     same ceiling.
+    //   - Responses can be larger when audit/scan endpoints return
+    //     many blocks at once (full_chain_audit, get_blocks_batch).
+    //     32 MiB covers MAX_BLOCK_HASHES * typical_block_size with
+    //     a similar margin.
+    //   - Setting both explicitly defends against a jsonrpsee
+    //     upstream default change silently widening or narrowing
+    //     the surface in a future release.
+    const RPC_MAX_BODY_BYTES: u32 = 32 * 1024 * 1024; // 32 MiB
     let server = ServerBuilder::default()
         .max_connections(config.max_connections)
+        .max_request_body_size(RPC_MAX_BODY_BYTES)
+        .max_response_body_size(RPC_MAX_BODY_BYTES)
         .set_http_middleware(
             ServiceBuilder::new().layer(ValidateRequestHeaderLayer::custom(bearer_validator)),
         )
-        .build(config.listen_addr)
-        .await
+        .build_from_tcp(std_listener)
         .map_err(|e| Error::RpcError(format!("RPC bind failed: {}", e)))?;
 
     info!(

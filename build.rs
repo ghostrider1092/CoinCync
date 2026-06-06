@@ -108,12 +108,19 @@ fn main() {
     }
 
     if !failures.is_empty() {
+        // 2026-06-05: switched from Unicode box (╔══╗) to OpenSSH-style
+        // @-border banner. ASCII-only survives every terminal / log
+        // pipeline (systemd-journald, tail, less, ssh, the GitHub Actions
+        // log viewer that strips Unicode), and the @-row visual pattern
+        // is "stop sign" — operators have learned over decades of OpenSSH
+        // host-key warnings that this shape means stop and read.
         panic!(
             "\n\n\
-             ╔══════════════════════════════════════════════════════════════╗\n\
-             ║  CRITICAL FILE INTEGRITY CHECK FAILED                        ║\n\
-             ║  Consensus-critical files have been modified!               ║\n\
-             ╚══════════════════════════════════════════════════════════════╝\n\
+             @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             @    CRITICAL FILE INTEGRITY CHECK FAILED                 @\n\
+             @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             \n\
+             Consensus-critical files have been modified!\n\
              \n\
              The following files do not match their locked hashes:\n\
              \n\

@@ -53,6 +53,14 @@ struct JsonRpcEnvelope {
 }
 
 impl DaemonClient {
+    /// Read-only access to the configured base URL. Used by the
+    /// orchestrator's startup banner so the operator can verify they
+    /// pointed the rig at the intended node — never log the api_key
+    /// alongside this; the bearer token stays private.
+    pub fn url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Build a client pointed at a daemon's JSON-RPC endpoint. The
     /// `base_url` is what we POST to: typically
     /// `http://127.0.0.1:28081` for a local daemon, or

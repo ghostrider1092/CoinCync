@@ -27,15 +27,18 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/coincync_fleet}"
 SERVICE="${SERVICE:-coincync-node}"
 INSTALL="${INSTALL:-/usr/local/bin/coincync-node}"
 SLEEP_S="${SLEEP_S:-8}"
-# 2026-06-03: 95.179.165.225 removed from the deploy FLEET. That box used to
-# run coincync-node + nginx, but on its 955 MB RAM tier the node OOM-looped
-# under sustained sync activity (RandomX dataset = 2 GB, exceeds box memory).
-# Migrated to nginx-only role; api.coincync.network now proxies to
-# 192.248.151.16 (coincync-lon, 16 GB) instead of localhost. See
-# docs/operations/api-role-architecture.md for the full picture.
-# If we ever upgrade 95.179.165.225 to a 2+ GB tier OR move it off the api
-# role, add it back to this list.
-FLEET="${FLEET:-root@66.135.23.193 root@140.82.57.168 root@207.148.111.76 root@207.148.6.50 root@192.248.151.16}"
+# Fleet history:
+# - 2026-06-03: 95.179.165.225 removed from the deploy FLEET. The 955 MB RAM
+#   tier OOM-looped under sustained sync (RandomX dataset = 2 GB). Migrated to
+#   nginx-only role; api.coincync.network proxied to London (192.248.151.16)
+#   as the RPC backend.
+# - 2026-06-05: London (192.248.151.16) destroyed. It missed the 2026-06-04
+#   testnet wipe and drifted onto the pre-wipe chain. nginx on 95.179.165.225
+#   flipped back to 127.0.0.1:28081 (api box runs its own coincync-node again,
+#   since the upgrade path was clearer than the routing tangle). If London is
+#   reprovisioned later, re-add it here AND to the Fleet array in
+#   `scripts/wipe-testnet-and-deploy.ps1` so future wipes don't miss it.
+FLEET="${FLEET:-root@66.135.23.193 root@140.82.57.168 root@207.148.111.76 root@207.148.6.50 root@95.179.165.225}"
 
 [ -f "$BINARY" ] || { echo "BINARY not found: $BINARY" >&2; exit 1; }
 [ -f "$SSH_KEY" ] || { echo "SSH_KEY not found: $SSH_KEY" >&2; exit 1; }

@@ -255,8 +255,8 @@ pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
 ///
 /// Limits are calibrated so normal IBD (requesting many blocks) is fine,
 /// but 100 GetBlocks/sec from a single peer triggers a penalty.
-// AUDIT (Phase D): Wired into P2P dispatch loop in `node.rs::handle_connection`.
-#[allow(dead_code)]
+///
+/// Wired in `node.rs` processor task (search `PeerMessageRateTracker::new`).
 pub struct PeerMessageRateTracker {
     /// (message_type_id, count) for the current window
     counts: HashMap<u8, u32>,
@@ -267,21 +267,42 @@ pub struct PeerMessageRateTracker {
 }
 
 /// Per-message-type limits (messages per 10-second window).
-/// Heavy request types have lower limits. Data responses are unlimited
-/// (we asked for them).
-#[allow(dead_code)]
+///
+/// AUDIT 2026-06-05 #11 — discriminants derived from `MessageType` enum at
+/// compile time so the table can never silently drift out of sync with the
+/// protocol again. The previous hard-coded byte values (0x01, 0x03, 0x0B,
+/// ...) referenced the wrong message types entirely — e.g. `0x0B` was
+/// labeled `GetAddr` but the protocol enum maps `0x0B` to `Headers` and
+/// `GetAddr` to `0x1E (30)`. The result was that the address-relay rate
+/// limit never fired on real `GetAddr` or `Addr` traffic — the exact gap
+/// the audit flagged.
+///
+/// Heavy request types have lower limits. Bulk data responses (Headers,
+/// BlockData, Txs, etc.) are unrate-limited at this layer — they're
+/// pull-driven (we asked for them), and a misbehaving responder is
+/// already scored by the request-tracking layer.
 const MSG_RATE_LIMITS: &[(u8, u32)] = &[
-    (0x01, 50),   // Version — 5/sec
-    (0x03, 100),  // GetHeaders — 10/sec
-    (0x05, 100),  // GetBlocks — 10/sec
-    (0x07, 200),  // GetData — 20/sec
-    (0x09, 500),  // InvTx — 50/sec (relaying txs to many peers is normal)
-    (0x0A, 100),  // InvBlock — 10/sec
-    (0x0B, 50),   // GetAddr — 5/sec
-    (0x10, 30),   // Ping — 3/sec
+    (super::protocol::MessageType::Version as u8,    50),  // 5/sec
+    (super::protocol::MessageType::Ping as u8,       30),  // 3/sec
+    (super::protocol::MessageType::GetHeaders as u8, 100), // 10/sec
+    (super::protocol::MessageType::GetBlocks as u8,  100), // 10/sec
+    (super::protocol::MessageType::GetData as u8,    200), // 20/sec
+    (super::protocol::MessageType::GetTxs as u8,     200), // 20/sec
+    (super::protocol::MessageType::InvTx as u8,      500), // 50/sec
+    (super::protocol::MessageType::InvBlock as u8,   100), // 10/sec
+    // Address relay: GetAddr is a request from peer; Addr is a push.
+    // Bitcoin Core's per-peer cap is ~1 addr/sec averaged with a 1000-token
+    // bucket. We rate-limit at the message granularity instead — each Addr
+    // can hold up to 1000 entries, so 10 messages / 10s gives the same
+    // effective ceiling without the per-address bookkeeping.
+    (super::protocol::MessageType::GetAddr as u8,    30),  // 3/sec — handshake-time only
+    (super::protocol::MessageType::Addr as u8,       100), // 10/sec — gossip burst headroom
+    // Flare: capability negotiation; one per handshake, but tolerate retries.
+    (super::protocol::MessageType::Flare as u8,      20),  // 2/sec
+    // Reject/Alert: protocol-level signals, never high volume.
+    (super::protocol::MessageType::Reject as u8,     30),  // 3/sec
 ];
 
-#[allow(dead_code)]
 impl PeerMessageRateTracker {
     pub fn new() -> Self {
         PeerMessageRateTracker {
@@ -906,11 +927,34 @@ mod tests {
     #[test]
     fn test_message_rate_tracker_flags_flood() {
         let mut tracker = PeerMessageRateTracker::new();
+        let get_blocks = super::super::protocol::MessageType::GetBlocks as u8;
         let mut exceeded = false;
         for _ in 0..101 {
-            exceeded = tracker.record(0x05); // GetBlocks, limit 100/10s
+            exceeded = tracker.record(get_blocks); // GetBlocks, limit 100/10s
         }
         assert!(exceeded, "expected message flood threshold to trigger");
+    }
+
+    #[test]
+    fn test_message_rate_tracker_addr_relay_capped() {
+        // AUDIT 2026-06-05 #11 — regression: ensure GetAddr/Addr discriminants
+        // actually hit the rate limiter. Pre-fix the table used the wrong
+        // bytes and address-relay traffic was unrate-limited.
+        let mut tracker = PeerMessageRateTracker::new();
+        let getaddr = super::super::protocol::MessageType::GetAddr as u8;
+        let mut exceeded = false;
+        for _ in 0..40 {
+            exceeded = tracker.record(getaddr); // GetAddr, limit 30/10s
+        }
+        assert!(exceeded, "GetAddr flood must trigger rate limiter");
+
+        let mut tracker = PeerMessageRateTracker::new();
+        let addr = super::super::protocol::MessageType::Addr as u8;
+        let mut exceeded = false;
+        for _ in 0..150 {
+            exceeded = tracker.record(addr); // Addr, limit 100/10s
+        }
+        assert!(exceeded, "Addr flood must trigger rate limiter");
     }
 
     #[test]

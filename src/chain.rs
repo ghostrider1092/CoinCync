@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 
 use crate::primitives::{Hash, Amount, KeyImage};
 use crate::transaction::{DecoyOutput, Transaction};
@@ -52,18 +54,27 @@ pub fn max_reorg_depth() -> u64 {
 //   Normal network jitter, race conditions, brief connectivity issues.
 //   Standard Nakamoto longest-chain rule applies.
 //
-// Tier 2 (depth 11-100): MESS-style exponential cost multiplier.
-//   Fork must demonstrate SIGNIFICANTLY more cumulative work to be accepted.
+// Tier 2 (depth 11 to max_reorg_depth): MESS-style exponential cost
+//   multiplier. Fork must demonstrate SIGNIFICANTLY more cumulative
+//   work to be accepted.
 //   Required work multiplier = 2^((depth - 10) / 20)
 //   At depth 30: fork needs 2x honest chain's work
 //   At depth 50: fork needs 4x
 //   At depth 70: fork needs 8x
 //   At depth 90: fork needs 16x
 //   This makes rental-hashrate attacks economically infeasible at depth.
+//   Exponent is capped at 40 in `evaluate_reorg_acceptability` to avoid
+//   u128 overflow on testnet's longer Tier-2 zone.
 //
-// Tier 3 (depth > 100): Hard reject. Absolute finality.
+// Tier 3 (depth > max_reorg_depth): Hard reject. Absolute finality.
 //   No amount of work can reorg past this depth.
-//   Combined with rolling checkpoints for defense in depth.
+//   Combined with per-DB Merkle checkpoints (storage::{spark,shielded,
+//   kernels}) for defense in depth — those bound how far back tree
+//   state can be rewritten regardless of work claims.
+//   max_reorg_depth is 100 on mainnet, 1000 on testnet (see
+//   `max_reorg_depth_for`). Tier-2 examples above are for the mainnet
+//   100-block window; testnet's extended Tier-2 zone applies the same
+//   formula across 990 blocks before hitting the hard cap.
 //
 // Historical precedent:
 //   - ETC 2019: 100+ block reorg, $1.1M double-spend
@@ -71,14 +82,47 @@ pub fn max_reorg_depth() -> u64 {
 //   - Horizen 2018: deep reorg, $550K stolen
 //   All were low-hashrate PoW chains without progressive reorg resistance.
 //
-// Reference: Ethereum Classic MESS (EIP-ECIP-1100)
+// Reference and divergence note (2026-06-05 audit):
+//
+// ECIP-1100 ("MESS") was the inspiration. However our implementation
+// is a SIMPLIFIED VARIANT, not a faithful port:
+//
+//   ECIP-1100 (canonical):
+//     - input: TIME DELTA (current.timestamp - common_ancestor.timestamp), seconds
+//     - formula: cubic polynomial, σ(t) = (3t² − 2t³/xcap) * height / xcap²
+//     - parameters: xcap ≈ 25132s (~7 hours), denominator 128, amplitude 15
+//     - peak multiplier: 31×
+//
+//   CoinCync MESS (ours):
+//     - input: DEPTH (block count), unitless
+//     - formula: pure exponential, σ(d) = 2^((d − REORG_UNCONDITIONAL_DEPTH) / 20)
+//     - parameter: MESS_EXPONENT_DIVISOR = 20 (doubling every 20 blocks)
+//     - peak: bounded by the Tier-3 hard depth cap (`max_reorg_depth_for`)
+//
+// Both have similar PEAK behavior (~30× multiplier ceiling) but the
+// path there is different — ours scales by chain depth, ECIP-1100
+// scales by wall-clock time since fork. For high-hashrate chains those
+// converge; for variable-hashrate or testnet-style chains they can
+// disagree.
+//
+// Tracked as audit item: revisit before mainnet whether to (a) adopt
+// the canonical ECIP-1100 cubic-polynomial formula, (b) keep this
+// variant and document the rationale in a CIP, or (c) replace with
+// an entirely different reorg-resistance scheme. Until that decision,
+// this comment is the single source of truth on what's implemented
+// vs. what was cited in the original commit.
 
 /// The depth below which reorgs are unconditionally accepted (standard Nakamoto rule).
 pub const REORG_UNCONDITIONAL_DEPTH: u64 = 10;
 
-/// The exponent divisor for MESS-style cost scaling.
-/// Work multiplier = 2^((depth - REORG_UNCONDITIONAL_DEPTH) / MESS_EXPONENT_DIVISOR)
-/// Higher divisor = gentler curve. 20 means doubling every 20 blocks above threshold.
+/// The exponent divisor for CoinCync MESS variant cost scaling.
+///
+/// Work multiplier = 2^((depth − REORG_UNCONDITIONAL_DEPTH) / MESS_EXPONENT_DIVISOR)
+///
+/// Higher divisor = gentler curve. 20 means doubling every 20 blocks above
+/// the unconditional threshold. NOT the same as ECIP-1100's xcap/amplitude
+/// pair — see the divergence note above the `REORG_UNCONDITIONAL_DEPTH`
+/// constant.
 pub const MESS_EXPONENT_DIVISOR: u64 = 20;
 
 /// Tier-2 MESS is disabled below this tip height. During chain bootstrap every
@@ -302,7 +346,16 @@ impl BlockchainInner {
 
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
-    /// Internal mutable state protected by RwLock
+    /// Internal mutable state protected by RwLock.
+    ///
+    /// SLOW PATH only — held during block commit / reorg / UTXO rebuild
+    /// where RandomX verification can keep the lock for ~500ms-2s under
+    /// load. Hot reads (tip / stats / height / difficulty) MUST NOT take
+    /// this lock; they use the lock-free snapshots below instead. The
+    /// invariant that makes this safe: every code path that calls
+    /// `self.inner.write()` and mutates `inner.tip` or `inner.stats`
+    /// MUST call `self.refresh_snapshots(&inner)` before releasing
+    /// the lock. See `refresh_snapshots` for the contract.
     inner: RwLock<BlockchainInner>,
     /// Database reference (optional)
     db: Option<Arc<Database>>,
@@ -315,6 +368,40 @@ pub struct Blockchain {
     /// Unix timestamp of the last block accepted from the P2P layer.
     /// Used by phantom-stall detection in the miner's IBD gate.
     last_block_received_at: std::sync::atomic::AtomicU64,
+
+    // ── Lock-free snapshots of hot-path fields ──────────────────────
+    //
+    // 2026-06-05: the RPC layer kept silently hanging when the sync
+    // engine held `inner.write()` during RandomX block verification.
+    // Every RPC handler that called `.tip()` / `.stats()` / `.height()`
+    // would block on `inner.read()`, exhaust the tokio worker pool, and
+    // the entire RPC layer would freeze until the writer released. The
+    // 2026-06-02 fix (`6a3667f`) bumped workers and moved 3 handlers
+    // to the blocking thread pool, which mitigated the symptom for
+    // those 3 handlers but left the architectural problem in place.
+    //
+    // The snapshot pattern below is the same one Bitcoin Core (atomic
+    // CBlockIndex* head pointer), Geth (atomic head block), and Solana
+    // (BankForks Arc snapshot) use for the same reason. Hot reads bypass
+    // the lock entirely. Writers update the snapshots inside the write
+    // critical section (see `refresh_snapshots`), so a reader sees
+    // either pre-write or post-write state, never a torn intermediate
+    // — and never blocks on the writer.
+    //
+    // The parking_lot RwLock stays the right tool for the slow path
+    // (UTXO mutation, full block insertion, reorg disconnects) because
+    // those genuinely need to block concurrent state inspection. The
+    // wrong tool was using it for `.tip()` calls that just read 4 fields.
+    /// Snapshot of the current chain tip. Reads via `.tip()` are
+    /// lock-free atomic loads (one ArcSwap load, no syscall).
+    tip_snapshot: ArcSwap<ChainTip>,
+    /// Snapshot of the current chain stats. Reads via `.stats()` are
+    /// lock-free.
+    stats_snapshot: ArcSwap<ChainStats>,
+    /// Snapshot of the current height. Reads via `.height()` are a
+    /// single relaxed atomic load. Redundant with tip_snapshot.height
+    /// but cheaper for the hottest call site of all.
+    height_snapshot: std::sync::atomic::AtomicU64,
 
     // ── Phase 2 privacy stores ──────────────────────────────────────
     // Wrapped in Option — None when Phase 2 is not active.
@@ -349,17 +436,19 @@ impl Blockchain {
 
     /// Create new blockchain with explicit network type
     pub fn new_with_network(network: NetworkType) -> Self {
+        let genesis_tip = ChainTip {
+            hash: Hash::zero(),
+            height: 0,
+            difficulty: 1,
+            timestamp: 0,
+        };
+        let genesis_stats = ChainStats::default();
         Blockchain {
             inner: RwLock::new(BlockchainInner {
                 blocks: HashMap::new(),
                 height_to_hash: HashMap::new(),
-                tip: ChainTip {
-                    hash: Hash::zero(),
-                    height: 0,
-                    difficulty: 1,
-                    timestamp: 0,
-                },
-                stats: ChainStats::default(),
+                tip: genesis_tip.clone(),
+                stats: genesis_stats.clone(),
                 genesis_hash: None,
                 utxos: UtxoSet::new(),
                 events: std::collections::VecDeque::with_capacity(MAX_CHAIN_EVENTS),
@@ -369,6 +458,12 @@ impl Blockchain {
             synced: std::sync::atomic::AtomicBool::new(true),
             peer_target_height: std::sync::atomic::AtomicU64::new(0),
             last_block_received_at: std::sync::atomic::AtomicU64::new(0),
+            // Lock-free snapshots — initialized to the same genesis
+            // values as `inner.tip` / `inner.stats`. Kept in sync by
+            // `refresh_snapshots` on every write that mutates either.
+            tip_snapshot: ArcSwap::from_pointee(genesis_tip),
+            stats_snapshot: ArcSwap::from_pointee(genesis_stats),
+            height_snapshot: std::sync::atomic::AtomicU64::new(0),
             // Phase 2 stores: None until Phase 2 activation
             spark_store: None,
             shielded_store: None,
@@ -384,17 +479,19 @@ impl Blockchain {
 
     /// Create blockchain with database and network type
     pub fn with_database(db: Arc<Database>, network: NetworkType) -> Self {
+        let genesis_tip = ChainTip {
+            hash: Hash::zero(),
+            height: 0,
+            difficulty: 1,
+            timestamp: 0,
+        };
+        let genesis_stats = ChainStats::default();
         Blockchain {
             inner: RwLock::new(BlockchainInner {
                 blocks: HashMap::new(),
                 height_to_hash: HashMap::new(),
-                tip: ChainTip {
-                    hash: Hash::zero(),
-                    height: 0,
-                    difficulty: 1,
-                    timestamp: 0,
-                },
-                stats: ChainStats::default(),
+                tip: genesis_tip.clone(),
+                stats: genesis_stats.clone(),
                 genesis_hash: None,
                 utxos: {
                     let mut u = UtxoSet::new();
@@ -408,6 +505,14 @@ impl Blockchain {
             synced: std::sync::atomic::AtomicBool::new(true),
             peer_target_height: std::sync::atomic::AtomicU64::new(0),
             last_block_received_at: std::sync::atomic::AtomicU64::new(0),
+            // See `new_with_network` for the rationale on these
+            // lock-free snapshots; same initialization here. Both
+            // constructors must keep these in sync with the initial
+            // `inner.tip` / `inner.stats` or the first read returns
+            // stale data before any block lands.
+            tip_snapshot: ArcSwap::from_pointee(genesis_tip),
+            stats_snapshot: ArcSwap::from_pointee(genesis_stats),
+            height_snapshot: std::sync::atomic::AtomicU64::new(0),
             // Phase 2 stores: None until Phase 2 activation
             spark_store: None,
             shielded_store: None,
@@ -601,6 +706,10 @@ impl Blockchain {
             // SECURITY (CC-001): Apply genesis block transactions to UTXO set
             let batch = UtxoSet::batch_from_block(0, &genesis.transactions);
             inner.utxos.apply_batch(batch);
+
+            // Snapshot the post-genesis state so `.tip()` / `.height()` /
+            // `.stats()` return the new values without taking the lock.
+            self.refresh_snapshots(&inner);
         }
 
         // Persist output index for genesis block
@@ -681,6 +790,9 @@ impl Blockchain {
                         // until the first non-fork block arrives. Observed on the
                         // testnet api box 2026-06-01 after the fleet upgrade.
                         inner.stats.difficulty = difficulty;
+                        // Snapshot the restored state so RPC reads see it
+                        // immediately, without taking the lock.
+                        self.refresh_snapshots(&inner);
                     }
                     tracing::info!("Loaded chain state: height={}, tip={}", state.height, state.tip_hash.to_hex());
 
@@ -868,6 +980,11 @@ impl Blockchain {
             elapsed.as_secs_f64()
         );
 
+        // Snapshot the rebuilt state — covers both the normal-path
+        // tip (unchanged) and the corruption-recovery path that
+        // mutates `inner.tip` / `inner.stats` above.
+        self.refresh_snapshots(&inner);
+
         Ok(())
     }
 
@@ -909,14 +1026,42 @@ impl Blockchain {
         }
     }
 
-    /// Get current height
-    pub fn height(&self) -> u64 {
-        self.inner.read().tip.height
+    /// Update the lock-free hot-read snapshots from the current
+    /// `inner` state. MUST be called inside (or immediately after)
+    /// every write that mutates `inner.tip` or `inner.stats`. The
+    /// caller already holds the write lock and is passing in the
+    /// resulting `BlockchainInner` reference.
+    ///
+    /// Cost: 2 Arc allocations + 3 atomic stores. ~100ns. Far less
+    /// than the cost of NOT calling it (every subsequent `.tip()` /
+    /// `.height()` / `.stats()` would take the parking_lot lock and
+    /// could block on a concurrent write).
+    ///
+    /// Failure mode if you forget to call this: the lock-free
+    /// snapshots drift stale, so `.tip()` returns the previous tip
+    /// for a window until the next call site that DOES refresh.
+    /// Sync engine + reorg paths will detect the drift via
+    /// inner.read() and re-converge, but RPC callers see stale data
+    /// in the interim. Symptom: explorer banner shows old height
+    /// for a few seconds after a fresh block. Not a consensus bug,
+    /// but enough of a UX bug that every grep result for
+    /// `self.inner.write()` should have a `refresh_snapshots`
+    /// call below it.
+    #[inline]
+    fn refresh_snapshots(&self, inner: &BlockchainInner) {
+        self.tip_snapshot.store(Arc::new(inner.tip.clone()));
+        self.stats_snapshot.store(Arc::new(inner.stats.clone()));
+        self.height_snapshot.store(inner.tip.height, Ordering::Release);
     }
 
-    /// Get current tip
+    /// Get current height. Lock-free; reads `height_snapshot` directly.
+    pub fn height(&self) -> u64 {
+        self.height_snapshot.load(Ordering::Acquire)
+    }
+
+    /// Get current tip. Lock-free; one ArcSwap load + Arc clone.
     pub fn tip(&self) -> ChainTip {
-        self.inner.read().tip.clone()
+        (**self.tip_snapshot.load()).clone()
     }
 
     /// Look up a transaction's block height and index via the tx_index.
@@ -924,9 +1069,9 @@ impl Blockchain {
         self.db.as_ref().and_then(|db| db.get_tx_location(tx_hash))
     }
 
-    /// Get tip hash
+    /// Get tip hash. Lock-free.
     pub fn tip_hash(&self) -> Hash {
-        self.inner.read().tip.hash
+        self.tip_snapshot.load().hash
     }
 
     /// Get the number of available (unspent) outputs in the UTXO set
@@ -941,14 +1086,14 @@ impl Blockchain {
         crate::consensus::validate_transaction(tx, &inner.utxos, inner.tip.height + 1)
     }
 
-    /// Get current difficulty
+    /// Get current difficulty. Lock-free.
     pub fn difficulty(&self) -> u128 {
-        self.inner.read().tip.difficulty
+        self.tip_snapshot.load().difficulty
     }
 
-    /// Get next difficulty (placeholder)
+    /// Get next difficulty (placeholder). Lock-free.
     pub fn next_difficulty(&self) -> u128 {
-        self.inner.read().tip.difficulty
+        self.tip_snapshot.load().difficulty
     }
 
     /// Compute the exact target hash for the next block using ASERT difficulty adjustment.
@@ -992,7 +1137,11 @@ impl Blockchain {
         // the peer-advertised target, AND tip is fresh enough that the
         // chain is clearly producing blocks (not actually stalled).
         if target.saturating_sub(h) <= 2 {
-            let tip_timestamp = self.inner.read().tip.timestamp;
+            // Lock-free read via snapshot — `is_synced()` is called by
+            // every RPC `get_info` request; taking inner.read() here
+            // would re-introduce the very contention pattern the
+            // snapshot fields exist to eliminate.
+            let tip_timestamp = self.tip_snapshot.load().timestamp;
             if let Ok(d) = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
             {
@@ -1009,9 +1158,9 @@ impl Blockchain {
         false
     }
 
-    /// Get chain statistics
+    /// Get chain statistics. Lock-free; one ArcSwap load + Arc clone.
     pub fn stats(&self) -> ChainStats {
-        self.inner.read().stats.clone()
+        (**self.stats_snapshot.load()).clone()
     }
 
     /// Get block by hash
@@ -1067,6 +1216,7 @@ impl Blockchain {
             inner.stats.height = height;
             inner.stats.tip_hash = tip_hash;
             inner.stats.total_difficulty = total_difficulty;
+            self.refresh_snapshots(&inner);
         }
         self.load_from_database()
     }
@@ -1208,6 +1358,11 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                     inner.tip.height,
                 );
             }
+
+            // Snapshot the rolled-back state — `.tip()` / `.height()`
+            // callers (RPC, miner, sync engine) must see the new tip
+            // immediately or they'll keep building on the orphaned chain.
+            self.refresh_snapshots(&inner);
         }
 
         // Remove from database and persist state (db is on Blockchain, not inner)
@@ -1580,6 +1735,12 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                     // unbounded RAM growth. Older blocks fall back to database lookup.
                     inner.evict_block_cache();
 
+                    // Snapshot the new tip — this is the hottest write
+                    // path in the chain (every accepted block lands here),
+                    // so the snapshot freshness is what makes RPC reads
+                    // of `.tip()` / `.height()` correct without locking.
+                    self.refresh_snapshots(&inner);
+
                     false
                 }
             }; // write lock released
@@ -1871,6 +2032,13 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                             disconnected_heights.push((h, removed_hash));
                         }
                     }
+
+                    // Snapshot after the disconnect — `inner.stats.total_supply`
+                    // was decremented and tip-relevant state is in flux.
+                    // The next scope (validate-and-apply) will refresh again
+                    // with the new fork tip, but readers in between should
+                    // see the partially-disconnected stats, not the pre-reorg.
+                    self.refresh_snapshots(&inner);
                 }
 
                 // H1 (atomicity fix): The persistent output_index removal that
@@ -2253,6 +2421,15 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                             }
                         }
                     }
+
+                    // Snapshot the post-reorg state. Covers all three paths:
+                    // success (new fork tip at line ~2338), pre-validation
+                    // rollback (restored to pre_reorg_tip at line ~2199),
+                    // and tip-validation rollback (restored at line ~2312).
+                    // Crucial: the RPC `.tip()` must NEVER report a fork-tip
+                    // that was rolled back, so this refresh happens AFTER
+                    // any rollback completes.
+                    self.refresh_snapshots(&inner);
                 }
 
                 // Return early if reorg failed (rollback already done above)

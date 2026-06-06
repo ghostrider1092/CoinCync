@@ -1,7 +1,64 @@
 //! # CLSAG Ring Signatures
 //!
-//! Compact Linkable Spontaneous Anonymous Group signatures.
-//! Based on the Monero CLSAG specification with proper curve operations.
+//! Compact Linkable Spontaneous Anonymous Group signatures, following
+//! the canonical Monero CLSAG specification (Goodell, Noether, Blue
+//! 2020, eprint 2019/654).
+//!
+//! ## Aggregate coefficients (canonical)
+//!
+//! ```text
+//! μ_p = H_s("CLSAG_agg_0" || {P_i} || {C_i} || I || D || C' || msg)
+//! μ_c = H_s("CLSAG_agg_1" || {P_i} || {C_i} || I || D || C' || msg)
+//! ```
+//!
+//! Both coefficients are independent random-oracle outputs over the
+//! full input set: the ring's public keys and commitments, the key
+//! image I, the commitment image D, the pseudo-output C', and the
+//! message. The independence — distinct domain prefix, both binding
+//! the same data — is what lets the unforgeability proof (forking
+//! lemma → DL reduction) go through cleanly.
+//!
+//! See [`compute_aggregate_coefficients`] and [`clsag_agg_hash`] for
+//! the implementation; both are direct transcriptions of the formula.
+//!
+//! ## Security properties verified
+//!
+//! - **Unforgeability** reduces to DL on the Ristretto group
+//!   (Curve25519, ~252-bit security) in the random-oracle model. The
+//!   forking-lemma extraction works because μ_p and μ_c are
+//!   independent RO queries.
+//! - **Linkability** is mechanical: key image `I = x · H_p(P)` is
+//!   deterministic in the secret x, so any two signatures by the same
+//!   x produce the same I.
+//! - **Anonymity (signer ambiguity)** comes from the symmetric
+//!   challenge ring — every ring index is structurally equivalent in
+//!   the verifier's view.
+//!
+//! ## Implementation defenses (belt-and-suspenders)
+//!
+//! Layered on top of the formal proof:
+//!
+//! - Key-image / commitment-image identity-point rejection (trivial
+//!   forgery defense: k=0 or z_real=z_pseudo).
+//! - Non-canonical scalar byte rejection (RFC 8032 §5.1.7
+//!   malleability defense).
+//! - Zero-challenge rejection (`c1 == 0` would unbind the key image
+//!   from the signer's secret).
+//! - Constant-time final challenge comparison (`ct_eq`).
+//! - Per-round challenge `clsag_hash` independently binds I, D, msg,
+//!   and the L, R points — so D-tampering is rejected at the
+//!   challenge-chain level even before aggregate-coefficient binding.
+//!
+//! ## History
+//!
+//! The pre-2026-06-05 implementation used a non-canonical aggregate-
+//! coefficient construction: `μ_p = H("CLSAG_round" || ring || I || C'
+//! || msg)` (missing D) and `μ_c = H("CLSAG_agg_1" || μ_p)` (derived,
+//! not independent). The variant was self-consistent and had no known
+//! concrete attack, but the forking-lemma proof did not apply — making
+//! the security argument informal rather than reducible to DL. The
+//! 2026-06-05 audit replaced it with the canonical formula above and
+//! the testnet was wiped to fresh genesis as part of the deployment.
 
 use curve25519_dalek::{
     ristretto::RistrettoPoint,
@@ -119,42 +176,49 @@ fn clsag_hash(
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Round hash for CLSAG
-fn clsag_round_hash(
+/// Aggregate-coefficient hash for canonical CLSAG.
+///
+/// `domain` is `b"CLSAG_agg_0"` for the key coefficient (mu_p) or
+/// `b"CLSAG_agg_1"` for the commitment coefficient (mu_c). Per the
+/// CLSAG paper (Goodell, Noether, Blue 2020, eprint 2019/654), both
+/// coefficients are independent random-oracle outputs over the SAME
+/// input set: the full ring (public keys + commitments), the key
+/// image I, the commitment image D, the pseudo-output commitment C',
+/// and the message.
+fn clsag_agg_hash(
+    domain: &[u8],
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
     message: &[u8],
 ) -> Scalar {
     let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_round");
-
+    hasher.update(domain);
     for member in ring {
         hasher.update(member.public_key.to_bytes());
         hasher.update(member.commitment.to_bytes());
     }
-
     hasher.update(key_image.to_bytes());
+    hasher.update(commitment_image.to_bytes());
     hasher.update(pseudo_output.to_bytes());
     hasher.update(message);
-
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Compute aggregate key coefficients
+/// Compute canonical CLSAG aggregate key coefficients.
+///
+/// mu_p = H_s("CLSAG_agg_0" || {Pi} || {Ci} || I || D || C' || msg)
+/// mu_c = H_s("CLSAG_agg_1" || {Pi} || {Ci} || I || D || C' || msg)
 fn compute_aggregate_coefficients(
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
     message: &[u8],
 ) -> (Scalar, Scalar) {
-    let mu_p = clsag_round_hash(ring, key_image, pseudo_output, message);
-
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_agg_1");
-    hasher.update(mu_p.as_bytes());
-    let mu_c = Scalar::from_bytes_mod_order_wide(&hasher.finalize().into());
-
+    let mu_p = clsag_agg_hash(b"CLSAG_agg_0", ring, key_image, commitment_image, pseudo_output, message);
+    let mu_c = clsag_agg_hash(b"CLSAG_agg_1", ring, key_image, commitment_image, pseudo_output, message);
     (mu_p, mu_c)
 }
 
@@ -203,8 +267,11 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
     let hp = hash_to_point(&expected_public.to_bytes());
     let commitment_image = PublicPoint::from_point(blinding_diff.as_scalar() * hp);
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) = compute_aggregate_coefficients(ring, &key_image, pseudo_output, message);
+    // Compute aggregate coefficients (canonical CLSAG: both μ_p and μ_c
+    // are independent RO queries over the full input set including D).
+    let (mu_p, mu_c) = compute_aggregate_coefficients(
+        ring, &key_image, &commitment_image, pseudo_output, message,
+    );
 
     // Generate random alpha
     let alpha = SecretScalar::random(rng);
@@ -360,8 +427,12 @@ pub fn clsag_verify(
         return false;
     }
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) = compute_aggregate_coefficients(ring, &signature.key_image, pseudo_output, message);
+    // Compute aggregate coefficients (canonical CLSAG: both μ_p and μ_c
+    // are independent RO queries over the full input set including D).
+    let (mu_p, mu_c) = compute_aggregate_coefficients(
+        ring, &signature.key_image, &signature.commitment_image,
+        pseudo_output, message,
+    );
 
     // Compute aggregate public keys (must match signing formulation)
     // W_i = mu_p * P_i + mu_c * (C_i - C')

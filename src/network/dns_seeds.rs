@@ -60,7 +60,12 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     "140.82.57.168:28080",    // Vultr — seed (US, Atlanta)
     "207.148.111.76:28080",   // Vultr — seed (US)
     "207.148.6.50:28080",     // Vultr — seed (US)
-    "192.248.151.16:28080",   // Vultr London — seed + baseline miner (EU)
+    // 2026-06-05: Vultr London (192.248.151.16) decommissioned. It missed the
+    // 2026-06-04 testnet wipe, stayed stuck on the pre-wipe chain advertising
+    // h=12,201 to the api-box's nginx backend (which was pointing at it). With
+    // the api box repointed to its own local node and London destroyed in
+    // Vultr, this entry was dialing a dead IP. Add it back only with a fresh
+    // node included in the next wipe cycle.
 ];
 
 /// Resolve DNS seeds and return a deduplicated list of socket addresses.

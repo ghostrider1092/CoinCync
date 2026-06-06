@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name         = "coincync"
-version = "1.0.10"
+version = "1.0.11"
 edition      = "2021"
 rust-version = "1.75"
 authors      = ["CoinCync 1.0 Contributors"]
@@ -172,6 +172,13 @@ dirs-next  = "2.0"
 # removed via issue #44. `dirs-next` covers the actual home/config-dir
 # usage in the codebase.
 parking_lot = "0.12"
+# 2026-06-05: lock-free snapshot storage for chain hot-path reads.
+# Used by `Blockchain` for `tip_snapshot` / `stats_snapshot` so that
+# `.tip()` / `.stats()` / `.height()` never take the parking_lot
+# write lock and therefore can't block RPC workers while a block
+# commit holds the write lock for RandomX verification. See
+# src/chain.rs around the `refresh_snapshots` helper.
+arc-swap   = "1.7"
 dashmap    = "5"
 num_cpus   = "1"
 byteorder  = "1"

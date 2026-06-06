@@ -196,17 +196,19 @@ impl DerivationPath {
         DerivationPath { components }
     }
 
-    /// CoinCync standard path: m/44'/888'/account'/change'/index'
-    /// CoinType for CoinCync: 888 (unofficial, needs BIP registration)
+    /// CoinCync standard path: m/44'/COINCYNC_COIN_TYPE'/account'/change'/index'
     ///
     /// SECURITY (M-6): All components are hardened because derive_child_key
     /// always uses private-key-based derivation. Making the path honest about
     /// this prevents interoperability mismatches with standard BIP32 tools.
+    ///
+    /// AUDIT 2026-06-05 #13: coin_type was migrated off 888 (NEO collision).
+    /// See `crate::constants::COINCYNC_COIN_TYPE`.
     pub fn coincync(account: u32, change: u32, index: u32) -> Self {
         DerivationPath {
             components: vec![
                 44 | 0x80000000,      // purpose (hardened)
-                888 | 0x80000000,     // coin type (hardened)
+                crate::constants::COINCYNC_COIN_TYPE | 0x80000000, // coin type (hardened)
                 account | 0x80000000, // account (hardened)
                 change | 0x80000000,  // change (hardened - matches actual derivation)
                 index | 0x80000000,   // address index (hardened - matches actual derivation)
@@ -219,7 +221,7 @@ impl DerivationPath {
         DerivationPath {
             components: vec![
                 44 | 0x80000000,
-                888 | 0x80000000,
+                crate::constants::COINCYNC_COIN_TYPE | 0x80000000,
                 account | 0x80000000,
                 2 | 0x80000000,  // special: view key (hardened)
                 0 | 0x80000000,
@@ -245,7 +247,7 @@ impl DerivationPath {
         DerivationPath {
             components: vec![
                 44 | 0x80000000,
-                888 | 0x80000000,
+                crate::constants::COINCYNC_COIN_TYPE | 0x80000000,
                 account | 0x80000000,
                 3 | 0x80000000,  // special: spend key (hardened)
                 0 | 0x80000000,  // (hardened)
@@ -253,7 +255,7 @@ impl DerivationPath {
         }
     }
 
-    /// Parse from string (e.g., "m/44'/888'/0'/0/0")
+    /// Parse from string (e.g., "m/44'/19166'/0'/0/0")
     pub fn from_string(path: &str) -> Result<Self> {
         let path = path.trim();
         if !path.starts_with("m/") && !path.starts_with("M/") {
@@ -400,17 +402,21 @@ mod tests {
 
     #[test]
     fn test_derivation_path_parse() {
-        let path = DerivationPath::from_string("m/44'/888'/0'/0/0").unwrap();
+        // Use string formatting from the constant so this test tracks any
+        // future coin_type re-pick automatically.
+        let path_str = format!("m/44'/{}'/0'/0/0", crate::constants::COINCYNC_COIN_TYPE);
+        let path = DerivationPath::from_string(&path_str).unwrap();
         assert_eq!(path.components().len(), 5);
         assert_eq!(path.components()[0], 44 | 0x80000000);
-        assert_eq!(path.components()[1], 888 | 0x80000000);
+        assert_eq!(path.components()[1], crate::constants::COINCYNC_COIN_TYPE | 0x80000000);
     }
 
     #[test]
     fn test_derivation_path_to_string() {
         let path = DerivationPath::coincync(0, 0, 0);
         // SECURITY (M-6): All components are hardened
-        assert_eq!(path.to_string(), "m/44'/888'/0'/0'/0'");
+        let expected = format!("m/44'/{}'/0'/0'/0'", crate::constants::COINCYNC_COIN_TYPE);
+        assert_eq!(path.to_string(), expected);
     }
 
     #[test]

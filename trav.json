@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "saved_at": 1779065392,
+  "swap": {
+    "id": "../../../etc/passwd",
+    "role": "Bob",
+    "state": "Negotiated",
+    "parameters": {
+      "cync_amount": 1,
+      "btc_amount_sats": 1,
+      "cync_timeout_blocks": 720,
+      "btc_timeout_blocks": 100,
+      "alice_cync_address": "a",
+      "bob_btc_address": "b"
+    }
+  }
+}

@@ -185,14 +185,27 @@ pub const TX_EXPIRY_BLOCKS: u64 = 500;
 // P2P Configuration
 // =============================================================================
 
-/// Maximum number of connected peers
+/// Maximum number of connected peers (operator-tunable config default).
+///
+/// 2026-06-05 audit clarification: this constant is the default for
+/// `Config::max_peers` (see `src/config.rs:571`). The runtime-enforced
+/// inbound + outbound limits are `MAX_INBOUND` and `MAX_OUTBOUND` in
+/// `src/network/node.rs` (64 + 16 = 80 actual cap). The 125 value here
+/// matches Bitcoin Core's historical default; the 80 enforced ceiling
+/// is more conservative for our smaller fleet. If you want to raise
+/// the runtime limit, change node.rs — changing this alone has no
+/// effect on actual connection acceptance.
 pub const MAX_PEERS: usize = 125;
 
-/// Maximum inbound peers
-pub const MAX_INBOUND_PEERS: usize = 100;
-
-/// Maximum outbound peers
-pub const MAX_OUTBOUND_PEERS: usize = 25;
+// 2026-06-05 audit cleanup: removed `MAX_INBOUND_PEERS = 100` and
+// `MAX_OUTBOUND_PEERS = 25` which were declared here but had ZERO
+// usages anywhere in the codebase. The actual enforced limits live
+// at `src/network/node.rs:70` (`MAX_INBOUND = 64`) and `:68`
+// (`MAX_OUTBOUND = 16`). Keeping the unused-but-different values
+// here invited the bug where a future contributor would import the
+// wrong constant and silently get a different limit than the runtime
+// actually enforces. If you need to read the limits programmatically,
+// import from `crate::network::node`.
 
 /// Peer connection timeout in seconds
 pub const PEER_TIMEOUT: u64 = 30;
@@ -547,6 +560,36 @@ pub const STANDARD_OUTPUT_COUNT: usize = 2;
 pub const FEE_DISTRIBUTION_HEIGHT: u64 = 525;
 #[cfg(not(feature = "testnet"))]
 pub const FEE_DISTRIBUTION_HEIGHT: u64 = 0;
+
+// =============================================================================
+// BIP-44 Wallet Derivation
+// =============================================================================
+
+/// SLIP-0044 coin_type for CoinCync HD wallet derivation.
+///
+/// AUDIT 2026-06-05 #13 — the previous value (`888`) is REGISTERED to
+/// NEO in the upstream SLIP-0044 registry
+/// (<https://github.com/satoshilabs/slips/blob/master/slip-0044.md>).
+/// Keeping it would have meant any standards-conformant HD wallet
+/// importing a CoinCync mnemonic at `m/44'/888'/...` would have
+/// derived NEO addresses instead of CoinCync ones — a silent
+/// interop-breaking footgun.
+///
+/// The new value below is **provisional**: it must be confirmed
+/// unclaimed against the current SLIP-0044 registry and registered via
+/// upstream PR before mainnet launch (target 2026-10-01). Track in
+/// the v1.0 audit-prep checklist. Until the PR is merged, the value
+/// is effectively a CoinCync-internal choice — wallet recovery only
+/// works against software that knows this number, which is fine for
+/// testnet but must be settled before mainnet so cold-storage / paper
+/// wallets created on third-party HD tools work.
+///
+/// 19166 was picked because (a) it sits well above the densely-claimed
+/// 0-1000 range, (b) it does not appear in known SLIP-0044 snapshots,
+/// (c) it has no obvious symbolic clash. If a clash is discovered, a
+/// fresh pick + testnet wallet regeneration is the recovery path —
+/// see `docs/decisions/2026-06-05-coin-type-migration.md`.
+pub const COINCYNC_COIN_TYPE: u32 = 19166;
 
 // =============================================================================
 // Ring Size by Height
