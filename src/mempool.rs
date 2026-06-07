@@ -1091,13 +1091,19 @@ impl SharedMempool {
         tx: Transaction,
         chain: &crate::chain::SharedBlockchain,
     ) -> Result<Hash> {
-        for ki in tx.key_images() {
-            if chain.is_spent(&ki) {
-                return Err(Error::DuplicateKeyImage(
-                    "key image already spent in chain".into(),
-                ));
-            }
-        }
+        // 2026-06-07: run the FULL chain validator at submission time.
+        // The previous code only checked key-image-spent — it missed
+        // every height-gated rule (coinbase maturity, ring member
+        // existence, lock heights, V2 activation, uniform-shape).
+        // Those rules ARE enforced by shadow_evict_invalid after the
+        // next block lands, so any tx tripping them was accepted to
+        // mempool, sat briefly, then silently evicted — confusing
+        // failure mode for users. Running the full validator here
+        // makes the two paths (accept + revalidate) symmetric: if a
+        // tx passes accept, it cannot evict for a chain-state reason
+        // (only for true state churn AFTER acceptance, e.g. its real
+        // input getting spent in a competing tx that landed first).
+        chain.validate_transaction(&tx)?;
         self.write_lock().add(tx)
     }
 
