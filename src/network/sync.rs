@@ -488,6 +488,23 @@ impl ChainSync {
         self.headers_request_time.map(|t| now > t + 60).unwrap_or(false)
     }
 
+    /// Whether a headers request is currently outstanding.
+    ///
+    /// Callers should NOT issue a new `GetHeaders` while this returns true —
+    /// the in-flight one is either still serving (gets responded to within
+    /// the timeout window) or will be reset by `headers_timed_out` →
+    /// `reset_headers_timeout` on the next tick.
+    ///
+    /// Added 2026-06-10 to fix the request-flood pathology that was
+    /// emitting ~4 GetHeaders/sec against a single peer for 8 hours while
+    /// stuck on a fork. The IBD tick loop checked `headers_timed_out` but
+    /// not whether a request was *currently pending*, so it sent a fresh
+    /// one every tick regardless of in-flight state. See
+    /// `docs/crucible/cycle-01/finding-03-headers-request-flood.md`.
+    pub fn headers_request_pending(&self) -> bool {
+        self.headers_request_time.is_some()
+    }
+
     pub fn reset_headers_timeout(&mut self) { self.headers_request_time = None; }
     pub fn request_timeout(&self) -> u64 { self.request_timeout }
 

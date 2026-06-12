@@ -1489,11 +1489,28 @@ impl P2PNode {
                     SyncState::Idle | SyncState::Headers | SyncState::ConfirmingSynced => {
                         let now = chrono::Utc::now().timestamp() as u64;
 
-                        // Check if headers request timed out (no response in 15s)
+                        // Time out a stuck request first — clears the
+                        // pending flag so the gate below can let a new
+                        // request through. The 60-second window is in
+                        // sync.rs::headers_timed_out (NOT 15s as an old
+                        // comment here implied).
                         if sync_sync.read().await.headers_timed_out(now) {
                             warn!("Headers request timed out, retrying with different peer");
                             sync_sync.write().await.reset_headers_timeout();
-                            // Don't continue — fall through to send new request
+                        }
+
+                        // 2026-06-10: gate the send on whether a request is
+                        // already in flight. Without this, every tick (~0.5s)
+                        // fired a fresh GetHeaders against the same peer
+                        // regardless of in-flight state — a 4 Hz hammer that
+                        // accumulated 26,000+ requests + 125 EMERGENCY-TIER-3
+                        // fires over 8 hours in one observed Crucible Cycle 01
+                        // session before the node died. The old code's only
+                        // gate was the timeout-reset above, which only fired
+                        // on EXPIRY but never prevented the send itself.
+                        // See docs/crucible/cycle-01/finding-03-headers-request-flood.md.
+                        if sync_sync.read().await.headers_request_pending() {
+                            continue;
                         }
 
                         // Build locator from our chain tip
