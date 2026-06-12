@@ -934,5 +934,53 @@ async fn start_node(
         .expect("failed to install ctrl-c handler");
 
     info!("Shutdown signal received, stopping node...");
-    Ok(())
+
+    // AUDIT 2026-06-05 #14 — persist mempool before exit so unconfirmed
+    // txs survive the restart. Failure is logged but not fatal — the
+    // node still needs to release the chain DB lock and exit.
+    //
+    // 2026-06-10 (Crucible Cycle 01 Finding #4): wrap the save in a
+    // `tokio::select!` against a second Ctrl+C, so a user who hits
+    // Ctrl+C twice can skip the save and force-exit immediately. The
+    // save normally takes <1s but can stall if the data directory is
+    // on a misbehaving disk; without the escape hatch, the user had
+    // no way to abort the shutdown.
+    let shutdown_seq = async {
+        match mempool.save_to_disk(&data_dir) {
+            Ok(0) => {}
+            Ok(n) => info!("Mempool: saved {} txs to disk", n),
+            Err(e) => error!("Mempool: save_to_disk failed: {}", e),
+        }
+    };
+
+    tokio::select! {
+        _ = shutdown_seq => {
+            info!("Shutdown complete.");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            warn!("Second Ctrl+C received — skipping mempool save, exiting immediately.");
+        }
+    }
+
+    // 2026-06-10 (Crucible Cycle 01 Finding #4): force the process to
+    // exit. The previous code returned `Ok(())` and relied on the
+    // `#[tokio::main]` runtime to drop, which in turn would abort all
+    // spawned tasks. In practice that never completed — 13+ orphaned
+    // tasks (REST API, JSON-RPC, P2P listeners, REST explorer,
+    // spawn_blocking workers for block processing) kept the runtime
+    // alive indefinitely after main's future resolved. Operator-
+    // visible symptom: "Shutdown signal received, stopping node..."
+    // logged, then no exit. SIGINT had to be repeated or the terminal
+    // killed to actually stop the process.
+    //
+    // The graceful shutdown above persists the mempool, which is the
+    // only state that must survive a restart. After that, force-exit
+    // is correct — RocksDB has its own atomic-write guarantees, the
+    // chain database is consistent on disk, and the P2P state is
+    // ephemeral by design.
+    //
+    // Process exits with code 0 (clean shutdown). Don't change to
+    // non-zero — operators (and systemd) treat that as a crash and
+    // may attempt restart.
+    std::process::exit(0);
 }
