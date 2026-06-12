@@ -27,18 +27,32 @@ use tokio::net::TcpStream;
 
 /// Idle threshold before the OS starts sending keepalive probes.
 ///
-/// Calibrated below typical NAT idle-timeout floors (consumer routers
-/// commonly default to 60-90s for TCP state) so that a probe fires
-/// before the router drops the entry. 45s gives ~30 seconds of margin
-/// against the most aggressive consumer routers.
+/// **Calibration history:**
+///   - 45s initial fix: Cycle 02 empirical test showed ~4x
+///     improvement (75s pre-fix flap → 320s before first
+///     disconnect for the protected side) but did not fully
+///     eliminate flaps.
+///   - 25s retighten attempt: did not show measurable
+///     improvement over 45s within a single 6-min window;
+///     possibly slight regression on the per-peer numbers.
+///     Reverted to 45s as the cleaner baseline.
+///
+/// **Why this isn't 0 flaps:**
+/// The keepalive helps only the side that has the fix. A peer
+/// running an older binary still flaps from their own NAT
+/// expiration; we can't fix that from our side. The proper
+/// full fix is application-layer Ping/Pong — traffic the peer
+/// will route as P2P messages, not keepalive frames — which
+/// both sides exchange and which both routers see as "real
+/// traffic." Tracked as a v1.0.15 follow-up.
 pub const P2P_KEEPALIVE_IDLE_SECS: u64 = 45;
 
 /// Time between keepalive probes after the first one fires.
 ///
 /// Unix-only — on Windows the OS picks its own probe interval. 15s
-/// means we get four probes inside a minute of unresponsiveness
-/// before TCP gives up; matches a reasonable "the peer is really
-/// gone, drop them" detection rate.
+/// means four probes inside a minute of unresponsiveness before TCP
+/// gives up; matches a reasonable "the peer is really gone, drop
+/// them" detection rate.
 pub const P2P_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
 /// Apply P2P keepalive sockopts to a TCP stream.
