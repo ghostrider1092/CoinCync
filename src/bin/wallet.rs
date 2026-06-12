@@ -1089,9 +1089,20 @@ async fn cmd_send(
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    // Fetch decoys from the node
+    // Fetch decoys from the node.
+    //
+    // 2026-06-07: `min_age` was hardcoded to 0, which let the wallet pick
+    // immature coinbase outputs as decoys. The consensus validator rejects
+    // any ring containing a coinbase younger than
+    // `min_output_age_at_height(current_height)` (10 pre-fork, 100 after
+    // MIN_OUTPUT_AGE_HARDFORK_HEIGHT). The tx would pass mempool admission
+    // (crypto-only check) and then get evicted seconds later when shadow-
+    // evict ran the full validator. Asking the node to filter at fetch
+    // time avoids the eviction class entirely — only mature outputs reach
+    // the wallet's decoy pool.
     let ring_size = 16usize;
-    let decoys_json = rpc_call(node, "get_decoys", serde_json::json!([ring_size * 8, 0]))
+    let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
+    let decoys_json = rpc_call(node, "get_decoys", serde_json::json!([ring_size * 8, min_decoy_age]))
         .await
         .map_err(|e| format!("rpc get_decoys: {}", e))?;
     let decoys_arr = decoys_json
