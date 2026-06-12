@@ -879,6 +879,18 @@ impl P2PNode {
                         continue;
                     }
 
+                        // Cycle 02 Finding #1: apply TCP keepalive on
+                        // every accepted inbound connection so it
+                        // survives NAT/router idle-state expiration on
+                        // the remote end. Failure logged but not fatal.
+                        if let Err(e) = crate::network::keepalive::apply_p2p_keepalive(&stream) {
+                            tracing::warn!(
+                                "Failed to set keepalive on inbound P2P connection from {}: {} \
+                                 — connection will flap on idle-NAT links",
+                                addr, e,
+                            );
+                        }
+
                         // Check if peer is banned by scorer
                         if acceptor_scorer.read().await.is_banned(&addr) {
                             debug!("Rejecting banned peer {}", addr);
