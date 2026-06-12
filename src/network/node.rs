@@ -1450,12 +1450,22 @@ impl P2PNode {
                     let current_height = sync_chain.height();
                     tracing::error!(
                         "Sync EMERGENCY-TIER-3 #{}: chain has not advanced past height {} \
-                         for {}s (>= {}s threshold) despite sync engine reporting non-stalled \
-                         state. This indicates an orphan-fetch cascade or similar pathology \
-                         where the engine is internally busy but making no real progress. \
-                         Forcing aggressive reset: clear address tried-list, drop expired \
-                         orphans, reset headers-request timeout. If this fires repeatedly, \
-                         operator may need to wipe + reimport snapshot.",
+                         for {}s (>= {}s threshold). \
+                         This usually means one of: \
+                         (1) all peers stopped mining — most common in small test meshes \
+                         or after a global fleet outage; check `coincync-node ibd-status` \
+                         on each peer to see whether anyone has a higher tip; \
+                         (2) sync engine internally busy — orphan-fetch cascade or \
+                         header request stuck; \
+                         (3) protocol version mismatch — your binary won't accept blocks \
+                         the peer is producing (look for `BLOCK REJECTED AS INVALID` lines). \
+                         Forcing aggressive reset for case (2): clear address tried-list, \
+                         drop expired orphans, reset headers-request timeout. \
+                         For case (1) the reset is harmless but won't help — you need \
+                         someone (or yourself) to mine. \
+                         If this fires repeatedly, the operator may need to wipe + \
+                         reimport snapshot. \
+                         (Cycle 02 Finding #4 — message disambiguates between cases.)",
                         emergency_t3_fires,
                         current_height,
                         secs_since_progress,
