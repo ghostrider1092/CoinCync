@@ -452,11 +452,22 @@ async fn start_node(
 
     if no_peers {
         info!("--no-peers: automatic peer discovery disabled (manual --addnode peers still allowed)");
-        // Enforce true isolation: disable bootstrap seeds and outbound slots.
-        // Without this, the node can still dial built-in seeds.
+        // Enforce true isolation: disable bootstrap seeds.
         p2p_config.bootstrap.dns_seeds.clear();
         p2p_config.bootstrap.seed_nodes.clear();
-        p2p_config.max_outbound = 0;
+        // 2026-06-09: cap outbound at the manual --addnode count, not 0.
+        // The previous `= 0` was silently fatal to --addnode: the node
+        // would log the peer was registered ("--addnode: adding manual
+        // peer X") + show "1 known addresses" in peer maintenance, yet
+        // never dial because the outbound slot budget was zero. The
+        // info-line above advertised "--addnode peers still allowed",
+        // which was a lie. Found via Crucible Cycle 01 — operator
+        // tried to peer with the only other v1.0.11 node (cross-CGNAT
+        // workaround), watched 0 outbound for 5+ minutes despite the
+        // manual peer being in the list.
+        // Min of 1 keeps the slot available even if the operator
+        // passed --no-peers without --addnode (degenerate but legal).
+        p2p_config.max_outbound = extra_peers.len().max(1);
     }
 
     // --proxy / --tor / --onion-only wire-up.
