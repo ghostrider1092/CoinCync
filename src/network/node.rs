@@ -80,8 +80,29 @@ pub const MAX_INBOUND: usize = 64;
 pub const MAX_CONNECTIONS_PER_IP: usize = 2;
 /// Connection timeout
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Ping interval
-pub const PING_INTERVAL: Duration = Duration::from_secs(120);
+/// Ping interval — how often we send an application-layer Ping to
+/// each connected peer to keep the path alive.
+///
+/// **Calibrated against NAT idle-state timeouts.** Cycle 02 (2026-06-11)
+/// surfaced a peer-flap pattern caused by consumer routers (and
+/// Cox CGNAT) dropping NAT entries after ~30-90s of TCP silence.
+/// The previous 120s value was too high — Pings fired well after
+/// the NAT had already dropped the entry, so each Ping arrived to
+/// no route and the connection silently died.
+///
+/// 25s puts the Ping well below the most aggressive NAT idle floor
+/// (~30s). Each Ping is a real Noise-encrypted P2P message that
+/// flows across the TCP stream, refreshing the router's NAT entry
+/// the same way any other P2P traffic would. Combined with TCP
+/// keepalive at 45s (added separately) this gives belt-and-suspenders
+/// path-keepalive coverage.
+///
+/// **Bandwidth cost is negligible:** 256-byte message × 2
+/// (Ping + Pong) × ~6 peers × (1 ping/25s) = ~250 bytes/sec.
+///
+/// See `docs/crucible/cycle-02/finding-01-peer-flap.md` for the
+/// full investigation.
+pub const PING_INTERVAL: Duration = Duration::from_secs(25);
 /// Peer timeout (no activity)
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(300);
 /// Per-peer send queue size (with backpressure)
