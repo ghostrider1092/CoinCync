@@ -267,11 +267,34 @@ pub const TESTNET_ADDRESS_PREFIX: &str = "tCYNC";
 // Ring Signatures
 // =============================================================================
 
-/// Minimum ring size for privacy
-/// Bootstrap minimum ring size — used when UTXO set is too small for full ring-16.
-/// After BOOTSTRAP_CUTOVER_HEIGHT (10,000 blocks), full RING_SIZE (16) is enforced.
-/// Named explicitly to distinguish from the post-bootstrap target.
+/// Minimum ring size for privacy.
+///
+/// Bootstrap minimum ring size — applied from genesis until
+/// [`RING_SIZE_RAMP_TO_MID_HEIGHT`], when the chain bumps to
+/// [`MID_RING_SIZE`]. See [`ring_size_at_height`].
 pub const BOOTSTRAP_MIN_RING_SIZE: usize = 11;
+
+/// Intermediate ring size for the staged bootstrap ramp.
+///
+/// Active from [`RING_SIZE_RAMP_TO_MID_HEIGHT`] up to
+/// [`RING_SIZE_RAMP_TO_FULL_HEIGHT`]. The graduated 11 → 13 → 16
+/// pattern gives the anonymity set time to grow at each step before
+/// the next bump, avoiding the cliff where a hard cutover from 11 to
+/// 16 would briefly outpace the available-outputs floor.
+pub const MID_RING_SIZE: usize = 13;
+
+/// Block height at which the ring size bumps from 11 → 13.
+///
+/// At 120s target block time this lands ~6.9 days post-genesis on a
+/// healthy testnet/mainnet chain.
+pub const RING_SIZE_RAMP_TO_MID_HEIGHT: u64 = 5_000;
+
+/// Block height at which the ring size bumps from 13 → 16 (final).
+///
+/// Matches the previous single-step bootstrap cutover at h=10,000
+/// (~13.9 days). The new path reaches full ring 16 at the same height
+/// as before — the change adds an intermediate stop at h=5,000.
+pub const RING_SIZE_RAMP_TO_FULL_HEIGHT: u64 = 10_000;
 
 /// Maximum ring size
 pub const MAX_RING_SIZE: usize = 32;
@@ -386,22 +409,20 @@ pub const MIN_OUTPUT_AGE_POST_FORK: u64 = 100;
 /// value (`MIN_OUTPUT_AGE` = 10); heights AT OR ABOVE this value
 /// use `MIN_OUTPUT_AGE_POST_FORK` = 100.
 ///
-/// **TESTNET — `u64::MAX` is a placeholder.** The actual activation
-/// height is picked in the pre-tag PR for the v1.0.10-testnet cut.
-/// Per `docs/launch/v1.0.10-CHECKLIST.md` §0, the height should be
-/// the current testnet tip + ~5,000 blocks (≈7 days at 120s) so
-/// operators have a real window to upgrade before the rule changes
-/// under them. While the placeholder is `u64::MAX`, behavior is
-/// strictly identical to pre-fork — `min_output_age_at_height` always
-/// returns 10 — so this guard ships safely in pre-cut commits and
-/// only "turns on" when the height is set.
+/// **TESTNET — `5_000`.** v1.0.12 activates at h=5,000, aligned with
+/// `RING_SIZE_RAMP_TO_MID_HEIGHT` so operators see "ring bumps from
+/// 11 → 13 and MIN_OUTPUT_AGE bumps from 10 → 100" as a single
+/// mental event at one height. The fresh-genesis v1.0.11 wipe puts
+/// the chain at h=0 → h=5,000 is ~6.9 days post-wipe @ 120s block
+/// time, giving testnet operators ~7 days to upgrade before the
+/// rule changes under them.
 ///
 /// **MAINNET — `0`.** The new value is active from genesis; there's
 /// no behavior to migrate because mainnet hasn't launched yet (target
 /// 2026-10-01 per `project_staged_mainnet`). New mainnet wallets see
 /// 100 as the maturity floor from block 1.
 #[cfg(feature = "testnet")]
-pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = u64::MAX;
+pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = 5_000;
 #[cfg(not(feature = "testnet"))]
 pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = 0;
 
@@ -595,35 +616,54 @@ pub const COINCYNC_COIN_TYPE: u32 = 19166;
 // Ring Size by Height
 // =============================================================================
 
-/// Get target ring size for a given block height
-/// Returns the target ring size for a given height.
-/// During bootstrap (< 10,000 blocks), allows BOOTSTRAP_MIN_RING_SIZE (11).
-/// After bootstrap, enforces full RING_SIZE (16).
+/// Get target ring size for a given block height.
+///
+/// Three-bracket staged bootstrap ramp:
+///
+/// - Heights `0..RING_SIZE_RAMP_TO_MID_HEIGHT` (default 0..5,000) →
+///   `BOOTSTRAP_MIN_RING_SIZE` (11)
+/// - Heights `RING_SIZE_RAMP_TO_MID_HEIGHT..RING_SIZE_RAMP_TO_FULL_HEIGHT`
+///   (default 5,000..10,000) → `MID_RING_SIZE` (13)
+/// - Heights `>= RING_SIZE_RAMP_TO_FULL_HEIGHT` (default 10,000+) →
+///   `DEFAULT_RING_SIZE` (16)
+///
+/// The graduated ramp replaces the previous single 11 → 16 hard
+/// cutover at h=10,000. Final ring 16 still activates at the same
+/// h=10,000 — the change introduces an intermediate stop at 13 to
+/// give the available-outputs floor time to catch up before each
+/// bump (effective_ring_size adapts down on young chains; the ramp
+/// minimises the period where target ring exceeds available-outputs
+/// floor).
 pub fn ring_size_at_height(height: u64) -> usize {
-    if height < 10_000 {
-        BOOTSTRAP_MIN_RING_SIZE // 11 during bootstrap
+    if height < RING_SIZE_RAMP_TO_MID_HEIGHT {
+        BOOTSTRAP_MIN_RING_SIZE // 11 — first stage
+    } else if height < RING_SIZE_RAMP_TO_FULL_HEIGHT {
+        MID_RING_SIZE           // 13 — intermediate stage
     } else {
-        DEFAULT_RING_SIZE // 16 after bootstrap
+        DEFAULT_RING_SIZE       // 16 — mature
     }
 }
 
 /// Get effective ring size, adapting to available outputs on young chains.
 ///
 /// On a freshly launched chain, there may be fewer outputs than the target
-/// ring size. Rather than making transactions impossible, we allow a smaller
-/// ring size (minimum 2: the real output + 1 decoy) when the chain is young.
-/// Once the chain matures past height 10,000 OR has enough outputs, the
-/// full target ring size is enforced.
+/// ring size (which itself ramps 11 → 13 → 16 — see [`ring_size_at_height`]).
+/// Rather than making transactions impossible, we allow a smaller ring size
+/// (minimum 2: the real output + 1 decoy) when the chain is young.
+///
+/// Once the chain matures past [`RING_SIZE_RAMP_TO_FULL_HEIGHT`]
+/// (final ring 16 active) OR has enough outputs, the full target ring
+/// size is enforced — no more adaptation.
 pub fn effective_ring_size(height: u64, available_outputs: usize) -> usize {
     let target = ring_size_at_height(height);
     if available_outputs >= target {
         target
-    } else if height >= 10_000 {
-        // After bootstrap period, enforce full ring size even if outputs are sparse
-        // (this shouldn't happen on a healthy chain)
+    } else if height >= RING_SIZE_RAMP_TO_FULL_HEIGHT {
+        // Post-bootstrap: enforce full ring size even if outputs are sparse
+        // (this shouldn't happen on a healthy chain).
         target
     } else {
-        // Young chain: adapt to what's available, minimum 2 for any privacy
+        // Young chain: adapt to what's available, minimum 2 for any privacy.
         available_outputs.max(2).min(target)
     }
 }
@@ -1135,10 +1175,33 @@ mod tests {
 
     #[test]
     fn test_ring_size_at_height() {
+        // v1.0.12 three-bracket ramp: 11 → 13 at h=5,000; 13 → 16 at h=10,000.
+
+        // Stage 1: bootstrap (h < 5_000) → ring 11.
         assert_eq!(ring_size_at_height(0), BOOTSTRAP_MIN_RING_SIZE);
-        assert_eq!(ring_size_at_height(9_999), BOOTSTRAP_MIN_RING_SIZE);
-        assert_eq!(ring_size_at_height(10_000), 16);
+        assert_eq!(ring_size_at_height(1), BOOTSTRAP_MIN_RING_SIZE);
+        assert_eq!(ring_size_at_height(4_999), BOOTSTRAP_MIN_RING_SIZE);
+
+        // Transition into stage 2 at exactly RING_SIZE_RAMP_TO_MID_HEIGHT.
+        assert_eq!(ring_size_at_height(RING_SIZE_RAMP_TO_MID_HEIGHT), MID_RING_SIZE);
+        assert_eq!(ring_size_at_height(5_000), MID_RING_SIZE);
+        assert_eq!(ring_size_at_height(5_001), MID_RING_SIZE);
+        assert_eq!(ring_size_at_height(9_999), MID_RING_SIZE);
+
+        // Transition into stage 3 at exactly RING_SIZE_RAMP_TO_FULL_HEIGHT.
+        assert_eq!(ring_size_at_height(RING_SIZE_RAMP_TO_FULL_HEIGHT), DEFAULT_RING_SIZE);
+        assert_eq!(ring_size_at_height(10_000), DEFAULT_RING_SIZE);
+        assert_eq!(ring_size_at_height(10_001), DEFAULT_RING_SIZE);
         assert_eq!(ring_size_at_height(100_000), DEFAULT_RING_SIZE);
+        assert_eq!(ring_size_at_height(u64::MAX), DEFAULT_RING_SIZE);
+
+        // Constitutional floor on the bootstrap value.
+        assert!(BOOTSTRAP_MIN_RING_SIZE >= 11);
+        // Mid value sits between bootstrap and default.
+        assert!(MID_RING_SIZE > BOOTSTRAP_MIN_RING_SIZE);
+        assert!(MID_RING_SIZE < DEFAULT_RING_SIZE);
+        // Ramp heights monotonically increasing.
+        assert!(RING_SIZE_RAMP_TO_MID_HEIGHT < RING_SIZE_RAMP_TO_FULL_HEIGHT);
     }
 
     /// Lock in the activation-boundary semantics of the MIN_OUTPUT_AGE
