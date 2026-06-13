@@ -73,6 +73,19 @@ pub enum EvictReason {
     LowFee,
     /// Sat in the mempool longer than the maximum age.
     Expired,
+    /// Failed a re-validation pass against new chain state — e.g.,
+    /// the tx no longer satisfies a height-coupled rule (ring-size
+    /// ramp at h=5,000, MIN_OUTPUT_AGE 10→100 hard fork, V2 tx
+    /// activation, uniform-tx-shape activation), a ring member became
+    /// unreachable post-reorg, a lock height was hit, etc.
+    ///
+    /// The `detail` carries the validator's error string so operators
+    /// investigating "where did user X's tx go?" see the actual
+    /// consensus rule that fired, not a misleading "DoubleSpend"
+    /// surrogate. v1.0.12: shadow_evict_invalid now uses this variant
+    /// (was DoubleSpend by mistake — comment apologised: "closest
+    /// existing variant").
+    Revalidation { detail: String },
 }
 
 /// A single auditable mempool event.
@@ -756,9 +769,13 @@ impl Mempool {
         );
         for (hash, reason) in invalid_hashes {
             tracing::debug!("  shadow-evict {}: {}", hash, reason);
+            // v1.0.12 fix: the audit log entry now carries the actual
+            // validator error string instead of the misleading
+            // DoubleSpend surrogate that pre-fix shadow_evict_invalid
+            // used. See EvictReason::Revalidation docstring.
             self.audit(AuditEvent::TxRemoved {
                 hash,
-                reason: EvictReason::DoubleSpend, // closest existing variant
+                reason: EvictReason::Revalidation { detail: reason.clone() },
                 timestamp: now,
             });
             self.remove(&hash);
