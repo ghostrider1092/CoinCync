@@ -413,9 +413,26 @@ impl std::fmt::Debug for WalletData {
 
 // SECURITY (M-5): Zeroize master seed when WalletData is dropped to prevent
 // it from lingering in freed memory (cold-boot/core-dump attacks).
+//
+// v1.0.12 fix: ALSO zeroize mnemonic_phrase. The mnemonic IS the seed
+// (BIP-39 24 words encode the same 256-bit entropy), so leaving it
+// in a regular String defeated the seed.zeroize() above — an attacker
+// recovering the mnemonic from heap recovers the wallet.
 impl Drop for WalletData {
     fn drop(&mut self) {
         self.seed.zeroize();
+        if let Some(ref mut phrase) = self.mnemonic_phrase {
+            // String doesn't get a blanket Zeroize impl in the
+            // `zeroize` crate, so reach into the bytes manually.
+            // SAFETY: String is guaranteed valid UTF-8 ONLY while
+            // it's not being mutated as bytes — but we're about to
+            // drop it anyway, so violating that invariant is fine.
+            // No other observer can see the now-non-UTF-8 buffer.
+            unsafe {
+                let bytes = phrase.as_bytes_mut();
+                bytes.zeroize();
+            }
+        }
     }
 }
 
