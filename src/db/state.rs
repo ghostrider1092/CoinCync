@@ -36,7 +36,10 @@ pub struct StateDb {
     /// Main state tree
     pub(crate) state: Tree,
     /// Checkpoints: height -> hash
-    checkpoints: Tree,
+    /// v1.0.12 made this `pub(crate)` so `Database::apply_tip_extend_atomic`
+    /// can include checkpoints in the multi-tree atomic transaction
+    /// alongside state, output_index, height_index, and tx_index.
+    pub(crate) checkpoints: Tree,
     /// Chain state undo data for reorgs
     undo: Tree,
 }
