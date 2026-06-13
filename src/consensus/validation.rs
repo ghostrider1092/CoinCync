@@ -1291,7 +1291,30 @@ pub fn validate_transaction(
 
     // Check ring size and duplicate ring members
     for (input_idx, input) in tx.inputs.iter().enumerate() {
-        let available = utxos.output_count();
+        // v1.0.12 fix (H1, consensus split risk): use the MONOTONIC
+        // cumulative output count, not the live UTXO set size.
+        //
+        // The previous `utxos.output_count()` returned `self.outputs.len()`
+        // — the count of CURRENTLY UNSPENT outputs — which decreases as
+        // outputs are spent. Two nodes processing the same chain can
+        // diverge on this number transiently during reorg, or under
+        // different pruning settings, and disagree on `effective_ring_size`
+        // because the bootstrap-adapt path keys off `available` to compute
+        // the expected ring size. The validator's strict-equality check
+        // below would then accept on one node and reject on the other —
+        // a consensus split.
+        //
+        // `total_outputs_ever()` is monotonically incremented in
+        // `add_output_ext` and (per audit fix in storage/utxos.rs:241)
+        // NEVER decremented, even on reorg disconnects. Every node that
+        // processed the same chain prefix has the same value. Determinism
+        // is preserved.
+        //
+        // Cast u64 → usize: on 64-bit hosts (all supported targets) this
+        // is identity. On hypothetical 32-bit hosts it would saturate at
+        // u32::MAX, which is still vastly larger than any target ring
+        // size (≤ 16), so the consensus decision is unaffected.
+        let available = utxos.total_outputs_ever() as usize;
         let ring_size = crate::constants::effective_ring_size(current_height, available);
         if input.ring_members.len() != ring_size {
             return Err(Error::InvalidRingSize {
