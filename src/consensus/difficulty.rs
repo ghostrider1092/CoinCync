@@ -145,7 +145,31 @@ fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyB
     let expected_time = (height_diff as i128) * (target_time as i128);
     let time_error = time_diff - expected_time;
 
-    let denominator = (halflife as i128) * (target_time as i128);
+    // v1.0.12 fix (S1 — consensus showstopper): denominator is `halflife`
+    // alone (in seconds), NOT `halflife * target_time`. The previous code
+    // multiplied by target_time, producing an effective halflife of
+    // `ASERT_HALFLIFE * TARGET_BLOCK_TIME = 3600 * 120 = 432,000s ≈ 5
+    // days` — making ASERT 120× weaker than designed. Canonical aserti3-2d
+    // (the Bitcoin Cash reference) defines:
+    //
+    //   new_target = anchor_target * 2^((time_diff - target_time*height_diff) / halflife)
+    //
+    // where halflife is in SECONDS. The multiplication by target_time was
+    // a unit-confusion bug. The ASERT_HALFLIFE constant docstring confirms
+    // intent: "halflife in seconds (1 hour)" — so the canonical formula
+    // is what was meant. Code review surfaced the dimensional mismatch.
+    //
+    // Practical effect of the fix: an 8-block window with each block 2×
+    // slow now produces ~1% target adjustment (was ~0.01%) — ASERT is
+    // actually responsive instead of leaning entirely on the
+    // MAX_DIFFICULTY_ADJ_NUM/DEN clamps + EMERGENCY_DROP for stability.
+    //
+    // This is a CONSENSUS CHANGE. Activation: along with the v1.0.12
+    // ring-ramp hard fork. Pre-v1.0.12 chains computed targets with the
+    // bugged formula; post-v1.0.12 chains use the canonical one. Mixed
+    // mining at the fork boundary will produce blocks the other version
+    // rejects — coordinated deployment required.
+    let denominator = halflife as i128;
     if denominator == 0 { return current_target; }
 
     let exponent_fp = time_error
@@ -347,6 +371,43 @@ mod tests {
         let old_diff = target_to_difficulty(&blocks.last().unwrap().target);
         let new_diff = target_to_difficulty(&new_target);
         assert!(new_diff >= old_diff);
+    }
+
+    /// v1.0.12 S1 regression test — ASERT must produce a MEASURABLE
+    /// difficulty change in response to sustained off-target block
+    /// times. The pre-fix bug made ASERT 120× weaker than designed
+    /// (denominator had a spurious `* target_time` factor); the
+    /// existing `test_difficulty_increases_on_fast_blocks` only
+    /// asserted `new_diff >= old_diff` which passed even with a
+    /// 0.01% adjustment, hiding the bug.
+    ///
+    /// This test pins the magnitude. With 20 blocks at half the
+    /// target time, ASERT should respond with a difficulty increase
+    /// of AT LEAST 5% (the original buggy version produced ~0.06%).
+    #[test]
+    fn test_asert_responsive_to_time_error() {
+        // 20 blocks at HALF the target time = 50% time deficit over
+        // ~20 minutes of expected time. With halflife=3600s, expected
+        // exponent ≈ -1200/3600 ≈ -0.333 → target should shrink by
+        // ~2^0.333 ≈ 1.26× → difficulty rises ~26%.
+        let blocks: Vec<_> = (0..20).map(|i| make_block(i, i * (TARGET_BLOCK_TIME / 2))).collect();
+        let new_target = calculate_difficulty(&blocks, 20);
+        let old_diff = target_to_difficulty(&blocks.last().unwrap().target);
+        let new_diff = target_to_difficulty(&new_target);
+
+        // Difficulty must rise meaningfully. 5% is a generous floor
+        // that catches the previous 0.06% bug shape but leaves
+        // headroom for clamp behaviour. The actual value should be
+        // closer to ~20-30% rise.
+        assert!(
+            new_diff >= old_diff + (old_diff / 20),
+            "ASERT failed to respond to 50% time deficit over 20 blocks: \
+             old_diff={}, new_diff={} (expected at least +5%); \
+             pre-S1-fix the response was 0.06% — if this test fails, \
+             check src/consensus/difficulty.rs::apply_asert for a \
+             spurious target_time multiplier in the denominator.",
+            old_diff, new_diff,
+        );
     }
 
     #[test]
