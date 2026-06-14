@@ -141,8 +141,13 @@ pub const LWMA_WINDOW: u64 = 60;
 /// Median time past window for timestamp rules (blocks).
 pub const MTP_WINDOW: usize = 11;
 
-/// Maximum time in the future a block timestamp may claim (seconds).
-pub const MAX_FUTURE_TIMESTAMP: u64 = 60 * 10;
+// v1.0.12 cleanup: removed unused `MAX_FUTURE_TIMESTAMP` constant.
+// Block-timestamp future drift is enforced via `MAX_TIMESTAMP_DRIFT`
+// (line 297) — `validate_block_header` consults that one. The
+// duplicate name carried the same numeric value (600s = 10min) but
+// was never referenced anywhere, creating a hazard where a future
+// edit could mistakenly tune the dead constant and assume the
+// validation rule changed.
 
 /// How often a new RandomX key block is chosen (blocks).
 pub const RANDOMX_KEY_INTERVAL: u64 = 2048;
