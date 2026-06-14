@@ -149,14 +149,29 @@ impl PedersenCommitment {
         PedersenCommitment(point.compress())
     }
 
-    /// Create from bytes (unchecked - does not validate the point)
-    /// Use `from_bytes_checked` for validated construction
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    /// Create from bytes WITHOUT validating that the bytes represent
+    /// a valid Ristretto point.
+    ///
+    /// **DANGER:** Any consumer of the returned `PedersenCommitment`
+    /// that doesn't immediately call `.decompress()` (or do another
+    /// equivalent curve check) gets a value that may not be on the
+    /// curve — silently making downstream verification more permissive
+    /// than intended.
+    ///
+    /// v1.0.12 rename (from `from_bytes` → `from_bytes_unchecked`) so
+    /// the name itself flags the unsafety. Every production caller as
+    /// of v1.0.12 already uses `from_bytes_checked`; this remains
+    /// available only for the rare case where a caller has already
+    /// validated the bytes through a different path (e.g., they came
+    /// from a previously-decompressed `to_bytes()` round-trip on the
+    /// same node) AND wants to skip the decompression cost.
+    pub fn from_bytes_unchecked(bytes: [u8; 32]) -> Self {
         PedersenCommitment(CompressedRistretto(bytes))
     }
 
-    /// Create from bytes with validation
-    /// Returns None if bytes don't represent a valid Ristretto point
+    /// Create from bytes with validation. Returns None if bytes don't
+    /// represent a valid Ristretto point. **This is the safe default
+    /// — every production caller should use this.**
     pub fn from_bytes_checked(bytes: [u8; 32]) -> Option<Self> {
         let compressed = CompressedRistretto(bytes);
         // Try to decompress to validate the point
