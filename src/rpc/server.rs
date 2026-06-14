@@ -1537,16 +1537,26 @@ pub async fn start_rpc_server(
                 -32602, "end must be >= start".to_string(), None::<()>,
             ));
         }
-        let capped = (end - start + 1).min(MAX_RANGE);
+        // v1.0.12 audit-follow-up: saturating arithmetic on the
+        // range math. `end - start + 1` overflows when start=0 and
+        // end=u64::MAX; `start + capped` overflows when start is
+        // near u64::MAX. Both panic in debug builds and wrap to
+        // wrong-but-silent in release. Saturating versions degrade
+        // cleanly to a small/empty range, which is the right
+        // semantics (no blocks exist that high).
+        let span = end.saturating_sub(start).saturating_add(1);
+        let capped = span.min(MAX_RANGE);
         let mut blocks = Vec::with_capacity(capped as usize);
-        for h in start..start + capped {
+        let loop_end = start.saturating_add(capped);
+        for h in start..loop_end {
             if let Some(block) = state.chain.get_block_by_height(h) {
                 blocks.push(serialize_block(&block, h));
             }
         }
+        let response_end = start.saturating_add(capped).saturating_sub(1);
         Ok::<_, ErrorObjectOwned>(json!({
             "start": start,
-            "end": start + capped - 1,
+            "end": response_end,
             "count": blocks.len(),
             "blocks": blocks,
         }))
@@ -1730,7 +1740,14 @@ pub async fn start_rpc_server(
         })?;
         let count = count.min(100); // Cap at 100 blocks per request
         let mut blocks = Vec::new();
-        for h in from_height..from_height + count {
+        // v1.0.12 audit-follow-up: saturating_add so from_height near
+        // u64::MAX doesn't overflow the upper bound. In debug builds
+        // the bare addition panics; in release it wraps to give an
+        // empty range — both wrong. With saturating_add, the loop is
+        // simply empty at the saturation point, which is the correct
+        // semantics (no blocks exist at u64::MAX anyway).
+        let end = from_height.saturating_add(count);
+        for h in from_height..end {
             if let Some(block) = state.chain.get_block_by_height(h) {
                 let block_hex = hex::encode(borsh::to_vec(&block).unwrap_or_default());
                 blocks.push(json!({
