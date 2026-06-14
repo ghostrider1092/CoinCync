@@ -3166,18 +3166,44 @@ async fn process_message(
                 }
             };
             {
-                // SECURITY (NET-001): Detect self-connection via nonce
+                // SECURITY (NET-001 + v1.0.12 fix): Detect self-connection
+                // via nonce match — but DON'T permanently ban the peer's
+                // address.
+                //
+                // The pre-v1.0.12 code marked any address that sent us
+                // OUR nonce as "ours" and permanently skipped it. But
+                // `our_nonce` is a per-node-lifetime u64; any peer who
+                // received our Version (i.e., every peer we've dialed
+                // or been dialed by) knows it and can replay it. An
+                // attacker spins up a peer, reads our_nonce from our
+                // outbound Version, then connects FROM A DIFFERENT
+                // ADDRESS sending our_nonce back. Pre-fix: we
+                // permanently banned that address. With repeats, the
+                // attacker could blacklist ANY IP — eclipse attack
+                // surface.
+                //
+                // The right defense is per-outbound nonce tracking
+                // (track which nonce we sent to which addr; require
+                // the inbound nonce to match BOTH the value AND the
+                // sender address). That's a v1.0.13 follow-up because
+                // it touches the Version-send path and the connection
+                // state map. For v1.0.12 we ship the smaller
+                // defensive fix: detect the nonce match, disconnect,
+                // but DON'T mark the address as ours. A legitimate
+                // self-connection (typically a config error where the
+                // operator addnoded their own IP) becomes a one-time
+                // disconnect the operator can resolve via config; an
+                // attacker can no longer poison the address book.
                 if version.nonce == our_nonce {
-                    warn!("Self-connection detected (nonce match), disconnecting peer {:?}", &peer_id[..4]);
-                    // Permanently ban this address in the address manager so the
-                    // outbound connector never retries it. Without this, the
-                    // exponential backoff delays connections to ALL seeds.
-                    if let Some(peer_info) = peers.get(&peer_id) {
-                        let self_addr = peer_info.addr;
-                        drop(peer_info);
-                        addresses.write().await.mark_self_address(self_addr);
-                        tracing::info!("Permanently skipping self-address {}", self_addr);
-                    }
+                    warn!(
+                        "Self-connection nonce match from peer {:?} \
+                         — disconnecting. Note: NOT marking as self-address \
+                         because the nonce is replay-able; if this fires \
+                         repeatedly for legitimately-yours addresses, \
+                         verify the operator config doesn't list its own IP \
+                         in --addnode.",
+                        &peer_id[..4],
+                    );
                     peers.remove(&peer_id);
                     senders.remove(&peer_id);
                     let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
