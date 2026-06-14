@@ -169,11 +169,33 @@ impl BlockReconstructor {
         let mut transactions: Vec<Option<Transaction>> = vec![None; total_txs];
         let mut missing = Vec::new();
 
-        // Fill in prefilled transactions
+        // v1.0.12: Reject malformed compact blocks at this layer
+        // instead of silently dropping bad prefills and letting the
+        // error surface as a merkle-root mismatch downstream.
+        //
+        // Two cases that the pre-fix code silently swallowed:
+        //   1. prefilled.index >= total_txs (out-of-bound slot)
+        //   2. two prefills targeting the same index (silent overwrite)
+        //
+        // Both produce a reconstructed block whose tx-order can't
+        // match the real block's merkle root, but the failure was
+        // late-bound (merkle check) — confusing to operators and
+        // wasting the mempool-index lookup work in the loop below.
+        // Returning Err(vec![]) here matches the "unrecoverable
+        // compact block" signal used for tx-count-cap violations
+        // above; the caller falls back to GetData for the full block.
+        let mut prefilled_indices = std::collections::HashSet::with_capacity(
+            compact.prefilled_txs.len()
+        );
         for prefilled in &compact.prefilled_txs {
-            if (prefilled.index as usize) < total_txs {
-                transactions[prefilled.index as usize] = Some(prefilled.tx.clone());
+            let idx = prefilled.index as usize;
+            if idx >= total_txs {
+                return Err(vec![]);
             }
+            if !prefilled_indices.insert(idx) {
+                return Err(vec![]); // duplicate index in prefilled set
+            }
+            transactions[idx] = Some(prefilled.tx.clone());
         }
 
         // Fill in transactions from mempool using short IDs
