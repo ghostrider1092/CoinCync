@@ -466,6 +466,37 @@ fn different_keyimage_is_distinct_spend() {
 // =============================================================================
 
 #[test]
+fn tx_with_duplicate_stealth_addresses_rejected() {
+    // v1.0.12 fix: a tx with two outputs sharing a stealth address
+    // would silently lose one output to UtxoSet's or_insert
+    // indexing. Now rejected at validate_transaction.
+    let utxos = UtxoSet::new();
+    // UNIFORM_TX_SHAPE_HEIGHT=0 requires exactly 2 inputs + 2 outputs
+    // for Transfer/Churn. Build one with duplicated outputs to land
+    // on the new dup-stealth check, not the shape check.
+    let tx0 = make_transfer(50, 10_000_000, BOOTSTRAP_MIN_RING_SIZE);
+    let tx1 = make_transfer(51, 10_000_000, BOOTSTRAP_MIN_RING_SIZE);
+    let dup = make_output(1);
+    let tx = Transaction {
+        version: 1,
+        tx_type: TxType::Transfer,
+        inputs: vec![tx0.inputs[0].clone(), tx1.inputs[0].clone()],
+        outputs: vec![dup.clone(), dup],
+        fee: tx0.fee,
+        range_proof: tx0.range_proof.clone(),
+        extra: vec![50],
+    };
+    let result = coincync::consensus::validate_transaction(&tx, &utxos, 100);
+    assert!(result.is_err(),
+            "tx with duplicate stealth addresses in its outputs must be rejected");
+    if let Err(e) = result {
+        let msg = format!("{:?}", e).to_lowercase();
+        assert!(msg.contains("duplicate") && msg.contains("stealth"),
+                "error must cite duplicate stealth address, got: {}", msg);
+    }
+}
+
+#[test]
 fn block_with_wrong_merkle_root_rejected() {
     let parent_header = base_header(10, 1_000_000, Hash::zero(), expected_magic());
     let parent_block = Block::new(parent_header.clone(), Vec::new());

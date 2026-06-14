@@ -1150,6 +1150,56 @@ pub fn validate_transaction(
         }
     }
 
+    // SECURITY (v1.0.12): Reject duplicate stealth addresses in
+    // tx.outputs — both in-tx and against existing on-chain
+    // outputs.
+    //
+    // ## The hole
+    //
+    // `UtxoSet::add_output_ext` uses `stealth_index.entry(addr)
+    // .or_insert(key)` to index outputs by stealth address. The
+    // `or_insert` SILENTLY DROPS any subsequent insert with the
+    // same key.
+    //
+    // In-tx case: if a tx has outputs[0].stealth_address ==
+    // outputs[1].stealth_address, only outputs[0] gets indexed.
+    // outputs[1]'s OutputRef sits in `outputs` keyed by
+    // (tx_hash, 1), but every spend-side lookup goes through
+    // get_output_by_stealth → returns outputs[0]'s OutputRef +
+    // commitment. The recipient (or an attacker who later wants
+    // to use it as a ring decoy) sees outputs[0]'s commitment,
+    // not outputs[1]'s. CLSAG ring verification would consult
+    // the wrong commitment and either incorrectly accept a
+    // fabricated signature or incorrectly reject a valid one,
+    // depending on the attacker's framing.
+    //
+    // Cross-tx case: if a new output's stealth address matches
+    // an existing on-chain output's, the new one's stealth_index
+    // / output_index entry is silently dropped — same lookup
+    // poisoning. Honest stealth addresses are random
+    // (Diffie-Hellman derived per-output); duplicates only
+    // happen via deliberate construction or broken RNG. Rejecting
+    // is safe.
+    //
+    // We check via the permanent output_index (retains historical
+    // outputs including spent ones) so a cross-tx clash with any
+    // ever-existed output is caught.
+    let mut seen_outputs_in_tx = std::collections::HashSet::with_capacity(tx.outputs.len());
+    for (out_idx, output) in tx.outputs.iter().enumerate() {
+        let addr_bytes = *output.stealth_address.as_bytes();
+        if !seen_outputs_in_tx.insert(addr_bytes) {
+            return Err(Error::InvalidTransaction(format!(
+                "duplicate stealth address at output {}", out_idx
+            )));
+        }
+        if utxos.get_output_index_entry(&addr_bytes).is_some() {
+            return Err(Error::InvalidTransaction(format!(
+                "output {} stealth address collides with existing on-chain output",
+                out_idx
+            )));
+        }
+    }
+
     // SECURITY (CRIT-5 + HIGH-4): Validate ring members exist in UTXO set and
     // enforce coinbase maturity. Ring members referencing non-existent outputs
     // could be used to forge ring signatures. Immature coinbase outputs must
