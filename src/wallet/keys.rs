@@ -439,15 +439,39 @@ impl SparkAddress {
             .unwrap_or_else(|_| "invalid_spark_address".to_string())
     }
 
-    pub fn from_bech32(s: &str) -> Result<Self> {
-        let (_, data, _) = bech32::decode(s)
+    /// Decode a bech32m-encoded Spark address.
+    ///
+    /// v1.0.12 audit follow-up: `expected_hrp` is now required (was
+    /// previously discarded via `(_,_,_)`), and the bech32 VARIANT
+    /// is checked too. Pre-fix this function accepted ANY hrp
+    /// (mainnet "ys" / testnet "ts" / random "abc") AND either
+    /// Bech32 or Bech32m, despite the encoder always emitting
+    /// Bech32m. Same cross-network-address-confusion class as the
+    /// earlier `PaymentAddress::from_bech32` fix.
+    ///
+    /// Spark is currently sketch-feature-gated
+    /// (`sketch-lelantus-spark`) so the function has no callers
+    /// in tree yet — fixing pre-emptively so the feature lands
+    /// already hardened.
+    pub fn from_bech32(s: &str, expected_hrp: &str) -> Result<Self> {
+        let (hrp, data, variant) = bech32::decode(s)
             .map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
+        if hrp != expected_hrp {
+            return Err(Error::Other(format!(
+                "Spark address HRP mismatch: expected {}, got {}",
+                expected_hrp, hrp
+            )));
+        }
+        if !matches!(variant, bech32::Variant::Bech32m) {
+            return Err(Error::Other(
+                "Spark address must use bech32m variant".into()
+            ));
+        }
         let raw: Vec<u8> = bech32::FromBase32::from_base32(&data)
             .map_err(|e| Error::Other(format!("base32 decode: {}", e)))?;
         if raw.len() != 43 {
             return Err(Error::Other("bad Spark address length".into()));
         }
-        // SAFETY: length validated to be exactly 43 on line 388
         let diversifier: [u8; 11] = raw[..11].try_into().unwrap();
         let pk_bytes: [u8; 32] = raw[11..43].try_into().unwrap();
         let pk = CompressedRistretto(pk_bytes)
