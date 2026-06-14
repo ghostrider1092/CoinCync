@@ -640,8 +640,31 @@ impl PeerScorer {
         false
     }
 
+    /// v1.0.12: Drop expired ban entries to bound memory.
+    ///
+    /// `is_banned()` only checks expiry; `ban()` only overwrites the
+    /// same address. Without an explicit sweep, the `banned` map
+    /// grows monotonically over the node's lifetime as old bans
+    /// expire but their entries linger. ~50 bytes per ever-banned IP.
+    /// On a long-running validator/seed seeing routine misbehavior
+    /// scoring, that adds up.
+    ///
+    /// Called opportunistically from `ban()` (best moment — we're
+    /// already mutating the map) and exposed publicly for periodic
+    /// callers (the node's housekeeping tick).
+    pub fn prune_expired_bans(&mut self) -> usize {
+        let now = Instant::now();
+        let before = self.banned.len();
+        self.banned.retain(|_, expiry| now < *expiry);
+        before.saturating_sub(self.banned.len())
+    }
+
     /// Ban a peer
     pub fn ban(&mut self, addr: SocketAddr) {
+        // v1.0.12: opportunistic GC — every ban call sweeps a few
+        // stale entries. Amortizes cleanup so long-running nodes
+        // don't need a dedicated housekeeping path to stay bounded.
+        self.prune_expired_bans();
         let expiry = Instant::now() + self.ban_duration;
         self.banned.insert(addr, expiry);
         self.scores.remove(&addr);
@@ -852,6 +875,38 @@ mod tests {
         assert!(scorer.is_banned(&addr));
         scorer.unban(&addr);
         assert!(!scorer.is_banned(&addr));
+    }
+
+    #[test]
+    fn prune_expired_bans_drops_old_entries() {
+        // v1.0.12 audit-follow-up #1: the banned map used to grow
+        // monotonically because `is_banned()` only checked expiry
+        // and never removed the entry. This test asserts that the
+        // new `prune_expired_bans()` sweep removes already-expired
+        // entries while preserving still-active ones.
+        let mut scorer = PeerScorer::new();
+        let live = test_addr(9001);
+        let stale = test_addr(9002);
+
+        // Hand-poke an already-expired entry into the map.
+        scorer.banned.insert(stale, Instant::now() - Duration::from_secs(60));
+        scorer.ban(live); // also exercises ban()'s opportunistic prune
+
+        // ban() should have GC'd stale already.
+        assert!(!scorer.banned.contains_key(&stale),
+                "ban() must opportunistically prune expired entries");
+        assert!(scorer.banned.contains_key(&live),
+                "live ban must persist past prune");
+
+        // Direct prune call is a no-op now (nothing stale).
+        assert_eq!(scorer.prune_expired_bans(), 0);
+
+        // Re-insert stale, call prune directly.
+        scorer.banned.insert(stale, Instant::now() - Duration::from_secs(60));
+        let removed = scorer.prune_expired_bans();
+        assert_eq!(removed, 1);
+        assert!(!scorer.banned.contains_key(&stale));
+        assert!(scorer.banned.contains_key(&live));
     }
 
     #[test]
