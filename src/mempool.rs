@@ -522,23 +522,51 @@ impl Mempool {
             return Err(self.reject(tx_hash, err));
         }
 
-        // SECURITY (BUG-12): Check for double-spend in mempool — allow RBF if fee is higher.
-        // Collect ALL conflicting transactions (not just the first one) to maintain
-        // the invariant that no two mempool txs share a key image.
+        // SECURITY (BUG-12 + v1.0.12 BIP-125 Rule 3): Check for
+        // double-spend in mempool — allow RBF only if BOTH the
+        // fee-rate-bump rule AND the absolute-fee-sum rule pass.
+        //
+        // The pre-v1.0.12 code only checked fee-rate per byte. That
+        // allowed a real mempool-revenue-drain attack:
+        //
+        //   1. Attacker submits fat tx_A: rate=100, size=1MB,
+        //      total_fee=100M atomic.
+        //   2. Honest user submits tx_B with same key image at
+        //      rate=150 (50% rate bump → passes 25% rule), size=1MB,
+        //      fee=150M. Replaces tx_A. Mempool rev rises.
+        //   3. Attacker submits tx_C: rate=200, size=1KB, fee=200K.
+        //      Conflicts with tx_B via key image (attacker owns the
+        //      key). 200 > 1.25 * 150 = 187.5 → rate rule passes.
+        //      Replaces tx_B. Mempool rev DROPS by 149.8M.
+        //
+        // BIP-125 Rule 3 closes this: the replacement tx must pay
+        // an absolute fee >= sum of absolute fees of all replaced
+        // txs. Since the attacker's tiny tx_C pays only 200K, far
+        // below tx_B's 150M, it's rejected.
+        //
+        // We retain the rate-bump rule too (Rule 4 in BIP-125)
+        // because pure absolute-fee comparison without it allows
+        // pinning attacks where a fat low-rate tx is replaced by an
+        // even fatter low-rate tx for the same total fee — that
+        // displaces high-rate small txs from the mempool. Both
+        // rules are mutually reinforcing.
         let new_fee_rate = scaled_fee_per_byte(tx.fee.as_atomic(), size);
+        let new_total_fee = tx.fee.as_atomic();
         let mut to_replace: Vec<Hash> = Vec::new();
+        let mut replaced_fee_sum: u128 = 0;
         for ki in tx.key_images() {
             if self.key_images.contains(&ki) {
                 // Find the conflicting transaction for this key image
                 let conflicting = self.transactions.iter()
                     .find(|(_, entry)| entry.tx.key_images().iter().any(|k| k == &ki))
-                    .map(|(hash, entry)| (*hash, entry.fee_per_byte));
+                    .map(|(hash, entry)| (*hash, entry.fee_per_byte, entry.fee.as_atomic()));
 
-                if let Some((old_hash, old_fee_rate)) = conflicting {
-                    // Require 25% fee bump minimum to prevent spam.
-                    // Phase D (audit fix): cross-multiply to avoid integer-division
-                    // rounding (the previous `old*125/100` then `>` form rejected exact
-                    // 125% bumps and silently allowed no-bump replacements at fee_rate=1).
+                if let Some((old_hash, old_fee_rate, old_fee_total)) = conflicting {
+                    // Rule 4: require 25% fee-RATE bump minimum.
+                    // Cross-multiply to avoid integer-division rounding
+                    // (the previous `old*125/100` then `>` form rejected
+                    // exact 125% bumps and silently allowed no-bump
+                    // replacements at fee_rate=1).
                     //
                     // Accept iff: new_rate * DEN >= old_rate * NUM AND new_rate > old_rate
                     let lhs = (new_fee_rate as u128).saturating_mul(RBF_FEE_BUMP_DENOMINATOR as u128);
@@ -546,15 +574,29 @@ impl Mempool {
                     if lhs >= rhs && new_fee_rate > old_fee_rate {
                         if !to_replace.contains(&old_hash) {
                             to_replace.push(old_hash);
+                            replaced_fee_sum = replaced_fee_sum
+                                .saturating_add(old_fee_total as u128);
                         }
                         continue; // Check remaining key images for other conflicts
                     }
                 }
                 let err = Error::DuplicateKeyImage(
-                    "duplicate key image; fee too low to replace".into(),
+                    "duplicate key image; fee rate too low to replace".into(),
                 );
                 return Err(self.reject(tx_hash, err));
             }
+        }
+        // Rule 3: absolute fee of replacement must be >= sum of
+        // absolute fees of all replaced txs. Enforced AFTER the
+        // rate-bump loop so we know the full replacement set.
+        if !to_replace.is_empty() && (new_total_fee as u128) < replaced_fee_sum {
+            let err = Error::DuplicateKeyImage(
+                format!(
+                    "RBF Rule 3: replacement fee {} < sum of replaced fees {}",
+                    new_total_fee, replaced_fee_sum,
+                ),
+            );
+            return Err(self.reject(tx_hash, err));
         }
         // Perform ALL replacements outside the borrow
         for old_hash in &to_replace {
