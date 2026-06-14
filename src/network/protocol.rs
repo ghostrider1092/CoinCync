@@ -464,6 +464,14 @@ pub struct InvMessage {
 
 impl InvMessage {
     /// Validate the message to prevent DoS attacks
+    ///
+    /// v1.0.12 audit-follow-up: in addition to the size cap, reject
+    /// duplicate hashes. Pre-fix a peer could send MAX_INV_SIZE invs
+    /// all referencing the same hash; the InvTx/InvBlock handlers
+    /// would push the duplicate into `needed` MAX_INV_SIZE times and
+    /// emit a GetTxs/GetBlocks asking for the same item that many
+    /// times in one message. Wasted bandwidth bounded but real
+    /// across many peers, and the receiver may double-process.
     pub fn validate(&self) -> Result<()> {
         if self.inventory.len() > MAX_INV_SIZE {
             return Err(Error::ProtocolError(format!(
@@ -471,6 +479,14 @@ impl InvMessage {
                 self.inventory.len(),
                 MAX_INV_SIZE
             )));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(self.inventory.len());
+        for inv in &self.inventory {
+            if !seen.insert(inv.hash) {
+                return Err(Error::ProtocolError(format!(
+                    "duplicate inventory hash"
+                )));
+            }
         }
         Ok(())
     }
@@ -699,5 +715,37 @@ mod tests {
     fn test_version_message() {
         let msg = Message::version(MAINNET_MAGIC, 100, Hash::zero()).unwrap();
         assert_eq!(msg.msg_type().unwrap(), MessageType::Version);
+    }
+
+    /// v1.0.12 audit-follow-up: InvMessage::validate rejects
+    /// duplicates. Pre-fix the only check was the size cap; a peer
+    /// could ship 500 invs all referencing the same hash and the
+    /// receiver's GetTxs/GetBlocks would re-request the same item
+    /// 500 times.
+    #[test]
+    fn inv_validate_rejects_duplicate_hashes() {
+        let h = Hash::from_bytes([7u8; 32]);
+        let msg = InvMessage {
+            inventory: vec![
+                InvVector { inv_type: 1, hash: h },
+                InvVector { inv_type: 1, hash: h }, // dup
+            ],
+        };
+        let err = msg.validate().unwrap_err();
+        let s = format!("{:?}", err).to_lowercase();
+        assert!(s.contains("duplicate"),
+                "must cite duplicate, got: {}", s);
+    }
+
+    #[test]
+    fn inv_validate_accepts_distinct_hashes() {
+        let msg = InvMessage {
+            inventory: vec![
+                InvVector { inv_type: 1, hash: Hash::from_bytes([1u8; 32]) },
+                InvVector { inv_type: 1, hash: Hash::from_bytes([2u8; 32]) },
+                InvVector { inv_type: 1, hash: Hash::from_bytes([3u8; 32]) },
+            ],
+        };
+        assert!(msg.validate().is_ok());
     }
 }

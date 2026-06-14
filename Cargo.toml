@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name         = "coincync"
-version = "1.0.11"
+version = "1.0.12"
 edition      = "2021"
 rust-version = "1.75"
 authors      = ["CoinCync 1.0 Contributors"]
@@ -192,7 +192,7 @@ ordered-float = "4"
 # â”€â”€ CLI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 colored   = "2"
 indicatif = { version = "0.18", features = ["tokio"] }
-dialoguer = { version = "0.12", features = ["password"], optional = true }
+dialoguer = { version = "0.12", features = ["password"] }
 console   = "0.15"
 rustyline = "13"
 strsim    = "0.11"

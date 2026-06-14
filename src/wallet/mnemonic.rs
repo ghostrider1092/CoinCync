@@ -47,11 +47,57 @@ impl WalletMnemonic {
     }
 
     /// Create from an existing phrase
+    /// Parse a BIP-39 mnemonic phrase, requiring 24 words (256 bits
+    /// of entropy).
+    ///
+    /// v1.0.12 audit-follow-up: enforces 24 words at the boundary.
+    /// `generate()` always emits 24 words; the pre-fix
+    /// `from_phrase` silently accepted any valid BIP-39 length
+    /// (12/15/18/21/24 words). Importing a 12-word seed halved
+    /// effective entropy from 256 bits to 128 bits with no
+    /// indication to the user.
+    ///
+    /// For a PoW privacy chain whose threat model includes
+    /// well-resourced attackers (nation-state, exchange-grade
+    /// compute, stolen-laptop scenarios), 128-bit seeds are below
+    /// the floor we want to advertise. CoinCync's wallet format
+    /// also assumes 256-bit seed material throughout the key
+    /// derivation chain — a 128-bit seed expanded to 256 bits via
+    /// PBKDF2 still has only 128 bits of underlying entropy.
+    ///
+    /// If a caller has a legitimate need to import a < 24-word
+    /// seed (cross-chain Bitcoin imports, exchange withdrawals),
+    /// they MUST go through `from_phrase_unchecked` explicitly so
+    /// the reduced-entropy choice is visible at the call site.
     pub fn from_phrase(phrase: &str) -> Result<Self> {
-        // Validate the mnemonic by parsing it
-        let _mnemonic = Mnemonic::parse_in(Language::English, phrase)
+        let mnemonic = Mnemonic::parse_in(Language::English, phrase)
             .map_err(|e| Error::InvalidMnemonic(e.to_string()))?;
 
+        let word_count = mnemonic.word_count();
+        if word_count != 24 {
+            return Err(Error::InvalidMnemonic(format!(
+                "mnemonic must be 24 words (256-bit entropy floor for CoinCync wallets); \
+                 got {} words. If you intentionally need to import a shorter seed, use \
+                 from_phrase_unchecked — but the resulting wallet will have reduced \
+                 entropy and is not recommended for storing significant value.",
+                word_count
+            )));
+        }
+
+        Ok(WalletMnemonic {
+            phrase: phrase.to_string(),
+        })
+    }
+
+    /// Parse a BIP-39 mnemonic phrase of ANY valid length (12, 15,
+    /// 18, 21, or 24 words). Use only when you have a specific
+    /// reason to accept reduced-entropy seeds — typically
+    /// cross-chain imports where the user's existing seed material
+    /// is fixed and re-keying isn't an option. Prefer `from_phrase`
+    /// (enforces 24 words) for any new wallet.
+    pub fn from_phrase_unchecked(phrase: &str) -> Result<Self> {
+        let _ = Mnemonic::parse_in(Language::English, phrase)
+            .map_err(|e| Error::InvalidMnemonic(e.to_string()))?;
         Ok(WalletMnemonic {
             phrase: phrase.to_string(),
         })
@@ -432,6 +478,24 @@ mod tests {
 
         // Different paths should give different keys
         assert_ne!(key1, key2);
+    }
+
+    /// v1.0.12 audit follow-up: from_phrase MUST reject < 24-word
+    /// mnemonics. generate() always emits 24; importing a shorter
+    /// (BIP-39-valid but lower-entropy) seed via the default path
+    /// is no longer allowed.
+    #[test]
+    fn test_from_phrase_rejects_short_mnemonics() {
+        // A valid 12-word BIP-39 phrase (test vector from BIP-39 spec).
+        let twelve = "abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon about";
+        let err = WalletMnemonic::from_phrase(twelve).unwrap_err();
+        let msg = format!("{:?}", err).to_lowercase();
+        assert!(msg.contains("24 words"),
+                "rejection must cite the 24-word floor, got: {}", msg);
+
+        // But from_phrase_unchecked accepts it (explicit opt-in).
+        assert!(WalletMnemonic::from_phrase_unchecked(twelve).is_ok());
     }
 
     #[test]

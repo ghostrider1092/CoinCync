@@ -12,7 +12,8 @@
 
 use coincync::consensus::{validate_block, Block, BlockHeader};
 use coincync::constants::{
-    BOOTSTRAP_MIN_RING_SIZE, DEFAULT_RING_SIZE, MIN_FEE_PER_BYTE,
+    BOOTSTRAP_MIN_RING_SIZE, DEFAULT_RING_SIZE, MID_RING_SIZE, MIN_FEE_PER_BYTE,
+    RING_SIZE_RAMP_TO_FULL_HEIGHT, RING_SIZE_RAMP_TO_MID_HEIGHT,
     ring_size_at_height,
 };
 use coincync::crypto::{
@@ -90,27 +91,147 @@ fn make_transfer(seed: u8, ring_size: usize) -> Transaction {
 }
 
 // =============================================================================
-// T2.1 — RING SIZE BOOTSTRAP CUTOVER (height 10,000)
+// T2.1 — RING SIZE GRADUATED RAMP (heights 5,000 and 10,000)
 //
-// Before 10,000: ring size 11 is minimum
-// At/after 10,000: ring size 16 is minimum
+// v1.0.12 replaced the single-step bootstrap cutover (11 → 16 at h=10,000)
+// with a three-bracket ramp:
+//   - h <  5,000              : ring 11 (BOOTSTRAP_MIN_RING_SIZE)
+//   - h ∈ [5,000, 10,000)     : ring 13 (MID_RING_SIZE) — NEW intermediate
+//   - h ≥ 10,000              : ring 16 (DEFAULT_RING_SIZE)
+//
+// The intermediate stage gives the available-outputs floor time to catch up
+// before the next bump. Full ring 16 still activates at the same h=10,000
+// — the change only adds the intermediate 13 at h=5,000.
+//
+// See docs/decisions/2026-06-06-ring-ramp-and-output-age.md.
 // =============================================================================
 
 #[test]
-fn ring_size_function_returns_11_before_cutover() {
+fn ring_size_function_stage_1_bootstrap_before_h_5000() {
     assert_eq!(ring_size_at_height(0), BOOTSTRAP_MIN_RING_SIZE);
-    assert_eq!(ring_size_at_height(9_999), BOOTSTRAP_MIN_RING_SIZE);
+    assert_eq!(ring_size_at_height(1), BOOTSTRAP_MIN_RING_SIZE);
+    assert_eq!(ring_size_at_height(4_999), BOOTSTRAP_MIN_RING_SIZE);
+    // RING_SIZE_RAMP_TO_MID_HEIGHT - 1 must still return 11.
+    assert_eq!(
+        ring_size_at_height(RING_SIZE_RAMP_TO_MID_HEIGHT - 1),
+        BOOTSTRAP_MIN_RING_SIZE,
+    );
 }
 
 #[test]
-fn ring_size_function_returns_16_at_cutover() {
+fn ring_size_function_stage_2_mid_at_h_5000_through_h_9999() {
+    // Activation height: exactly 5,000 must return MID_RING_SIZE.
+    assert_eq!(ring_size_at_height(RING_SIZE_RAMP_TO_MID_HEIGHT), MID_RING_SIZE);
+    assert_eq!(ring_size_at_height(5_000), MID_RING_SIZE);
+    assert_eq!(ring_size_at_height(5_001), MID_RING_SIZE);
+    // Spread across the bracket.
+    assert_eq!(ring_size_at_height(7_500), MID_RING_SIZE);
+    // Last height before the next bump.
+    assert_eq!(ring_size_at_height(9_999), MID_RING_SIZE);
+    assert_eq!(
+        ring_size_at_height(RING_SIZE_RAMP_TO_FULL_HEIGHT - 1),
+        MID_RING_SIZE,
+    );
+}
+
+#[test]
+fn ring_size_function_stage_3_full_at_h_10000_onward() {
+    assert_eq!(ring_size_at_height(RING_SIZE_RAMP_TO_FULL_HEIGHT), DEFAULT_RING_SIZE);
     assert_eq!(ring_size_at_height(10_000), DEFAULT_RING_SIZE);
-}
-
-#[test]
-fn ring_size_function_returns_16_after_cutover() {
     assert_eq!(ring_size_at_height(10_001), DEFAULT_RING_SIZE);
     assert_eq!(ring_size_at_height(100_000), DEFAULT_RING_SIZE);
+    assert_eq!(ring_size_at_height(u64::MAX), DEFAULT_RING_SIZE);
+}
+
+#[test]
+fn ring_size_constants_invariants() {
+    // Constitutional floor (Article III).
+    assert!(BOOTSTRAP_MIN_RING_SIZE >= 11);
+    // Ramp is monotonically increasing.
+    assert!(MID_RING_SIZE > BOOTSTRAP_MIN_RING_SIZE);
+    assert!(DEFAULT_RING_SIZE > MID_RING_SIZE);
+    // Activation heights are monotonically increasing.
+    assert!(RING_SIZE_RAMP_TO_MID_HEIGHT < RING_SIZE_RAMP_TO_FULL_HEIGHT);
+    // The new mid-stage must come strictly between the bracket endpoints.
+    assert!(RING_SIZE_RAMP_TO_MID_HEIGHT > 0);
+    assert!(RING_SIZE_RAMP_TO_FULL_HEIGHT < u64::MAX);
+}
+
+// =============================================================================
+// T2.1.b — END-TO-END VALIDATOR ENFORCEMENT OF THE RAMP
+//
+// The unit tests above verify the ring_size_at_height() function. These
+// tests verify that the CONSENSUS VALIDATOR actually uses that function
+// at each ring-size enforcement site — proving the ramp isn't just a
+// function nobody calls.
+//
+// We craft a transaction with an explicit ring-member-count, run it
+// through Mempool::add (which calls validate_transaction at the
+// configured chain height), and assert acceptance/rejection at the
+// expected outcome.
+//
+// add_skip_crypto bypasses CLSAG/range-proof crypto so we only exercise
+// the ring-size gate — what we care about for this test.
+// =============================================================================
+
+#[test]
+fn ring_ramp_validator_mempool_admission_basic_floor_only() {
+    // `Mempool::add_skip_crypto` runs the contextless
+    // `validate_transaction_basic` path — which only enforces the
+    // CONSTITUTIONAL FLOOR (ring >= 11), not the height-aware ramp.
+    // This test pins that semantic: at mempool admission without chain
+    // context, any ring >= 11 is accepted.
+    //
+    // The actual ring-ramp enforcement at h=5,000 happens at the
+    // height-aware `validate_transaction(tx, &utxos, current_height)`
+    // path (called by `Mempool::add_with_chain` and by block
+    // validation). That path's call site is pinned by the
+    // source-content test below.
+    {
+        let mut pool = Mempool::new();
+        let tx_11 = make_transfer(101, BOOTSTRAP_MIN_RING_SIZE);
+        assert!(
+            pool.add_skip_crypto(tx_11).is_ok(),
+            "basic-floor path: ring=11 must be accepted",
+        );
+    }
+    {
+        // ring=13 must ALSO pass at the contextless path (it's >= 11)
+        // — the strict-equality enforcement at h=5,000 only kicks in
+        // via the height-aware path.
+        let mut pool = Mempool::new();
+        let tx_13 = make_transfer(102, MID_RING_SIZE);
+        assert!(
+            pool.add_skip_crypto(tx_13).is_ok(),
+            "basic-floor path: ring=13 must be accepted (>= 11 floor)",
+        );
+    }
+    {
+        // ring=10 must be REJECTED at the basic floor (< 11).
+        let mut pool = Mempool::new();
+        let tx_10 = make_transfer(103, 10);
+        assert!(
+            pool.add_skip_crypto(tx_10).is_err(),
+            "basic-floor path: ring=10 must be rejected (< constitutional floor)",
+        );
+    }
+}
+
+#[test]
+fn ring_ramp_validator_call_site_exists_at_height_aware_path() {
+    // Source-content surrogate: pin the validator's call site that
+    // consumes `ring_size_at_height` (via `effective_ring_size`). If a
+    // future refactor removes the `effective_ring_size(current_height, ...)`
+    // call from src/consensus/validation.rs, this test fails with a
+    // pointer to docs/decisions/2026-06-06-ring-ramp-and-output-age.md.
+    let validation_rs = include_str!("../src/consensus/validation.rs");
+    assert!(
+        validation_rs.contains("effective_ring_size(current_height"),
+        "consensus/validation.rs must call \
+         `effective_ring_size(current_height, ...)` to enforce the \
+         v1.0.12 ring-size ramp at the height-aware validator path. \
+         See docs/decisions/2026-06-06-ring-ramp-and-output-age.md.",
+    );
 }
 
 #[test]

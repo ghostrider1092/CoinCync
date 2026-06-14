@@ -149,14 +149,29 @@ impl PedersenCommitment {
         PedersenCommitment(point.compress())
     }
 
-    /// Create from bytes (unchecked - does not validate the point)
-    /// Use `from_bytes_checked` for validated construction
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    /// Create from bytes WITHOUT validating that the bytes represent
+    /// a valid Ristretto point.
+    ///
+    /// **DANGER:** Any consumer of the returned `PedersenCommitment`
+    /// that doesn't immediately call `.decompress()` (or do another
+    /// equivalent curve check) gets a value that may not be on the
+    /// curve — silently making downstream verification more permissive
+    /// than intended.
+    ///
+    /// v1.0.12 rename (from `from_bytes` → `from_bytes_unchecked`) so
+    /// the name itself flags the unsafety. Every production caller as
+    /// of v1.0.12 already uses `from_bytes_checked`; this remains
+    /// available only for the rare case where a caller has already
+    /// validated the bytes through a different path (e.g., they came
+    /// from a previously-decompressed `to_bytes()` round-trip on the
+    /// same node) AND wants to skip the decompression cost.
+    pub fn from_bytes_unchecked(bytes: [u8; 32]) -> Self {
         PedersenCommitment(CompressedRistretto(bytes))
     }
 
-    /// Create from bytes with validation
-    /// Returns None if bytes don't represent a valid Ristretto point
+    /// Create from bytes with validation. Returns None if bytes don't
+    /// represent a valid Ristretto point. **This is the safe default
+    /// — every production caller should use this.**
     pub fn from_bytes_checked(bytes: [u8; 32]) -> Option<Self> {
         let compressed = CompressedRistretto(bytes);
         // Try to decompress to validate the point
@@ -707,6 +722,81 @@ pub fn verify_range_proofs_dispatch(
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    /// v1.0.12 audit fix: prove the hardcoded H_GENERATOR_COMPRESSED
+    /// bytes ARE the canonical nothing-up-my-sleeve point.
+    ///
+    /// Pedersen commitment binding (C = v*H + r*G ⇒ no opening to a
+    /// different value) requires that NOBODY knows the discrete log
+    /// of H w.r.t. G. The hardcoded bytes are a trust-the-source
+    /// assumption: a malicious supplier could substitute H = k*G for
+    /// a known k, silently breaking binding (committing party could
+    /// open ANY commitment to ANY value by adjusting r).
+    ///
+    /// This test re-derives H from the canonical method used by the
+    /// dalek-cryptography bulletproofs crate
+    /// (RistrettoPoint::hash_from_bytes::<Sha3_512> on the compressed
+    /// basepoint bytes — the exact method PedersenGens::default()
+    /// uses for its B_blinding) and asserts the hardcoded bytes
+    /// match. Any tampering with the hardcoded constant —
+    /// accidental or malicious — fails CI.
+    #[test]
+    fn test_h_generator_is_canonical_nums_point() {
+        use curve25519_dalek::constants::{
+            RISTRETTO_BASEPOINT_POINT, RISTRETTO_BASEPOINT_COMPRESSED,
+        };
+        use sha3::Sha3_512;
+
+        // Canonical derivation matching dalek bulletproofs PedersenGens::default():
+        //   B_blinding = RistrettoPoint::hash_from_bytes::<Sha3_512>(
+        //       RISTRETTO_BASEPOINT_COMPRESSED.as_bytes())
+        let canonical_h = RistrettoPoint::hash_from_bytes::<Sha3_512>(
+            RISTRETTO_BASEPOINT_COMPRESSED.as_bytes(),
+        );
+        let canonical_h_compressed = canonical_h.compress();
+
+        // Suppress unused-warning if the basepoint constant import is
+        // optimized out in a future toolchain.
+        let _ = RISTRETTO_BASEPOINT_POINT;
+
+        assert_eq!(
+            canonical_h_compressed.as_bytes(),
+            &H_GENERATOR_COMPRESSED,
+            "H_GENERATOR_COMPRESSED MUST be the canonical SHA-512(G) → \
+             Ristretto NUMS point. If this test fails, the hardcoded \
+             constant has been tampered with — Pedersen binding is \
+             potentially broken because the substituter may know the \
+             discrete log of H w.r.t. G."
+        );
+    }
+
+    /// v1.0.12 audit fix: prove that for any random (value, blinding)
+    /// pairs, the commitments C = v*H + r*G are deterministic and
+    /// the homomorphic property holds (commit_combine == sum). This
+    /// is a basic structural sanity check that catches generator
+    /// regressions like accidentally swapping H and G in commit().
+    #[test]
+    fn test_commitment_homomorphic_uniformity() {
+        let v1 = 1_000_000_000u64;
+        let v2 = 2_500_000_000u64;
+        let r1 = BlindingFactor::random(&mut OsRng);
+        let r2 = BlindingFactor::random(&mut OsRng);
+
+        let c1 = pedersen_commit(v1, r1.as_scalar());
+        let c2 = pedersen_commit(v2, r2.as_scalar());
+        let c_sum = pedersen_commit(v1 + v2, &(r1.as_scalar() + r2.as_scalar()));
+
+        assert_eq!(
+            (c1 + c2).compress(),
+            c_sum.compress(),
+            "Pedersen commitments must be homomorphic: \
+             commit(v1, r1) + commit(v2, r2) == commit(v1+v2, r1+r2)",
+        );
+
+        // Determinism: same inputs always yield same point.
+        let c1_dup = pedersen_commit(v1, r1.as_scalar());
+        assert_eq!(c1.compress(), c1_dup.compress());
+    }
 
     #[test]
     fn test_commitment_creation() {

@@ -392,6 +392,53 @@ fn mempool_allows_rbf_with_fee_bump() {
     assert_eq!(pool.len(), 1, "pool should have exactly 1 tx after RBF (replacement, not addition)");
 }
 
+#[test]
+fn mempool_rbf_rejects_lower_absolute_fee_even_at_higher_rate() {
+    // v1.0.12 BIP-125 Rule 3 fix: a small high-rate replacement
+    // must still pay >= total absolute fee of replaced tx(s).
+    //
+    // Without Rule 3, an attacker can replace a fat tx (fee=10M)
+    // with a tiny higher-rate tx (fee=200K) — net mempool revenue
+    // drops dramatically.
+    let mut pool = Mempool::new();
+
+    // tx1: fat tx with large 'extra' blob and large absolute fee
+    // at a modest fee rate.
+    let tx1 = {
+        let mut t = make_transfer(50, 0, BOOTSTRAP_MIN_RING_SIZE);
+        t.extra = vec![50; 20_000]; // ~20KB
+        // Pin to a modest rate by sizing fee against actual size.
+        let size = t.size() as u64;
+        t.fee = Amount::from_atomic(size * MIN_FEE_PER_BYTE * 3); // rate = 3*MIN
+        t
+    };
+
+    // tx2: tiny tx with same key_image at a HIGHER rate but LOWER
+    // absolute fee than tx1.
+    let tx2 = {
+        let mut t = make_transfer(50, 0, BOOTSTRAP_MIN_RING_SIZE);
+        t.inputs[0].key_image = tx1.inputs[0].key_image;
+        t.extra = vec![51]; // tiny — base tx size only
+        let size = t.size() as u64;
+        t.fee = Amount::from_atomic(size * MIN_FEE_PER_BYTE * 10); // rate = 10*MIN, but tiny
+        t
+    };
+
+    pool.add_skip_crypto(tx1.clone()).expect("fat tx admitted");
+
+    // sanity: tx2 should have higher fee-rate but lower absolute fee
+    let rate1 = (tx1.fee.as_atomic() as u128 * 1_000_000) / tx1.size() as u128;
+    let rate2 = (tx2.fee.as_atomic() as u128 * 1_000_000) / tx2.size() as u128;
+    assert!(rate2 > rate1, "tx2 should have higher fee rate (got {} vs {})", rate2, rate1);
+    assert!(tx2.fee.as_atomic() < tx1.fee.as_atomic(),
+            "tx2 should have lower absolute fee (got {} vs {})",
+            tx2.fee.as_atomic(), tx1.fee.as_atomic());
+
+    let result = pool.add_skip_crypto(tx2);
+    assert!(result.is_err(),
+            "BIP-125 Rule 3: replacement with lower absolute fee must be rejected even at higher rate");
+}
+
 // =============================================================================
 // 8. DOUBLE-SPEND: Bit-flipped keyimage should be different
 // =============================================================================
@@ -417,6 +464,37 @@ fn different_keyimage_is_distinct_spend() {
 // =============================================================================
 // 9. Block with wrong merkle root
 // =============================================================================
+
+#[test]
+fn tx_with_duplicate_stealth_addresses_rejected() {
+    // v1.0.12 fix: a tx with two outputs sharing a stealth address
+    // would silently lose one output to UtxoSet's or_insert
+    // indexing. Now rejected at validate_transaction.
+    let utxos = UtxoSet::new();
+    // UNIFORM_TX_SHAPE_HEIGHT=0 requires exactly 2 inputs + 2 outputs
+    // for Transfer/Churn. Build one with duplicated outputs to land
+    // on the new dup-stealth check, not the shape check.
+    let tx0 = make_transfer(50, 10_000_000, BOOTSTRAP_MIN_RING_SIZE);
+    let tx1 = make_transfer(51, 10_000_000, BOOTSTRAP_MIN_RING_SIZE);
+    let dup = make_output(1);
+    let tx = Transaction {
+        version: 1,
+        tx_type: TxType::Transfer,
+        inputs: vec![tx0.inputs[0].clone(), tx1.inputs[0].clone()],
+        outputs: vec![dup.clone(), dup],
+        fee: tx0.fee,
+        range_proof: tx0.range_proof.clone(),
+        extra: vec![50],
+    };
+    let result = coincync::consensus::validate_transaction(&tx, &utxos, 100);
+    assert!(result.is_err(),
+            "tx with duplicate stealth addresses in its outputs must be rejected");
+    if let Err(e) = result {
+        let msg = format!("{:?}", e).to_lowercase();
+        assert!(msg.contains("duplicate") && msg.contains("stealth"),
+                "error must cite duplicate stealth address, got: {}", msg);
+    }
+}
 
 #[test]
 fn block_with_wrong_merkle_root_rejected() {

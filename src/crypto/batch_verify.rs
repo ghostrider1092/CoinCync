@@ -240,7 +240,13 @@ impl BatchVerifier {
             return false;
         }
 
-        // Parse pseudo output commitment
+        // Parse pseudo output commitment. `Commitment::from_bytes` in
+        // curve.rs ALREADY validates curve membership via the
+        // `CompressedRistretto::decompress()` call inside
+        // `PublicPoint::from_bytes` — returns None on invalid points.
+        // This is the safe variant; `PedersenCommitment::from_bytes`
+        // in bulletproofs.rs is a different type whose unchecked
+        // path is fixed separately.
         let pseudo_output = match Commitment::from_bytes(sig.pseudo_output) {
             Some(c) => c,
             None => return false,

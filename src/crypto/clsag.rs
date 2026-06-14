@@ -259,6 +259,20 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
         return Err(Error::InvalidSignature("invalid signing parameters".into()));
     }
 
+    // SECURITY (v1.0.12): Defense-in-depth — refuse to sign over a
+    // ring that contains an identity public key or commitment. The
+    // verifier rejects these (see clsag_verify); signing such a ring
+    // would just produce signatures that always fail validation,
+    // which is a footgun — fail loudly here instead.
+    use curve25519_dalek::traits::Identity;
+    for m in ring {
+        if m.public_key.as_point() == &RistrettoPoint::identity()
+            || m.commitment.as_point().as_point() == &RistrettoPoint::identity()
+        {
+            return Err(Error::InvalidSignature("identity ring member".into()));
+        }
+    }
+
     // Compute key image I = x * Hp(P)
     let key_image = KeyImage::from_secret(secret_key);
 
@@ -390,6 +404,38 @@ pub fn clsag_verify(
     // SECURITY: Also reject identity commitment_image (same reasoning)
     if signature.commitment_image.as_point() == &RistrettoPoint::identity() {
         return false;
+    }
+
+    // SECURITY (v1.0.12): Reject ring members whose public key OR
+    // commitment is the identity point.
+    //
+    // If ring[i].public_key == identity, then aggregate_keys[i] =
+    // mu_p * 0 + mu_c * (C_i - C') = mu_c * (C_i - C'). The attacker
+    // controls C_i (it's just a published commitment), so they can
+    // make aggregate_keys[i] equal anything they want — including
+    // identity (set C_i = pseudo_output). Then L_i = s_i * G + c_i *
+    // identity = s_i * G, and R_i = s_i * Hp(P_i) + c_i *
+    // aggregate_key_image becomes manipulable without knowing the
+    // real signer's secret. Concretely: a single identity ring slot
+    // breaks the ring's "indistinguishability" — verifier can prove
+    // the signer is NOT that slot — and creates an algebra hole for
+    // forgery in adjacent rings.
+    //
+    // If ring[i].commitment == identity, the commitment-binding half
+    // of the proof at that slot collapses similarly (C_i - C' = -C',
+    // attacker-controlled in the sense the attacker picks the slot).
+    //
+    // Neither case can arise from honest tx construction (identity =
+    // 0*G, which a real spendable output would never have as either
+    // its key or its commitment), so rejecting them is zero false
+    // positive and closes the algebra-hole class.
+    for m in ring {
+        if m.public_key.as_point() == &RistrettoPoint::identity() {
+            return false;
+        }
+        if m.commitment.as_point().as_point() == &RistrettoPoint::identity() {
+            return false;
+        }
     }
 
     // SECURITY: Parse responses, silently dropping any non-canonical
@@ -595,6 +641,15 @@ pub fn simple_ring_verify(
     // SECURITY: Reject identity point key images (would indicate invalid/forged signature)
     if signature.key_image.as_point().as_point() == &RistrettoPoint::identity() {
         return false;
+    }
+
+    // SECURITY (v1.0.12): Reject identity ring members. See
+    // clsag_verify for the full algebra; same hole applies here
+    // (L_i = s_i*G + c_i*identity = s_i*G is attacker-controlled).
+    for pk in public_keys {
+        if pk.as_point() == &RistrettoPoint::identity() {
+            return false;
+        }
     }
 
     let responses: Vec<Scalar> = signature.responses.iter()
@@ -814,6 +869,126 @@ mod tests {
 
         // Should still verify
         assert!(clsag_verify(message, &ring, &pseudo_output, &sig2));
+    }
+
+    #[test]
+    fn test_clsag_rejects_identity_ring_pubkey() {
+        use curve25519_dalek::traits::Identity;
+
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(1000u64, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(1000u64, &z_pseudo);
+        let blinding_diff = SecretScalar::from_scalar(
+            z_real.as_scalar() - z_pseudo.as_scalar()
+        );
+
+        let decoy_secret = SecretScalar::random(&mut OsRng);
+        let decoy_commitment = Commitment::commit(1000u64, &SecretScalar::random(&mut OsRng));
+
+        let identity_pk = PublicPoint::from_point(RistrettoPoint::identity());
+
+        // Ring with one identity public key in slot 1.
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(identity_pk, decoy_commitment),
+            RingMember::new(decoy_secret.to_public(),
+                Commitment::commit(1000u64, &SecretScalar::random(&mut OsRng))),
+        ];
+
+        // Sign-side defense: must refuse to produce the signature.
+        let sign_result = clsag_sign(
+            b"identity ring test",
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        );
+        assert!(sign_result.is_err(), "clsag_sign must refuse identity ring members");
+
+        // Verify-side defense: even if a malicious signature is
+        // submitted over an identity ring, the verifier must reject
+        // regardless of the signature contents.
+        let valid_ring = vec![
+            RingMember::new(public,
+                Commitment::commit(1000u64, &z_real)),
+            RingMember::new(decoy_secret.to_public(),
+                Commitment::commit(1000u64, &SecretScalar::random(&mut OsRng))),
+        ];
+        let valid_sig = clsag_sign(
+            b"test",
+            &valid_ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        ).unwrap();
+
+        // Now try to verify that signature against an identity ring
+        // (won't math out, but the early ring-identity check must
+        // catch it before we get to algebra).
+        assert!(!clsag_verify(b"test", &ring, &pseudo_output, &valid_sig));
+    }
+
+    #[test]
+    fn test_clsag_rejects_identity_ring_commitment() {
+        use curve25519_dalek::traits::Identity;
+
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(1000u64, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(1000u64, &z_pseudo);
+        let blinding_diff = SecretScalar::from_scalar(
+            z_real.as_scalar() - z_pseudo.as_scalar()
+        );
+
+        let decoy_secret = SecretScalar::random(&mut OsRng);
+
+        let identity_commit = Commitment::from_point(
+            crate::crypto::curve::PublicPoint::from_point(RistrettoPoint::identity())
+        );
+
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(decoy_secret.to_public(), identity_commit),
+        ];
+
+        let result = clsag_sign(
+            b"identity commit ring",
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        );
+        assert!(result.is_err(), "clsag_sign must refuse identity commitment ring members");
+    }
+
+    #[test]
+    fn test_simple_ring_rejects_identity_pubkey() {
+        use curve25519_dalek::traits::Identity;
+
+        let identity_pk = PublicPoint::from_point(RistrettoPoint::identity());
+        let normal_secret = SecretScalar::random(&mut OsRng);
+
+        let public_keys = vec![normal_secret.to_public(), identity_pk];
+
+        // Any signature submitted over a ring with identity must
+        // fail before algebra runs.
+        let bogus_sig = SimpleRingSignature {
+            key_image: KeyImage::from_secret(&normal_secret),
+            c0: [1u8; 32],
+            responses: vec![[1u8; 32], [1u8; 32]],
+        };
+        assert!(!simple_ring_verify(b"msg", &public_keys, &bogus_sig));
     }
 
     #[test]

@@ -1118,7 +1118,31 @@ impl SharedWallet {
             .current()
             .ok_or(Error::WalletLocked)?;
 
-        let current_height = wallet.scanned_height;
+        // v1.0.12 fix: height-coupled consensus values must be computed
+        // for the height the tx will be MINED at — that's chain tip + 1,
+        // not the wallet's last-scanned height. Two failure modes the
+        // old `wallet.scanned_height` triggered:
+        //
+        //   (a) Wallet is behind the chain tip (mid-IBD, post-disconnect,
+        //       just opened). scanned_height is a stale past value; the
+        //       validator runs at the live tip+1; ring_size_at_height,
+        //       min_output_age_at_height, and V2_TX_ACTIVATION_HEIGHT
+        //       gates can all disagree. Validator rejects with
+        //       InvalidRingSize / InvalidLockHeight / version errors.
+        //
+        //   (b) Wallet is at the chain tip but the tip straddles an
+        //       activation boundary. Wallet at tip=4999 picks ring=11
+        //       (BOOTSTRAP_MIN_RING_SIZE); tx will be mined at h=5000
+        //       where validator requires ring=13 (MID_RING_SIZE) →
+        //       silent rejection via Cycle 01 Finding #1 path (now
+        //       loud per the same fix). Same shape at 9,999→10,000
+        //       and for MIN_OUTPUT_AGE_HARDFORK_HEIGHT and
+        //       V2_TX_ACTIVATION_HEIGHT.
+        //
+        // The correct height is `chain.height() + 1` — what
+        // `bin/wallet.rs:1138` already does via `info.height`. The
+        // library path mirrors that now.
+        let current_height = chain.height().saturating_add(1);
 
         // Convert recipients to the format needed by create_privacy_transaction
         let privacy_recipients: Vec<(crate::primitives::PublicKey, crate::primitives::PublicKey, Amount)> =
@@ -1126,7 +1150,7 @@ impl SharedWallet {
                 .map(|(addr, amount)| (addr.spend_public_key, addr.view_public_key, *amount))
                 .collect();
 
-        // Get ring size for current height
+        // Get ring size for the height the tx will be mined at.
         let ring_size = crate::constants::ring_size_at_height(current_height);
 
         // Get decoy outputs from the chain
@@ -1194,7 +1218,11 @@ impl SharedWallet {
             .current()
             .ok_or(Error::WalletLocked)?;
 
-        let current_height = wallet.scanned_height;
+        // v1.0.12 fix: use chain.height()+1 (where the tx will be
+        // mined) instead of wallet.scanned_height (a potentially stale
+        // past height). Same reasoning as the matching site in
+        // create_transfer above — see that comment for full rationale.
+        let current_height = chain.height().saturating_add(1);
         let ring_size = crate::constants::ring_size_at_height(current_height);
         let decoy_count = (ring_size - 1) * 5;
         // CONSENSUS-COUPLED: see comment at the matching site in

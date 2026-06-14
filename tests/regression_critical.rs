@@ -424,7 +424,7 @@ fn test_regression_pedersen_commitment_from_bytes_unchecked() {
     let invalid_bytes = [0xFFu8; 32];
 
     // The UNCHECKED constructor accepts invalid bytes (this is the dangerous path)
-    let unchecked = PedersenCommitment::from_bytes(invalid_bytes);
+    let unchecked = PedersenCommitment::from_bytes_unchecked(invalid_bytes);
     // It "works" but the commitment is garbage
     assert_eq!(unchecked.to_bytes(), invalid_bytes);
 
@@ -437,8 +437,8 @@ fn test_regression_pedersen_commitment_from_bytes_unchecked() {
     );
 
     // Verify that checked_add on two invalid-point commitments returns None
-    let bad_a = PedersenCommitment::from_bytes(invalid_bytes);
-    let bad_b = PedersenCommitment::from_bytes([0xFE; 32]);
+    let bad_a = PedersenCommitment::from_bytes_unchecked(invalid_bytes);
+    let bad_b = PedersenCommitment::from_bytes_unchecked([0xFE; 32]);
     assert!(
         bad_a.checked_add(&bad_b).is_none(),
         "checked_add must return None when operands contain invalid curve points"

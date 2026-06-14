@@ -1750,45 +1750,77 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                 // The block is stored but not applied. The fork path will check
                 // cumulative work and perform a reorg if this block's chain is heavier.
             } else {
-                // Post-lock work: persist to database, record checkpoints.
-                self.persist_output_index(&block.transactions, block.header.height);
-
-                // Index transactions for O(1) lookup by hash
+                // ── v1.0.12 atomic tip-extend (H2 fix) ──────────────────
+                //
+                // Pre-v1.0.12 this section was a sequence of independent
+                // tree.insert calls — persist_output_index, index_tx,
+                // set_height_hash, add_checkpoint, save_state — with no
+                // transactional guarantee across trees. A crash between
+                // any two writes left disk inconsistent. The fix collects
+                // all mutations and dispatches them through
+                // `Database::apply_tip_extend_atomic`, which wraps them
+                // in a single `trees.transaction(...)` mirroring the
+                // shape of `apply_reorg_atomic`.
                 if let Some(ref db) = self.db {
+                    // ── 1. Pre-serialize output_index entries ───────────
+                    let mut output_additions: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+                    for tx in &block.transactions {
+                        let is_coinbase = tx.is_coinbase();
+                        for output in &tx.outputs {
+                            let stealth = *output.stealth_address.as_bytes();
+                            let entry = OutputIndexEntry {
+                                commitment: output.commitment,
+                                height: block.header.height,
+                                is_coinbase,
+                                lock_height: output.lock_height,
+                            };
+                            // Serialize the entry using the same path as the
+                            // non-atomic version (db.output_index.insert
+                            // serializes internally). We serialize via borsh
+                            // — same primitive the index uses.
+                            let bytes = borsh::to_vec(&entry).map_err(|e| {
+                                Error::Internal(format!("Failed to serialize OutputIndexEntry: {}", e))
+                            })?;
+                            output_additions.push((stealth, bytes));
+                        }
+                    }
+
+                    // ── 2. Pre-build tx_index entries ───────────────────
+                    let mut tx_index_adds: Vec<([u8; 32], u64, u32)> = Vec::new();
                     for (idx, tx) in block.transactions.iter().enumerate() {
-                        let _ = db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32);
-                    }
-                }
-
-                // Update database height index (only after race check passes)
-                if let Some(ref db) = self.db {
-                    db.blocks.set_height_hash(block.header.height, &hash)?;
-
-                    // Auto-record checkpoint every CHECKPOINT_INTERVAL blocks
-                    let mut last_checkpoint_height = 0u64;
-                    if block.header.height > 0 && block.header.height % crate::constants::CHECKPOINT_INTERVAL == 0 {
-                        if let Err(e) = db.state.add_checkpoint(block.header.height, &hash) {
-                            tracing::error!("Failed to record checkpoint at height {}: {}", block.header.height, e);
-                        } else {
-                            last_checkpoint_height = block.header.height;
-                            tracing::info!(
-                                "Auto-checkpoint recorded: height={}, hash={}",
-                                block.header.height,
-                                hash.to_hex()[..16].to_string()
-                            );
-                            self.record_event(ChainEventType::CheckpointRecorded, block.header.height, &hash, serde_json::json!({}));
-                        }
+                        tx_index_adds.push((
+                            *tx.hash().as_bytes(),
+                            block.header.height,
+                            idx as u32,
+                        ));
                     }
 
-                    // Compute last_checkpoint from DB if we didn't just set one
-                    if last_checkpoint_height == 0 {
-                        if let Ok(Some(prev_state)) = db.state.get_state() {
-                            last_checkpoint_height = prev_state.last_checkpoint;
-                        }
-                    }
+                    // ── 3. Decide if this block lands a checkpoint ──────
+                    let checkpoint = if block.header.height > 0
+                        && block.header.height % crate::constants::CHECKPOINT_INTERVAL == 0
+                    {
+                        Some((block.header.height, *hash.as_bytes()))
+                    } else {
+                        None
+                    };
 
+                    // ── 4. Compute new chain state ──────────────────────
+                    //
+                    // last_checkpoint: if we're adding one in this block,
+                    // use its height. Otherwise fetch the previous value
+                    // from the committed state (read BEFORE the
+                    // transaction — txn closure is pure-writes).
+                    let last_checkpoint_height = if let Some((h, _)) = checkpoint {
+                        h
+                    } else {
+                        db.state.get_state()
+                            .ok()
+                            .flatten()
+                            .map(|s| s.last_checkpoint)
+                            .unwrap_or(0)
+                    };
                     let stats = self.stats();
-                    let state = ChainStateData {
+                    let state_data = ChainStateData {
                         tip_hash: hash,
                         height: block.header.height,
                         total_difficulty: stats.total_difficulty,
@@ -1796,7 +1828,37 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                         total_burned: 0,
                         last_checkpoint: last_checkpoint_height,
                     };
-                    db.state.save_state(&state)?;
+                    let new_state_bytes = borsh::to_vec(&state_data).map_err(|e| {
+                        Error::Internal(format!("Failed to serialize ChainStateData: {}", e))
+                    })?;
+
+                    // ── 5. Atomic commit ───────────────────────────────
+                    db.apply_tip_extend_atomic(
+                        &output_additions,
+                        block.header.height,
+                        *hash.as_bytes(),
+                        checkpoint,
+                        &new_state_bytes,
+                        &tx_index_adds,
+                    )?;
+
+                    // ── 6. Operator events ─────────────────────────────
+                    //
+                    // Run AFTER atomic commit succeeds — if the
+                    // transaction fails, no event fires.
+                    if checkpoint.is_some() {
+                        tracing::info!(
+                            "Auto-checkpoint recorded: height={}, hash={}",
+                            block.header.height,
+                            hash.to_hex()[..16].to_string()
+                        );
+                        self.record_event(ChainEventType::CheckpointRecorded, block.header.height, &hash, serde_json::json!({}));
+                    }
+                } else {
+                    // No DB attached (in-memory mode, e.g., tests). Keep
+                    // the in-memory output_index in sync (when there's no
+                    // DB, persist_output_index is a no-op anyway).
+                    self.persist_output_index(&block.transactions, block.header.height);
                 }
 
                 // ── Phase 2 privacy store wire-up (P3d) ─────────────────

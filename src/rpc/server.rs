@@ -819,6 +819,21 @@ pub async fn start_rpc_server(
         let (hex_block,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
+        // v1.0.12 audit-follow-up: bound the hex input length before
+        // hex::decode + borsh::from_slice. A valid block is at most
+        // MAX_BLOCK_SIZE = 2 MB → 4 MB hex. Reject anything past 2× that.
+        // The jsonrpsee body-size default covers the gross case, but
+        // a per-method cap stops authenticated callers (compromised
+        // API key, malicious miner) from wasting our hex+borsh decode
+        // budget on garbage that consensus would reject anyway.
+        const MAX_HEX_BLOCK: usize = 2 * 2 * crate::constants::MAX_BLOCK_SIZE;
+        if hex_block.len() > MAX_HEX_BLOCK {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("hex block too large: {} chars (max {})", hex_block.len(), MAX_HEX_BLOCK),
+                None::<()>,
+            ));
+        }
         let block_bytes = hex::decode(&hex_block).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
@@ -982,6 +997,18 @@ pub async fn start_rpc_server(
         let (hex_tx,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
+        // v1.0.12 audit-follow-up: bound hex input length. Valid tx
+        // is at most MAX_TX_SIZE = 500_000 bytes → 1 MB hex. Cap at
+        // 2× headroom. Same rationale as submit_block — close the
+        // authenticated-caller decode-amp gap.
+        const MAX_HEX_TX: usize = 2 * 2 * crate::constants::MAX_TX_SIZE;
+        if hex_tx.len() > MAX_HEX_TX {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("hex tx too large: {} chars (max {})", hex_tx.len(), MAX_HEX_TX),
+                None::<()>,
+            ));
+        }
         let tx_bytes = hex::decode(&hex_tx).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
@@ -1510,16 +1537,26 @@ pub async fn start_rpc_server(
                 -32602, "end must be >= start".to_string(), None::<()>,
             ));
         }
-        let capped = (end - start + 1).min(MAX_RANGE);
+        // v1.0.12 audit-follow-up: saturating arithmetic on the
+        // range math. `end - start + 1` overflows when start=0 and
+        // end=u64::MAX; `start + capped` overflows when start is
+        // near u64::MAX. Both panic in debug builds and wrap to
+        // wrong-but-silent in release. Saturating versions degrade
+        // cleanly to a small/empty range, which is the right
+        // semantics (no blocks exist that high).
+        let span = end.saturating_sub(start).saturating_add(1);
+        let capped = span.min(MAX_RANGE);
         let mut blocks = Vec::with_capacity(capped as usize);
-        for h in start..start + capped {
+        let loop_end = start.saturating_add(capped);
+        for h in start..loop_end {
             if let Some(block) = state.chain.get_block_by_height(h) {
                 blocks.push(serialize_block(&block, h));
             }
         }
+        let response_end = start.saturating_add(capped).saturating_sub(1);
         Ok::<_, ErrorObjectOwned>(json!({
             "start": start,
-            "end": start + capped - 1,
+            "end": response_end,
             "count": blocks.len(),
             "blocks": blocks,
         }))
@@ -1703,7 +1740,14 @@ pub async fn start_rpc_server(
         })?;
         let count = count.min(100); // Cap at 100 blocks per request
         let mut blocks = Vec::new();
-        for h in from_height..from_height + count {
+        // v1.0.12 audit-follow-up: saturating_add so from_height near
+        // u64::MAX doesn't overflow the upper bound. In debug builds
+        // the bare addition panics; in release it wraps to give an
+        // empty range — both wrong. With saturating_add, the loop is
+        // simply empty at the saturation point, which is the correct
+        // semantics (no blocks exist at u64::MAX anyway).
+        let end = from_height.saturating_add(count);
+        for h in from_height..end {
             if let Some(block) = state.chain.get_block_by_height(h) {
                 let block_hex = hex::encode(borsh::to_vec(&block).unwrap_or_default());
                 blocks.push(json!({

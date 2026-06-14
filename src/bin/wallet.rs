@@ -541,27 +541,44 @@ fn resolve_home(p: &PathBuf) -> PathBuf {
     p.clone()
 }
 
+/// Maximum password length accepted from any input path (interactive
+/// prompt or stdin pipe). Prevents OOM via malicious piped input
+/// (`cat big-file | wallet --password -`) and limits the heap-resident
+/// window of password bytes regardless of source. 4 KiB comfortably
+/// exceeds any reasonable human-typed password.
+const MAX_PASSWORD_LEN: usize = 4 * 1024;
+
+/// Interactive password prompt with terminal echo disabled.
+///
+/// v1.0.12 fix (C1, mainnet-blocker): pre-fix used `stdin.read_line`
+/// with NO echo suppression — every keystroke was visible on the
+/// terminal, captured by screen recordings, scrollback, tmux logs,
+/// shoulder-surfers. Direct credential compromise vector.
+///
+/// Uses `dialoguer::Password` which calls into the OS termios layer
+/// to disable terminal echo for the duration of input.
+///
+/// Note on Zeroizing: a full propagation of `Zeroizing<String>`
+/// through every save_wallet / churn / RPC call site is a larger
+/// refactor tracked as a v1.0.13 follow-up. For v1.0.12, the
+/// critical fixes are (a) echo-off (this commit) and (b) the
+/// argv-exposure warning + stdin bound below.
 fn prompt_password(confirm: bool) -> Result<String, String> {
-    use std::io::{BufRead, Write};
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    write!(out, "Password: ").map_err(|e| e.to_string())?;
-    out.flush().map_err(|e| e.to_string())?;
-    let mut pw = String::new();
-    stdin.lock().read_line(&mut pw).map_err(|e| e.to_string())?;
-    let pw = pw.trim().to_string();
+    let prompt = dialoguer::Password::new()
+        .with_prompt("Password");
+    let prompt = if confirm {
+        prompt.with_confirmation("Confirm", "Passwords do not match")
+    } else {
+        prompt
+    };
+    let pw = prompt.interact().map_err(|e| e.to_string())?;
     if pw.is_empty() {
         return Err("password must not be empty".into());
     }
-    if confirm {
-        write!(out, "Confirm: ").map_err(|e| e.to_string())?;
-        out.flush().map_err(|e| e.to_string())?;
-        let mut pw2 = String::new();
-        stdin.lock().read_line(&mut pw2).map_err(|e| e.to_string())?;
-        if pw.trim() != pw2.trim() {
-            return Err("passwords do not match".into());
-        }
+    if pw.len() > MAX_PASSWORD_LEN {
+        return Err(format!(
+            "password too long (max {} bytes)", MAX_PASSWORD_LEN,
+        ));
     }
     Ok(pw)
 }
@@ -569,30 +586,64 @@ fn prompt_password(confirm: bool) -> Result<String, String> {
 /// Resolve a password from a CLI option, with stdin support via `-`.
 ///
 /// Three cases:
-/// - `Some("-")` reads one line from stdin (the password). Trailing CR/LF
-///   stripped. Empty line is an error. Use when piping a password from an
-///   automation context — keeps the secret out of argv (process list) and
-///   out of env vars (visible to children, persistent across shells).
-/// - `Some(s)` for any other s returns s as the password. Argv exposure
-///   tradeoff is the caller's choice; we still accept it for human use.
+/// - `Some("-")` reads up to MAX_PASSWORD_LEN bytes from stdin (the
+///   password). Trailing CR/LF stripped. Empty line is an error.
+///   Excess-length input is rejected (defense against piped-file
+///   OOM). Use when piping a password from automation — keeps the
+///   secret out of argv (process list) and out of env vars (visible
+///   to children, persistent across shells).
+///
+/// - `Some(s)` for any other s returns s as the password. ARGV
+///   EXPOSURE WARNING: a literal `--password <pw>` is visible to any
+///   local user via `/proc/<pid>/cmdline` (Linux) or
+///   `wmic process get commandline` (Windows). Prefer `-` (stdin)
+///   for non-interactive use. Logged at warn level once per
+///   invocation to make this trade-off visible to the operator.
+///
 /// - `None` falls back to interactive `prompt_password(confirm)`.
 ///
-/// `confirm` only applies to the interactive path — piping is assumed to
-/// be deliberate, and re-typing for confirmation is hostile to automation.
+/// `confirm` only applies to the interactive path — piping is assumed
+/// to be deliberate, and re-typing for confirmation is hostile to
+/// automation.
 fn resolve_password(opt: Option<String>, confirm: bool) -> Result<String, String> {
+    use std::io::Read;
     match opt {
         Some(s) if s == "-" => {
-            use std::io::BufRead;
+            // v1.0.12 fix: bound stdin read at MAX_PASSWORD_LEN so a
+            // multi-GB piped file doesn't OOM the binary.
             let stdin = std::io::stdin();
-            let mut pw = String::new();
-            stdin.lock().read_line(&mut pw).map_err(|e| e.to_string())?;
-            let pw = pw.trim_end_matches(['\r', '\n']).to_string();
-            if pw.is_empty() {
+            let mut handle = stdin.lock().take((MAX_PASSWORD_LEN + 1) as u64);
+            let mut buf = String::new();
+            handle.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+            if buf.len() > MAX_PASSWORD_LEN {
+                return Err(format!(
+                    "stdin password too long (max {} bytes); refusing to read \
+                     more — did you accidentally pipe a large file?",
+                    MAX_PASSWORD_LEN,
+                ));
+            }
+            // Strip ONE trailing newline (typical interactive paste
+            // pattern). Don't trim() — leading/trailing whitespace
+            // might be intentional in the password.
+            let pw_str: String = buf
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string();
+            if pw_str.is_empty() {
                 return Err("password must not be empty when reading from stdin".into());
             }
-            Ok(pw)
+            Ok(pw_str)
         }
-        Some(s) => Ok(s),
+        Some(s) => {
+            // ARGV exposure warning — see function doc.
+            tracing::warn!(
+                "Password passed via `--password <literal>` is visible to \
+                 any local user via /proc/<pid>/cmdline on Linux or \
+                 `wmic process get commandline` on Windows. Prefer `--password -` \
+                 (piping the secret on stdin) for non-interactive use."
+            );
+            Ok(s)
+        }
         None => prompt_password(confirm),
     }
 }
@@ -1591,7 +1642,7 @@ async fn cmd_multisig_round2(
         nonces,
     };
 
-    let sig_share = multisig::signing_round2(&share, &secret, &commitments, &message)
+    let sig_share = multisig::signing_round2(&share, secret, &commitments, &message)
         .map_err(|e| format!("round2: {}", e))?;
 
     let json = serde_json::to_string_pretty(&sig_share)

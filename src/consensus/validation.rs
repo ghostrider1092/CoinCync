@@ -455,14 +455,21 @@ pub fn validate_block_with_checkpoint_for_network(
 
             for (idx, output) in coinbase.outputs.iter().enumerate() {
                 // Extract declared amount from encrypted_amount field
-                // (coinbase uses plaintext amount since reward is public)
-                let declared_amount = if output.encrypted_amount.len() >= 8 {
+                // (coinbase uses plaintext amount since reward is public).
+                //
+                // v1.0.12 audit-follow-up #5: tightened from `>= 8` to
+                // `== 8`. Honest coinbase construction emits exactly
+                // 8 bytes (LE u64). The pre-fix `>= 8` silently
+                // accepted longer payloads and used only the first 8
+                // bytes — chain-bloat path bounded by MAX_TX_SIZE but
+                // still real per-coinbase waste on every block forever.
+                let declared_amount = if output.encrypted_amount.len() == 8 {
                     let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&output.encrypted_amount[..8]);
+                    bytes.copy_from_slice(&output.encrypted_amount);
                     u64::from_le_bytes(bytes)
                 } else {
                     result.add_error(format!(
-                        "Coinbase output {} has invalid amount encoding (expected 8 bytes, got {})",
+                        "Coinbase output {} has invalid amount encoding (expected exactly 8 bytes, got {})",
                         idx, output.encrypted_amount.len()
                     ));
                     all_valid = false;
@@ -584,6 +591,35 @@ pub fn validate_block_with_checkpoint_for_network(
         for ki in tx.key_images() {
             if !seen_key_images.insert(ki) {
                 result.add_error(format!("Duplicate key image in block: {}", ki));
+            }
+        }
+    }
+
+    // SECURITY (v1.0.12 audit follow-up): Reject blocks where two
+    // distinct txs create the same stealth address as an output.
+    //
+    // The dup-stealth check inside `validate_transaction` (commit
+    // 5aeb27dd) catches: (a) duplicates within a single tx via an
+    // in-tx HashSet, and (b) clash with any already-on-chain
+    // output via `utxos.get_output_index_entry`. It does NOT catch
+    // CROSS-TX-WITHIN-BLOCK clashes — tx1 and tx2 each create
+    // output with stealth X, neither X is in the UTXO yet at
+    // validation time, and `validate_transaction` runs in parallel
+    // across txs so they can't see each other's new outputs.
+    //
+    // Without this check, block-apply would `or_insert` index tx1's
+    // output X and silently drop tx2's output X from
+    // stealth_index/output_index — same silent-output-loss + CLSAG
+    // forgery-path as the in-tx variant.
+    let mut seen_block_outputs = std::collections::HashSet::new();
+    for (tx_idx, tx) in block.transactions.iter().enumerate() {
+        for (out_idx, output) in tx.outputs.iter().enumerate() {
+            let addr_bytes = *output.stealth_address.as_bytes();
+            if !seen_block_outputs.insert(addr_bytes) {
+                result.add_error(format!(
+                    "Cross-tx duplicate stealth address in block at tx {} output {}",
+                    tx_idx, out_idx
+                ));
             }
         }
     }
@@ -1150,6 +1186,89 @@ pub fn validate_transaction(
         }
     }
 
+    // SECURITY (v1.0.12): Reject duplicate stealth addresses in
+    // tx.outputs — both in-tx and against existing on-chain
+    // outputs.
+    //
+    // ## The hole
+    //
+    // `UtxoSet::add_output_ext` uses `stealth_index.entry(addr)
+    // .or_insert(key)` to index outputs by stealth address. The
+    // `or_insert` SILENTLY DROPS any subsequent insert with the
+    // same key.
+    //
+    // In-tx case: if a tx has outputs[0].stealth_address ==
+    // outputs[1].stealth_address, only outputs[0] gets indexed.
+    // outputs[1]'s OutputRef sits in `outputs` keyed by
+    // (tx_hash, 1), but every spend-side lookup goes through
+    // get_output_by_stealth → returns outputs[0]'s OutputRef +
+    // commitment. The recipient (or an attacker who later wants
+    // to use it as a ring decoy) sees outputs[0]'s commitment,
+    // not outputs[1]'s. CLSAG ring verification would consult
+    // the wrong commitment and either incorrectly accept a
+    // fabricated signature or incorrectly reject a valid one,
+    // depending on the attacker's framing.
+    //
+    // Cross-tx case: if a new output's stealth address matches
+    // an existing on-chain output's, the new one's stealth_index
+    // / output_index entry is silently dropped — same lookup
+    // poisoning. Honest stealth addresses are random
+    // (Diffie-Hellman derived per-output); duplicates only
+    // happen via deliberate construction or broken RNG. Rejecting
+    // is safe.
+    //
+    // We check via the permanent output_index (retains historical
+    // outputs including spent ones) so a cross-tx clash with any
+    // ever-existed output is caught.
+    let mut seen_outputs_in_tx = std::collections::HashSet::with_capacity(tx.outputs.len());
+    for (out_idx, output) in tx.outputs.iter().enumerate() {
+        let addr_bytes = *output.stealth_address.as_bytes();
+        if !seen_outputs_in_tx.insert(addr_bytes) {
+            return Err(Error::InvalidTransaction(format!(
+                "duplicate stealth address at output {}", out_idx
+            )));
+        }
+        if utxos.get_output_index_entry(&addr_bytes).is_some() {
+            return Err(Error::InvalidTransaction(format!(
+                "output {} stealth address collides with existing on-chain output",
+                out_idx
+            )));
+        }
+
+        // SECURITY (v1.0.12): Per-output size bounds.
+        //
+        // Pre-fix, encrypted_memo and encrypted_amount size caps lived
+        // ONLY in `validate_transaction_basic` (mempool admission). A
+        // miner could include a tx with encrypted_memo.len() = several
+        // hundred KiB in a mined block; block validation calls THIS
+        // function (validate_transaction), which let it through. Same
+        // class as the version=0 / MAX_TX_VERSION bug found 2026-06-03.
+        //
+        // MAX_TX_SIZE caps the overall tx, so the absolute worst case
+        // is one tx ~= MAX_TX_SIZE — but that's still chain-bloat as
+        // every honest node pays disk + bandwidth for it forever.
+        // Tightening here closes the gap.
+        if output.encrypted_memo.len() > 256 {
+            return Err(Error::InvalidTransaction(format!(
+                "output {} encrypted_memo too large: {} bytes (max 256)",
+                out_idx, output.encrypted_memo.len()
+            )));
+        }
+        // v1.0.12 audit-follow-up #4: encrypted_amount is an XOR-masked
+        // u64 — exactly 8 bytes. Honest wallets construct it via
+        // `vec![0u8; 8]` everywhere (see grep for "encrypted_amount: vec"
+        // in src/). Accepting 0..=64 (the prior bound) silently let
+        // malicious miners pad each output with up to 56 surplus bytes
+        // — bounded chain bloat that compounds across every UTXO that
+        // outlives the tx. Tighten to exact length.
+        if output.encrypted_amount.len() != 8 {
+            return Err(Error::InvalidTransaction(format!(
+                "output {} encrypted_amount must be exactly 8 bytes, got {}",
+                out_idx, output.encrypted_amount.len()
+            )));
+        }
+    }
+
     // SECURITY (CRIT-5 + HIGH-4): Validate ring members exist in UTXO set and
     // enforce coinbase maturity. Ring members referencing non-existent outputs
     // could be used to forge ring signatures. Immature coinbase outputs must
@@ -1291,7 +1410,30 @@ pub fn validate_transaction(
 
     // Check ring size and duplicate ring members
     for (input_idx, input) in tx.inputs.iter().enumerate() {
-        let available = utxos.output_count();
+        // v1.0.12 fix (H1, consensus split risk): use the MONOTONIC
+        // cumulative output count, not the live UTXO set size.
+        //
+        // The previous `utxos.output_count()` returned `self.outputs.len()`
+        // — the count of CURRENTLY UNSPENT outputs — which decreases as
+        // outputs are spent. Two nodes processing the same chain can
+        // diverge on this number transiently during reorg, or under
+        // different pruning settings, and disagree on `effective_ring_size`
+        // because the bootstrap-adapt path keys off `available` to compute
+        // the expected ring size. The validator's strict-equality check
+        // below would then accept on one node and reject on the other —
+        // a consensus split.
+        //
+        // `total_outputs_ever()` is monotonically incremented in
+        // `add_output_ext` and (per audit fix in storage/utxos.rs:241)
+        // NEVER decremented, even on reorg disconnects. Every node that
+        // processed the same chain prefix has the same value. Determinism
+        // is preserved.
+        //
+        // Cast u64 → usize: on 64-bit hosts (all supported targets) this
+        // is identity. On hypothetical 32-bit hosts it would saturate at
+        // u32::MAX, which is still vastly larger than any target ring
+        // size (≤ 16), so the consensus decision is unaffected.
+        let available = utxos.total_outputs_ever() as usize;
         let ring_size = crate::constants::effective_ring_size(current_height, available);
         if input.ring_members.len() != ring_size {
             return Err(Error::InvalidRingSize {

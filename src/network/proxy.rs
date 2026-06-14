@@ -54,10 +54,23 @@ pub async fn connect_peer(
         }
         _ => {
             // Direct connection (proxy not configured or not onion_only)
-            tokio::time::timeout(timeout, TcpStream::connect(target))
+            let stream = tokio::time::timeout(timeout, TcpStream::connect(target))
                 .await
                 .map_err(|_| Error::ConnectionFailed("connection timed out".into()))?
-                .map_err(|e| Error::ConnectionFailed(e.to_string()))
+                .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
+
+            // Cycle 02 Finding #1: apply TCP keepalive so the
+            // connection survives NAT/router idle-state expiration.
+            // A failure here is logged but not fatal — a flap-prone
+            // connection is still better than no connection.
+            if let Err(e) = super::keepalive::apply_p2p_keepalive(&stream) {
+                tracing::warn!(
+                    "Failed to set keepalive on outbound P2P connection to {}: {} \
+                     — connection will flap on idle-NAT links",
+                    target, e,
+                );
+            }
+            Ok(stream)
         }
     }
 }

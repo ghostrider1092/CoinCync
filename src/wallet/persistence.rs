@@ -300,12 +300,35 @@ impl WalletHeader {
         const KDF_M_COST_MAX_KIB: u32 = 524_288;    // 512 MiB; 2× default (was 1 GiB)
         const KDF_T_COST_MAX: u32 = 32;             // 32 iter; ~10× default (was 100)
         const KDF_P_COST_MAX: u32 = 8;              // 8 lanes; 2× default (was 16)
-        // Argon2 crate minimums (`argon2::Params::MIN_*`). Hardcoded
-        // here so a future crate-version bump that lowers them doesn't
-        // silently widen our acceptance window.
-        const KDF_M_COST_MIN_KIB: u32 = 8;          // argon2::Params::MIN_M_COST
-        const KDF_T_COST_MIN: u32 = 2;              // argon2::Params::MIN_T_COST
-        const KDF_P_COST_MIN: u32 = 1;              // argon2::Params::MIN_P_COST
+        // SECURITY (v1.0.12): Minimums are tightened to *security*
+        // floors, not the argon2 crate's protocol minimums (which
+        // are 8 KiB / 2 iter / 1 lane — essentially zero defense
+        // against offline brute force).
+        //
+        // ## The hole
+        //
+        // A pre-fix wallet file could carry kdf_m_cost=8,
+        // kdf_t_cost=2, kdf_p_cost=1 — values that pass argon2's
+        // own parameter validation. With those, deriving the
+        // wallet-encryption key from a candidate password takes
+        // microseconds on commodity hardware. An attacker who
+        // obtained an encrypted wallet file (laptop theft, leaked
+        // cloud backup, etc.) could try millions of passwords per
+        // second instead of the ~1/sec the defaults provide. A
+        // strong password might still hold; a typical user
+        // password would not.
+        //
+        // Honest wallets never carry params this low:
+        // - Default since 2026-05-08:    256 MiB / 3 iter / 4 lanes
+        // - LEGACY_V2 (oldest supported):  64 MiB / 3 iter / 4 lanes
+        //
+        // So no real wallet file is rejected by a 64 MiB / 3 iter
+        // / 1 lane floor. A tampered file that lowered params is
+        // rejected, foreclosing the brute-force attack at file-
+        // load time.
+        const KDF_M_COST_MIN_KIB: u32 = LEGACY_V2_ARGON2_M_COST; // 64 MiB
+        const KDF_T_COST_MIN: u32 = 3;              // matches all historical defaults
+        const KDF_P_COST_MIN: u32 = 1;              // any lane count is fine on the security floor
         if self.kdf_m_cost > KDF_M_COST_MAX_KIB || self.kdf_m_cost < KDF_M_COST_MIN_KIB {
             return Err(Error::Corruption(format!(
                 "kdf_m_cost out of range: {} KiB (allowed {}..={} KiB)",
@@ -413,9 +436,26 @@ impl std::fmt::Debug for WalletData {
 
 // SECURITY (M-5): Zeroize master seed when WalletData is dropped to prevent
 // it from lingering in freed memory (cold-boot/core-dump attacks).
+//
+// v1.0.12 fix: ALSO zeroize mnemonic_phrase. The mnemonic IS the seed
+// (BIP-39 24 words encode the same 256-bit entropy), so leaving it
+// in a regular String defeated the seed.zeroize() above — an attacker
+// recovering the mnemonic from heap recovers the wallet.
 impl Drop for WalletData {
     fn drop(&mut self) {
         self.seed.zeroize();
+        if let Some(ref mut phrase) = self.mnemonic_phrase {
+            // String doesn't get a blanket Zeroize impl in the
+            // `zeroize` crate, so reach into the bytes manually.
+            // SAFETY: String is guaranteed valid UTF-8 ONLY while
+            // it's not being mutated as bytes — but we're about to
+            // drop it anyway, so violating that invariant is fine.
+            // No other observer can see the now-non-UTF-8 buffer.
+            unsafe {
+                let bytes = phrase.as_bytes_mut();
+                bytes.zeroize();
+            }
+        }
     }
 }
 
@@ -1269,6 +1309,61 @@ mod tests {
             ),
             other => panic!("expected Error::Corruption, got: {:?}", other),
         }
+    }
+
+    /// v1.0.12 security-floor test: a wallet file that lowers the
+    /// Argon2id memory cost to the protocol minimum (8 KiB) would
+    /// derive the encryption key essentially instantly — enabling
+    /// offline password brute force against a stolen wallet file.
+    /// The pre-fix lower bound permitted this; the post-fix lower
+    /// bound is LEGACY_V2_ARGON2_M_COST (64 MiB), the smallest
+    /// value any honest wallet ever carried. This test asserts the
+    /// tampered file is rejected.
+    #[test]
+    fn validate_rejects_undersized_kdf_m_cost_brute_force_floor() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: 8,         // argon2 protocol min — fast key derivation, brute-forceable
+            kdf_t_cost: ARGON2_T_COST,
+            kdf_p_cost: ARGON2_P_COST,
+        };
+        let err = header
+            .validate()
+            .expect_err("validate must reject pre-fix protocol-min m_cost");
+        match err {
+            Error::Corruption(msg) => assert!(
+                msg.contains("kdf_m_cost"),
+                "expected kdf_m_cost-specific error, got: {}",
+                msg
+            ),
+            other => panic!("expected Error::Corruption, got: {:?}", other),
+        }
+    }
+
+    /// v1.0.12 security-floor test: LEGACY_V2 wallets used
+    /// m=64 MiB / t=3 / p=4 and must still load post-fix. This
+    /// test asserts the new floor doesn't accidentally reject
+    /// legacy files.
+    #[test]
+    fn validate_accepts_legacy_v2_kdf_params() {
+        let header = WalletHeader {
+            magic: *WALLET_MAGIC,
+            version: WALLET_VERSION,
+            encrypted: true,
+            kdf_salt: [0u8; 32],
+            nonce: [0u8; 24],
+            checksum: [0u8; 4],
+            kdf_m_cost: LEGACY_V2_ARGON2_M_COST, // 64 MiB
+            kdf_t_cost: LEGACY_V2_ARGON2_T_COST, // 3
+            kdf_p_cost: LEGACY_V2_ARGON2_P_COST, // 4
+        };
+        assert!(header.validate().is_ok(),
+                "legacy v2 KDF params must still validate after security-floor tightening");
     }
 
     #[test]

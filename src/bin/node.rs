@@ -947,14 +947,39 @@ async fn start_node(
         });
     }
 
-    info!("Node is running. Ctrl-C to stop.");
+    info!("Node is running. Ctrl-C or SIGTERM to stop.");
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install ctrl-c handler");
-
-    info!("Shutdown signal received, stopping node...");
+    // v1.0.12 audit-follow-up: wait for EITHER SIGINT (Ctrl-C, from
+    // an interactive operator) OR SIGTERM (the standard systemd /
+    // Docker / k8s graceful-stop signal). Previously only ctrl_c()
+    // was wired, so under systemd the node received SIGTERM,
+    // ignored it, and got SIGKILL'd after the grace timeout — with
+    // mempool.dat never saved. Fleet boxes run under systemd; this
+    // is a real production loss-of-mempool every restart cycle.
+    //
+    // Windows has no SIGTERM equivalent at this layer, so we keep
+    // it Unix-only via cfg.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Shutdown signal (SIGINT) received, stopping node...");
+            }
+            _ = sigterm.recv() => {
+                info!("Shutdown signal (SIGTERM) received, stopping node...");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install ctrl-c handler");
+        info!("Shutdown signal received, stopping node...");
+    }
 
     // AUDIT 2026-06-05 #14 — persist mempool before exit so unconfirmed
     // txs survive the restart. Failure is logged but not fatal — the

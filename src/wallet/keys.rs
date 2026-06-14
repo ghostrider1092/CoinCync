@@ -168,15 +168,38 @@ impl PaymentAddress {
             .unwrap_or_else(|_| "invalid_address".to_string())
     }
 
-    pub fn from_bech32(s: &str) -> Result<Self> {
-        let (_, data, _) = bech32::decode(s)
+    /// Decode a bech32m payment address, REJECTING any HRP that
+    /// doesn't match `expected_hrp`.
+    ///
+    /// v1.0.12 fix: pre-fix discarded the decoded HRP entirely with
+    /// `let (_, data, _) = ...`, so a mainnet address fed to a testnet
+    /// wallet (or vice versa) decoded successfully and would have been
+    /// treated as a valid recipient — sending funds to a key that
+    /// doesn't exist on the target chain.
+    ///
+    /// Note: this `PaymentAddress` bech32 path has no production
+    /// callers as of v1.0.12 (the live address format is the older
+    /// `tCYNC.../CYNC...` base58 format handled in
+    /// `src/primitives/address.rs`, which DOES validate the network).
+    /// Fixing this preemptively so a future wired-in caller can't
+    /// reintroduce the cross-network send bug.
+    pub fn from_bech32(s: &str, expected_hrp: &str) -> Result<Self> {
+        let (hrp, data, _) = bech32::decode(s)
             .map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
+        if hrp != expected_hrp {
+            return Err(Error::Other(format!(
+                "wrong network HRP: expected {:?}, got {:?} \
+                 (cross-network send to a key that doesn't exist on \
+                 the target chain — refusing)",
+                expected_hrp, hrp,
+            )));
+        }
         let raw: Vec<u8> = bech32::FromBase32::from_base32(&data)
             .map_err(|e| Error::Other(format!("base32 decode: {}", e)))?;
         if raw.len() != 43 {
             return Err(Error::Other("bad address length".into()));
         }
-        // SAFETY: length checked to be exactly 43 on line 176
+        // SAFETY: length checked to be exactly 43 above.
         let diversifier: [u8; 11] = raw[..11].try_into().expect("len==43");
         let pk_bytes: [u8; 32]   = raw[11..43].try_into().expect("len==43");
         let pk_d = CompressedRistretto(pk_bytes)
@@ -300,9 +323,33 @@ mod tests {
         let ivk  = fvk.to_incoming_viewing_key();
         let addr = ivk.to_payment_address([7u8; 11]).unwrap();
         let enc  = addr.to_bech32("yc");
-        let dec  = PaymentAddress::from_bech32(&enc).unwrap();
+        let dec  = PaymentAddress::from_bech32(&enc, "yc").unwrap();
         assert_eq!(addr.diversifier, dec.diversifier);
         assert_eq!(addr.pk_d.compress(), dec.pk_d.compress());
+    }
+
+    /// v1.0.12 regression: HRP must be validated against the
+    /// expected value. Pre-fix this decoded successfully because
+    /// the decoder discarded the HRP entirely → cross-network send
+    /// to a key that doesn't exist on the target chain.
+    #[test]
+    fn cross_network_address_is_rejected() {
+        let sk   = test_spend_key();
+        let fvk  = sk.to_full_viewing_key();
+        let ivk  = fvk.to_incoming_viewing_key();
+        let addr = ivk.to_payment_address([7u8; 11]).unwrap();
+        let mainnet_enc = addr.to_bech32("yc");
+        // Testnet wallet decoding a mainnet address must fail.
+        let result = PaymentAddress::from_bech32(&mainnet_enc, "tc");
+        assert!(
+            result.is_err(),
+            "mainnet (yc) address must be rejected when expected_hrp=tc"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("wrong network HRP") || err.contains("cross-network"),
+            "error message should make cross-network mismatch clear: got {:?}", err
+        );
     }
 
     #[test]
@@ -392,15 +439,39 @@ impl SparkAddress {
             .unwrap_or_else(|_| "invalid_spark_address".to_string())
     }
 
-    pub fn from_bech32(s: &str) -> Result<Self> {
-        let (_, data, _) = bech32::decode(s)
+    /// Decode a bech32m-encoded Spark address.
+    ///
+    /// v1.0.12 audit follow-up: `expected_hrp` is now required (was
+    /// previously discarded via `(_,_,_)`), and the bech32 VARIANT
+    /// is checked too. Pre-fix this function accepted ANY hrp
+    /// (mainnet "ys" / testnet "ts" / random "abc") AND either
+    /// Bech32 or Bech32m, despite the encoder always emitting
+    /// Bech32m. Same cross-network-address-confusion class as the
+    /// earlier `PaymentAddress::from_bech32` fix.
+    ///
+    /// Spark is currently sketch-feature-gated
+    /// (`sketch-lelantus-spark`) so the function has no callers
+    /// in tree yet — fixing pre-emptively so the feature lands
+    /// already hardened.
+    pub fn from_bech32(s: &str, expected_hrp: &str) -> Result<Self> {
+        let (hrp, data, variant) = bech32::decode(s)
             .map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
+        if hrp != expected_hrp {
+            return Err(Error::Other(format!(
+                "Spark address HRP mismatch: expected {}, got {}",
+                expected_hrp, hrp
+            )));
+        }
+        if !matches!(variant, bech32::Variant::Bech32m) {
+            return Err(Error::Other(
+                "Spark address must use bech32m variant".into()
+            ));
+        }
         let raw: Vec<u8> = bech32::FromBase32::from_base32(&data)
             .map_err(|e| Error::Other(format!("base32 decode: {}", e)))?;
         if raw.len() != 43 {
             return Err(Error::Other("bad Spark address length".into()));
         }
-        // SAFETY: length validated to be exactly 43 on line 388
         let diversifier: [u8; 11] = raw[..11].try_into().unwrap();
         let pk_bytes: [u8; 32] = raw[11..43].try_into().unwrap();
         let pk = CompressedRistretto(pk_bytes)

@@ -424,6 +424,123 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically apply a tip-extend block's persistence to disk.
+    ///
+    /// v1.0.12 (H2 fix): the pre-fix tip-extend persistence path in
+    /// `chain.rs::add_block` was a sequence of independent
+    /// `tree.insert` calls + final `db.flush()` — no transactional
+    /// guarantee across trees. A crash between any two writes left
+    /// disk inconsistent:
+    ///
+    ///   - chain_state advanced past the height whose hash hadn't
+    ///     yet been written to `height_index` → recovery sees a
+    ///     tip-pointing-at-nothing.
+    ///
+    ///   - `output_index` half-applied (some outputs of the block
+    ///     persisted, others not) → wallet scan misses outputs.
+    ///
+    ///   - checkpoint added but `chain_state.last_checkpoint` not
+    ///     yet updated → operator triage confusion.
+    ///
+    /// This method mirrors `apply_reorg_atomic`'s shape for the
+    /// tip-extend case (the 99.99% path that previously lacked
+    /// atomicity). All mutations execute inside one
+    /// `trees.transaction` — either all writes commit or none do.
+    ///
+    /// Caller responsibilities (matching `apply_reorg_atomic`):
+    ///   - Pre-serialize OutputIndexEntries (the transaction closure
+    ///     must be pure-writes; per-key existence checks happen
+    ///     outside).
+    ///   - Pre-filter `output_additions` for oldest-wins semantics
+    ///     against the committed DB.
+    ///   - Pre-compute the serialized `new_state` blob.
+    pub fn apply_tip_extend_atomic(
+        &self,
+        // Output index entries to add — already filtered for oldest-wins.
+        // (stealth_addr_bytes, serialized OutputIndexEntry bytes)
+        output_additions: &[([u8; 32], Vec<u8>)],
+        // (height, hash) of the new tip
+        tip_height: u64,
+        tip_hash: [u8; 32],
+        // Optional checkpoint to add at this height. None means
+        // "this block isn't on a CHECKPOINT_INTERVAL boundary."
+        checkpoint: Option<(u64, [u8; 32])>,
+        // New chain state, pre-serialized.
+        new_state: &[u8],
+        // Tx index additions: (tx_hash_bytes, height, tx_idx)
+        tx_index_adds: &[([u8; 32], u64, u32)],
+    ) -> Result<()> {
+        use shim::transaction::Transactional;
+
+        // Pre-compute oldest-wins additions for output_index. The
+        // transaction closure must be pure writes (per the comment in
+        // `apply_reorg_atomic`), so the "already present" check
+        // happens up-front against the committed DB.
+        let mut oi_to_insert: Vec<(&[u8; 32], &Vec<u8>)> = Vec::new();
+        for (stealth, entry_bytes) in output_additions {
+            if self.output_index.tree.get(stealth.as_slice())
+                .map_err(|e| Error::DatabaseError(e.to_string()))?
+                .is_none()
+            {
+                oi_to_insert.push((stealth, entry_bytes));
+            }
+        }
+
+        let trees: &[&shim::Tree] = &[
+            &self.output_index.tree,
+            &self.blocks.height_index,
+            &self.state.state,
+            &self.tx_index,
+            &self.state.checkpoints,
+        ];
+
+        trees.transaction(|tx_trees| {
+            let oi_tree = &tx_trees[0];
+            let hi_tree = &tx_trees[1];
+            let st_tree = &tx_trees[2];
+            let ti_tree = &tx_trees[3];
+            let cp_tree = &tx_trees[4];
+
+            // 1. Add output_index entries (pre-filtered above).
+            for (stealth, entry_bytes) in &oi_to_insert {
+                oi_tree.insert(stealth.as_slice(), entry_bytes.as_slice())?;
+            }
+
+            // 2. Set height → hash for the new tip.
+            hi_tree.insert(&tip_height.to_be_bytes(), tip_hash.as_slice())?;
+
+            // 3. Add tx_index entries: (tx_hash → height || tx_idx).
+            for (hash, height, tx_idx) in tx_index_adds {
+                let mut value = [0u8; 12];
+                value[..8].copy_from_slice(&height.to_le_bytes());
+                value[8..].copy_from_slice(&tx_idx.to_le_bytes());
+                ti_tree.insert(hash.as_slice(), &value)?;
+            }
+
+            // 4. Add checkpoint if this block lands on the interval.
+            if let Some((cp_height, cp_hash)) = checkpoint {
+                cp_tree.insert(&cp_height.to_be_bytes(), cp_hash.as_slice())?;
+            }
+
+            // 5. Update chain state. Last so it's the "this block is
+            //    accepted" commit signal — partial-failure recovery
+            //    sees the old state if any earlier write fails.
+            st_tree.insert(b"chain_state", new_state)?;
+
+            Ok(())
+        }).map_err(|e: shim::transaction::TransactionError| {
+            Error::DatabaseError(format!("Atomic tip-extend transaction failed: {:?}", e))
+        })?;
+
+        // Sync to disk after the atomic transaction completes — mirrors
+        // apply_reorg_atomic's pattern. Without this, a crash between
+        // commit-to-WAL and the next OS-level sync could lose the
+        // transaction.
+        self.flush()?;
+
+        Ok(())
+    }
+
     /// Flush all pending writes to disk
     pub fn flush(&self) -> Result<()> {
         self.db.flush()

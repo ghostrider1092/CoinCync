@@ -509,17 +509,40 @@ pub fn verify_spark_spend(
 
     let h_gen = gen_h();
 
-    // Decode challenges + responses
+    // Decode challenges + responses.
+    //
+    // v1.0.12 fix: use `from_canonical_bytes` instead of
+    // `from_bytes_mod_order`. The mod-order variant accepts
+    // ANY 32 bytes and reduces modulo the curve order; for any
+    // valid scalar `s`, the bytes `s + ℓ` (where ℓ is the curve
+    // order, encoded as bytes) reduce to the same `s`. That made
+    // proof-bytes MALLEABLE — two distinct serialized proofs that
+    // verify identically.
+    //
+    // For Spark, where proof-bytes uniqueness matters (downstream
+    // double-spend detection keys off proof bytes in some flows,
+    // and the serial-tag is derived from canonical scalar
+    // representations), malleable scalar parses are a forge-adjacent
+    // bug. Bail with an explicit error if any challenge or response
+    // byte sequence isn't canonical.
     let c: Vec<Scalar> = proof
         .challenges
         .iter()
-        .map(|b| Scalar::from_bytes_mod_order(*b))
-        .collect();
+        .map(|b| {
+            Scalar::from_canonical_bytes(*b)
+                .into_option()
+                .ok_or(Error::SparkVerifyFailed)
+        })
+        .collect::<Result<_>>()?;
     let z: Vec<Scalar> = proof
         .responses
         .iter()
-        .map(|b| Scalar::from_bytes_mod_order(*b))
-        .collect();
+        .map(|b| {
+            Scalar::from_canonical_bytes(*b)
+                .into_option()
+                .ok_or(Error::SparkVerifyFailed)
+        })
+        .collect::<Result<_>>()?;
 
     // Recompute L_i = z_i*H + c_i*P_i for every i
     let l: Vec<RistrettoPoint> = (0..n)

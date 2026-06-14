@@ -80,8 +80,29 @@ pub const MAX_INBOUND: usize = 64;
 pub const MAX_CONNECTIONS_PER_IP: usize = 2;
 /// Connection timeout
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Ping interval
-pub const PING_INTERVAL: Duration = Duration::from_secs(120);
+/// Ping interval — how often we send an application-layer Ping to
+/// each connected peer to keep the path alive.
+///
+/// **Calibrated against NAT idle-state timeouts.** Cycle 02 (2026-06-11)
+/// surfaced a peer-flap pattern caused by consumer routers (and
+/// Cox CGNAT) dropping NAT entries after ~30-90s of TCP silence.
+/// The previous 120s value was too high — Pings fired well after
+/// the NAT had already dropped the entry, so each Ping arrived to
+/// no route and the connection silently died.
+///
+/// 25s puts the Ping well below the most aggressive NAT idle floor
+/// (~30s). Each Ping is a real Noise-encrypted P2P message that
+/// flows across the TCP stream, refreshing the router's NAT entry
+/// the same way any other P2P traffic would. Combined with TCP
+/// keepalive at 45s (added separately) this gives belt-and-suspenders
+/// path-keepalive coverage.
+///
+/// **Bandwidth cost is negligible:** 256-byte message × 2
+/// (Ping + Pong) × ~6 peers × (1 ping/25s) = ~250 bytes/sec.
+///
+/// See `docs/crucible/cycle-02/finding-01-peer-flap.md` for the
+/// full investigation.
+pub const PING_INTERVAL: Duration = Duration::from_secs(25);
 /// Peer timeout (no activity)
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(300);
 /// Per-peer send queue size (with backpressure)
@@ -858,6 +879,18 @@ impl P2PNode {
                         continue;
                     }
 
+                        // Cycle 02 Finding #1: apply TCP keepalive on
+                        // every accepted inbound connection so it
+                        // survives NAT/router idle-state expiration on
+                        // the remote end. Failure logged but not fatal.
+                        if let Err(e) = crate::network::keepalive::apply_p2p_keepalive(&stream) {
+                            tracing::warn!(
+                                "Failed to set keepalive on inbound P2P connection from {}: {} \
+                                 — connection will flap on idle-NAT links",
+                                addr, e,
+                            );
+                        }
+
                         // Check if peer is banned by scorer
                         if acceptor_scorer.read().await.is_banned(&addr) {
                             debug!("Rejecting banned peer {}", addr);
@@ -872,11 +905,23 @@ impl P2PNode {
                             continue;
                         }
 
-                        let inbound_count = acceptor_peers.iter()
+                        // v1.0.12 audit-follow-up: early-exit count.
+                        // The pre-fix `.filter().count()` walked EVERY
+                        // peer entry on every accept — O(N_total) per
+                        // accept, which under accept-flood with 100
+                        // inbound peers = ~10K iters/sec just to
+                        // compute a single comparison. `take(MAX)` short-
+                        // circuits the iterator once we've seen enough
+                        // inbound entries to know we're at the cap;
+                        // worst-case bound becomes O(MAX_INBOUND)
+                        // regardless of total peer count. A true counter
+                        // would be O(1) but requires touching every
+                        // connect/disconnect path — left for v1.0.13.
+                        let at_cap = acceptor_peers.iter()
                             .filter(|p| !p.outbound)
-                            .count();
-
-                        if inbound_count >= MAX_INBOUND {
+                            .take(MAX_INBOUND)
+                            .count() >= MAX_INBOUND;
+                        if at_cap {
                             debug!("Max inbound connections reached, rejecting {}", addr);
                             acceptor_tracker.untrack_connection(&addr);
                             continue;
@@ -1417,12 +1462,22 @@ impl P2PNode {
                     let current_height = sync_chain.height();
                     tracing::error!(
                         "Sync EMERGENCY-TIER-3 #{}: chain has not advanced past height {} \
-                         for {}s (>= {}s threshold) despite sync engine reporting non-stalled \
-                         state. This indicates an orphan-fetch cascade or similar pathology \
-                         where the engine is internally busy but making no real progress. \
-                         Forcing aggressive reset: clear address tried-list, drop expired \
-                         orphans, reset headers-request timeout. If this fires repeatedly, \
-                         operator may need to wipe + reimport snapshot.",
+                         for {}s (>= {}s threshold). \
+                         This usually means one of: \
+                         (1) all peers stopped mining — most common in small test meshes \
+                         or after a global fleet outage; check `coincync-node ibd-status` \
+                         on each peer to see whether anyone has a higher tip; \
+                         (2) sync engine internally busy — orphan-fetch cascade or \
+                         header request stuck; \
+                         (3) protocol version mismatch — your binary won't accept blocks \
+                         the peer is producing (look for `BLOCK REJECTED AS INVALID` lines). \
+                         Forcing aggressive reset for case (2): clear address tried-list, \
+                         drop expired orphans, reset headers-request timeout. \
+                         For case (1) the reset is harmless but won't help — you need \
+                         someone (or yourself) to mine. \
+                         If this fires repeatedly, the operator may need to wipe + \
+                         reimport snapshot. \
+                         (Cycle 02 Finding #4 — message disambiguates between cases.)",
                         emergency_t3_fires,
                         current_height,
                         secs_since_progress,
@@ -1832,6 +1887,10 @@ impl P2PNode {
         // SECURITY (NET-002): Share conn_tracker with maintenance to untrack stale peers
         let maint_tracker = self.conn_tracker.clone();
         let maint_scorer = self.peer_scorer.clone();
+        // v1.0.12 stall-fix: chain handle needed so the IBD header-refresh
+        // tick can build a fresh locator from the current local height
+        // each cycle (see header-refresh arm in the maintenance select!).
+        let maint_chain = self.chain.clone();
         // Take the broadcast queue receiver for the maintenance task
         let mut broadcast_rx = self.tx_broadcast_rx.lock()
             .take()
@@ -1842,6 +1901,34 @@ impl P2PNode {
             let mut cleanup_interval = interval(Duration::from_secs(60));
             // Dandelion++ monitor runs every DANDELION_MONITOR_INTERVAL_SECS
             let mut dandelion_interval = interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
+            // v1.0.12 stall-fix: proactive peer-height refresh during IBD.
+            // The pre-fix code refreshed `peer.height` ONLY on incoming
+            // InvBlock (node.rs:3340) — which depends on the chain
+            // actively producing blocks. If the source chain itself
+            // stalls (no new blocks → no InvBlocks), peer.height stays
+            // frozen at the handshake-time value. The local sync code
+            // then SKIPS those peers when picking GetBlocks targets
+            // because their stale-known-height says they don't have
+            // the blocks we need.
+            //
+            // Symptom: synced cleanly to ~handshake-time-tip, then
+            // grew very slowly because only the ONE peer whose
+            // height we successfully refreshed (typically the
+            // healthiest seed) served the remainder one block at a
+            // time.
+            //
+            // Fix: every 30s during IBD, send a fresh GetHeaders to
+            // every connected peer. Their Headers response runs
+            // through the existing path at node.rs:3693 which calls
+            // update_peer_height_for(peer_id, max_header_height) —
+            // peer.height becomes current, sync re-routes block
+            // requests across all real-height peers, single-peer
+            // bottleneck dissolves.
+            //
+            // 30s cadence: light — ~5 peers × 1 GetHeaders/30s = ~1
+            // outbound msg/6s. Stops firing the moment sync flips
+            // is_synced=true.
+            let mut header_refresh_interval = interval(Duration::from_secs(30));
 
             while *maint_running.read().await {
                 tokio::select! {
@@ -1912,6 +1999,54 @@ impl P2PNode {
                         // Update stempool size gauge
                         let stempool_size = maint_dandelion.read().await.stempool_size();
                         crate::metrics::dandelion::STEMPOOL_SIZE.set(stempool_size as i64);
+                    }
+
+                    _ = header_refresh_interval.tick() => {
+                        // v1.0.12 stall-fix: only fires during IBD. Once
+                        // is_synced flips, this arm becomes a no-op.
+                        let is_ibd = !maint_sync.read().await.is_synced();
+                        if !is_ibd {
+                            continue;
+                        }
+                        // Build the locator ONCE per tick; reused across
+                        // peers. height() is a cheap atomic-style read.
+                        let our_height = maint_chain.height();
+                        let chain_ref = &maint_chain;
+                        let locator = build_locator(our_height, |h| chain_ref.get_block_hash(h));
+                        if locator.is_empty() {
+                            continue;
+                        }
+                        // Iterate connected peers; one fresh nonce per
+                        // peer so responses don't collide on validate_header_nonce.
+                        let peer_ids: Vec<PeerId> = maint_peers.iter()
+                            .filter(|p| p.state == PeerState::Connected)
+                            .map(|p| p.id)
+                            .collect();
+                        let mut sent = 0usize;
+                        for peer_id in peer_ids {
+                            let nonce = maint_sync.write().await.allocate_header_nonce();
+                            let msg = match Message::get_headers_with_nonce(
+                                magic, locator.clone(), Hash::zero(), nonce,
+                            ) {
+                                Ok(m) => m,
+                                Err(_) => continue,
+                            };
+                            let data = match msg.to_bytes() {
+                                Ok(d) => d,
+                                Err(_) => continue,
+                            };
+                            if let Some(sender) = maint_senders.get(&peer_id) {
+                                if sender.send(data).await.is_ok() {
+                                    sent += 1;
+                                }
+                            }
+                        }
+                        if sent > 0 {
+                            debug!(
+                                "IBD header-refresh: sent GetHeaders to {} peer(s) at our_h={}",
+                                sent, our_height
+                            );
+                        }
                     }
 
                     _ = cleanup_interval.tick() => {
@@ -2738,6 +2873,144 @@ fn net_addr_to_socket_addr(net_addr: &super::protocol::NetAddr) -> Option<Socket
     }
 }
 
+/// Returns true if the given IP is routable on the public internet —
+/// i.e., the kind of address that a real peer could be reachable at.
+///
+/// v1.0.12 fix (HIGH): pre-fix only rejected loopback + unspecified
+/// for peer gossip. An attacker could poison our address book with
+/// multicast / link-local / CGNAT / docs / broadcast IPs and we would
+/// dial them (burning connection slots) and gossip them onward.
+/// Bitcoin CVE-2015-3641 class. Mirrors Bitcoin Core's
+/// `CNetAddr::IsRoutable()` shape.
+///
+/// Rejections (all variants):
+///   - Loopback (127.0.0.0/8, ::1)
+///   - Unspecified (0.0.0.0, ::)
+///   - Multicast (224.0.0.0/4, ff00::/8)
+///   - IPv4 link-local (169.254.0.0/16) — APIPA
+///   - IPv4 private (10/8, 172.16/12, 192.168/16) — RFC 1918
+///   - IPv4 CGNAT shared address (100.64.0.0/10) — RFC 6598
+///   - IPv4 documentation (192.0.2/24, 198.51.100/24, 203.0.113/24)
+///     and benchmark (198.18/15) — RFC 5737, RFC 2544
+///   - IPv4 broadcast (255.255.255.255)
+///   - IPv6 unique local (fc00::/7) — RFC 4193
+///   - IPv6 link-local (fe80::/10) — RFC 4291
+///   - IPv6 documentation (2001:db8::/32) — RFC 3849
+///   - IPv4-compatible IPv6 (::a.b.c.d, deprecated per RFC 4291)
+fn is_routable(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 10.0.0.0/8 — private
+            if octets[0] == 10 { return false; }
+            // 172.16.0.0/12 — private
+            if octets[0] == 172 && (octets[1] & 0xf0) == 16 { return false; }
+            // 192.168.0.0/16 — private
+            if octets[0] == 192 && octets[1] == 168 { return false; }
+            // 169.254.0.0/16 — link-local (APIPA)
+            if octets[0] == 169 && octets[1] == 254 { return false; }
+            // 100.64.0.0/10 — CGNAT (RFC 6598)
+            if octets[0] == 100 && (octets[1] & 0xc0) == 64 { return false; }
+            // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 — docs (RFC 5737)
+            if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 { return false; }
+            if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 { return false; }
+            if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 { return false; }
+            // 198.18.0.0/15 — benchmark (RFC 2544)
+            if octets[0] == 198 && (octets[1] & 0xfe) == 18 { return false; }
+            // 255.255.255.255 — broadcast
+            if octets == [255, 255, 255, 255] { return false; }
+            // 0.0.0.0/8 — "this network" (also covers unspecified above)
+            if octets[0] == 0 { return false; }
+            true
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            // fc00::/7 — unique local (RFC 4193)
+            if (segments[0] & 0xfe00) == 0xfc00 { return false; }
+            // fe80::/10 — link-local (RFC 4291)
+            if (segments[0] & 0xffc0) == 0xfe80 { return false; }
+            // 2001:db8::/32 — documentation (RFC 3849)
+            if segments[0] == 0x2001 && segments[1] == 0x0db8 { return false; }
+            // IPv4-compatible IPv6 (::a.b.c.d) — deprecated per RFC 4291.
+            // Reject; the legitimate IPv4-in-v6 form is IPv4-mapped
+            // (::ffff:a.b.c.d) which we already converted to V4 above.
+            if v6.to_ipv4().is_some() && v6.to_ipv4_mapped().is_none() {
+                return false;
+            }
+            true
+        }
+    }
+}
+
+#[cfg(test)]
+mod is_routable_tests {
+    use super::is_routable;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn rejects_unroutable_ipv4() {
+        // Each must be rejected; checked separately so the failing
+        // assertion identifies the specific octet pattern.
+        let reject_v4 = [
+            "0.0.0.0", "127.0.0.1",
+            "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
+            "169.254.1.2",         // link-local
+            "100.64.0.1", "100.127.255.255",       // CGNAT
+            "192.0.2.1", "198.51.100.1", "203.0.113.1",  // docs
+            "198.18.0.1", "198.19.255.255",        // benchmark
+            "255.255.255.255",     // broadcast
+            "224.0.0.1", "239.255.255.255",        // multicast
+        ];
+        for s in reject_v4 {
+            let ip = IpAddr::V4(s.parse::<Ipv4Addr>().unwrap());
+            assert!(!is_routable(ip), "expected NOT routable: {}", s);
+        }
+    }
+
+    #[test]
+    fn accepts_routable_ipv4() {
+        let accept_v4 = ["1.1.1.1", "8.8.8.8", "66.135.23.193", "203.0.114.1"];
+        for s in accept_v4 {
+            let ip = IpAddr::V4(s.parse::<Ipv4Addr>().unwrap());
+            assert!(is_routable(ip), "expected routable: {}", s);
+        }
+    }
+
+    #[test]
+    fn rejects_unroutable_ipv6() {
+        let reject_v6 = [
+            "::",                           // unspecified
+            "::1",                          // loopback
+            "fe80::1",                      // link-local
+            "fc00::1", "fd00::1",          // unique local
+            "ff00::1", "ff02::1",          // multicast
+            "2001:db8::1",                  // documentation
+        ];
+        for s in reject_v6 {
+            let ip = IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+            assert!(!is_routable(ip), "expected NOT routable: {}", s);
+        }
+    }
+
+    #[test]
+    fn accepts_routable_ipv6() {
+        let accept_v6 = [
+            "2001:4860:4860::8888",         // Google DNS
+            "2a01:e0a:c53:63d0::1",         // Real-world routable prefix
+        ];
+        for s in accept_v6 {
+            let ip = IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+            assert!(is_routable(ip), "expected routable: {}", s);
+        }
+    }
+}
+
 /// Pick a connected peer for sending requests, preferring higher-scored peers.
 ///
 /// Uses weighted random selection based on composite peer scores when a scorer
@@ -2905,18 +3178,44 @@ async fn process_message(
                 }
             };
             {
-                // SECURITY (NET-001): Detect self-connection via nonce
+                // SECURITY (NET-001 + v1.0.12 fix): Detect self-connection
+                // via nonce match — but DON'T permanently ban the peer's
+                // address.
+                //
+                // The pre-v1.0.12 code marked any address that sent us
+                // OUR nonce as "ours" and permanently skipped it. But
+                // `our_nonce` is a per-node-lifetime u64; any peer who
+                // received our Version (i.e., every peer we've dialed
+                // or been dialed by) knows it and can replay it. An
+                // attacker spins up a peer, reads our_nonce from our
+                // outbound Version, then connects FROM A DIFFERENT
+                // ADDRESS sending our_nonce back. Pre-fix: we
+                // permanently banned that address. With repeats, the
+                // attacker could blacklist ANY IP — eclipse attack
+                // surface.
+                //
+                // The right defense is per-outbound nonce tracking
+                // (track which nonce we sent to which addr; require
+                // the inbound nonce to match BOTH the value AND the
+                // sender address). That's a v1.0.13 follow-up because
+                // it touches the Version-send path and the connection
+                // state map. For v1.0.12 we ship the smaller
+                // defensive fix: detect the nonce match, disconnect,
+                // but DON'T mark the address as ours. A legitimate
+                // self-connection (typically a config error where the
+                // operator addnoded their own IP) becomes a one-time
+                // disconnect the operator can resolve via config; an
+                // attacker can no longer poison the address book.
                 if version.nonce == our_nonce {
-                    warn!("Self-connection detected (nonce match), disconnecting peer {:?}", &peer_id[..4]);
-                    // Permanently ban this address in the address manager so the
-                    // outbound connector never retries it. Without this, the
-                    // exponential backoff delays connections to ALL seeds.
-                    if let Some(peer_info) = peers.get(&peer_id) {
-                        let self_addr = peer_info.addr;
-                        drop(peer_info);
-                        addresses.write().await.mark_self_address(self_addr);
-                        tracing::info!("Permanently skipping self-address {}", self_addr);
-                    }
+                    warn!(
+                        "Self-connection nonce match from peer {:?} \
+                         — disconnecting. Note: NOT marking as self-address \
+                         because the nonce is replay-able; if this fires \
+                         repeatedly for legitimately-yours addresses, \
+                         verify the operator config doesn't list its own IP \
+                         in --addnode.",
+                        &peer_id[..4],
+                    );
                     peers.remove(&peer_id);
                     senders.remove(&peer_id);
                     let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
@@ -3685,9 +3984,14 @@ async fn process_message(
                         continue; // Stale address — too old
                     }
                     if let Some(socket_addr) = net_addr_to_socket_addr(net_addr) {
-                        // Skip unroutable addresses
-                        let ip = socket_addr.ip();
-                        if ip.is_loopback() || ip.is_unspecified() {
+                        // v1.0.12 fix (HIGH): expanded unroutable filter.
+                        // Pre-fix only rejected loopback + unspecified, so
+                        // an attacker poisoning our address book with
+                        // multicast / link-local / CGNAT / IPv6-multicast /
+                        // broadcast / docs-IPs would have us dial those
+                        // (burning connection slots) and gossip them
+                        // onward. Bitcoin CVE-2015-3641 class.
+                        if !is_routable(socket_addr.ip()) {
                             continue;
                         }
                         let mut pa = PeerAddress::new(socket_addr);

@@ -1,6 +1,7 @@
 // src/network/mod.rs
 pub mod bootstrap;
 pub mod dns_seeds;
+pub mod keepalive;
 pub mod socks_dns;
 
 // Ported from CoinCync (copy as-is):
