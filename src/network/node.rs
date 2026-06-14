@@ -905,11 +905,23 @@ impl P2PNode {
                             continue;
                         }
 
-                        let inbound_count = acceptor_peers.iter()
+                        // v1.0.12 audit-follow-up: early-exit count.
+                        // The pre-fix `.filter().count()` walked EVERY
+                        // peer entry on every accept — O(N_total) per
+                        // accept, which under accept-flood with 100
+                        // inbound peers = ~10K iters/sec just to
+                        // compute a single comparison. `take(MAX)` short-
+                        // circuits the iterator once we've seen enough
+                        // inbound entries to know we're at the cap;
+                        // worst-case bound becomes O(MAX_INBOUND)
+                        // regardless of total peer count. A true counter
+                        // would be O(1) but requires touching every
+                        // connect/disconnect path — left for v1.0.13.
+                        let at_cap = acceptor_peers.iter()
                             .filter(|p| !p.outbound)
-                            .count();
-
-                        if inbound_count >= MAX_INBOUND {
+                            .take(MAX_INBOUND)
+                            .count() >= MAX_INBOUND;
+                        if at_cap {
                             debug!("Max inbound connections reached, rejecting {}", addr);
                             acceptor_tracker.untrack_connection(&addr);
                             continue;
