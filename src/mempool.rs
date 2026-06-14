@@ -1060,6 +1060,31 @@ impl Mempool {
         if !path.exists() {
             return Ok(0);
         }
+
+        // v1.0.12 audit-follow-up: bound the read at MAX_MEMPOOL_BYTES
+        // before allocating, then bound the parsed Vec length at
+        // MAX_MEMPOOL_TXS as defense in depth.
+        //
+        // Trust model: mempool.dat is normally written by this node,
+        // but ANY actor with filesystem access (other local user,
+        // container neighbor, exfiltrator, even a leftover file from
+        // a crashed peer process) can substitute a crafted file. An
+        // untrusted file with a 4 GB Vec length prefix would (a) be
+        // fully read into memory by std::fs::read, then (b) push
+        // borsh into a long allocation loop before failing. Even
+        // bounded allocation strategies in borsh 1.x can still
+        // amortize tens of GB of work before erroring.
+        let metadata = std::fs::metadata(&path)
+            .map_err(|e| Error::DatabaseError(format!("stat mempool.dat: {}", e)))?;
+        if metadata.len() > crate::constants::MAX_MEMPOOL_BYTES as u64 {
+            // Remove the oversized file so we don't refuse forever.
+            let _ = std::fs::remove_file(&path);
+            return Err(Error::SerializationError(format!(
+                "mempool.dat too large: {} bytes (max {})",
+                metadata.len(), crate::constants::MAX_MEMPOOL_BYTES
+            )));
+        }
+
         let data = std::fs::read(&path)
             .map_err(|e| Error::DatabaseError(format!("Failed to read mempool.dat: {}", e)))?;
         // Always remove the file after reading to avoid replaying stale txs
@@ -1067,6 +1092,13 @@ impl Mempool {
 
         let txs: Vec<Transaction> = borsh::from_slice(&data)
             .map_err(|e| Error::SerializationError(format!("mempool.dat corrupt: {}", e)))?;
+
+        if txs.len() > crate::constants::MAX_MEMPOOL_TXS {
+            return Err(Error::SerializationError(format!(
+                "mempool.dat contains {} txs (max {})",
+                txs.len(), crate::constants::MAX_MEMPOOL_TXS
+            )));
+        }
 
         let mut loaded = 0;
         for tx in txs {
