@@ -1832,6 +1832,10 @@ impl P2PNode {
         // SECURITY (NET-002): Share conn_tracker with maintenance to untrack stale peers
         let maint_tracker = self.conn_tracker.clone();
         let maint_scorer = self.peer_scorer.clone();
+        // v1.0.12 stall-fix: chain handle needed so the IBD header-refresh
+        // tick can build a fresh locator from the current local height
+        // each cycle (see header-refresh arm in the maintenance select!).
+        let maint_chain = self.chain.clone();
         // Take the broadcast queue receiver for the maintenance task
         let mut broadcast_rx = self.tx_broadcast_rx.lock()
             .take()
@@ -1842,6 +1846,34 @@ impl P2PNode {
             let mut cleanup_interval = interval(Duration::from_secs(60));
             // Dandelion++ monitor runs every DANDELION_MONITOR_INTERVAL_SECS
             let mut dandelion_interval = interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
+            // v1.0.12 stall-fix: proactive peer-height refresh during IBD.
+            // The pre-fix code refreshed `peer.height` ONLY on incoming
+            // InvBlock (node.rs:3340) — which depends on the chain
+            // actively producing blocks. If the source chain itself
+            // stalls (no new blocks → no InvBlocks), peer.height stays
+            // frozen at the handshake-time value. The local sync code
+            // then SKIPS those peers when picking GetBlocks targets
+            // because their stale-known-height says they don't have
+            // the blocks we need.
+            //
+            // Symptom: synced cleanly to ~handshake-time-tip, then
+            // grew very slowly because only the ONE peer whose
+            // height we successfully refreshed (typically the
+            // healthiest seed) served the remainder one block at a
+            // time.
+            //
+            // Fix: every 30s during IBD, send a fresh GetHeaders to
+            // every connected peer. Their Headers response runs
+            // through the existing path at node.rs:3693 which calls
+            // update_peer_height_for(peer_id, max_header_height) —
+            // peer.height becomes current, sync re-routes block
+            // requests across all real-height peers, single-peer
+            // bottleneck dissolves.
+            //
+            // 30s cadence: light — ~5 peers × 1 GetHeaders/30s = ~1
+            // outbound msg/6s. Stops firing the moment sync flips
+            // is_synced=true.
+            let mut header_refresh_interval = interval(Duration::from_secs(30));
 
             while *maint_running.read().await {
                 tokio::select! {
@@ -1912,6 +1944,54 @@ impl P2PNode {
                         // Update stempool size gauge
                         let stempool_size = maint_dandelion.read().await.stempool_size();
                         crate::metrics::dandelion::STEMPOOL_SIZE.set(stempool_size as i64);
+                    }
+
+                    _ = header_refresh_interval.tick() => {
+                        // v1.0.12 stall-fix: only fires during IBD. Once
+                        // is_synced flips, this arm becomes a no-op.
+                        let is_ibd = !maint_sync.read().await.is_synced();
+                        if !is_ibd {
+                            continue;
+                        }
+                        // Build the locator ONCE per tick; reused across
+                        // peers. height() is a cheap atomic-style read.
+                        let our_height = maint_chain.height();
+                        let chain_ref = &maint_chain;
+                        let locator = build_locator(our_height, |h| chain_ref.get_block_hash(h));
+                        if locator.is_empty() {
+                            continue;
+                        }
+                        // Iterate connected peers; one fresh nonce per
+                        // peer so responses don't collide on validate_header_nonce.
+                        let peer_ids: Vec<PeerId> = maint_peers.iter()
+                            .filter(|p| p.state == PeerState::Connected)
+                            .map(|p| p.id)
+                            .collect();
+                        let mut sent = 0usize;
+                        for peer_id in peer_ids {
+                            let nonce = maint_sync.write().await.allocate_header_nonce();
+                            let msg = match Message::get_headers_with_nonce(
+                                magic, locator.clone(), Hash::zero(), nonce,
+                            ) {
+                                Ok(m) => m,
+                                Err(_) => continue,
+                            };
+                            let data = match msg.to_bytes() {
+                                Ok(d) => d,
+                                Err(_) => continue,
+                            };
+                            if let Some(sender) = maint_senders.get(&peer_id) {
+                                if sender.send(data).await.is_ok() {
+                                    sent += 1;
+                                }
+                            }
+                        }
+                        if sent > 0 {
+                            debug!(
+                                "IBD header-refresh: sent GetHeaders to {} peer(s) at our_h={}",
+                                sent, our_height
+                            );
+                        }
                     }
 
                     _ = cleanup_interval.tick() => {
