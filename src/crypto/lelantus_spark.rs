@@ -533,7 +533,7 @@ pub fn verify_spark_spend(
                 .into_option()
                 .ok_or(Error::SparkVerifyFailed)
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_>>()?;
     let z: Vec<Scalar> = proof
         .responses
         .iter()
@@ -542,7 +542,7 @@ pub fn verify_spark_spend(
                 .into_option()
                 .ok_or(Error::SparkVerifyFailed)
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_>>()?;
 
     // Recompute L_i = z_i*H + c_i*P_i for every i
     let l: Vec<RistrettoPoint> = (0..n)
