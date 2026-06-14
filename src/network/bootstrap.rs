@@ -462,10 +462,44 @@ impl AddressManager {
         if !path.exists() {
             return Ok(0);
         }
+
+        // v1.0.12 audit-follow-up: bound the read at MAX_ADDRBOOK_BYTES
+        // before fs::read_to_string allocates, AND cap the parsed Vec
+        // length post-decode. Same OOM-on-startup risk class as
+        // Mempool::load_from_disk (commit 95e93066): any actor with
+        // filesystem access can drop a multi-GB or N-billion-entry
+        // JSON file into the data dir.
+        //
+        // Honest address books with max_addresses=100 entries serialize
+        // to a few KB. 1 MB is ~10K entries — generous over the
+        // in-memory cap, narrow enough to make a crafted-file DoS
+        // impractical. Hard-coded vs a public const because no other
+        // call site needs to reason about this number.
+        const MAX_ADDRBOOK_BYTES: u64 = 1024 * 1024; // 1 MiB
+        const MAX_ADDRBOOK_ENTRIES: usize = 10_000;
+
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| Error::InvalidState(format!("stat address book: {}", e)))?;
+        if metadata.len() > MAX_ADDRBOOK_BYTES {
+            // Remove the oversized file so the node isn't bricked.
+            let _ = std::fs::remove_file(path);
+            return Err(Error::InvalidState(format!(
+                "address book file too large: {} bytes (max {})",
+                metadata.len(), MAX_ADDRBOOK_BYTES
+            )));
+        }
+
         let data = std::fs::read_to_string(path)
             .map_err(|e| Error::InvalidState(format!("read address book: {}", e)))?;
         let entries: Vec<PeerAddressSerde> = serde_json::from_str(&data)
             .map_err(|e| Error::InvalidState(format!("parse address book: {}", e)))?;
+
+        if entries.len() > MAX_ADDRBOOK_ENTRIES {
+            return Err(Error::InvalidState(format!(
+                "address book file has {} entries (max {})",
+                entries.len(), MAX_ADDRBOOK_ENTRIES
+            )));
+        }
 
         let mut loaded = 0;
         for entry in entries {
