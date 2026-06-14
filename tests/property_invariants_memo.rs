@@ -228,11 +228,24 @@ proptest! {
     /// fresh per transaction (so two different txs with identical memo
     /// content have different ciphertexts via different tx_secrets).
     ///
-    /// This property verifies the determinism so a regression introducing
-    /// randomness — which would make decryption fail on re-derivation —
-    /// is caught.
+    /// Property: encrypt_memo MUST be non-deterministic — a fresh
+    /// nonce is generated per call.
+    ///
+    /// Updated 2026-06-14 to match the security fix in commit
+    /// 79b2625e ("crypto/memo: random nonce per encryption — close
+    /// nonce-reuse hazard"). Pre-fix the encryption derived its
+    /// nonce from (tx_sk, view_pk), making the output deterministic
+    /// — and exposing every output's memo to anyone who saw two
+    /// memos encrypted under the same key pair (XChaCha20 nonce
+    /// reuse leaks the keystream → plaintext XOR is recoverable).
+    /// The fix randomizes the nonce; this test would have caught
+    /// any regression that reverted it.
+    ///
+    /// The decryption side is unaffected: receiver reads the
+    /// nonce from the wire-format prefix and derives the key from
+    /// (tx_pk, view_sk).
     #[test]
-    fn encrypt_is_deterministic(
+    fn encrypt_uses_fresh_nonce_per_call(
         memo in proptest::collection::vec(any::<u8>(), 1..=64),
         tx_seed in any::<u64>(),
         view_seed in any::<u64>(),
@@ -241,8 +254,10 @@ proptest! {
         let (_, view_public) = keypair_from_seed(view_seed);
         let e1 = encrypt_memo(&memo, &tx_secret, &view_public).expect("e1");
         let e2 = encrypt_memo(&memo, &tx_secret, &view_public).expect("e2");
-        prop_assert_eq!(e1, e2,
-            "encrypt_memo non-deterministic with fixed (memo, tx_sk, view_pk)");
+        prop_assert_ne!(&e1, &e2,
+            "encrypt_memo MUST produce different ciphertexts on re-call \
+             (nonce-reuse hazard would let a passive observer XOR two \
+             same-key ciphertexts to recover plaintext xor)");
     }
 
     // ─── Encrypted output structure ──────────────────────────────
