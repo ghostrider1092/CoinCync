@@ -1198,6 +1198,32 @@ pub fn validate_transaction(
                 out_idx
             )));
         }
+
+        // SECURITY (v1.0.12): Per-output size bounds.
+        //
+        // Pre-fix, encrypted_memo and encrypted_amount size caps lived
+        // ONLY in `validate_transaction_basic` (mempool admission). A
+        // miner could include a tx with encrypted_memo.len() = several
+        // hundred KiB in a mined block; block validation calls THIS
+        // function (validate_transaction), which let it through. Same
+        // class as the version=0 / MAX_TX_VERSION bug found 2026-06-03.
+        //
+        // MAX_TX_SIZE caps the overall tx, so the absolute worst case
+        // is one tx ~= MAX_TX_SIZE — but that's still chain-bloat as
+        // every honest node pays disk + bandwidth for it forever.
+        // Tightening here closes the gap.
+        if output.encrypted_memo.len() > 256 {
+            return Err(Error::InvalidTransaction(format!(
+                "output {} encrypted_memo too large: {} bytes (max 256)",
+                out_idx, output.encrypted_memo.len()
+            )));
+        }
+        if output.encrypted_amount.len() > 64 {
+            return Err(Error::InvalidTransaction(format!(
+                "output {} encrypted_amount too large: {} bytes (max 64)",
+                out_idx, output.encrypted_amount.len()
+            )));
+        }
     }
 
     // SECURITY (CRIT-5 + HIGH-4): Validate ring members exist in UTXO set and
