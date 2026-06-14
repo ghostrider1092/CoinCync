@@ -455,14 +455,21 @@ pub fn validate_block_with_checkpoint_for_network(
 
             for (idx, output) in coinbase.outputs.iter().enumerate() {
                 // Extract declared amount from encrypted_amount field
-                // (coinbase uses plaintext amount since reward is public)
-                let declared_amount = if output.encrypted_amount.len() >= 8 {
+                // (coinbase uses plaintext amount since reward is public).
+                //
+                // v1.0.12 audit-follow-up #5: tightened from `>= 8` to
+                // `== 8`. Honest coinbase construction emits exactly
+                // 8 bytes (LE u64). The pre-fix `>= 8` silently
+                // accepted longer payloads and used only the first 8
+                // bytes — chain-bloat path bounded by MAX_TX_SIZE but
+                // still real per-coinbase waste on every block forever.
+                let declared_amount = if output.encrypted_amount.len() == 8 {
                     let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&output.encrypted_amount[..8]);
+                    bytes.copy_from_slice(&output.encrypted_amount);
                     u64::from_le_bytes(bytes)
                 } else {
                     result.add_error(format!(
-                        "Coinbase output {} has invalid amount encoding (expected 8 bytes, got {})",
+                        "Coinbase output {} has invalid amount encoding (expected exactly 8 bytes, got {})",
                         idx, output.encrypted_amount.len()
                     ));
                     all_valid = false;
@@ -1218,9 +1225,16 @@ pub fn validate_transaction(
                 out_idx, output.encrypted_memo.len()
             )));
         }
-        if output.encrypted_amount.len() > 64 {
+        // v1.0.12 audit-follow-up #4: encrypted_amount is an XOR-masked
+        // u64 — exactly 8 bytes. Honest wallets construct it via
+        // `vec![0u8; 8]` everywhere (see grep for "encrypted_amount: vec"
+        // in src/). Accepting 0..=64 (the prior bound) silently let
+        // malicious miners pad each output with up to 56 surplus bytes
+        // — bounded chain bloat that compounds across every UTXO that
+        // outlives the tx. Tighten to exact length.
+        if output.encrypted_amount.len() != 8 {
             return Err(Error::InvalidTransaction(format!(
-                "output {} encrypted_amount too large: {} bytes (max 64)",
+                "output {} encrypted_amount must be exactly 8 bytes, got {}",
                 out_idx, output.encrypted_amount.len()
             )));
         }
