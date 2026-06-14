@@ -595,6 +595,35 @@ pub fn validate_block_with_checkpoint_for_network(
         }
     }
 
+    // SECURITY (v1.0.12 audit follow-up): Reject blocks where two
+    // distinct txs create the same stealth address as an output.
+    //
+    // The dup-stealth check inside `validate_transaction` (commit
+    // 5aeb27dd) catches: (a) duplicates within a single tx via an
+    // in-tx HashSet, and (b) clash with any already-on-chain
+    // output via `utxos.get_output_index_entry`. It does NOT catch
+    // CROSS-TX-WITHIN-BLOCK clashes — tx1 and tx2 each create
+    // output with stealth X, neither X is in the UTXO yet at
+    // validation time, and `validate_transaction` runs in parallel
+    // across txs so they can't see each other's new outputs.
+    //
+    // Without this check, block-apply would `or_insert` index tx1's
+    // output X and silently drop tx2's output X from
+    // stealth_index/output_index — same silent-output-loss + CLSAG
+    // forgery-path as the in-tx variant.
+    let mut seen_block_outputs = std::collections::HashSet::new();
+    for (tx_idx, tx) in block.transactions.iter().enumerate() {
+        for (out_idx, output) in tx.outputs.iter().enumerate() {
+            let addr_bytes = *output.stealth_address.as_bytes();
+            if !seen_block_outputs.insert(addr_bytes) {
+                result.add_error(format!(
+                    "Cross-tx duplicate stealth address in block at tx {} output {}",
+                    tx_idx, out_idx
+                ));
+            }
+        }
+    }
+
     // If there are duplicate key images, fail fast before expensive validation
     if !result.valid {
         return Ok(result);
