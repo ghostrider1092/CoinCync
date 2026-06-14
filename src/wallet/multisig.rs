@@ -177,9 +177,27 @@ pub fn signing_round1(share: &KeyShare) -> Result<(Round1Output, Round1Secret)> 
 /// Round 2: Produce a signature share.
 /// Each signer calls this with their key share, their round1 secret,
 /// all participants' round1 commitments, and the message to sign.
+///
+/// v1.0.12 audit follow-up: `secret` is now consumed BY VALUE (not
+/// `&Round1Secret`). FROST is a Schnorr-family signature scheme;
+/// reusing the same nonces across two signing sessions leaks the
+/// signing key. The pre-fix signature `&Round1Secret` allowed a
+/// caller to pass `&secret` twice — accidentally or via a buggy
+/// coordinator loop — and silently produce two signatures over
+/// different messages from the SAME nonces, exposing the
+/// participant's key share to anyone who saw both signatures.
+///
+/// Consuming the secret makes nonce reuse a compile-time error
+/// (use-after-move) under Rust's ownership rules. Any caller that
+/// genuinely wants to sign twice must run signing_round1 again to
+/// generate fresh nonces — which is the correct and required
+/// behaviour.
+///
+/// (Round1Secret is non-Clone by design so this guarantee can't be
+/// trivially bypassed.)
 pub fn signing_round2(
     share: &KeyShare,
-    secret: &Round1Secret,
+    secret: Round1Secret,
     all_commitments: &[Round1Output],
     message: &[u8],
 ) -> Result<Round2Output> {
@@ -203,6 +221,11 @@ pub fn signing_round2(
         &key_package,
     )
     .map_err(|e| Error::Internal(format!("round2 sign failed: {}", e)))?;
+    // Drop secret explicitly now — its move into this function is
+    // already what guarantees single-use, but a named drop here
+    // makes the intent loud + future-edits can hang zeroize logic
+    // off this site if Round1Secret ever gets a Drop impl.
+    drop(secret);
 
     let share_bytes = signature_share.serialize();
 
@@ -477,8 +500,8 @@ mod tests {
         let all_commitments = vec![r1_out_1.clone(), r1_out_2.clone()];
 
         // 3. Participants 1 and 2 do round 2
-        let r2_out_1 = signing_round2(&keygen.shares[0], &r1_secret_1, &all_commitments, message).unwrap();
-        let r2_out_2 = signing_round2(&keygen.shares[1], &r1_secret_2, &all_commitments, message).unwrap();
+        let r2_out_1 = signing_round2(&keygen.shares[0], r1_secret_1, &all_commitments, message).unwrap();
+        let r2_out_2 = signing_round2(&keygen.shares[1], r1_secret_2, &all_commitments, message).unwrap();
         let all_shares = vec![r2_out_1, r2_out_2];
 
         // 4. Aggregate into final signature

@@ -1642,7 +1642,7 @@ async fn cmd_multisig_round2(
         nonces,
     };
 
-    let sig_share = multisig::signing_round2(&share, &secret, &commitments, &message)
+    let sig_share = multisig::signing_round2(&share, secret, &commitments, &message)
         .map_err(|e| format!("round2: {}", e))?;
 
     let json = serde_json::to_string_pretty(&sig_share)
