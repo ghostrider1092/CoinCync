@@ -766,10 +766,16 @@ async fn start_node(
                         Ok(BlockStatus::Orphan) => {
                             // Don't re-request the orphan itself — peers will keep handing
                             // back the same block and we never advance. Instead, ask sync
-                            // to fetch the orphan's parent so the gap fills. When the
-                            // parent connects, gossip re-delivers the orphan and the
-                            // second pass succeeds. See sync::mark_block_orphan for the
-                            // long version of why; root-caused 2026-05-02.
+                            // to fetch the orphan's parent so the gap fills, AND pass the
+                            // orphan body so the sync manager can stash it in
+                            // `orphan_blocks`. When the parent connects, the drain loop in
+                            // `on_block_received_from` replays the pooled orphan directly —
+                            // no second gossip required.
+                            //
+                            // See sync::mark_block_orphan for the long version, including
+                            // the 2026-06-17 root-cause notes on why the hashes-only
+                            // version stuck the chain at h=167 with 200 blocks of
+                            // orphan-fetch loops.
                             warn!(
                                 "Block {} from peer {:?} orphan; fetching parent {}",
                                 hex::encode(&hash.as_bytes()[..8]),
@@ -777,9 +783,10 @@ async fn start_node(
                                 hex::encode(&prev_hash.as_bytes()[..8]),
                             );
                             let p2p2 = event_p2p.clone();
+                            let block_for_pool = block_for_relay.clone();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_orphan(&peer_id, &hash, &prev_hash).await;
+                                p2p2.notify_block_orphan(&peer_id, block_for_pool, &prev_hash).await;
                             });
                         }
                         Ok(BlockStatus::Invalid(reason)) => {

@@ -512,9 +512,11 @@ impl P2PNode {
     }
 
     /// IBD orphan recovery: when a block came back as Orphan, ask the
-    /// sync manager to fetch the parent so the gap fills, instead of
-    /// re-requesting the orphan itself in a loop. See sync::mark_block_orphan
-    /// for the full rationale.
+    /// sync manager to fetch the parent so the gap fills, AND store the
+    /// orphan body so the drain in `on_block_received_from` can replay
+    /// it once the parent connects. See `sync::mark_block_orphan` for
+    /// the full rationale + the 2026-06-17 root-cause notes on why the
+    /// hashes-only version of this function stuck the chain.
     ///
     /// Also runs orphan-flood detection on the originating peer. A handful
     /// of orphans during IBD is normal (we're catching up), but more than
@@ -523,8 +525,8 @@ impl P2PNode {
     /// PoW-recheck CPU exhaustion). Flooders accumulate
     /// `MisbehaviorType::OrphanFlood` strikes (20 points each); five
     /// distinct flooding windows ban the peer.
-    pub async fn notify_block_orphan(&self, peer_id: &PeerId, orphan_hash: &Hash, parent_hash: &Hash) {
-        self.sync.write().await.mark_block_orphan(orphan_hash, parent_hash);
+    pub async fn notify_block_orphan(&self, peer_id: &PeerId, block: Block, parent_hash: &Hash) {
+        self.sync.write().await.mark_block_orphan(block, Some(*peer_id), parent_hash);
 
         let flooded = self.orphan_flood.write().await.record(*peer_id);
         if !flooded {
