@@ -1,0 +1,23 @@
+{
+  "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node listed here will have every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) run scripts/sync-fleet-config.sh, (3) verify every node converges. See docs/operations/fleet-config.md (TODO) for the runbook.",
+  "_last_changed": "2026-06-18 — full fleet inventory captured during the post-stall hardening pass; miner added (was missing from every node's dial list, root cause of the 2026-06-17/18 stall).",
+  "network": "testnet",
+  "p2p_port": 28080,
+  "rpc_port": 28081,
+  "_rpc_bind_policy": "Per-host RPC bind address. 127.0.0.1 means loopback-only (RPC only reachable from localhost; safer default; assumes nginx or stunnel for any public exposure). 0.0.0.0 means listen on all interfaces (public RPC). Keep loopback unless the host is intentionally serving public RPC (api node has nginx; seed1/seed2 historically served fleet members directly).",
+  "nodes": {
+    "seed1":    { "ip": "66.135.23.193",   "rpc_bind": "0.0.0.0",   "role": "seed",     "notes": "Vultr. Public-facing via api.coincync.network nginx upstream." },
+    "seed2":    { "ip": "140.82.57.168",   "rpc_bind": "0.0.0.0",   "role": "seed",     "notes": "Vultr." },
+    "seed3":    { "ip": "45.32.251.6",     "rpc_bind": "127.0.0.1", "role": "seed",     "notes": "Vultr 3.3GB. Re-provisioned 2026-06-18 after the original 207.148.111.76 host-key rotation issue; new IP. RPC loopback-only — seed role doesn't need exposed RPC." },
+    "explorer": { "ip": "207.148.6.50",    "rpc_bind": "127.0.0.1", "role": "explorer", "notes": "Vultr. Runs the public block-explorer frontend. RPC loopback-only — frontend proxies via local nginx." },
+    "api":      { "ip": "95.179.165.225",  "rpc_bind": "0.0.0.0",   "role": "api",      "notes": "Vultr. Hosts the public api.coincync.network nginx reverse proxy + faucet + frost-coord." },
+    "miner":    { "ip": "149.248.37.11",   "rpc_bind": "127.0.0.1", "role": "miner",    "notes": "Vultr CPU-optimized 4GB / 2 vCPU AMD EPYC-Turin. Runs coincync-rig solo-mining; provisioned 2026-06-15; added to fleet-config 2026-06-18. RPC loopback-only — rig polls from same box." }
+  },
+  "deactivated": {
+    "_description": "Nodes that were once in the fleet but no longer participate. Kept here for historical reference; NOT added to addnode lists. Re-activate by moving back into `nodes` and re-running sync-fleet-config.sh.",
+    "london":   { "ip": "TBD",            "role": "seed", "notes": "Deleted 2026-06-04. Historical placeholder; replace IP if re-provisioned." }
+  },
+  "_history": {
+    "seed3_207.148.111.76": "DESTROYED 2026-06-18. Original Vultr seed3 was rotated/decommissioned after the 2026-06-06 host-key change. Replaced by a fresh box at 45.32.251.6. The old IP should not appear in any addnode list or known-hosts entry."
+  }
+}
