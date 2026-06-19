@@ -131,8 +131,46 @@ impl ChainSync {
     }
 
     pub fn set_local_tip(&mut self, height: u64, tip: Hash) {
+        let prior_local = self.local_height;
         self.local_height = height;
         self.local_tip = tip;
+
+        // FIX 2026-06-19: prune stale peer height claims when our local
+        // chain advances past them. Without this prune, a single peer
+        // that advertised a (possibly false) high height N keeps
+        // `best_known_height = N` set forever, even after our own chain
+        // advances to N+5. The IBD state machine then never transitions
+        // to Synced (line below requires local >= best_known), so we
+        // stay in Headers/IBD mode AS THE CHAIN LEADER, stop
+        // broadcasting outgoing, and the public view stalls while we
+        // continue privately mining.
+        //
+        // This was the root cause of the 2026-06-17/18 series of
+        // broadcast stalls — the dedicated miner was stuck believing
+        // it was behind peers that had quietly fallen further behind
+        // it, never re-broadcasting its tip. The operational mitigation
+        // was repeated `systemctl restart coincync-node` on seed1; this
+        // fix removes the need.
+        //
+        // Pruning is safe: a peer's height claim is only "valid" until
+        // we surpass it. If the peer actually had blocks at the claimed
+        // height, they would have served them by now (Headers/GetBlocks
+        // path) and our local_height would have advanced to match.
+        // If the peer was lying / falling behind itself, evicting their
+        // stale claim is the correct action.
+        //
+        // The peer is welcome to re-advertise via a fresh
+        // `update_peer_height_for` if they get new blocks; their entry
+        // simply doesn't pin our state machine to IBD in the meantime.
+        if height > prior_local {
+            self.peer_heights.retain(|_, h| *h > height);
+            // After pruning, recompute best_known from what's left.
+            // refresh_best_known only RAISES best_known; for the
+            // post-prune drop we need to recompute from scratch.
+            let pm = self.peer_heights.values().copied().max().unwrap_or(0);
+            self.best_known_height = pm.max(self.local_height);
+        }
+
         if self.local_height >= self.best_known_height
             && self.pending_headers.is_empty() && self.downloading.is_empty() {
             self.state = SyncState::Synced;
@@ -867,5 +905,80 @@ mod tests {
             "update_peer_height must reject oversized claims same as \
              update_peer_height_for"
         );
+    }
+
+    /// Regression test for the 2026-06-17/18 broadcast-stall bug.
+    ///
+    /// Scenario (live-observed on the dedicated miner box during the
+    /// 2026-06-17 to 2026-06-18 incident):
+    ///
+    ///  1. Local node is at height N, in Synced state, broadcasting normally.
+    ///  2. A misbehaving peer P advertises height N+5 (falsely or stalely).
+    ///  3. update_peer_height_for(P, N+5) sets state = Headers (IBD).
+    ///  4. Local node mines blocks N+1, N+2, ... N+10 via its own rig.
+    ///     set_local_tip is called for each.
+    ///  5. Pre-fix: best_known_height stays at N+5 forever (it's >= local
+    ///     when local was N, and refresh_best_known only RAISES). State
+    ///     never transitions back to Synced. Local node stops broadcasting
+    ///     outgoing because it believes it's behind P.
+    ///  6. Result: local node mines privately, public view of chain stalls.
+    ///
+    /// The fix: when set_local_tip advances local_height, prune
+    /// peer_heights entries that are stale (peer's claim is now <=
+    /// our actual local). Recompute best_known_height from what's left.
+    /// If no peers exceed local, best_known_height drops to local and
+    /// state transitions to Synced — broadcasting resumes.
+    #[test]
+    fn regression_2026_06_18_broadcast_stall_from_stale_peer_claim() {
+        let mut sync = ChainSync::new(1_000, Hash::zero());
+
+        // Peer P advertises N+5 — pushes us into Headers (IBD).
+        let peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(peer, 1_005);
+        assert_eq!(sync.state, SyncState::Headers, "peer claim must trigger IBD");
+        assert_eq!(sync.best_known_height, 1_005);
+
+        // We mine blocks ourselves: local advances to 1_001, 1_002, ... 1_010.
+        // Without the fix, peer_heights[P] stays at 1_005 forever and
+        // best_known_height never drops below 1_005, so state never
+        // returns to Synced.
+        for h in 1_001..=1_010 {
+            sync.set_local_tip(h, Hash::zero());
+        }
+
+        // Post-fix: P's stale claim of 1_005 is pruned when local
+        // surpassed it. best_known_height drops to local. State
+        // transitions to Synced — broadcasting can resume.
+        assert!(
+            !sync.peer_heights.contains_key(&peer),
+            "peer's stale height claim must be pruned once local advances past it \
+             (pre-fix bug: claim sat in peer_heights forever, pinning best_known_height \
+             and freezing state in Headers/IBD)"
+        );
+        assert_eq!(sync.local_height, 1_010);
+        assert_eq!(
+            sync.best_known_height, 1_010,
+            "with no peers ahead, best_known_height must equal local — \
+             pre-fix this stuck at the stale peer's 1_005 claim"
+        );
+        assert_eq!(
+            sync.state,
+            SyncState::Synced,
+            "state must return to Synced once local catches up — pre-fix this \
+             stayed in Headers indefinitely because best_known_height was pinned"
+        );
+
+        // Sanity: a peer that's GENUINELY ahead is NOT pruned.
+        let live_peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(live_peer, 1_020);
+        assert_eq!(sync.state, SyncState::Headers, "genuine higher claim still triggers IBD");
+        // local advances to 1_015 — peer's 1_020 claim is still ahead, must NOT be pruned.
+        sync.set_local_tip(1_015, Hash::zero());
+        assert_eq!(
+            sync.peer_heights.get(&live_peer).copied(),
+            Some(1_020),
+            "peers still ahead of our local must NOT be pruned"
+        );
+        assert_eq!(sync.best_known_height, 1_020);
     }
 }
