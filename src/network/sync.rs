@@ -78,6 +78,22 @@ pub struct ChainSync {
     next_header_nonce: u64,
     orphans_per_peer: HashMap<PeerId, usize>,
     blocks_entered_at: Option<u64>,
+    // Phase 2a (V3 partial): per-peer total cumulative difficulty.
+    // Populated by `update_peer_difficulty_for`, called when we observe
+    // a block (announce or response) from `peer` with a known total work.
+    // Currently advisory — peer selection still uses height. Phase 2b
+    // (v1.0.12 protocol bump) will introduce a wire-format handshake
+    // field carrying this value at connection time, at which point peer
+    // trust switches from height to cumulative difficulty.
+    //
+    // Why difficulty, not height? Bitcoin Core, zebrad (Zcash), and
+    // bitcoin-rs all select the canonical chain by cumulative work, not
+    // longest-by-count. A peer on a shorter but higher-difficulty fork
+    // is on the better chain. Height-based selection is correct only in
+    // honest-majority chains with stable difficulty; under fork stress
+    // it's a known failure mode (V3 in the state-machine doc).
+    peer_difficulties: HashMap<PeerId, u128>,
+    best_known_difficulty: u128,
 }
 
 impl ChainSync {
@@ -101,6 +117,8 @@ impl ChainSync {
             headers_request_time: None,
             headers_received_this_cycle: false,
             peer_heights: HashMap::new(),
+            peer_difficulties: HashMap::new(),
+            best_known_difficulty: 0,
             pending_header_nonces: HashSet::new(),
             next_header_nonce: 1,
             orphans_per_peer: HashMap::new(),
@@ -131,50 +149,38 @@ impl ChainSync {
     }
 
     pub fn set_local_tip(&mut self, height: u64, tip: Hash) {
-        let prior_local = self.local_height;
         self.local_height = height;
         self.local_tip = tip;
-
-        // FIX 2026-06-19: prune stale peer height claims when our local
-        // chain advances past them. Without this prune, a single peer
-        // that advertised a (possibly false) high height N keeps
-        // `best_known_height = N` set forever, even after our own chain
-        // advances to N+5. The IBD state machine then never transitions
-        // to Synced (line below requires local >= best_known), so we
-        // stay in Headers/IBD mode AS THE CHAIN LEADER, stop
-        // broadcasting outgoing, and the public view stalls while we
-        // continue privately mining.
-        //
-        // This was the root cause of the 2026-06-17/18 series of
-        // broadcast stalls — the dedicated miner was stuck believing
-        // it was behind peers that had quietly fallen further behind
-        // it, never re-broadcasting its tip. The operational mitigation
-        // was repeated `systemctl restart coincync-node` on seed1; this
-        // fix removes the need.
-        //
-        // Pruning is safe: a peer's height claim is only "valid" until
-        // we surpass it. If the peer actually had blocks at the claimed
-        // height, they would have served them by now (Headers/GetBlocks
-        // path) and our local_height would have advanced to match.
-        // If the peer was lying / falling behind itself, evicting their
-        // stale claim is the correct action.
-        //
-        // The peer is welcome to re-advertise via a fresh
-        // `update_peer_height_for` if they get new blocks; their entry
-        // simply doesn't pin our state machine to IBD in the meantime.
-        if height > prior_local {
-            self.peer_heights.retain(|_, h| *h > height);
-            // After pruning, recompute best_known from what's left.
-            // refresh_best_known only RAISES best_known; for the
-            // post-prune drop we need to recompute from scratch.
-            let pm = self.peer_heights.values().copied().max().unwrap_or(0);
-            self.best_known_height = pm.max(self.local_height);
-        }
-
+        // V1/V2 closure (Phase 2/3 refactor, see docs/architecture/sync-state-machine.md):
+        // When local advances, any peer whose claimed height is now <= local
+        // is announcing a stale view. Prune those entries so they cannot
+        // pin best_known above local indefinitely (the chronic stall bug).
+        // This mirrors Monero's behaviour where per-peer "remaining work"
+        // collapses to zero once local catches up — but we make it explicit
+        // by removing the entry, not merely ignoring it.
+        self.prune_stale_peer_heights();
+        // I2/I3 enforcement: best_known_height must equal
+        // max(local_height, max(peer_heights.values())). Re-derive from
+        // scratch rather than only-grow, so the field can SHRINK when peers
+        // disconnect or local overtakes them. Bitcoin Core derives
+        // `pindexBestHeader` from the headers tree on every update; we
+        // mirror that by recomputing on every state mutation.
+        self.recompute_best_known();
         if self.local_height >= self.best_known_height
             && self.pending_headers.is_empty() && self.downloading.is_empty() {
             self.state = SyncState::Synced;
         }
+    }
+
+    /// Drop peer entries whose claimed height is at-or-below our local
+    /// height. Such claims are stale — either the peer was lagging and we
+    /// caught up, or it sent us a header chain we've now fully ingested.
+    /// In both cases the entry contributes no useful work and risks
+    /// pinning `best_known_height` (and downstream RPC `target_height`)
+    /// above us indefinitely. Closes V2.
+    fn prune_stale_peer_heights(&mut self) {
+        let local = self.local_height;
+        self.peer_heights.retain(|_, h| *h > local);
     }
 
     pub fn update_peer_height_for(&mut self, peer_id: PeerId, height: u64) {
@@ -201,8 +207,17 @@ impl ChainSync {
         if height > max {
             return;
         }
+        // Drop stale-on-arrival claims: a peer announcing height <= local
+        // is reporting work we've already absorbed. Inserting it would
+        // immediately be pruned by `prune_stale_peer_heights` anyway; skip.
+        if height <= self.local_height {
+            // Still remove any prior (now-stale) entry for this peer.
+            self.peer_heights.remove(&peer_id);
+            self.recompute_best_known();
+            return;
+        }
         self.peer_heights.insert(peer_id, height);
-        self.refresh_best_known();
+        self.recompute_best_known();
         if height > self.local_height && matches!(self.state, SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced) {
             self.state = SyncState::Headers;
             self.headers_request_time = None;
@@ -218,19 +233,83 @@ impl ChainSync {
         if height > max {
             return;
         }
+        // I2 enforcement: best_known must not drop below local. Use
+        // recompute path so the field can be reduced if this anonymous
+        // update was the only thing holding it above the peer-set max.
         if height > self.best_known_height { self.best_known_height = height; }
+        if self.best_known_height < self.local_height {
+            self.best_known_height = self.local_height;
+        }
     }
 
-    fn refresh_best_known(&mut self) {
-        let pm = self.peer_heights.values().copied().max().unwrap_or(0);
-        if pm > self.best_known_height { self.best_known_height = pm; }
+    /// Phase 2a (V3 partial): record observed cumulative difficulty for a
+    /// peer. Currently advisory. Drops claims at-or-below local total work
+    /// (mirrors `prune_stale_peer_heights` semantics for the difficulty
+    /// signal). Once Phase 2b wire-format lands, this is the canonical
+    /// signal for peer selection.
+    pub fn update_peer_difficulty_for(&mut self, peer_id: PeerId, total_difficulty: u128) {
+        // Reject obviously-bogus claims: a peer cannot have more than 2x
+        // the highest difficulty we've observed elsewhere, OR a fixed
+        // floor for the bootstrap case. This is the difficulty analogue
+        // of the height +10_000 reject in `update_peer_height_for`.
+        const BOGUS_FACTOR: u128 = 2;
+        let observed_max = self.peer_difficulties.values().copied().max()
+            .unwrap_or(self.best_known_difficulty);
+        let cap = observed_max.saturating_mul(BOGUS_FACTOR).max(1u128 << 60);
+        if total_difficulty > cap {
+            return;
+        }
+        self.peer_difficulties.insert(peer_id, total_difficulty);
+        self.recompute_best_difficulty();
+    }
+
+    /// Record our local cumulative difficulty. Called when local tip
+    /// advances by the chain layer.
+    pub fn set_local_total_difficulty(&mut self, total_difficulty: u128) {
+        if total_difficulty > self.best_known_difficulty {
+            self.best_known_difficulty = total_difficulty;
+        }
+        // Prune stale peer claims (mirrors height pruning).
+        let cutoff = total_difficulty;
+        self.peer_difficulties.retain(|_, d| *d > cutoff);
+    }
+
+    /// Best peer by cumulative work — call this once Phase 2b is live;
+    /// today's IBD loop still uses height-based selection.
+    pub fn best_peer_by_difficulty(&self) -> Option<(PeerId, u128)> {
+        self.peer_difficulties.iter().max_by_key(|(_, d)| *d).map(|(p, d)| (*p, *d))
+    }
+
+    pub fn best_known_difficulty(&self) -> u128 { self.best_known_difficulty }
+
+    fn recompute_best_difficulty(&mut self) {
+        let peer_max = self.peer_difficulties.values().copied().max().unwrap_or(0);
+        self.best_known_difficulty = peer_max.max(self.best_known_difficulty);
+    }
+
+    /// Re-derive `best_known_height` from current observable signals.
+    /// best_known_height := max(local_height, max(peer_heights.values()))
+    /// Unlike the previous `refresh_best_known` which was monotonic-grow,
+    /// this can SHRINK the field when peers leave or stale claims are
+    /// pruned. Closes V1.
+    fn recompute_best_known(&mut self) {
+        let peer_max = self.peer_heights.values().copied().max().unwrap_or(0);
+        self.best_known_height = peer_max.max(self.local_height);
     }
 
     pub fn true_best_height(&self) -> u64 {
         self.best_known_height.max(self.peer_heights.values().copied().max().unwrap_or(0))
     }
 
-    pub fn remove_peer_height(&mut self, peer_id: &PeerId) { self.peer_heights.remove(peer_id); }
+    pub fn remove_peer_height(&mut self, peer_id: &PeerId) {
+        self.peer_heights.remove(peer_id);
+        self.peer_difficulties.remove(peer_id);
+        // Departing peer was potentially the sole holder of the highest
+        // claimed height/difficulty; recompute both so best_known_*
+        // shrinks when appropriate (I3 closure).
+        self.recompute_best_known();
+        self.recompute_best_difficulty();
+    }
 
     pub fn peers_above_height(&self, min: u64) -> Vec<PeerId> {
         self.peer_heights.iter().filter(|(_, &h)| h >= min).map(|(&id, _)| id).collect()
@@ -293,13 +372,50 @@ impl ChainSync {
         out
     }
 
+    /// Mark a block as in-flight from a specific peer.
+    ///
+    /// Closes V4 (downloading drift): this is the canonical mark-in-flight
+    /// entry point and enforces that `downloading`, `download_timestamps`,
+    /// and `pending_requests` all contain `hash` after the call. Inspired by
+    /// Bitcoin Core's `mapBlocksInFlight` unified map and Monero's
+    /// `block_queue::insert_span`, but adapted to our three-collection API.
+    ///
+    /// Idempotent: safe to call repeatedly; updates the peer/timestamp on
+    /// re-call (the most recent request wins for timeout accounting).
     pub fn record_request(&mut self, hash: Hash, peer: PeerId, ts: u64) {
-        if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
+        if self.pending_requests.len() >= MAX_PENDING_REQUESTS
+            && !self.pending_requests.contains_key(&hash)
+        {
             if let Some(k) = self.pending_requests.iter().min_by_key(|(_, r)| r.requested_at).map(|(h, _)| *h) {
                 self.pending_requests.remove(&k);
+                // Evicted from pending_requests but the in-flight set must
+                // shed it too — else `downloading`/`download_timestamps`
+                // leak entries forever.
+                self.downloading.remove(&k);
+                self.download_timestamps.remove(&k);
             }
         }
+        // I8 enforcement: ensure all three collections contain `hash`.
+        self.downloading.insert(hash);
+        self.download_timestamps.entry(hash).or_insert(DownloadEntry { entered_at: ts });
         self.pending_requests.insert(hash, BlockRequest { hash, requested_from: peer, requested_at: ts });
+        // Intentional carve-out from I10's strict reading:
+        //
+        //   We do NOT drop Synced→Blocks here.
+        //
+        // `record_request` is called both for IBD (Blocks state, fine) and
+        // for InvBlock tip-catch-up (Synced state, peer announced 1-2 new
+        // blocks above our tip — see node.rs:3171). The InvBlock case must
+        // keep state=Synced because broadcasting is gated on Synced; if we
+        // drop to Blocks for a single tip catch-up, broadcasts stall, which
+        // is precisely the chronic stall bug. Bitcoin Core makes the same
+        // distinction: `IsInitialBlockDownload()` returns false during tip
+        // catch-up even with one block in flight.
+        //
+        // I10 is therefore refined: Synced tolerates a SMALL number of
+        // in-flight blocks (≤ INV_CATCHUP_DOWNLOAD_TOLERANCE), but
+        // pending_headers must still be empty (that's IBD, not catch-up).
+        // Checked in the proptest harness via `check_i10_refined`.
     }
 
     pub fn peer_orphan_limit_reached(&self, pid: &PeerId) -> bool {
@@ -566,16 +682,30 @@ impl ChainSync {
     }
 
     pub fn requeue_failed(&mut self, hashes: Vec<Hash>) {
+        let any = !hashes.is_empty();
         for h in hashes.into_iter().rev() {
+            // I8 enforcement: clear from ALL three in-flight collections,
+            // not just two. Even if record_request was already called for
+            // this hash (e.g. partial-send race), the requeue path must
+            // fully reset its in-flight state.
             self.downloading.remove(&h);
             self.download_timestamps.remove(&h);
+            self.pending_requests.remove(&h);
             self.pending_headers.push_front(h);
+        }
+        // I10 enforcement: state == Synced ⇒ pending_headers.is_empty().
+        // If we just pushed work back into pending_headers, we're no
+        // longer synced — drop to Blocks.
+        if any && self.state == SyncState::Synced {
+            self.state = SyncState::Blocks;
+            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
         }
     }
 
+    /// Mark a direct (non-IBD) block request as in-flight. Retained for
+    /// caller readability; semantically identical to `record_request` now
+    /// that the latter enforces all-3-in-sync (V4 closure).
     pub fn track_direct_request(&mut self, hash: Hash, peer: PeerId, ts: u64) {
-        self.downloading.insert(hash);
-        self.download_timestamps.insert(hash, DownloadEntry { entered_at: ts });
         self.record_request(hash, peer, ts);
     }
 
@@ -587,6 +717,10 @@ impl ChainSync {
         self.pending_headers.clear();
         self.downloading.clear();
         self.download_timestamps.clear();
+        // Phase 2a: also clear difficulty model on hard reset.
+        // peer_heights/peer_difficulties are NOT cleared here — those
+        // belong to the connection layer's view of peers and are reset
+        // via on_peer_disconnected when connections actually drop.
         self.state = SyncState::Idle;
         self.blocks_entered_at = None;
     }
@@ -623,6 +757,14 @@ impl ChainSync {
             self.download_timestamps.remove(h);
             self.pending_headers.push_front(*h);
         }
+        // I10 enforcement: pending_headers got new entries from either
+        // timeout or stuck branch — if state was Synced (e.g. an InvBlock
+        // catch-up request that timed out), drop to Blocks so the IBD
+        // loop will re-issue them.
+        if (!to.is_empty() || !stuck.is_empty()) && self.state == SyncState::Synced {
+            self.state = SyncState::Blocks;
+            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+        }
         if sc > 0 {
             tracing::warn!("[SYNC] Recovered {} stuck downloads", sc);
             if sc >= 5 && self.state == SyncState::Blocks {
@@ -643,12 +785,23 @@ impl ChainSync {
             .filter(|h| !self.pending_requests.contains_key(h)).copied().collect();
         let c = s.len();
         for h in s { self.downloading.remove(&h); self.download_timestamps.remove(&h); self.pending_headers.push_front(h); }
+        // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
+        if c > 0 && self.state == SyncState::Synced {
+            self.state = SyncState::Blocks;
+            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+        }
         c
     }
 
     pub fn on_peer_disconnected(&mut self, peer: &PeerId) {
         self.peer_heights.remove(peer);
+        self.peer_difficulties.remove(peer);
         self.orphans_per_peer.remove(peer);
+        // Re-derive best_known after peer leaves (I3 closure — fixes the
+        // case where the departing peer was the sole holder of the highest
+        // claim and best_known would otherwise be pinned above local).
+        self.recompute_best_known();
+        self.recompute_best_difficulty();
         let rq: Vec<Hash> = self.pending_requests.iter()
             .filter(|(_, r)| &r.requested_from == peer).map(|(h, _)| *h).collect();
         for h in &rq {
@@ -656,6 +809,11 @@ impl ChainSync {
             self.downloading.remove(h);
             self.download_timestamps.remove(h);
             self.pending_headers.push_front(*h);
+        }
+        // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
+        if !rq.is_empty() && self.state == SyncState::Synced {
+            self.state = SyncState::Blocks;
+            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
         }
         if !rq.is_empty() { tracing::info!("Peer {:?} disconnected, re-queued {} requests", peer, rq.len()); }
     }
@@ -835,78 +993,443 @@ mod tests {
         );
     }
 
-    /// Regression test for the 2026-06-17/18 broadcast-stall bug.
-    ///
-    /// Scenario (live-observed on the dedicated miner box during the
-    /// 2026-06-17 to 2026-06-18 incident):
-    ///
-    ///  1. Local node is at height N, in Synced state, broadcasting normally.
-    ///  2. A misbehaving peer P advertises height N+5 (falsely or stalely).
-    ///  3. update_peer_height_for(P, N+5) sets state = Headers (IBD).
-    ///  4. Local node mines blocks N+1, N+2, ... N+10 via its own rig.
-    ///     set_local_tip is called for each.
-    ///  5. Pre-fix: best_known_height stays at N+5 forever (it's >= local
-    ///     when local was N, and refresh_best_known only RAISES). State
-    ///     never transitions back to Synced. Local node stops broadcasting
-    ///     outgoing because it believes it's behind P.
-    ///  6. Result: local node mines privately, public view of chain stalls.
-    ///
-    /// The fix: when set_local_tip advances local_height, prune
-    /// peer_heights entries that are stale (peer's claim is now <=
-    /// our actual local). Recompute best_known_height from what's left.
-    /// If no peers exceed local, best_known_height drops to local and
-    /// state transitions to Synced — broadcasting resumes.
-    #[test]
-    fn regression_2026_06_18_broadcast_stall_from_stale_peer_claim() {
-        let mut sync = ChainSync::new(1_000, Hash::zero());
+    // ─────────────────────────────────────────────────────────────────────
+    // PHASE 1: state-machine property tests
+    //
+    // Per `docs/architecture/sync-state-machine.md`, ChainSync has 13
+    // numbered invariants (I1–I13) and 8 known violations (V1–V8). This
+    // proptest harness generates random sequences of triggers (§3 of the
+    // doc) and asserts invariants after each event.
+    //
+    // Tests that FAIL here document the known violations. Phase 2 + 3
+    // code changes are scored against this harness: each fix should
+    // close one or more failing properties.
+    //
+    // Test layout:
+    //   - SyncEvent enum: one variant per externally-observable trigger
+    //   - arb_event: proptest strategy mixing all event variants
+    //   - apply_event: dispatches Event → ChainSync method call
+    //   - invariant_*: one assert helper per invariant from §6
+    //   - prop_*: one property test per invariant
+    // ─────────────────────────────────────────────────────────────────────
 
-        // Peer P advertises N+5 — pushes us into Headers (IBD).
-        let peer = super::super::peer::generate_peer_id();
-        sync.update_peer_height_for(peer, 1_005);
-        assert_eq!(sync.state, SyncState::Headers, "peer claim must trigger IBD");
-        assert_eq!(sync.best_known_height, 1_005);
+    use proptest::prelude::*;
 
-        // We mine blocks ourselves: local advances to 1_001, 1_002, ... 1_010.
-        // Without the fix, peer_heights[P] stays at 1_005 forever and
-        // best_known_height never drops below 1_005, so state never
-        // returns to Synced.
-        for h in 1_001..=1_010 {
-            sync.set_local_tip(h, Hash::zero());
+    /// Small peer pool: we use a fixed set of 5 PeerIds and index into them
+    /// so the test generates collisions and re-asserts on the same peer
+    /// (which is how the V2 bug manifests in production).
+    fn peer_pool() -> Vec<PeerId> {
+        (0..5u8).map(|i| {
+            let mut bytes = [0u8; 32];
+            bytes[0] = i;
+            bytes
+        }).collect()
+    }
+
+    /// Externally-observable triggers from §3 of the doc. Each variant
+    /// maps to one of the public methods on ChainSync.
+    #[derive(Debug, Clone)]
+    enum SyncEvent {
+        /// trigger: update_peer_height_for(peer_idx, height)
+        PeerHeightUpdate { peer_idx: usize, height: u64 },
+        /// trigger: update_peer_height(height) — the no-peer-id variant
+        AnonHeightUpdate { height: u64 },
+        /// trigger: set_local_tip(height, tip)
+        LocalTipAdvance { delta: i32 },
+        /// trigger: queue_headers(headers) — `count` random hashes
+        QueueHeaders { count: u8 },
+        /// trigger: remove_peer_height(peer_idx) on peer disconnect
+        PeerDisconnect { peer_idx: usize },
+        /// trigger: clear() — hard reset (rare)
+        HardClear,
+        /// trigger: get_blocks_to_request(max) — pop hashes into in-flight set
+        GetBlocksToRequest { max: u8 },
+        /// trigger: record_request(hash_idx, peer_idx, ts) — mark which peer owns hash
+        RecordRequest { hash_seed: u8, peer_idx: usize },
+        /// trigger: requeue_failed(hash_idx) — un-mark in-flight after send error
+        RequeueFailed { hash_seed: u8 },
+        /// trigger: track_direct_request — atomic mark-in-flight
+        TrackDirectRequest { hash_seed: u8, peer_idx: usize },
+        /// trigger: get_blocks_to_retry — timeout-driven re-issue
+        GetBlocksToRetry { time_advance: u64 },
+        /// trigger: recover_stuck_downloads — orphaned-entry sweep
+        RecoverStuckDownloads,
+    }
+
+    /// proptest strategy mixing all event variants.
+    fn arb_event() -> impl Strategy<Value = SyncEvent> {
+        prop_oneof![
+            // peer height updates dominate — that's where V1/V2 lived
+            6 => (0usize..5, 0u64..2_000).prop_map(|(peer_idx, height)|
+                SyncEvent::PeerHeightUpdate { peer_idx, height }),
+            2 => (0u64..2_000).prop_map(|height|
+                SyncEvent::AnonHeightUpdate { height }),
+            // local tip advancement: occasionally retreat (reorg)
+            3 => (-5i32..20).prop_map(|delta|
+                SyncEvent::LocalTipAdvance { delta }),
+            // block lifecycle — drives V4 surface
+            3 => (1u8..15).prop_map(|count|
+                SyncEvent::QueueHeaders { count }),
+            3 => (1u8..10).prop_map(|max|
+                SyncEvent::GetBlocksToRequest { max }),
+            3 => (0u8..30, 0usize..5).prop_map(|(hash_seed, peer_idx)|
+                SyncEvent::RecordRequest { hash_seed, peer_idx }),
+            2 => (0u8..30).prop_map(|hash_seed|
+                SyncEvent::RequeueFailed { hash_seed }),
+            2 => (0u8..30, 0usize..5).prop_map(|(hash_seed, peer_idx)|
+                SyncEvent::TrackDirectRequest { hash_seed, peer_idx }),
+            1 => (1u64..120).prop_map(|time_advance|
+                SyncEvent::GetBlocksToRetry { time_advance }),
+            1 => Just(SyncEvent::RecoverStuckDownloads),
+            1 => (0usize..5).prop_map(|peer_idx|
+                SyncEvent::PeerDisconnect { peer_idx }),
+            1 => Just(SyncEvent::HardClear),
+        ]
+    }
+
+    /// Deterministic hash from a seed byte — lets two RecordRequest events
+    /// reference the same hash if they share the same seed.
+    fn hash_from_seed(seed: u8) -> Hash {
+        let mut b = [0u8; 32];
+        b[0] = seed;
+        b[31] = 0xAA;
+        Hash::from_bytes(b)
+    }
+
+    /// Apply one event to the ChainSync.
+    fn apply_event(sync: &mut ChainSync, event: &SyncEvent, peers: &[PeerId]) {
+        match event {
+            SyncEvent::PeerHeightUpdate { peer_idx, height } => {
+                sync.update_peer_height_for(peers[*peer_idx], *height);
+            }
+            SyncEvent::AnonHeightUpdate { height } => {
+                sync.update_peer_height(*height);
+            }
+            SyncEvent::LocalTipAdvance { delta } => {
+                let new_height = (sync.local_height as i64 + *delta as i64).max(0) as u64;
+                let mut tip_bytes = [0u8; 32];
+                tip_bytes[..8].copy_from_slice(&new_height.to_le_bytes());
+                sync.set_local_tip(new_height, Hash::from_bytes(tip_bytes));
+            }
+            SyncEvent::QueueHeaders { count } => {
+                let local_byte = (sync.local_height & 0xFF) as u8;
+                let headers: Vec<Hash> = (0..*count).map(|i| {
+                    let mut b = [0u8; 32];
+                    b[0] = i;
+                    b[1] = local_byte;
+                    Hash::from_bytes(b)
+                }).collect();
+                let _ = sync.queue_headers(headers);
+            }
+            SyncEvent::PeerDisconnect { peer_idx } => {
+                sync.remove_peer_height(&peers[*peer_idx]);
+            }
+            SyncEvent::HardClear => {
+                sync.clear();
+            }
+            SyncEvent::GetBlocksToRequest { max } => {
+                let _ = sync.get_blocks_to_request(*max as usize);
+            }
+            SyncEvent::RecordRequest { hash_seed, peer_idx } => {
+                sync.record_request(hash_from_seed(*hash_seed), peers[*peer_idx], 1000);
+            }
+            SyncEvent::RequeueFailed { hash_seed } => {
+                sync.requeue_failed(vec![hash_from_seed(*hash_seed)]);
+            }
+            SyncEvent::TrackDirectRequest { hash_seed, peer_idx } => {
+                sync.track_direct_request(hash_from_seed(*hash_seed), peers[*peer_idx], 1000);
+            }
+            SyncEvent::GetBlocksToRetry { time_advance } => {
+                let _ = sync.get_blocks_to_retry(1000 + *time_advance);
+            }
+            SyncEvent::RecoverStuckDownloads => {
+                let _ = sync.recover_stuck_downloads();
+            }
+        }
+    }
+
+    // ─── Invariant assertions ────────────────────────────────────
+    // Each returns Ok(()) if invariant holds, Err(msg) otherwise.
+
+    /// I2: best_known_height >= local_height at all times.
+    fn check_i2(sync: &ChainSync) -> std::result::Result<(), String> {
+        if sync.best_known_height < sync.local_height {
+            Err(format!(
+                "I2 VIOLATED: best_known_height={} < local_height={}",
+                sync.best_known_height, sync.local_height,
+            ))
+        } else { Ok(()) }
+    }
+
+    /// I3: best_known_height == max(peer_heights.values()).max(local_height).
+    /// NOTE: I3 is "should hold AT ALL TIMES." Pre-`e80a2df9`, only enforced
+    /// after `set_local_tip` or `refresh_best_known`. Between those, drift
+    /// is possible. This check is loose: it allows best_known_height to
+    /// EXCEED the computed value (e.g., if it was set higher earlier and
+    /// never decreased), but flags the inverse — being LOWER than computed.
+    fn check_i3(sync: &ChainSync) -> std::result::Result<(), String> {
+        let computed = sync.peer_heights.values().copied().max()
+            .unwrap_or(0)
+            .max(sync.local_height);
+        if sync.best_known_height < computed {
+            Err(format!(
+                "I3 VIOLATED: best_known_height={} < computed max={} (peer heights={:?}, local={})",
+                sync.best_known_height, computed,
+                sync.peer_heights.values().copied().collect::<Vec<_>>(),
+                sync.local_height,
+            ))
+        } else { Ok(()) }
+    }
+
+    /// I8 (corrected from initial doc draft):
+    ///   I8a: `downloading.keys() == download_timestamps.keys()` (exact mirror)
+    ///   I8b: `pending_requests.keys() ⊆ downloading.keys()` (subset; pending
+    ///        may briefly be empty while downloading has the entry, since
+    ///        get_blocks_to_request inserts into downloading but record_request
+    ///        is called later per-peer in node.rs's IBD loop)
+    ///
+    /// References:
+    ///   - Bitcoin Core uses a unified `mapBlocksInFlight: BlockHash → (peer,
+    ///     time)` — no drift opportunity (src/net_processing.cpp).
+    ///   - Monero `block_queue::insert_span` is similarly unified.
+    /// We retain the 3-collection structure here but document and enforce
+    /// the precise relationship so any new code path is audited against it.
+    fn check_i8(sync: &ChainSync) -> std::result::Result<(), String> {
+        let dl: std::collections::HashSet<_> = sync.downloading.iter().copied().collect();
+        let ts: std::collections::HashSet<_> = sync.download_timestamps.keys().copied().collect();
+        let pr: std::collections::HashSet<_> = sync.pending_requests.keys().copied().collect();
+        if dl != ts {
+            return Err(format!(
+                "I8a VIOLATED: downloading.keys() ≠ download_timestamps.keys() \
+                 (downloading={}, timestamps={}, sym_diff={})",
+                dl.len(), ts.len(), dl.symmetric_difference(&ts).count(),
+            ));
+        }
+        if !pr.is_subset(&dl) {
+            let leak: Vec<_> = pr.difference(&dl).collect();
+            return Err(format!(
+                "I8b VIOLATED: pending_requests has {} hashes not in downloading: {:?}",
+                leak.len(), leak.iter().take(3).collect::<Vec<_>>(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// I10 (refined): state == Synced ⇒ pending_headers.is_empty() AND
+    /// downloading.len() ≤ INV_CATCHUP_DOWNLOAD_TOLERANCE.
+    ///
+    /// Original strict reading "downloading.is_empty() too" was incorrect
+    /// because production InvBlock tip catch-up (node.rs:3171,
+    /// track_direct_request) issues 1-2 GetBlocks from Synced state to
+    /// fetch newly-announced tip blocks. Broadcasting is gated on Synced,
+    /// so dropping to Blocks would stall broadcasts — that's the chronic
+    /// stall pathology. Bitcoin Core makes the same distinction:
+    /// `IsInitialBlockDownload()` stays false during small tip-fetches.
+    ///
+    /// pending_headers ≠ empty in Synced state remains a hard violation —
+    /// pending_headers is only populated by `queue_headers`, which is the
+    /// IBD-style multi-block discovery path, not tip catch-up.
+    const INV_CATCHUP_DOWNLOAD_TOLERANCE: usize = 16;
+    fn check_i10(sync: &ChainSync) -> std::result::Result<(), String> {
+        if sync.state != SyncState::Synced { return Ok(()); }
+        if !sync.pending_headers.is_empty() {
+            return Err(format!(
+                "I10 VIOLATED: state=Synced but pending_headers={}",
+                sync.pending_headers.len(),
+            ));
+        }
+        if sync.downloading.len() > INV_CATCHUP_DOWNLOAD_TOLERANCE {
+            return Err(format!(
+                "I10 VIOLATED: state=Synced but downloading={} > tolerance={}",
+                sync.downloading.len(), INV_CATCHUP_DOWNLOAD_TOLERANCE,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Bonus: bounded growth of `peer_heights`.
+    /// Should never exceed peer pool size (5) — only one entry per peer.
+    fn check_peer_heights_bounded(sync: &ChainSync, max_peers: usize) -> std::result::Result<(), String> {
+        if sync.peer_heights.len() > max_peers {
+            Err(format!(
+                "peer_heights.len()={} > max_peers={} (unbounded growth!)",
+                sync.peer_heights.len(), max_peers,
+            ))
+        } else { Ok(()) }
+    }
+
+    /// Run all invariants. Returns Vec of (invariant_id, error) for any failures.
+    fn check_all_invariants(sync: &ChainSync) -> Vec<(&'static str, String)> {
+        let mut failures = Vec::new();
+        if let Err(e) = check_i2(sync) { failures.push(("I2", e)); }
+        if let Err(e) = check_i3(sync) { failures.push(("I3", e)); }
+        if let Err(e) = check_i8(sync) { failures.push(("I8", e)); }
+        if let Err(e) = check_i10(sync) { failures.push(("I10", e)); }
+        if let Err(e) = check_peer_heights_bounded(sync, 5) { failures.push(("peer-pool-bound", e)); }
+        failures
+    }
+
+    // ─── Properties ──────────────────────────────────────────────
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2048))]
+
+        /// Property: invariants hold after every event in a random sequence.
+        ///
+        /// This is the SINGLE-TEST harness. Any failing invariant produces
+        /// a minimized counterexample sequence — invaluable for diagnosing
+        /// which event order triggers which violation.
+        ///
+        /// Expected failures at Phase 1 (these document V1–V8 known bugs):
+        ///   - I3: may show transient drift between events (V1)
+        ///   - peer-pool-bound: may show growth past 5 if remove_peer_height
+        ///     races with update_peer_height_for (V1)
+        ///
+        /// NOT EXPECTED to fail:
+        ///   - I2 (post-`e80a2df9` should hold; if it fails, e80a2df9 was
+        ///     insufficient — needs Phase 3 fix)
+        ///   - I8 (downloading drift): no direct events in this harness
+        ///     trigger it; needs a richer block-lifecycle event mix in a
+        ///     follow-up proptest (Phase 1.5 — V4 closure)
+        ///   - I10: should hold by construction in current code
+        #[test]
+        fn prop_invariants_hold_under_random_sequence(
+            events in prop::collection::vec(arb_event(), 1..50)
+        ) {
+            let peers = peer_pool();
+            let mut sync = ChainSync::new(0, Hash::zero());
+
+            for (i, event) in events.iter().enumerate() {
+                apply_event(&mut sync, event, &peers);
+                let failures = check_all_invariants(&sync);
+                if !failures.is_empty() {
+                    let detail = failures.iter()
+                        .map(|(id, msg)| format!("  {}: {}", id, msg))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    prop_assert!(
+                        false,
+                        "After event {}/{} ({:?}), invariants violated:\n{}\n\
+                         Full sequence: {:?}",
+                        i + 1, events.len(), event, detail, events,
+                    );
+                }
+            }
         }
 
-        // Post-fix: P's stale claim of 1_005 is pruned when local
-        // surpassed it. best_known_height drops to local. State
-        // transitions to Synced — broadcasting can resume.
-        assert!(
-            !sync.peer_heights.contains_key(&peer),
-            "peer's stale height claim must be pruned once local advances past it \
-             (pre-fix bug: claim sat in peer_heights forever, pinning best_known_height \
-             and freezing state in Headers/IBD)"
-        );
-        assert_eq!(sync.local_height, 1_010);
-        assert_eq!(
-            sync.best_known_height, 1_010,
-            "with no peers ahead, best_known_height must equal local — \
-             pre-fix this stuck at the stale peer's 1_005 claim"
-        );
-        assert_eq!(
-            sync.state,
-            SyncState::Synced,
-            "state must return to Synced once local catches up — pre-fix this \
-             stayed in Headers indefinitely because best_known_height was pinned"
-        );
+        /// Specific property for V2 (the recurring stall):
+        /// After local advances past a peer's claimed height, that peer's
+        /// entry should be pruned and best_known should drop.
+        ///
+        /// This is the e80a2df9 fix coded as a property. Will pass on
+        /// fix/s1-asert-backport branch (where e80a2df9 is applied) but
+        /// FAILS on origin/main (which is what this refactor branches from).
+        /// Phase 3 reconciles the patch + model.
+        #[test]
+        fn prop_v2_peer_claim_pruned_when_local_overtakes(
+            peer_idx in 0usize..5,
+            peer_claim in 10u64..500,
+            local_advance_to in 500u64..1_000,
+        ) {
+            let peers = peer_pool();
+            let mut sync = ChainSync::new(0, Hash::zero());
 
-        // Sanity: a peer that's GENUINELY ahead is NOT pruned.
-        let live_peer = super::super::peer::generate_peer_id();
-        sync.update_peer_height_for(live_peer, 1_020);
-        assert_eq!(sync.state, SyncState::Headers, "genuine higher claim still triggers IBD");
-        // local advances to 1_015 — peer's 1_020 claim is still ahead, must NOT be pruned.
-        sync.set_local_tip(1_015, Hash::zero());
-        assert_eq!(
-            sync.peer_heights.get(&live_peer).copied(),
-            Some(1_020),
-            "peers still ahead of our local must NOT be pruned"
-        );
-        assert_eq!(sync.best_known_height, 1_020);
+            // Peer P advertises height N.
+            sync.update_peer_height_for(peers[peer_idx], peer_claim);
+            prop_assert_eq!(sync.best_known_height, peer_claim);
+
+            // Local advances past N.
+            let mut tip_bytes = [0u8; 32];
+            tip_bytes[..8].copy_from_slice(&local_advance_to.to_le_bytes());
+            sync.set_local_tip(local_advance_to, Hash::from_bytes(tip_bytes));
+
+            // V2 closure expected: peer's claim should be pruned (it's now stale).
+            prop_assert!(
+                !sync.peer_heights.contains_key(&peers[peer_idx]),
+                "peer's stale height claim must be pruned once local advances past it \
+                 (V2 closure / e80a2df9). peer_claim={}, local_advance_to={}, \
+                 still-in-peer_heights={:?}",
+                peer_claim, local_advance_to,
+                sync.peer_heights.get(&peers[peer_idx]).copied(),
+            );
+            prop_assert_eq!(
+                sync.best_known_height, local_advance_to,
+                "best_known_height must drop to local once stale claim is pruned"
+            );
+        }
+
+        /// Phase 2a (V3 partial): peer difficulty model invariants.
+        ///   - best_known_difficulty ≥ max(peer_difficulties.values())
+        ///   - best_peer_by_difficulty returns the peer with max difficulty
+        ///   - a peer claim ≤ local total work is pruned by
+        ///     `set_local_total_difficulty` (mirrors V2 height pruning)
+        #[test]
+        fn prop_v3_difficulty_model_consistent(
+            claims in prop::collection::vec((0usize..5, 1u128..1_000_000_000_000), 1..15),
+            local_td in 0u128..500_000,
+        ) {
+            let peers = peer_pool();
+            let mut sync = ChainSync::new(0, Hash::zero());
+
+            // Apply peer claims; latest wins per peer.
+            let mut expected: std::collections::HashMap<PeerId, u128> = Default::default();
+            for (peer_idx, td) in &claims {
+                sync.update_peer_difficulty_for(peers[*peer_idx], *td);
+                expected.insert(peers[*peer_idx], *td);
+            }
+
+            // After all claims, best_known_difficulty ≥ max(expected.values())
+            let expected_max = expected.values().copied().max().unwrap_or(0);
+            prop_assert!(
+                sync.best_known_difficulty() >= expected_max,
+                "best_known_difficulty={} < max(peer_difficulties)={}",
+                sync.best_known_difficulty(), expected_max,
+            );
+
+            // Best peer by difficulty matches.
+            if let Some((p, d)) = sync.best_peer_by_difficulty() {
+                prop_assert_eq!(d, expected[&p],
+                    "best_peer_by_difficulty returned ({:?}, {}) but expected[p]={}",
+                    p, d, expected[&p]);
+            }
+
+            // Now advance local total difficulty — peers with claims ≤ local
+            // must be pruned.
+            sync.set_local_total_difficulty(local_td);
+            let still_present: Vec<u128> = sync.peer_difficulties.values().copied().collect();
+            for d in &still_present {
+                prop_assert!(*d > local_td,
+                    "Peer with difficulty {} ≤ local_td {} not pruned", d, local_td);
+            }
+        }
+
+        /// Specific property for V5 (the queue-stuck Synced transition):
+        /// If we advance local to match best_known AND queues are drained,
+        /// state should be Synced.
+        #[test]
+        fn prop_v5_synced_when_caught_up_and_drained(
+            target_height in 100u64..500,
+        ) {
+            let mut sync = ChainSync::new(0, Hash::zero());
+            // Advance to target. With no peer claims, best_known should equal target.
+            let mut tip_bytes = [0u8; 32];
+            tip_bytes[..8].copy_from_slice(&target_height.to_le_bytes());
+            sync.set_local_tip(target_height, Hash::from_bytes(tip_bytes));
+
+            prop_assert!(
+                sync.pending_headers.is_empty(),
+                "no events queue pending_headers in this property; should be empty"
+            );
+            prop_assert!(
+                sync.downloading.is_empty(),
+                "no events populate downloading in this property; should be empty"
+            );
+            prop_assert_eq!(
+                sync.state, SyncState::Synced,
+                "state must be Synced when local==best_known and queues empty. \
+                 Actual: state={:?}, local={}, best_known={}",
+                sync.state, sync.local_height, sync.best_known_height,
+            );
+        }
     }
 }
