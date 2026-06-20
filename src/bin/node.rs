@@ -732,7 +732,27 @@ async fn start_node(
                             // transitions + reorg-induced maturity
                             // changes. Belt-and-suspenders for the
                             // miner-side filter in mining/template.rs.
-                            event_mempool.shadow_evict_invalid(event_chain.as_ref());
+                            //
+                            // v1.0.11.7: wrapped in spawn_blocking to
+                            // move parking_lot::RwLock contention off
+                            // the tokio worker. Previously
+                            // shadow_evict_invalid ran inline; under
+                            // sustained block flow it held the chain
+                            // RwLock for the duration of the mempool
+                            // walk, blocking other tokio tasks (RPC,
+                            // network reads) on the same worker. With
+                            // 8 workers + busy IBD, contention could
+                            // pile up and stall the runtime. Bitcoin
+                            // Core's MaybeUpdateMempoolForReorg runs
+                            // on a separate background thread for the
+                            // same reason. We .await the join so
+                            // post-block notifications below see the
+                            // updated mempool state.
+                            let evict_mempool = event_mempool.clone();
+                            let evict_chain = event_chain.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                evict_mempool.shadow_evict_invalid(evict_chain.as_ref());
+                            }).await;
 
                             // Notify IBD sync manager so it advances its
                             // local_height cursor and releases the next

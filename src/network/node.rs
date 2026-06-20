@@ -1896,9 +1896,31 @@ impl P2PNode {
             .take()
             .expect("broadcast receiver already taken");
 
-        tokio::spawn(async move {
+        // v1.0.11.7: maintenance task supervisor + heartbeat.
+        //
+        // The maintenance loop hosts ping, dandelion, cleanup, peer-scoring,
+        // ban-flush, and header-refresh. A panic inside any `.await` (e.g.
+        // a poisoned RwLock during .write().await) would silently terminate
+        // the task — systemd still reports `active`, TCP listeners stay
+        // bound, but background work stops. This matched the silent-hang
+        // signature on 2026-06-19 (3 of 5 fleet nodes reported `active`
+        // while their last log was 17 hours old).
+        //
+        // Supervisor: spawn the loop into a JoinHandle; a separate watcher
+        // observes the JoinHandle and logs CRITICAL on any termination
+        // path (clean exit, panic, cancel). Operator must restart the
+        // service; auto-restart of a task holding shared mutable state is
+        // unsafe without a full lock-reset protocol.
+        //
+        // Heartbeat: emit a single INFO line every 30 s with tick counter
+        // + peer counts. Missed heartbeats (>~60 s) = operator restarts.
+        // Reference: zebrad actor-model wrappers + Bitcoin Core scheduler
+        // thread's periodic LogPrintf at TRACE.
+        let maint_handle = tokio::spawn(async move {
             let mut ping_interval = interval(PING_INTERVAL);
             let mut cleanup_interval = interval(Duration::from_secs(60));
+            let mut heartbeat_interval = interval(Duration::from_secs(30));
+            let mut heartbeat_ticks: u64 = 0;
             // Dandelion++ monitor runs every DANDELION_MONITOR_INTERVAL_SECS
             let mut dandelion_interval = interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
             // v1.0.12 stall-fix: proactive peer-height refresh during IBD.
@@ -1932,6 +1954,11 @@ impl P2PNode {
 
             while *maint_running.read().await {
                 tokio::select! {
+                    // Biased: ping is most safety-critical (peers evict
+                    // us after PEER_TIMEOUT=300s of silence). Listed
+                    // first so under load it's never starved by the
+                    // higher-frequency cleanup branch.
+                    biased;
                     _ = ping_interval.tick() => {
                         // Send pings to all peers
                         let ping = Message::ping(magic);
@@ -2105,6 +2132,58 @@ impl P2PNode {
                             .collect();
                         maint_tracker.cleanup_stale_entries(&active_ips);
                     }
+                    _ = heartbeat_interval.tick() => {
+                        heartbeat_ticks = heartbeat_ticks.saturating_add(1);
+                        let peer_count = maint_peers.len();
+                        let outbound = maint_peers.iter()
+                            .filter(|p| p.outbound && p.state == PeerState::Connected)
+                            .count();
+                        info!(
+                            target: "node::heartbeat",
+                            "maintenance tick={} peers={} outbound={}",
+                            heartbeat_ticks, peer_count, outbound
+                        );
+                    }
+                }
+            }
+        });
+
+        // Supervisor watcher: if the maintenance task ever terminates
+        // (panic, clean exit, abort), log CRITICAL so an operator
+        // restarts. Without this, a panicked task is invisible to
+        // systemd (process stays alive but background work is dead).
+        tokio::spawn(async move {
+            match maint_handle.await {
+                Ok(()) => {
+                    tracing::error!(
+                        target: "node::supervisor",
+                        "CRITICAL: maintenance task exited cleanly (no panic). \
+                         The loop is unbounded; this should never happen. \
+                         Node is now running WITHOUT ping/dandelion/peer-scoring/ban-flush. \
+                         Restart the service immediately."
+                    );
+                }
+                Err(e) if e.is_panic() => {
+                    tracing::error!(
+                        target: "node::supervisor",
+                        "CRITICAL: maintenance task PANICKED ({:?}). \
+                         Node is now running WITHOUT background maintenance. \
+                         Heartbeat will stop. Restart the service immediately.",
+                        e
+                    );
+                }
+                Err(e) if e.is_cancelled() => {
+                    tracing::warn!(
+                        target: "node::supervisor",
+                        "Maintenance task cancelled — expected during shutdown."
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "node::supervisor",
+                        "CRITICAL: maintenance task ended with JoinError: {:?}",
+                        e
+                    );
                 }
             }
         });
