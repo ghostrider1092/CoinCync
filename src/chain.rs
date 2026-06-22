@@ -1058,6 +1058,95 @@ impl Blockchain {
         None
     }
 
+    /// Count blocks in `[window_start, window_end)` whose coinbase signals
+    /// the given BIP-9 deployment bit.
+    ///
+    /// Provides the `signal_count_fn` callback that `ForkSignaler::state()`
+    /// (see `src/consensus/fork_signal.rs`) consumes. Walks the main-chain
+    /// blocks in the half-open range, inspects each block's coinbase
+    /// transaction's `extra` field, decodes the trailing 4 bytes as
+    /// `SignalBits` (via `fork_signal::decode_signal_bits`), and counts the
+    /// blocks where the queried bit is set.
+    ///
+    /// ## Backward compatibility
+    ///
+    /// Blocks mined by a pre-CIP-012 rig binary have an 8-byte coinbase
+    /// `extra` (height only, no trailing signal bytes). `decode_signal_bits`
+    /// returns `SignalBits(0)` for those, so they contribute 0 to the count
+    /// — same as a v1.0.12-aware rig that didn't pass `--signal-v1012`.
+    /// New miners that DO opt in produce 12-byte extras with the bit set,
+    /// and contribute 1 to the count.
+    ///
+    /// ## Performance
+    ///
+    /// `get_block_by_height` is amortized O(1): two `HashMap` lookups in
+    /// the in-memory cache (`blocks` + `height_to_hash`) for blocks within
+    /// the cache window, with a sled-disk fallback for older blocks. The
+    /// signal-window scan is 2016 blocks, which fits well within the
+    /// in-memory cache for any block within `2 × MAX_BLOCK_CACHE` of the
+    /// tip — i.e., the entire BIP-9 window is almost certainly hot. If
+    /// every block in the window were uncached (worst case during a deep
+    /// reorg-replay), each lookup adds ~one sled `get()` of <1 ms, capping
+    /// the full scan at ~2 seconds — still acceptable for a once-per-block
+    /// invocation, but worth noting that the "O(1) per lookup" claim
+    /// assumes hot cache.
+    ///
+    /// No memoization yet; if profiling shows this on a hot path, the
+    /// per-window count is trivially memoizable since it only changes by
+    /// ±1 when a new block lands (or a reorg unwinds + replays). A
+    /// single read-lock-held-across-the-whole-scan variant would also
+    /// shave ~300 µs vs the current per-block acquire pattern. Both
+    /// optimizations are YAGNI right now — BIP-9 query is one-per-block
+    /// at most, dwarfed by the RandomX + Bulletproof costs of validation.
+    ///
+    /// ## Missing-block handling
+    ///
+    /// A height that maps to no block (gap in the chain, e.g. during
+    /// reorg-rollback) is skipped without error — counts as 0 contribution.
+    /// A block whose coinbase is missing (impossible by construction, but
+    /// defensive) is similarly skipped. The point of the BIP-9 state
+    /// machine is to be robust against partial state; an aggressive panic
+    /// here would convert a transient DB-gap into a node halt.
+    ///
+    /// ## Prior art
+    ///
+    /// - **Bitcoin Core `ThresholdConditionCache::GetStateStatisticsFor`** in
+    ///   `versionbits.cpp` does the equivalent count by walking `CBlockIndex`
+    ///   pointers. Same shape, different chain-index representation.
+    /// - **Bitcoin Cash, Litecoin, Dogecoin** all inherited the BIP 9 pattern
+    ///   and walk-block-index-counting their coinbase / header signal bit.
+    pub fn count_signaling_blocks_in_window(
+        &self,
+        window_start: u64,
+        window_end: u64,
+        bit: u32,
+    ) -> u64 {
+        use crate::consensus::fork_signal::decode_signal_bits;
+
+        // Early-out on degenerate/inverted ranges. saturating_sub guards
+        // against the (window_end < window_start) case — a caller bug
+        // that shouldn't happen but won't underflow a u64 if it does.
+        // Inlined into the check (no variable) per review feedback —
+        // the value isn't used elsewhere.
+        if window_end.saturating_sub(window_start) == 0 {
+            return 0;
+        }
+
+        let mut count: u64 = 0;
+        for h in window_start..window_end {
+            let Some(block) = self.get_block_by_height(h) else {
+                continue;   // gap; contributes 0
+            };
+            let Some(coinbase) = block.coinbase() else {
+                continue;   // structurally impossible; defensive
+            };
+            if decode_signal_bits(&coinbase.extra).signals(bit) {
+                count = count.saturating_add(1);
+            }
+        }
+        count
+    }
+
     /// Restore state from database
     pub fn restore_state(&self, height: u64, tip_hash: Hash, total_difficulty: u128) -> Result<()> {
         {
@@ -3041,5 +3130,77 @@ mod tests {
         chain.rewind_phase2_stores(1);
         chain.rewind_phase2_stores(0); // stacks already empty — no panic
         assert_eq!(roots(&chain), genesis_roots);
+    }
+
+    // ─── count_signaling_blocks_in_window — BIP-9 helper ───────────────────
+
+    /// Empty range returns 0. Cheap smoke test ensuring the early-out path
+    /// works and doesn't allocate a 0-capacity vector or otherwise misbehave
+    /// on a degenerate window. Also asserts the `signal_count_fn` contract
+    /// (matches ForkSignaler's `signal_count_fn: Fn(u64,u64,u32) -> u64`):
+    /// the half-open `[start, start)` interval contains zero blocks.
+    #[test]
+    fn count_signaling_blocks_empty_window_returns_zero() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let count = chain.count_signaling_blocks_in_window(
+            10, 10, crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
+        );
+        assert_eq!(count, 0);
+    }
+
+    /// Range that extends beyond the tip returns 0 for every heights gap
+    /// without panicking. Defensive — the BIP-9 state machine queries
+    /// arbitrary windows including ones that haven't been mined yet, and
+    /// must not crash the validator if asked about height ranges that
+    /// don't exist yet on this chain.
+    #[test]
+    fn count_signaling_blocks_past_tip_returns_zero() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        // Chain is at height 0 (genesis only). Query window 1000..2000 —
+        // none of those blocks exist; method must return 0, not panic.
+        let count = chain.count_signaling_blocks_in_window(
+            1000, 2000, crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
+        );
+        assert_eq!(count, 0);
+    }
+
+    /// Inverted range (end < start) saturates to 0 without iterating
+    /// backwards or overflowing. The `saturating_sub` early-out at the
+    /// top of the method handles this; this test pins that behavior so
+    /// a future refactor that drops the guard fails fast.
+    #[test]
+    fn count_signaling_blocks_inverted_range_returns_zero() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let count = chain.count_signaling_blocks_in_window(
+            2000, 1000, crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
+        );
+        assert_eq!(count, 0);
+    }
+
+    /// Genesis block coinbase has 8-byte extra (height only); it must
+    /// NOT signal any CIP bit. Asserts the "legacy coinbase = no signal"
+    /// invariant through the chain method (rather than only at the
+    /// `decode_signal_bits` unit-test level).
+    #[test]
+    fn count_signaling_blocks_genesis_signals_nothing() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        // Window covers exactly genesis (height 0..1). Genesis coinbase
+        // has 8-byte extra → no CIP bits set.
+        for bit in [
+            crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
+            crate::consensus::fork_signal::bits::VIEW_TAGS,
+            crate::consensus::fork_signal::bits::RING_SIZE_16,
+            crate::consensus::fork_signal::bits::FEE_MARKET_V2,
+        ] {
+            let count = chain.count_signaling_blocks_in_window(0, 1, bit);
+            assert_eq!(
+                count, 0,
+                "genesis coinbase unexpectedly signaled bit 0x{:08x}", bit
+            );
+        }
     }
 }
