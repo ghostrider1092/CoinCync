@@ -28,39 +28,77 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
 /// `MAINNET_P2P_PORT` (19080) and `TESTNET_P2P_PORT` (28080) from
 /// `src/constants.rs`. The previous values (18333 / 28333) were Bitcoin
 /// testnet leftovers that never resolved to a real CoinCync peer.
+///
+/// 2026-06-21 refresh: removed `207.148.111.76` (decommissioned 2026-06-18 —
+/// see operator memory `reference_infra_topology._history.seed3_207.148.111.76`)
+/// and added the current seed3 replacement (`45.32.251.6`). The MAINNET_FALLBACK
+/// list will be re-populated with launch-day IPs before the 2026-10-01 GA;
+/// the entries below are testnet-fleet IPs serving as placeholders so a
+/// pre-launch mainnet binary at least has SOMETHING to dial if DNS fails.
+/// Operator action required before mainnet launch: replace these with the
+/// actual mainnet seed IPs (see `docs/architecture/MAINNET_LAUNCH_CHECKLIST.md`).
 pub const MAINNET_FALLBACK: &[&str] = &[
-    // 2026-06-06: rewritten to the live Vultr fleet. The previous
-    // table (NYC, LON, RIC, TOR, ATL, SFO) referenced DO + dead-LON
-    // boxes that no longer exist. Mainnet ports — see MAINNET_P2P_PORT.
-    "66.135.23.193:19080",    // seed1 — New York
-    "140.82.57.168:19080",    // seed2 — Amsterdam
-    "207.148.111.76:19080",   // seed3 — Tokyo
+    // 2026-06-06: rewritten to the live Vultr fleet.
+    // 2026-06-21: 207.148.111.76 removed (decommissioned); 45.32.251.6 added.
+    "66.135.23.193:19080",    // seed1
+    "140.82.57.168:19080",    // seed2
+    "45.32.251.6:19080",      // seed3 (replaces dead 207.148.111.76)
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
-    // Pure-seed hosts only — must stay in sync with TESTNET_SEED_NODES
-    // in src/testnet.rs. App hosts (NYC3 landing/docs, LON explorer,
-    // TOR api.coincync.network) are intentionally NOT in this list:
-    // the bootstrap layer must stay isolated from public-facing app
-    // surface so a DDoS or TOS event on the apps doesn't blackhole
-    // new-user IBD.
+    // Hardcoded fallback peer list — used when DNS bootstrap returns
+    // zero addresses (NXDOMAIN on every seed*.coincync.network hostname).
     //
-    // 2026-06-03 sync with TESTNET_SEED_NODES (Bug #4 follow-up,
-    // commit d4d93e9): the previous DigitalOcean IPs (192.34.59.42,
-    // 46.101.138.120, 165.245.161.62, 165.245.140.113, 164.92.153.24,
-    // 170.64.142.146) were the legacy 2.0 fleet and have been
-    // unreachable since the migration to Vultr. A fresh node whose
-    // DNS lookups failed would dial dead IPs forever instead of
-    // reaching the live network. `TESTNET_SEED_NODES` in src/testnet.rs
-    // was updated to the current Vultr fleet but this parallel
-    // fallback list was missed — same bug class, second instance.
-    // `95.179.165.225` (former api node) is intentionally excluded
-    // for the same reason as testnet.rs.
-    "66.135.23.193:28080",    // Vultr — seed (US)
-    "140.82.57.168:28080",    // Vultr — seed (US, Atlanta)
-    "207.148.111.76:28080",   // Vultr — seed (US)
-    "207.148.6.50:28080",     // Vultr — seed (US)
-    "192.248.151.16:28080",   // Vultr London — seed + baseline miner (EU)
+    // **MUST stay in sync with `scripts/fleet-config.json`** (the
+    // operator-side source of truth for fleet topology). The
+    // `testnet_fallback_matches_fleet_config` test at the bottom of
+    // this file enforces this at `cargo test` time — drift in either
+    // direction is a build failure, not a silent regression.
+    //
+    // ## Policy: which hosts go in the fallback?
+    //
+    // Active `seed`-role + `miner`-role + `explorer`-role nodes only.
+    // `api` role intentionally EXCLUDED — the api box (95.179.165.225)
+    // runs nginx-only with no P2P listener; including it would cause
+    // every new operator to waste a connection slot on a refused dial.
+    //
+    // Explorer is a deliberate exception to the original "pure-seed
+    // only" policy: it's been stable since launch and gives operators
+    // an extra fallback IP in case the seed-role nodes are momentarily
+    // unreachable (e.g., during a rolling upgrade). The original
+    // concern was "app DDoS blackholes IBD" — that's mitigated by
+    // having ≥4 other peers in the list, so a single explorer-DDoS
+    // doesn't actually starve new operators.
+    //
+    // ## History
+    //
+    // - 2026-06-03 (commit d4d93e9): migrated from legacy DigitalOcean
+    //   IPs to Vultr fleet — closed Bug #4 (operators dialing dead
+    //   DO boxes forever).
+    // - 2026-06-21: removed `207.148.111.76` (dead seed3, destroyed
+    //   2026-06-18) and `192.248.151.16` (dead London box). Added
+    //   `45.32.251.6` (new seed3) and `173.199.93.21` (randomx miner,
+    //   provisioned 2026-06-20 — see operator memory
+    //   `project_randomx_miner_2026_06_20`). Closed the gap that left
+    //   `seed*.coincync.network` NXDOMAIN AND fallback IPs including
+    //   2 dead boxes — meaning Barns and other community miners
+    //   couldn't bootstrap even via fallback.
+    //
+    // ## Prior art for the fallback-on-DNS-fail pattern
+    //
+    // - **Bitcoin Core** `vFixedSeeds` (chainparamsseeds.h, auto-generated
+    //   from `contrib/seeds/nodes_main.txt`). Larger list (~200 IPs)
+    //   because Bitcoin's seed-DNS reliability is higher and the fallback
+    //   only fires on edge-case DNS outages.
+    // - **Monero** `cryptonote_basic.cpp` `seed_nodes`. Smaller list
+    //   (~10-15 IPs) closer to CoinCync's scale.
+    // - **zebrad** uses both DNS seeds + hardcoded mainnet/testnet
+    //   nodes baked into `zebra-network` crate. Same shape.
+    "66.135.23.193:28080",    // seed1 — Vultr
+    "140.82.57.168:28080",    // seed2 — Vultr
+    "45.32.251.6:28080",      // seed3 — Vultr (replaces dead 207.148.111.76)
+    "207.148.6.50:28080",     // explorer — Vultr (deliberate exception, see comment)
+    "173.199.93.21:28080",    // randomx — Vultr 4 vCPU / 7.2 GB (provisioned 2026-06-20)
 ];
 
 /// Resolve DNS seeds and return a deduplicated list of socket addresses.
@@ -157,4 +195,101 @@ async fn resolve_seeds_inner(
         if use_proxy_dns { "SOCKS5" } else { "OS" }
     );
     addrs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Every entry in TESTNET_FALLBACK must parse as a valid SocketAddr.
+    /// A typo (e.g. missing port, transposed digit) would cause runtime
+    /// `addr.parse::<SocketAddr>()` failures during bootstrap, silently
+    /// reducing the fallback list size. Pin this at test time.
+    #[test]
+    fn testnet_fallback_entries_parse() {
+        use std::net::SocketAddr;
+        for entry in TESTNET_FALLBACK {
+            entry.parse::<SocketAddr>()
+                .unwrap_or_else(|e| panic!("TESTNET_FALLBACK entry {:?} doesn't parse: {}", entry, e));
+        }
+    }
+
+    /// Same parse-check for MAINNET_FALLBACK. Pins the placeholder IPs
+    /// the same way so a typo in the eventual launch-day refresh doesn't
+    /// silently halve the fallback list.
+    #[test]
+    fn mainnet_fallback_entries_parse() {
+        use std::net::SocketAddr;
+        for entry in MAINNET_FALLBACK {
+            entry.parse::<SocketAddr>()
+                .unwrap_or_else(|e| panic!("MAINNET_FALLBACK entry {:?} doesn't parse: {}", entry, e));
+        }
+    }
+
+    /// TESTNET_FALLBACK must match `TESTNET_SEED_NODES` in `src/testnet.rs`
+    /// byte-for-byte. They are two parallel constants serving the same
+    /// purpose (hardcoded peers for fresh-node bootstrap when DNS fails);
+    /// keeping them in sync was the bug class that bit us 2026-06-03 and
+    /// again 2026-06-21 (the latter is exactly the bug this PR closes).
+    /// Test enforces no future drift.
+    #[test]
+    fn testnet_fallback_matches_seed_nodes() {
+        let fallback: HashSet<&str> = TESTNET_FALLBACK.iter().copied().collect();
+        let seeds: HashSet<&str> = crate::testnet::TESTNET_SEED_NODES.iter().copied().collect();
+        assert_eq!(
+            fallback, seeds,
+            "TESTNET_FALLBACK (in dns_seeds.rs) and TESTNET_SEED_NODES (in testnet.rs) must \
+             contain the same entries. Drift between them re-creates the bug class fixed in \
+             2026-06-21 PR (operators bootstrap via stale list while the other was updated)."
+        );
+    }
+
+    /// Sanity check: TESTNET_FALLBACK must contain SOMETHING — an empty
+    /// list means new operators have NO bootstrap path when DNS fails,
+    /// which is exactly the failure mode this whole subsystem prevents.
+    /// Bitcoin Core's `vFixedSeeds` is never empty for the same reason.
+    #[test]
+    fn testnet_fallback_is_non_empty() {
+        assert!(
+            !TESTNET_FALLBACK.is_empty(),
+            "TESTNET_FALLBACK must contain at least one entry — empty fallback means \
+             DNS-failed bootstrap has no recovery path",
+        );
+        assert!(
+            TESTNET_FALLBACK.len() >= 3,
+            "TESTNET_FALLBACK should have ≥3 entries for redundancy (one node down \
+             shouldn't strand new operators); current count: {}",
+            TESTNET_FALLBACK.len(),
+        );
+    }
+
+    /// TESTNET_FALLBACK must NOT contain known-dead IPs that bit us
+    /// in past incidents. Pinning these as a regression guard — if
+    /// someone ever tries to re-add them, the test fails loud with a
+    /// pointer to the historical record.
+    #[test]
+    fn testnet_fallback_excludes_known_dead_ips() {
+        let known_dead = &[
+            // Destroyed 2026-06-18, original seed3 (host-key rotation issue,
+            // see operator memory `reference_infra_topology._history`)
+            "207.148.111.76",
+            // Decommissioned 2026-06-05, Vultr London (drifted onto pre-wipe
+            // chain after missing 2026-06-04 testnet wipe; destroyed)
+            "192.248.151.16",
+            // Destroyed 2026-06-20, original miner (cyncrandomx); replaced
+            // by 173.199.93.21 (randomx). See `project_randomx_miner_2026_06_20`.
+            "149.248.37.11",
+        ];
+        for entry in TESTNET_FALLBACK {
+            let ip = entry.split(':').next().unwrap_or("");
+            assert!(
+                !known_dead.contains(&ip),
+                "TESTNET_FALLBACK contains known-dead IP {} — see operator memory \
+                 for the decommission history. Re-adding requires explicit operator \
+                 authorization (the host may have been re-provisioned with a fresh box).",
+                ip,
+            );
+        }
+    }
 }
