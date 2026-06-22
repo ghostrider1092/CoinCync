@@ -141,6 +141,48 @@ pub const LWMA_WINDOW: u64 = 60;
 /// Median time past window for timestamp rules (blocks).
 pub const MTP_WINDOW: usize = 11;
 
+/// v1.0.12 protocol upgrade activation height.
+///
+/// At or above this height, the validator additionally enforces the
+/// six v1.0.12 consensus changes (see commits in
+/// feat/v1.0.12-hard-fork-prep for the per-rule landings):
+///
+///   1. cross-tx duplicate stealth addresses rejected at block level
+///   2. encrypted_amount tightened to exactly 8 bytes
+///   3. per-output size caps enforced at block validation (not just tx)
+///   4. duplicate stealth addresses rejected within tx.outputs
+///   5. ring-size enforcement via monotonic `total_outputs_ever()`
+///      (closes the H1 consensus-split risk from live-UTXO-set lookups)
+///   6. graduated ring-size ramp 11 → 13 → 16 replaces single-step
+///      bootstrap cutover at h=10_000
+///
+/// All six are TIGHTENING: a v1.0.12-valid block is also v1.0.11-valid.
+/// So honest miners producing well-formed blocks pre-activation continue
+/// to produce valid blocks post-activation without any binary change on
+/// the miner side. The fork is purely on the VALIDATION side — v1.0.11.3
+/// nodes start rejecting blocks that exploit the v1.0.11 gaps once the
+/// chain crosses this height.
+///
+/// `u64::MAX` = dormant. The activation height is set in a SEPARATE
+/// commit close to the announcement date (T-3 in the rollout plan), so
+/// that no binary published before then can accidentally activate the
+/// fork.
+///
+/// See `docs/operations/v1.0.12-hard-fork-rollout.md` (TODO) for the
+/// full operator runbook + Discord announcement template.
+pub const HARD_FORK_V1_0_12_HEIGHT: u64 = u64::MAX;
+
+/// Maximum bytes per output's `encrypted_memo` field.
+///
+/// XOR-encrypted ciphertext envelope around a user memo. Honest
+/// wallets pad memos up to this cap via the
+/// MAX_MEMO_SIZE = 256 + MEMO_OVERHEAD constants in src/crypto/memo.rs;
+/// caller code never produces longer payloads. The cap exists to
+/// prevent block-level chain bloat from miner-crafted txs that
+/// bypass mempool admission. v1.0.12 hard-fork enforces this cap at
+/// block-validation time too (see HARD_FORK_V1_0_12_HEIGHT).
+pub const MAX_OUTPUT_MEMO_SIZE: usize = 256;
+
 /// Maximum time in the future a block timestamp may claim (seconds).
 pub const MAX_FUTURE_TIMESTAMP: u64 = 60 * 10;
 

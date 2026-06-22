@@ -453,17 +453,31 @@ pub fn validate_block_with_checkpoint_for_network(
             let mut total_declared: u64 = 0;
             let mut all_valid = true;
 
+            // v1.0.12 audit-follow-up #5 (backport of v1.0.12-release
+            // 3507a1cd): coinbase encrypted_amount must be exactly 8
+            // bytes post-fork. Honest coinbase construction always
+            // emits exactly 8 (LE u64). The pre-fork `>= 8` silently
+            // accepted longer payloads and used only the first 8
+            // bytes — bounded chain bloat that compounds across every
+            // block forever. Tightened at HARD_FORK_V1_0_12_HEIGHT.
+            let v1_0_12_active = block.header.height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT;
             for (idx, output) in coinbase.outputs.iter().enumerate() {
                 // Extract declared amount from encrypted_amount field
                 // (coinbase uses plaintext amount since reward is public)
-                let declared_amount = if output.encrypted_amount.len() >= 8 {
+                let length_ok = if v1_0_12_active {
+                    output.encrypted_amount.len() == 8
+                } else {
+                    output.encrypted_amount.len() >= 8
+                };
+                let declared_amount = if length_ok {
                     let mut bytes = [0u8; 8];
                     bytes.copy_from_slice(&output.encrypted_amount[..8]);
                     u64::from_le_bytes(bytes)
                 } else {
+                    let expected_msg = if v1_0_12_active { "exactly 8 bytes" } else { "8 bytes" };
                     result.add_error(format!(
-                        "Coinbase output {} has invalid amount encoding (expected 8 bytes, got {})",
-                        idx, output.encrypted_amount.len()
+                        "Coinbase output {} has invalid amount encoding (expected {}, got {})",
+                        idx, expected_msg, output.encrypted_amount.len()
                     ));
                     all_valid = false;
                     continue;
@@ -588,7 +602,49 @@ pub fn validate_block_with_checkpoint_for_network(
         }
     }
 
-    // If there are duplicate key images, fail fast before expensive validation
+    // v1.0.12 protocol upgrade (gated by HARD_FORK_V1_0_12_HEIGHT):
+    // reject blocks where two distinct txs create the same stealth
+    // address as an output.
+    //
+    // The dup-stealth check inside `validate_transaction` catches:
+    // (a) duplicates within a single tx via an in-tx HashSet,
+    // (b) clash with any already-on-chain output via
+    // `utxos.get_output_index_entry`. It does NOT catch CROSS-TX-
+    // WITHIN-BLOCK clashes — tx1 and tx2 each create an output with
+    // stealth X, neither X is in the UTXO yet at validation time,
+    // and `validate_transaction` runs in parallel across txs so
+    // they cannot see each other's new outputs.
+    //
+    // Without this check, block-apply would `or_insert` index tx1's
+    // output X and silently drop tx2's output X from
+    // stealth_index/output_index — silent-output-loss + CLSAG
+    // forgery-path via wrong-commitment ring lookup against tx2's
+    // "shadowed" output. Backport of v1.0.12-release commit cfc680b7.
+    //
+    // Strictly tightening: any block accepted under this check is
+    // also acceptable under the pre-fork rules. Honest wallets
+    // generate Diffie-Hellman-derived per-output stealth addresses
+    // (effectively random); no honest block was ever produced with a
+    // clash. Activation deferred until HARD_FORK_V1_0_12_HEIGHT is
+    // set away from u64::MAX in a coordinated deploy.
+    if block.header.height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+        let mut seen_block_outputs = std::collections::HashSet::new();
+        for (tx_idx, tx) in block.transactions.iter().enumerate() {
+            for (out_idx, output) in tx.outputs.iter().enumerate() {
+                let addr_bytes = *output.stealth_address.as_bytes();
+                if !seen_block_outputs.insert(addr_bytes) {
+                    result.add_error(format!(
+                        "Cross-tx duplicate stealth address in block at tx {} output {}",
+                        tx_idx, out_idx
+                    ));
+                }
+            }
+        }
+    }
+
+    // If there are duplicate key images (or cross-tx dup stealth
+    // addresses, post v1.0.12 activation), fail fast before expensive
+    // validation
     if !result.valid {
         return Ok(result);
     }
@@ -1035,6 +1091,69 @@ pub fn validate_transaction(
         return Err(Error::InvalidOutputCount { count: 0, max: crate::constants::MAX_TX_OUTPUTS });
     }
 
+    // v1.0.12 audit-follow-up #4 (backport of v1.0.12-release commit
+    // 3507a1cd): non-coinbase output encrypted_amount must be exactly
+    // 8 bytes post-fork. The XOR-masked u64 design (see
+    // src/crypto/memo.rs) implies exactly 8 bytes; honest wallets
+    // construct it as `vec![0u8; 8]` everywhere (grep
+    // "encrypted_amount: vec" in src/ — 9 sites, all 8 bytes).
+    //
+    // Pre-fork, the `len() > 64` upper bound in
+    // validate_transaction_basic accepted 0..=64, silently letting
+    // malicious miners pad up to 56 surplus bytes per output —
+    // bounded chain bloat that compounds across every UTXO outliving
+    // the tx. Tightened to exact length at activation.
+    //
+    // Strictly tightening: any tx valid under this check is also
+    // valid under the pre-fork rule. Honest wallets unaffected.
+    if current_height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+        for (out_idx, output) in tx.outputs.iter().enumerate() {
+            // v1.0.12 #3/8 (cf. commit 9c8633e7): encrypted_amount must be
+            // exactly 8 bytes post-fork.
+            if output.encrypted_amount.len() != 8 {
+                return Err(Error::InvalidTransaction(format!(
+                    "output {} encrypted_amount must be exactly 8 bytes, got {}",
+                    out_idx, output.encrypted_amount.len()
+                )));
+            }
+            // v1.0.12 #4/8 (backport of v1.0.12-release 161fd74f):
+            // per-output size caps at block-level validation.
+            //
+            // Pre-fix, the encrypted_memo size cap lived ONLY in
+            // `validate_transaction_basic` (mempool admission). The main
+            // `validate_transaction` — called by block validation — never
+            // checked it. A miner could include a tx with
+            // encrypted_memo.len() = many KiB in a self-mined block;
+            // block validation let it through.
+            //
+            // Same bug class as the version=0 / MAX_TX_VERSION gap found
+            // 2026-06-03: a check duplicated by accident between the
+            // mempool and block paths drifts at the block path. The
+            // single-source-of-truth refactor for this class lives in
+            // `check_context_free_invariants` on v1.0.13-refactor
+            // (commit 4bd0bca1) and is the longer-term fix; v1.0.12 just
+            // ports the missing cap into validate_transaction here.
+            //
+            // MAX_TX_SIZE caps the overall tx so per-block damage is
+            // bounded, but every honest node pays disk + bandwidth for
+            // the inflated bytes forever, AND the bloated UTXO persists
+            // until the output is spent.
+            //
+            // The matching encrypted_amount > 64 cap from the upstream
+            // 161fd74f commit is INTENTIONALLY OMITTED here: the v1.0.12
+            // tightening to `!= 8` above is strictly stricter than `> 64`,
+            // so the > 64 check is dead code after activation.
+            if output.encrypted_memo.len() > crate::constants::MAX_OUTPUT_MEMO_SIZE {
+                return Err(Error::InvalidTransaction(format!(
+                    "output {} encrypted_memo too large: {} bytes (max {})",
+                    out_idx,
+                    output.encrypted_memo.len(),
+                    crate::constants::MAX_OUTPUT_MEMO_SIZE,
+                )));
+            }
+        }
+    }
+
     // Check input count
     if tx.inputs.len() > crate::constants::MAX_TX_INPUTS {
         return Err(Error::InvalidInputCount {
@@ -1147,6 +1266,64 @@ pub fn validate_transaction(
         // Chain-level double-spend check (existing)
         if utxos.contains_key_image(&input.key_image) {
             return Err(Error::DuplicateKeyImage("duplicate key image detected".into()));
+        }
+    }
+
+    // v1.0.12 #5/8 (backport of v1.0.12-release 5aeb27dd): reject
+    // duplicate stealth addresses across this tx's outputs AND
+    // collisions with any existing on-chain output's stealth address.
+    //
+    // Why: `UtxoSet::add_output_ext` indexes outputs by stealth address
+    // via `HashMap::entry().or_insert()` — first-wins semantics chosen
+    // for coinbase-output sharing across heights. For regular Transfer
+    // outputs that becomes a footgun:
+    //
+    //   In-tx case: tx.outputs[0].stealth_address ==
+    //   tx.outputs[1].stealth_address — both OutputRefs land in the
+    //   primary (tx_hash, index) map, but only outputs[0] gets indexed
+    //   in stealth_index / output_index. Every spend-side lookup
+    //   (`get_output_by_stealth`, ring-member commitment-match check at
+    //   line ~1167) returns outputs[0]'s OutputRef + commitment. CLSAG
+    //   verification consults the wrong commitment → silently accepts a
+    //   fabricated ring signature OR silently rejects a valid one,
+    //   depending on the attacker's framing.
+    //
+    //   Cross-tx case: a new output's stealth address matches an
+    //   existing on-chain output's — the new entry is silently dropped
+    //   in stealth_index / output_index. Same lookup poisoning.
+    //
+    // Honest stealth addresses are random (Diffie-Hellman derived
+    // per-output); duplicates only happen via deliberate construction
+    // or broken RNG. Rejecting is safe.
+    //
+    // We check via the permanent `output_index` (retains historical
+    // outputs including spent ones) so a cross-tx clash with any
+    // ever-existed output is caught.
+    //
+    // Strictly tightening: any tx valid post-fork is also valid
+    // pre-fork (under the current loose "first-wins" rule the tx would
+    // have been silently accepted with broken indexing). Honest
+    // wallets unaffected.
+    //
+    // The cross-tx-WITHIN-BLOCK variant (two distinct txs in the same
+    // block each creating an output with the same stealth address) is
+    // covered by item #2/8 (commit 1cc2f1f4) at block-validation level.
+    if current_height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+        let mut seen_outputs_in_tx = std::collections::HashSet::with_capacity(tx.outputs.len());
+        for (out_idx, output) in tx.outputs.iter().enumerate() {
+            let addr_bytes = *output.stealth_address.as_bytes();
+            if !seen_outputs_in_tx.insert(addr_bytes) {
+                return Err(Error::InvalidTransaction(format!(
+                    "duplicate stealth address at output {}",
+                    out_idx,
+                )));
+            }
+            if utxos.get_output_index_entry(&addr_bytes).is_some() {
+                return Err(Error::InvalidTransaction(format!(
+                    "output {} stealth address collides with existing on-chain output",
+                    out_idx,
+                )));
+            }
         }
     }
 
@@ -1291,7 +1468,64 @@ pub fn validate_transaction(
 
     // Check ring size and duplicate ring members
     for (input_idx, input) in tx.inputs.iter().enumerate() {
-        let available = utxos.output_count();
+        // v1.0.12 #6/8 (backport of v1.0.12-release 1d27d3c8): use
+        // monotonic `total_outputs_ever()` instead of the live
+        // `output_count()` for the ring-size enforcement input.
+        //
+        // ## The bug this fixes
+        //
+        // `output_count()` returns the count of CURRENTLY UNSPENT outputs.
+        // That value (a) decreases as outputs are spent, (b) differs
+        // transiently between nodes mid-reorg as they disconnect chains
+        // at different rates, and (c) differs between archival nodes and
+        // any node running pruning. Below `RING_SIZE_RAMP_TO_FULL_HEIGHT`
+        // (10,000), `effective_ring_size` keys off `available` to compute
+        // the bootstrap-adapt ring size — so two nodes with different
+        // `available` for the same block can REQUIRE DIFFERENT RING SIZES,
+        // accept on one node and reject on the other, and produce a
+        // consensus split.
+        //
+        // ## The fix
+        //
+        // `total_outputs_ever()` is monotonically incremented in
+        // `add_output_ext` and NEVER decremented (the disconnect counter
+        // is separate at `reorg_disconnects_total`). Every node that
+        // processed the same chain prefix has identical values.
+        // Determinism preserved across all node configurations.
+        //
+        // ## Cast safety
+        //
+        // u64 → usize via `as`: on all supported 64-bit targets this is
+        // identity. On hypothetical 32-bit hosts it saturates at
+        // u32::MAX, which is still vastly larger than any target ring
+        // size (≤ 16), so the consensus decision is unaffected.
+        //
+        // ## Why gated despite being a determinism fix
+        //
+        // The flip from `output_count()` to `total_outputs_ever()` is
+        // a hardening, but it IS a consensus rule change: a block that
+        // happened to pass under the buggy formula on node A and fail
+        // on node B might now fail on both. Gating the change at
+        // HARD_FORK_V1_0_12_HEIGHT means every node flips the rule at
+        // the same height; binaries with this code shipped before the
+        // activation height still apply the old (nondeterministic)
+        // logic, exactly matching v1.0.11.x nodes that don't have this
+        // commit at all. No split at deploy time; clean cutover at the
+        // height.
+        //
+        // ## Why this is the v1.0.12 release blocker
+        //
+        // Pre-fork, the buggy formula is non-deterministic — different
+        // node configurations can disagree on ring-size requirements
+        // for the SAME block in the bootstrap window (h < 10,000). The
+        // testnet has been lucky so far (no archival/pruned-node mix
+        // observed live), but mainnet at launch would absolutely have
+        // both. This must activate by mainnet GA (2026-10-01).
+        let available = if current_height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+            utxos.total_outputs_ever() as usize
+        } else {
+            utxos.output_count()
+        };
         let ring_size = crate::constants::effective_ring_size(current_height, available);
         if input.ring_members.len() != ring_size {
             return Err(Error::InvalidRingSize {
