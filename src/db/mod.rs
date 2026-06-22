@@ -209,7 +209,200 @@ pub struct Database {
     pub filters: FilterDb,
     /// Transaction hash → (block_height, tx_index) for O(1) tx lookups
     pub tx_index: shim::Tree,
+    /// DB-level metadata (schema_version, future cross-cutting flags).
+    /// Reserved key namespace `b"schema/*"` for versioning; future cross-
+    /// cutting metadata can use other prefixes. Public so RPC/diagnostic
+    /// code can read the schema version on a live node.
+    pub metadata: shim::Tree,
 }
+
+// ─── Schema versioning ──────────────────────────────────────────────
+//
+// The DB carries a single `u32` schema-version stamp in the
+// `__db_metadata__` tree under the key `b"schema/db_version"`. Every
+// release increments `EXPECTED_DB_SCHEMA_VERSION` when ANY persisted
+// Borsh struct's on-disk layout changes incompatibly. Open-time check:
+//   - Fresh DB (no blocks yet) → stamp current version, proceed.
+//   - Existing DB with matching version → proceed.
+//   - Existing DB with missing version → refuse to start: legacy v0 DB
+//     that predates this versioning scheme. Operator chooses wipe-and-
+//     resync, or writes an explicit one-time migration. No silent
+//     auto-migrate at this version because there's no v0→v1 mapping
+//     yet (v0 had no version field — the layouts ARE byte-identical
+//     today, but future v1.1 must not accidentally read a v0 layout
+//     as if it were v1).
+//   - Existing DB with stored > expected → refuse to start: future DB,
+//     operator downgraded binary. Same as Bitcoin Core's
+//     `kVersionNumberFromDb > kCurrentVersion` check.
+//   - Existing DB with stored < expected → future PR will run
+//     registered migration closures here. Today the migration table
+//     is empty, so this branch returns an explicit "no migration
+//     registered" error — better than a silent skip.
+//
+// ## Prior art
+//
+// - **Monero** (`BlockchainDB::get_db_version` + `m_open`): single
+//   `uint32` per-DB version, compared against `MAX_VERSION` constant.
+//   Same shape used here.
+// - **Bitcoin Core** (`CDBWrapper::Read(kVersionKey, ...)`): per-DB
+//   version stored in a reserved key; mismatch aborts startup.
+//   CoinCync mirrors this pattern, with the additional fresh-DB
+//   short-circuit Monero also has.
+// - **Zcash** (`CDBEnv::version_check` in `walletdb.cpp`): same
+//   pattern, version stored in DB header. Migration registry
+//   dispatched per (from, to) tuple, which is the shape the future
+//   v1.1 migration code will adopt here.
+//
+// ## Why u32 (not u8)
+//
+// u8 is sufficient for foreseeable lifetime (255 schema versions =
+// 255 incompatible v1.X.Y releases — a chain that takes 30 years to
+// hit). u32 is the Monero/Bitcoin/Zcash convention; following it
+// avoids "why is CoinCync special?" review noise. Cost: 3 wasted
+// bytes per DB. Trivial.
+//
+// ## Why the constant lives in this module (not in `constants.rs`)
+//
+// Schema version is a DB-layer invariant, not a consensus rule.
+// Bumping it doesn't fork the chain — it changes how locally-stored
+// data is laid out on disk. Keeping it adjacent to the open-time
+// check makes both ends visible in one place; reviewers reading the
+// schema-version logic don't have to context-switch to constants.rs
+// to understand what "EXPECTED" means.
+
+/// Verify the DB's stored schema version matches `EXPECTED_DB_SCHEMA_VERSION`,
+/// or stamp it if the DB is fresh. Called once during `Database::open_with_config`.
+///
+/// Decision matrix:
+///
+/// | Stored version | Fresh DB?   | Action                                    |
+/// |----------------|-------------|-------------------------------------------|
+/// | None           | YES         | Stamp EXPECTED, proceed                   |
+/// | None           | NO          | ERROR: legacy v0 DB needs migration       |
+/// | Some(v == EXP) | (either)    | Proceed                                   |
+/// | Some(v <  EXP) | (either)    | ERROR: no migration registered (today)    |
+/// | Some(v >  EXP) | (either)    | ERROR: future DB, downgrade binary        |
+///
+/// Fresh-DB detection uses `BlockDb::is_empty()` (no blocks accepted yet).
+/// This is the same shape Bitcoin Core uses (`pblockindex->empty()` check
+/// during `LoadBlockIndexDB`) and Monero uses (`m_height == 0` check in
+/// `BlockchainDB::is_open`).
+fn verify_or_stamp_schema_version(
+    metadata: &shim::Tree,
+    blocks: &BlockDb,
+) -> Result<()> {
+    let stored = metadata.get(SCHEMA_VERSION_KEY)
+        .map_err(|e| Error::DatabaseError(format!(
+            "failed to read schema_version from metadata tree: {}", e
+        )))?;
+
+    match stored {
+        None => {
+            // No version stamp. Either fresh DB (no blocks yet) or
+            // legacy v0 DB that predates this versioning scheme.
+            if blocks.is_empty() {
+                // Fresh DB: stamp it.
+                let version_bytes = EXPECTED_DB_SCHEMA_VERSION.to_le_bytes();
+                metadata.insert(SCHEMA_VERSION_KEY, &version_bytes)
+                    .map_err(|e| Error::DatabaseError(format!(
+                        "failed to stamp initial schema_version: {}", e
+                    )))?;
+                tracing::info!(
+                    "Fresh database initialized with schema_version = {}",
+                    EXPECTED_DB_SCHEMA_VERSION,
+                );
+                Ok(())
+            } else {
+                // Existing DB with no version stamp = legacy. Refuse to
+                // open. Operator must wipe-and-resync OR write a one-time
+                // migration script. Auto-migrate is unsafe at this stage
+                // because pre-v1 layout has no formal definition we can
+                // pin (the layout WAS v0 by convention, but v0 was never
+                // explicitly stamped, so we can't be sure what we'd be
+                // reading).
+                Err(Error::DatabaseError(format!(
+                    "Legacy database detected: blocks present but no schema_version \
+                     stamp. This DB was created before schema versioning was \
+                     introduced (pre-v1). To proceed, either (a) wipe the data dir \
+                     and resync from genesis, or (b) restore from a v1-stamped \
+                     chaindata snapshot. Expected schema_version = {}.",
+                    EXPECTED_DB_SCHEMA_VERSION,
+                )))
+            }
+        }
+        Some(bytes) if bytes.len() != 4 => {
+            // Length mismatch = corruption or future format
+            // (e.g., if v2 switches to u64). Refuse to start.
+            Err(Error::DatabaseError(format!(
+                "schema_version key has wrong length: expected 4 bytes (u32 LE), \
+                 got {} bytes. Either DB corruption or a binary built for a future \
+                 schema-version format.",
+                bytes.len(),
+            )))
+        }
+        Some(bytes) => {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&bytes);
+            let stored_version = u32::from_le_bytes(buf);
+
+            match stored_version.cmp(&EXPECTED_DB_SCHEMA_VERSION) {
+                std::cmp::Ordering::Equal => {
+                    tracing::debug!(
+                        "DB schema_version = {} (matches expected)",
+                        stored_version,
+                    );
+                    Ok(())
+                }
+                std::cmp::Ordering::Greater => {
+                    // Stored > expected: DB created by a future binary,
+                    // operator downgraded. We refuse to start because we
+                    // can't safely read a layout newer than we know.
+                    Err(Error::DatabaseError(format!(
+                        "DB schema_version is {} but this binary expects {}. \
+                         The database was created by a newer binary; either \
+                         upgrade this binary to a release that knows version {}, \
+                         or wipe the data dir and resync.",
+                        stored_version, EXPECTED_DB_SCHEMA_VERSION, stored_version,
+                    )))
+                }
+                std::cmp::Ordering::Less => {
+                    // Stored < expected: an upgrade path is needed. In v1.0
+                    // there are no migrations (we're at v1). When v1.1
+                    // bumps EXPECTED to 2, this branch will dispatch into
+                    // a registered migration table (see future commit).
+                    Err(Error::DatabaseError(format!(
+                        "DB schema_version is {} but this binary expects {}. \
+                         No migration is registered for {} → {} yet. This is a \
+                         placeholder error — when v1.1 ships, this branch will \
+                         run the registered migration. For now: wipe the data dir \
+                         and resync from genesis, OR downgrade to a binary that \
+                         expects schema_version {}.",
+                        stored_version, EXPECTED_DB_SCHEMA_VERSION,
+                        stored_version, EXPECTED_DB_SCHEMA_VERSION,
+                        stored_version,
+                    )))
+                }
+            }
+        }
+    }
+}
+
+/// Current DB schema version. Bump on ANY incompatible on-disk
+/// layout change to a persisted struct or tree.
+///
+/// History:
+///   v1: initial mainnet-candidate (Oct 2026). Establishes the
+///       versioning invariant — every subsequent layout change MUST
+///       bump this AND ship a registered migration from v1 → vN.
+pub const EXPECTED_DB_SCHEMA_VERSION: u32 = 1;
+
+/// Reserved metadata tree name. Underscored name avoids accidental
+/// collision with consensus-layer tree names (which are unprefixed,
+/// e.g. `blocks`, `utxos`).
+const METADATA_TREE_NAME: &str = "__db_metadata__";
+
+/// Reserved key in the metadata tree where the schema version u32 lives.
+const SCHEMA_VERSION_KEY: &[u8] = b"schema/db_version";
 
 impl Database {
     /// Open or create database at path with auto-detected optimal config
@@ -249,6 +442,18 @@ impl Database {
         let filters = FilterDb::new(&db)?;
         let tx_index = db.open_tree("tx_index")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        let metadata = db.open_tree(METADATA_TREE_NAME)
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        // Schema-version check runs AFTER every tree is opened. We need
+        // the BlockDb to detect "fresh DB" (no blocks → fresh) and we
+        // need the metadata tree to read the stored version.
+        //
+        // If this returns Err, we explicitly do NOT proceed — refusing
+        // to start is the SAFE behavior. A node that silently mutates
+        // a misversioned DB is the failure mode that produces "the
+        // testnet DB got bricked by the v1.1 upgrade" stories.
+        verify_or_stamp_schema_version(&metadata, &blocks)?;
 
         tracing::info!("Database opened successfully");
 
@@ -262,7 +467,37 @@ impl Database {
             output_index,
             filters,
             tx_index,
+            metadata,
         })
+    }
+
+    /// Read the current DB schema version. Returns the version stamp
+    /// stored in the metadata tree (will equal `EXPECTED_DB_SCHEMA_VERSION`
+    /// for any DB that successfully opened via `open_with_config`, since
+    /// open-time validation rejects mismatched versions).
+    ///
+    /// Exposed for RPC + diagnostic tooling — `get_info` can include this
+    /// so operators can verify all fleet nodes agree on the DB layout
+    /// they're running. Differential schema versions across a fleet are
+    /// invisible without an explicit accessor like this.
+    pub fn schema_version(&self) -> Result<u32> {
+        match self.metadata.get(SCHEMA_VERSION_KEY)
+            .map_err(|e| Error::DatabaseError(e.to_string()))?
+        {
+            Some(bytes) if bytes.len() == 4 => {
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(&bytes);
+                Ok(u32::from_le_bytes(buf))
+            }
+            Some(bytes) => Err(Error::DatabaseError(format!(
+                "schema_version key has wrong length: expected 4 bytes, got {}",
+                bytes.len(),
+            ))),
+            None => Err(Error::DatabaseError(
+                "schema_version key missing from metadata tree (should be impossible \
+                 after successful Database::open — file a bug)".into()
+            )),
+        }
     }
 
     /// Open a temporary database (for testing)
@@ -543,5 +778,153 @@ mod tests {
         // Re-open same path should work (not corrupt)
         let db2 = Database::open(dir.path()).unwrap();
         assert!(db2.flush().is_ok());
+    }
+
+    // ─── Schema versioning ───────────────────────────────────────
+
+    /// Fresh DB → first open stamps EXPECTED_DB_SCHEMA_VERSION.
+    /// Pins the "fresh DB short-circuit" path in
+    /// `verify_or_stamp_schema_version`.
+    #[test]
+    fn schema_version_stamped_on_fresh_db() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let stamped = db.schema_version().expect("schema_version readable");
+        assert_eq!(stamped, EXPECTED_DB_SCHEMA_VERSION);
+    }
+
+    /// Reopening the same DB does not re-stamp, does not error, and
+    /// reports the same version. This is the steady-state path —
+    /// 99%+ of opens take this branch.
+    #[test]
+    fn schema_version_preserved_across_reopen() {
+        let dir = tempdir().unwrap();
+        {
+            let db = Database::open(dir.path()).unwrap();
+            db.flush().unwrap();
+        }
+        // Reopen — must not error, must report same version.
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), EXPECTED_DB_SCHEMA_VERSION);
+    }
+
+    /// DB stamped with a FUTURE version (e.g., the operator downgraded
+    /// from a v1.1 binary back to v1.0) refuses to open.
+    /// This is the "downgrade safety" invariant — silently mutating a
+    /// future-format DB with old code would corrupt data.
+    #[test]
+    fn schema_version_future_version_rejected() {
+        let dir = tempdir().unwrap();
+        // Open + corrupt schema_version to a future value
+        {
+            let db = Database::open(dir.path()).unwrap();
+            let future_version: u32 = EXPECTED_DB_SCHEMA_VERSION + 1;
+            db.metadata
+                .insert(SCHEMA_VERSION_KEY, &future_version.to_le_bytes())
+                .unwrap();
+            db.flush().unwrap();
+        }
+        // Reopen MUST fail.
+        let result = Database::open(dir.path());
+        assert!(result.is_err(), "future-version DB must refuse to open");
+        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        assert!(
+            msg.contains("created by a newer binary") || msg.contains("future"),
+            "error message should explain the downgrade scenario; got: {}", msg,
+        );
+    }
+
+    /// DB stamped with an OLDER version (e.g., the operator upgraded
+    /// from v1.0 to a hypothetical v1.1) requires a registered migration.
+    /// Today the migration table is empty so this errors with a
+    /// migration-required message. When v1.1 ships with a v1→v2 migration
+    /// registered, that test will need updating.
+    #[test]
+    fn schema_version_older_version_requires_migration() {
+        // Skip if there's no "older" version (EXPECTED is at v1, lowest).
+        // When EXPECTED bumps to 2 in a future PR, this test starts
+        // running and asserts the migration-required error path.
+        if EXPECTED_DB_SCHEMA_VERSION <= 1 {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        {
+            let db = Database::open(dir.path()).unwrap();
+            let older_version: u32 = EXPECTED_DB_SCHEMA_VERSION - 1;
+            db.metadata
+                .insert(SCHEMA_VERSION_KEY, &older_version.to_le_bytes())
+                .unwrap();
+            db.flush().unwrap();
+        }
+        let result = Database::open(dir.path());
+        assert!(result.is_err(), "older-version DB without migration must refuse to open");
+        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        assert!(
+            msg.contains("No migration is registered"),
+            "error should request a migration; got: {}", msg,
+        );
+    }
+
+    /// DB with wrong-length schema_version value (corruption or future
+    /// format) refuses to open. Defends against the case where v2
+    /// switches to u64 — a v1 binary reading a v2 DB sees 8 bytes
+    /// where it expects 4, and we want a clear error instead of
+    /// reading a truncated value.
+    #[test]
+    fn schema_version_wrong_length_rejected() {
+        let dir = tempdir().unwrap();
+        {
+            let db = Database::open(dir.path()).unwrap();
+            // Write 8 bytes where 4 are expected
+            db.metadata
+                .insert(SCHEMA_VERSION_KEY, &[1u8, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap();
+            db.flush().unwrap();
+        }
+        let result = Database::open(dir.path());
+        assert!(result.is_err(), "wrong-length schema_version must refuse to open");
+        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        assert!(
+            msg.contains("wrong length") || msg.contains("4 bytes"),
+            "error should describe the length mismatch; got: {}", msg,
+        );
+    }
+
+    /// Legacy v0 DB (existing blocks but no schema_version stamp)
+    /// refuses to open. This is the critical defense against silently
+    /// opening a pre-versioning DB with v1.0 code and mutating it as
+    /// if it were already v1-stamped.
+    ///
+    /// Note: hard to simulate cleanly without an actual block-insertion
+    /// path (which requires more setup than this test wants). Instead,
+    /// we simulate by opening a fresh DB, stamping it, then DELETING
+    /// the stamp + writing some data to blocks tree to simulate the
+    /// "non-empty DB without stamp" shape.
+    #[test]
+    fn schema_version_legacy_unstamped_db_rejected() {
+        let dir = tempdir().unwrap();
+        {
+            let db = Database::open(dir.path()).unwrap();
+            // Simulate legacy state: data exists in blocks tree, but
+            // no schema_version stamp. Insert a sentinel key into the
+            // blocks tree (bypassing the typed API — we don't care if
+            // the value is a real block, only that the tree isn't empty).
+            db.blocks.height_index.insert(b"\x00\x00\x00\x00\x00\x00\x00\x00", b"sentinel")
+                .unwrap();
+            // Wait — height_index isn't the tree we check. Open the
+            // actual blocks tree and stuff a key into it.
+            let blocks_tree = db.db.open_tree("blocks").unwrap();
+            blocks_tree.insert(b"sentinel_key", b"sentinel_value").unwrap();
+            // Now remove the schema_version stamp.
+            db.metadata.remove(SCHEMA_VERSION_KEY).unwrap();
+            db.flush().unwrap();
+        }
+        let result = Database::open(dir.path());
+        assert!(result.is_err(), "legacy unstamped DB must refuse to open");
+        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        assert!(
+            msg.contains("Legacy database") || msg.contains("schema_version stamp"),
+            "error should identify the legacy DB scenario; got: {}", msg,
+        );
     }
 }

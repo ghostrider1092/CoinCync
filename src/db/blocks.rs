@@ -41,6 +41,22 @@ impl BlockDb {
         })
     }
 
+    /// True if no blocks have been stored yet.
+    ///
+    /// Used by `Database::open_with_config` to distinguish "fresh DB
+    /// from genesis" (legitimate first-stamp of schema_version) from
+    /// "existing DB with no schema_version stamp" (legacy v0 DB, must
+    /// not silently auto-migrate). See `verify_or_stamp_schema_version`
+    /// in `db/mod.rs`.
+    ///
+    /// Checks the `blocks` tree specifically because that's the
+    /// authoritative "real chain data exists" signal — the other
+    /// trees (height_index, meta, pruned) are derived from / indexed
+    /// against it.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
     /// Store a block (block data only, by hash)
     ///
     /// SECURITY (M-1): Split from old insert() which unconditionally overwrote
