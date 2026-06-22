@@ -115,6 +115,58 @@ for HOST in $HOSTS; do
         ssh $SSH_OPTS "${SSH_USER}@${IP}" "journalctl -u coincync-node -n 20 --no-pager" || true
         exit 1
     fi
+
+    # GATE BEFORE NEXT HOST — prevent fleet partition.
+    #
+    # `systemctl is-active` alone is insufficient: the node is "active" the
+    # instant its main process is forked, but the P2P mesh takes 30-90s to
+    # re-establish (per-peer Noise handshake + pending GETHEADERS recovery).
+    # If we move to the next host before this host's mesh is healed, BOTH
+    # hosts can simultaneously have peer_count < 3 while the miner keeps
+    # producing blocks — the partition trigger that wedged the chain on
+    # 2026-06-20 (addnode swap) and again on 2026-06-21 (recovery from
+    # that wedge). See [[feedback_no_bulk_rolling_restart]] in operator
+    # memory for the full incident history.
+    #
+    # Healthy "ready for next host" criteria:
+    #   - peer_count >= 3 (enough mesh to gossip blocks)
+    #   - tip_age_secs < 300 (chain producing/syncing; not stuck)
+    # Wait up to 90s for both to be true; bail with diagnostic if not.
+    echo "  waiting for mesh + chain to re-establish (peer_count >= 3, tip_age < 300s)..."
+    READY=0
+    for ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        sleep 6
+        # Pull get_info via loopback RPC. Need the env file for the bearer key.
+        INFO=$(ssh $SSH_OPTS "${SSH_USER}@${IP}" '
+            K=$(grep COINCYNC_RPC_API_KEY /etc/coincync/coincync.env 2>/dev/null | cut -d= -f2)
+            curl -s -m 4 http://127.0.0.1:28081/rpc/testnet \
+                -H "Authorization: Bearer $K" \
+                -H "Content-Type: application/json" \
+                -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"get_info\"}" 2>/dev/null
+        ' 2>/dev/null)
+        # Parse peer_count + tip_age_secs with jq if available, else python.
+        if command -v jq >/dev/null 2>&1; then
+            PEERS=$(echo "$INFO" | jq -r '.result.peer_count // 0' 2>/dev/null)
+            TIP_AGE=$(echo "$INFO" | jq -r '.result.tip_age_secs // 999999' 2>/dev/null)
+        else
+            PEERS=$(echo "$INFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("peer_count",0))' 2>/dev/null || echo 0)
+            TIP_AGE=$(echo "$INFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("tip_age_secs",999999))' 2>/dev/null || echo 999999)
+        fi
+        echo "    attempt $ATTEMPT/15: peer_count=$PEERS tip_age=${TIP_AGE}s"
+        if [[ "$PEERS" -ge 3 && "$TIP_AGE" -lt 300 ]]; then
+            READY=1
+            break
+        fi
+    done
+    if [[ $READY -ne 1 ]]; then
+        echo "  FAIL: $HOST did not reach (peer_count>=3, tip_age<300s) within 90s."
+        echo "  This indicates a mesh problem that could cause a fleet partition if"
+        echo "  we move to the next host. Investigate before continuing (peer logs,"
+        echo "  firewall, addnode reachability) — see memory feedback_no_bulk_rolling_restart."
+        ssh $SSH_OPTS "${SSH_USER}@${IP}" "journalctl -u coincync-node -n 30 --no-pager | grep -E 'handshake|disconnected|orphan|peer|addnode' | tail -15" || true
+        exit 1
+    fi
+    echo "  ✓ $HOST mesh re-established, safe to proceed to next host"
 done
 
 echo
