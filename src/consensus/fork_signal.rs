@@ -26,7 +26,35 @@ pub mod bits {
     pub const LELANTUS_SPARK: u32 = 1 << 4;
     /// CIP-006: MimbleWimble cut-through (Grin style)
     pub const MW_CUTTHROUGH:  u32 = 1 << 5;
-    // Bits 6–30: reserved for future CIPs
+    /// CIP-012: v1.0.12 hard-fork bundle.
+    ///
+    /// Composite bit signaling miner readiness for the v1.0.12 consensus
+    /// upgrades (already implemented + gated by `HARD_FORK_V1_0_12_HEIGHT`
+    /// on `feat/v1012-hard-fork-forward-port` / PR #68):
+    ///
+    ///   - encrypted_amount tightened to exactly 8 bytes
+    ///   - per-output size caps at block-level validation
+    ///   - reject duplicate stealth addresses within a single tx
+    ///   - reject cross-tx duplicate stealth addresses within a block
+    ///   - ring-size uses monotonic `total_outputs_ever()` (H1 release blocker)
+    ///
+    /// Bundled into a SINGLE bit because these all activate together as
+    /// the v1.0.12 release — they share the same release tag, same
+    /// deployment cadence, same test matrix. Bitcoin Core's BIP 9 uses
+    /// the bundle-per-bit pattern for the same reason (Taproot was a
+    /// single bit for BIP 340 + 341 + 342 even though those are 3 BIPs).
+    ///
+    /// Activation gate is currently `HARD_FORK_V1_0_12_HEIGHT = u64::MAX`
+    /// (height-based, dormant). Future: add BIP-9 state-machine wiring
+    /// in `validation.rs` so activation requires BOTH the height gate
+    /// AND `SIGNAL_THRESHOLD` blocks in a `SIGNAL_WINDOW` window having
+    /// this bit set — closes the "premature activation while miners
+    /// still on old binaries" risk that BIP 8 (LOT=true) covers in
+    /// Bitcoin Core. Until that wiring lands, this bit is informational
+    /// only — miners CAN signal but the validator doesn't yet consult
+    /// the signal state.
+    pub const V1_0_12_BUNDLE: u32 = 1 << 6;
+    // Bits 7–30: reserved for future CIPs
     /// Must always be set (identifies CoinCync 1.0 blocks)
     pub const MUST_SET:       u32 = 1 << 31;
 }
@@ -83,6 +111,30 @@ pub static DEPLOYMENTS: &[Deployment] = &[
         bit:                  bits::MW_CUTTHROUGH,
         start_height:         u64::MAX,
         timeout_height:       u64::MAX,
+        min_activation_height: u64::MAX,
+    },
+    // v1.0.12 hard-fork bundle. Currently dormant (start_height = u64::MAX)
+    // — operator sets real values when the fork release schedule firms up.
+    //
+    // When activating, the canonical Bitcoin BIP 9 pattern is to align
+    // `start_height` to a SIGNAL_WINDOW boundary (multiple of 2016) so the
+    // first signaling window is a complete window. timeout_height is then
+    // start_height + N*SIGNAL_WINDOW for some N giving miners enough cadence
+    // to upgrade. min_activation_height is typically timeout_height + 1 grace
+    // window so even a last-window lock-in has time to propagate before any
+    // node enforces the new rules. Example for a 3-window deployment:
+    //
+    //   start_height: 100_800          // 50 * 2016
+    //   timeout_height: 106_848        // start + 3 * 2016
+    //   min_activation_height: 108_864 // timeout + 1 * 2016 (grace)
+    //
+    // (Those numbers are illustrative — actual values pending operator
+    // release-schedule decision; see [[project_roadmap_v1_0_13_to_16]].)
+    Deployment {
+        name:                  "v1.0.12-bundle",
+        bit:                   bits::V1_0_12_BUNDLE,
+        start_height:          u64::MAX,
+        timeout_height:        u64::MAX,
         min_activation_height: u64::MAX,
     },
 ];
@@ -261,5 +313,77 @@ mod tests {
             matches!(state, DeploymentState::Started { .. }),
             "expected Started, got {:?}", state
         );
+    }
+
+    #[test]
+    fn v1_0_12_bundle_bit_distinct_from_other_cips() {
+        // Each CIP must use a distinct bit. A typo that gave V1_0_12_BUNDLE
+        // the same value as an existing CIP would cause double-signaling
+        // (a single miner block would appear to signal for both at once),
+        // which would corrupt the activation state machines for both
+        // deployments. This test makes that mistake compile-fail-loud.
+        let all_cips = [
+            ("VIEW_TAGS",      bits::VIEW_TAGS),
+            ("RING_SIZE_16",   bits::RING_SIZE_16),
+            ("FEE_MARKET_V2",  bits::FEE_MARKET_V2),
+            ("HALO2_SHIELDED", bits::HALO2_SHIELDED),
+            ("LELANTUS_SPARK", bits::LELANTUS_SPARK),
+            ("MW_CUTTHROUGH",  bits::MW_CUTTHROUGH),
+            ("V1_0_12_BUNDLE", bits::V1_0_12_BUNDLE),
+            ("MUST_SET",       bits::MUST_SET),
+        ];
+        for (i, (name_a, bit_a)) in all_cips.iter().enumerate() {
+            for (name_b, bit_b) in &all_cips[i + 1..] {
+                assert_ne!(
+                    bit_a, bit_b,
+                    "CIP bit collision: {} and {} both = 0x{:08x}",
+                    name_a, name_b, bit_a,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v1_0_12_bundle_signaled_by_dedicated_bit_only() {
+        // A coinbase signaling for ONLY the v1.0.12 bundle must NOT
+        // accidentally signal for any other CIP. Guards against the
+        // case where SignalBits::new() OR's in unintended bits, or
+        // where the bit constant is defined as a mask covering more
+        // than its intended bit.
+        let s = SignalBits::new(bits::V1_0_12_BUNDLE);
+        assert!(s.signals(bits::V1_0_12_BUNDLE), "must signal own bit");
+        assert!(s.signals(bits::MUST_SET),       "MUST_SET always implicit");
+        for other in [
+            bits::VIEW_TAGS,
+            bits::RING_SIZE_16,
+            bits::FEE_MARKET_V2,
+            bits::HALO2_SHIELDED,
+            bits::LELANTUS_SPARK,
+            bits::MW_CUTTHROUGH,
+        ] {
+            assert!(
+                !s.signals(other),
+                "v1.0.12 signal leaked into other CIP bit 0x{:08x}", other,
+            );
+        }
+    }
+
+    #[test]
+    fn v1_0_12_bundle_deployment_registered_dormant() {
+        // The deployment must be present in DEPLOYMENTS so callers can
+        // iterate them, but all three height fields MUST be u64::MAX
+        // until an operator deliberately enables the schedule. A
+        // misconfigured non-MAX value would let the BIP 9 state machine
+        // begin transitioning state silently against production
+        // chains — exactly the premature-activation class the deployment
+        // schedule exists to prevent.
+        let d = DEPLOYMENTS
+            .iter()
+            .find(|d| d.bit == bits::V1_0_12_BUNDLE)
+            .expect("V1_0_12_BUNDLE must be registered in DEPLOYMENTS");
+        assert_eq!(d.name, "v1.0.12-bundle");
+        assert_eq!(d.start_height, u64::MAX, "must ship dormant");
+        assert_eq!(d.timeout_height, u64::MAX, "must ship dormant");
+        assert_eq!(d.min_activation_height, u64::MAX, "must ship dormant");
     }
 }
