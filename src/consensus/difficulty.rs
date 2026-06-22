@@ -145,7 +145,30 @@ fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyB
     let expected_time = (height_diff as i128) * (target_time as i128);
     let time_error = time_diff - expected_time;
 
-    let denominator = (halflife as i128) * (target_time as i128);
+    // S1 backport (2026-06-15): denominator is `halflife` alone (in
+    // seconds), NOT `halflife * target_time`. The previous code
+    // multiplied by target_time, producing an effective halflife of
+    // `ASERT_HALFLIFE * TARGET_BLOCK_TIME = 3600 * 120 = 432,000s ≈ 5
+    // days` — making ASERT 120× weaker than designed. Canonical
+    // aserti3-2d (the Bitcoin Cash reference) defines:
+    //
+    //   new_target = anchor_target * 2^((time_diff - target_time*height_diff) / halflife)
+    //
+    // where halflife is in SECONDS. The multiplication by target_time
+    // was a unit-confusion bug. The ASERT_HALFLIFE constant docstring
+    // confirms intent: "halflife in seconds (1 hour)" — so the
+    // canonical formula is what was meant.
+    //
+    // CONSENSUS-AFFECTING. Required a full testnet wipe + new genesis
+    // when this backport landed (2026-06-15): blocks mined under the
+    // bugged formula produced targets ~0% adjusted between blocks,
+    // while the correct formula adjusts the target ~3% over an
+    // 8-block window with the time errors we were seeing. External
+    // tester barns hit the wall on IBD at testnet block 2222 (target
+    // 0x00153b2a... canonical vs 0x0015d888... computed by fixed
+    // formula) — the divergence diagnostic at
+    // tests/diag_asert_at_2222.rs (in v1.0.13-refactor) reproduces it.
+    let denominator = halflife as i128;
     if denominator == 0 { return current_target; }
 
     let exponent_fp = time_error

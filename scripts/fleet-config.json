@@ -1,6 +1,6 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node listed here will have every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) run scripts/sync-fleet-config.sh, (3) verify every node converges. See docs/operations/fleet-config.md (TODO) for the runbook.",
-  "_last_changed": "2026-06-18 — full fleet inventory captured during the post-stall hardening pass; miner added (was missing from every node's dial list, root cause of the 2026-06-17/18 stall).",
+  "_last_changed": "2026-06-20 — miner box swap: 149.248.37.11 (Vultr 4GB EPYC, OOM-cycled and was destroyed) replaced by randomx at 173.199.93.21 (Vultr 4 vCPU / 7.2 GB / 150 GB). Mining wallet rotated to fresh keys; address tCYNC3ZK17GBDV7K3aY61M7FvKnQmGmCEYUjCG7qcLDidCnQ7scKWh82i9s18uiiDTaKZM3RQmdqePXLGuyW8Yk4Y3aNVjapNtYp.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
@@ -11,13 +11,15 @@
     "seed3":    { "ip": "45.32.251.6",     "rpc_bind": "127.0.0.1", "role": "seed",     "notes": "Vultr 3.3GB. Re-provisioned 2026-06-18 after the original 207.148.111.76 host-key rotation issue; new IP. RPC loopback-only — seed role doesn't need exposed RPC." },
     "explorer": { "ip": "207.148.6.50",    "rpc_bind": "127.0.0.1", "role": "explorer", "notes": "Vultr. Runs the public block-explorer frontend. RPC loopback-only — frontend proxies via local nginx." },
     "api":      { "ip": "95.179.165.225",  "rpc_bind": "0.0.0.0",   "role": "api",      "notes": "Vultr. Hosts the public api.coincync.network nginx reverse proxy + faucet + frost-coord." },
-    "miner":    { "ip": "149.248.37.11",   "rpc_bind": "127.0.0.1", "role": "miner",    "notes": "Vultr CPU-optimized 4GB / 2 vCPU AMD EPYC-Turin. Runs coincync-rig solo-mining; provisioned 2026-06-15; added to fleet-config 2026-06-18. RPC loopback-only — rig polls from same box." }
+    "randomx":  { "ip": "173.199.93.21",   "rpc_bind": "127.0.0.1", "role": "miner",    "notes": "Vultr 4 vCPU / 7.2 GB / 150 GB. Runs coincync-rig solo-mining at ~520 H/s on 3 threads (v1.0.11.7). Provisioned 2026-06-20 as replacement for the destroyed miner box (149.248.37.11). RPC loopback-only — rig polls from same box. Wallet keys live on operator dev box at C:\\Users\\unkno\\.coincync\\wallets\\miner2.wallet." }
   },
   "deactivated": {
     "_description": "Nodes that were once in the fleet but no longer participate. Kept here for historical reference; NOT added to addnode lists. Re-activate by moving back into `nodes` and re-running sync-fleet-config.sh.",
-    "london":   { "ip": "TBD",            "role": "seed", "notes": "Deleted 2026-06-04. Historical placeholder; replace IP if re-provisioned." }
+    "london":   { "ip": "TBD",            "role": "seed",  "notes": "Deleted 2026-06-04. Historical placeholder; replace IP if re-provisioned." },
+    "miner":    { "ip": "149.248.37.11",  "role": "miner", "notes": "DESTROYED 2026-06-20 by operator. Original Vultr CPU-optimized 4GB / 2 vCPU AMD EPYC-Turin box. Was the solo miner from 2026-06-15 → 2026-06-20 (5 days). Replaced by `randomx` (173.199.93.21) which has 4 vCPU and 7.2 GB. The old IP must not appear in any addnode list or known-hosts entry." }
   },
   "_history": {
-    "seed3_207.148.111.76": "DESTROYED 2026-06-18. Original Vultr seed3 was rotated/decommissioned after the 2026-06-06 host-key change. Replaced by a fresh box at 45.32.251.6. The old IP should not appear in any addnode list or known-hosts entry."
+    "seed3_207.148.111.76": "DESTROYED 2026-06-18. Original Vultr seed3 was rotated/decommissioned after the 2026-06-06 host-key change. Replaced by a fresh box at 45.32.251.6. The old IP should not appear in any addnode list or known-hosts entry.",
+    "miner_149.248.37.11": "DESTROYED 2026-06-20. Original solo-miner box. Operator triggered upgrade to a larger spec; new miner is `randomx` at 173.199.93.21 (see nodes). The old IP must not appear in any addnode list or known-hosts entry. Mining wallet was rotated to fresh keys at the same time (see _last_changed)."
   }
 }
