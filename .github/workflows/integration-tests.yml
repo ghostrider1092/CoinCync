@@ -36,13 +36,18 @@ jobs:
     # Timeout history:
     #   50 (original) → 75 (2026-05-24, commit 3772c89) → 90 (2026-05-24, this commit)
     # unit-lib-bins (`cargo test --release --workspace --lib --bins`
-    # over 600+ unit tests) reliably runs 60-70 min even with warm
-    # Swatinem cache. The 75 bump was borderline; this 90 bump leaves
-    # headroom for slow runner machines and future test additions.
-    # The other 5 matrix shards finish in <2 min so they're unaffected
-    # by the higher cap. Longer-term fix is sharding unit-lib-bins —
-    # tracked as a GitHub issue alongside this commit.
-    timeout-minutes: 90
+    # over 600+ unit tests) historically runs 60-70 min with warm cache.
+    # 75 was borderline; 90 was the last bump (still hit cancellation
+    # 2026-06-18). Bumped to 120 to give margin for slow runner machines
+    # + cumulative test additions across the 2026-06 work pile (v1.0.12
+    # prep commits add HashSet + utxo lookups in validate_transaction,
+    # marginally slower per-tx). The other 5 matrix shards finish in
+    # <2 min so they're unaffected by the higher cap.
+    #
+    # Longer-term fix: shard unit-lib-bins itself. Split by feature
+    # gate (mainnet vs testnet) or by crate (coincync lib vs rig vs
+    # swap vs cynchub). Tracked as a separate GitHub issue.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
