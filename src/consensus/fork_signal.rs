@@ -154,6 +154,95 @@ pub enum DeploymentState {
     Failed,
 }
 
+// ── Coinbase `extra` field encoding ───────────────────────────────
+//
+// Miners signal their CIP votes by embedding `SignalBits` in the
+// coinbase transaction's `extra` field. The layout is:
+//
+//    [0..8]    height_le_u64       (existing; same as pre-CIP-012)
+//    [8..12]   signal_bits_le_u32  (new; OMITTED when raw bits = 0)
+//
+// Backward-compat: a coinbase with `extra.len() == 8` (no trailing
+// signal bytes) is interpreted as "no signal" (SignalBits(0)). This
+// is what every pre-CIP-012 coinbase looks like. New miners that
+// pass `--signal-v1012` produce 12-byte extra; new miners that
+// don't pass any signal flag produce 8-byte extra (unchanged from
+// today). Validators accept BOTH lengths and decode accordingly —
+// the encoding is purely additive, no schema-versioning needed,
+// no hard-fork required for the encoding itself.
+//
+// Prior art:
+// - **Bitcoin Core**: signal bits live in `nVersion` field of the
+//   block header (4 bytes, 28 usable bits). CoinCync's BlockHeader
+//   uses a narrower u8 version field (see header.rs), so we route
+//   signaling through the coinbase `extra` field instead. Same
+//   conceptual mechanism, different on-wire location.
+// - **Monero**: miners signal hardfork-readiness via `vote` field
+//   in coinbase, very similar shape (small extension to coinbase
+//   metadata, not header). Our pattern follows Monero's more
+//   directly than Bitcoin's.
+
+/// Encode the `extra` field of a coinbase transaction with optional signal bits.
+///
+/// Always emits the 8-byte height prefix. Appends 4 bytes of signal-bit
+/// little-endian u32 IFF the raw signal value is non-zero — keeps
+/// pre-CIP-012 no-signal coinbases byte-identical to their historical
+/// encoding.
+///
+/// ## "Non-zero" semantics — important distinction
+///
+/// `SignalBits` has TWO constructors:
+///   - `SignalBits(0)` — the literal default; raw() == 0; no MUST_SET bit.
+///   - `SignalBits::new(raw)` — OR's in MUST_SET (bit 31) so raw() != 0
+///     even if the caller passes 0.
+///
+/// The encoder branches on `signal_bits.raw() != 0`, NOT on "the caller
+/// chose to signal." A caller that wants TRULY no signal (legacy byte
+/// layout) must pass `SignalBits(0)` directly — that's what the rig's
+/// `run_solo_cli` does when no `--signal-vX` flag is set:
+///
+///   if raw == 0 { SignalBits(0) } else { SignalBits::new(raw) }
+///
+/// This guarantees:
+///   - Operator doesn't pass `--signal-v1012` → SignalBits(0) → 8-byte
+///     extra → byte-identical to pre-CIP-012 coinbase, no block-hash drift
+///   - Operator passes `--signal-v1012` → SignalBits::new(V1_0_12_BUNDLE)
+///     → raw() = 0x80000040 (MUST_SET | V1_0_12_BUNDLE) → 12-byte extra
+///     with the signal trailer
+///
+/// Calling `SignalBits::new(0)` would emit a 4-byte trailer of just
+/// MUST_SET — that's a valid CIP-012-era no-CIP-signaled coinbase
+/// (different from legacy but technically valid). The rig avoids this
+/// case via the explicit zero-check above; downstream callers should
+/// either pass `SignalBits(0)` for "absolutely no signal bytes" or
+/// `SignalBits::new(raw)` for "I want to opt into the new format and
+/// signal these specific bits."
+pub fn encode_coinbase_extra(height: u64, signal_bits: SignalBits) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12);
+    out.extend_from_slice(&height.to_le_bytes());
+    if signal_bits.raw() != 0 {
+        out.extend_from_slice(&signal_bits.raw().to_le_bytes());
+    }
+    out
+}
+
+/// Decode signal bits from a coinbase transaction's `extra` field.
+///
+/// Returns `SignalBits(0)` for pre-CIP-012 coinbases (`extra.len() == 8`
+/// or shorter) or any extra without the trailing 4 signal bytes. Returns
+/// the decoded bits for new-format coinbases (`extra.len() >= 12`).
+///
+/// Never panics: short slices return the no-signal default; longer-than-12
+/// slices ignore trailing bytes (forward-compat for future fields).
+pub fn decode_signal_bits(extra: &[u8]) -> SignalBits {
+    if extra.len() < 12 {
+        return SignalBits(0);
+    }
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&extra[8..12]);
+    SignalBits(u32::from_le_bytes(buf))
+}
+
 /// Tracks signaling state for all deployments.
 pub struct ForkSignaler {
     /// For each deployment bit, the height at which it locked in (if any).
@@ -366,6 +455,80 @@ mod tests {
                 "v1.0.12 signal leaked into other CIP bit 0x{:08x}", other,
             );
         }
+    }
+
+    #[test]
+    fn encode_no_signal_matches_legacy_format() {
+        // A coinbase that signals nothing must produce the SAME byte
+        // sequence as pre-CIP-012 miners (just 8 height-bytes). This
+        // preserves byte-for-byte block-hash compatibility for blocks
+        // produced by an upgraded miner that doesn't opt in to signaling.
+        let encoded = encode_coinbase_extra(12345, SignalBits(0));
+        assert_eq!(encoded.len(), 8, "no-signal extra must be 8 bytes");
+        assert_eq!(encoded, 12345u64.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn encode_with_signal_appends_4_bytes() {
+        let bits = SignalBits::new(bits::V1_0_12_BUNDLE);
+        let encoded = encode_coinbase_extra(12345, bits);
+        assert_eq!(encoded.len(), 12, "signal extra must be 12 bytes");
+        // Height in first 8 bytes — must match legacy format.
+        assert_eq!(&encoded[0..8], &12345u64.to_le_bytes()[..]);
+        // Signal bits in last 4 bytes.
+        let trailer = u32::from_le_bytes(encoded[8..12].try_into().unwrap());
+        assert_eq!(trailer, bits.raw());
+    }
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let bits = SignalBits::new(bits::V1_0_12_BUNDLE | bits::VIEW_TAGS);
+        let encoded = encode_coinbase_extra(99, bits);
+        let decoded = decode_signal_bits(&encoded);
+        assert_eq!(decoded.raw(), bits.raw());
+        assert!(decoded.signals(bits::V1_0_12_BUNDLE));
+        assert!(decoded.signals(bits::VIEW_TAGS));
+        assert!(decoded.signals(bits::MUST_SET));
+    }
+
+    #[test]
+    fn decode_legacy_8byte_extra_returns_no_signal() {
+        // The exact pattern every coinbase prior to CIP-012 produces.
+        let legacy = 555u64.to_le_bytes().to_vec();
+        let decoded = decode_signal_bits(&legacy);
+        assert_eq!(decoded.raw(), 0, "pre-CIP-012 coinbase = no signal");
+        // Verify it doesn't accidentally signal any CIP bit.
+        for bit in [
+            bits::VIEW_TAGS, bits::RING_SIZE_16, bits::FEE_MARKET_V2,
+            bits::HALO2_SHIELDED, bits::LELANTUS_SPARK, bits::MW_CUTTHROUGH,
+            bits::V1_0_12_BUNDLE, bits::MUST_SET,
+        ] {
+            assert!(!decoded.signals(bit), "legacy extra signaled bit 0x{:08x}", bit);
+        }
+    }
+
+    #[test]
+    fn decode_short_extra_returns_no_signal() {
+        // Defensive: 0-, 1-, 7-byte extras must not panic; must return
+        // no-signal default. Should never occur in practice (every
+        // valid coinbase has at least 8 bytes for the height), but
+        // the decoder is consumed by the validator on potentially
+        // attacker-controlled input — must not panic.
+        for short in [vec![], vec![0u8], (0..7).map(|i| i as u8).collect()] {
+            let decoded = decode_signal_bits(&short);
+            assert_eq!(decoded.raw(), 0);
+        }
+    }
+
+    #[test]
+    fn decode_ignores_trailing_bytes_beyond_12() {
+        // Forward-compat: future CIPs may extend extra with additional
+        // fields after the signal bits. Decoder must read exactly
+        // bytes 8..12 as signal and IGNORE anything after — not error.
+        let mut extra = encode_coinbase_extra(42, SignalBits::new(bits::V1_0_12_BUNDLE));
+        extra.extend_from_slice(b"future-cip-data");   // trailing garbage
+        let decoded = decode_signal_bits(&extra);
+        assert!(decoded.signals(bits::V1_0_12_BUNDLE));
     }
 
     #[test]

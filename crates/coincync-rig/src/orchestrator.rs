@@ -73,6 +73,7 @@ pub async fn run_solo(
     poll_interval_secs: u64,
     threads: usize,
     metrics: Option<std::sync::Arc<crate::metrics::MetricsState>>,
+    signal_bits: coincync::consensus::fork_signal::SignalBits,
 ) -> Result<()> {
     bind_randomx_genesis_for_network(network);
 
@@ -236,12 +237,16 @@ pub async fn run_solo(
             }
         };
 
-        // 2-3. Build the candidate block from template + coinbase
+        // 2-3. Build the candidate block from template + coinbase.
+        // signal_bits is passed through to the coinbase builder so the
+        // operator's --signal-v1012 opt-in lands as the trailing 4 bytes
+        // of coinbase.extra (see fork_signal::encode_coinbase_extra).
         let (mut header, txs) = match build_header_from_template(
             &template,
             &miner_spend_pub,
             &miner_view_pub,
             network,
+            signal_bits,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -487,6 +492,7 @@ fn build_header_from_template(
     miner_spend_pub: &PublicKey,
     miner_view_pub: &PublicKey,
     fallback_network: NetworkType,
+    signal_bits: coincync::consensus::fork_signal::SignalBits,
 ) -> Result<(BlockHeader, Vec<Transaction>)> {
     let height = template["height"]
         .as_u64()
@@ -530,6 +536,7 @@ fn build_header_from_template(
         miner_spend_pub,
         miner_view_pub,
         claimable_fees,
+        signal_bits,
     )?;
 
     // tx_root = merkle root over [coinbase, ...mempool_txs]
@@ -609,6 +616,7 @@ fn create_mining_coinbase_with_fees(
     miner_spend_pub: &PublicKey,
     miner_view_pub: &PublicKey,
     total_fees: u64,
+    signal_bits: coincync::consensus::fork_signal::SignalBits,
 ) -> Result<Transaction> {
     let reward = coincync::emission::calculate_block_reward(height);
     let total_amount = reward.as_atomic().saturating_add(total_fees);
@@ -651,7 +659,11 @@ fn create_mining_coinbase_with_fees(
         outputs: vec![output],
         fee: Amount::ZERO,
         range_proof: vec![],
-        extra: height.to_le_bytes().to_vec(),
+        // Coinbase extra carries the height (8 bytes) plus optional
+        // BIP-9 signal bits (4 bytes) when the operator opts in via
+        // --signal-v1012. encode_coinbase_extra preserves byte-for-byte
+        // compatibility with the pre-CIP-012 format when signal_bits == 0.
+        extra: coincync::consensus::fork_signal::encode_coinbase_extra(height, signal_bits),
     })
 }
 

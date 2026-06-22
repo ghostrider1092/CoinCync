@@ -153,6 +153,24 @@ enum Command {
         /// inside systemd units — the TUI needs a real TTY.
         #[arg(long, default_value_t = false)]
         tui: bool,
+        /// Signal miner readiness for the v1.0.12 hard-fork bundle
+        /// (CIP-012 — encrypted_amount=8, dup-stealth rejection,
+        /// per-output size caps, ring-size monotonic).
+        ///
+        /// When set, the rig appends a 4-byte SignalBits suffix to
+        /// the coinbase `extra` field with the V1_0_12_BUNDLE bit set.
+        /// Validators currently DON'T consult this signal (the v1.0.12
+        /// rules on PR #68 are still height-gated by
+        /// HARD_FORK_V1_0_12_HEIGHT) — so passing this flag today is
+        /// informational only. Once BIP-9 wiring lands in a follow-up
+        /// PR, the fork will activate when ≥SIGNAL_THRESHOLD blocks
+        /// in a SIGNAL_WINDOW have this bit set AND the height gate
+        /// is met. Operators upgrading to a v1.0.12-aware rig should
+        /// enable this flag so the signal count accumulates as they
+        /// mine — once the wiring activates, that history retroactively
+        /// counts toward lock-in.
+        #[arg(long, default_value_t = false)]
+        signal_v1012: bool,
     },
 
     /// Same as `run-solo`, but takes a TOML config file. CLI flags
@@ -226,8 +244,8 @@ fn main() -> Result<()> {
         }
         Command::Bench { threads, duration } => run_bench(threads, duration),
         Command::Info { node, api_key } => run_info(&node, api_key),
-        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port, metrics_bind, tui } => {
-            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port, &metrics_bind, tui, tui_log_rx)
+        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port, metrics_bind, tui, signal_v1012 } => {
+            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port, &metrics_bind, tui, signal_v1012, tui_log_rx)
         }
         Command::RunConfig { config } => run_config_cli(&config),
     }
@@ -434,8 +452,26 @@ fn run_solo_cli(
     metrics_port: u16,
     metrics_bind: &str,
     tui_enabled: bool,
+    signal_v1012: bool,
     tui_log_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
+    // Build SignalBits from miner opt-in flags. Today there's only
+    // V1_0_12_BUNDLE (CIP-012); future CIPs add their own flag here
+    // and OR their bit into `signal_raw`. Passing SignalBits(0)
+    // produces a legacy 8-byte coinbase.extra (byte-identical to
+    // pre-CIP-012 miners); passing any non-zero set produces the
+    // 12-byte form. See fork_signal::encode_coinbase_extra.
+    let signal_bits = {
+        let mut raw = 0u32;
+        if signal_v1012 {
+            raw |= coincync::consensus::fork_signal::bits::V1_0_12_BUNDLE;
+        }
+        if raw == 0 {
+            coincync::consensus::fork_signal::SignalBits(0)
+        } else {
+            coincync::consensus::fork_signal::SignalBits::new(raw)
+        }
+    };
     let n_threads = if threads == 0 {
         match std::thread::available_parallelism() {
             Ok(n) => n.get(),
@@ -518,6 +554,7 @@ fn run_solo_cli(
             poll_interval_secs,
             n_threads,
             metrics_state,
+            signal_bits,
         )
         .await
     })
@@ -555,6 +592,11 @@ struct MiningSection {
     /// firewalled.
     #[serde(default = "default_metrics_bind")]
     metrics_bind: String,
+    /// Signal v1.0.12 hard-fork readiness (CIP-012). See `--signal-v1012`
+    /// in `RunSolo` for full details. Defaults to false (no signaling)
+    /// for backward-compat with operators on pre-CIP-012 rig configs.
+    #[serde(default)]
+    signal_v1012: bool,
 }
 
 fn default_metrics_bind() -> String {
@@ -600,6 +642,7 @@ fn run_config_cli(config_path: &str) -> Result<()> {
         cfg.mining.metrics_port,
         &cfg.mining.metrics_bind,
         false,
+        cfg.mining.signal_v1012,
         None,
     )
 }
