@@ -32,7 +32,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y cmake clang libssl-dev pkg-config
@@ -63,7 +63,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build coincync (node + wallet)
         run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
@@ -90,7 +90,7 @@ jobs:
   build-macos-intel:
     runs-on: macos-13
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps
         run: brew install cmake
@@ -121,7 +121,7 @@ jobs:
   build-macos-arm:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps
         run: brew install cmake
