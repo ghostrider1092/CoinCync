@@ -163,14 +163,44 @@ pub const MTP_WINDOW: usize = 11;
 /// nodes start rejecting blocks that exploit the v1.0.11 gaps once the
 /// chain crosses this height.
 ///
-/// `u64::MAX` = dormant. The activation height is set in a SEPARATE
-/// commit close to the announcement date (T-3 in the rollout plan), so
-/// that no binary published before then can accidentally activate the
-/// fork.
+/// Activates on testnet around 2026-07-01 at height 13_000.
+///
+/// Picked 2026-06-22 (operator decision). Tip was h=3892 on 2026-06-22
+/// with measured block rate in the 700-1200/day range. Activation
+/// height chosen so the chain reaches it ON OR AFTER July 1, never
+/// before, even at the high end of the rate range:
+///
+///   - fast (1200/day): h=13_000 hits 2026-07-01 (target)
+///   - medium (900/day): h=13_000 hits 2026-07-03 (2 days late, ok)
+///   - slow (692/day): h=13_000 hits 2026-07-07 (5 days late, ok)
+///
+/// The "never premature" property matters: miners who haven't upgraded
+/// by the announced date will still have their pre-fork blocks rejected
+/// post-activation. Premature activation = unhappy miners. Late
+/// activation = community waits a few extra days, no harm done. Pick
+/// the height that biases toward "late, never early."
+///
+/// Activation mode: CIP-007 Mode A (static-height flag day). NO BIP-9
+/// signaling window for this round — same shape as the CIP-010
+/// ring-size rehearsal. Operator-controlled 5-node fleet + small
+/// community miner set makes signaling overkill; ship straight to
+/// static-height.
+///
+/// Mainnet (GA 2026-10-01) inherits these rules from genesis — no
+/// separate mainnet activation event needed. This constant is
+/// testnet-scoped behavior.
+///
+/// Rules that activate at this height (all already dormant-gated on
+/// main via PR #68, commits a582bbf0..d81be9e3):
+///   1. encrypted_amount tightened to exactly 8 bytes
+///   2. per-output size caps at block-level validation
+///   3. reject duplicate stealth addresses within a tx
+///   4. reject cross-tx duplicate stealth addresses within a block
+///   5. ring-size uses monotonic total_outputs_ever()
 ///
 /// See `docs/operations/v1.0.12-hard-fork-rollout.md` (TODO) for the
 /// full operator runbook + Discord announcement template.
-pub const HARD_FORK_V1_0_12_HEIGHT: u64 = u64::MAX;
+pub const HARD_FORK_V1_0_12_HEIGHT: u64 = 13_000;
 
 /// Maximum bytes per output's `encrypted_memo` field.
 ///
