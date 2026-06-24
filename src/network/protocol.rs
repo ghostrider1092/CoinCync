@@ -463,7 +463,21 @@ pub struct InvMessage {
 }
 
 impl InvMessage {
-    /// Validate the message to prevent DoS attacks
+    /// Validate the message to prevent DoS attacks.
+    ///
+    /// In addition to the size cap, reject duplicate hashes. Pre-fix
+    /// a peer could send MAX_INV_SIZE invs all referencing the same
+    /// hash; the InvTx/InvBlock handlers would push the duplicate
+    /// into `needed` MAX_INV_SIZE times and emit a GetTxs/GetBlocks
+    /// asking for the same item that many times in one message.
+    /// Wasted bandwidth was bounded but real across many peers, and
+    /// the receiver may double-process the same payload.
+    ///
+    /// Prior art: Bitcoin Core's `ProcessMessage` Inv handler caps
+    /// at MAX_INV_SZ (50,000) AND rejects duplicates via the
+    /// `m_recent_rejects` filter; we apply the dup check at the
+    /// validate-message layer so the rejection signals a malformed
+    /// envelope rather than per-item state.
     pub fn validate(&self) -> Result<()> {
         if self.inventory.len() > MAX_INV_SIZE {
             return Err(Error::ProtocolError(format!(
@@ -471,6 +485,14 @@ impl InvMessage {
                 self.inventory.len(),
                 MAX_INV_SIZE
             )));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(self.inventory.len());
+        for inv in &self.inventory {
+            if !seen.insert(inv.hash) {
+                return Err(Error::ProtocolError(
+                    "duplicate inventory hash".to_string()
+                ));
+            }
         }
         Ok(())
     }
@@ -699,5 +721,52 @@ mod tests {
     fn test_version_message() {
         let msg = Message::version(MAINNET_MAGIC, 100, Hash::zero()).unwrap();
         assert_eq!(msg.msg_type().unwrap(), MessageType::Version);
+    }
+
+    /// InvMessage::validate rejects duplicates. Pre-fix the only check
+    /// was the size cap; a peer could ship MAX_INV_SIZE invs all
+    /// referencing the same hash and the receiver's GetTxs/GetBlocks
+    /// would re-request the same item that many times in one message.
+    #[test]
+    fn inv_validate_rejects_duplicate_hashes() {
+        let h = Hash::from_bytes([7u8; 32]);
+        let msg = InvMessage {
+            inventory: vec![
+                InvVector { inv_type: 1, hash: h },
+                InvVector { inv_type: 1, hash: h }, // dup
+            ],
+        };
+        let err = msg.validate().unwrap_err();
+        let s = format!("{:?}", err).to_lowercase();
+        assert!(s.contains("duplicate"),
+                "must cite duplicate, got: {}", s);
+    }
+
+    /// A well-formed InvMessage with all-distinct hashes still passes.
+    #[test]
+    fn inv_validate_accepts_distinct_hashes() {
+        let msg = InvMessage {
+            inventory: vec![
+                InvVector { inv_type: 1, hash: Hash::from_bytes([1u8; 32]) },
+                InvVector { inv_type: 1, hash: Hash::from_bytes([2u8; 32]) },
+                InvVector { inv_type: 1, hash: Hash::from_bytes([3u8; 32]) },
+            ],
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    /// Distinct hashes carrying the same `inv_type` are not duplicates —
+    /// the dedup check operates on hash only, matching the semantic
+    /// "same target item." Different hashes = different items even when
+    /// of the same type.
+    #[test]
+    fn inv_validate_distinct_hashes_same_type_pass() {
+        let msg = InvMessage {
+            inventory: vec![
+                InvVector { inv_type: 2, hash: Hash::from_bytes([10u8; 32]) },
+                InvVector { inv_type: 2, hash: Hash::from_bytes([11u8; 32]) },
+            ],
+        };
+        assert!(msg.validate().is_ok());
     }
 }
