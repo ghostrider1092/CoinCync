@@ -619,8 +619,22 @@ impl PeerScorer {
         false
     }
 
-    /// Ban a peer
+    /// Ban a peer.
+    ///
+    /// Defense in depth: opportunistically prune already-expired ban
+    /// entries every time we touch the map. The periodic
+    /// `cleanup_bans()` in node.rs's maintenance tick already runs the
+    /// same sweep, so the upper bound on `banned.len()` is fine in
+    /// steady state — this just closes the window between maintenance
+    /// ticks where a flood of new bans could push the map well past
+    /// the equilibrium size. Cheap: HashMap::retain is O(n) but n is
+    /// bounded by recent unique offender count, not historical total.
+    ///
+    /// Prior art: Bitcoin Core's `BanMan::BannedSetClean()` runs
+    /// inline before every `Discourage()` / `Ban()` call for the same
+    /// "amortize cleanup at write time" reason.
     pub fn ban(&mut self, addr: SocketAddr) {
+        self.cleanup_bans();
         let expiry = Instant::now() + self.ban_duration;
         self.banned.insert(addr, expiry);
         self.scores.remove(&addr);
@@ -831,6 +845,34 @@ mod tests {
         assert!(scorer.is_banned(&addr));
         scorer.unban(&addr);
         assert!(!scorer.is_banned(&addr));
+    }
+
+    /// Defense in depth: `ban()` opportunistically prunes already-
+    /// expired entries before inserting the new one. Without this,
+    /// a flood of bans between maintenance ticks could push the
+    /// `banned` map well past its steady-state size. This test
+    /// hand-pokes an expired entry into the map, calls ban() on a
+    /// different addr, and verifies the expired entry is gone.
+    #[test]
+    fn ban_opportunistically_prunes_expired_entries() {
+        let mut scorer = PeerScorer::new();
+        let live = test_addr(9001);
+        let stale = test_addr(9002);
+
+        // Hand-poke an already-expired entry into the map. Bypasses
+        // ban() so we set up the precondition without triggering the
+        // very GC we're testing.
+        scorer.banned.insert(stale, Instant::now() - Duration::from_secs(60));
+        assert!(scorer.banned.contains_key(&stale),
+                "test setup: stale entry must be present before ban()");
+
+        // ban() should sweep stale as a side effect.
+        scorer.ban(live);
+
+        assert!(!scorer.banned.contains_key(&stale),
+                "ban() must opportunistically prune the expired entry");
+        assert!(scorer.banned.contains_key(&live),
+                "ban() must still record the new ban (live entry persists)");
     }
 
     #[test]
