@@ -2,7 +2,7 @@
 //!
 //! Persistent storage for unspent transaction outputs.
 
-use crate::db::shim::{Db, Tree};
+use crate::db::shim::{Db, Tree, transaction::Transactional};
 use crate::primitives::{Hash, KeyImage};
 use crate::transaction::TxOutput;
 use crate::error::{Error, Result};
@@ -124,10 +124,24 @@ impl UtxoDb {
         // Check if we won the race
         match cas_result {
             Ok(()) => {
-                // We successfully marked the key image as spent
-                // Now clean up the UTXO entry
-
-                // Get output entry to update height count
+                // SECURITY (cleanup atomicity): the key image is now marked spent
+                // (CAS above is atomic at the single-key level), but the UTXO
+                // cleanup touches THREE separate trees (outputs, utxo_by_height,
+                // height_counts). Previously these were independent writes — a
+                // crash or io error between them left the DB in a partially-
+                // consistent state where the same logical output had:
+                //   - key_image marked spent
+                //   - entry still present in outputs and/or utxo_by_height
+                //   - height_count overcounted
+                // Consumers of `utxo_by_height` re-validate against `outputs` and
+                // skip orphans, so the leak isn't a correctness break, but it
+                // wastes I/O on every ring decoy selection and ages the DB.
+                //
+                // Wrap the cleanup in a multi-tree transaction so either all
+                // three trees are updated or none are. Prior art: Monero's
+                // BlockchainLMDB `remove_output` runs inside the parent
+                // mdb_txn that wraps the whole block apply, giving the same
+                // all-or-nothing guarantee.
                 let height_to_decrement = match self.outputs.get(&output_key)
                     .map_err(|e| Error::DatabaseError(e.to_string()))? { Some(data) => {
                     let entry: OutputEntry = deserialize(&data)?;
@@ -136,17 +150,58 @@ impl UtxoDb {
                     None
                 }};
 
-                // Remove from UTXO set
-                self.outputs.remove(&output_key)
-                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                let trees: &[&Tree] = &[&self.outputs, &self.utxo_by_height, &self.height_counts];
+                trees.transaction(|tx_trees| {
+                    // 1. Remove from primary UTXO set
+                    tx_trees[0].remove(output_key.as_slice())?;
 
-                // Decrement height count
-                if let Some(height) = height_to_decrement {
-                    self.decrement_height_count(height)?;
-                }
+                    // 2. Remove from height secondary index so spent outputs
+                    //    don't leak into ring decoy scans.
+                    if let Some(height) = height_to_decrement {
+                        let mut height_key = Vec::with_capacity(8 + output_key.len());
+                        height_key.extend_from_slice(&height.to_be_bytes());
+                        height_key.extend_from_slice(&output_key);
+                        tx_trees[1].remove(height_key.as_slice())?;
+
+                        // 3. Decrement the per-height counter inline. We do
+                        //    the decode/update/encode by hand because
+                        //    fetch_and_update is a single-tree primitive that
+                        //    can't participate in this multi-tree tx.
+                        let counter_key = height.to_be_bytes();
+                        let current = match tx_trees[2].get(counter_key.as_slice())? {
+                            Some(b) if b.len() == 8 => {
+                                let mut arr = [0u8; 8];
+                                arr.copy_from_slice(&b);
+                                u64::from_le_bytes(arr)
+                            }
+                            // Wrong-length entries are treated as zero by the
+                            // single-tree path (with an error log); preserve
+                            // that behavior here so a corrupt counter doesn't
+                            // abort the spend. A trace would require io inside
+                            // the tx closure — keep it silent here, the
+                            // single-tree path will surface it on the next
+                            // increment_height_count call.
+                            _ => 0,
+                        };
+                        let new_count = current.saturating_sub(1);
+                        if new_count == 0 {
+                            tx_trees[2].remove(counter_key.as_slice())?;
+                        } else {
+                            tx_trees[2].insert(counter_key.as_slice(), new_count.to_le_bytes().as_slice())?;
+                        }
+                    }
+
+                    Ok(())
+                }).map_err(|e: crate::db::shim::transaction::TransactionError| {
+                    Error::DatabaseError(format!("spend_output cleanup tx failed: {:?}", e))
+                })?;
 
                 // Flush to ensure durability
                 self.outputs.flush()
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                self.utxo_by_height.flush()
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                self.height_counts.flush()
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
                 self.key_images.flush()
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
@@ -382,35 +437,6 @@ impl UtxoDb {
         Ok(())
     }
 
-    /// Decrement output count at height (atomic)
-    fn decrement_height_count(&self, height: u64) -> Result<()> {
-        let key = height.to_be_bytes();
-        self.height_counts.fetch_and_update(&key, |old| {
-            let current = match old {
-                Some(b) if b.len() == 8 => {
-                    let mut arr = [0u8; 8];
-                    arr.copy_from_slice(b);
-                    u64::from_le_bytes(arr)
-                }
-                Some(b) => {
-                    tracing::error!(
-                        "DB CORRUPTION: height_counts[height={}] has {} bytes, expected 8 — treating as 0",
-                        height, b.len()
-                    );
-                    0
-                }
-                None => 0,
-            };
-            let new_count = current.saturating_sub(1);
-            if new_count == 0 {
-                None // remove key
-            } else {
-                Some(new_count.to_le_bytes().to_vec())
-            }
-        }).map_err(|e| Error::DatabaseError(e.to_string()))?;
-        Ok(())
-    }
-
     /// Get output count at height
     fn get_height_count(&self, height: u64) -> Result<u64> {
         let key = height.to_be_bytes();
@@ -501,5 +527,108 @@ mod tests {
         assert!(utxo_db.has_output(&tx_hash, 0).unwrap());
         assert!(utxo_db.has_output(&tx_hash, 1).unwrap());
         assert!(!utxo_db.has_output(&tx_hash, 2).unwrap());
+    }
+
+    /// After a successful spend, the height secondary index must be cleared
+    /// for that output. Otherwise spent outputs leak into ring decoy scans.
+    #[test]
+    fn spend_output_clears_height_index() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = UtxoDb::new(&db).unwrap();
+
+        let tx_hash = Hash::from_bytes([20u8; 32]);
+        let output = TxOutput {
+            stealth_address: PublicKey::from_bytes([21u8; 32]),
+            tx_public_key: PublicKey::from_bytes([22u8; 32]),
+            commitment: [23u8; 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        utxo_db.add_output(tx_hash, 0, output, 777, false).unwrap();
+        assert_eq!(utxo_db.get_outputs_at_height(777).unwrap().len(), 1);
+
+        let key_image = KeyImage::from_bytes([99u8; 32]);
+        assert!(utxo_db.spend_output(&tx_hash, 0, key_image).unwrap());
+
+        // Height index must be empty after spend, not just the primary tree.
+        assert_eq!(
+            utxo_db.get_outputs_at_height(777).unwrap().len(),
+            0,
+            "spent output leaked into utxo_by_height — ring decoy selection would surface it"
+        );
+    }
+
+    /// height_counts must be decremented in lockstep with the primary tree.
+    /// When the last output at a height is spent, the counter key must be
+    /// removed (no zero-value zombies).
+    #[test]
+    fn spend_output_decrements_and_removes_zero_height_count() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = UtxoDb::new(&db).unwrap();
+
+        let tx_hash = Hash::from_bytes([30u8; 32]);
+        let output = TxOutput {
+            stealth_address: PublicKey::from_bytes([31u8; 32]),
+            tx_public_key: PublicKey::from_bytes([32u8; 32]),
+            commitment: [33u8; 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        utxo_db.add_output(tx_hash, 0, output.clone(), 1000, false).unwrap();
+        utxo_db.add_output(tx_hash, 1, output, 1000, false).unwrap();
+        assert_eq!(utxo_db.get_height_count(1000).unwrap(), 2);
+
+        let ki0 = KeyImage::from_bytes([41u8; 32]);
+        assert!(utxo_db.spend_output(&tx_hash, 0, ki0).unwrap());
+        assert_eq!(utxo_db.get_height_count(1000).unwrap(), 1);
+
+        let ki1 = KeyImage::from_bytes([42u8; 32]);
+        assert!(utxo_db.spend_output(&tx_hash, 1, ki1).unwrap());
+        assert_eq!(
+            utxo_db.get_height_count(1000).unwrap(),
+            0,
+            "height_counts must read as zero (entry removed) when all outputs at the height are spent"
+        );
+    }
+
+    /// CAS still rejects a second spend with the same key image — the
+    /// transactional cleanup must not change the double-spend guarantee.
+    #[test]
+    fn spend_output_second_attempt_returns_false() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = UtxoDb::new(&db).unwrap();
+
+        let tx_hash = Hash::from_bytes([50u8; 32]);
+        let output = TxOutput {
+            stealth_address: PublicKey::from_bytes([51u8; 32]),
+            tx_public_key: PublicKey::from_bytes([52u8; 32]),
+            commitment: [53u8; 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        utxo_db.add_output(tx_hash, 0, output, 200, false).unwrap();
+        let key_image = KeyImage::from_bytes([77u8; 32]);
+        assert!(utxo_db.spend_output(&tx_hash, 0, key_image).unwrap());
+
+        // Second attempt with the same key_image MUST return false (key image
+        // already present — CAS loses the race).
+        assert!(!utxo_db.spend_output(&tx_hash, 0, key_image).unwrap());
+        // And second attempt must not corrupt state — key image still spent,
+        // output still gone, height count still consistent.
+        assert!(utxo_db.is_spent(&key_image).unwrap());
+        assert!(!utxo_db.has_output(&tx_hash, 0).unwrap());
+        assert_eq!(utxo_db.get_height_count(200).unwrap(), 0);
     }
 }
