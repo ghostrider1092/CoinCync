@@ -6,3 +6,32 @@ ignore = [
   # Re-evaluate on every dependency refresh.
   "RUSTSEC-2023-0089",
 ]
+
+# Yanked-crate checks are intentionally disabled.
+#
+# Yanks are a quality/policy signal from crate maintainers, NOT a
+# security vulnerability classification. The default `cargo audit`
+# behavior treats yanks the same as RUSTSEC advisories (fail the
+# build), which is too strict given how the Zcash / halo2 ecosystem
+# uses yanks to nudge consumers toward newer minor releases.
+#
+# Background (added 2026-06-23): on this date the entire
+# `halo2_gadgets 0.3.x` series was yanked in favor of 0.5.0, along
+# with all `orchard` versions below 0.14.0. Both crates are workspace-
+# only deps used exclusively in `crates/orchard-side/` (Phase 2
+# shielded-pool implementation; not in v1.0.12 testnet hard-fork
+# scope and not in mainnet 2026-10-01 scope). The right fix is a
+# coordinated dep bump (`halo2_gadgets = "0.5"` + `orchard = "0.14"`
+# + API audit of crates/orchard-side/src/{action,commitment,
+# nullifier,spend_key}.rs), gated on the same crypto-review process
+# the other v1.0.12 dep bumps need (PR #56 tari_bulletproofs_plus,
+# #51, #50, #54, #48 — see project_v1012_hardfork_release_scope.md).
+#
+# Until that review window opens, disable yank-failing here so a
+# transient upstream yank can't block consensus-relevant PRs from
+# landing. Vulnerability checks (RUSTSEC) remain strict.
+#
+# TODO(v1.0.13): bump halo2_gadgets + orchard + audit crates/orchard-side
+# integration, then flip enabled = true.
+[yanked]
+enabled = false
