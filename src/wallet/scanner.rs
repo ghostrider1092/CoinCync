@@ -1080,6 +1080,36 @@ fn scan_output_with_keys(
                 &shared_secret,
             );
 
+            // 2026-06-22 ghost-balance defense (parallel-path parity):
+            // recompute Pedersen C = amount*H + blinding*G from the decrypted
+            // (amount, blinding) and refuse to claim the output if it doesn't
+            // match the on-chain commitment. The serial path `scan_output`
+            // does this check; the parallel path historically skipped it,
+            // so an attacker who could derive a stealth address matching our
+            // keys but ship a lying `encrypted_amount` would inflate
+            // `WalletScanner::stats.total_amount` (line ~961) and any
+            // downstream consumer that reads DecryptedOutput before the
+            // `decrypted_to_utxo` filter catches the mismatch.
+            //
+            // See the long-form rationale at `scan_output`:692-706.
+            // Same drop-and-continue behavior so the two paths return
+            // identical results given the same inputs.
+            let expected_commitment = PedersenCommitment::commit(
+                amount,
+                &blinding_factor,
+            ).to_bytes();
+            if expected_commitment != output.commitment {
+                tracing::debug!(
+                    "scanner(parallel): stealth match but commitment recompute \
+                     mismatch (tx={}, output_idx={}, claimed amount {}). \
+                     Likely malicious sender or corrupted output — skipping.",
+                    tx_hash.to_hex(),
+                    output_index,
+                    amount,
+                );
+                continue;
+            }
+
             return Some(DecryptedOutput {
                 tx_hash,
                 output_index,
@@ -2124,5 +2154,129 @@ mod tests {
         let bob_found = bob_scanner.scan_block(&block);
         assert_eq!(bob_found.len(), 1, "Bob should find 1 output (the transfer)");
         assert_eq!(bob_found[0].amount, send_amount);
+    }
+
+    /// Ghost-balance defense for the parallel scan path.
+    ///
+    /// Builds two outputs both addressed to Bob (stealth match succeeds on
+    /// both). One has an honest commitment; the other has a garbage
+    /// commitment that doesn't bind to (amount, blinding). `scan_blocks_parallel`
+    /// must return only the honest output and reject the forged one, otherwise
+    /// `ScanStats::total_amount` and any downstream consumer would see an
+    /// inflated balance. The serial scan path has had this check since
+    /// 2026-06-03; this test pins the parallel path to the same contract.
+    #[test]
+    fn scan_blocks_parallel_drops_forged_commitment_output() {
+        use rand::rngs::OsRng;
+        use crate::crypto::generate_stealth_address_checked;
+        use crate::primitives::Amount;
+
+        let bob_view_secret = SecretKey::generate(&mut OsRng);
+        let _bob_spend_secret = SecretKey::generate(&mut OsRng);
+        let bob_view_public = bob_view_secret.public_key();
+        let bob_spend_public = _bob_spend_secret.public_key();
+
+        // Build an honest output for Bob (output index 0, real commitment).
+        let honest_amount: u64 = 7_000_000_000;
+        let (honest_stealth, honest_tx_secret) = generate_stealth_address_checked(
+            &bob_spend_public, &bob_view_public, 0, &mut OsRng,
+        ).unwrap();
+        let honest_tx_scalar = SecretScalar::from_bytes(*honest_tx_secret.as_bytes());
+        let view_point = PublicPoint::from_bytes(*bob_view_public.as_bytes()).unwrap();
+        let honest_shared = view_point.mul(&honest_tx_scalar);
+        let honest_shared_secret: [u8; 32] = *hash_domain(
+            b"COINCYNC_SHARED_v2",
+            &[honest_shared.to_bytes().as_slice(), &[0u8]].concat(),
+        ).as_bytes();
+        let honest_blinding = BlindingFactor::from_bytes(
+            *hash_domain(b"COINCYNC_BLINDING", &honest_shared_secret).as_bytes(),
+        );
+        let honest_commitment = PedersenCommitment::commit(honest_amount, &honest_blinding).to_bytes();
+        let honest_output = TxOutput {
+            stealth_address: honest_stealth.public_key,
+            tx_public_key: honest_stealth.tx_public_key,
+            commitment: honest_commitment,
+            encrypted_amount: encrypt_amount(honest_amount, &honest_shared_secret),
+            view_tag: generate_view_tag(&bob_view_public, &honest_tx_secret, 0),
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        // Build a forged-commitment output for Bob (output index 1).
+        // Stealth match still succeeds, encrypted_amount still decrypts under
+        // Bob's view key, but `commitment` is garbage — so the recompute check
+        // must drop it.
+        let forged_amount: u64 = 999_999_999_999; // huge claimed value
+        let (forged_stealth, forged_tx_secret) = generate_stealth_address_checked(
+            &bob_spend_public, &bob_view_public, 1, &mut OsRng,
+        ).unwrap();
+        let forged_tx_scalar = SecretScalar::from_bytes(*forged_tx_secret.as_bytes());
+        let forged_shared = view_point.mul(&forged_tx_scalar);
+        let forged_shared_secret: [u8; 32] = *hash_domain(
+            b"COINCYNC_SHARED_v2",
+            &[forged_shared.to_bytes().as_slice(), &[1u8]].concat(),
+        ).as_bytes();
+        let forged_output = TxOutput {
+            stealth_address: forged_stealth.public_key,
+            tx_public_key: forged_stealth.tx_public_key,
+            commitment: [0xABu8; 32], // garbage — doesn't bind to anything
+            encrypted_amount: encrypt_amount(forged_amount, &forged_shared_secret),
+            view_tag: generate_view_tag(&bob_view_public, &forged_tx_secret, 1),
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![honest_output, forged_output],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        };
+
+        let block = Block {
+            header: crate::consensus::BlockHeader {
+                network_magic: NetworkType::Testnet.magic_bytes(),
+                version: 1,
+                height: 42,
+                timestamp: 1000,
+                prev_hash: Hash::zero(),
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0,
+                nonce: 0,
+                target: Hash::from_bytes([0xFFu8; 32]),
+                miner_pubkey: bob_spend_public,
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            },
+            transactions: vec![tx],
+        };
+
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(bob_view_secret, bob_spend_public, 0);
+        let found = scanner.scan_blocks_parallel(&[block]);
+
+        assert_eq!(
+            found.len(), 1,
+            "parallel scanner must drop the forged-commitment output; found {} outputs (expected only the honest one)",
+            found.len(),
+        );
+        assert_eq!(
+            found[0].amount, honest_amount,
+            "the surviving output must be the honest one, not the forged one"
+        );
+        assert_eq!(
+            found[0].output_index, 0,
+            "forged output at index 1 leaked through the parallel path"
+        );
+        assert_eq!(
+            scanner.stats().total_amount, honest_amount as u128,
+            "stats.total_amount must NOT include the forged 999_999_999_999 value"
+        );
     }
 }
