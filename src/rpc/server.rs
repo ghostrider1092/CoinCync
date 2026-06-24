@@ -819,6 +819,25 @@ pub async fn start_rpc_server(
         let (hex_block,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
+        // Bound the hex input length BEFORE hex::decode + borsh::from_slice.
+        // A valid block is at most MAX_BLOCK_SIZE = 2 MB → 4 MB hex.
+        // Reject anything past 2× that. The jsonrpsee body-size default
+        // covers the gross case, but a per-method cap stops authenticated
+        // callers (compromised API key, malicious miner) from wasting our
+        // hex+borsh decode budget on garbage that consensus would reject.
+        //
+        // Prior art: Bitcoin Core's `submitblock` RPC rejects oversized
+        // hex at the JSON-parse layer via `MAX_BLOCK_SERIALIZED_SIZE`;
+        // Monero's `/sendrawtransaction` daemon endpoint rejects past
+        // `MAX_TX_BLOB_SIZE` before deserialization.
+        const MAX_HEX_BLOCK: usize = 2 * 2 * crate::constants::MAX_BLOCK_SIZE;
+        if hex_block.len() > MAX_HEX_BLOCK {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("hex block too large: {} chars (max {})", hex_block.len(), MAX_HEX_BLOCK),
+                None::<()>,
+            ));
+        }
         let block_bytes = hex::decode(&hex_block).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
@@ -982,6 +1001,18 @@ pub async fn start_rpc_server(
         let (hex_tx,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
+        // Bound hex input length. Valid tx is at most MAX_TX_SIZE =
+        // 500,000 bytes → 1 MB hex. Cap at 2× headroom. Same rationale
+        // as submit_block above — close the authenticated-caller decode
+        // amplification gap before hex::decode + borsh::from_slice.
+        const MAX_HEX_TX: usize = 2 * 2 * crate::constants::MAX_TX_SIZE;
+        if hex_tx.len() > MAX_HEX_TX {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("hex tx too large: {} chars (max {})", hex_tx.len(), MAX_HEX_TX),
+                None::<()>,
+            ));
+        }
         let tx_bytes = hex::decode(&hex_tx).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
