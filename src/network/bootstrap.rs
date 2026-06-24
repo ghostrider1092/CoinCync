@@ -429,10 +429,51 @@ impl AddressManager {
         if !path.exists() {
             return Ok(0);
         }
+
+        // DoS-on-startup defense: bound the read at MAX_ADDRBOOK_BYTES
+        // before fs::read_to_string allocates, AND cap the parsed Vec
+        // length post-decode. Same OOM-on-startup risk class as
+        // Mempool::load_from_disk: any actor with filesystem access
+        // (other local user, container neighbor, exfiltrator, leftover
+        // file from a crashed peer process) can drop a multi-GB or
+        // N-billion-entry JSON file into the data dir.
+        //
+        // Honest address books with max_addresses=100 entries serialize
+        // to a few KB. 1 MiB is ~10K entries — generous over the
+        // in-memory cap, narrow enough to make a crafted-file DoS
+        // impractical. Hard-coded vs a public const because no other
+        // call site needs to reason about this number.
+        //
+        // Prior art: Bitcoin Core's `CAddrMan::Unserialize` caps the
+        // peers.dat file at MAX_ADDRMAN_SIZE and rejects oversized
+        // serializations before allocating; Monero's
+        // `node_server::store_peerlist` does the same with explicit
+        // bucket counts.
+        const MAX_ADDRBOOK_BYTES: u64 = 1024 * 1024; // 1 MiB
+        const MAX_ADDRBOOK_ENTRIES: usize = 10_000;
+
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| Error::InvalidState(format!("stat address book: {}", e)))?;
+        if metadata.len() > MAX_ADDRBOOK_BYTES {
+            // Remove the oversized file so the node isn't bricked across restarts.
+            let _ = std::fs::remove_file(path);
+            return Err(Error::InvalidState(format!(
+                "address book file too large: {} bytes (max {})",
+                metadata.len(), MAX_ADDRBOOK_BYTES
+            )));
+        }
+
         let data = std::fs::read_to_string(path)
             .map_err(|e| Error::InvalidState(format!("read address book: {}", e)))?;
         let entries: Vec<PeerAddressSerde> = serde_json::from_str(&data)
             .map_err(|e| Error::InvalidState(format!("parse address book: {}", e)))?;
+
+        if entries.len() > MAX_ADDRBOOK_ENTRIES {
+            return Err(Error::InvalidState(format!(
+                "address book file has {} entries (max {})",
+                entries.len(), MAX_ADDRBOOK_ENTRIES
+            )));
+        }
 
         let mut loaded = 0;
         for entry in entries {
@@ -529,6 +570,87 @@ mod tests {
         }
 
         assert_eq!(mgr.len(), 5);
+    }
+
+    /// DoS-on-startup defense: an address-book file larger than 1 MiB
+    /// must be rejected at the stat() stage before any read or decode.
+    /// The oversized file is removed so the node doesn't fail-loop on
+    /// every restart.
+    #[test]
+    fn load_from_file_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("addrbook.json");
+
+        // 1 MiB + 1 byte — just past the cap. set_len gives us a sparse
+        // file on most filesystems, which is fine for the metadata().len()
+        // check we're testing.
+        let oversize = 1024 * 1024 + 1;
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(oversize).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), oversize);
+
+        let mut mgr = AddressManager::new(100);
+        let result = mgr.load_from_file(&path);
+
+        assert!(result.is_err(), "oversized address book must be rejected");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("too large") || err_msg.contains("max"),
+            "error must surface size-cap reason, got: {}",
+            err_msg
+        );
+        assert!(!path.exists(), "oversized address book must be removed after rejection");
+    }
+
+    /// Empty-vec roundtrip: a valid empty JSON `[]` must load cleanly
+    /// (zero entries, no error).
+    #[test]
+    fn load_from_file_accepts_empty_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("addrbook.json");
+        std::fs::write(&path, "[]").unwrap();
+
+        let mut mgr = AddressManager::new(100);
+        let loaded = mgr.load_from_file(&path).unwrap();
+        assert_eq!(loaded, 0, "empty address book must load zero entries");
+        // The non-oversized path does NOT remove the file (only the
+        // oversized branch removes), so the file should still be there.
+        assert!(path.exists(), "valid file must not be deleted on success");
+    }
+
+    /// Entry-count cap: a JSON array with > MAX_ADDRBOOK_ENTRIES (10k)
+    /// must be rejected post-decode. Test via 10,001 minimal entries
+    /// staying well under the 1 MiB byte cap.
+    #[test]
+    fn load_from_file_rejects_too_many_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("addrbook.json");
+
+        // Build a JSON array with 10,001 minimal entries. Each
+        // PeerAddressSerde entry is roughly:
+        //   {"addr":"1.2.3.4:1","last_seen":0,"services":0}
+        // ~50 bytes serialized; 10,001 × ~50 ≈ 500 KB — well under 1 MiB.
+        let mut s = String::from("[");
+        for i in 0..10_001 {
+            if i > 0 { s.push(','); }
+            s.push_str(&format!(
+                r#"{{"addr":"1.2.3.4:1","last_seen":0,"services":0}}"#
+            ));
+        }
+        s.push(']');
+        std::fs::write(&path, &s).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() < 1024 * 1024,
+            "test fixture must fit under the byte cap so we exercise the entry cap, not the byte cap");
+
+        let mut mgr = AddressManager::new(100);
+        let result = mgr.load_from_file(&path);
+        assert!(result.is_err(), "10,001 entries must be rejected");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("entries") || err.contains("max"),
+            "error must surface entry-cap reason, got: {}",
+            err
+        );
     }
 
     #[test]
