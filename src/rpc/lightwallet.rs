@@ -200,7 +200,19 @@ impl LightWalletServer {
             difficulty: stats.difficulty.to_string(),
             block_time_target: crate::constants::TARGET_BLOCK_TIME,
             min_fee_per_byte: crate::constants::MIN_FEE_PER_BYTE,
-            ring_size: crate::constants::BOOTSTRAP_MIN_RING_SIZE,
+            // C1: the ring size advertised to external light wallets must
+            // reflect what the validator will require for a tx mined into
+            // the NEXT block (chain tip + 1), not a hardcoded bootstrap
+            // value. Light wallets that trust this field to build their tx
+            // must see the height-aware ring size, otherwise they build
+            // ring-11 txs at h>=5000 (v1.0.12 ramp activation) and get
+            // InvalidRingSize rejection at submission time.
+            //
+            // saturating_add is defensive: a tip at u64::MAX has bigger
+            // problems than ring-size selection.
+            ring_size: crate::constants::ring_size_at_height(
+                stats.height.saturating_add(1),
+            ),
             network: "testnet".to_string(),
         }
     }
