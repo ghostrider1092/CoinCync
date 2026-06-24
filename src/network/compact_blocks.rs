@@ -169,11 +169,38 @@ impl BlockReconstructor {
         let mut transactions: Vec<Option<Transaction>> = vec![None; total_txs];
         let mut missing = Vec::new();
 
-        // Fill in prefilled transactions
+        // Reject malformed compact blocks at this layer instead of
+        // silently dropping bad prefills and letting the error surface
+        // as a merkle-root mismatch downstream.
+        //
+        // Two cases that the pre-fix code silently swallowed:
+        //   1. prefilled.index >= total_txs (out-of-bound slot)
+        //   2. two prefills targeting the same index (silent overwrite)
+        //
+        // Both produce a reconstructed block whose tx-order cannot
+        // match the real block's merkle root, but the failure was
+        // late-bound (merkle check) — confusing to operators and
+        // wasting the mempool-index lookup work in the loop below.
+        // Returning Err(vec![]) here matches the "unrecoverable
+        // compact block" signal used for tx-count-cap violations
+        // above; the caller falls back to GetData for the full block.
+        //
+        // Prior art: Bitcoin Core's `BlockTransactions` validation
+        // rejects out-of-range and duplicate indices before
+        // attempting block reconstruction (see net_processing.cpp
+        // ProcessMessage<BlockTxn>).
+        let mut prefilled_indices = std::collections::HashSet::with_capacity(
+            compact.prefilled_txs.len()
+        );
         for prefilled in &compact.prefilled_txs {
-            if (prefilled.index as usize) < total_txs {
-                transactions[prefilled.index as usize] = Some(prefilled.tx.clone());
+            let idx = prefilled.index as usize;
+            if idx >= total_txs {
+                return Err(vec![]);
             }
+            if !prefilled_indices.insert(idx) {
+                return Err(vec![]); // duplicate index in prefilled set
+            }
+            transactions[idx] = Some(prefilled.tx.clone());
         }
 
         // Fill in transactions from mempool using short IDs
@@ -412,5 +439,54 @@ mod tests {
         }
         // With 6-byte IDs and 100 entries, collisions are astronomically unlikely
         assert_eq!(ids.len(), 100);
+    }
+
+    /// Defense against malformed compact blocks: an out-of-bounds
+    /// prefilled index must abort reconstruction at this layer, not
+    /// silently swallow the bad entry and surface a confusing
+    /// merkle-root mismatch downstream.
+    #[test]
+    fn reconstruct_rejects_out_of_bounds_prefilled_index() {
+        let block = make_test_block();
+        let mut compact = CompactBlock::from_block(&block);
+
+        // tx_count() = short_ids.len() + prefilled_txs.len(), so we
+        // can't use `block.transactions.len()` as the OOB sentinel —
+        // pushing the bad prefilled entry would grow tx_count() and
+        // the index would land back in range. Use u16::MAX as a clearly
+        // out-of-bounds slot that no plausible tx_count() can reach.
+        let bad_tx = block.transactions[0].clone();
+        compact.prefilled_txs.push(PrefilledTx { index: u16::MAX, tx: bad_tx });
+
+        let mempool_txs: Vec<_> = block.transactions[1..].to_vec();
+        let reconstructor = BlockReconstructor::new(&mempool_txs, compact.nonce);
+        let result = reconstructor.reconstruct(&compact);
+
+        assert!(result.is_err(), "out-of-bounds prefilled index must abort reconstruction");
+        assert!(result.unwrap_err().is_empty(),
+                "rejection must signal 'unrecoverable compact block' (empty missing-list)");
+    }
+
+    /// Two prefilled entries targeting the same index must be rejected.
+    /// Pre-fix one entry would silently overwrite the other; the
+    /// resulting transaction order can't match the real block's merkle
+    /// root but the failure is late-bound.
+    #[test]
+    fn reconstruct_rejects_duplicate_prefilled_index() {
+        let block = make_test_block();
+        let mut compact = CompactBlock::from_block(&block);
+
+        // Push a second prefilled entry at index 0 (where the real
+        // coinbase already lives in compact.prefilled_txs).
+        let dup_tx = block.transactions[1].clone();
+        compact.prefilled_txs.push(PrefilledTx { index: 0, tx: dup_tx });
+
+        let mempool_txs: Vec<_> = block.transactions[1..].to_vec();
+        let reconstructor = BlockReconstructor::new(&mempool_txs, compact.nonce);
+        let result = reconstructor.reconstruct(&compact);
+
+        assert!(result.is_err(), "duplicate prefilled index must abort reconstruction");
+        assert!(result.unwrap_err().is_empty(),
+                "rejection must signal 'unrecoverable compact block' (empty missing-list)");
     }
 }
