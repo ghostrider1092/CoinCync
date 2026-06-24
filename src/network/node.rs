@@ -2636,6 +2636,147 @@ fn net_addr_to_socket_addr(net_addr: &super::protocol::NetAddr) -> Option<Socket
     }
 }
 
+/// Returns true if the given IP is routable on the public internet —
+/// i.e., the kind of address a real peer could be reachable at.
+///
+/// Pre-fix the only filter on incoming Addr gossip was `is_loopback()
+/// || is_unspecified()`. An attacker poisoning our address book with
+/// multicast / link-local / CGNAT / docs / broadcast IPs would get us
+/// to dial those (burning connection slots) and gossip them onward,
+/// fanning out the pollution to peers. Bitcoin CVE-2015-3641 class.
+/// Mirrors Bitcoin Core's `CNetAddr::IsRoutable()` shape.
+///
+/// Rejections (all variants):
+///   - Loopback (127.0.0.0/8, ::1)
+///   - Unspecified (0.0.0.0, ::)
+///   - Multicast (224.0.0.0/4, ff00::/8)
+///   - IPv4 link-local (169.254.0.0/16) — APIPA
+///   - IPv4 private (10/8, 172.16/12, 192.168/16) — RFC 1918
+///   - IPv4 CGNAT shared address (100.64.0.0/10) — RFC 6598
+///   - IPv4 documentation (192.0.2/24, 198.51.100/24, 203.0.113/24)
+///     and benchmark (198.18/15) — RFC 5737, RFC 2544
+///   - IPv4 broadcast (255.255.255.255), 0.0.0.0/8
+///   - IPv6 unique local (fc00::/7) — RFC 4193
+///   - IPv6 link-local (fe80::/10) — RFC 4291
+///   - IPv6 documentation (2001:db8::/32) — RFC 3849
+///   - IPv4-compatible IPv6 (::a.b.c.d, deprecated per RFC 4291)
+///
+/// NOT used for self-connection checks in this module — those use a
+/// narrower loopback-only filter because a 10.x address can be a
+/// legitimate dial target on a LAN testnet. Routability gating is
+/// only meaningful for gossip-relayed addresses we'd push to peers.
+fn is_routable(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 10.0.0.0/8 — private
+            if octets[0] == 10 { return false; }
+            // 172.16.0.0/12 — private
+            if octets[0] == 172 && (octets[1] & 0xf0) == 16 { return false; }
+            // 192.168.0.0/16 — private
+            if octets[0] == 192 && octets[1] == 168 { return false; }
+            // 169.254.0.0/16 — link-local (APIPA)
+            if octets[0] == 169 && octets[1] == 254 { return false; }
+            // 100.64.0.0/10 — CGNAT (RFC 6598)
+            if octets[0] == 100 && (octets[1] & 0xc0) == 64 { return false; }
+            // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 — docs (RFC 5737)
+            if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 { return false; }
+            if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 { return false; }
+            if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 { return false; }
+            // 198.18.0.0/15 — benchmark (RFC 2544)
+            if octets[0] == 198 && (octets[1] & 0xfe) == 18 { return false; }
+            // 255.255.255.255 — broadcast
+            if octets == [255, 255, 255, 255] { return false; }
+            // 0.0.0.0/8 — "this network" (also covers unspecified above)
+            if octets[0] == 0 { return false; }
+            true
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            // fc00::/7 — unique local (RFC 4193)
+            if (segments[0] & 0xfe00) == 0xfc00 { return false; }
+            // fe80::/10 — link-local (RFC 4291)
+            if (segments[0] & 0xffc0) == 0xfe80 { return false; }
+            // 2001:db8::/32 — documentation (RFC 3849)
+            if segments[0] == 0x2001 && segments[1] == 0x0db8 { return false; }
+            // IPv4-compatible IPv6 (::a.b.c.d) — deprecated per RFC 4291.
+            // Reject; the legitimate IPv4-in-v6 form is IPv4-mapped
+            // (::ffff:a.b.c.d) which we already converted to V4 above.
+            if v6.to_ipv4().is_some() && v6.to_ipv4_mapped().is_none() {
+                return false;
+            }
+            true
+        }
+    }
+}
+
+#[cfg(test)]
+mod is_routable_tests {
+    use super::is_routable;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn rejects_unroutable_ipv4() {
+        let reject_v4 = [
+            "0.0.0.0", "127.0.0.1",
+            "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
+            "169.254.1.2",                         // link-local
+            "100.64.0.1", "100.127.255.255",        // CGNAT
+            "192.0.2.1", "198.51.100.1", "203.0.113.1",  // docs
+            "198.18.0.1", "198.19.255.255",         // benchmark
+            "255.255.255.255",                      // broadcast
+            "224.0.0.1", "239.255.255.255",         // multicast
+        ];
+        for s in reject_v4 {
+            let ip = IpAddr::V4(s.parse::<Ipv4Addr>().unwrap());
+            assert!(!is_routable(ip), "expected NOT routable: {}", s);
+        }
+    }
+
+    #[test]
+    fn accepts_routable_ipv4() {
+        let accept_v4 = ["1.1.1.1", "8.8.8.8", "66.135.23.193", "203.0.114.1"];
+        for s in accept_v4 {
+            let ip = IpAddr::V4(s.parse::<Ipv4Addr>().unwrap());
+            assert!(is_routable(ip), "expected routable: {}", s);
+        }
+    }
+
+    #[test]
+    fn rejects_unroutable_ipv6() {
+        let reject_v6 = [
+            "::",                                   // unspecified
+            "::1",                                  // loopback
+            "fe80::1",                              // link-local
+            "fc00::1", "fd00::1",                   // unique local
+            "ff00::1", "ff02::1",                   // multicast
+            "2001:db8::1",                          // documentation
+        ];
+        for s in reject_v6 {
+            let ip = IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+            assert!(!is_routable(ip), "expected NOT routable: {}", s);
+        }
+    }
+
+    #[test]
+    fn accepts_routable_ipv6() {
+        let accept_v6 = [
+            "2001:4860:4860::8888",                 // Google DNS
+            "2a01:e0a:c53:63d0::1",                 // real-world routable prefix
+        ];
+        for s in accept_v6 {
+            let ip = IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+            assert!(is_routable(ip), "expected routable: {}", s);
+        }
+    }
+}
+
 /// Pick a connected peer for sending requests, preferring higher-scored peers.
 ///
 /// Uses weighted random selection based on composite peer scores when a scorer
@@ -3595,9 +3736,15 @@ async fn process_message(
                         continue; // Stale address — too old
                     }
                     if let Some(socket_addr) = net_addr_to_socket_addr(net_addr) {
-                        // Skip unroutable addresses
-                        let ip = socket_addr.ip();
-                        if ip.is_loopback() || ip.is_unspecified() {
+                        // Expanded unroutable filter (Bitcoin CVE-2015-3641
+                        // class). Pre-fix this only rejected loopback +
+                        // unspecified, so an attacker poisoning our
+                        // address book with multicast / link-local /
+                        // CGNAT / IPv6-multicast / broadcast / docs IPs
+                        // would have us dial those (burning connection
+                        // slots) and gossip them onward. See is_routable()
+                        // above for the full rejection table.
+                        if !is_routable(socket_addr.ip()) {
                             continue;
                         }
                         let mut pa = PeerAddress::new(socket_addr);
