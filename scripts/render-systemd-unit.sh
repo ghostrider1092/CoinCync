@@ -60,14 +60,27 @@ NETWORK=$(jq -r '.network' "$CONFIG" | tr -d '\r')
 # 0.0.0.0 = listen on all interfaces (public RPC).
 RPC_BIND=$(jq -r ".nodes.\"$HOSTNAME\".rpc_bind // \"127.0.0.1\"" "$CONFIG" | tr -d '\r')
 
-# Build the addnode list: every OTHER active node, sorted by hostname
-# for deterministic output.
+# Build the addnode list: every OTHER active node THAT RUNS A
+# COINCYNC-NODE, sorted by hostname for deterministic output.
+#
+# Exclude role=api: those hosts run an nginx reverse proxy ONLY,
+# not coincync-node, so adding them to addnode wastes outbound
+# dial budget on connection attempts that always fail. Repeatedly
+# triggers eclipse-defense throttling (it counts api as a known
+# peer in api's /16 subnet) and starves legitimate fleet peers
+# out of outbound slots. Discovered 2026-06-24 during chain-
+# partition recovery: see [[project_chain_partition_2026_06_22]]
+# in operator memory.
+#
+# Any new non-node infra roles (frost-coordinator host, faucet-
+# only host, etc.) should be added to this exclusion list.
 ADDNODES=$(jq -r \
     --arg self "$HOSTNAME" \
     --arg port "$P2P_PORT" \
     '.nodes
      | to_entries
      | map(select(.key != $self))
+     | map(select(.value.role != "api"))
      | sort_by(.key)
      | map("    --addnode " + .value.ip + ":" + $port + " \\")
      | join("\n")

@@ -62,9 +62,23 @@ for HOST in $HOSTS; do
         continue
     fi
     IP=$(jq -r ".nodes.\"$HOST\".ip" "$CONFIG")
+    ROLE=$(jq -r ".nodes.\"$HOST\".role" "$CONFIG")
+
+    # Skip hosts that don't run coincync-node. role=api hosts run
+    # nginx-only (public reverse proxy + faucet + frost-coord) and
+    # would have no coincync-node service to restart. Pushing a unit
+    # there is harmless but the restart step would fail. The matching
+    # exclusion in render-systemd-unit.sh keeps these hosts out of
+    # other nodes' addnode lists too. Discovered 2026-06-24 — see
+    # [[project_chain_partition_2026_06_22]].
+    if [[ "$ROLE" == "api" ]]; then
+        echo
+        echo "[$HOST $IP] role=api (nginx-only) — skipping unit deployment"
+        continue
+    fi
     echo
     echo "============================================================"
-    echo "[$HOST $IP]"
+    echo "[$HOST $IP] role=$ROLE"
     echo "============================================================"
 
     # Render the desired unit
