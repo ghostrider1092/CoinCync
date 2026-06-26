@@ -1,0 +1,164 @@
+# Grafana alert rules for the CoinCync fleet.
+# Provisioning format: import via Grafana → Alerting → Import → YAML.
+# Adjust thresholds per `docs/operations/monitoring-setup.md`.
+#
+# Naming convention: <severity>_<what>_<scope>
+
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: coincync-fleet
+    folder: CoinCync
+    interval: 1m
+    rules:
+
+      # ─────────────────────────────────────────────────────────────
+      # CRITICAL — chain or sync broken; would have caught today's
+      # 18-hour partition in 5 min instead.
+      # ─────────────────────────────────────────────────────────────
+
+      - uid: cync-tip-stale
+        title: critical_tip_stale_per_host
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: PROMETHEUS_UID
+            model:
+              expr: coincync_tip_age_secs
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [600]
+              expression: A
+              refId: B
+        noDataState: NoData
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "Tip stale on {{ $labels.host }}"
+          description: "tip_age_secs={{ $values.A }} > 600s. Likely chain stall, miner down, or peer mesh broken. Check #operations + journalctl -u coincync-node on the host."
+          runbook: "docs/operations/runbook-chain-stall.md"
+        labels:
+          severity: critical
+          component: chain
+
+      - uid: cync-not-synced
+        title: critical_not_synced_per_host
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: PROMETHEUS_UID
+            model:
+              expr: coincync_is_synced
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+              expression: A
+              refId: B
+        for: 10m
+        annotations:
+          summary: "Node {{ $labels.host }} not synced for 10+ min"
+          description: "is_synced=0 sustained. Either lost peer mesh OR on the wrong fork. Compare tip hashes across hosts — diverged hash means partition."
+        labels:
+          severity: critical
+          component: chain
+
+      # ─────────────────────────────────────────────────────────────
+      # WARNING — degraded but not yet broken
+      # ─────────────────────────────────────────────────────────────
+
+      - uid: cync-peer-count-low
+        title: warning_peer_count_low_per_host
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: PROMETHEUS_UID
+            model:
+              expr: coincync_peer_count
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [3]
+              expression: A
+              refId: B
+        for: 5m
+        annotations:
+          summary: "Peer count low on {{ $labels.host }}"
+          description: "peer_count={{ $values.A }} < 3. Mesh degraded. Eclipse risk + partition risk. Check addnode reachability."
+        labels:
+          severity: warning
+          component: network
+
+      - uid: cync-mem-tight
+        title: warning_memory_tight_per_host
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: PROMETHEUS_UID
+            model:
+              expr: node_memory_MemAvailable_bytes
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [500000000]   # 500 MB
+              expression: A
+              refId: B
+        for: 5m
+        annotations:
+          summary: "Memory tight on {{ $labels.host }} — OOM risk"
+          description: "MemAvailable < 500 MB. Risk of OOM-kill on coincync-node. Add swap + tune RocksDB cache OR resize to bigger box (see docs/operations/monitoring-setup.md sister doc on right-sizing)."
+        labels:
+          severity: warning
+          component: system
+
+      # ─────────────────────────────────────────────────────────────
+      # INFO — single-shot per fleet-wide event
+      # ─────────────────────────────────────────────────────────────
+
+      - uid: cync-restart-burst
+        title: info_node_restart_burst
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: PROMETHEUS_UID
+            model:
+              expr: increase(coincync_node_start_time_seconds[10m]) > 0
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+              expression: A
+              refId: B
+        for: 0m
+        annotations:
+          summary: "{{ $labels.host }} coincync-node restarted within 10 min"
+          description: "Process restart detected. If burst of >2 restarts in 30m, escalate — likely OOM-cycle or panic loop."
+        labels:
+          severity: info
+          component: process
