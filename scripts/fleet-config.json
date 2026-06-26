@@ -1,6 +1,6 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node listed here will have every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) run scripts/sync-fleet-config.sh, (3) verify every node converges. See docs/operations/fleet-config.md (TODO) for the runbook.",
-  "_last_changed": "2026-06-26 \u2014 seed1 box upgrade: 104.207.140.83 (Vultr 1 vCPU, send-queue backlog under gossip load) replaced by 216.128.156.239 (Vultr 4 vCPU / 7.2 GB / 150 GB). Same procedure as the 2026-06-25 swap; pre-existing 8 GB swap + chaindata refresh + systemd memory drop-in applied.",
+  "_last_changed": "2026-06-26 \u2014 added relay1 (208.85.17.18) as first non-mining gossip-resilience node. role=relay is a new role tag treated same as seed by the render script. Fleet now has 6 coincync-node hosts (seed1/2/3 + explorer + randomx + relay1) + 1 nginx-only api.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
@@ -41,6 +41,12 @@
       "rpc_bind": "127.0.0.1",
       "role": "miner",
       "notes": "Vultr 4 vCPU / 7.2 GB / 150 GB. Runs coincync-rig solo-mining at ~520 H/s on 3 threads (v1.0.11.7). Provisioned 2026-06-20 as replacement for the destroyed miner box (149.248.37.11). RPC loopback-only \u00e2\u20ac\u201d rig polls from same box. Wallet keys live on operator dev box at C:\\Users\\unkno\\.coincync\\wallets\\miner2.wallet."
+    },
+    "relay1": {
+      "ip": "208.85.17.18",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Vultr 2 vCPU / 3.3 GB / 94 GB. Provisioned 2026-06-26 as first non-mining gossip-resilience node. Pure coincync-node, no rig. RPC loopback-only \u2014 not in public proxy rotation. role=relay treated same as seed by render-systemd-unit.sh (api is the only excluded role)."
     }
   },
   "deactivated": {
