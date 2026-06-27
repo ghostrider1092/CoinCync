@@ -1,6 +1,6 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node listed here will have every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) run scripts/sync-fleet-config.sh, (3) verify every node converges. See docs/operations/fleet-config.md (TODO) for the runbook.",
-  "_last_changed": "2026-06-26 \u2014 added relay1 (208.85.17.18) as first non-mining gossip-resilience node. role=relay is a new role tag treated same as seed by the render script. Fleet now has 6 coincync-node hosts (seed1/2/3 + explorer + randomx + relay1) + 1 nginx-only api.",
+  "_last_changed": "2026-06-26 \u2014 added relay2 (70.34.250.31) paired with relay1 for gossip redundancy. Fleet now: 3 seeds + 1 explorer + 1 miner + 2 relays + 1 nginx-api = 8 hosts total (7 coincync-node + 1 nginx).",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
@@ -47,6 +47,12 @@
       "rpc_bind": "127.0.0.1",
       "role": "relay",
       "notes": "Vultr 2 vCPU / 3.3 GB / 94 GB. Provisioned 2026-06-26 as first non-mining gossip-resilience node. Pure coincync-node, no rig. RPC loopback-only \u2014 not in public proxy rotation. role=relay treated same as seed by render-systemd-unit.sh (api is the only excluded role)."
+    },
+    "relay2": {
+      "ip": "70.34.250.31",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Vultr 2 vCPU / 3.3 GB / 75 GB. Provisioned 2026-06-26 as second relay paired with relay1 for gossip redundancy. Different region from relay1. Pure coincync-node, no rig."
     }
   },
   "deactivated": {
