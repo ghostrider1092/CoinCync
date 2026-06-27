@@ -6822,32 +6822,55 @@ async function renderMiningLive(){
   const asOf = $('mininglive-as-of');
   if (asOf) asOf.textContent = `updated ${new Date().toLocaleTimeString()}`;
 
-  const live = await rpc('get_mining_live', []);
-  if (live){
-    const hrHuman = (h) => {
-      if (h == null) return '—';
-      if (h > 1e9) return (h/1e9).toFixed(2) + ' GH/s';
-      if (h > 1e6) return (h/1e6).toFixed(2) + ' MH/s';
-      if (h > 1e3) return (h/1e3).toFixed(2) + ' KH/s';
-      return Math.round(h) + ' H/s';
-    };
-    const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
-    set('mininglive-hr',     hrHuman(live.hashrate ?? live.network_hashrate));
-    set('mininglive-median', (live.median_block_time != null) ? `${live.median_block_time.toFixed(1)} s` : '—');
-    set('mininglive-diff',   (live.difficulty != null) ? Number(live.difficulty).toLocaleString() : '—');
-  }
+  const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+  const hrHuman = (h) => {
+    if (h == null || !isFinite(h)) return '—';
+    if (h > 1e9) return (h/1e9).toFixed(2) + ' GH/s';
+    if (h > 1e6) return (h/1e6).toFixed(2) + ' MH/s';
+    if (h > 1e3) return (h/1e3).toFixed(2) + ' KH/s';
+    return Math.round(h) + ' H/s';
+  };
+
+  // Derive network-wide stats from PUBLIC chain data (get_info + recent
+  // block timestamps). We do NOT call get_mining_live here — that RPC
+  // returns the LOCAL node's mining state, which is all zeros on a
+  // non-mining node like explorer.coincync.network. Network hashrate
+  // is a function of difficulty + target block time and is available
+  // from any node on the network. Median block time comes from the
+  // same block-range we already fetch for the histogram below.
+  const info = await rpc('get_info', []);
+  if (!info) return;
+  const TARGET_BLOCK_TIME_S = 120;
+  const difficulty = Number(info.difficulty || 0);
+  // Hashrate estimate: target = difficulty * 2^256 / 2^256_max work per hash;
+  // simplified across difficulty units to hashes_per_block / seconds_per_block.
+  // For CoinCync's PoW (difficulty IS expected hashes per block), this is
+  // simply difficulty / target_block_time. Same formula as Bitcoin's
+  // `bitcoin-cli getnetworkhashps` and Monero's `get_info.target` /
+  // block-time conversion.
+  const networkHashrate = difficulty > 0 ? difficulty / TARGET_BLOCK_TIME_S : null;
+  set('mininglive-hr',   hrHuman(networkHashrate));
+  set('mininglive-diff', difficulty > 0 ? difficulty.toLocaleString() : '—');
 
   // Pull last 50 blocks for block-time histogram. Derived from
-  // get_block_range — same surface used by the blocks page.
-  const info = await rpc('get_blockchain_info', []);
-  if (!info || info.height == null) return;
+  // get_block_range — same surface used by the blocks page. We
+  // also compute the median inter-block interval from the same
+  // dataset to fill the "Recent median" tile.
   const tip = info.height;
+  if (tip == null) return;
   const range = await rpc('get_block_range', [{start: Math.max(0, tip-50), end: tip}]);
   const blocks = (range && range.blocks) || [];
   const times = [];
   for (let i = 1; i < blocks.length; i++){
     const dt = (blocks[i].timestamp || 0) - (blocks[i-1].timestamp || 0);
     if (dt > 0 && dt < 1800) times.push(dt);  // discard outliers
+  }
+  if (times.length){
+    const sorted = [...times].sort((a,b) => a-b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    set('mininglive-median', `${median.toFixed(1)} s`);
+  } else {
+    set('mininglive-median', '—');
   }
   if (!times.length || typeof Chart === 'undefined') return;
   const BINS = 14;
@@ -10403,10 +10426,18 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
   </div>
 </div>
 
-<!--  MINING-LIVE TILE 
-     Real-time hashrate estimate from get_mining_live RPC. Currently
-     scattered across other pages; consolidating into one focused
-     dashboard so operators can watch the chain breathing. -->
+<!--  MINING-LIVE TILE
+     Network-wide hashrate + block-time stats. Derived purely from
+     public chain data (get_info.difficulty + recent block timestamps);
+     no per-miner RPC required. Network hashrate = difficulty / 120s
+     (Bitcoin Core's `getnetworkhashps` formula). Refreshes every 10s
+     while this tab is active.
+
+     Rewrite 2026-06-27: previously called get_mining_live, which
+     returns LOCAL node mining state — zero on a non-mining explorer
+     node. Replaced with get_info + get_block_range derivation; the
+     existing 4 DOM tiles (hashrate / target / median / difficulty)
+     map 1:1 to what visitors actually want. -->
 <div class="page" id="page-mininglive">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Live mining</div>
