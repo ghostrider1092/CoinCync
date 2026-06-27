@@ -4,7 +4,7 @@
 
 use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 use std::time::Duration;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::time::timeout;
@@ -254,6 +254,27 @@ struct PeerAddressSerde {
     services: u64,
 }
 
+/// Peer-aging: after this many consecutive failed dial attempts with no
+/// intervening success, an address is purged from the in-memory pool.
+///
+/// Without this, dead IPs (e.g., destroyed fleet hosts that other peers
+/// still gossip) sit in `addresses` forever, get repeatedly retried,
+/// fail again, and eat outbound dial slots via the eclipse-defense
+/// subnet counter (`MAX_OUTBOUND_PER_SUBNET`) — observed 2026-06-26 when
+/// 4 destroyed IPs across the fleet (66.135.23.193, 104.207.140.83,
+/// 149.248.37.11, 207.148.111.76) collectively starved real fleet peers
+/// out of the outbound rotation. See [[project_chain_partition_2026_06_22]].
+///
+/// 5 failures × 15s dial timeout ≈ 75s to purge a dead address. Other
+/// fleet members may re-gossip it back in, but they too will purge after
+/// 5 attempts, so the network self-cleans within minutes instead of the
+/// pre-fix "forever."
+///
+/// Reset to 0 on every `mark_success`. Purge does NOT permanently
+/// blacklist — re-gossip via `add()` adds the address back fresh
+/// (could be a host that came back after maintenance).
+const FAILURE_PURGE_THRESHOLD: u32 = 5;
+
 /// Address manager for peer discovery
 pub struct AddressManager {
     /// Known addresses
@@ -264,6 +285,9 @@ pub struct AddressManager {
     tried: HashSet<SocketAddr>,
     /// Self-addresses (detected via nonce match) — never connect to these
     self_addresses: HashSet<SocketAddr>,
+    /// Per-address consecutive-failure count. Resets on `mark_success`;
+    /// purges address from pool when it crosses `FAILURE_PURGE_THRESHOLD`.
+    failures: HashMap<SocketAddr, u32>,
     /// Maximum addresses to store
     max_addresses: usize,
 }
@@ -275,6 +299,7 @@ impl AddressManager {
             known_addrs: HashSet::new(),
             tried: HashSet::new(),
             self_addresses: HashSet::new(),
+            failures: HashMap::new(),
             max_addresses,
         }
     }
@@ -357,6 +382,13 @@ impl AddressManager {
     ///
     /// SECURITY (M-8): Bounded to MAX_TRIED to prevent unbounded memory growth
     /// and eventual permanent outbound isolation (get_next returns None).
+    ///
+    /// Peer-aging (2026-06-26): each call increments a per-address failure
+    /// counter. Once that crosses `FAILURE_PURGE_THRESHOLD`, the address is
+    /// PURGED from `addresses` + `known_addrs` entirely so it stops eating
+    /// outbound dial slots via the eclipse-defense subnet counter. The
+    /// address can be re-added via gossip later (could be a host coming back
+    /// after maintenance), at which point the failure count starts fresh.
     pub fn mark_tried(&mut self, addr: SocketAddr) {
         const MAX_TRIED: usize = 5_000;
         if self.tried.len() >= MAX_TRIED {
@@ -366,11 +398,26 @@ impl AddressManager {
             }
         }
         self.tried.insert(addr);
+
+        // Bump per-address failure count; purge if we've crossed the threshold.
+        let count = self.failures.entry(addr).and_modify(|c| *c += 1).or_insert(1);
+        if *count >= FAILURE_PURGE_THRESHOLD {
+            tracing::debug!(
+                "AddressManager: purging {} after {} consecutive failures",
+                addr, count
+            );
+            self.addresses.retain(|a| a.addr != addr);
+            self.known_addrs.remove(&addr);
+            self.tried.remove(&addr);
+            self.failures.remove(&addr);
+        }
     }
 
     /// Mark an address as successful
     pub fn mark_success(&mut self, addr: SocketAddr) {
         self.tried.remove(&addr);
+        // Reset failure count — a successful connect proves the address is alive.
+        self.failures.remove(&addr);
 
         // Update last_seen
         if let Some(peer) = self.addresses.iter_mut().find(|a| a.addr == addr) {
@@ -570,6 +617,94 @@ mod tests {
         }
 
         assert_eq!(mgr.len(), 5);
+    }
+
+    /// Peer-aging (2026-06-26): after FAILURE_PURGE_THRESHOLD consecutive
+    /// mark_tried calls with no intervening mark_success, the address is
+    /// purged from the in-memory pool. Prevents the "dead IP gossiped
+    /// forever" pattern that starved fleet outbound slots on 2026-06-26.
+    #[test]
+    fn peer_aging_purges_after_consecutive_failures() {
+        let mut mgr = AddressManager::new(100);
+        let live: SocketAddr = "192.0.2.1:28080".parse().unwrap();
+        let dead: SocketAddr = "192.0.2.99:28080".parse().unwrap();
+
+        mgr.add(PeerAddress::new(live));
+        mgr.add(PeerAddress::new(dead));
+        assert_eq!(mgr.len(), 2, "both addresses present pre-failures");
+
+        // 4 failures on dead: still present (threshold is 5)
+        for _ in 0..4 { mgr.mark_tried(dead); }
+        assert!(
+            mgr.addresses.iter().any(|a| a.addr == dead),
+            "address must persist until threshold reached"
+        );
+
+        // 5th failure on dead: purged
+        mgr.mark_tried(dead);
+        assert!(
+            !mgr.addresses.iter().any(|a| a.addr == dead),
+            "address must be purged after FAILURE_PURGE_THRESHOLD consecutive failures"
+        );
+        assert!(
+            mgr.addresses.iter().any(|a| a.addr == live),
+            "other addresses must not be affected"
+        );
+    }
+
+    /// mark_success resets the failure counter — a healthy peer that
+    /// occasionally trips a dial timeout shouldn't get purged after a
+    /// long uptime.
+    #[test]
+    fn peer_aging_success_resets_failure_count() {
+        let mut mgr = AddressManager::new(100);
+        let addr: SocketAddr = "192.0.2.7:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(addr));
+
+        // 4 failures, then a success — count resets
+        for _ in 0..4 { mgr.mark_tried(addr); }
+        mgr.mark_success(addr);
+
+        // 4 more failures — still under threshold (count was reset, so we're at 4)
+        for _ in 0..4 { mgr.mark_tried(addr); }
+        assert!(
+            mgr.addresses.iter().any(|a| a.addr == addr),
+            "mark_success must reset the failure counter so a flaky-then-healthy peer isn't purged"
+        );
+
+        // 5th failure pushes us over
+        mgr.mark_tried(addr);
+        assert!(
+            !mgr.addresses.iter().any(|a| a.addr == addr),
+            "5 consecutive failures after the reset must purge"
+        );
+    }
+
+    /// A purged address can be re-added via gossip — purge is not a
+    /// permanent ban (could be a fleet host coming back after maintenance).
+    /// Failure count starts fresh on re-add.
+    #[test]
+    fn peer_aging_purged_address_can_be_readded() {
+        let mut mgr = AddressManager::new(100);
+        let addr: SocketAddr = "192.0.2.42:28080".parse().unwrap();
+
+        mgr.add(PeerAddress::new(addr));
+        for _ in 0..5 { mgr.mark_tried(addr); }
+        assert!(!mgr.addresses.iter().any(|a| a.addr == addr), "purged");
+
+        // Re-add via gossip
+        mgr.add(PeerAddress::new(addr));
+        assert!(
+            mgr.addresses.iter().any(|a| a.addr == addr),
+            "re-add via gossip must succeed (purge is not a permanent ban)"
+        );
+
+        // Failure count starts fresh — takes another 5 failures to purge again
+        for _ in 0..4 { mgr.mark_tried(addr); }
+        assert!(
+            mgr.addresses.iter().any(|a| a.addr == addr),
+            "after re-add, counter is fresh — 4 failures must not yet purge"
+        );
     }
 
     /// DoS-on-startup defense: an address-book file larger than 1 MiB
