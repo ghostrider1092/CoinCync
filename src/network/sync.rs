@@ -183,9 +183,54 @@ impl ChainSync {
         if height > self.best_known_height { self.best_known_height = height; }
     }
 
+    /// Re-derive `best_known_height` from current state as
+    /// `max(local_height, max(peer_heights))`.
+    ///
+    /// ## Why this is a true recompute, not a ratchet
+    ///
+    /// 2026-06-27 fix for the production "phantom target_height pins
+    /// the chain forever" bug. Previously this was implemented as:
+    ///
+    ///     if pm > self.best_known_height { self.best_known_height = pm; }
+    ///
+    /// which is a one-way RATCHET: best_known could only grow, never
+    /// shrink. The documented v1.0.11.6 refactor invariant V1
+    /// ("best_known_height re-derived from max(local, max(peers)) on
+    /// every state mutation") was not actually enforced — every caller
+    /// of refresh_best_known got the ratchet behavior, NOT the recompute
+    /// the invariant promised.
+    ///
+    /// Production failure mode: a peer sends an InvBlock for a block
+    /// hash we don't have. node.rs:3312 speculatively bumps that peer's
+    /// tracked height to `our_h + 1` via update_peer_height_for, which
+    /// calls refresh_best_known. best_known_height jumps from local to
+    /// local+1. We request the block via GetBlocks. The request times
+    /// out (peer doesn't actually have the block, or it's an orphan-fork
+    /// remnant). We never receive the block. local stays at N. With the
+    /// ratchet behavior:
+    ///   - peer_heights[bad_peer] = N+1
+    ///   - best_known_height = N+1 (was N before the InvBlock, latched)
+    ///   - is_synced() = (local >= true_best) = (N >= N+1) = false
+    ///   - rig sees is_synced=false → refuses to mine
+    ///   - chain wedged
+    /// Even AFTER the bad peer disconnected, on_peer_disconnected called
+    /// peer_heights.remove() but DID NOT call refresh_best_known —
+    /// because the ratchet would have been a no-op anyway. So
+    /// best_known stayed at N+1 forever, even with peer_heights empty.
+    ///
+    /// True recompute fixes all of these:
+    ///   - Adding a higher peer_heights entry: best_known goes up
+    ///   - Removing the high-water-mark peer: best_known recomputes
+    ///   - All peers disconnect: best_known falls back to local
+    ///   - local advances past stale peer entries: best_known follows
+    ///
+    /// Bitcoin Core does exactly this in CNodeState::nLastBlockAnnounced
+    /// + PeerLogicValidation::FindNextBlocksToDownload: peer-height
+    /// state is re-evaluated from current members on every relevant
+    /// event, no latches.
     fn refresh_best_known(&mut self) {
         let pm = self.peer_heights.values().copied().max().unwrap_or(0);
-        if pm > self.best_known_height { self.best_known_height = pm; }
+        self.best_known_height = self.local_height.max(pm);
     }
 
     pub fn true_best_height(&self) -> u64 {
@@ -407,6 +452,14 @@ impl ChainSync {
     pub fn on_block_processed(&mut self, hash: Hash, height: u64) {
         self.local_height = height;
         self.local_tip = hash;
+        // 2026-06-27 fix: re-derive best_known_height after local advance.
+        // refresh_best_known computes max(local, max(peers)) so advancing
+        // local naturally floors best_known up. Without this, an empty
+        // peer_heights map would let best_known stay at a stale low
+        // value from before; with the call, best_known tracks local
+        // monotonically when no peer is ahead. Symmetric with the
+        // peer-disconnect path.
+        self.refresh_best_known();
         if self.pending_headers.is_empty() && self.downloading.is_empty() {
             self.blocks_entered_at = None;
             let tb = self.true_best_height();
@@ -610,6 +663,12 @@ impl ChainSync {
 
     pub fn on_peer_disconnected(&mut self, peer: &PeerId) {
         self.peer_heights.remove(peer);
+        // 2026-06-27 fix: re-derive best_known_height after the peer's
+        // tracked height is removed. Previously this was missing, which
+        // meant best_known stayed pinned to the disconnected peer's old
+        // value forever — the production "phantom target pins chain"
+        // bug. See refresh_best_known docs for the full failure mode.
+        self.refresh_best_known();
         self.orphans_per_peer.remove(peer);
         let rq: Vec<Hash> = self.pending_requests.iter()
             .filter(|(_, r)| &r.requested_from == peer).map(|(h, _)| *h).collect();
@@ -795,5 +854,87 @@ mod tests {
             "update_peer_height must reject oversized claims same as \
              update_peer_height_for"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Regression tests for the 2026-06-27 "phantom target pins chain"
+    // bug. See refresh_best_known docs for the production failure
+    // mode. The bug was that refresh_best_known was a one-way ratchet
+    // instead of a true recompute, so once best_known got bumped via
+    // a speculative update_peer_height_for (e.g., from an InvBlock
+    // for a hash that's never delivered), it stayed bumped forever
+    // even when the peer disconnected.
+    // ─────────────────────────────────────────────────────────────
+
+    /// best_known_height MUST drop when the high-water-mark peer
+    /// disconnects, so the chain doesn't stay pinned at a phantom
+    /// target after the bogus peer is gone.
+    #[test]
+    fn best_known_drops_when_high_peer_disconnects() {
+        let mut sync = ChainSync::new(7_291, Hash::zero());
+        let p_real = super::super::peer::generate_peer_id();
+        let p_bogus = super::super::peer::generate_peer_id();
+
+        // Real peer at our height — best_known stays at 7291.
+        sync.update_peer_height_for(p_real, 7_291);
+        assert_eq!(sync.best_known_height, 7_291);
+
+        // Bogus peer "announces" h=7292 (the InvBlock-for-phantom-hash
+        // scenario from node.rs:3312). best_known bumps.
+        sync.update_peer_height_for(p_bogus, 7_292);
+        assert_eq!(sync.best_known_height, 7_292,
+            "speculative bump must take effect when bumped");
+
+        // Bogus peer disconnects (TCP drop / timeout / whatever).
+        // best_known MUST recompute back down to the actual max.
+        sync.on_peer_disconnected(&p_bogus);
+        assert_eq!(sync.best_known_height, 7_291,
+            "after the bogus peer disconnects, best_known_height MUST \
+             drop back to the actual max(local, max(remaining peers)). \
+             The pre-fix ratchet behavior was the production bug \
+             that wedged the chain 2026-06-27 — even with the bad \
+             peer gone, best_known stayed at 7_292 forever, is_synced \
+             stayed false, and rigs refused to mine.");
+        assert!(sync.is_synced(),
+            "with local=7291 and no peer ahead, is_synced must be true");
+    }
+
+    /// best_known_height MUST drop when ALL peers disconnect, falling
+    /// back to local_height. Boundary case of the above test.
+    #[test]
+    fn best_known_falls_to_local_when_all_peers_gone() {
+        let mut sync = ChainSync::new(7_291, Hash::zero());
+        let p1 = super::super::peer::generate_peer_id();
+        let p2 = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(p1, 7_295);
+        sync.update_peer_height_for(p2, 7_300);
+        assert_eq!(sync.best_known_height, 7_300);
+
+        sync.on_peer_disconnected(&p1);
+        assert_eq!(sync.best_known_height, 7_300,
+            "removing the non-highest peer doesn't drop best_known");
+        sync.on_peer_disconnected(&p2);
+        assert_eq!(sync.best_known_height, 7_291,
+            "with no peers left, best_known floors at local_height");
+        assert!(sync.is_synced());
+    }
+
+    /// best_known_height MUST advance when local_height advances,
+    /// even if no peer is ahead (it should track local as a floor).
+    /// Symmetric with the on_peer_disconnected recompute.
+    #[test]
+    fn best_known_tracks_local_advance() {
+        let mut sync = ChainSync::new(7_291, Hash::zero());
+        let p = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(p, 7_295);
+        assert_eq!(sync.best_known_height, 7_295);
+
+        // Local advances past the peer's tracked height.
+        sync.on_block_processed(Hash::zero(), 7_300);
+        assert_eq!(sync.best_known_height, 7_300,
+            "advancing local past stale peer entries must raise best_known. \
+             Without on_block_processed → refresh_best_known, best_known \
+             would lag at 7_295 even though we've passed it locally.");
+        assert!(sync.is_synced());
     }
 }
