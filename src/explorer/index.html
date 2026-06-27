@@ -930,7 +930,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b);background:linear-gradient(180deg,rgba(212,160,89,.06),transparent)">
         <div>
           <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.16em;text-transform:uppercase">Release</div>
-          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.0.12-rc1 &middot; Hard Fork Release Candidate</div>
+          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.0.12-rc3 &middot; Hard Fork Release Candidate</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px">
           <span id="v108-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--t3);transition:background .3s"></span>
@@ -939,10 +939,10 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         </div>
       </div>
 
-      <!-- What's new in v1.0.12-rc1, collapsed by default -->
+      <!-- What's new in v1.0.12-rc3, collapsed by default -->
       <div id="v108-whatsnew" class="hidden" style="padding:14px 18px;border-bottom:1px solid var(--b);background:rgba(212,160,89,.02)">
         <div style="font-size:12px;color:var(--t2);line-height:1.7">
-          <strong style="color:var(--ac2)">Testnet hard fork.</strong> Activates at testnet height <strong>13,000</strong> (~2026-07-01). CIP-007 Mode A &mdash; static-height flag day, no signaling window. All five rules are <em>tightening</em>: honest miners producing well-formed blocks pre-activation continue to produce valid blocks post-activation. Please upgrade all nodes to <a href="https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12-rc1" style="color:var(--ac2)">v1.0.12-rc1</a> by <strong>2026-06-28</strong>.
+          <strong style="color:var(--ac2)">Testnet hard fork.</strong> Activates at testnet height <strong>13,000</strong> (~2026-07-05). CIP-007 Mode A &mdash; static-height flag day, no signaling window. All five rules are <em>tightening</em>: honest miners producing well-formed blocks pre-activation continue to produce valid blocks post-activation. Please upgrade all nodes to <a href="https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12-rc3" style="color:var(--ac2)">v1.0.12-rc3</a> by <strong>2026-07-03</strong>.
         </div>
         <ul style="margin:8px 0 4px;padding-left:20px;font-size:11px;color:var(--t3);line-height:1.7">
           <li><strong style="color:var(--t2)">encrypted_amount tightened</strong> to exactly 8 bytes (no over/under-size acceptance).</li>
@@ -952,7 +952,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
           <li><strong style="color:var(--t2)">Ring-size enforcement</strong> via monotonic <code>total_outputs_ever()</code>, so ring decoys cannot reference future outputs.</li>
         </ul>
         <div style="margin-top:8px;font-size:10px;color:var(--t3)">
-          Shipping alongside the RC: PR #112 peer-aging (purges dead IPs from <code>AddressManager</code> after 5 failed dials), 12-PR audit-prep marathon (#90-101, Bitcoin-Core-equivalent defense-in-depth), 2 new gossip-resilience relay nodes, miner-stall watchdog, Grafana Cloud monitoring + Discord alerting. Binary SHA-256: <code>5d099719ace&hellip;</code>. Full ledger: <a href="https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/operations/CHANGES-2026-06-26.md" style="color:var(--ac2)">CHANGES-2026-06-26.md</a>.
+          Shipping in rc3: PR #112 peer-aging (purges dead IPs from <code>AddressManager</code> after 5 failed dials), PR #117 legacy-DB migration (existing v1.0.11.x operators upgrade without wiping chaindata &mdash; run <code>coincync-node --network testnet migrate-legacy-db</code> once before starting on rc3), 12-PR audit-prep marathon (#90-101, Bitcoin-Core-equivalent defense-in-depth), 2 new gossip-resilience relay nodes, second miner randomx2 (closes single-miner SPOF), miner-stall watchdog. Binary SHA-256: <code>6fcf9d91c46&hellip;</code>. Full ledger: <a href="https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/operations/CHANGES-2026-06-26.md" style="color:var(--ac2)">CHANGES-2026-06-26.md</a>.
         </div>
       </div>
 
@@ -10756,7 +10756,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
         <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
         <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('✉','Subscribed',e.value,3000);e.value=''}else{showToast('⚠','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
       </div>
-      <div class="footer-credit">Developed by Cync Lab · v1.0.11.7 stable · v1.0.12-rc1 hard-fork RC (h=13_000) · <span class="badge">✓ Auditable</span></div>
+      <div class="footer-credit">Developed by Cync Lab · v1.0.11.7 stable · v1.0.12-rc3 hard-fork RC (h=13,000) · <span class="badge">✓ Auditable</span></div>
     </div>
   </div>
 </footer>
