@@ -15,6 +15,12 @@
 #
 # Requires: ssh key at ~/.ssh/coincync_fleet (override with SSH_KEY env), jq.
 #
+# Env overrides:
+#   SSH_KEY=path/to/key          - SSH key (default ~/.ssh/coincync_fleet)
+#   SSH_USER=username            - SSH user (default root)
+#   MESH_GATE_ATTEMPTS=N         - per-host gate attempts × 6s each
+#                                  (default 30 = 180s; bump for slow links)
+#
 # IMPORTANT: this restarts coincync-node on every host it touches.
 # Each restart is ~5-10s downtime per node. Run during a quiet period.
 # Rolling sequence (one host at a time) preserves chain availability —
@@ -145,10 +151,23 @@ for HOST in $HOSTS; do
     # Healthy "ready for next host" criteria:
     #   - peer_count >= 3 (enough mesh to gossip blocks)
     #   - tip_age_secs < 300 (chain producing/syncing; not stuck)
-    # Wait up to 90s for both to be true; bail with diagnostic if not.
-    echo "  waiting for mesh + chain to re-establish (peer_count >= 3, tip_age < 300s)..."
+    #
+    # Bumped to 30 attempts × 6s = 180s default on 2026-06-27 after seed3
+    # spuriously failed the 90s window during the randomx2 rollout. seed3
+    # was at peer_count=2 / tip_age=539s when the old 15-attempt window
+    # expired, then reached the gate ~3 min later on its own. The 90s
+    # window was too tight for cold-start hosts whose in-memory peer pool
+    # has to rebuild from scratch (every fleet member starts with 0 known
+    # peers, has to handshake outbound to each of the 7 others). 180s is
+    # comfortable headroom without making the script meaningfully slower
+    # — exits early on success, so well-behaved hosts still clear in
+    # 1-2 attempts (12s). Override via MESH_GATE_ATTEMPTS env var if your
+    # network is slower (each attempt = 6s of wait + ~1s of RPC).
+    MESH_GATE_ATTEMPTS="${MESH_GATE_ATTEMPTS:-30}"
+    GATE_TIMEOUT_S=$((MESH_GATE_ATTEMPTS * 6))
+    echo "  waiting for mesh + chain to re-establish (peer_count >= 3, tip_age < 300s; up to ${GATE_TIMEOUT_S}s)..."
     READY=0
-    for ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    for ATTEMPT in $(seq 1 "$MESH_GATE_ATTEMPTS"); do
         sleep 6
         # Pull get_info via loopback RPC. Need the env file for the bearer key.
         INFO=$(ssh $SSH_OPTS "${SSH_USER}@${IP}" '
@@ -166,17 +185,19 @@ for HOST in $HOSTS; do
             PEERS=$(echo "$INFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("peer_count",0))' 2>/dev/null || echo 0)
             TIP_AGE=$(echo "$INFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("tip_age_secs",999999))' 2>/dev/null || echo 999999)
         fi
-        echo "    attempt $ATTEMPT/15: peer_count=$PEERS tip_age=${TIP_AGE}s"
+        echo "    attempt $ATTEMPT/$MESH_GATE_ATTEMPTS: peer_count=$PEERS tip_age=${TIP_AGE}s"
         if [[ "$PEERS" -ge 3 && "$TIP_AGE" -lt 300 ]]; then
             READY=1
             break
         fi
     done
     if [[ $READY -ne 1 ]]; then
-        echo "  FAIL: $HOST did not reach (peer_count>=3, tip_age<300s) within 90s."
+        echo "  FAIL: $HOST did not reach (peer_count>=3, tip_age<300s) within ${GATE_TIMEOUT_S}s."
         echo "  This indicates a mesh problem that could cause a fleet partition if"
         echo "  we move to the next host. Investigate before continuing (peer logs,"
         echo "  firewall, addnode reachability) — see memory feedback_no_bulk_rolling_restart."
+        echo "  (If this is a known-slow host, override the gate via env:"
+        echo "   MESH_GATE_ATTEMPTS=60 bash scripts/sync-fleet-config.sh ...)"
         ssh $SSH_OPTS "${SSH_USER}@${IP}" "journalctl -u coincync-node -n 30 --no-pager | grep -E 'handshake|disconnected|orphan|peer|addnode' | tail -15" || true
         exit 1
     fi
