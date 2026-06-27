@@ -1,6 +1,6 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node listed here will have every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) run scripts/sync-fleet-config.sh, (3) verify every node converges. See docs/operations/fleet-config.md (TODO) for the runbook.",
-  "_last_changed": "2026-06-26 \u2014 added relay2 (70.34.250.31) paired with relay1 for gossip redundancy. Fleet now: 3 seeds + 1 explorer + 1 miner + 2 relays + 1 nginx-api = 8 hosts total (7 coincync-node + 1 nginx).",
+  "_last_changed": "2026-06-27 \u2014 added randomx2 (45.32.79.234) as second miner. Closes the single-miner SPOF risk that was the biggest pre-mainnet operational gap (see [[project_randomx_miner_2026_06_20]] and the 2026-06-27 'best yet?' chain-state review). Same wallet payout as randomx; 3 threads; chaindata bootstrapped via tarball from randomx (5s source downtime). After PR merge, run scripts/sync-fleet-config.sh to roll new --addnode lists out. Fleet now: 3 seeds + 1 explorer + 2 miners + 2 relays + 1 nginx-api = 9 hosts total (8 coincync-node + 1 nginx). Prior change 2026-06-26: added relay2 (70.34.250.31) paired with relay1 for gossip redundancy.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
@@ -53,6 +53,12 @@
       "rpc_bind": "127.0.0.1",
       "role": "relay",
       "notes": "Vultr 2 vCPU / 3.3 GB / 75 GB. Provisioned 2026-06-26 as second relay paired with relay1 for gossip redundancy. Different region from relay1. Pure coincync-node, no rig."
+    },
+    "randomx2": {
+      "ip": "45.32.79.234",
+      "rpc_bind": "127.0.0.1",
+      "role": "miner",
+      "notes": "Vultr 4 vCPU / 7.2 GB / 150 GB. Provisioned 2026-06-27 as second miner (SPOF elimination for randomx 173.199.93.21). Runs coincync-rig solo-mining at ~570 H/s on 3 threads. Mining payout address shared with randomx (tCYNC3ZK17GBDV7K3aY61M7FvKnQmGmCEYUjCG7qcLDidCnQ7scKWh82i9s18uiiDTaKZM3RQmdqePXLGuyW8Yk4Y3aNVjapNtYp). Chaindata bootstrapped via tarball from randomx (~5s source downtime). Bootstrap also doubled effective hashrate \u2014 see [[project_randomx_miner_2026_06_20]] for context on the SPOF gap this closes. RPC loopback-only."
     }
   },
   "deactivated": {
