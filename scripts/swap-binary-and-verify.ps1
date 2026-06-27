@@ -1,6 +1,34 @@
 #requires -Version 5.1
 # swap-binary-and-verify.ps1
 #
+# ⚠️ DEPRECATED 2026-06-27 — use scripts/deploy-node-binary.sh instead.
+#
+# This script was written for the 2026-04 5-node fleet during the IBD
+# orphan-loop wedge recovery. It hardcodes IPs that are now stale
+# (66.135.23.193 destroyed 2026-06-25, 207.148.111.76 destroyed
+# 2026-06-18, api 95.179.165.225 is nginx-only) and misses the post-
+# 2026-06 hosts (randomx, relay1, relay2). It also lacks the
+# peer_count >= 3 AND tip_age < 300s safety gate that prevents fleet
+# partition during rolling restart (see
+# scripts/sync-fleet-config.sh + feedback_no_bulk_rolling_restart).
+#
+# The canonical binary-deploy path is now:
+#
+#   bash scripts/deploy-node-binary.sh
+#
+# That script reads the fleet from scripts/fleet-config.json (single
+# source of truth), excludes role=api hosts, restarts coincync-rig
+# on the miner host (avoiding the systemd-dep footgun documented in
+# project_chain_partition_2026_06_22), and enforces the safety gate
+# between hosts.
+#
+# This file is kept only for historical reference. Do NOT run it as-is
+# on the current fleet — it will SSH to dead IPs and skip half the
+# active fleet. If you need to use it, update the $Fleet array AND
+# add the peer/tip gate first.
+#
+# Original purpose preserved below for archaeology:
+#
 # Push a freshly-built coincync-node binary to all 5 fleet boxes, restart
 # the service, and re-query get_info to confirm the IBD orphan-loop wedge
 # is resolved (height should advance past 936 toward target).
@@ -10,6 +38,14 @@
 #
 # If -BinaryPath is omitted, defaults to release\v1.0.1-testnet\coincync-node-linux-x86_64
 # (the original deployed binary — probably not what you want).
+
+Write-Warning "swap-binary-and-verify.ps1 is DEPRECATED. Use scripts/deploy-node-binary.sh instead."
+Write-Warning "See the header comment for why this script is unsafe on the current fleet."
+$confirm = Read-Host "Continue with the stale fleet list anyway? Type 'I-KNOW-THIS-IS-UNSAFE' to proceed"
+if ($confirm -ne 'I-KNOW-THIS-IS-UNSAFE') {
+  Write-Host "Aborted. Use scripts/deploy-node-binary.sh instead." -ForegroundColor Yellow
+  exit 1
+}
 
 param(
   [string]$BinaryPath = "C:\Users\unkno\OneDrive\coincync 1.0\release\v1.0.1-testnet\coincync-node-linux-x86_64-fresh"
