@@ -4,8 +4,8 @@
 
 A proof-of-work cryptocurrency with mandatory privacy at the consensus layer, an auditable supply curve, and constitutional protections against admin authority, federations, governance tokens, and compliance hooks.
 
-**Status:** Public testnet · **v1.0.11.7-testnet** (current production)
-**Network:** 6-node Vultr fleet (3 seeds + explorer + api + miner), single operator
+**Status:** Public testnet · **v1.0.11.7-testnet** stable · **[v1.0.12-rc1](https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12-rc1)** hard-fork release candidate (activates testnet h=13_000, ~2026-07-01)
+**Network:** 8-host Vultr fleet (3 seeds + explorer + miner + 2 relays + api-nginx), single operator
 **Mainnet:** **targeted 2026-10-01** (gated on schema-versioning + cyncswap audit; both in flight)
 **Live chain:** [api.coincync.network/rpc/testnet](https://api.coincync.network/rpc/testnet) (`get_info` JSON-RPC) · [explorer.coincync.network](https://explorer.coincync.network)
 **Discord:** [join](https://discord.gg/5tYNSCsqzy) — **actively looking for community testnet miners**, see [run-a-testnet-miner](#run-a-testnet-miner) below
@@ -40,11 +40,11 @@ CoinCync is **early-stage infrastructure software on public testnet**. Honest re
 
 **What's known rough:**
 
-- 6/6 fleet nodes hosted on a single cloud provider (Vultr) — correlated failure mode acknowledged, mitigated by inviting community operators on different providers (see [Run a testnet miner](#run-a-testnet-miner))
+- 8/8 fleet nodes hosted on a single cloud provider (Vultr), though across multiple regions — correlated provider failure mode acknowledged, mitigated by inviting community operators on different providers (see [Run a testnet miner](#run-a-testnet-miner))
 - **Single-miner network** today (100% of hashrate is on one box). Every restart for maintenance produces a publicly visible chain stall. This is the single biggest pre-mainnet issue and the reason we're actively recruiting community miners
 - Test coverage is high (700+ tests) but several integration tests assume specific fleet state
 - Wallet UX is mid-refactor; some pages still feel utilitarian
-- 8 PRs open against `main` as of 2026-06-21 — review queue, not technical debt
+- Active PR review queue (typically 5–10 PRs open against `main` at any moment) — review queue, not technical debt
 
 Use at your own risk. Testnet coins have no real value. Mainnet binaries are not yet a live public network.
 
@@ -162,7 +162,7 @@ Auto-discovered when you run `coincync-node --network testnet` — no `--addnode
 
 ## Versioning
 
-`v1.0.x-testnet` releases are the stable codebase for the pre-mainnet testnet. Breaking consensus changes during this sequence are coordinated via documented hard forks (e.g., `MIN_OUTPUT_AGE` 10 → 100 in v1.0.10) so node operators have explicit activation-height-gated upgrade windows. v1.0 mainnet ships **October 1, 2026** — at that point the codebase is frozen against breaking changes per strict SemVer. Anything that requires a breaking change post-mainnet becomes v2.0.
+`v1.0.x-testnet` releases are the stable codebase for the pre-mainnet testnet. Breaking consensus changes during this sequence are coordinated via documented hard forks (e.g., the v1.0.12 fork at testnet h=13_000 tightens `encrypted_amount`, per-output size caps, stealth-address dedup, and ring-size enforcement) so node operators have explicit activation-height-gated upgrade windows. v1.0 mainnet ships **October 1, 2026** — at that point the codebase is frozen against breaking changes per strict SemVer. Anything that requires a breaking change post-mainnet becomes v2.0.
 
 **Tag-cut discipline:**
 

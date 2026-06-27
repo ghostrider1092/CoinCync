@@ -797,7 +797,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <div><span class="label">Mempool</span><span class="val" id="tk-pool">â€”</span></div>
   <div><span class="label">Ring Size</span><span class="val">11</span></div>
   <div><span class="label">Supply</span><span class="val" id="tk-supply">â€”</span></div>
-  <div><span class="label">Version</span><span class="val">v1.0.10</span></div>
+  <div><span class="label">Version</span><span class="val">v1.0.11.7</span></div>
 </div>
 
 <div class="priv-bar">
@@ -930,7 +930,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b);background:linear-gradient(180deg,rgba(212,160,89,.06),transparent)">
         <div>
           <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.16em;text-transform:uppercase">Release</div>
-          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.0.10-testnet &middot; Network Status</div>
+          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.0.12-rc1 &middot; Hard Fork Release Candidate</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px">
           <span id="v108-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--t3);transition:background .3s"></span>
@@ -939,21 +939,20 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         </div>
       </div>
 
-      <!-- What's new in 1.0.8, collapsed by default -->
+      <!-- What's new in v1.0.12-rc1, collapsed by default -->
       <div id="v108-whatsnew" class="hidden" style="padding:14px 18px;border-bottom:1px solid var(--b);background:rgba(212,160,89,.02)">
         <div style="font-size:12px;color:var(--t2);line-height:1.7">
-          <strong style="color:var(--ac2)">No consensus break.</strong> Operators upgrade at their own pace.
+          <strong style="color:var(--ac2)">Testnet hard fork.</strong> Activates at testnet height <strong>13,000</strong> (~2026-07-01). CIP-007 Mode A &mdash; static-height flag day, no signaling window. All five rules are <em>tightening</em>: honest miners producing well-formed blocks pre-activation continue to produce valid blocks post-activation. Please upgrade all nodes to <a href="https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12-rc1" style="color:var(--ac2)">v1.0.12-rc1</a> by <strong>2026-06-28</strong>.
         </div>
         <ul style="margin:8px 0 4px;padding-left:20px;font-size:11px;color:var(--t3);line-height:1.7">
-          <li><strong style="color:var(--t2)">Observability.</strong> Prometheus <code>/metrics</code> with four hot-path histograms (block-receive-to-tip, tx-admit-to-mempool, peer-handshake, RandomX-hash). Localhost-only by design.</li>
-          <li><strong style="color:var(--t2)">Privacy.</strong> Constant-rate cover traffic on the wire via <code>MessageType::Padding = 99</code>. Third leg of jitter + size-norm + cover packets is now complete.</li>
-          <li><strong style="color:var(--t2)">Runtime.</strong> Six new <code>Blockchain::*_async</code> methods route block/mempool work off the tokio worker pool via <code>spawn_blocking</code>. Structural fix for the 2026-05-12 stall.</li>
-          <li><strong style="color:var(--t2)">Consensus prep.</strong> CIP-011 rolling-finality machinery merged behind <code>rolling-finality</code> feature flag (default OFF). Phase-2 storage trees gain reorg checkpoint/rewind (dormant, trees still <code>None</code>).</li>
-          <li><strong style="color:var(--t2)">Wallet.</strong> Opt-in update check (Monero posture): default OFF, explicit privacy warning on enable.</li>
-          <li><strong style="color:var(--t2)">Security.</strong> 18 dependabot alerts closed (1 critical, 6 high, 9 medium, 2 low).</li>
+          <li><strong style="color:var(--t2)">encrypted_amount tightened</strong> to exactly 8 bytes (no over/under-size acceptance).</li>
+          <li><strong style="color:var(--t2)">Per-output size caps</strong> enforced at block validation, not just mempool admission.</li>
+          <li><strong style="color:var(--t2)">Duplicate stealth addresses rejected within a tx</strong> &mdash; closes the same-output-twice class of malleability.</li>
+          <li><strong style="color:var(--t2)">Cross-tx stealth-address dedup within a block</strong> &mdash; prevents two txs in the same block from colliding on a stealth output.</li>
+          <li><strong style="color:var(--t2)">Ring-size enforcement</strong> via monotonic <code>total_outputs_ever()</code>, so ring decoys cannot reference future outputs.</li>
         </ul>
         <div style="margin-top:8px;font-size:10px;color:var(--t3)">
-          Coming in v1.0.10 (3rd or 4th week of June): <code>MIN_OUTPUT_AGE</code> 10 &rarr; 100 hard fork with coordinated activation height. Activation guard already in code; activation height set at tag-cut. Plus RandomX fast-mode (5-10&times; per-hash) for miners with &ge;3 GB RAM, real secret-leak SECURITY fix in view-key zeroize, validator&harr;fee-market consensus dedup, and the full audit-prep punchlist sweep (&sim;67 items closed).
+          Shipping alongside the RC: PR #112 peer-aging (purges dead IPs from <code>AddressManager</code> after 5 failed dials), 12-PR audit-prep marathon (#90-101, Bitcoin-Core-equivalent defense-in-depth), 2 new gossip-resilience relay nodes, miner-stall watchdog, Grafana Cloud monitoring + Discord alerting. Binary SHA-256: <code>5d099719ace&hellip;</code>. Full ledger: <a href="https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/operations/CHANGES-2026-06-26.md" style="color:var(--ac2)">CHANGES-2026-06-26.md</a>.
         </div>
       </div>
 
@@ -977,7 +976,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
           <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:8px">Spark: <span id="v108-spark-size">&mdash;</span></div>
           <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
             <span id="v108-phase2-status" style="display:inline-block;padding:2px 6px;border-radius:3px;background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.3);font-size:9px;letter-spacing:.05em">REWIND READY</span><br>
-            <span style="color:var(--t3)">Trees dormant &middot; v1.0.10 ships the prep</span>
+            <span style="color:var(--t3)">Trees dormant &middot; activation deferred to post-v1.1</span>
           </div>
         </div>
 
@@ -1890,7 +1889,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>â€º</span>Node Health</div>
     <div class="page-title" style="margin-bottom:4px">Node health dashboard</div>
-    <div class="page-sub" style="margin-bottom:20px">Live status of the active 6-node CoinCync public testnet fleet</div>
+    <div class="page-sub" style="margin-bottom:20px">Live status of the active 8-host CoinCync public testnet fleet (3 seeds + explorer + miner + 2 relays + api-nginx)</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:-8px 0 12px 0">
       <span class="badge">source: <span id="health-source">/health/*</span></span>
       <span class="badge">freshness: <span id="health-freshness">â€”</span></span>
@@ -10757,7 +10756,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
         <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
         <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('âœ‰','Subscribed',e.value,3000);e.value=''}else{showToast('âš ','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
       </div>
-      <div class="footer-credit">Developed by Cync Lab Â· v1.0.10 Â· <span class="badge">âœ“ Auditable</span></div>
+      <div class="footer-credit">Developed by Cync Lab Â· v1.0.11.7 stable Â· v1.0.12-rc1 hard-fork RC (h=13_000) Â· <span class="badge">âœ“ Auditable</span></div>
     </div>
   </div>
 </footer>
