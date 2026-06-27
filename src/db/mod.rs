@@ -40,6 +40,7 @@ pub use pruning::{PruneResult, prune_blocks, is_pruned};
 
 use std::path::Path;
 use crate::error::{Error, Result};
+use crate::primitives::Hash;
 
 /// Database performance mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -385,6 +386,187 @@ fn verify_or_stamp_schema_version(
             }
         }
     }
+}
+
+/// Outcome of a [`migrate_legacy_db_to_v1`] call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MigrationOutcome {
+    /// DB was already stamped at the expected version (idempotent re-run).
+    AlreadyStamped,
+    /// DB was unstamped (legacy pre-v1) and we stamped it as v1 after
+    /// confirming the genesis block matches the expected hash.
+    Stamped { genesis_hash: Hash },
+}
+
+/// One-shot legacy DB migration: stamp an existing pre-v1 chaindata
+/// with `schema_version = 1`, after validating the genesis block in
+/// the DB matches the expected genesis hash for the network.
+///
+/// This is the explicit-opt-in escape hatch for fleet and community
+/// operators upgrading from v1.0.11.x (which did not write the
+/// schema_version stamp) to v1.0.12+ (which requires it). Without this
+/// helper the only options were "wipe and resync from genesis" or
+/// "restore from a v1-stamped snapshot" — neither of which exists
+/// yet in production.
+///
+/// ## Safety
+///
+/// The hard rule baked into [`verify_or_stamp_schema_version`] is "do
+/// not silently auto-migrate; the layout of pre-v1 DBs was never
+/// formally defined." This helper does NOT auto-stamp — it requires
+/// the caller to:
+///
+///   1. Pass the network's `expected_genesis` hash explicitly. We then
+///      read the actual block-0 hash from the DB and refuse to stamp
+///      if they disagree. That guards against:
+///        - Stamping a mainnet DB with a testnet binary (or vice versa)
+///        - Stamping a DB that was forked off at genesis (different
+///          chain entirely)
+///        - Stamping a corrupted DB whose height index points at
+///          the wrong block
+///
+///   2. Invoke this function explicitly via a CLI subcommand
+///      (`coincync-node migrate-legacy-db`) — the normal `Database::open`
+///      path still rejects unstamped DBs. This is operator-acknowledged
+///      action, not silent on-startup behavior.
+///
+/// ## Idempotency
+///
+/// Re-running on an already-stamped DB returns [`MigrationOutcome::AlreadyStamped`]
+/// and changes nothing. Safe to re-invoke in operator runbooks without
+/// guard conditions.
+///
+/// ## Errors
+///
+/// - Empty DB (no block at height 0) — use normal [`Database::open`]
+///   to initialize a fresh DB; this helper is only for legacy migration
+/// - DB stamped at a non-v1 version (would need a real migration table,
+///   not just a stamp)
+/// - Genesis-hash mismatch (DB belongs to a different network/chain)
+/// - Any RocksDB I/O error during read/write
+///
+/// ## Future
+///
+/// When v1 → v2 migration ships, the `Less` branch of
+/// [`verify_or_stamp_schema_version`] will dispatch into a registered
+/// migration table. This helper stays in place as the legacy-only
+/// entry point for v0 → v1.
+pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
+    path: P,
+    config: DbConfig,
+    expected_genesis: &Hash,
+) -> Result<MigrationOutcome> {
+    tracing::info!(
+        "Opening database for legacy migration: cache={}MB, mode={:?}",
+        config.cache_size_mb,
+        config.mode,
+    );
+
+    let db = shim::Config::new()
+        .path(path)
+        .cache_capacity((config.cache_size_mb * 1024 * 1024) as u64)
+        .flush_every_ms(config.flush_interval_ms)
+        .open()
+        .map_err(|e| Error::DatabaseError(format!(
+            "failed to open DB for migration: {}", e
+        )))?;
+
+    let blocks = BlockDb::new(&db)?;
+    let metadata = db.open_tree(METADATA_TREE_NAME)
+        .map_err(|e| Error::DatabaseError(format!(
+            "failed to open metadata tree: {}", e
+        )))?;
+
+    // Step 1: idempotency check — already stamped?
+    let stored = metadata.get(SCHEMA_VERSION_KEY)
+        .map_err(|e| Error::DatabaseError(format!(
+            "failed to read schema_version: {}", e
+        )))?;
+    match stored {
+        None => { /* legacy DB — proceed with migration */ }
+        Some(bytes) if bytes.len() == 4 => {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&bytes);
+            let v = u32::from_le_bytes(buf);
+            if v == EXPECTED_DB_SCHEMA_VERSION {
+                tracing::info!(
+                    "DB already stamped at schema_version = {}. Nothing to do.",
+                    v,
+                );
+                return Ok(MigrationOutcome::AlreadyStamped);
+            }
+            return Err(Error::DatabaseError(format!(
+                "DB stamped at schema_version = {} but legacy migration only \
+                 handles v0 → v1. Use the registered migration table (or wipe \
+                 and resync) for non-v0 sources.",
+                v,
+            )));
+        }
+        Some(bytes) => {
+            return Err(Error::DatabaseError(format!(
+                "schema_version key has wrong length: expected 4 bytes (u32 LE), \
+                 got {} bytes. DB appears corrupted; do not attempt migration.",
+                bytes.len(),
+            )));
+        }
+    }
+
+    // Step 2: must not be empty — a fresh DB should go through normal open.
+    if blocks.is_empty() {
+        return Err(Error::DatabaseError(
+            "Database is empty (no block at height 0). This helper migrates \
+             EXISTING pre-v1 chaindata. For a fresh install, use normal \
+             startup (`coincync-node`) which auto-stamps new DBs.".into()
+        ));
+    }
+
+    // Step 3: validate genesis hash matches the network's expected hash.
+    // This is the SAFETY GATE — without it we could silently stamp a DB
+    // belonging to mainnet with a testnet binary (or any other chain
+    // mismatch). The hash of block-0 is the canonical chain identifier.
+    let actual_genesis = blocks.get_hash_by_height(0)
+        .map_err(|e| Error::DatabaseError(format!(
+            "failed to read block-0 hash: {}", e
+        )))?
+        .ok_or_else(|| Error::DatabaseError(
+            "block height index has no entry at height 0 — DB corruption, \
+             refusing to migrate".into()
+        ))?;
+
+    if &actual_genesis != expected_genesis {
+        return Err(Error::DatabaseError(format!(
+            "Genesis hash mismatch — refusing to migrate.\n  \
+             DB genesis:       {}\n  \
+             Expected genesis: {}\n  \
+             This DB belongs to a different network or chain. Make sure \
+             you're running `migrate-legacy-db` with the same --network \
+             flag used to create the DB.",
+            actual_genesis, expected_genesis,
+        )));
+    }
+
+    // Step 4: stamp.
+    let version_bytes = EXPECTED_DB_SCHEMA_VERSION.to_le_bytes();
+    metadata.insert(SCHEMA_VERSION_KEY, &version_bytes)
+        .map_err(|e| Error::DatabaseError(format!(
+            "failed to write schema_version stamp: {}", e
+        )))?;
+
+    // Flush to disk before reporting success. If the binary crashes
+    // between insert() and a subsequent flush, the stamp would be lost
+    // and the operator would have to re-run migration. Force a flush
+    // so the operation is durable once we return Ok.
+    db.flush()
+        .map_err(|e| Error::DatabaseError(format!(
+            "failed to flush schema_version stamp to disk: {}", e
+        )))?;
+
+    tracing::info!(
+        "Legacy DB migrated: schema_version stamped as {} (genesis verified: {})",
+        EXPECTED_DB_SCHEMA_VERSION,
+        actual_genesis,
+    );
+    Ok(MigrationOutcome::Stamped { genesis_hash: actual_genesis })
 }
 
 /// Current DB schema version. Bump on ANY incompatible on-disk
@@ -926,5 +1108,135 @@ mod tests {
             msg.contains("Legacy database") || msg.contains("schema_version stamp"),
             "error should identify the legacy DB scenario; got: {}", msg,
         );
+    }
+
+    // ─── Legacy DB migration (migrate_legacy_db_to_v1) ───────────
+
+    /// Test helper: build a synthetic "legacy v0" DB at `path` with
+    /// a single block at height 0 whose hash is `genesis`. Matches the
+    /// shape v1.0.11.x binaries produced (non-empty blocks tree, valid
+    /// height_index entry at 0, no schema_version stamp). After this
+    /// runs, `migrate_legacy_db_to_v1(path, …, &genesis)` should succeed.
+    fn build_synthetic_legacy_db(path: &std::path::Path, genesis: Hash) {
+        let db = Database::open(path).unwrap();
+        // Make blocks tree non-empty so is_empty() returns false.
+        let blocks_tree = db.db.open_tree("blocks").unwrap();
+        blocks_tree.insert(genesis.as_bytes(), b"sentinel_block_body").unwrap();
+        // Index height 0 → genesis hash so get_hash_by_height(0) works.
+        db.blocks.height_index
+            .insert(&0u64.to_be_bytes(), genesis.as_bytes())
+            .unwrap();
+        // Strip the schema_version stamp — this is what makes it "legacy".
+        db.metadata.remove(SCHEMA_VERSION_KEY).unwrap();
+        db.flush().unwrap();
+    }
+
+    /// Happy path: legacy DB with matching genesis hash gets stamped.
+    /// After migration, `Database::open` succeeds and reports v1.
+    #[test]
+    fn migrate_legacy_db_to_v1_stamps_matching_genesis() {
+        let dir = tempdir().unwrap();
+        let genesis = Hash::from_bytes([0x42; 32]);
+        build_synthetic_legacy_db(dir.path(), genesis);
+
+        let outcome = migrate_legacy_db_to_v1(
+            dir.path(), DbConfig::default(), &genesis,
+        ).expect("migration should succeed on legacy DB with matching genesis");
+
+        match outcome {
+            MigrationOutcome::Stamped { genesis_hash } => {
+                assert_eq!(genesis_hash, genesis, "outcome should report verified genesis");
+            }
+            other => panic!("expected Stamped, got {:?}", other),
+        }
+
+        // Normal open now works.
+        let db = Database::open(dir.path()).expect("post-migration open should succeed");
+        assert_eq!(db.schema_version().unwrap(), EXPECTED_DB_SCHEMA_VERSION);
+    }
+
+    /// Genesis hash mismatch (operator pointed migration at the wrong
+    /// network) must abort without modifying the DB. The error must
+    /// name both the actual and expected hashes so the operator can
+    /// diagnose immediately.
+    #[test]
+    fn migrate_legacy_db_to_v1_rejects_wrong_genesis() {
+        let dir = tempdir().unwrap();
+        let actual = Hash::from_bytes([0x42; 32]);
+        let wrong_expected = Hash::from_bytes([0xAB; 32]);
+        build_synthetic_legacy_db(dir.path(), actual);
+
+        let result = migrate_legacy_db_to_v1(
+            dir.path(), DbConfig::default(), &wrong_expected,
+        );
+
+        let err = result.expect_err("must reject wrong-genesis migration");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Genesis hash mismatch") || msg.contains("different network"),
+            "error should name the mismatch; got: {}", msg,
+        );
+
+        // Critical: confirm the DB was NOT stamped despite the error.
+        // (Otherwise operators retrying with the correct network would
+        // silently get an "AlreadyStamped" no-op on a never-validated DB.)
+        let db_path_again = dir.path();
+        let db_check = shim::Config::new().path(db_path_again).open().unwrap();
+        let meta = db_check.open_tree(METADATA_TREE_NAME).unwrap();
+        assert!(meta.get(SCHEMA_VERSION_KEY).unwrap().is_none(),
+            "stamp must not be written on a failed migration");
+    }
+
+    /// Empty DB (no blocks) — operator pointed migration at a freshly-
+    /// created DB by mistake. Migration must refuse rather than stamp;
+    /// the operator should be using normal startup instead.
+    #[test]
+    fn migrate_legacy_db_to_v1_rejects_empty_db() {
+        let dir = tempdir().unwrap();
+        // Fresh DB: opening it stamps it. To simulate "operator points
+        // migration at an empty-but-existing dir" we strip the stamp
+        // back off so the entry condition is met (no stamp), but leave
+        // the blocks tree empty.
+        {
+            let db = Database::open(dir.path()).unwrap();
+            db.metadata.remove(SCHEMA_VERSION_KEY).unwrap();
+            db.flush().unwrap();
+        }
+
+        let result = migrate_legacy_db_to_v1(
+            dir.path(), DbConfig::default(), &Hash::from_bytes([0xAA; 32]),
+        );
+        let err = result.expect_err("must reject empty-DB migration");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("empty") || msg.contains("EXISTING pre-v1"),
+            "error should point at empty-DB scenario; got: {}", msg,
+        );
+    }
+
+    /// Idempotency: re-running migration on an already-stamped DB is
+    /// a no-op (returns AlreadyStamped) and changes nothing. Critical
+    /// for operator runbooks that may re-run the migration step under
+    /// uncertainty.
+    #[test]
+    fn migrate_legacy_db_to_v1_is_idempotent_when_already_stamped() {
+        let dir = tempdir().unwrap();
+        // Open + close to stamp a fresh DB at v1.
+        {
+            let db = Database::open(dir.path()).unwrap();
+            db.flush().unwrap();
+        }
+
+        // Migration on the already-stamped DB should be a no-op. The
+        // expected-genesis arg doesn't matter for this path — idempotency
+        // checks happen before the genesis-hash check.
+        let outcome = migrate_legacy_db_to_v1(
+            dir.path(), DbConfig::default(), &Hash::from_bytes([0xFF; 32]),
+        ).expect("migration should report idempotency");
+        assert_eq!(outcome, MigrationOutcome::AlreadyStamped);
+
+        // And the stamp is still correct after the no-op.
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), EXPECTED_DB_SCHEMA_VERSION);
     }
 }

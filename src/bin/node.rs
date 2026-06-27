@@ -115,6 +115,17 @@ enum Command {
     /// GitHub and intermediaries on every restart. Running this
     /// subcommand explicitly is informed-consent update checking.
     CheckUpdate,
+    /// One-shot: stamp a pre-v1 chaindata as `schema_version = 1`,
+    /// after validating the genesis block in the DB matches the
+    /// expected genesis hash for `--network`. Operator-only escape
+    /// hatch for upgrading from v1.0.11.x (no stamp) to v1.0.12+
+    /// (requires stamp).
+    ///
+    /// Idempotent: re-running on an already-stamped DB is a no-op.
+    /// Aborts if the DB belongs to a different chain (genesis hash
+    /// mismatch). See `docs/operations/v1.0.12-hard-fork-rollout.md`
+    /// for the full upgrade runbook.
+    MigrateLegacyDb,
 }
 
 // SECURITY (runtime resilience): force at least 4 worker threads regardless of
@@ -199,6 +210,50 @@ async fn main() {
         Command::PrintGenesisHash => print_genesis_hash(network),
         Command::Status => show_status(network, &data_dir).await,
         Command::CheckUpdate => check_update().await,
+        Command::MigrateLegacyDb => {
+            // Resolve the chaindata path the same way start_node does
+            // (data_dir / <network>) so this subcommand operates on the
+            // exact directory the daemon would open. Mismatched paths
+            // are the #1 way operators end up "migrating" a different
+            // DB than the one their service is using.
+            let network_subdir = match network {
+                Network::Mainnet => "mainnet",
+                Network::Testnet => "testnet",
+                Network::Regtest => "regtest",
+            };
+            let chaindata_path = data_dir.join(network_subdir);
+            let expected_genesis = match network {
+                Network::Mainnet => coincync::mainnet::mainnet_genesis().hash(),
+                _ => coincync::testnet::expected_genesis_hash(),
+            };
+            info!(
+                "Migrating legacy DB at {} (network={}, expected_genesis={})",
+                chaindata_path.display(),
+                network_subdir,
+                expected_genesis,
+            );
+            match coincync::db::migrate_legacy_db_to_v1(
+                &chaindata_path,
+                coincync::db::DbConfig::default(),
+                &expected_genesis,
+            ) {
+                Ok(coincync::db::MigrationOutcome::AlreadyStamped) => {
+                    info!("DB was already stamped at the expected schema version. No changes made.");
+                }
+                Ok(coincync::db::MigrationOutcome::Stamped { genesis_hash }) => {
+                    info!(
+                        "✓ Legacy DB migrated successfully. schema_version stamped. (genesis verified: {})",
+                        genesis_hash,
+                    );
+                    info!("You can now start the node normally: `systemctl start coincync-node` (or just `coincync-node`).");
+                }
+                Err(e) => {
+                    error!("Migration failed: {}", e);
+                    error!("The DB has NOT been modified. Read the error above carefully — most migration failures are 'wrong --network flag' or 'wrong --data-dir path'.");
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Start => {
             if let Err(e) = start_node(
                 network,
