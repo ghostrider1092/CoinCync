@@ -160,10 +160,16 @@ EOSSH
     # Healthy "ready for next host" criteria:
     #   - peer_count >= 3 (enough mesh to gossip blocks)
     #   - tip_age_secs < 300 (chain producing/syncing; not stuck)
-    # Wait up to 90s for both to be true; bail with diagnostic if not.
-    echo "  waiting for mesh + chain (peer_count >= 3 AND tip_age < 300s)..."
+    #
+    # Bumped from 15 attempts (90s) to 30 attempts (180s) on 2026-06-27
+    # for consistency with the same fix in sync-fleet-config.sh (PR #119).
+    # Cold-start hosts need ~120-180s to handshake out to every fleet peer.
+    # Override via MESH_GATE_ATTEMPTS env var for known-slow networks.
+    MESH_GATE_ATTEMPTS="${MESH_GATE_ATTEMPTS:-30}"
+    GATE_TIMEOUT_S=$((MESH_GATE_ATTEMPTS * 6))
+    echo "  waiting for mesh + chain (peer_count >= 3 AND tip_age < 300s; up to ${GATE_TIMEOUT_S}s)..."
     READY=0
-    for ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    for ATTEMPT in $(seq 1 "$MESH_GATE_ATTEMPTS"); do
         sleep 6
         INFO=$(ssh $SSH_OPTS "root@${IP}" '
             K=$(grep COINCYNC_RPC_API_KEY /etc/coincync/coincync.env 2>/dev/null | cut -d= -f2)
@@ -179,15 +185,17 @@ EOSSH
             PEERS=$(echo "$INFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("peer_count",0))' 2>/dev/null || echo 0)
             TIP_AGE=$(echo "$INFO" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("tip_age_secs",999999))' 2>/dev/null || echo 999999)
         fi
-        echo "    attempt $ATTEMPT/15: peer_count=$PEERS tip_age=${TIP_AGE}s"
+        echo "    attempt $ATTEMPT/$MESH_GATE_ATTEMPTS: peer_count=$PEERS tip_age=${TIP_AGE}s"
         if [[ "$PEERS" -ge 3 && "$TIP_AGE" -lt 300 ]]; then
             READY=1
             break
         fi
     done
     if [[ $READY -ne 1 ]]; then
-        echo "  ✗ $HOST did not reach (peer_count>=3, tip_age<300s) within 90s." >&2
+        echo "  ✗ $HOST did not reach (peer_count>=3, tip_age<300s) within ${GATE_TIMEOUT_S}s." >&2
         echo "    Aborting fleet deploy to prevent partition cascade." >&2
+        echo "    (If this is a known-slow host or the chain itself is stalled going in," >&2
+        echo "     override the gate: MESH_GATE_ATTEMPTS=60 BINARY=... bash scripts/deploy-node-binary.sh)" >&2
         ssh $SSH_OPTS "root@${IP}" "journalctl -u coincync-node -n 20 --no-pager | tail -15" || true
         exit 4
     fi
