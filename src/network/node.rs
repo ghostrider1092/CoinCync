@@ -82,6 +82,39 @@ pub const MAX_CONNECTIONS_PER_IP: usize = 2;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ping interval
 pub const PING_INTERVAL: Duration = Duration::from_secs(120);
+
+/// How often the maintenance loop re-announces our current chain tip
+/// to every connected peer via InvBlock.
+///
+/// Why this exists (2026-06-27 gossip bug): `broadcast_raw` uses
+/// `try_send` on bounded per-peer mpsc channels (capacity 100, see
+/// `peer.rs`). When a peer's channel is full at the moment we mine
+/// a new block, that peer's InvBlock for the new tip is silently
+/// dropped. Without a follow-up announcement the peer never learns
+/// about the new block — they'd only re-sync if some OTHER trigger
+/// (peer disconnect/reconnect, headers exchange, etc.) brought them
+/// back into the IBD flow. We saw this in production: randomx2 mined
+/// h=7276 → 7277 → 7278 while 7 other fleet hosts stayed stuck at
+/// h=7275 for 13+ minutes. seed1's own EMERGENCY-TIER-3 detector
+/// flagged the stall but had no recovery path.
+///
+/// Periodic tip re-announce (Bitcoin Core's "trickle" pattern, but
+/// per-peer-channel rather than per-peer-task) closes the gap: even
+/// if a per-peer channel was full when the original Inv was sent,
+/// the channel drains within seconds and the next interval picks
+/// up. 60s matches Bitcoin Core's send-loop cadence; for a 120s
+/// target block time it bounds peer staleness at one block.
+///
+/// Tuning rationale (rejected alternatives):
+///   - Bigger channel capacity alone (100 → 1000): just delays the
+///     symptom under sustained mining bursts; still drops eventually.
+///   - send().await instead of try_send: one slow peer stalls the
+///     broadcast loop (explicitly rejected by the 2026-05-02 fix).
+///   - More aggressive cadence (10-30s): wastes bandwidth on the
+///     happy path where the original Inv already landed; the receive
+///     side de-dupes via known-hash check so it's not harmful, just
+///     not useful.
+pub const TIP_REBROADCAST_INTERVAL_SECS: u64 = 60;
 /// Peer timeout (no activity)
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(300);
 /// Global memory budget for P2P buffers (50 MB)
@@ -1742,12 +1775,19 @@ impl P2PNode {
         let mut broadcast_rx = self.tx_broadcast_rx.lock()
             .take()
             .expect("broadcast receiver already taken");
+        // 2026-06-27: needed for periodic tip re-announce (TIP_REBROADCAST_INTERVAL_SECS).
+        // See the constant's doc-comment for the production gossip bug
+        // this closes.
+        let maint_chain_tip = self.chain_tip.clone();
 
         tokio::spawn(async move {
             let mut ping_interval = interval(PING_INTERVAL);
             let mut cleanup_interval = interval(Duration::from_secs(60));
             // Dandelion++ monitor runs every DANDELION_MONITOR_INTERVAL_SECS
             let mut dandelion_interval = interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
+            // 2026-06-27 gossip-bug fix: periodic InvBlock re-announce of our
+            // current tip to all peers. See TIP_REBROADCAST_INTERVAL_SECS docs.
+            let mut tip_announce_interval = interval(Duration::from_secs(TIP_REBROADCAST_INTERVAL_SECS));
 
             while *maint_running.read().await {
                 tokio::select! {
@@ -1818,6 +1858,51 @@ impl P2PNode {
                         // Update stempool size gauge
                         let stempool_size = maint_dandelion.read().await.stempool_size();
                         crate::metrics::dandelion::STEMPOOL_SIZE.set(stempool_size as i64);
+                    }
+
+                    _ = tip_announce_interval.tick() => {
+                        // Periodic tip re-announce: every TIP_REBROADCAST_INTERVAL_SECS
+                        // we send InvBlock for our current tip hash to every connected
+                        // peer. Receivers de-dupe via known-hash check, so this is a
+                        // no-op for peers who already have the block. Peers who missed
+                        // the original Inv (per-peer channel was full at the time, see
+                        // broadcast_raw doc) pick up the announcement here, request the
+                        // block via GetBlocks, and catch up.
+                        //
+                        // Best-effort: try_send-style behavior. If a peer's channel is
+                        // STILL full after 60s of drain time, something is wrong with
+                        // that peer specifically — the cleanup_interval below will GC
+                        // it after PEER_TIMEOUT. We don't want one slow peer to stall
+                        // re-announces to everyone else.
+                        let tip = *maint_chain_tip.read().await;
+                        if tip != Hash::zero() {
+                            if let Ok(msg) = Message::inv_block(magic, tip) {
+                                if let Ok(data) = msg.to_bytes() {
+                                    let mut sent = 0usize;
+                                    let mut full = 0usize;
+                                    for sender_ref in maint_senders.iter() {
+                                        // try_send: don't block on a single congested peer.
+                                        // Skip Closed (cleanup_interval handles dead peers).
+                                        match sender_ref.try_send(data.clone()) {
+                                            Ok(()) => sent += 1,
+                                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => full += 1,
+                                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+                                        }
+                                    }
+                                    if full > 0 {
+                                        debug!(
+                                            "tip_announce: sent InvBlock to {} peers ({} channels full, retry in {}s)",
+                                            sent, full, TIP_REBROADCAST_INTERVAL_SECS,
+                                        );
+                                    } else {
+                                        tracing::trace!(
+                                            "tip_announce: sent InvBlock {} to {} peers",
+                                            tip, sent,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     _ = cleanup_interval.tick() => {
