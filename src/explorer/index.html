@@ -9702,12 +9702,38 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
     <div class="panel" style="margin-bottom:18px">
       <div class="panel-head">Endpoints</div>
       <table>
-        <thead><tr><th>URL</th><th>Purpose</th><th>Auth</th></tr></thead>
+        <thead><tr><th>URL</th><th>Purpose</th><th>Client auth required</th></tr></thead>
         <tbody>
-          <tr><td class="mono">https://api.coincync.network/rpc/testnet</td><td>Public testnet RPC. Cloudflare-fronted; nginx injects bearer.</td><td>None (auto-injected)</td></tr>
-          <tr><td class="mono">https://explorer.coincync.network/api/testnet</td><td>Same daemon, hosted from the explorer box.</td><td>None</td></tr>
+          <tr><td class="mono">https://api.coincync.network/rpc/testnet</td><td>Public testnet RPC. Cloudflare-fronted; nginx terminates bearer auth.</td><td>No (nginx adds bearer; coincync-node bearer-checks every request)</td></tr>
+          <tr><td class="mono">https://explorer.coincync.network/api/testnet</td><td>Same daemon, fronted by the explorer's nginx.</td><td>No (nginx adds bearer)</td></tr>
         </tbody>
       </table>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Security model &middot; what's exposed and why</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.7">
+        <strong style="color:var(--t)">"Client auth: No" does NOT mean "anyone can do anything to the node."</strong>
+        It means clients (browsers, mobile wallets, integrators) don't need to manage a bearer token — nginx adds it
+        for them on the way in. The bearer is required at the daemon layer; nginx is the only thing that knows the
+        token. The daemon rejects any request that arrives without it.
+        <ul style="margin:10px 0 0;padding-left:20px;font-size:12px;color:var(--t3);line-height:1.7">
+          <li><strong style="color:var(--t2)">Read methods</strong> (<code>get_info</code>, <code>get_block_range</code>,
+              <code>get_supply_info</code>, etc.) are intentionally public — the explorer, mobile wallets, and integrators
+              all rely on them. Same posture as <code>bitcoin-cli getblockchaininfo</code> over a public RPC.</li>
+          <li><strong style="color:var(--t2)">Write methods that mutate consensus state</strong> (<code>submit_block</code>,
+              <code>send_raw_transaction</code>) are public by design — that's how mining submissions and transaction
+              broadcasts work on any permissionless chain. Validity is enforced at consensus time, not at RPC admission.</li>
+          <li><strong style="color:var(--t2)">Administrative methods that would let anyone harm a node</strong>
+              (<code>stop_node</code>, <code>ban_peer</code>, <code>clear_mempool</code>, etc.) are <strong>not implemented</strong>
+              in coincync-node at all. There's no RPC surface that would let a third party reach into the daemon's
+              process or peer-management state.</li>
+        </ul>
+        <div style="margin-top:10px;font-size:11px;color:var(--t3)">
+          For full RPC access without any auth boundary (heavy integrators, dev work), run your own node and point at
+          <code>http://127.0.0.1:28081</code>. See <code>docs/DEVELOPER.md</code>.
+        </div>
+      </div>
     </div>
 
     <div class="panel" style="margin-bottom:18px">
