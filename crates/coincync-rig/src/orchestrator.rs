@@ -207,14 +207,28 @@ pub async fn run_solo(
                             .get("peer_count")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        // ALL three conditions must hold. Empty mesh
-                        // with synced=true is the false-positive case
-                        // from 2026-06-28 — don't trust it.
-                        let ok = is_synced && tip_age < 300 && peers >= 3;
+                        // BOTH conditions must hold. Empty mesh with
+                        // synced=true is the false-positive case from
+                        // 2026-06-28 — don't trust it. peer_count >= 3
+                        // is the actual signal that catches the
+                        // fresh-restart-mid-IBD scenario (peers haven't
+                        // reconnected yet → peer_heights is empty →
+                        // best_known=local → is_synced=true even
+                        // though daemon is still catching up).
+                        //
+                        // We deliberately do NOT check tip_age here.
+                        // A high tip_age during normal operation just
+                        // means we're in a slow-block stretch (PoW
+                        // variance). Refusing to mine in that case
+                        // causes a deadlock: rigs won't mine because
+                        // chain is slow, chain stays slow because
+                        // rigs aren't mining. tip_age tracks SYMPTOM,
+                        // peer_count tracks CAUSE (mesh established
+                        // vs not). Use the cause.
+                        let _ = tip_age; // intentionally unused; see above
+                        let ok = is_synced && peers >= 3;
                         let reason = if !is_synced {
                             "is_synced=false".to_string()
-                        } else if tip_age >= 300 {
-                            format!("tip_age={}s (>=300s; chain stalled or local recovering)", tip_age)
                         } else if peers < 3 {
                             format!("peer_count={} (<3; mesh not established, possibly mid-restart)", peers)
                         } else {
