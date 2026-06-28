@@ -163,11 +163,30 @@ pub async fn run_solo(
         // his wallet showed rewards from mined blocks, but those
         // blocks never propagated to peers.
         //
+        // 2026-06-28 strengthening (Bug B fix): is_synced alone is
+        // insufficient when the daemon is recovering from a fresh
+        // restart. During UTXO rebuild + IBD catch-up, the daemon
+        // may briefly report is_synced=true based on a transient
+        // empty peer_heights map (best_known == local because no
+        // peer has reported a height yet). Rig then starts mining,
+        // finds a block, submits to daemon → daemon RPC is flaky
+        // mid-recovery → rig sees HTTP error and mislabels as
+        // "block rejected." Observed 2026-06-28 01:27 UTC after a
+        // watchdog-driven node restart.
+        //
+        // Three-part gate now:
+        //   - is_synced == true               (legacy check)
+        //   - tip_age_secs < 300              (chain producing recently,
+        //                                      not a stale single peer)
+        //   - peer_count >= 3                 (real mesh established,
+        //                                      not an empty-peers
+        //                                      false is_synced=true)
+        //
         // Cached for SYNC_CACHE_SECS to avoid hammering get_info when
         // unsynced state is persistent. Recheck rate of every 30s
         // means up to 30s of mining wasted after sync is achieved
         // (we'll re-check then proceed), which is negligible cost.
-        let synced_now = {
+        let (synced_now, gate_reason) = {
             let stale = match last_sync_check {
                 None => true,
                 Some(t) => t.elapsed() >= Duration::from_secs(SYNC_CACHE_SECS),
@@ -175,14 +194,35 @@ pub async fn run_solo(
             if stale {
                 match daemon.get_info().await {
                     Ok(info) => {
-                        let s = info
+                        let is_synced = info
                             .get("synced")
                             .and_then(|v| v.as_bool())
                             .or_else(|| info.get("is_synced").and_then(|v| v.as_bool()))
                             .unwrap_or(false);
-                        cached_synced = s;
+                        let tip_age = info
+                            .get("tip_age_secs")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(u64::MAX);
+                        let peers = info
+                            .get("peer_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        // ALL three conditions must hold. Empty mesh
+                        // with synced=true is the false-positive case
+                        // from 2026-06-28 — don't trust it.
+                        let ok = is_synced && tip_age < 300 && peers >= 3;
+                        let reason = if !is_synced {
+                            "is_synced=false".to_string()
+                        } else if tip_age >= 300 {
+                            format!("tip_age={}s (>=300s; chain stalled or local recovering)", tip_age)
+                        } else if peers < 3 {
+                            format!("peer_count={} (<3; mesh not established, possibly mid-restart)", peers)
+                        } else {
+                            "OK".to_string()
+                        };
+                        cached_synced = ok;
                         last_sync_check = Some(Instant::now());
-                        s
+                        (ok, reason)
                     }
                     Err(e) => {
                         // Daemon unreachable for get_info — assume unsynced
@@ -191,21 +231,23 @@ pub async fn run_solo(
                         // a daemon we can't talk to.
                         warn!(
                             error = %e,
-                            "orchestrator: sync-gate get_info failed, treating as unsynced"
+                            "orchestrator: sync-gate get_info failed, treating as unsynced \
+                             (daemon may be restarting or unreachable)"
                         );
                         cached_synced = false;
                         last_sync_check = Some(Instant::now());
-                        false
+                        (false, format!("get_info HTTP error: {}", e))
                     }
                 }
             } else {
-                cached_synced
+                (cached_synced, "(cached)".to_string())
             }
         };
         if !synced_now {
             warn!(
                 sleep_secs = SYNC_WAIT_SECS,
-                "orchestrator: local node is NOT synced — refusing to mine to avoid \
+                reason = %gate_reason,
+                "orchestrator: local node not ready to mine — refusing to mine to avoid \
                  producing blocks on a private fork. Will recheck after sleep."
             );
             tokio::time::sleep(Duration::from_secs(SYNC_WAIT_SECS)).await;
