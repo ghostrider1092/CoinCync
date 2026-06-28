@@ -158,11 +158,21 @@ server {
     # browser never sees the API key. Each box's UFW restricts source to
     # the explorer's IP only — Bearer + IP allowlist is two layers.
     # NODE_POLL_MS in the dashboard JS controls poll cadence (~12 s).
-    location = /health/seed1    { rewrite ^ / break; proxy_pass http://66.135.23.193:28081;  proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    # IPs updated 2026-06-27 to match current fleet (scripts/fleet-config.json).
+    # Previously hardcoded to destroyed hosts: seed1 was 66.135.23.193 (destroyed
+    # 2026-06-25), seed3 was 207.148.111.76 (destroyed 2026-06-18) — both 504'd
+    # for weeks. Also added randomx, randomx2, relay1, relay2 which didn't exist
+    # when this file was first written.
+    # api intentionally absent — that host runs nginx-only (no coincync-node)
+    # so health-probing it would always 504.
+    location = /health/seed1    { rewrite ^ / break; proxy_pass http://216.128.156.239:28081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
     location = /health/seed2    { rewrite ^ / break; proxy_pass http://140.82.57.168:28081;  proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
-    location = /health/seed3    { rewrite ^ / break; proxy_pass http://207.148.111.76:28081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/seed3    { rewrite ^ / break; proxy_pass http://45.32.251.6:28081;    proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
     location = /health/explorer { rewrite ^ / break; proxy_pass http://127.0.0.1:28081;      proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
-    location = /health/api      { rewrite ^ / break; proxy_pass http://95.179.165.225:28081; proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/randomx  { rewrite ^ / break; proxy_pass http://173.199.93.21:28081;  proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/randomx2 { rewrite ^ / break; proxy_pass http://45.32.79.234:28081;   proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/relay1   { rewrite ^ / break; proxy_pass http://208.85.17.18:28081;   proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
+    location = /health/relay2   { rewrite ^ / break; proxy_pass http://70.34.250.31:28081;   proxy_set_header Authorization "Bearer $coincync_rpc_key"; proxy_set_header Content-Type application/json; }
 
     # REST API proxy. The explorer's `rest()` helper calls
     # /api/v1/<network>/<path>; rewrite into the backend's /v1/<path>

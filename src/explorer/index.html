@@ -363,6 +363,7 @@ code{font-family:var(--mono);font-size:11px;background:var(--s2);padding:1px 5px
 .health-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 .health-dot.online{background:var(--verified);box-shadow:0 0 6px rgba(126,184,124,.4)}
 .health-dot.offline{background:var(--critical)}
+.health-dot.protected{background:var(--ac);box-shadow:0 0 4px rgba(212,160,89,.3)}
 .health-dot.checking{background:var(--ac2);animation:blink 1s infinite}
 .health-ip{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--t)}
 .health-role{font-size:11px;color:var(--t3);font-family:var(--mono);margin-top:2px}
@@ -2271,12 +2272,23 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 // _rpc: internal RPC endpoint for health queries. Never displayed to users.
 // proxy: nginx proxy path (production). _rpc: direct fallback (local dev / offline).
+// Fleet topology — kept in sync with scripts/fleet-config.json.
+// `loopbackRpc` flag: hosts that bind coincync-node RPC to 127.0.0.1
+// (per fleet-config.json rpc_bind) can't be probed directly from the
+// explorer box. The Health page shows them with an amber "Protected
+// (loopback-only)" badge — intentional, not a problem.
+// `apiNginxOnly` flag: api host runs nginx only (no coincync-node);
+// probing it would always 504. Shown for topology completeness only.
 const NODES=[
-  {id:'1a2b',label:'seed1',   loc:'New Jersey, USA',       role:'Seed (US-East)',      proxy:'/health/seed1',   _rpc:'http://66.135.23.193:28081'},
-  {id:'3c4d',label:'seed2',   loc:'Amsterdam, Netherlands',role:'Seed (Europe)',       proxy:'/health/seed2',   _rpc:'http://140.82.57.168:28081'},
-  {id:'5e6f',label:'seed3',   loc:'Tokyo, Japan',          role:'Seed (Asia-Pacific)', proxy:'/health/seed3',   _rpc:'http://207.148.111.76:28081'},
-  {id:'7a8b',label:'explorer',loc:'Dallas, USA',           role:'Explorer + Relay',    proxy:'/health/explorer',_rpc:'http://207.148.6.50:28081'},
-  {id:'9c0d',label:'api',     loc:'Frankfurt, Germany',    role:'Public API + Relay',  proxy:'/health/api',     _rpc:'http://95.179.165.225:28081'},
+  {id:'1a2b',label:'seed1',   loc:'Vultr · public bind',     role:'Seed · public RPC',         proxy:'/health/seed1',    _rpc:'http://216.128.156.239:28081'},
+  {id:'3c4d',label:'seed2',   loc:'Vultr',                   role:'Seed · public RPC',         proxy:'/health/seed2',    _rpc:'http://140.82.57.168:28081'},
+  {id:'5e6f',label:'seed3',   loc:'Vultr · loopback RPC',    role:'Seed · loopback-only',      proxy:'/health/seed3',    _rpc:'http://45.32.251.6:28081',    loopbackRpc:true},
+  {id:'7a8b',label:'explorer',loc:'Vultr · loopback RPC',    role:'Explorer · loopback-only',  proxy:'/health/explorer', _rpc:'http://127.0.0.1:28081'},
+  {id:'9c0d',label:'api',     loc:'Vultr · nginx-only',      role:'Public API · nginx gateway',proxy:'/health/api',      _rpc:'http://95.179.165.225:28081', apiNginxOnly:true},
+  {id:'rxa1',label:'randomx', loc:'Vultr · loopback RPC',    role:'Miner · loopback-only',     proxy:'/health/randomx',  _rpc:'http://173.199.93.21:28081',  loopbackRpc:true},
+  {id:'rxa2',label:'randomx2',loc:'Vultr · loopback RPC',    role:'Miner · loopback-only',     proxy:'/health/randomx2', _rpc:'http://45.32.79.234:28081',   loopbackRpc:true},
+  {id:'rly1',label:'relay1',  loc:'Vultr · loopback RPC',    role:'Relay · loopback-only',     proxy:'/health/relay1',   _rpc:'http://208.85.17.18:28081',   loopbackRpc:true},
+  {id:'rly2',label:'relay2',  loc:'Vultr · loopback RPC',    role:'Relay · loopback-only',     proxy:'/health/relay2',   _rpc:'http://70.34.250.31:28081',   loopbackRpc:true},
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
@@ -3156,11 +3168,22 @@ async function loadHealth(){
   if(!grid)return;
   grid.innerHTML='';
   let tableRows='';
-  const classifyProbeError = (err) => {
+  const classifyProbeError = (err, node) => {
     const code = err && err.httpStatus ? err.httpStatus : 0;
+    // Loopback-only or nginx-only hosts can't be probed directly from
+    // the explorer box — their RPC is by-design not reachable. Show
+    // an info-level badge so operators don't think it's an outage.
+    // Per scripts/fleet-config.json: rpc_bind=127.0.0.1 hosts are
+    // intentionally not externally probable.
+    if (node && (node.loopbackRpc || node.apiNginxOnly)) {
+      const detail = node.apiNginxOnly
+        ? 'host runs nginx-only (no coincync-node service)'
+        : 'rpc_bind=127.0.0.1 (loopback-only by design; see fleet-config.json)';
+      return {state:'protected',label:'Probe N/A · by design',detail};
+    }
     if (code === 401 || code === 403) return {state:'protected',label:'RPC Protected',detail:'auth required'};
     if (code === 404) return {state:'protected',label:'RPC Protected',detail:'route missing'};
-    if (code === 502 || code === 503 || code === 504) return {state:'protected',label:'RPC Protected',detail:'proxy upstream unavailable'};
+    if (code === 502 || code === 503 || code === 504) return {state:'offline',label:'Probe failed',detail:'proxy upstream unavailable (host should be reachable but isn\'t — investigate)'};
     if (String(err && err.message || '').includes('timeout')) return {state:'offline',label:'Unreachable',detail:'timeout'};
     if (code) return {state:'offline',label:'Unreachable',detail:'http '+code};
     return {state:'offline',label:'Unreachable',detail:'network error'};
@@ -3227,9 +3250,16 @@ async function loadHealth(){
         <div class="health-stat"><span class="health-key">Tip age</span><span class="health-val">${info.tip_age_secs||0}s</span></div>`;
       return {id:node.id,label:node.label,loc:node.loc,role:node.role,info,online:true,state:'online'};
     }else{
-      const dot=$('hd-'+nodeId);if(dot)dot.className='health-dot offline';
-      const cls=classifyProbeError(probeError);
-      const hs=$('hs-'+nodeId);if(hs)hs.innerHTML=`<div class="age" style="color:var(--critical)" title="${cls.detail}">${cls.label}</div>`;
+      const cls=classifyProbeError(probeError, node);
+      const dot=$('hd-'+nodeId);
+      if(dot){
+        // protected state (intentional, by-design) -> amber dot; offline
+        // (real outage) -> red. Differentiates "this is fine, just not
+        // probable" from "this host is broken."
+        dot.className = cls.state === 'protected' ? 'health-dot protected' : 'health-dot offline';
+      }
+      const labelColor = cls.state === 'protected' ? 'var(--ac)' : 'var(--critical)';
+      const hs=$('hs-'+nodeId);if(hs)hs.innerHTML=`<div class="age" style="color:${labelColor}" title="${cls.detail}">${cls.label}</div>`;
       return {id:node.id,label:node.label,loc:node.loc,role:node.role,info:null,online:false,state:cls.state,reason:cls.detail};
     }
   });
