@@ -3390,12 +3390,46 @@ async fn process_message(
                     return Ok(());
                 }
 
-                // Post-IBD: peer has blocks we don't. Update their height
-                // estimate to our_h+1 (lower bound — they're at least one
-                // block ahead). Body fetch follows below.
-                let our_h = chain.height();
-                let estimated_peer_height = our_h + 1;
-                sync.write().await.update_peer_height_for(peer_id, estimated_peer_height);
+                // Post-IBD: peer has blocks we don't. Fetch them directly
+                // via GetBlocks (below). We do NOT speculatively bump
+                // peer_heights[peer_id] here — the bump used to be:
+                //
+                //     update_peer_height_for(peer_id, our_h + 1)
+                //
+                // as a "lower bound" estimate. In practice that was a
+                // permanent latch: if the peer never delivered the
+                // announced block (stale orphan-fork remnant, peer with
+                // a phantom hash in its known set, etc.), peer_heights
+                // stayed at our_h+1 forever. best_known_height latched
+                // to our_h+1. is_synced() returned false. coincync-rig's
+                // sync gate flipped — "refusing to mine to avoid
+                // producing blocks on a private fork" — and the chain
+                // wedged until somebody restarted the offending peer.
+                // This was the production failure mode observed
+                // 2026-06-27 (multiple wedges, including one 42-min
+                // stall that required an emergency
+                // COINCYNC_RIG_SKIP_SYNC_CHECK=1 bypass to recover).
+                //
+                // The rc5 refresh_best_known fix (PR #125) made the
+                // peer-disconnect path self-clear correctly. But a
+                // STILL-CONNECTED peer with a latched bump kept
+                // best_known pinned regardless. The bump itself is
+                // the bug — remove it.
+                //
+                // Correct peer_height updates still happen via:
+                //   - Handshake (version.start_height) at node.rs:~3033
+                //   - Header sync (max_header_height) at node.rs:~3640
+                // Both of those use ACTUAL heights, not speculation.
+                // When we successfully receive and process the block
+                // requested below, refresh_best_known runs on
+                // on_block_processed (rc5 fix) and recomputes
+                // best_known from current peer_heights + local. No
+                // speculation needed.
+                //
+                // Bitcoin Core / Monero / zebrad all follow the same
+                // posture: speculative peer-height bumps on Inv are
+                // not done; height tracking is event-driven from
+                // confirmed messages only.
 
                 let mut needed = Vec::new();
                 for inv in &inv_msg.inventory {
