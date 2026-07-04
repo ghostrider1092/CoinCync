@@ -531,6 +531,117 @@ async fn health() -> Json<Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// GET /api/v1/health/live — liveness probe for Cloudflare LB / nginx / k8s.
+///
+/// Returns HTTP 200 iff the REST process is up. Does NOT check the RPC
+/// backend or the chain state. A wedged node whose async runtime is
+/// still scheduling this handler will still return 200 here — that's
+/// the point. Load balancers use liveness to decide whether to restart
+/// the container; they use readiness (below) to decide whether to route
+/// traffic.
+///
+/// Under 1KB response, no allocation of any RPC call.
+async fn health_live() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "live",
+            "version": env!("CARGO_PKG_VERSION"),
+        })),
+    )
+}
+
+/// GET /api/v1/health/ready — readiness probe for load-balancer routing.
+///
+/// Returns HTTP 200 iff the node is healthy enough to serve queries:
+///   - Backend RPC is reachable and answering (proves the jsonrpsee
+///     event loop isn't wedged — the silent-hang class that took down
+///     api.coincync.network for 41h on 2026-07-02)
+///   - Peer count is at least MIN_PEERS_FOR_READY (default 3 — matches
+///     the fleet minimum used elsewhere: sync-fleet-config.sh peer_count
+///     ≥ 3 gate, and feedback_no_bulk_rolling_restart's between-restart
+///     verification)
+///   - Chain tip age is under MAX_TIP_AGE_FOR_READY (default 600s, 10
+///     minutes — 5x the target block time so real chain silence is
+///     caught but transient block-arrival gaps aren't)
+///
+/// Returns HTTP 503 SERVICE UNAVAILABLE otherwise, with a JSON body
+/// naming which check failed. Cloudflare LB / nginx interprets 503 as
+/// "route around this host" and the fleet gains automatic failover.
+///
+/// The body always includes the observed peer_count and tip_age_secs
+/// so the LB dashboard shows the failing check without needing to
+/// parse status codes.
+async fn health_ready(State(st): State<RestState>) -> impl IntoResponse {
+    const MIN_PEERS_FOR_READY: u64 = 3;
+    const MAX_TIP_AGE_FOR_READY: u64 = 600;
+
+    // Round-trip a get_info call so we prove BOTH the REST layer AND
+    // the jsonrpsee backend are responsive. A wedged jsonrpsee event
+    // loop (the 2026-07-02 api-box failure mode) times out here.
+    let info = match jsonrpc_call(&st, "get_info", Value::Array(vec![])).await {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "not-ready",
+                    "reason": "backend RPC unreachable — jsonrpsee event loop may be wedged",
+                })),
+            );
+        }
+    };
+
+    let peer_count = info.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tip_age_secs = info
+        .get("tip_age_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(u64::MAX);
+    let is_synced = info.get("synced").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Peer floor: a node with 0-2 peers can't reliably serve fresh
+    // tip queries. LB should skip it until it recovers.
+    if peer_count < MIN_PEERS_FOR_READY {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not-ready",
+                "reason": format!("peer_count={} below floor {}", peer_count, MIN_PEERS_FOR_READY),
+                "peer_count": peer_count,
+                "tip_age_secs": tip_age_secs,
+                "synced": is_synced,
+            })),
+        );
+    }
+
+    // Tip staleness: if the chain hasn't moved in 10+ min this node
+    // is either partitioned or IBD-stuck. Don't route reads to it.
+    if tip_age_secs > MAX_TIP_AGE_FOR_READY {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not-ready",
+                "reason": format!("tip_age={}s exceeds ceiling {}s", tip_age_secs, MAX_TIP_AGE_FOR_READY),
+                "peer_count": peer_count,
+                "tip_age_secs": tip_age_secs,
+                "synced": is_synced,
+            })),
+        );
+    }
+
+    // All checks green.
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ready",
+            "peer_count": peer_count,
+            "tip_age_secs": tip_age_secs,
+            "synced": is_synced,
+            "height": info.get("height"),
+        })),
+    )
+}
+
 /// GET /api/v1/status — node status summary for the explorer header bar
 async fn get_status(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let info = jsonrpc_call(&st, "get_info", Value::Array(vec![])).await?;
@@ -1431,6 +1542,8 @@ pub async fn run_rest_api(
     let app = app
         // ─── Core ────────────────────────────────────────────
         .route("/api/v1/health", get(health))
+        .route("/api/v1/health/live", get(health_live))
+        .route("/api/v1/health/ready", get(health_ready))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/supply", get(get_supply))
         .route("/api/v1/supply/circulating", get(get_supply_circulating))
@@ -1528,6 +1641,8 @@ mod tests {
         };
         Router::new()
             .route("/api/v1/health", get(health))
+            .route("/api/v1/health/live", get(health_live))
+            .route("/api/v1/health/ready", get(health_ready))
             .with_state(state)
     }
 
@@ -1540,6 +1655,41 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_health_live_returns_200_regardless_of_backend() {
+        // Liveness only proves the REST process is up. It does NOT
+        // reach out to the jsonrpsee backend. Even with a bogus
+        // jsonrpc_addr (unreachable), /health/live must return 200
+        // because the point of liveness is to answer "is the process
+        // alive" for restart-if-dead deciders, not "is it functional"
+        // for route-around-if-broken deciders.
+        let app = make_test_router();
+        let req = Request::builder()
+            .uri("/api/v1/health/live")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_health_ready_returns_503_when_backend_unreachable() {
+        // Readiness DOES reach the jsonrpsee backend. In this test the
+        // backend at 127.0.0.1:19081 is not running, so the get_info
+        // call inside health_ready must time out / fail, and the
+        // handler must return 503. This is the exact signal a
+        // Cloudflare LB uses to route around a wedged host — the
+        // silent-hang class of failure that took api.coincync.network
+        // down for 41 hours on 2026-07-02.
+        let app = make_test_router();
+        let req = Request::builder()
+            .uri("/api/v1/health/ready")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

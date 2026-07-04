@@ -88,12 +88,23 @@ struct Cli {
     explorer: bool,
 
     /// Bind address for the REST + explorer server. Defaults to
-    /// `127.0.0.1:<rpc_port + 2>`. Only relevant when `--explorer`
-    /// is set OR when an external client wants the rest.rs surface.
-    /// Binding to a non-localhost address with `--explorer` set
-    /// triggers a security warning at startup but is permitted.
+    /// `127.0.0.1:<rpc_port + 2>`. Binding to a non-localhost address
+    /// with `--explorer` set triggers a security warning at startup
+    /// but is permitted.
     #[arg(long)]
     rest_bind: Option<String>,
+
+    /// Opt out of the REST layer entirely. By default the REST server
+    /// is spawned on 127.0.0.1:<rpc_port + 2> on every node so that a
+    /// load balancer (Cloudflare LB, nginx, HAProxy) fronting
+    /// api.coincync.network can health-check every fleet host and
+    /// route around a wedged one — closing the single-api-host SPOF
+    /// that caused the 41-hour public-RPC outage on 2026-07-02.
+    ///
+    /// Set this flag on resource-constrained hosts that don't need
+    /// the REST surface (e.g., miners running rig on the same box).
+    #[arg(long)]
+    rest_disable: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -261,6 +272,7 @@ async fn main() {
                 cli.p2p_bind,
                 cli.rpc_bind,
                 cli.rest_bind,
+                cli.rest_disable,
                 cli.addnode,
                 cli.no_peers,
                 cli.explorer,
@@ -465,6 +477,7 @@ async fn start_node(
     p2p_bind: Option<String>,
     rpc_bind: Option<String>,
     rest_bind: Option<String>,
+    rest_disable: bool,
     addnodes: Vec<String>,
     no_peers: bool,
     serve_explorer: bool,
@@ -974,20 +987,38 @@ async fn start_node(
     // skip it otherwise (the REST surface is otherwise opt-in via
     // --rest-bind). Spawned as a background task so the node's
     // ctrl-c shutdown loop below still runs.
-    let rest_listen: Option<std::net::SocketAddr> = rest_bind
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .or_else(|| {
-            if serve_explorer {
+    // Multi-host REST: default REST to bind on 127.0.0.1:<rpc+2> on
+    // EVERY node, not just those with --explorer or --rest-bind.
+    // Rationale: the REST surface exposes /api/v1/health, /health/live,
+    // /health/ready, /rpc allowlist and /api/v1/status. A load balancer
+    // (Cloudflare LB, nginx, HAProxy) fronting api.coincync.network can
+    // now health-check every fleet host and route around a wedged one
+    // — closing the SPOF where one broken api-role box takes down the
+    // entire public RPC surface (the 41-hour outage on 2026-07-02
+    // that motivated this change).
+    //
+    // Precedence:
+    //   1. --rest-disable wins (opt out — e.g. resource-constrained
+    //      miner boxes). Returns None → REST is not spawned.
+    //   2. Explicit --rest-bind wins over the default.
+    //   3. Otherwise default to 127.0.0.1:<rpc+2>.
+    //
+    // Loopback default means no exposure without an explicit nginx/LB
+    // wiring; ufw stays untouched by this change.
+    let rest_listen: Option<std::net::SocketAddr> = if rest_disable {
+        None
+    } else {
+        rest_bind
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
                 // Default to rpc_port + 2 so it doesn't collide with
                 // either the jsonrpsee server (rpc_port) or the
                 // conventional "explorer HTTP" slot at rpc_port + 1
                 // (which deploy/explorer/Caddyfile uses externally).
                 Some(([127, 0, 0, 1], rpc_listen.port().wrapping_add(2)).into())
-            } else {
-                None
-            }
-        });
+            })
+    };
 
     if let Some(addr) = rest_listen {
         info!("Starting REST API on {}{}",
