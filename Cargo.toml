@@ -35,6 +35,15 @@ path = "src/bin/wallet.rs"
 name = "update-critical-hashes"
 path = "src/bin/update_critical_hashes.rs"
 
+[[bin]]
+# Small operator CLI used by scripts/publish-peer-snapshot.sh to sign
+# peer-snapshot JSON with a raw Ed25519 seed. Output is the exact
+# 64-byte signature the consumer (src/network/peer_snapshot.rs)
+# expects to see on IPFS — no PEM envelope, no SSH wire format.
+# See the file header for the design rationale.
+name = "coincync-sign-snapshot"
+path = "src/bin/sign_snapshot.rs"
+
 [features]
 default = ["randomx"]
 testnet = ["randomx"]
