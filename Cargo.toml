@@ -117,6 +117,15 @@ async-trait = "0.1"
 rayon       = "1.8"
 crossbeam-channel = "0.5"
 flume       = "0.11"
+# SIGUSR1 handler used by `src/runtime_watchdog.rs` to arm an on-demand
+# diagnostic-snapshot request from an operator (`kill -USR1 <pid>`).
+# The registry sub-crate is what tokio's `signal::unix::signal` uses
+# internally, so registering a second handler here coexists cleanly —
+# multiple concurrent handlers per signal is the design goal of the
+# registry crate. We only ever call `low_level::register` in an
+# async-signal-safe closure that stores an AtomicBool; every other path
+# stays in `signal-hook`'s safe wrapper API.
+signal-hook = "0.3"
 
 # â”€â”€ JSON-RPC + HTTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 jsonrpsee  = { version = "0.24", features = ["server", "client", "macros"] }

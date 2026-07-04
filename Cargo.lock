@@ -1033,6 +1033,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sha3",
+ "signal-hook",
  "snow",
  "socket2 0.5.10",
  "strsim",
