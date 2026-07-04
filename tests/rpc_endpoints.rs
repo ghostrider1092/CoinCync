@@ -740,6 +740,16 @@ async fn rpc_public_bind_redacts_real_peer_fixture_fields() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_loopback_exposes_peer_fixture_fields_when_not_minimized() {
+    // Serialize with the other env-var-touching tests
+    // (rpc_loopback_env_override_forces_metadata_minimization sets
+    // COINCYNC_RPC_MINIMIZE_METADATA=1 under the same env_lock; without
+    // acquiring the lock here, cargo's default test parallelism can
+    // schedule us to observe the polluted env while that test runs).
+    // Defensively also remove the var so a prior test process
+    // (or a stray cleanup miss) can't force minimization on us.
+    let _guard = env_lock().lock().await;
+    std::env::remove_var("COINCYNC_RPC_MINIMIZE_METADATA");
+
     let config = RpcConfig {
         auth_enabled: false,
         api_key: None,

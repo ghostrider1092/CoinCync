@@ -88,7 +88,13 @@ jobs:
           echo "Committer date: $(git log -1 --format=%ct) ($(git log -1 --format=%ci))"
 
       - name: Build (run 1) via canonical Docker path
-        run: ./scripts/build-in-docker.sh --out "$PWD/out-run1"
+        # Explicit `bash` prefix: belt-and-suspenders even after
+        # `git update-index --chmod=+x` marks the script executable
+        # in the tree. If a future rewrite of the script accidentally
+        # loses the +x bit (Windows checkout without core.filemode,
+        # editor round-trip through a filesystem that doesn't preserve
+        # mode), this step still runs.
+        run: bash ./scripts/build-in-docker.sh --out "$PWD/out-run1"
 
       - name: Snapshot run-1 SHA256SUMS
         run: |
@@ -110,7 +116,8 @@ jobs:
         run: docker builder prune --filter "label=coincync-build" --force || true
 
       - name: Build (run 2) via canonical Docker path
-        run: ./scripts/build-in-docker.sh --out "$PWD/out-run2"
+        # Same `bash` prefix as run 1 above — see that step's comment.
+        run: bash ./scripts/build-in-docker.sh --out "$PWD/out-run2"
 
       - name: Compare run-1 vs run-2 SHA256SUMS
         run: |
