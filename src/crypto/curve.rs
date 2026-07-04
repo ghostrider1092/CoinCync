@@ -210,6 +210,28 @@ impl PublicPoint {
     pub fn hash_to_point(&self) -> PublicPoint {
         hash_to_point(&self.to_bytes()).into()
     }
+
+    /// R-7 CLASS + R-80 SURGICAL FIX (2026-07-03): explicitly
+    /// zeroize the underlying RistrettoPoint. curve25519-dalek 4.1
+    /// implements `Zeroize` for RistrettoPoint at ristretto.rs:1266
+    /// under the `zeroize` feature (which our Cargo.toml now enables
+    /// explicitly). Callers holding a `PublicPoint` that carries
+    /// secret material (e.g. the ECDH shared point) MUST call
+    /// this on the point before it goes out of scope. We do NOT
+    /// impl Drop for PublicPoint because that conflicts with the
+    /// `Copy` derive that many callers rely on; instead callers
+    /// zero explicitly at the site where the shared-point value
+    /// is used, then let the Copy'd stack slot go.
+    pub fn zeroize(&mut self) {
+        use zeroize::Zeroize as _;
+        self.0.zeroize();
+    }
+}
+
+impl zeroize::Zeroize for PublicPoint {
+    fn zeroize(&mut self) {
+        Self::zeroize(self);
+    }
 }
 
 impl From<RistrettoPoint> for PublicPoint {

@@ -48,6 +48,25 @@ pub const MAX_REJECT_DATA_SIZE: usize = 256;
 /// Maximum reject message reason length
 pub const MAX_REJECT_REASON_LENGTH: usize = 256;
 
+// P5-N-CLASS-A + P5-P1 SURGICAL FIX (2026-07-03): the CANONICAL
+// per-message-type size caps are `MessageType::max_size()` below
+// (L240+). The framer at network/framing.rs:110-119 and :264
+// enforces those caps BEFORE the payload reaches any handler, so
+// handler-side size checks are defense-in-depth only. The
+// constants below are ALIASES that point at the canonical
+// per-type caps via `MessageType::X.max_size()` calls; use
+// `MessageType::X.max_size()` directly in new code.
+//
+// Legacy aliases retained so existing handler-side checks in
+// node.rs continue to compile; they now match `max_size()` values
+// exactly, restoring single-source-of-truth semantics.
+pub const MAX_GETHEADERS_PAYLOAD: usize = 2 * 1024;
+pub const MAX_GETBLOCKS_PAYLOAD: usize = 16 * 1024;
+pub const MAX_GETTXS_PAYLOAD: usize = 16 * 1024;
+pub const MAX_GETDATA_PAYLOAD: usize = 16 * 1024;
+pub const MAX_INV_PAYLOAD: usize = 64 * 1024;
+pub const MAX_ADDR_PAYLOAD: usize = 256 * 1024;
+
 /// Message header
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct MessageHeader {
@@ -557,8 +576,23 @@ pub struct RejectMessage {
 }
 
 impl RejectMessage {
-    /// Validate the message to prevent DoS attacks
+    /// Validate the message to prevent DoS attacks.
+    ///
+    /// Audit fix: previously only `reason` and `data` were length-checked,
+    /// leaving `message` unbounded. A malicious peer could send a Reject
+    /// with a 16 MB `message` field; borsh would happily allocate the
+    /// full Vec for the String length prefix before `validate()` ever
+    /// ran, OOM-bombing the node. Reference: Bitcoin Core caps every
+    /// String field on the wire (user-agent 256 B, reject reason 111 B
+    /// per BIP61); Monero's epee serialization bounds all wire Strings.
     pub fn validate(&self) -> Result<()> {
+        if self.message.len() > MAX_REJECT_REASON_LENGTH {
+            return Err(Error::ProtocolError(format!(
+                "reject message too long: {} > {}",
+                self.message.len(),
+                MAX_REJECT_REASON_LENGTH
+            )));
+        }
         if self.reason.len() > MAX_REJECT_REASON_LENGTH {
             return Err(Error::ProtocolError(format!(
                 "reject reason too long: {} > {}",

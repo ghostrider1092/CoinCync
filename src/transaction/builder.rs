@@ -334,11 +334,20 @@ impl TransactionBuilder {
             let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
             let view_point = PublicPoint::from_bytes(*recipient.view_public.as_bytes())
                 .ok_or(Error::CryptoError("invalid recipient view public key for blinding derivation".into()))?;
-            let shared_point = view_point.mul(&tx_scalar);
-            let shared_secret = hash_domain(
-                b"COINCYNC_SHARED_v2",
-                &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
-            );
+            // P5-B1 SURGICAL FIX (2026-07-03): R-7 CLASS — zeroize
+            // both the shared-point buffer and the RistrettoPoint.
+            let mut shared_point = view_point.mul(&tx_scalar);
+            let mut shared_bytes = shared_point.to_bytes();
+            let mut ss_buf = Vec::with_capacity(32 + 1);
+            ss_buf.extend_from_slice(&shared_bytes);
+            ss_buf.push(output_index);
+            let shared_secret = hash_domain(b"COINCYNC_SHARED_v2", &ss_buf);
+            {
+                use zeroize::Zeroize;
+                ss_buf.zeroize();
+                shared_bytes.zeroize();
+                shared_point.zeroize();
+            }
             let blinding_hash = hash_domain(b"COINCYNC_BLINDING", shared_secret.as_bytes());
             BlindingFactor::from_bytes(*blinding_hash.as_bytes())
         };
@@ -546,7 +555,13 @@ impl TransactionBuilder {
         let blindings: Vec<BlindingFactor> = self.outputs.iter().map(|o| o.blinding.clone()).collect();
         let range_proof = create_aggregated_range_proof_for_height(&amounts, &blindings, rng, self.target_height)?;
 
-        let range_proof_bytes = range_proof.to_bytes();
+        // R-6 SURGICAL FIX (2026-07-03): use try_to_bytes so a borsh
+        // serialization failure propagates as a real error rather
+        // than panicking the whole tx-builder.
+        let range_proof_bytes = range_proof.try_to_bytes()
+            .map_err(|e| crate::error::Error::CryptoError(format!(
+                "R-6: RangeProof serialization failed: {}", e
+            )))?;
 
         // Generate pseudo-output blinding factors for privacy
         // Each input gets a different pseudo-output blinding (r'_i), so that
@@ -705,13 +720,21 @@ fn encrypt_amount(
         Some(p) => p,
         None => return vec![0u8; 8],
     };
-    let shared_point = view_point.mul(&tx_scalar);
+    let mut shared_point = view_point.mul(&tx_scalar);
 
-    // Derive shared secret (same as scanner.rs compute_shared_secret)
-    let shared_secret = hash_domain(
-        b"COINCYNC_SHARED_v2",
-        &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
-    );
+    // Derive shared secret (same as scanner.rs compute_shared_secret).
+    // P5-B1: R-7 CLASS zeroize.
+    let mut shared_bytes = shared_point.to_bytes();
+    let mut buf = Vec::with_capacity(32 + 1);
+    buf.extend_from_slice(&shared_bytes);
+    buf.push(output_index);
+    let shared_secret = hash_domain(b"COINCYNC_SHARED_v2", &buf);
+    {
+        use zeroize::Zeroize;
+        buf.zeroize();
+        shared_bytes.zeroize();
+        shared_point.zeroize();
+    }
 
     // Derive amount key (same as scanner.rs decrypt_amount)
     let amount_key = hash_domain(b"COINCYNC_AMOUNT_KEY", shared_secret.as_bytes());
@@ -738,11 +761,22 @@ fn compute_view_tag(
         Some(p) => p,
         None => return 0,
     };
-    let shared_point = view_point.mul(&tx_scalar);
+    let mut shared_point = view_point.mul(&tx_scalar);
 
-    let tag_input = [shared_point.to_bytes().as_slice(), &[output_index]].concat();
+    // P5-B1: R-7 CLASS zeroize.
+    let mut shared_bytes = shared_point.to_bytes();
+    let mut tag_input = Vec::with_capacity(32 + 1);
+    tag_input.extend_from_slice(&shared_bytes);
+    tag_input.push(output_index);
     let tag_hash = hash_domain(b"COINCYNC_VIEWTAG_v2", &tag_input);
-    tag_hash.as_bytes()[0]
+    let tag = tag_hash.as_bytes()[0];
+    {
+        use zeroize::Zeroize;
+        tag_input.zeroize();
+        shared_bytes.zeroize();
+        shared_point.zeroize();
+    }
+    tag
 }
 
 /// Decrypt amount using view secret key and ECDH
@@ -760,13 +794,21 @@ pub fn decrypt_amount(
 
     let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
     let tx_point = PublicPoint::from_bytes(*tx_public.as_bytes())?;
-    let shared_point = tx_point.mul(&view_scalar);
+    let mut shared_point = tx_point.mul(&view_scalar);
 
-    // Same derivation chain as encrypt_amount and scanner.rs
-    let shared_secret = hash_domain(
-        b"COINCYNC_SHARED_v2",
-        &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
-    );
+    // Same derivation chain as encrypt_amount and scanner.rs.
+    // P5-B1: R-7 CLASS zeroize.
+    let mut shared_bytes = shared_point.to_bytes();
+    let mut buf = Vec::with_capacity(32 + 1);
+    buf.extend_from_slice(&shared_bytes);
+    buf.push(output_index);
+    let shared_secret = hash_domain(b"COINCYNC_SHARED_v2", &buf);
+    {
+        use zeroize::Zeroize;
+        buf.zeroize();
+        shared_bytes.zeroize();
+        shared_point.zeroize();
+    }
     let amount_key = hash_domain(b"COINCYNC_AMOUNT_KEY", shared_secret.as_bytes());
 
     let mut amount_bytes = [0u8; 8];

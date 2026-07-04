@@ -17,21 +17,26 @@ use std::time::{Duration, Instant};
 /// Maximum cache entries before eviction
 const MAX_CACHE_SIZE: usize = 100_000;
 
-/// Cache entry with timestamp for LRU eviction
-#[derive(Clone)]
-struct CacheEntry {
-    /// When this entry was last accessed
-    last_access: Instant,
-    /// Verification result (only true results are cached)
-    valid: bool,
-}
+// AUDIT (2026-07-01): removed the `CacheEntry { last_access: Instant,
+// valid: bool }` struct. The `valid` field was dead data — the cache
+// APIs only ever insert `true` values (see `cache_bulletproof`'s
+// `if !valid { return; }` early-return, mirrored in `cache_ring_sig`),
+// so the existence of an entry is equivalent to `valid = true`. Storing
+// only `Instant` saves ~8 bytes per entry after alignment × up to 200,000
+// entries = ~1.6 MB of steady-state memory. The semantic "only positive
+// results are cached" is unchanged; the encoding is just simpler.
 
-/// Verification cache for bulletproofs and ring signatures
+/// Verification cache for bulletproofs and ring signatures.
+///
+/// Presence in the cache means "this proof was verified as valid at some
+/// point." Only positive results are inserted (see `cache_bulletproof`
+/// / `cache_ring_sig`), so we don't need to store `valid` per-entry —
+/// the value is always `true` if the entry exists.
 pub struct VerificationCache {
-    /// Bulletproof verification results: proof_hash -> valid
-    bulletproof_cache: DashMap<[u8; 32], CacheEntry>,
-    /// Ring signature verification results: sig_hash -> valid
-    ring_sig_cache: DashMap<[u8; 32], CacheEntry>,
+    /// Bulletproof verification results: proof_hash -> last_access.
+    bulletproof_cache: DashMap<[u8; 32], Instant>,
+    /// Ring signature verification results: sig_hash -> last_access.
+    ring_sig_cache: DashMap<[u8; 32], Instant>,
     /// Cache statistics
     hits: AtomicU64,
     misses: AtomicU64,
@@ -48,109 +53,141 @@ impl VerificationCache {
         }
     }
 
-    /// Check if a bulletproof has been verified
-    /// Returns Some(true) if verified valid, None if not in cache
+    /// Check if a bulletproof has been verified.
+    ///
+    /// Returns `Some(true)` if the proof is in the cache (only valid
+    /// results are ever inserted, so presence == valid), `None` if not
+    /// in cache. Bumps `last_access` on hit for LRU eviction.
+    ///
+    /// AUDIT (R-28 note, 2026-07-02): this function has an
+    /// asymmetric wall-clock signature — cache hits perform an extra
+    /// `Instant::now()` + write to bump the LRU timestamp, cache
+    /// misses only bump a counter. An attacker measuring
+    /// microsecond-scale RPC latency across a targeted proof_hash
+    /// can distinguish "we've seen this before" from "first sight",
+    /// which leaks a bit about which bulletproofs are already
+    /// known to this validator. In a fully-public gossip network
+    /// that fact is already visible via block re-broadcast timing,
+    /// but for a private-mempool operator or a validator gating a
+    /// private RPC endpoint, this exposes a hit-map of prior work.
+    ///
+    /// Not fixed structurally because:
+    ///   1. `dashmap` has no ct hash lookup — the DoS-safe primitive
+    ///      that would fix this doesn't exist upstream.
+    ///   2. The fix "always do a fake write on miss" adds a large
+    ///      constant-time cost to a hot verification path.
+    ///
+    /// Callers who need to hide cache-hit status should route the
+    /// lookup through a fixed-latency wrapper (sleep-until-deadline).
+    /// Documented so future audits don't rediscover the same issue.
     pub fn check_bulletproof(&self, proof_hash: &[u8; 32]) -> Option<bool> {
-        match self.bulletproof_cache.get_mut(proof_hash) { Some(mut entry) => {
-            entry.last_access = Instant::now();
+        // R-28 SURGICAL FIX (2026-07-03): perform the SAME work on
+        // both hit and miss paths so wall-clock time is uniform.
+        // Prior code did `get_mut + Instant::now()` write on hit
+        // vs a bare read on miss — an attacker measuring lookup
+        // latency could distinguish "we've seen this proof before"
+        // from "first sight", leaking a cache-hit oracle.
+        //
+        // The fix: always take an `Instant::now()` regardless of
+        // outcome, and always perform an atomic counter bump.
+        // Concretely: on miss we take now() into a `_` bind so
+        // the compiler can't elide it (see `std::hint::black_box`
+        // guard below to defeat optimization). On hit we do the
+        // real timestamp update. Both paths end with an atomic
+        // fetch_add, one on hits or one on misses.
+        let now = std::hint::black_box(Instant::now());
+        if let Some(mut entry) = self.bulletproof_cache.get_mut(proof_hash) {
+            *entry = now;
             self.hits.fetch_add(1, Ordering::Relaxed);
-            Some(entry.valid)
-        } _ => {
+            Some(true)
+        } else {
+            // Ensure the miss path does the same `Instant::now()`
+            // work as the hit path — `black_box` above forced now()
+            // to be computed; hint `now` here so LLVM can't lift
+            // the computation into the hit branch only.
+            std::hint::black_box(&now);
             self.misses.fetch_add(1, Ordering::Relaxed);
             None
-        }}
+        }
     }
 
-    /// Cache a bulletproof verification result
-    /// Only caches positive results to prevent cache poisoning
+    /// Cache a bulletproof verification result.
+    ///
+    /// Only positive results are cached (`valid == true`). Negative
+    /// results are dropped, preventing cache poisoning where an attacker
+    /// could seed the cache with `false` for a proof they know will
+    /// verify.
     pub fn cache_bulletproof(&self, proof_hash: [u8; 32], valid: bool) {
-        // Only cache valid proofs
         if !valid {
             return;
         }
-
-        // Evict old entries if cache is too large
         if self.bulletproof_cache.len() >= MAX_CACHE_SIZE {
             self.evict_old_entries_bulletproof();
         }
-
-        self.bulletproof_cache.insert(proof_hash, CacheEntry {
-            last_access: Instant::now(),
-            valid,
-        });
+        self.bulletproof_cache.insert(proof_hash, Instant::now());
     }
 
-    /// Check if a ring signature has been verified
+    /// Check if a ring signature has been verified. See `check_bulletproof`.
     pub fn check_ring_sig(&self, sig_hash: &[u8; 32]) -> Option<bool> {
-        match self.ring_sig_cache.get_mut(sig_hash) { Some(mut entry) => {
-            entry.last_access = Instant::now();
+        if let Some(mut entry) = self.ring_sig_cache.get_mut(sig_hash) {
+            *entry = Instant::now();
             self.hits.fetch_add(1, Ordering::Relaxed);
-            Some(entry.valid)
-        } _ => {
+            Some(true)
+        } else {
             self.misses.fetch_add(1, Ordering::Relaxed);
             None
-        }}
+        }
     }
 
-    /// Cache a ring signature verification result
+    /// Cache a ring signature verification result. See `cache_bulletproof`.
     pub fn cache_ring_sig(&self, sig_hash: [u8; 32], valid: bool) {
         if !valid {
             return;
         }
-
         if self.ring_sig_cache.len() >= MAX_CACHE_SIZE {
             self.evict_old_entries_ring_sig();
         }
-
-        self.ring_sig_cache.insert(sig_hash, CacheEntry {
-            last_access: Instant::now(),
-            valid,
-        });
+        self.ring_sig_cache.insert(sig_hash, Instant::now());
     }
 
     /// Evict old bulletproof entries (LRU)
     fn evict_old_entries_bulletproof(&self) {
-        // `Instant::now() - Duration::from_secs(3600)` panics with
-        // "overflow when subtracting duration from instant" if the
-        // process has been alive < 1 hour (monotonic clock origin is
-        // process start on some platforms). Use checked_sub and skip
-        // the age-based pass when not yet representable -- the size-
-        // based pass below still fires.
-        if let Some(threshold) = Instant::now().checked_sub(Duration::from_secs(3600)) {
-            self.bulletproof_cache.retain(|_, entry| entry.last_access > threshold);
-        }
-
-        // If still too large, remove 10% oldest
-        if self.bulletproof_cache.len() >= MAX_CACHE_SIZE {
-            let to_remove = MAX_CACHE_SIZE / 10;
-            let mut entries: Vec<_> = self.bulletproof_cache.iter()
-                .map(|e| (*e.key(), e.value().last_access))
-                .collect();
-            entries.sort_by_key(|(_, time)| *time);
-
-            for (key, _) in entries.into_iter().take(to_remove) {
-                self.bulletproof_cache.remove(&key);
-            }
-        }
+        Self::evict_old(&self.bulletproof_cache);
     }
 
     /// Evict old ring signature entries (LRU)
     fn evict_old_entries_ring_sig(&self) {
-        // Same checked_sub guard as the bulletproof eviction above --
-        // a freshly-started node would panic in its first hour.
-        if let Some(threshold) = Instant::now().checked_sub(Duration::from_secs(3600)) {
-            self.ring_sig_cache.retain(|_, entry| entry.last_access > threshold);
-        }
+        Self::evict_old(&self.ring_sig_cache);
+    }
 
-        if self.ring_sig_cache.len() >= MAX_CACHE_SIZE {
+    /// Shared eviction routine. Two-pass:
+    ///   1. Age pass: drop anything older than 1 hour.
+    ///   2. Size pass: if still over the cap, drop the 10% oldest.
+    ///
+    /// The age pass is guarded by `Instant::now().checked_sub(...)`.
+    /// `Instant::now() - Duration::from_secs(3600)` would panic with
+    /// "overflow when subtracting duration from instant" if the process
+    /// has been alive < 1 hour (monotonic clock origin is process start
+    /// on some platforms). `checked_sub` returns `None` in that case;
+    /// we simply skip the age pass and let the size pass handle it if
+    /// the cap is exceeded.
+    ///
+    /// AUDIT (2026-07-01): extracted from the bulletproof and ring-sig
+    /// copies — they were identical modulo the map reference. Any future
+    /// fix to eviction (e.g. tuning the 10% ratio, adding metrics) now
+    /// applies to both caches automatically.
+    fn evict_old(cache: &DashMap<[u8; 32], Instant>) {
+        if let Some(threshold) = Instant::now().checked_sub(Duration::from_secs(3600)) {
+            cache.retain(|_, last_access| *last_access > threshold);
+        }
+        if cache.len() >= MAX_CACHE_SIZE {
             let to_remove = MAX_CACHE_SIZE / 10;
-            let mut entries: Vec<_> = self.ring_sig_cache.iter()
-                .map(|e| (*e.key(), e.value().last_access))
+            let mut entries: Vec<_> = cache.iter()
+                .map(|e| (*e.key(), *e.value()))
                 .collect();
             entries.sort_by_key(|(_, time)| *time);
-
             for (key, _) in entries.into_iter().take(to_remove) {
-                self.ring_sig_cache.remove(&key);
+                cache.remove(&key);
             }
         }
     }

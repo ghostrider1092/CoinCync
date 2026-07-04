@@ -24,10 +24,56 @@ impl SupplyState {
         self.total_minted.saturating_sub(self.total_burned)
     }
 
+    /// Apply a block's emission and burn.
+    ///
+    /// AUDIT (R-32 fix site 1/3, 2026-07-02): saturating arithmetic
+    /// on supply totals is a silent-catastrophe risk — if either
+    /// total_minted or total_burned saturates at u64::MAX, subsequent
+    /// blocks become invisible to the audit chain. At CoinCync's
+    /// max emission per block, saturation would take
+    /// (u64::MAX / max_block_emission) blocks ≈ billions of years,
+    /// so the reachability is via bug / attack rather than natural
+    /// growth. We now detect a would-saturate condition via
+    /// `checked_add` first and emit a LOUD ERROR log if it fires.
+    /// The state is left at the saturation value (the same as
+    /// before) so the caller doesn't crash; but ops can now see the
+    /// event in structured logs and page immediately.
     pub fn apply_block(&mut self, emission: u64, burned: u64, height: u64) {
         self.height = height;
-        self.total_minted = self.total_minted.saturating_add(emission);
-        self.total_burned = self.total_burned.saturating_add(burned);
+        match self.total_minted.checked_add(emission) {
+            Some(v) => self.total_minted = v,
+            None => {
+                tracing::error!(
+                    target: "audit_supply",
+                    event = "total_minted_saturated",
+                    total_minted = self.total_minted,
+                    emission = emission,
+                    height = height,
+                    "SUPPLY AUDIT: total_minted would overflow u64 at height {} \
+                     (current {}, +emission {}). Clamping at u64::MAX; every future \
+                     emission from this height forward will silently vanish from the \
+                     audit. This is either a chain bug or an attack — investigate NOW.",
+                    height, self.total_minted, emission,
+                );
+                self.total_minted = u64::MAX;
+            }
+        }
+        match self.total_burned.checked_add(burned) {
+            Some(v) => self.total_burned = v,
+            None => {
+                tracing::error!(
+                    target: "audit_supply",
+                    event = "total_burned_saturated",
+                    total_burned = self.total_burned,
+                    burned = burned,
+                    height = height,
+                    "SUPPLY AUDIT: total_burned would overflow u64 at height {} \
+                     (current {}, +burned {}). Clamping at u64::MAX.",
+                    height, self.total_burned, burned,
+                );
+                self.total_burned = u64::MAX;
+            }
+        }
         self.update_commitment();
     }
 
@@ -77,7 +123,18 @@ pub fn audit_block(
     if !fee_distribution_valid { issues.push("Fee distribution invalid".into()); }
 
     let burn_pct = if congested { FEE_BURN_CONGESTED_PERCENT } else { FEE_BURN_NORMAL_PERCENT };
-    let approximate_burn = total_fees.as_atomic() * burn_pct / 100;
+    // R-32 site 2/3: use u128 intermediate to keep `total_fees * burn_pct`
+    // representable up to u64::MAX * 100; then narrow back. `burn_pct` is
+    // 0..=100 by construction of the constant, so the u128 result is
+    // <= total_fees.as_atomic() and always fits in u64.
+    let approximate_burn = ((total_fees.as_atomic() as u128) * (burn_pct as u128) / 100) as u64;
+    // R-32 site 2/3 (continued): saturating arithmetic on the expected
+    // circulating supply matches SupplyState's saturating semantics —
+    // if the underlying arithmetic saturates in apply_block, the audit
+    // math here must match, otherwise supply_valid would false-flag.
+    // The `apply_block` fix emits a loud log on saturation; the audit
+    // path here inherits that visibility because a supply mismatch at
+    // saturation triggers the "Supply mismatch" issue below.
     let expected_circulating = supply_before.circulating()
         .saturating_add(emission.as_atomic())
         .saturating_sub(approximate_burn);
@@ -106,6 +163,16 @@ impl SupplyProof {
     }
 
     pub fn verify(&self) -> bool {
+        // AUDIT (2026-07-01): `circulating` is not covered by `proof_hash`
+        // (only height, total_minted, total_burned are). Without this
+        // invariant check, an attacker could hand out a proof whose
+        // `circulating` field is arbitrary while the hash still verifies,
+        // and any consumer that reads `.circulating` directly would trust
+        // it. Enforce the derivation here so `verify() == true` implies
+        // `circulating == total_minted - total_burned`.
+        if self.circulating != self.total_minted.saturating_sub(self.total_burned) {
+            return false;
+        }
         let expected = hash_domain(b"supply_proof",
             &[self.height.to_le_bytes().as_slice(), self.total_minted.to_le_bytes().as_slice(), self.total_burned.to_le_bytes().as_slice()].concat());
         self.proof_hash == expected
@@ -140,10 +207,33 @@ pub type SupplyAuditProof = SupplyProof;
 pub struct BlockSupplyDelta { pub height: u64, pub emission: u64, pub burned: u64, pub net_change: i64 }
 
 impl BlockSupplyDelta {
+    /// AUDIT (R-32 site 3/3, 2026-07-02): `net_change` uses i128
+    /// intermediate + clamp to i64 because a single block's
+    /// (emission - burned) always fits well within i64 for any
+    /// realistic block, but a corrupt/adversarial input could
+    /// exercise the clamp. The clamp is CORRECT (matches the
+    /// `saturating` semantics of `apply_block`), but a silent clamp
+    /// hides the underlying corruption. Log an error on clamp so
+    /// ops see the event.
     pub fn new(height: u64, emission: Amount, burned: Amount) -> Self {
+        let net_i128 = (emission.as_atomic() as i128) - (burned.as_atomic() as i128);
+        let clamped = net_i128.clamp(i64::MIN as i128, i64::MAX as i128);
+        if clamped != net_i128 {
+            tracing::error!(
+                target: "audit_supply",
+                event = "net_change_clamped",
+                emission = emission.as_atomic(),
+                burned = burned.as_atomic(),
+                height = height,
+                "SUPPLY AUDIT: net_change ({}) clamped to fit i64 at height {}. \
+                 A single block's emission-burn should never approach i64 range; \
+                 this indicates upstream input corruption.",
+                net_i128, height,
+            );
+        }
         BlockSupplyDelta {
             height, emission: emission.as_atomic(), burned: burned.as_atomic(),
-            net_change: ((emission.as_atomic() as i128) - (burned.as_atomic() as i128)).clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+            net_change: clamped as i64,
         }
     }
 }
@@ -186,5 +276,20 @@ mod tests {
         assert!(proof.verify());
         proof.total_minted += 1;
         assert!(!proof.verify());
+    }
+
+    #[test]
+    fn test_supply_proof_circulating_tamper_rejected() {
+        // AUDIT (2026-07-01): regression for the soundness gap where
+        // `circulating` was inside SupplyProof but not covered by the hash.
+        // Verify() must reject a proof whose `circulating` field disagrees
+        // with total_minted - total_burned, even though proof_hash is valid.
+        let mut state = SupplyState::genesis();
+        state.apply_block(1_000_000, 50_000, 5);
+        let mut proof = SupplyProof::from_state(&state);
+        assert!(proof.verify(), "clean proof should verify");
+        // Tamper only the derived field. The hash is untouched.
+        proof.circulating = proof.circulating.saturating_add(1);
+        assert!(!proof.verify(), "verify() must reject inconsistent circulating");
     }
 }

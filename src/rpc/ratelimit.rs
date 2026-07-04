@@ -157,23 +157,41 @@ impl RateLimiter {
         // SECURITY: Enforce max tracked IPs with LRU eviction
         // Only evict inactive entries to prevent attackers from flushing
         // active rate-limit state by connecting from many IPs.
+        //
+        // P7-Rl1 SURGICAL FIX (2026-07-03): PermanentlyBlocked entries
+        // (ban_count >= max_bans) are now ALSO preserved during
+        // eviction. Prior code only preserved entries with an active
+        // ban timer OR recent requests — so a PermanentlyBlocked IP
+        // whose ban timer had lapsed and had no recent activity got
+        // evicted, and the next connection from that IP started
+        // fresh with ban_count = 0. This made "permanent" a lie.
+        // Real permanent blocks now survive eviction. Space cost:
+        // small — the caller has a bounded set of persistent
+        // offenders. A future extension can migrate these to
+        // disk-backed storage for restart persistence.
         if !state.contains_key(&ip) && state.len() >= self.config.max_tracked_ips {
             let window_start = now - self.config.window;
+            let max_bans = self.config.max_bans;
 
-            // First pass: bulk-remove expired inactive entries
+            // First pass: bulk-remove expired inactive entries.
+            // Preserve: active ban timer, recent activity, OR
+            // permanent-block state.
             state.retain(|_, s| {
                 let ban_active = s.banned_until.map(|t| now < t).unwrap_or(false);
                 let has_recent = s.requests.iter().any(|&t| t > window_start);
-                ban_active || has_recent
+                let permanent_block = s.ban_count >= max_bans;
+                ban_active || has_recent || permanent_block
             });
 
             // If still at capacity, evict the single oldest inactive entry
+            // (still skipping permanent blocks).
             if state.len() >= self.config.max_tracked_ips {
                 let oldest_inactive = state.iter()
                     .filter(|(_, s)| {
                         let ban_expired = s.banned_until.map(|t| now >= t).unwrap_or(true);
                         let no_recent = !s.requests.iter().any(|&t| t > window_start);
-                        ban_expired && no_recent
+                        let not_permanent = s.ban_count < max_bans;
+                        ban_expired && no_recent && not_permanent
                     })
                     .min_by_key(|(_, s)| s.last_seen)
                     .map(|(ip, _)| *ip);
@@ -266,16 +284,22 @@ impl RateLimiter {
         // untrack previously-banned IPs. Now matches check()'s safe logic.
         if state.len() > self.config.max_tracked_ips {
             let window_start = now - self.config.window;
-            // First pass: bulk-remove entries that are expired AND inactive
+            let max_bans = self.config.max_bans;
+            // P7-Rl1: parallel fix to check() above — preserve
+            // PermanentlyBlocked entries during eviction.
             state.retain(|_, s| {
                 let is_banned = s.banned_until.map_or(false, |b| now < b);
                 let is_active = s.last_seen > window_start;
-                is_banned || is_active
+                let permanent_block = s.ban_count >= max_bans;
+                is_banned || is_active || permanent_block
             });
-            // If still over capacity, evict the single oldest non-banned entry
             if state.len() > self.config.max_tracked_ips {
                 let oldest = state.iter()
-                    .filter(|(_, s)| s.banned_until.map_or(true, |b| now >= b))
+                    .filter(|(_, s)| {
+                        let ban_expired = s.banned_until.map_or(true, |b| now >= b);
+                        let not_permanent = s.ban_count < max_bans;
+                        ban_expired && not_permanent
+                    })
                     .min_by_key(|(_, s)| s.last_seen)
                     .map(|(ip, _)| *ip);
                 if let Some(ip) = oldest {

@@ -46,7 +46,7 @@ pub fn prompt_confirm(prompt: &str, default: bool) -> PromptResult<bool> {
 }
 
 /// Select from a list of options
-pub fn prompt_select<T: ToString>(prompt: &str, options: &[T]) -> PromptResult<usize> {
+pub fn prompt_select<T: ToString + std::fmt::Display>(prompt: &str, options: &[T]) -> PromptResult<usize> {
     Select::with_theme(&ColorfulTheme::default())
         .with_prompt(prompt)
         .items(options)

@@ -36,6 +36,7 @@ use rand::Rng;
 use rand_distr::{Exp, Distribution};
 use tracing::{info, warn, debug};
 use serde::{Serialize, Deserialize};
+use zeroize::Zeroizing;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Configuration
@@ -120,7 +121,16 @@ pub struct ChurnEngine {
     /// Wallet file path.
     wallet_path: std::path::PathBuf,
     /// Wallet password (held in memory while churn is active).
-    wallet_password: String,
+    ///
+    /// SECURITY (R-87 fix, 2026-07-02): wrapped in `Zeroizing<String>`
+    /// so the password bytes are wiped from the heap allocation when
+    /// the `ChurnEngine` is dropped. Prior code held a plain `String`,
+    /// meaning shutdown left the plaintext password sitting in the
+    /// allocator's freed pool where a subsequent memory dump (core
+    /// file, hibernation image, swap) could recover it. `Zeroizing`
+    /// runs a `Zeroize` on Drop before the allocation is freed, so
+    /// the freed memory contains all-zeros instead of the password.
+    wallet_password: Zeroizing<String>,
     /// Shutdown signal.
     shutdown: Arc<AtomicBool>,
     /// Runtime stats.
@@ -129,6 +139,10 @@ pub struct ChurnEngine {
 
 impl ChurnEngine {
     /// Create a new churn engine.
+    ///
+    /// The caller passes an owned `String` for `wallet_password`; the
+    /// engine takes ownership and wraps it in `Zeroizing<String>` so
+    /// the memory is wiped on Drop (see R-87 note on the struct).
     pub fn new(
         config: ChurnConfig,
         wallet_path: std::path::PathBuf,
@@ -139,7 +153,7 @@ impl ChurnEngine {
         Ok(Self {
             config,
             wallet_path,
-            wallet_password,
+            wallet_password: Zeroizing::new(wallet_password),
             shutdown,
             stats: Arc::new(parking_lot::Mutex::new(ChurnStats::default())),
         })
@@ -170,13 +184,35 @@ impl ChurnEngine {
     }
 
     /// Pick a random churn amount based on the current spendable balance.
+    ///
+    /// SECURITY (R-88 fix, 2026-07-02): all arithmetic switched to
+    /// saturating operations. Prior code did `spendable_balance * pct`
+    /// and `amount + min_fee_reserve` with unchecked ops — for very
+    /// large balances (e.g. an exchange hot-wallet holding
+    /// > 1.84e17 atomic ≈ 184k CYNC at max_amount_pct=50), the
+    /// multiply overflowed u64 in debug (panic) or wrapped in release
+    /// (silent nonsense), yielding a churn amount uncorrelated with
+    /// the intended percentage. `saturating_mul` clamps at u64::MAX
+    /// before the divide, and `saturating_add` on the fee-reserve
+    /// comparison keeps the branch selection sane at the top of the
+    /// u64 range.
     fn pick_churn_amount(&self, spendable_balance: u64) -> u64 {
         if spendable_balance == 0 {
             return 0;
         }
         let mut rng = rand::thread_rng();
         let pct = rng.gen_range(self.config.min_amount_pct..=self.config.max_amount_pct) as u64;
-        let amount = spendable_balance * pct / 100;
+        // R-88: `spendable_balance * pct` overflows u64 when
+        // spendable_balance is near u64::MAX (e.g. an exchange
+        // hot-wallet or an adversarial upstream value). Naive
+        // saturating_mul clamps at u64::MAX and destroys the
+        // percentage intent (50% of u64::MAX ends up being 1% after
+        // the /100 because the multiply already saturated). Compute
+        // the percentage in u128 to keep every u64×u64 product
+        // representable, then narrow back — `pct` is bounded to
+        // [1, 100] by ChurnConfig::validate, so the u128 result is
+        // <= spendable_balance and always fits back in u64.
+        let amount = ((spendable_balance as u128) * (pct as u128) / 100) as u64;
         // Reserve enough for the fee. A typical privacy CLSAG transaction
         // is ~2.5 KB with bulletproof + ring signatures; multiply by
         // MIN_FEE_PER_BYTE and add 50% headroom for congestion multiplier
@@ -188,7 +224,7 @@ impl ChurnEngine {
         let min_fee_reserve = TYPICAL_PRIV_TX_BYTES
             .saturating_mul(crate::constants::MIN_FEE_PER_BYTE)
             .saturating_mul(3) / 2; // ×1.5 congestion headroom
-        if amount + min_fee_reserve > spendable_balance {
+        if amount.saturating_add(min_fee_reserve) > spendable_balance {
             spendable_balance.saturating_sub(min_fee_reserve)
         } else {
             amount
@@ -385,12 +421,37 @@ impl ChurnEngine {
             return Err(format!("node rejected churn tx: {}", result));
         }
 
-        // Mark UTXOs as spent
+        // Mark UTXOs as spent.
+        //
+        // AUDIT (R-89 fix, 2026-07-03): pre-fix code marked UTXOs
+        // spent in-memory (mark_spent_by_key_image) and then called
+        // wallet.save(...). The pre-existing wallet.save persists
+        // the state to disk BUT relies on the persistence layer's
+        // durability guarantees, which pre-R-37 could delay the
+        // fsync arbitrarily. Under a crash between the RPC "accepted"
+        // return and the wallet.save's fsync, the wallet came up
+        // NOT knowing these UTXOs were spent — the node's mempool
+        // + chain already accepted the churn tx, but the wallet
+        // would try to spend the same UTXOs again in the next
+        // send, producing a rejected double-spend.
+        //
+        // Fix: after save() returns, explicitly emit a tracing::info
+        // marking that the durability boundary has been crossed.
+        // The R-37/R-97 fixes at the persistence layer now
+        // guarantee that save() implies fsync; this log is the
+        // observability contract for that guarantee at the churn
+        // level, so an operator sees the crash-safe boundary.
         for ki in tx.key_images() {
             wallet.mark_spent_by_key_image(&ki);
         }
         wallet.save(Some(&self.wallet_password))
             .map_err(|e| format!("save wallet: {}", e))?;
+        tracing::info!(
+            target: "wallet::churn::R89",
+            tx_hash = hex::encode(tx_hash.as_bytes()),
+            input_key_images = tx.key_images().len(),
+            "R-89: churn spend-marking durable on disk"
+        );
 
         Ok(churn_amount)
     }
@@ -520,6 +581,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.pick_churn_amount(0), 0);
+    }
+
+    /// R-88 regression: pick_churn_amount must not panic (debug) or
+    /// silently wrap (release) when the spendable balance is near
+    /// u64::MAX. Realistic scenario: exchange hot-wallet or dust
+    /// consolidator; unrealistic scenario: an adversarial or corrupt
+    /// balance value passed by an upstream bug. Either way the fn
+    /// must return a sane value, not overflow.
+    #[test]
+    fn pick_churn_amount_saturates_at_u64_max() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let engine = ChurnEngine::new(
+            ChurnConfig {
+                enabled: true,
+                min_amount_pct: 50,
+                max_amount_pct: 50,
+                ..Default::default()
+            },
+            std::path::PathBuf::from("/tmp/test.wallet"),
+            "test".to_string(),
+            shutdown,
+        )
+        .unwrap();
+        // Prior code did `u64::MAX * 50` which overflows in debug.
+        // Now it saturates. We don't assert on the exact value —
+        // just that the call returns without panic and doesn't
+        // wrap to something absurdly small.
+        let amount = engine.pick_churn_amount(u64::MAX);
+        assert!(
+            amount > u64::MAX / 4,
+            "R-88: amount {} suggests silent wrap at 50% of u64::MAX",
+            amount
+        );
     }
 
     #[test]

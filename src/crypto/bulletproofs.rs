@@ -149,9 +149,41 @@ impl PedersenCommitment {
         PedersenCommitment(point.compress())
     }
 
-    /// Create from bytes (unchecked - does not validate the point)
-    /// Use `from_bytes_checked` for validated construction
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    /// Create from bytes WITHOUT validating that the encoded point
+    /// is a canonical Ristretto element.
+    ///
+    /// # DANGER (R-5 fix, 2026-07-02)
+    ///
+    /// This constructor is a well-known API footgun. The
+    /// `CompressedRistretto` wrapper stores the 32 bytes verbatim;
+    /// no canonicalisation, no subgroup check, no decompress attempt.
+    /// A caller who feeds a non-canonical byte string produces a
+    /// `PedersenCommitment` that:
+    ///   - Compares unequal to the canonical form of the same point.
+    ///   - Fails `decompress()` at every downstream site
+    ///     (bulletproof verification, transaction validation).
+    ///   - Silently passes any code path that only checks bytewise
+    ///     equality (e.g. mempool dedup, DB lookup keys).
+    ///
+    /// This produces the "invalid but stored" wedge state where a
+    /// mempool tx passes bytewise dedup but fails validation on
+    /// mining. Callers with adversarial byte input MUST use
+    /// [`PedersenCommitment::from_bytes_checked`] instead — it runs
+    /// the decompression validation and returns `None` on non-canonical
+    /// bytes. This unchecked form remains ONLY for the internal
+    /// serde/borsh round-trip path where the bytes have already been
+    /// validated elsewhere (see the decode paths that call
+    /// `from_bytes_checked` immediately after construction).
+    ///
+    /// AUDIT (R-5 SURGICAL FIX, 2026-07-03): renamed the unchecked
+    /// variant to `from_bytes_unchecked` so its danger is
+    /// unmissable in code review. Every in-tree caller ALREADY uses
+    /// `from_bytes_checked` (verified 2026-07-03 across
+    /// consensus/validation.rs, crypto/disclosure.rs, and
+    /// crypto/parallel_proofs.rs — 5 sites, all validated). This
+    /// unchecked form remains only for the internal borsh
+    /// round-trip path where the encoder produced the bytes.
+    pub fn from_bytes_unchecked(bytes: [u8; 32]) -> Self {
         PedersenCommitment(CompressedRistretto(bytes))
     }
 
@@ -254,19 +286,15 @@ impl PedersenCommitment {
         Some(PedersenCommitment((a - b).compress()))
     }
 
-    /// Add another commitment (legacy API - panics on invalid point)
-    /// Prefer `checked_add` for error handling
-    #[deprecated(note = "Use checked_add for proper error handling")]
-    pub fn add(&self, other: &PedersenCommitment) -> Self {
-        self.checked_add(other).expect("invalid commitment point")
-    }
-
-    /// Subtract another commitment (legacy API - panics on invalid point)
-    /// Prefer `checked_sub` for error handling
-    #[deprecated(note = "Use checked_sub for proper error handling")]
-    pub fn sub(&self, other: &PedersenCommitment) -> Self {
-        self.checked_sub(other).expect("invalid commitment point")
-    }
+    // AUDIT (2026-07-01): removed the deprecated `add`/`sub` methods
+    // that unwrapped `checked_add`/`checked_sub` with `.expect("invalid
+    // commitment point")`. Repo-wide grep confirmed zero external callers
+    // — `#[deprecated]` had done its job and all users migrated to the
+    // checked variants. The deprecated wrappers were a live panic
+    // footgun (any future caller who ignored the deprecation warning
+    // would panic-on-invalid-input, crashing the node from the
+    // consensus verification path). Callers must use `checked_add`/
+    // `checked_sub` and handle the `Option::None` case explicitly.
 }
 
 /// Range proof wrapper
@@ -297,16 +325,11 @@ impl RangeProof {
         self.data.is_empty()
     }
 
-    /// Serialize to bytes
-    ///
-    /// # Panics
-    /// Panics if serialization fails, which would indicate a bug.
-    /// SECURITY: Never silently return empty data on serialization failure.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        borsh::to_vec(self).expect("RangeProof serialization should never fail for valid proofs")
-    }
-
-    /// Try to serialize to bytes, returning Result
+    /// R-6 SURGICAL FIX (2026-07-03): the panicking `to_bytes()` form
+    /// has been REMOVED. All callers (tx-builder, test suite) have
+    /// been migrated to `try_to_bytes` and propagate errors via `?`.
+    /// The remaining `try_to_bytes` is the ONLY serialization entry
+    /// point.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>> {
         borsh::to_vec(self).map_err(|e| Error::SerializationError(e.to_string()))
     }
@@ -795,7 +818,8 @@ mod tests {
         let (_, blinding) = commit(&mut OsRng, amount);
 
         let proof = create_range_proof(amount, &blinding, &mut OsRng).unwrap();
-        let bytes = proof.to_bytes();
+        // R-6: try_to_bytes — panicking form deprecated.
+        let bytes = proof.try_to_bytes().unwrap();
         let restored = RangeProof::from_bytes(&bytes).unwrap();
 
         assert_eq!(proof.version, restored.version);

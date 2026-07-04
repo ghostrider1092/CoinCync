@@ -7,7 +7,7 @@ use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 
 use crate::db::Database;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::storage::{PruningPlan, PrunedBlockData};
 
 /// Result of a pruning operation
@@ -51,7 +51,18 @@ pub fn prune_blocks(db: &Database, plan: &PruningPlan) -> Result<PruneResult> {
             // Create compact header
             let pruned_data = PrunedBlockData::from_block(&block, height);
 
-            // Serialize the pruned header
+            // Serialize the pruned header.
+            //
+            // AUDIT (R-36 fix, 2026-07-03): pre-fix code used
+            // `.unwrap_or_default()`, which silently substituted an
+            // EMPTY Vec<u8> if borsh failed. That empty vec then went
+            // into `store_pruned_and_remove` and was written to disk
+            // as the "pruned header" for this height — silent data
+            // loss. A subsequent get_pruned_header(height) would
+            // return an empty deserialization payload and the chain
+            // would think the header was corrupted. Now we propagate
+            // the borsh error with `?` — the whole prune plan aborts
+            // instead of losing a header.
             let header_bytes = borsh::to_vec(&PrunedBlockRecord {
                 hash: pruned_data.hash.as_bytes().to_vec(),
                 height: pruned_data.height,
@@ -60,17 +71,34 @@ pub fn prune_blocks(db: &Database, plan: &PruningPlan) -> Result<PruneResult> {
                 timestamp: pruned_data.timestamp,
                 target: pruned_data.target.as_bytes().to_vec(),
                 tx_count: pruned_data.tx_count,
-            }).unwrap_or_default();
+            }).map_err(|e| Error::SerializationError(format!(
+                "R-36: failed to serialize PrunedBlockRecord for height {}: {}",
+                height, e
+            )))?;
 
-            // Store pruned header
-            db.blocks.store_pruned_header(height, &header_bytes)?;
-
-            // Get original block size for stats
-            let block_bytes = borsh::to_vec(&block).unwrap_or_default();
+            // Get original block size for stats BEFORE the atomic prune.
+            // borsh serialization is deterministic; a failure here is
+            // consistent with the header serialization failure above
+            // (borsh doesn't know about the storage layer, only about
+            // the type), so if it fails here it would fail again on
+            // retry. Propagate rather than silently underreporting the
+            // stats — the stats matter for operator visibility even if
+            // they're not consensus-critical.
+            let block_bytes = borsh::to_vec(&block).map_err(|e| Error::SerializationError(format!(
+                "R-36: failed to serialize Block for stats at height {}: {}",
+                height, e
+            )))?;
             bytes_freed += block_bytes.len() as u64;
 
-            // Remove full block data
-            db.blocks.remove_by_height(height)?;
+            // AUDIT (2026-07-01): use the atomic `store_pruned_and_remove`
+            // helper instead of `store_pruned_header` + `remove_by_height`
+            // back-to-back. The two-call form crash-windowed a state where
+            // the pruned header existed but the full block was NOT removed,
+            // so disk stayed allocated indefinitely (the outer heights_to_prune
+            // list doesn't revisit already-processed heights across restarts).
+            // The atomic helper packs the two writes into one RocksDB
+            // WriteBatch — either both land or neither, no partial state.
+            db.blocks.store_pruned_and_remove(height, &header_bytes)?;
 
             blocks_pruned += 1;
         }

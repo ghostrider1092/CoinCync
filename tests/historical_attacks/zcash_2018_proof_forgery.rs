@@ -29,7 +29,7 @@ fn zcash_2018_proof_not_transplantable() {
     let correct_commit = PedersenCommitment::commit(amount.as_atomic(), &bf);
 
     let proof = create_aggregated_range_proof_for_height(&[amount], &[bf], &mut rng, 0).unwrap();
-    let proof_ref = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+    let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
 
     // Correct commitment verifies
     assert!(verify_range_proofs_dispatch(&[correct_commit], &proof_ref, 0),
@@ -61,7 +61,7 @@ fn zcash_2018_different_blinding_different_commitment() {
     let commit2 = PedersenCommitment::commit(amount.as_atomic(), &bf2); // same amount, different blinding
 
     let proof = create_aggregated_range_proof_for_height(&[amount], &[bf1], &mut rng, 0).unwrap();
-    let proof_ref = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+    let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
 
     assert!(verify_range_proofs_dispatch(&[commit1], &proof_ref, 0), "Original must verify");
     assert!(

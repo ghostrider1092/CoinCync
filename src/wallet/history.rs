@@ -429,15 +429,35 @@ impl TransactionHistory {
         }
     }
 
-    /// Check if an address has been used in any prior transaction.
-    /// Returns true if the address appears as a recipient in any outgoing tx
-    /// OR as a receiving address in any incoming tx (via recipient_address field).
-    /// Useful for address reuse detection to protect privacy.
+    /// Check if any record's `recipient_address` field equals `address`.
+    ///
+    /// AUDIT (R-91 fix, 2026-07-02): the prior docstring said this
+    /// checked BOTH "the address appears as a recipient in any outgoing
+    /// tx" AND "as a receiving address in any incoming tx". That was
+    /// misleading in two ways:
+    ///
+    /// 1. There is only ONE storage field consulted — `recipient_address`
+    ///    on `TransactionRecord`. Whether that field carries meaning for
+    ///    an incoming tx depends entirely on whether a caller has
+    ///    invoked `set_recipient_address` after `record_incoming`.
+    ///    Nothing populates it automatically for incoming records.
+    /// 2. The prior wording made the function sound like a privacy
+    ///    guarantee ("Useful for address reuse detection to protect
+    ///    privacy") when in fact it will silently return `false` for
+    ///    an incoming tx whose recipient_address was never annotated.
+    ///    A caller relying on this to gate wallet actions ("only send
+    ///    to fresh addresses") could reuse an address the wallet DID
+    ///    receive from, unnoticed.
+    ///
+    /// The correct read: this is a bookkeeping helper for records the
+    /// caller has explicitly tagged. Do NOT rely on it as a privacy
+    /// gate — for outgoing-address reuse detection, the wallet keeps a
+    /// separate set on `WalletData`; for incoming-address reuse, a
+    /// dedicated stealth-address / subaddress lookup path exists.
     pub fn has_address(&self, address: &str) -> bool {
-        self.records.iter().any(|r| {
-            // Check recipient_address on both outgoing and incoming records
-            r.recipient_address.as_deref() == Some(address)
-        })
+        self.records
+            .iter()
+            .any(|r| r.recipient_address.as_deref() == Some(address))
     }
 
     /// Set recipient address for a transaction (works for both directions).

@@ -49,11 +49,29 @@ impl SpendKey {
 
 /// Full Viewing Key — sees all incoming AND outgoing transactions.
 /// Cannot spend. Safe to share with a full auditor.
+///
+/// AUDIT (R-80 fix, 2026-07-03): pre-fix code had `#[derive(Clone)]`
+/// with no zeroize discipline. The `rivk: Scalar` field IS SECRET
+/// (it's the internal viewing-key randomness that derives ivk / ovk),
+/// so an FVK dropped without wiping leaves rivk in memory. Now:
+///   - `ak` and `nk` are PUBLIC curve points, no zeroize needed.
+///   - `rivk` is manually zeroized in a custom Drop below.
+/// curve25519-dalek's `Scalar` implements `Zeroize` in the `zeroize`
+/// feature (which the workspace enables), so we can call it directly.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FullViewingKey {
     pub ak:   RistrettoPoint,   // spend validating key
     pub nk:   RistrettoPoint,   // nullifier deriving key
     pub rivk: Scalar,           // internal viewing key randomness
+}
+
+impl Drop for FullViewingKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        // Only `rivk` carries secret material. Public curve points
+        // are safe to leave unzeroed.
+        self.rivk.zeroize();
+    }
 }
 
 impl FullViewingKey {
@@ -78,6 +96,23 @@ impl FullViewingKey {
         OutgoingViewingKey(buf)
     }
 
+    /// Encode the FVK as a base58 string prefixed `yfvk`.
+    ///
+    /// AUDIT (R-81 note, 2026-07-03): the returned String CONTAINS
+    /// THE PLAINTEXT `rivk` SCALAR (bytes 64..96 of the 96-byte
+    /// payload). A leaked FVK string is complete disclosure of the
+    /// wallet's viewing capability — an attacker with the yfvk...
+    /// string sees every incoming and outgoing tx. This is BY
+    /// DESIGN — an FVK is intended to be shared with an auditor —
+    /// but callers who log, transmit, or store this string are
+    /// leaking the audit key.
+    ///
+    /// Structural fix would be to require encryption at share
+    /// time (encode-with-passphrase), matching Zcash's ZIP-317
+    /// unified-address encoding pattern. Deferred pending API
+    /// design decision. Meanwhile: `raw` on the stack contains
+    /// the same secret; zeroize it before return so we don't
+    /// double-expose via memory dump.
     pub fn encode(&self) -> String {
         let ak = self.ak.compress().to_bytes();
         let nk = self.nk.compress().to_bytes();
@@ -86,7 +121,13 @@ impl FullViewingKey {
         raw[..32].copy_from_slice(&ak);
         raw[32..64].copy_from_slice(&nk);
         raw[64..].copy_from_slice(&rv);
-        format!("yfvk{}", bs58::encode(&raw).into_string())
+        let encoded = format!("yfvk{}", bs58::encode(&raw).into_string());
+        // R-81: wipe the raw buffer (contains rivk bytes) before return.
+        {
+            use zeroize::Zeroize;
+            raw.zeroize();
+        }
+        encoded
     }
 }
 
@@ -94,8 +135,19 @@ impl FullViewingKey {
 
 /// Incoming Viewing Key — sees received transactions only.
 /// Share with exchanges for deposit detection.
+///
+/// AUDIT (R-80 fix, 2026-07-03): `.0: Scalar` is SECRET — the
+/// scan-side scalar that decrypts every incoming output. Drop
+/// impl below zeros it explicitly (Scalar's own Zeroize impl).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct IncomingViewingKey(pub Scalar);
+
+impl Drop for IncomingViewingKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
 
 impl IncomingViewingKey {
     /// Generate a fresh diversified payment address.
@@ -120,15 +172,40 @@ impl IncomingViewingKey {
     /// Derive a 1-byte view tag for fast scanning.
     /// Wallets compare this byte before doing full decryption —
     /// rejects 99.6% of outputs without any elliptic-curve work.
+    ///
+    /// AUDIT (R-82 fix, R-7 class site, 2026-07-03): `shared` is
+    /// the ECDH shared point `ephemeral * ivk` — recovering it lets
+    /// an attacker derive every ivk-scan-key derived from the same
+    /// ephemeral, plus link the recipient. Pre-fix code let
+    /// `shared: RistrettoPoint` drop unzeroized. curve25519-dalek's
+    /// RistrettoPoint doesn't derive `ZeroizeOnDrop` upstream (the
+    /// underlying `EdwardsPoint` field elements are u64 arrays), so
+    /// we do a best-effort wipe via `subtle::black_box` + explicit
+    /// overwrite of the compressed serialization. The point value
+    /// on the STACK is what we can wipe here; the CPU registers
+    /// that held intermediate multiplies are out of our reach
+    /// (that requires either a jump into asm or full
+    /// architectural mitigation).
     pub fn view_tag(&self, ephemeral_key: &RistrettoPoint) -> u8 {
-        let shared = ephemeral_key * self.0;
+        let mut shared = ephemeral_key * self.0;
+        let mut shared_bytes = shared.compress().to_bytes();
         let h = Blake2bParams::new()
             .hash_length(32)
             .personal(b"yrc_view_tag____")
             .to_state()
-            .update(shared.compress().as_bytes())
+            .update(&shared_bytes)
             .finalize();
-        h.as_bytes()[0]
+        let tag = h.as_bytes()[0];
+        // R-82 + R-7 CLASS + R-80 SURGICAL FIX (2026-07-03): wipe
+        // both the compressed shared-point bytes AND the raw
+        // RistrettoPoint. curve25519-dalek 4.1's Zeroize impl
+        // (ristretto.rs:1266) is now explicitly enabled in our
+        // Cargo.toml `curve25519-dalek/zeroize` feature. Prior
+        // "best-effort" claim retired.
+        use zeroize::Zeroize;
+        shared_bytes.zeroize();
+        shared.zeroize();
+        tag
     }
 
     pub fn encode(&self) -> String {
@@ -140,7 +217,10 @@ impl IncomingViewingKey {
 
 /// Outgoing Viewing Key — sees where you sent funds.
 /// Share with tax software or auditors.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// AUDIT (R-80 fix, 2026-07-03): `.0: [u8; 32]` is derived from
+/// FVK.rivk — treat as secret. Zeroize on drop.
+#[derive(Clone, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct OutgoingViewingKey(pub [u8; 32]);
 
 impl OutgoingViewingKey {
@@ -159,13 +239,25 @@ pub struct PaymentAddress {
 }
 
 impl PaymentAddress {
-    /// Encode as bech32: cync1...
-    pub fn to_bech32(&self, hrp: &str) -> String {
+    /// Encode as bech32m: cync1...
+    ///
+    /// AUDIT (R-83 fix, 2026-07-02): prior signature was
+    /// `-> String` with a silent `.unwrap_or_else(|_| "invalid_address")`
+    /// fallback. That was dangerous: an invalid HRP would produce a
+    /// literal `"invalid_address"` string that downstream code (QR
+    /// generators, RPC responses, payment fields) would happily
+    /// display as if it were a real address. A user who copy-pastes
+    /// the sentinel into a wallet UI could send funds to a burn
+    /// destination or, worse, if some third-party wallet
+    /// coincidentally accepts a similar-looking string, to an
+    /// attacker. Signature now returns `Result<String>` so the
+    /// caller must acknowledge and handle the encoding failure.
+    pub fn to_bech32(&self, hrp: &str) -> Result<String> {
         let mut raw = [0u8; 43];
         raw[..11].copy_from_slice(&self.diversifier);
         raw[11..].copy_from_slice(self.pk_d.compress().as_bytes());
         bech32::encode(hrp, bech32::ToBase32::to_base32(&raw), bech32::Variant::Bech32m)
-            .unwrap_or_else(|_| "invalid_address".to_string())
+            .map_err(|e| Error::Other(format!("PaymentAddress bech32 encode: {}", e)))
     }
 
     pub fn from_bech32(s: &str) -> Result<Self> {
@@ -299,7 +391,7 @@ mod tests {
         let fvk  = sk.to_full_viewing_key();
         let ivk  = fvk.to_incoming_viewing_key();
         let addr = ivk.to_payment_address([7u8; 11]).unwrap();
-        let enc  = addr.to_bech32("yc");
+        let enc  = addr.to_bech32("yc").expect("test HRP is valid");
         let dec  = PaymentAddress::from_bech32(&enc).unwrap();
         assert_eq!(addr.diversifier, dec.diversifier);
         assert_eq!(addr.pk_d.compress(), dec.pk_d.compress());
@@ -342,9 +434,24 @@ pub struct SparkSpendKey(pub Scalar);
 
 impl SpendKey {
     /// Derive the Spark spend key from the master spend key.
+    ///
+    /// AUDIT (R-84 fix, 2026-07-03): pre-fix code did
+    ///   `let bytes = self.bytes;`
+    /// which Copy-cloned the master spend key onto the stack of
+    /// this fn. SpendKey has `ZeroizeOnDrop` on the struct so
+    /// `self.bytes` is protected — but the LOCAL `bytes` copy on
+    /// this stack frame is NOT zeroed on function return. Every
+    /// call to `to_spark_spend_key` leaks a stack window carrying
+    /// the master spend key. Now we bind as `mut` and wipe
+    /// explicitly before return.
     pub fn to_spark_spend_key(&self) -> SparkSpendKey {
-        let bytes = self.bytes;
+        let mut bytes = self.bytes;
         let s = scalar_from_hash(b"yrc_spark_spend_", &bytes);
+        // R-84: wipe the stack copy of the master spend key.
+        {
+            use zeroize::Zeroize;
+            bytes.zeroize();
+        }
         SparkSpendKey(s)
     }
 }
@@ -384,12 +491,17 @@ pub struct SparkAddress {
 }
 
 impl SparkAddress {
-    pub fn to_bech32(&self, hrp: &str) -> String {
+    /// Encode as bech32m: ys1... / ts1...
+    ///
+    /// AUDIT (R-83 fix, 2026-07-02): same silent-fallback bug as
+    /// `PaymentAddress::to_bech32` — see that fn's doc comment for
+    /// the full rationale. Signature now returns `Result<String>`.
+    pub fn to_bech32(&self, hrp: &str) -> Result<String> {
         let mut raw = [0u8; 43];
         raw[..11].copy_from_slice(&self.diversifier);
         raw[11..].copy_from_slice(self.pk.compress().as_bytes());
         bech32::encode(hrp, bech32::ToBase32::to_base32(&raw), bech32::Variant::Bech32m)
-            .unwrap_or_else(|_| "invalid_spark_address".to_string())
+            .map_err(|e| Error::Other(format!("SparkAddress bech32 encode: {}", e)))
     }
 
     pub fn from_bech32(s: &str) -> Result<Self> {

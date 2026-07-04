@@ -145,7 +145,7 @@ fn attack_commitment_wraparound() {
     let evil_bf = BlindingFactor::random(&mut rng);
     let evil_commit = PedersenCommitment::commit(u64::MAX, &evil_bf);
 
-    let proof_ref = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+    let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
     let result = verify_range_proofs_dispatch(&[evil_commit], &proof_ref, 0);
     assert!(
         !result,

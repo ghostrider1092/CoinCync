@@ -160,6 +160,12 @@ async fn start_test_server_with_config(port: u16, mut config: RpcConfig) -> (Str
         config.network_name = "testnet".to_string();
     }
 
+    // start_rpc_server refuses non-loopback bind without TLS or the
+    // ACK env var (main-side hardening). These tests specifically
+    // exercise public-bind behaviour — set the ACK so the harness
+    // gets past the pre-flight check. Real deployments should use TLS.
+    std::env::set_var("COINCYNC_RPC_TLS_PROXY_ACK", "1");
+
     let p2p: Option<Arc<coincync::network::P2PNode>> = None;
     let server = start_rpc_server(shared_chain, shared_mempool, p2p, config)
         .await
@@ -182,6 +188,9 @@ async fn start_test_server_with_peer_fixture(
     if config.network_name.is_empty() {
         config.network_name = "testnet".to_string();
     }
+
+    // Same public-bind ACK as start_test_server_with_config above.
+    std::env::set_var("COINCYNC_RPC_TLS_PROXY_ACK", "1");
 
     let mut node_cfg = NodeConfig::default();
     node_cfg.data_dir = std::env::temp_dir().join(format!("coincync-rpc-peer-fixture-{}", port));

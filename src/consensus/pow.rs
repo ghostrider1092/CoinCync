@@ -399,7 +399,14 @@ mod randomx_cache {
                     ))?;
                 *guard = Some(ThreadVm { key: *seed, vm });
             }
-            let tvm = guard.as_ref().expect("thread VM was just installed");
+            // INVARIANT: the block above set `*guard = Some(ThreadVm { .. })`
+            // and no code path releases the guard between there and here.
+            // The `expect` documents that invariant; it can only fire if
+            // the `*guard = Some(..)` line above is removed by future
+            // refactoring, in which case an explicit panic here surfaces
+            // the break faster than a silent None-then-crash-elsewhere.
+            let tvm = guard.as_ref()
+                .expect("BUG: thread VM guard is None immediately after being set — invariant broken by refactor");
             let hash = tvm.vm.calculate_hash(input)
                 .map_err(|e| crate::error::Error::Internal(format!("RandomX hash failed: {}", e)))?;
             let mut output = [0u8; 32];
@@ -799,11 +806,48 @@ mod randomx_cache {
 }
 
 /// Derive a stable RandomX key from height, bound to the chain's genesis hash.
+///
+/// AUDIT (R-2 fix, 2026-07-02): the fallback path (when
+/// `bind_randomx_genesis_for_network` was never called) used to
+/// consult `COINCYNC_NETWORK` and default to testnet ENTIRELY
+/// SILENTLY. If a binary forgot to call the bind function (which
+/// happened during the 2026-06-27 rc3 deploy), the whole PoW chain
+/// derived from the wrong genesis and looked like network-wide
+/// invalid-PoW. Now:
+/// 1. The first time the fallback fires, emit an ERROR-level log
+///    (via `std::sync::Once`) so ops see it. Deduplicated so the
+///    hot path isn't flooded, but LOUD once.
+/// 2. Structured `tracing::error!` with the specific reason so the
+///    log is greppable in observability tooling.
+/// 3. Behavior unchanged (still falls back), because panicking here
+///    would kill mining/validation loops mid-block. But the fall-
+///    back is no longer silent, which was the whole R-2 issue.
+///
+/// See `bind_randomx_genesis_for_network` at L109; the correct call
+/// site is `coincync-node`/`coincync-miner` process startup.
 #[cfg(feature = "randomx")]
 fn randomx_key_for_height(height: u64) -> [u8; 32] {
     use crate::primitives::hash_domain;
     let epoch = height / RANDOMX_KEY_EPOCH;
     let genesis_bytes: [u8; 32] = RANDOMX_GENESIS_BYTES.get().copied().unwrap_or_else(|| {
+        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+        WARN_ONCE.call_once(|| {
+            let network_env = std::env::var("COINCYNC_NETWORK")
+                .ok()
+                .unwrap_or_else(|| "<unset>".to_string());
+            tracing::error!(
+                target: "consensus_pow",
+                event = "randomx_genesis_not_bound",
+                network_env = %network_env,
+                "RANDOMX GENESIS NOT BOUND: bind_randomx_genesis_for_network was \
+                 never called before PoW derivation; falling back to \
+                 COINCYNC_NETWORK env var ('{}'). If this daemon is producing \
+                 rejected blocks, the wrong-genesis fallback is why. Restart the \
+                 binary and ensure bind_randomx_genesis_for_network is invoked \
+                 during process init, BEFORE the first block is mined or verified.",
+                network_env
+            );
+        });
         let network = std::env::var("COINCYNC_NETWORK")
             .ok()
             .map(|v| v.trim().to_ascii_lowercase())
@@ -924,6 +968,30 @@ pub fn meets_difficulty(hash: &Hash, target: &Hash) -> bool {
 }
 
 /// Calculate work from target (difficulty). `max_target / target` (Bitcoin formula).
+///
+/// AUDIT (R-3 doc-only fix, 2026-07-02): the function reads ONLY the
+/// upper 128 bits of the 256-bit target and does the divide in u128.
+/// This is deliberate — the return type is u128 (chain work
+/// aggregated across all blocks fits comfortably in u128 for any
+/// realistic chain lifetime; see Bitcoin's `nChainWork` which is
+/// stored as arith_uint256 but only the upper bits ever matter in
+/// practice). Dropping the lower 128 bits loses at most 1 part in
+/// 2^128 of precision on any single block's work contribution,
+/// which is well below the granularity of the difficulty-adjustment
+/// algorithm's output.
+///
+/// The tradeoff DOES mean that two targets differing only in their
+/// bottom 128 bits produce identical `work_from_target` values — but
+/// the DAA (see `difficulty.rs`) rounds to whole ~28-bit steps
+/// anyway, so no two consecutive real targets can differ only in the
+/// bottom half. If a future change makes the DAA finer-grained past
+/// 128 bits of resolution, this function must switch to u256 or
+/// arith_uint256 arithmetic (see Bitcoin Core's `arith_uint256::GetLow64`
+/// pattern and the `#include <arith_uint256.h>` uses in `pow.cpp`).
+///
+/// This function is used ONLY for fork-choice work comparison; it is
+/// NOT used to compute or verify the target bytes themselves. Target
+/// bytes are compared full-width via `Hash::meets_difficulty`.
 pub fn work_from_target(target: &Hash) -> u128 {
     let bytes = target.as_bytes();
     let mut buf = [0u8; 16];

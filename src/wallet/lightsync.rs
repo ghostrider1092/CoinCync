@@ -574,10 +574,22 @@ fn compute_view_tag_light(view_secret: &SecretKey, tx_public: &PublicKey, output
         Some(p) => p,
         None => return 0xFF,
     };
-    let shared_point = tx_point.mul(&view_scalar);
-
-    let tag_input = [shared_point.to_bytes().as_slice(), &[output_index]].concat();
+    // R-7 CLASS (2026-07-03): ECDH shared point + heap-derived buffer
+    // both hold secret material. Mirror wallet/scanner.rs::compute_view_tag:
+    // build the input buffer explicitly, then zeroize shared_bytes,
+    // tag_input, and the RistrettoPoint before scope exit.
+    let mut shared_point = tx_point.mul(&view_scalar);
+    let mut shared_bytes = shared_point.to_bytes();
+    let mut tag_input = Vec::with_capacity(32 + 1);
+    tag_input.extend_from_slice(&shared_bytes);
+    tag_input.push(output_index);
     let tag_hash = hash_domain(b"COINCYNC_VIEWTAG_v2", &tag_input);
+    {
+        use zeroize::Zeroize;
+        tag_input.zeroize();
+        shared_bytes.zeroize();
+        shared_point.zeroize();
+    }
     tag_hash.as_bytes()[0]
 }
 
@@ -588,12 +600,21 @@ fn compute_shared_secret_light(view_secret: &SecretKey, tx_public: &PublicKey, o
         Some(p) => p,
         None => return [0u8; 32],
     };
-    let shared_point = tx_point.mul(&view_scalar);
-
-    let shared = hash_domain(
-        b"COINCYNC_SHARED_v2",
-        &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
-    );
+    // R-7 CLASS (2026-07-03): same treatment as compute_view_tag_light —
+    // the shared_point is the ECDH shared secret; zeroize both the
+    // point and the heap buffer we serialize it into.
+    let mut shared_point = tx_point.mul(&view_scalar);
+    let mut shared_bytes = shared_point.to_bytes();
+    let mut buf = Vec::with_capacity(32 + 1);
+    buf.extend_from_slice(&shared_bytes);
+    buf.push(output_index);
+    let shared = hash_domain(b"COINCYNC_SHARED_v2", &buf);
+    {
+        use zeroize::Zeroize;
+        buf.zeroize();
+        shared_bytes.zeroize();
+        shared_point.zeroize();
+    }
     *shared.as_bytes()
 }
 

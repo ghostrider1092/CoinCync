@@ -491,8 +491,34 @@ async fn mine_parallel(
     drop(found_tx);
 
     // Race: a worker finds a nonce, or the deadline fires.
+    //
+    // Defensive: if the deadline is already in the past (worker setup +
+    // template build burned more than poll_interval_secs, OR caller
+    // handed us a stale deadline), `saturating_duration_since` would
+    // return Duration::ZERO, which `tokio::time::timeout(0, recv)`
+    // returns from immediately with Elapsed — the rig would loop
+    // straight back to template fetch without giving threads a chance
+    // to find a nonce. Detect this and yield a real minimum window
+    // (50 ms) so the worker threads at least submit one nonce attempt
+    // before the timeout, which preserves the operator-visible signal
+    // of "rig is making progress" vs the indistinguishable hang state.
+    //
+    // Reference: Bitcoin Core's `getblocktemplate` retry loop computes
+    // the wait window AT THE MOMENT of waiting, never from a pre-
+    // stored deadline (see `node/miner.cpp`).
     let started = Instant::now();
-    let timeout = deadline.saturating_duration_since(Instant::now());
+    let now = Instant::now();
+    let timeout = if deadline <= now {
+        tracing::warn!(
+            target: "rig::orchestrator",
+            "mine_parallel called with deadline already in the past \
+             (overran setup window) — granting minimum 50 ms mining \
+             slice instead of returning Timeout immediately"
+        );
+        Duration::from_millis(50)
+    } else {
+        deadline.saturating_duration_since(now)
+    };
     let outcome = tokio::time::timeout(timeout, found_rx.recv()).await;
 
     // Always tell workers to stop, then join. Joining is fast since

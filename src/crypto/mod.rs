@@ -38,6 +38,11 @@ mod parallel_proofs;
 mod disclosure;
 pub mod memo;
 
+// Canonical-decode-enforced wrappers for peer-controlled crypto values.
+// See the module docstring for the class of bug they prevent.
+mod peer_scalars;
+pub use peer_scalars::{PeerScalar, PeerPoint};
+
 // ── Phase 2 additions (yourcoin_combined) ───────────────────────
 // `mw_cutthrough` exposes the cut-through engine and `MwKernel`
 // type. The engine is constructed but inert in v1.0.x — see CIP-003.
@@ -106,6 +111,15 @@ pub use secure::{
     verify_hash, verify_mac,
 };
 
+// `ring_selection` is consumed by the wallet's send path
+// (`src/wallet/send.rs::select_ring_decoys`) which delegates UNIFORM
+// (Fisher-Yates) decoy selection. Prior comment here said "gamma-
+// distribution" — that was stale after the Wave 15 gamma→uniform
+// migration and is now corrected. See `ring_selection.rs` module
+// docstring (L3-22) for the Möser-2018 rationale behind the switch.
+// Do NOT prune these re-exports — their absence from the
+// `src/consensus/` grep is expected since consensus code verifies
+// rings, doesn't select them.
 pub use ring_selection::{
     RingSelector, RingSelectionConfig, RingSelectionStats,
     RingQualityReport, OutputRef,
@@ -132,6 +146,11 @@ pub use parallel_proofs::{
     verify_block_proofs,
 };
 
+// `disclosure` is consumed by the wallet CLI (`src/bin/wallet.rs`)
+// which exposes selective-disclosure proofs (balance / ownership / sum
+// / source) to end users via `coincync-wallet disclose ...` subcommands.
+// See `src/bin/wallet.rs:1962+` for concrete callers. NOT dead code
+// despite zero references from the consensus / mempool / RPC layers.
 pub use disclosure::{
     DisclosureProof, DisclosureType,
     BalanceProof as DisclosureBalanceProof,

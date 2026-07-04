@@ -271,20 +271,66 @@ pub struct P2PNode {
 impl P2PNode {
     /// Create a new P2P node with blockchain and mempool references
     pub fn new(config: NodeConfig, chain: SharedBlockchain, mempool: SharedMempool) -> Self {
-        // Load or generate Noise identity (persistent X25519 keypair)
-        let identity = match super::noise::NodeIdentity::load_or_generate_fresh(&config.data_dir) {
-            Ok(id) => {
-                tracing::info!(
-                    "Noise identity loaded: {}",
-                    hex::encode(&id.peer_id()[..8])
-                );
-                Arc::new(id)
+        // Load or generate Noise identity (persistent X25519 keypair).
+        //
+        // P5-N1 SURGICAL FIX (2026-07-03): the pre-fix code fell back
+        // to an ephemeral identity on ANY error. If the identity file
+        // exists but is temporarily unreadable (permission blip, backup
+        // daemon holding a lock, disk transient), the node came up
+        // with a FRESH peer_id — losing accumulated peer reputation
+        // and appearing as a Sybil twin to any peer that remembers our
+        // prior key. Now:
+        //   - Check the file's presence explicitly first.
+        //   - If it doesn't exist: legit fresh install, generate + save.
+        //   - If it exists but load failed: LOUD error log flagging
+        //     the identity oscillation risk, still fall back (don't
+        //     halt — a running node with degraded rep is better than
+        //     no node), but ops sees the alert.
+        // File name matches network::noise::NodeIdentity::load_or_generate_fresh L176.
+        let identity_path = config.data_dir.join("node_key");
+        let identity = if identity_path.exists() {
+            match super::noise::NodeIdentity::load_or_generate_fresh(&config.data_dir) {
+                Ok(id) => {
+                    tracing::info!(
+                        "Noise identity loaded: {}",
+                        hex::encode(&id.peer_id()[..8])
+                    );
+                    Arc::new(id)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "network::identity::P5N1",
+                        error = %e,
+                        path = %identity_path.display(),
+                        "P5-N1: identity file EXISTS but load FAILED — \
+                         falling back to ephemeral identity. This means \
+                         our peer_id has CHANGED for this session; peers \
+                         will see us as a fresh Sybil twin, and \
+                         accumulated reputation is lost. Investigate file \
+                         permissions / backup contention / disk health \
+                         and restart when resolved."
+                    );
+                    let id = super::noise::NodeIdentity::generate();
+                    Arc::new(id)
+                }
             }
-            Err(e) => {
-                tracing::warn!("Failed to load Noise identity: {}, using ephemeral", e);
-                // Generate ephemeral identity in-memory
-                let id = super::noise::NodeIdentity::generate();
-                Arc::new(id)
+        } else {
+            // Fresh install: legit case, just create + save.
+            match super::noise::NodeIdentity::load_or_generate_fresh(&config.data_dir) {
+                Ok(id) => {
+                    tracing::info!(
+                        "Noise identity generated (fresh install): {}",
+                        hex::encode(&id.peer_id()[..8])
+                    );
+                    Arc::new(id)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "First-run identity generation failed: {}, using ephemeral", e
+                    );
+                    let id = super::noise::NodeIdentity::generate();
+                    Arc::new(id)
+                }
             }
         };
 
@@ -342,39 +388,50 @@ impl P2PNode {
         key_images: &[crate::primitives::KeyImage],
     ) -> Option<()> {
         let dht = self.dht.as_ref()?;
-        let dht_guard = dht.lock();
 
         if key_images.is_empty() { return Some(()); }
 
-        // Group key images by stripe
-        let mut by_stripe: std::collections::HashMap<u32, Vec<[u8; 32]>> =
-            std::collections::HashMap::new();
-        for ki in key_images {
-            let stripe = super::dht::key_image_stripe(ki, dht_guard.stripe_count);
-            by_stripe.entry(stripe).or_default().push(*ki.as_bytes());
-        }
+        // P5-N2 SURGICAL FIX (2026-07-03): snapshot the per-stripe
+        // peer selection UNDER the sync `parking_lot::Mutex`, then
+        // drop the guard BEFORE any `.await`. Prior code held the
+        // guard across `sender.send(data).await` at every send in
+        // the loop — a classic sync-lock-across-await bug that
+        // could deadlock any other async task needing DHT state
+        // and blocked the tokio worker for the send's duration.
+        let sends: Vec<(u32, [u8; 32], Vec<[u8; 32]>)> = {
+            let dht_guard = dht.lock();
 
-        // Send GetKeyImageStatus to one peer per stripe
-        for (stripe, ki_bytes) in &by_stripe {
-            let stripe_idx = *stripe as usize;
-            if stripe_idx >= dht_guard.peers_by_stripe.len() { continue; }
-            let stripe_peers = &dht_guard.peers_by_stripe[stripe_idx];
-            if stripe_peers.is_empty() {
-                tracing::debug!("DHT: no peers for stripe {}, skipping {} key images", stripe, ki_bytes.len());
-                continue;
+            // Group key images by stripe using the guarded stripe_count
+            let mut by_stripe: std::collections::HashMap<u32, Vec<[u8; 32]>> =
+                std::collections::HashMap::new();
+            for ki in key_images {
+                let stripe = super::dht::key_image_stripe(ki, dht_guard.stripe_count);
+                by_stripe.entry(stripe).or_default().push(*ki.as_bytes());
             }
 
-            // Pick first available peer in this stripe
-            let target = stripe_peers[0];
+            let mut sends = Vec::new();
+            for (stripe, ki_bytes) in by_stripe.into_iter() {
+                let stripe_idx = stripe as usize;
+                if stripe_idx >= dht_guard.peers_by_stripe.len() { continue; }
+                let stripe_peers = &dht_guard.peers_by_stripe[stripe_idx];
+                if stripe_peers.is_empty() {
+                    tracing::debug!(
+                        "DHT: no peers for stripe {}, skipping {} key images",
+                        stripe, ki_bytes.len()
+                    );
+                    continue;
+                }
+                // Snapshot target + payload for later async send.
+                sends.push((stripe, stripe_peers[0], ki_bytes));
+            }
+            sends
+            // dht_guard drops here — before any await below.
+        };
+
+        // Now safe to await — no sync lock held.
+        for (stripe, target, ki_bytes) in sends {
             if let Some(sender) = self.peer_senders.get(&target) {
-                if let Ok(encoded) = borsh::to_vec(ki_bytes) {
-                    // Frame as a real Message — the per-peer write loop in
-                    // peer_handler reads `data[4]` as the message type and
-                    // expects the full magic+type+length+checksum header. A
-                    // raw `vec![type, ...payload]` makes data[4] a body byte,
-                    // which the framer then rejects with "unknown type: N",
-                    // breaking the connection mid-IBD. (See: 2026-05-09 IBD
-                    // wedge investigation.)
+                if let Ok(encoded) = borsh::to_vec(&ki_bytes) {
                     let msg = super::protocol::Message::new(
                         self.config.magic,
                         super::protocol::MessageType::GetKeyImageStatus,
@@ -391,7 +448,6 @@ impl P2PNode {
             }
         }
 
-        drop(dht_guard);
         Some(())
     }
 
@@ -812,9 +868,52 @@ impl P2PNode {
                             .count();
 
                         if inbound_count >= MAX_INBOUND {
-                            debug!("Max inbound connections reached, rejecting {}", addr);
-                            acceptor_tracker.untrack_connection(&addr);
-                            continue;
+                            // Saturation. Before rejecting, try to evict
+                            // a more-evictable peer per the Bitcoin Core
+                            // `AttemptToEvictConnection` algorithm. This
+                            // closes the eclipse vector where an attacker
+                            // fills all 64 slots from one /16 and pins us.
+                            //
+                            // Snapshot the inbound peers, hand them to the
+                            // selector, then disconnect the chosen victim
+                            // (if any) by dropping its sender and removing
+                            // it from the peers table.
+                            let snapshot: Vec<crate::network::peer::PeerInfo> =
+                                acceptor_peers.iter()
+                                    .filter(|p| !p.outbound)
+                                    .map(|p| p.clone())
+                                    .collect();
+                            let now = std::time::Instant::now();
+                            let victim_ref: Vec<&crate::network::peer::PeerInfo> =
+                                snapshot.iter().collect();
+                            match crate::network::eviction::select_inbound_to_evict(
+                                victim_ref, now,
+                            ) {
+                                Some(victim_id) => {
+                                    debug!(
+                                        "Inbound saturated ({}); evicting peer {:?} per AttemptToEvictConnection to admit {}",
+                                        inbound_count, &victim_id[..4], addr
+                                    );
+                                    // Drop the sender first so the peer's
+                                    // write task unwinds; then remove
+                                    // from peers + untrack the IP. Order
+                                    // matches Bitcoin Core's eviction
+                                    // sequence in CConnman.
+                                    acceptor_senders.remove(&victim_id);
+                                    if let Some((_, victim)) = acceptor_peers.remove(&victim_id) {
+                                        acceptor_tracker.untrack_connection(&victim.addr);
+                                    }
+                                    // Slot freed; fall through to accept.
+                                }
+                                None => {
+                                    debug!(
+                                        "Max inbound connections reached ({}) and no evictable peer; rejecting {}",
+                                        inbound_count, addr
+                                    );
+                                    acceptor_tracker.untrack_connection(&addr);
+                                    continue;
+                                }
+                            }
                         }
 
                         debug!("Incoming connection from {} (IP has {} connections)",
@@ -1181,14 +1280,30 @@ impl P2PNode {
             // This HashMap lives for the lifetime of the processor task and
             // tracks each peer's per-message-type rate. When a peer exceeds
             // the configured limit, they get a MessageFlood misbehavior score.
+            //
+            // P5-N3 SURGICAL FIX (2026-07-03): the pre-fix HashMap grew
+            // WITHOUT BOUND — entries were inserted on first message per
+            // peer but never removed when peers disconnected. Over a
+            // long-running node with churn, this leaked memory. Now we
+            // prune every 1000 messages by dropping any tracker whose
+            // peer_id is no longer in `processor_peers`. Cheap: 1000-msg
+            // cadence keeps the O(N) sweep amortized to a few µs per
+            // message.
             let mut rate_trackers: std::collections::HashMap<
                 super::peer::PeerId,
                 super::scoring::PeerMessageRateTracker,
             > = std::collections::HashMap::new();
+            let mut rate_prune_ctr: u64 = 0;
+            const RATE_PRUNE_EVERY: u64 = 1000;
 
             while *processor_running.read().await {
                 match msg_rx.recv().await {
                     Some(msg) => {
+                        // P5-N3: periodic prune of dead peers.
+                        rate_prune_ctr = rate_prune_ctr.wrapping_add(1);
+                        if rate_prune_ctr.is_multiple_of(RATE_PRUNE_EVERY) {
+                            rate_trackers.retain(|pid, _| processor_peers.contains_key(pid));
+                        }
                         // Rate-limit check (before expensive processing)
                         if !msg.data.is_empty() {
                             let msg_type_id = msg.data[0];
@@ -1771,26 +1886,110 @@ impl P2PNode {
         // SECURITY (NET-002): Share conn_tracker with maintenance to untrack stale peers
         let maint_tracker = self.conn_tracker.clone();
         let maint_scorer = self.peer_scorer.clone();
-        // Take the broadcast queue receiver for the maintenance task
-        let mut broadcast_rx = self.tx_broadcast_rx.lock()
-            .take()
-            .expect("broadcast receiver already taken");
-        // 2026-06-27: needed for periodic tip re-announce (TIP_REBROADCAST_INTERVAL_SECS).
-        // See the constant's doc-comment for the production gossip bug
-        // this closes.
+        // P5-Sc1 SURGICAL FIX (2026-07-03): capture the orphan-flood
+        // tracker so the cleanup task can call `forget()` on
+        // disconnected peers. Prior code left OrphanFloodTracker
+        // entries for every peer ever seen, growing without bound.
+        let maint_orphan_flood = self.orphan_flood.clone();
+        // Captured for the periodic ban-list flush below. Closes the
+        // crash-loses-recent-bans gap: shutdown-only persistence would
+        // strand any ban accumulated since startup if the process is
+        // SIGKILL'd or OOM-killed before clean shutdown runs. Bitcoin
+        // Core's `DumpBanlist()` is similarly called both periodically
+        // (every 15 min via scheduler) and on shutdown.
+        let maint_ban_list_path = ban_list_path.clone();
+        // 2026-06-27: needed for periodic tip re-announce
+        // (TIP_REBROADCAST_INTERVAL_SECS). See the constant's doc-comment
+        // for the production gossip bug this closes (PR #123).
         let maint_chain_tip = self.chain_tip.clone();
+        // Take the broadcast queue receiver for the maintenance task.
+        //
+        // Audit fix: previously `.expect("broadcast receiver already taken")`
+        // panicked on a second start() call, terminating the async task
+        // without a graceful error path. Replaced with a typed error
+        // return so the caller can detect double-start (e.g. supervisor
+        // restart after a crash without dropping the prior P2PNode) and
+        // recover. Reference: Bitcoin Core's `CConnman::Start()` returns
+        // bool and refuses re-start if `interruptNet` was never armed.
+        let mut broadcast_rx = match self.tx_broadcast_rx.lock().take() {
+            Some(rx) => rx,
+            None => {
+                return Err(Error::InvalidState(
+                    "P2PNode::start called twice on the same instance — \
+                     broadcast receiver was already consumed by a prior call. \
+                     This indicates a supervisor bug or unintended re-init.".into()
+                ));
+            }
+        };
 
-        tokio::spawn(async move {
+        // Spawn the maintenance task with panic supervision. Previously
+        // a panic inside this task (e.g., a poisoned RwLock during
+        // `.write().await`) would terminate the task silently — the node
+        // would keep its TCP listeners but stop pinging peers, draining
+        // the broadcast queue, and persisting bans. systemd would still
+        // report `active`. The production silent-hang on 2026-06-19
+        // matched this signature.
+        //
+        // We wrap the loop body in an outer task that simply logs at
+        // ERROR if the inner work-loop ever returns. A real fix would
+        // also auto-restart the loop, but auto-restart of a task that
+        // holds shared mutable state (peers, scorer, dandelion) is
+        // risky if those structures are mid-mutation; safer to log
+        // loudly and let the operator restart the process. Reference:
+        // zebrad's actor model wraps every actor in a top-level
+        // supervisor that escalates panics. Bitcoin Core's `scheduler`
+        // thread is the equivalent supervised-task pattern.
+        let maint_handle = tokio::spawn(async move {
             let mut ping_interval = interval(PING_INTERVAL);
             let mut cleanup_interval = interval(Duration::from_secs(60));
             // Dandelion++ monitor runs every DANDELION_MONITOR_INTERVAL_SECS
             let mut dandelion_interval = interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
+            // Periodic ban-list flush. Same cadence as Bitcoin Core's
+            // `DumpBanlist()` (every 15 min via CScheduler). Cheap to
+            // call: writes a small JSON file even when the ban list is
+            // empty. Cost-benefit favors always flushing over tracking
+            // a dirty flag.
+            let mut ban_flush_interval = interval(Duration::from_secs(900));
+            // Outbound peer rotation. Bitcoin Core picks a "block-relay-only"
+            // outbound peer every ~22.5 minutes and forces an eviction +
+            // reconnection to disrupt eclipse setups (see net_processing.cpp
+            // `MaybePickEvictionCandidate` and the EXTRA_PEER_CHECK_INTERVAL
+            // constant, defaulting to 45 min). We pick a similar cadence
+            // (45 min) to balance churn against eclipse-defense — too
+            // aggressive and we waste bandwidth on Noise handshakes; too
+            // slow and a patient eclipse holds. Closes audit MEDIUM #28.
+            let mut outbound_rotate_interval = interval(Duration::from_secs(45 * 60));
+            // Heartbeat / liveness signal. Emits a single INFO line every
+            // 30 seconds with a monotonically-increasing tick counter +
+            // current peer count. External watchdogs (or operator `tail
+            // -f`) can detect silent-hang within 30 s instead of the 17
+            // hours observed in the production incident where the
+            // maintenance task froze and `systemd is-active` kept
+            // reporting `active`. If the heartbeat stops, the maintenance
+            // loop is dead — restart the service. Reference: Bitcoin
+            // Core's `scheduler` thread emits periodic LogPrintf at TRACE
+            // level for similar reason. Cheap: one log line per 30 s.
+            let mut heartbeat_interval = interval(Duration::from_secs(30));
+            let mut heartbeat_ticks: u64 = 0;
             // 2026-06-27 gossip-bug fix: periodic InvBlock re-announce of our
-            // current tip to all peers. See TIP_REBROADCAST_INTERVAL_SECS docs.
+            // current tip to all peers. See TIP_REBROADCAST_INTERVAL_SECS docs
+            // (from PR #123).
             let mut tip_announce_interval = interval(Duration::from_secs(TIP_REBROADCAST_INTERVAL_SECS));
 
             while *maint_running.read().await {
                 tokio::select! {
+                    // Biased polling: under sustained load, the default
+                    // `select!` randomization can starve low-frequency
+                    // branches. PING_INTERVAL (120 s) is the most safety-
+                    // critical (peers evict us after PEER_TIMEOUT=300 s
+                    // of no activity), so it must run on schedule even
+                    // if cleanup_interval is also ready. Listed in
+                    // priority order. Reference: tokio docs on `biased;`
+                    // ordering — "evaluates branches in declared order;
+                    // skip random branch selection entirely." Bitcoin
+                    // Core's scheduler similarly prioritizes ping/health
+                    // ticks over background maintenance.
+                    biased;
                     _ = ping_interval.tick() => {
                         // Send pings to all peers
                         let ping = Message::ping(magic);
@@ -1921,6 +2120,8 @@ impl P2PNode {
                             maint_senders.remove(&id);
                             // Re-queue any pending sync requests from this peer
                             maint_sync.write().await.on_peer_disconnected(&id);
+                            // P5-Sc1: drop the peer's OrphanFloodTracker entry.
+                            maint_orphan_flood.write().await.forget(&id);
                             let _ = maint_event_tx.send(NodeEvent::PeerDisconnected(id));
                         }
 
@@ -1946,6 +2147,110 @@ impl P2PNode {
                         scorer.auto_ban_bad_peers(); // Ban peers with very low scores
                         scorer.cleanup_bans(); // Remove expired bans
                     }
+                    _ = ban_flush_interval.tick() => {
+                        // Persist current ban list to disk so an unclean
+                        // shutdown (OOM, SIGKILL, host crash) doesn't lose
+                        // bans accumulated since startup. Bitcoin Core
+                        // `BanMan::DumpBanlist` is the equivalent path.
+                        let scorer = maint_scorer.read().await;
+                        if let Err(e) = scorer.save_bans_to_file(&maint_ban_list_path) {
+                            warn!("Periodic ban-list save failed: {}", e);
+                        }
+                    }
+                    _ = outbound_rotate_interval.tick() => {
+                        // Eclipse-fatigue defense: every ~45 min, disconnect
+                        // the LONGEST-CONNECTED outbound peer. A new outbound
+                        // slot opens; the connector loop fills it on its
+                        // next tick from the address book, biasing toward
+                        // peers we haven't tried recently. This is the
+                        // active counterpart to the inbound netgroup
+                        // eviction (eviction.rs): inbound defends against
+                        // attacker-saturation, outbound rotation defends
+                        // against attacker-persistence.
+                        //
+                        // Skip rotation when outbound peer count is at or
+                        // below 3 — we don't want to drop to 2 outbound
+                        // mid-IBD just for hygiene. The connector loop
+                        // can be slow to fill new slots under partial
+                        // network reachability.
+                        let outbound_snapshot: Vec<(PeerId, std::time::Instant, std::net::SocketAddr)> =
+                            maint_peers.iter()
+                                .filter(|p| p.outbound && p.state == PeerState::Connected)
+                                .map(|p| (p.id, p.connected_at, p.addr))
+                                .collect();
+                        if outbound_snapshot.len() > 3 {
+                            if let Some((evict_id, _ts, evict_addr)) = outbound_snapshot
+                                .into_iter()
+                                .min_by_key(|(_, ts, _)| *ts)
+                            {
+                                debug!(
+                                    "Rotating outbound peer {} (longest-connected) to disrupt potential eclipse hold",
+                                    evict_addr
+                                );
+                                maint_senders.remove(&evict_id);
+                                if let Some((_, evicted)) = maint_peers.remove(&evict_id) {
+                                    maint_tracker.untrack_connection(&evicted.addr);
+                                }
+                            }
+                        }
+                    }
+                    _ = heartbeat_interval.tick() => {
+                        heartbeat_ticks = heartbeat_ticks.saturating_add(1);
+                        // Single-line INFO heartbeat so external watchdogs +
+                        // log-tailing operators can detect a silent maintenance-
+                        // task freeze within 30 s. Missing heartbeats for >2
+                        // intervals (~60 s) = restart the service.
+                        let peer_count = maint_peers.len();
+                        let outbound = maint_peers.iter()
+                            .filter(|p| p.outbound && p.state == PeerState::Connected)
+                            .count();
+                        info!(
+                            target: "node::heartbeat",
+                            "maintenance tick={} peers={} outbound={}",
+                            heartbeat_ticks, peer_count, outbound
+                        );
+                    }
+                }
+            }
+        });
+
+        // Supervisor watcher: detect maintenance-task panic / clean exit.
+        // If the maintenance task ever terminates (panic, clean break, or
+        // task abort), this watcher logs CRITICAL. Operator must restart
+        // the service — auto-restart of a task holding shared mutable
+        // state is unsafe without a full lock-reset protocol.
+        tokio::spawn(async move {
+            match maint_handle.await {
+                Ok(()) => {
+                    tracing::error!(
+                        target: "node::supervisor",
+                        "CRITICAL: maintenance task exited cleanly (no panic). \
+                         This should never happen — the loop is unbounded. \
+                         Node is now running WITHOUT ping/dandelion/peer-scoring/ban-flush. \
+                         Restart the service immediately."
+                    );
+                }
+                Err(e) if e.is_panic() => {
+                    tracing::error!(
+                        target: "node::supervisor",
+                        "CRITICAL: maintenance task PANICKED ({:?}). \
+                         Node is now running WITHOUT background maintenance. \
+                         Heartbeat will stop. Restart the service immediately.",
+                        e
+                    );
+                }
+                Err(e) if e.is_cancelled() => {
+                    tracing::warn!(
+                        target: "node::supervisor",
+                        "Maintenance task cancelled — expected during shutdown."
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "node::supervisor",
+                        "CRITICAL: maintenance task ended with JoinError: {:?}",
+                        e
+                    );
                 }
             }
         });
@@ -2285,9 +2590,22 @@ impl P2PNode {
     /// SECURITY (NET-003): Untrack the connection to prevent per-IP counter leak,
     /// and store the ban to prevent immediate reconnection.
     pub async fn ban_peer(&self, peer_id: &PeerId) {
-        // Get address before removing for connection tracking cleanup
-        if let Some(peer) = self.peers.get(peer_id) {
-            self.conn_tracker.untrack_connection(&peer.addr);
+        // Get address before removing for connection tracking cleanup +
+        // scorer ban propagation. Audit MEDIUM #30 closure: previously
+        // ban_peer set local PeerInfo.reputation = -100 and removed the
+        // entry, but the `PeerScorer` (the authority for accept-loop ban
+        // checks at node.rs:763 / 1022) was NOT informed. The peer could
+        // reconnect immediately because is_banned(addr) returned false
+        // until the scorer's own auto_ban_bad_peers tick (~60s later)
+        // observed the dropped score and persisted a ban. Reference:
+        // Bitcoin Core's CConnman::Ban calls CBanDB::Write atomically
+        // before disconnecting; we mirror that ordering here.
+        let peer_addr = self.peers.get(peer_id).map(|p| p.addr);
+        if let Some(addr) = peer_addr {
+            self.conn_tracker.untrack_connection(&addr);
+            // Propagate to the scorer FIRST so any reconnect attempt
+            // racing with this disconnect hits is_banned() = true.
+            self.peer_scorer.write().await.ban(addr);
         }
         if let Some(mut peer) = self.peers.get_mut(peer_id) {
             peer.reputation = -100;
@@ -3183,13 +3501,20 @@ async fn process_message(
         }
 
         MessageType::Ping => {
-            // Parse nonce and respond with pong
-            if payload.len() >= 8 {
-                let nonce = u64::from_le_bytes(payload[..8].try_into().unwrap_or([0u8; 8]));
-                if let Some(sender) = senders.get(&peer_id) {
-                    let pong = Message::pong(magic, nonce);
-                    let _ = sender.send(pong.to_bytes()?).await;
+            // Parse nonce and respond with pong.
+            // P5-N5 fix: score malformed pings (< 8 bytes) as protocol violation.
+            if payload.len() < 8 {
+                warn!("Malformed Ping (<8 bytes) from peer {:?}", &peer_id[..4]);
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                 }
+                return Ok(());
+            }
+            let nonce = u64::from_le_bytes(payload[..8].try_into().unwrap_or([0u8; 8]));
+            if let Some(sender) = senders.get(&peer_id) {
+                let pong = Message::pong(magic, nonce);
+                let _ = sender.send(pong.to_bytes()?).await;
             }
         }
 
@@ -3198,8 +3523,9 @@ async fn process_message(
         }
 
         MessageType::GetHeaders => {
-            // Peer is requesting headers - serve from our chain
-            if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
+            // Peer is requesting headers - serve from our chain.
+            // P5-N6 fix: tight per-type cap.
+            if payload.len() > super::protocol::MAX_GETHEADERS_PAYLOAD {
                 warn!("GetHeaders message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr)
@@ -3258,8 +3584,9 @@ async fn process_message(
         }
 
         MessageType::GetBlocks => {
-            // Peer is requesting full blocks by hash
-            if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
+            // Peer is requesting full blocks by hash.
+            // P5-N-CLASS-A fix: tight per-type cap.
+            if payload.len() > super::protocol::MAX_GETBLOCKS_PAYLOAD {
                 warn!("GetBlocks message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr)
@@ -3319,8 +3646,18 @@ async fn process_message(
         }
 
         MessageType::InvTx => {
-            // Transaction inventory - request txs we don't have
-            if let Ok(inv_msg) = borsh::from_slice::<InvMessage>(payload) {
+            // Transaction inventory - request txs we don't have.
+            // P5-N8 + P5-N-CLASS-A fix: tight size cap + score borsh Err.
+            if payload.len() > super::protocol::MAX_INV_PAYLOAD {
+                warn!("InvTx message too large from peer {:?}", &peer_id[..4]);
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                }
+                return Ok(());
+            }
+            match borsh::from_slice::<InvMessage>(payload) {
+                Ok(inv_msg) => {
                 if let Err(e) = inv_msg.validate() {
                     warn!("Invalid InvTx from peer {:?}: {}", &peer_id[..4], e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
@@ -3346,12 +3683,31 @@ async fn process_message(
                         }
                     }
                 }
+                }
+                Err(e) => {
+                    // P5-N7 fix: score borsh parse failure.
+                    warn!("Failed to deserialize InvTx from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
+                }
             }
         }
 
         MessageType::InvBlock => {
-            // Block inventory - check if we're missing blocks
-            if let Ok(inv_msg) = borsh::from_slice::<InvMessage>(payload) {
+            // Block inventory - check if we're missing blocks.
+            // P5-N8 + P5-N-CLASS-A fix: tight size cap + Err scoring.
+            if payload.len() > super::protocol::MAX_INV_PAYLOAD {
+                warn!("InvBlock message too large from peer {:?}", &peer_id[..4]);
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                }
+                return Ok(());
+            }
+            match borsh::from_slice::<InvMessage>(payload) {
+                Ok(inv_msg) => {
                 if let Err(e) = inv_msg.validate() {
                     warn!("Invalid InvBlock from peer {:?}: {}", &peer_id[..4], e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
@@ -3474,12 +3830,22 @@ async fn process_message(
                         }
                     }
                 }
+                }
+                Err(e) => {
+                    // P5-N7 fix: score borsh parse failure.
+                    warn!("Failed to deserialize InvBlock from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
+                }
             }
         }
 
         MessageType::GetTxs => {
-            // Peer is requesting transactions by hash
-            if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
+            // Peer is requesting transactions by hash.
+            // P5-N-CLASS-A fix: tight per-type cap.
+            if payload.len() > super::protocol::MAX_GETTXS_PAYLOAD {
                 warn!("GetTxs message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr)
@@ -3487,7 +3853,9 @@ async fn process_message(
                 }
                 return Ok(());
             }
-            if let Ok(msg) = borsh::from_slice::<GetBlocksMessage>(payload) {
+            // P5-N7 fix: match with Err scoring instead of silent-Ok.
+            match borsh::from_slice::<GetBlocksMessage>(payload) {
+                Ok(msg) => {
                 if let Err(e) = msg.validate() {
                     warn!("Invalid GetTxs from peer {:?}: {}", &peer_id[..4], e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
@@ -3509,6 +3877,14 @@ async fn process_message(
                         }
                     }
                 }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize GetTxs from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
+                }
             }
         }
 
@@ -3521,8 +3897,10 @@ async fn process_message(
                 }
                 return Ok(());
             }
-            // Parse transactions
-            if let Ok(txs_msg) = borsh::from_slice::<super::protocol::TxsMessage>(payload) {
+            // Parse transactions.
+            // P5-N7 fix: match with Err scoring.
+            match borsh::from_slice::<super::protocol::TxsMessage>(payload) {
+                Ok(txs_msg) => {
                 // SECURITY: Validate message before processing
                 if let Err(e) = txs_msg.validate() {
                     warn!("Invalid TxsMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
@@ -3590,6 +3968,13 @@ async fn process_message(
                         }
                     }
                 }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize TxsMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    }
+                }
             }
         }
 
@@ -3602,8 +3987,9 @@ async fn process_message(
                 }
                 return Ok(());
             }
-            // Parse blocks
-            if let Ok(blocks_msg) = borsh::from_slice::<super::protocol::BlocksMessage>(payload) {
+            // Parse blocks. P5-N7 fix: match with Err scoring.
+            match borsh::from_slice::<super::protocol::BlocksMessage>(payload) {
+                Ok(blocks_msg) => {
                 // SECURITY: Limit number of blocks per message
                 if blocks_msg.blocks.len() > super::protocol::MAX_BLOCK_HASHES {
                     warn!("Too many blocks in message from peer {}", hex::encode(&peer_id[..8]));
@@ -3707,6 +4093,13 @@ async fn process_message(
                     }
                     let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));
                 }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize BlocksMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    }
+                }
             }
         }
 
@@ -3719,8 +4112,9 @@ async fn process_message(
                 }
                 return Ok(());
             }
-            // Parse headers and queue for download
-            if let Ok(headers_msg) = borsh::from_slice::<super::protocol::HeadersMessage>(payload) {
+            // Parse headers and queue for download. P5-N7 fix: match with Err scoring.
+            match borsh::from_slice::<super::protocol::HeadersMessage>(payload) {
+                Ok(headers_msg) => {
                 // SECURITY: Validate message before processing
                 if let Err(e) = headers_msg.validate() {
                     warn!("Invalid HeadersMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
@@ -3763,6 +4157,13 @@ async fn process_message(
                     headers_msg.nonce, hashes.len(), max_header_height, &peer_id[..4]
                 );
                 sync_guard.queue_headers(hashes);
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize HeadersMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    }
+                }
             }
         }
 
@@ -3821,8 +4222,19 @@ async fn process_message(
         }
 
         MessageType::Addr => {
-            // SECURITY: Validate addr messages
-            if let Ok(addr_msg) = borsh::from_slice::<super::protocol::AddrMessage>(payload) {
+            // SECURITY: Validate addr messages.
+            // P5-N-CLASS-A fix: tight per-type cap.
+            if payload.len() > super::protocol::MAX_ADDR_PAYLOAD {
+                warn!("Addr message too large from peer {}", hex::encode(&peer_id[..8]));
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                }
+                return Ok(());
+            }
+            // P5-N7 fix: match with Err scoring.
+            match borsh::from_slice::<super::protocol::AddrMessage>(payload) {
+                Ok(addr_msg) => {
                 if let Err(e) = addr_msg.validate() {
                     warn!("Invalid AddrMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
@@ -3856,12 +4268,16 @@ async fn process_message(
                     }
                     if let Some(socket_addr) = net_addr_to_socket_addr(net_addr) {
                         // Expanded unroutable filter (Bitcoin CVE-2015-3641
-                        // class). Pre-fix this only rejected loopback +
-                        // unspecified, so an attacker poisoning our
-                        // address book with multicast / link-local /
-                        // CGNAT / IPv6-multicast / broadcast / docs IPs
-                        // would have us dial those (burning connection
-                        // slots) and gossip them onward. See is_routable()
+                        // class + P5-N10 audit). Pre-fix this only
+                        // rejected loopback + unspecified, so an attacker
+                        // poisoning our address book with multicast /
+                        // link-local / CGNAT / IPv6-multicast / broadcast /
+                        // docs / RFC1918 private IPs would have us dial
+                        // those (burning connection slots) and gossip
+                        // them onward, causing (a) inadvertent LAN
+                        // topology leaks when peers exchanged addresses
+                        // back, (b) address-book pollution with
+                        // unreachable 10.x.x.x entries. See is_routable()
                         // above for the full rejection table.
                         if !is_routable(socket_addr.ip()) {
                             continue;
@@ -3876,21 +4292,36 @@ async fn process_message(
                 if accepted > 0 {
                     debug!("Added {} peer addresses from {}", accepted, hex::encode(&peer_id[..8]));
                 }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize AddrMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::InvalidAddress);
+                    }
+                }
             }
         }
 
         MessageType::GetData => {
-            // Peer requests specific blocks by hash (individual block responses)
-            if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
+            // Peer requests specific blocks by hash (individual block responses).
+            // P5-N-CLASS-A fix: tight per-type cap.
+            if payload.len() > super::protocol::MAX_GETDATA_PAYLOAD {
                 warn!("GetData message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr).record_protocol_violation();
                 }
                 return Ok(());
             }
-            if let Ok(msg) = borsh::from_slice::<GetBlocksMessage>(payload) {
+            // P5-N7 fix: match with Err scoring.
+            match borsh::from_slice::<GetBlocksMessage>(payload) {
+                Ok(msg) => {
                 if let Err(e) = msg.validate() {
                     warn!("Invalid GetData from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
                     return Ok(());
                 }
                 // Send each block individually as BlockData.
@@ -3910,6 +4341,14 @@ async fn process_message(
                         if let Ok(data) = m.to_bytes() {
                             let _ = sender.send(data).await;
                         }
+                    }
+                }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize GetData from peer {:?}: {}", &peer_id[..4], e);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
             }

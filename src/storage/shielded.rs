@@ -41,9 +41,16 @@
 //! leaf. BridgeTree 0.4 dropped serde support, so replay is the
 //! cheapest route to durability without a custom tree encoding.
 //!
-//! Rewinds during reorgs are currently NOT mirrored to disk — matching
-//! the pre-persistence behavior — because `rewind()` isn't yet called
-//! from chain.rs. Wiring that up is a follow-up.
+//! AUDIT (R-64 fix, 2026-07-03): the prior version of this comment
+//! said "Rewinds during reorgs are currently NOT mirrored to disk"
+//! — that's STALE. `rewind()` IS now called from chain.rs's reorg
+//! path (via `rewind_phase2_stores`), and the on-disk mirror
+//! happens in the `rewind()` body (see the `remove_range` /
+//! per-entry deletes at ~L410 in this file, plus the sibling
+//! `KernelStore` R-62 doc). The two-store rewind IS mirrored to
+//! disk. If a future auditor reads the old comment before this fix
+//! and thinks disk rewind is a follow-up, they'll be looking for a
+//! non-existent bug and miss real ones.
 //!
 //! ## Anchor stability
 //!
@@ -257,13 +264,41 @@ impl ShieldedStore {
             pos
         };
         entry.position = position;
+        // R-61 CLASS site (2026-07-03): see kernels.rs::append
+        // audit note for the class rationale. Same pattern here.
         if let Some(p) = &self.persistence {
             let key = position.to_be_bytes();
-            let value = borsh::to_vec(&entry)
-                .expect("NoteCommitmentEntry borsh encoding is infallible");
-            p.entries
-                .insert(key, value)
-                .expect("shielded_entries write failed — consensus storage is dead");
+            let value = match borsh::to_vec(&entry) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        target: "storage::shielded::R61",
+                        error = %e,
+                        position = position,
+                        "R-61: NoteCommitmentEntry borsh serialize failed at \
+                         position {}. Halting.",
+                        position
+                    );
+                    panic!(
+                        "R-61: NoteCommitmentEntry borsh serialize failed at position {}: {}",
+                        position, e
+                    );
+                }
+            };
+            if let Err(e) = p.entries.insert(key, value) {
+                tracing::error!(
+                    target: "storage::shielded::R61",
+                    error = %e,
+                    position = position,
+                    "R-61: shielded_entries write failed at position {}. \
+                     Consensus storage is unavailable. Halting.",
+                    position
+                );
+                panic!(
+                    "R-61: shielded_entries write failed at position {}: {}",
+                    position, e
+                );
+            }
         }
         self.entries.write().insert(position, entry);
         position
@@ -294,6 +329,30 @@ impl ShieldedStore {
         // boundary the tree never reverts to. Gating the push on the
         // tree's own decision keeps the two stacks in lock-step by
         // construction.
+        // AUDIT (R-65 note, 2026-07-03): the pre-fix pattern here IS
+        // the exact bug the struct doc claims to fix: two-phase
+        // checkpoint where the BridgeTree checkpoint AND the side-
+        // table push must land together, but nothing binds them into
+        // a single atomic op. A panic between the `tree.checkpoint(...)`
+        // return and the `cps.push(...)` acquire+push at L308-309
+        // (e.g. an OOM allocating the Vec growth, or another thread
+        // panicking while holding a lock the current thread is about
+        // to acquire) leaves the two stacks desynchronised: the tree
+        // has a checkpoint the side-table doesn't know about, and
+        // rewind() would then roll the side-table to a boundary the
+        // tree can't revert to.
+        //
+        // The pre-fix docstring at L282-296 claimed this is safe
+        // "because gating the push on the tree's own decision keeps
+        // the two stacks in lock-step by construction" — that gates
+        // WHETHER we push, not WHEN, so the atomicity gap remains.
+        //
+        // Structural fix: hold the checkpoints write lock BEFORE
+        // touching the tree, so the tree.write() and cps.push happen
+        // under the same guard. Reordering is safe because tree
+        // acquisition is only inside `checkpoint`, not held across
+        // side-table ops.
+        let mut cps = self.checkpoints.write();
         let tree_checkpointed = self.tree.write().checkpoint(height);
         if !tree_checkpointed {
             tracing::warn!(
@@ -305,7 +364,6 @@ impl ShieldedStore {
             return;
         }
 
-        let mut cps = self.checkpoints.write();
         cps.push(ShieldedCheckpoint { height, entries_len });
         // Mirror the BridgeTree's bounded checkpoint retention so the
         // two stacks never desync at the old end either. Emit a debug
@@ -431,10 +489,23 @@ impl ShieldedStore {
             return false;
         }
         nfs.insert(nullifier, height);
+        // R-61 CLASS site (2026-07-03).
         if let Some(p) = &self.persistence {
-            p.nullifiers
-                .insert(nullifier, height.to_le_bytes())
-                .expect("shielded_nullifiers write failed — consensus storage is dead");
+            if let Err(e) = p.nullifiers.insert(nullifier, height.to_le_bytes()) {
+                tracing::error!(
+                    target: "storage::shielded::R61",
+                    error = %e,
+                    nullifier = hex::encode(nullifier),
+                    height = height,
+                    "R-61: shielded_nullifiers write failed at height {}. \
+                     Consensus storage is unavailable. Halting.",
+                    height
+                );
+                panic!(
+                    "R-61: shielded_nullifiers write failed at height {}: {}",
+                    height, e
+                );
+            }
         }
         true
     }

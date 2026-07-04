@@ -122,10 +122,41 @@ pub struct Round1Output {
     pub commitment_bytes: Vec<u8>,
 }
 
-/// Internal state kept between round 1 and round 2 (secret, never share)
+/// Internal state kept between round 1 and round 2 (secret, never share).
+///
+/// AUDIT (R-93 fix, 2026-07-03): pre-fix code had no Drop impl on
+/// this type. `frost::round1::SigningNonces` contains the two
+/// FROST hiding/binding nonces (32 bytes each) that are the
+/// nuclear secret of FROST — nonce reuse or leakage lets an
+/// attacker recover a participant's signing share, which is a
+/// share of the group key. `frost-ed25519` at 0.6.x DOES
+/// implement `ZeroizeOnDrop` on `SigningNonces` internally
+/// (verified via reading their src/round1.rs 2026-07-03 —
+/// see https://github.com/ZcashFoundation/frost/blob/main/frost-core/src/round1.rs
+/// which derives Zeroize/ZeroizeOnDrop on Nonce/SigningNonces),
+/// so field-drop chain wipes them.
+///
+/// This Drop wraps the field-drop chain with an EXPLICIT wipe of
+/// the participant_id (non-secret, but included for defense in
+/// depth so a memory dump can't correlate leftover nonce bytes
+/// with a participant identifier).
 pub struct Round1Secret {
     pub participant_id: u16,
     pub nonces: frost::round1::SigningNonces,
+}
+
+impl Drop for Round1Secret {
+    fn drop(&mut self) {
+        // frost::round1::SigningNonces is wiped by its own
+        // ZeroizeOnDrop impl (verified 2026-07-03 against the
+        // frost-core repo). We zero the participant_id to close
+        // any residual correlation. If a future frost crate
+        // update REMOVES ZeroizeOnDrop, this Drop is our last
+        // line of defense — but we can't reach into the private
+        // fields structurally, so switch dependencies immediately
+        // if that ever happens.
+        self.participant_id = 0;
+    }
 }
 
 /// Round 2 output: signature share to send to coordinator
@@ -372,16 +403,40 @@ pub fn reconstruct_group_secret(
         let id_scalar = Scalar::from(share.participant_id as u64);
         ids.push(id_scalar);
 
-        // Deserialize the signing share scalar
-        let mut share_bytes = [0u8; 32];
-        if share.signing_share_bytes.len() >= 32 {
-            share_bytes.copy_from_slice(&share.signing_share_bytes[..32]);
-        } else {
-            return Err(Error::Internal("signing share too short".into()));
+        // Deserialize the signing share scalar.
+        //
+        // AUDIT (C35 fix, 2026-07-02): the prior check was `if
+        // signing_share_bytes.len() >= 32 { copy_from_slice(&[..32]) }`,
+        // which SILENTLY TRUNCATED any input longer than 32 bytes. A
+        // malformed or attacker-crafted share whose first 32 bytes
+        // decode canonically but whose tail carries garbage would slip
+        // through with only the tail discarded. FROST-ed25519's
+        // `SigningShare::serialize()` returns exactly 32 bytes for a
+        // Scalar (curve25519 group order fits in 32 B), so any
+        // deviation is malformed input and must reject.
+        //
+        // Also (R-92 fix): `share_bytes` on the stack held one
+        // participant's signing share scalar bytes and was never
+        // zeroized after use. Bounded here with an explicit `.zeroize()`
+        // on both the success and error paths.
+        if share.signing_share_bytes.len() != 32 {
+            return Err(Error::Internal(format!(
+                "signing share has unexpected length {} (must be exactly 32 bytes; \
+                 FROST-ed25519 SigningShare serializes to a 32-byte canonical Scalar)",
+                share.signing_share_bytes.len()
+            )));
         }
-        signing_scalars.push(Scalar::from_canonical_bytes(share_bytes)
-            .into_option()
-            .ok_or_else(|| Error::Internal("invalid scalar in signing share".into()))?);
+        let mut share_bytes = [0u8; 32];
+        share_bytes.copy_from_slice(&share.signing_share_bytes[..32]);
+        let scalar_opt: Option<Scalar> = Scalar::from_canonical_bytes(share_bytes).into();
+        // Zeroize share_bytes BEFORE we hit the ? on the None branch —
+        // otherwise the early-return path leaves the stack copy alive
+        // until scope unwind.
+        share_bytes.zeroize();
+        signing_scalars.push(
+            scalar_opt
+                .ok_or_else(|| Error::Internal("invalid scalar in signing share".into()))?,
+        );
     }
 
     // Compute Lagrange coefficients and interpolate
@@ -487,5 +542,60 @@ mod tests {
         // 5. Verify
         assert!(verify_signature(&sig, message).unwrap());
         assert!(verify_signature(&sig, b"wrong message").is_err());
+    }
+
+    // ── C35 close: reject non-32-byte signing shares (no silent truncation) ──
+
+    /// Regression: a signing share with EXTRA trailing bytes must be
+    /// rejected — prior behavior silently discarded the tail. Craft a
+    /// valid share, tack a byte onto it, and check reconstruct fails.
+    #[test]
+    fn reconstruct_rejects_share_longer_than_32_bytes() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let mut tampered = keygen.shares.clone();
+        // Extend participant 0's signing share by one byte.
+        tampered[0].signing_share_bytes.push(0xFF);
+        let err = reconstruct_group_secret(&tampered[..2]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unexpected length 33"),
+            "expected explicit length-error for 33-byte share, got: {}",
+            msg
+        );
+    }
+
+    /// Regression: a signing share with TOO FEW bytes must also reject
+    /// with an explicit length error (not the prior generic "too short").
+    #[test]
+    fn reconstruct_rejects_share_shorter_than_32_bytes() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let mut tampered = keygen.shares.clone();
+        // Truncate participant 0's signing share by one byte.
+        tampered[0].signing_share_bytes.pop();
+        let err = reconstruct_group_secret(&tampered[..2]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unexpected length 31"),
+            "expected explicit length-error for 31-byte share, got: {}",
+            msg
+        );
+    }
+
+    /// Sanity: valid (exactly-32-byte) shares still reconstruct successfully.
+    /// Confirms the length check hasn't accidentally broken the happy path.
+    #[test]
+    fn reconstruct_accepts_exactly_32_byte_shares() {
+        let keygen = generate_shares(2, 3).unwrap();
+        // Every share from generate_shares is expected to be exactly 32 bytes.
+        for s in &keygen.shares {
+            assert_eq!(
+                s.signing_share_bytes.len(),
+                32,
+                "FROST-ed25519 signing_share must be exactly 32 bytes"
+            );
+        }
+        // Reconstruct with the first `threshold` shares.
+        let _secret = reconstruct_group_secret(&keygen.shares[..2])
+            .expect("valid 32-byte shares must reconstruct");
     }
 }

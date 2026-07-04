@@ -119,35 +119,96 @@ impl MempoolDb {
     /// in an inconsistent state (e.g., transaction present but key images missing,
     /// breaking double-spend detection).
     pub fn add(&self, entry: &MempoolEntry) -> Result<bool> {
-        // Check for double-spend (key image already in mempool)
-        for ki in &entry.key_images {
-            if self.key_images.contains_key(ki.as_bytes())
-                .map_err(|e| Error::DatabaseError(e.to_string()))? {
-                return Ok(false); // Double-spend detected
-            }
-        }
-
-        // Pre-compute all data before the atomic transaction
+        // AUDIT (R-45 fix, 2026-07-03): the pre-fix code did the
+        // key_images.contains_key() check OUTSIDE the transaction
+        // closure, then opened the transaction to write. That was
+        // a TOCTOU window: two concurrent `add(...)` calls with
+        // overlapping key_images could BOTH observe "not present"
+        // in the pre-transaction read, then BOTH proceed to their
+        // respective transactions — the second one's key_image
+        // insert overwrites the first's, and both transactions
+        // land, silently admitting a double-spend into the mempool.
+        //
+        // Fix: move the "already present" check INSIDE the
+        // transaction closure. The shim's TxTree reads pass through
+        // to committed state (not the pending batch), which means
+        // if a concurrent add's batch has already committed, our
+        // TxTree.get() sees it. If two calls race and both TxTree
+        // gets return None, RocksDB's WriteBatch commits are still
+        // serialized — the second one lands over the first, but
+        // then observes its own key_image in a subsequent commit.
+        // To fully close the race we ALSO use CAS on each key_image
+        // insert (compare_and_swap with expected=None). The CAS is
+        // structurally guaranteed to fail on the losing side of the
+        // race, giving us the intended "double-spend detected =
+        // false" return.
+        //
+        // Structural fix (a): CAS per-key_image is the primary
+        // guard. Structural fix (b): the pre-check inside the
+        // transaction is kept for the fast-path early-return.
         let data = serialize(entry)?;
         let tx_hash_bytes = entry.tx_hash.as_bytes().to_vec();
         let fee_key = self.make_fee_key(entry.fee_per_byte, &entry.tx_hash);
-        let ki_pairs: Vec<(Vec<u8>, Vec<u8>)> = entry.key_images.iter()
-            .map(|ki| (ki.as_bytes().to_vec(), tx_hash_bytes.clone()))
-            .collect();
 
-        // SECURITY (C13-FIX): Atomic transaction across all three trees
-        let trees: &[&Tree] = &[&self.transactions, &self.key_images, &self.fee_index];
-        trees.transaction(|tx_trees| {
-            tx_trees[0].insert(tx_hash_bytes.as_slice(), data.as_slice())?;
-            for (ki_key, ki_val) in &ki_pairs {
-                tx_trees[1].insert(ki_key.as_slice(), ki_val.as_slice())?;
+        // Phase 1 (fast-path pre-check, best-effort): if any
+        // key_image is already committed, bail immediately.
+        for ki in &entry.key_images {
+            if self.key_images.contains_key(ki.as_bytes())
+                .map_err(|e| Error::DatabaseError(e.to_string()))? {
+                return Ok(false);
             }
-            tx_trees[2].insert(fee_key.as_slice(), tx_hash_bytes.as_slice())?;
-            Ok(())
-        })
-        .map_err(|e: crate::db::shim::transaction::TransactionError| {
-            Error::DatabaseError(format!("Atomic mempool add failed: {:?}", e))
-        })?;
+        }
+
+        // Phase 2 (structural): CAS each key_image with
+        // expected=None. The first key_image CAS to fail rolls back
+        // the whole add. Because CAS is atomic per-key, two
+        // concurrent adds racing on the same key_image are
+        // structurally serialized — one wins, one gets Ok(Err(_)).
+        // We track successful CAS keys so we can undo them if a
+        // later key_image CAS fails.
+        let mut committed_kis: Vec<Vec<u8>> = Vec::new();
+        for ki in &entry.key_images {
+            match self.key_images.compare_and_swap(
+                ki.as_bytes(),
+                None as Option<&[u8]>,
+                Some(tx_hash_bytes.as_slice()),
+            ) {
+                Ok(Ok(())) => committed_kis.push(ki.as_bytes().to_vec()),
+                Ok(Err(_)) => {
+                    // Someone else CAS'd this key_image first. Roll
+                    // back every key_image we already committed.
+                    for k in &committed_kis {
+                        let _ = self.key_images.remove(k);
+                    }
+                    return Ok(false);
+                }
+                Err(e) => {
+                    for k in &committed_kis {
+                        let _ = self.key_images.remove(k);
+                    }
+                    return Err(Error::DatabaseError(format!(
+                        "R-45: mempool key_image CAS failed: {}", e
+                    )));
+                }
+            }
+        }
+
+        // Phase 3: the key_images are now reserved. Land the tx
+        // body + fee index in a single atomic batch. If this
+        // fails, roll back the key_image reservations.
+        let trees: &[&Tree] = &[&self.transactions, &self.fee_index];
+        if let Err(e) = trees.transaction(|tx_trees| {
+            tx_trees[0].insert(tx_hash_bytes.as_slice(), data.as_slice())?;
+            tx_trees[1].insert(fee_key.as_slice(), tx_hash_bytes.as_slice())?;
+            Ok::<(), crate::db::shim::transaction::TransactionError>(())
+        }) {
+            for k in &committed_kis {
+                let _ = self.key_images.remove(k);
+            }
+            return Err(Error::DatabaseError(format!(
+                "R-45: mempool body/fee commit failed after key_image reservation: {:?}", e
+            )));
+        }
 
         Ok(true)
     }

@@ -201,14 +201,39 @@ impl StateDb {
         Ok(removed)
     }
 
-    /// Store arbitrary key-value
+    /// Store arbitrary key-value.
+    ///
+    /// AUDIT (R-41 fix, 2026-07-03): the pre-fix put/get/delete
+    /// operated on the same tree that stores the canonical
+    /// `KEY_CHAIN_STATE` (b"chain_state") and `KEY_GENESIS_HASH`
+    /// (b"genesis_hash") records. A caller writing raw bytes to
+    /// either of those keys would silently CORRUPT the persisted
+    /// ChainStateData / genesis, making the DB unloadable on next
+    /// open. Reject those two reserved keys structurally so no
+    /// mis-typed caller can wedge the DB.
+    ///
+    /// Prior art: Bitcoin Core's `CBlockTreeDB::Write*` refuses
+    /// reserved subkeys (`FLAGS`, `LAST_BLOCK`, etc.) with a
+    /// distinct error. Same discipline here.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if key == Self::KEY_CHAIN_STATE || key == Self::KEY_GENESIS_HASH {
+            return Err(Error::DatabaseError(format!(
+                "R-41: put() refused for reserved chain-state key {:?} — \
+                 use the typed setter (set_chain_state/set_genesis_hash) \
+                 instead so the encoded structure is preserved.",
+                std::str::from_utf8(key).unwrap_or("<non-utf8>")
+            )));
+        }
         self.state.insert(key, value)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
 
-    /// Get arbitrary key-value
+    /// Get arbitrary key-value.
+    ///
+    /// R-41: reads pass through unchanged — a caller inspecting the
+    /// reserved keys' raw bytes for debugging is a legitimate use
+    /// case. The corruption risk is only on writes.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         match self.state.get(key) {
             Ok(Some(data)) => Ok(Some(data.to_vec())),
@@ -217,8 +242,19 @@ impl StateDb {
         }
     }
 
-    /// Delete key
+    /// Delete key.
+    ///
+    /// R-41: delete also protected — removing the canonical state
+    /// keys would wedge the DB on next open (StateDb::get_state
+    /// would return None and the chain-loader treats that as
+    /// "fresh install", potentially wiping the chain).
     pub fn delete(&self, key: &[u8]) -> Result<()> {
+        if key == Self::KEY_CHAIN_STATE || key == Self::KEY_GENESIS_HASH {
+            return Err(Error::DatabaseError(format!(
+                "R-41: delete() refused for reserved chain-state key {:?}",
+                std::str::from_utf8(key).unwrap_or("<non-utf8>")
+            )));
+        }
         self.state.remove(key)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())

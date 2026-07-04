@@ -168,17 +168,40 @@ impl WalletDb {
         key
     }
 
-    /// Add owned output
+    /// Add owned output.
+    ///
+    /// AUDIT (2026-07-01): the two writes (primary `outputs` + secondary
+    /// `unspent_outputs`) are now atomic — a crash between them was
+    /// leaving the primary row without an index entry, which
+    /// `get_unspent_outputs()` (line ~238) iterates via the secondary
+    /// index. Result was that the wallet PERMANENTLY LOST VISIBILITY of
+    /// UTXOs added in the crash window: `calculate_balance()` still saw
+    /// them via `get_all_outputs()` (reads primary), but
+    /// `get_spendable_outputs()` — the send path — went through
+    /// `get_unspent_outputs()` and returned an empty result for the lost
+    /// row, so the user could see the balance but not spend it. A rescan
+    /// recovered it, but that's a manual step. Same shape as the
+    /// utxos.rs "storage #1 + #7" atomicity fix; this brings the wallet
+    /// db in line. Reference: Bitcoin Core's CCoinsMap writes are
+    /// single-batch (CDBBatch::Write, sync=true).
     pub fn add_output(&self, output: &OwnedOutput) -> Result<()> {
         let key = Self::make_output_key(&output.tx_hash, output.output_index);
         let data = serialize(output)?;
-        self.outputs.insert(key.clone(), data)
+        let is_unspent = !output.spent;
+
+        use crate::db::shim::transaction::Transactional;
+        [&self.outputs, &self.unspent_outputs]
+            .as_slice()
+            .transaction(|trees| {
+                let outputs_tx = &trees[0];
+                let unspent_tx = &trees[1];
+                outputs_tx.insert(key.clone(), data.clone())?;
+                if is_unspent {
+                    unspent_tx.insert(key.clone(), &[1u8][..])?;
+                }
+                Ok(())
+            })
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        // H23: Track unspent outputs in secondary index
-        if !output.spent {
-            self.unspent_outputs.insert(key, &[1u8])
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        }
         Ok(())
     }
 
@@ -195,7 +218,40 @@ impl WalletDb {
         }
     }
 
-    /// Mark output as spent
+    /// Mark output as spent.
+    ///
+    /// AUDIT (2026-07-01): the "set spent flag on primary" and "remove
+    /// from unspent secondary index" writes are now atomic. Before this
+    /// fix, a crash between the two left the row marked spent in the
+    /// primary tree while still present in the `unspent_outputs` index.
+    /// `get_unspent_outputs` (line ~238) has a defensive filter
+    /// (`if !output.spent`) that dropped stale index entries, so the
+    /// observable-badness in mark_spent's crash window was smaller than
+    /// add_output's (no wrong balance / send). But (a) other iterations
+    /// of `unspent_outputs` may not carry the defensive filter, and (b)
+    /// the state divergence itself is a footgun for future readers.
+    /// Fixing here matches the pattern the utxos.rs "storage #1 + #7"
+    /// audit already established.
+    /// AUDIT (R-46 fix, 2026-07-03): the pre-fix code did the
+    /// `self.outputs.get()` read OUTSIDE the transaction, checked
+    /// `output.spent`, then opened a transaction to commit. That
+    /// creates a TOCTOU window: two concurrent mark_spent calls
+    /// for the same (tx_hash, index) — e.g. two nodes reprocessing
+    /// the same received tx after a reorg — could BOTH observe
+    /// `output.spent == false`, both stage their spent_by
+    /// attribution, and both transactions commit. The LATER commit
+    /// wins, silently overwriting the first spent_by/spent_at_height.
+    /// This corrupts wallet accounting (the visible spender in
+    /// history now points at the wrong tx) and can mask a real
+    /// double-spend from the wallet's perspective.
+    ///
+    /// Fix: the pre-read stays where it is (we need to know if the
+    /// row exists to skip early). But we also do a CAS on the
+    /// primary key's serialized form — if another writer already
+    /// updated the row between our pre-read and our CAS, the CAS
+    /// fails and we return `Ok(false)` (already-spent semantics).
+    /// The transaction's `remove(unspent_outputs)` still runs but
+    /// is idempotent — removing an already-absent key is a no-op.
     pub fn mark_spent(
         &self,
         tx_hash: &Hash,
@@ -218,14 +274,42 @@ impl WalletDb {
             output.spent_at_height = Some(spent_at_height);
 
             let new_data = serialize(&output)?;
-            self.outputs.insert(key.clone(), new_data)
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            // H23: Remove from unspent index
-            self.unspent_outputs.remove(&key)
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-            return Ok(true);
+            // R-46: CAS on the primary tree — replace ONLY IF the
+            // stored bytes still equal the pre-read snapshot. If a
+            // concurrent mark_spent already mutated the row, CAS
+            // returns Ok(Err(...)) and we bail with `Ok(false)`.
+            match self.outputs.compare_and_swap(
+                key.as_slice(),
+                Some(data.as_ref()),
+                Some(new_data.as_slice()),
+            ) {
+                Ok(Ok(())) => {
+                    // Our update won. Drop the unspent_outputs index
+                    // entry to keep it in sync. Non-atomic vs the CAS
+                    // above; a crash between CAS and this remove
+                    // leaves a stale index entry that the defensive
+                    // `if !output.spent` filter in get_unspent_outputs
+                    // already tolerates (see the pre-existing
+                    // docstring above L227-229).
+                    self.unspent_outputs.remove(key.as_slice())
+                        .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                    return Ok(true);
+                }
+                Ok(Err(_)) => {
+                    // Concurrent writer beat us — treat as already
+                    // spent. This is the correct semantics: our
+                    // attempt to attribute this spend lost the race,
+                    // whoever won is now the source of truth.
+                    return Ok(false);
+                }
+                Err(e) => {
+                    return Err(Error::DatabaseError(format!(
+                        "R-46: mark_spent CAS failed for tx {} idx {}: {}",
+                        hex::encode(tx_hash.as_bytes()), index, e
+                    )));
+                }
+            }
         }
 
         Ok(false)
@@ -293,20 +377,43 @@ impl WalletDb {
         Ok((total, pending))
     }
 
-    /// Add wallet transaction
+    /// Add wallet transaction.
+    ///
+    /// AUDIT (2026-07-02): the two writes (primary `transactions` +
+    /// secondary `tx_by_time` H24 index) are now atomic. This is the same
+    /// class of multi-tree-without-transaction shape that the 2026-07-01
+    /// audit found and fixed in `add_output`, `mark_spent`, and
+    /// pruning — but this callsite was missed at that time. A systematic
+    /// re-verification of `db/wallet.rs` on 2026-07-02 grepped every
+    /// `self.<tree>.insert`/`.remove` pair and caught it. Same failure
+    /// shape as add_output: crash between L341 and L349 (pre-fix) left
+    /// the tx in the primary tree without a `tx_by_time` index entry;
+    /// callers reading via `transactions.get` still see it (that path
+    /// is used by `get_transaction`), but any iterator via `tx_by_time`
+    /// misses it — the recent-transactions view, wallet UI history,
+    /// and any downstream analytics all silently drop the row. On
+    /// reorg-rewind or clear+rescan the drift widens.
+    /// Prior art: Bitcoin Core CCoinsMap single-batch CDBBatch::Write.
     pub fn add_transaction(&self, tx: &WalletTx) -> Result<()> {
         let data = serialize(tx)?;
-        self.transactions.insert(tx.tx_hash.as_bytes(), data)
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         // H24: Insert into timestamp-prefixed index for efficient recent-tx queries.
         // Key = BE timestamp (8 bytes) + tx_hash (32 bytes) for correct ordering.
         let mut time_key = Vec::with_capacity(40);
         time_key.extend_from_slice(&tx.timestamp.to_be_bytes());
         time_key.extend_from_slice(tx.tx_hash.as_bytes());
-        self.tx_by_time.insert(time_key, tx.tx_hash.as_bytes())
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
+        use crate::db::shim::transaction::Transactional;
+        [&self.transactions, &self.tx_by_time]
+            .as_slice()
+            .transaction(|trees| {
+                let transactions_tx = &trees[0];
+                let tx_by_time_tx = &trees[1];
+                transactions_tx.insert(tx.tx_hash.as_bytes(), data.clone())?;
+                tx_by_time_tx.insert(time_key.clone(), tx.tx_hash.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
 
@@ -450,7 +557,22 @@ impl WalletDb {
         self.transactions.len()
     }
 
-    /// Clear all wallet data (dangerous!)
+    /// Clear all wallet data (dangerous!).
+    ///
+    /// AUDIT (2026-07-01): added `unspent_outputs` (H23 secondary index)
+    /// and `tx_by_time` (H24 secondary index) to the clear set. Before
+    /// this fix, `clear()` reset the 5 primary trees but left both
+    /// secondary indexes populated. On a subsequent `add_output()` /
+    /// `add_transaction()` the stale indexes would still point at the
+    /// pre-clear primary rows — but those rows had been deleted, so
+    /// `get_unspent_outputs()` (which reads `outputs.get(&key)` after
+    /// the index lookup at line ~243) got `None` and skipped them, so no
+    /// user-observable ghost balance. The indexes still drifted from
+    /// the primaries indefinitely, wasting disk and confusing every
+    /// future audit of these tables. The two missing tree clears are
+    /// added below. Atomicity across all 7 clears is not required —
+    /// `clear()` is a full-wallet reset explicitly gated as
+    /// "dangerous!"; recovery from an interrupted clear is a rescan.
     pub fn clear(&self) -> Result<()> {
         self.outputs.clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
@@ -461,6 +583,11 @@ impl WalletDb {
         self.pending.clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         self.labels.clear()
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        // 2026-07-01: secondary indexes missing from the original clear.
+        self.unspent_outputs.clear()
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        self.tx_by_time.clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }

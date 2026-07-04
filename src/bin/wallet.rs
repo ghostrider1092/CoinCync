@@ -542,26 +542,27 @@ fn resolve_home(p: &PathBuf) -> PathBuf {
 }
 
 fn prompt_password(confirm: bool) -> Result<String, String> {
-    use std::io::{BufRead, Write};
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    write!(out, "Password: ").map_err(|e| e.to_string())?;
-    out.flush().map_err(|e| e.to_string())?;
-    let mut pw = String::new();
-    stdin.lock().read_line(&mut pw).map_err(|e| e.to_string())?;
-    let pw = pw.trim().to_string();
+    // P8-Bw1 (2026-07-03): use dialoguer's hidden-input Password prompt.
+    // The previous read_line implementation echoed the password to the
+    // terminal — visible in scrollback, terminal recordings, and any
+    // shell that logs the tty (screen/tmux, mosh, `script`, some CI
+    // wrappers). dialoguer::Password disables terminal echo via the
+    // console crate's cross-platform tty control (termios ECHO off on
+    // Unix, SetConsoleMode on Windows), which is the standard fix.
+    // Falls through to Err(String) on non-tty stdin so callers see the
+    // same interface as before (piped automation must use `--password -`
+    // to opt into the stdin-mode branch of resolve_password).
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let mut prompt = dialoguer::Password::with_theme(&theme).with_prompt("Password");
+    if confirm {
+        prompt = prompt
+            .with_confirmation("Confirm password", "passwords do not match");
+    }
+    let pw = prompt
+        .interact()
+        .map_err(|e| format!("password prompt failed: {}", e))?;
     if pw.is_empty() {
         return Err("password must not be empty".into());
-    }
-    if confirm {
-        write!(out, "Confirm: ").map_err(|e| e.to_string())?;
-        out.flush().map_err(|e| e.to_string())?;
-        let mut pw2 = String::new();
-        stdin.lock().read_line(&mut pw2).map_err(|e| e.to_string())?;
-        if pw.trim() != pw2.trim() {
-            return Err("passwords do not match".into());
-        }
     }
     Ok(pw)
 }
@@ -1208,6 +1209,11 @@ async fn cmd_send(
         (None, None) => Vec::new(),
     };
 
+    // R-113 note: SharedWallet.balance() clones because it can't
+    // hold the RwLock guard across the return. If a future refactor
+    // adds a `with_balance<T>(|b: &Balance| -> T)` closure API on
+    // SharedWallet, callers can drop this clone. For now the
+    // clone is the structural cost of using SharedWallet.
     let balance_snapshot = wallet.balance();
     let mut rng = rand::rngs::OsRng;
     let tx = coincync::wallet::send::create_privacy_transaction_with_options(

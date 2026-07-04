@@ -79,16 +79,44 @@ impl Wallet {
         }
 
         // Generate seed
-        let (mnemonic, seed) = generate_mnemonic();
+        let (mnemonic, mut seed) = generate_mnemonic();
 
-        // Create keys
-        let keys = WalletKeys::from_seed(seed);
+        // Create keys.
+        //
+        // AUDIT (R-110 fix, 2026-07-03): pre-fix code did
+        //   let (mnemonic, seed) = generate_mnemonic();
+        //   let keys = WalletKeys::from_seed(seed);
+        //   let data = WalletData::new(seed, network);
+        // The `seed: [u8; 32]` local was Copy-moved into
+        // WalletKeys::from_seed AND WalletData::new. Both structs
+        // implement zero-on-drop on their INTERNAL fields, but the
+        // Copy-source `seed` on THIS stack frame is untouched and
+        // never zeroized. Wallet::create is only called at wallet
+        // creation, so the window is one-shot per wallet — but the
+        // stack frame COULD be reused by a subsequent scan / send
+        // that dumps stack via a bug or panic. Explicit zeroize
+        // closes the window.
+        let mut keys = WalletKeys::from_seed(seed);
+        // R-115: annotate with the mnemonic so future save() cycles
+        // preserve it. Also passes the phrase through to the initial
+        // save via WalletData.mnemonic_phrase (which save_wallet
+        // will encrypt+persist).
+        keys.set_mnemonic_phrase(mnemonic.clone());
 
         // Create wallet data
-        let data = WalletData::new(seed, network);
+        let mut data = WalletData::new(seed, network);
+        data.mnemonic_phrase = Some(mnemonic.clone());
 
         // Save to file
         save_wallet(&path, &data, password)?;
+
+        // R-110: wipe local `seed` after both consumers have taken
+        // their Copy. `keys` and `data` internally hold their own
+        // seed copies, protected by their own drop chains.
+        {
+            use zeroize::Zeroize;
+            seed.zeroize();
+        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -203,10 +231,14 @@ impl Wallet {
         let seed = mnemonic_to_seed(mnemonic)?;
 
         // Create keys
-        let keys = WalletKeys::from_seed(seed);
+        let mut keys = WalletKeys::from_seed(seed);
+        // R-115: annotate with the caller-supplied mnemonic so
+        // future save() calls preserve it.
+        keys.set_mnemonic_phrase(mnemonic.to_string());
 
         // Create wallet data
-        let data = WalletData::new(seed, network);
+        let mut data = WalletData::new(seed, network);
+        data.mnemonic_phrase = Some(mnemonic.to_string());
 
         // Save to file
         save_wallet(&path, &data, password)?;
@@ -298,6 +330,15 @@ impl Wallet {
             WalletKeys::from_seed(data.seed)
         };
 
+        // R-115 SURGICAL FIX (2026-07-03): restore the mnemonic
+        // phrase into WalletKeys if the save file persisted one.
+        // Pre-fix code did WalletKeys::from_seed(data.seed) and
+        // discarded data.mnemonic_phrase.
+        let mut keys = keys;
+        if let Some(phrase) = data.mnemonic_phrase.as_ref() {
+            keys.set_mnemonic_phrase(phrase.clone());
+        }
+
         self.keys = Some(keys);
         self.scanned_height = data.scanned_height;
         self.network = data.network.clone();
@@ -306,29 +347,39 @@ impl Wallet {
         self.subaddress_data = data.subaddresses.clone();
         self.created_at = data.created_at;
 
-        // Restore persisted UTXOs from sidecar file (decrypt if encrypted)
+        // Restore persisted UTXOs from sidecar file (decrypt if encrypted).
+        //
+        // R-111 fix (2026-07-02): `decrypt_sidecar` returns a `Vec<u8>`
+        // containing decrypted plaintext (UTXO structs with the
+        // amount_blinding_bytes secret material). Prior code let the
+        // Vec drop unzeroized, leaving the plaintext on the heap
+        // until re-allocation. Now: `mut json_bytes` + explicit
+        // `.zeroize()` after deserialization at each sidecar path.
         let utxo_path = self.path.with_extension("utxos");
         if utxo_path.exists() {
             if let Ok(bytes) = std::fs::read(&utxo_path) {
-                let json_bytes = Self::decrypt_sidecar(&bytes, password);
+                let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
                 if let Ok(utxos) = serde_json::from_slice::<Vec<UTXO>>(&json_bytes) {
                     for utxo in utxos {
                         self.balance.add_utxo(utxo);
                     }
                 }
+                json_bytes.zeroize();
             }
         }
 
-        // Restore persisted transaction history from sidecar file (decrypt if encrypted)
+        // Restore persisted transaction history from sidecar file (decrypt if encrypted).
+        // See R-111 note above; same pattern.
         let history_path = self.path.with_extension("history");
         if history_path.exists() {
             if let Ok(bytes) = std::fs::read(&history_path) {
-                let json_bytes = Self::decrypt_sidecar(&bytes, password);
+                let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
                 if let Ok(records) = serde_json::from_slice::<Vec<TransactionRecord>>(&json_bytes) {
                     for record in records {
                         self.history.add(record);
                     }
                 }
+                json_bytes.zeroize();
             }
         }
 
@@ -339,27 +390,45 @@ impl Wallet {
         // proxy at unlock time — wallets that refresh more aggressively
         // can call `release_expired_reservations(true_current_height)` on
         // open with a fresh chain query.
+        //
+        // R-111 fix: zeroize decrypted plaintext after use.
         let reservations_path = self.path.with_extension("reservations");
         if reservations_path.exists() {
             if let Ok(bytes) = std::fs::read(&reservations_path) {
-                let json_bytes = Self::decrypt_sidecar(&bytes, password);
+                let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
                 if let Ok(entries) = serde_json::from_slice::<Vec<((Hash, u8), super::balance::Reservation)>>(&json_bytes) {
                     self.balance.restore_reservations(entries, self.scanned_height);
                 }
+                json_bytes.zeroize();
             }
         }
 
         Ok(())
     }
 
-    /// Lock wallet
+    /// Lock wallet.
     ///
-    /// SECURITY: Explicitly drops keys to trigger zeroize-on-drop behavior
-    /// from WalletKeys. We take() the Option to ensure Drop runs immediately.
+    /// SECURITY (R-112 fix, 2026-07-02): Prior implementation only dropped
+    /// `WalletKeys`. Balance, history and subaddress caches survived,
+    /// which leaked spend-side privacy: an attacker with a memory dump
+    /// after `lock()` still saw UTXOs, ring positions, transaction
+    /// history and subaddress indices. Now we:
+    ///   1. Explicitly drop `WalletKeys` (triggers ZeroizeOnDrop).
+    ///   2. Replace `balance` with an empty `Balance` (drops the old
+    ///      UTXO + key-image tables).
+    ///   3. Clear `history.records` in place.
+    ///   4. Drop `subaddress_data` (subaddress derivation indices are
+    ///      a privacy leak — they reveal receive-address patterns).
+    /// `scanned_height`, `network`, `label`, `path` and `created_at` are
+    /// non-secret bookkeeping and are kept so unlock() can restore scan
+    /// state without a full re-scan.
     pub fn lock(&mut self) {
         if let Some(keys) = self.keys.take() {
             drop(keys); // Explicitly trigger Drop (which runs ZeroizeOnDrop)
         }
+        self.balance = Balance::new();
+        self.history.clear();
+        self.subaddress_data = None;
         self.state = WalletState::Locked;
     }
 
@@ -417,16 +486,53 @@ impl Wallet {
     /// - Consider using per-transaction view keys for limited disclosure
     /// - Ensure secure transmission (encrypted channel)
     pub fn export_view_key(&self, epoch: Option<u64>) -> Result<String> {
-        // SECURITY: Log that sensitive key material is being exported
+        // Audit MEDIUM #32 closure: this entry point now refuses export.
+        // The view key reveals ALL transaction history — exporting it
+        // from an already-unlocked wallet without password re-confirm is
+        // an unattended-session footgun (an attacker who walks up to an
+        // unlocked desktop wallet can dump the view key in one RPC call).
+        // Use `export_view_key_confirmed(password, epoch)` instead.
+        //
+        // Reference: Monero's wallet2 `get_seed`/`get_multisig_seed` REQUIRE
+        // re-entry of the wallet password; zcashd's `z_exportviewingkey`
+        // similarly gates on unlock + confirmation. The bool-toggle
+        // variant proposed by the audit was rejected as too easy to
+        // call with the wrong default; making the safe API the only API
+        // forces every caller to be explicit.
+        let _ = epoch;
+        Err(Error::InvalidState(
+            "export_view_key requires password re-confirmation; \
+             call export_view_key_confirmed(password, epoch) instead".into()
+        ))
+    }
+
+    /// Export the view key after re-verifying the wallet password.
+    ///
+    /// Closes audit MEDIUM #32 (view-key export not gated behind password
+    /// re-entry). Password verification is implicit: we re-run `load_wallet`
+    /// with the supplied password and reject on cipher-tag mismatch. The
+    /// password is held in memory only for the verify call; it is dropped
+    /// before the view key is returned.
+    pub fn export_view_key_confirmed(
+        &self,
+        password: &str,
+        epoch: Option<u64>,
+    ) -> Result<String> {
+        // Re-verify password by attempting wallet load. A wrong password
+        // surfaces as a decrypt error (Argon2id KDF + AEAD tag check).
+        // We discard the loaded data — we only need confirmation that
+        // the operator currently holds the password, not the data itself.
+        let _ = load_wallet(&self.path, Some(password))?;
+
         tracing::warn!(
             target: "wallet::security",
-            "View key export requested - this reveals transaction history"
+            "View key export confirmed by password re-entry; \
+             this reveals transaction history to the recipient"
         );
 
         let keys = self.keys.as_ref()
             .ok_or(Error::InvalidState("wallet locked".into()))?;
 
-        // Get the requested epoch or current
         let key_epoch = match epoch {
             Some(e) => keys.get_epoch(e)
                 .ok_or(Error::InvalidState(format!("epoch {} not found", e)))?,
@@ -453,7 +559,23 @@ impl Wallet {
         self.balance.total()
     }
 
-    /// Get the full Balance tracker
+    /// Get the full Balance tracker.
+    ///
+    /// AUDIT (R-113 note, 2026-07-03): `Balance` contains a
+    /// `HashMap<OutputKey, UTXO>` where each `UTXO` holds an
+    /// `amount_blinding_bytes: [u8; 32]` — the Pedersen blinding
+    /// factor, which is SECRET material. `.clone()` DUPLICATES
+    /// every blinding factor into a fresh HashMap on the caller's
+    /// heap, doubling the memory footprint of secret material and
+    /// widening the attack surface for a memory dump.
+    ///
+    /// Callers who only need to QUERY the balance should use
+    /// `balance_ref()` (already public, see just below) — it
+    /// returns `&Balance` with zero clone cost. This fn stays
+    /// public for the small number of callers who genuinely need
+    /// an owned Balance (RPC serialization, snapshot testing);
+    /// they accept the secret-duplication cost. New callers must
+    /// justify the clone.
     pub fn balance(&self) -> Balance {
         self.balance.clone()
     }
@@ -707,7 +829,7 @@ impl Wallet {
             let bytes_to_write = if let Some(pw) = password {
                 let mut salt = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut salt);
-                let mut key = super::derive_key_default(pw, &salt);
+                let mut key = super::derive_key_default(pw, &salt)?;
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
@@ -720,8 +842,15 @@ impl Wallet {
             let utxo_tmp_path = self.path.with_extension("utxos.tmp");
             std::fs::write(&utxo_tmp_path, &bytes_to_write)
                 .map_err(|e| Error::InvalidState(format!("failed to write UTXO temp file: {}", e)))?;
+            // R-100 fix: harden BEFORE the atomic rename so the
+            // as-visible-to-others file always has restrictive perms.
+            super::persistence::harden_secret_file_permissions(&utxo_tmp_path);
             std::fs::rename(&utxo_tmp_path, &utxo_path)
                 .map_err(|e| Error::InvalidState(format!("failed to rename UTXO file: {}", e)))?;
+            // Also harden the final path in case the rename doesn't
+            // preserve ACLs on this platform (Windows preserves them
+            // via move within same volume, but this is defense-in-depth).
+            super::persistence::harden_secret_file_permissions(&utxo_path);
         } else if utxo_path.exists() {
             let _ = std::fs::remove_file(&utxo_path);
         }
@@ -739,7 +868,7 @@ impl Wallet {
             let bytes_to_write = if let Some(pw) = password {
                 let mut salt = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut salt);
-                let mut key = super::derive_key_default(pw, &salt);
+                let mut key = super::derive_key_default(pw, &salt)?;
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
@@ -752,8 +881,11 @@ impl Wallet {
             let reservations_tmp_path = self.path.with_extension("reservations.tmp");
             std::fs::write(&reservations_tmp_path, &bytes_to_write)
                 .map_err(|e| Error::InvalidState(format!("failed to write reservations temp file: {}", e)))?;
+            // R-100 fix: harden reservations sidecar (same defense as .utxos).
+            super::persistence::harden_secret_file_permissions(&reservations_tmp_path);
             std::fs::rename(&reservations_tmp_path, &reservations_path)
                 .map_err(|e| Error::InvalidState(format!("failed to rename reservations file: {}", e)))?;
+            super::persistence::harden_secret_file_permissions(&reservations_path);
         } else if reservations_path.exists() {
             let _ = std::fs::remove_file(&reservations_path);
         }
@@ -768,7 +900,7 @@ impl Wallet {
             let bytes_to_write = if let Some(pw) = password {
                 let mut salt = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut salt);
-                let mut key = super::derive_key_default(pw, &salt);
+                let mut key = super::derive_key_default(pw, &salt)?;
                 let mut nonce = [0u8; 24];
                 rand::rngs::OsRng.fill_bytes(&mut nonce);
                 let encrypted = super::encrypt(&json, &key, &nonce)?;
@@ -781,8 +913,11 @@ impl Wallet {
             let history_tmp_path = self.path.with_extension("history.tmp");
             std::fs::write(&history_tmp_path, &bytes_to_write)
                 .map_err(|e| Error::InvalidState(format!("failed to write history temp file: {}", e)))?;
+            // R-100 fix: harden history sidecar (same defense as .utxos).
+            super::persistence::harden_secret_file_permissions(&history_tmp_path);
             std::fs::rename(&history_tmp_path, &history_path)
                 .map_err(|e| Error::InvalidState(format!("failed to rename history file: {}", e)))?;
+            super::persistence::harden_secret_file_permissions(&history_path);
         } else if history_path.exists() {
             let _ = std::fs::remove_file(&history_path);
         }
@@ -792,17 +927,61 @@ impl Wallet {
         // spend_secret. Using spend_secret would cause restore to produce
         // wrong keys since the derived key would be treated as a master
         // seed. Using master_seed_for_backup() which is the secure API.
-        let seed = *keys.master_seed_for_backup();
+        //
+        // R-114 fix (2026-07-02): the prior `let seed = *keys.master_seed_for_backup();`
+        // Copy'd the [u8; 32] master seed onto the stack of save(). The
+        // stack copy was never zeroized; it persisted until save()
+        // returned. Since save() is called after every scan cycle (i.e.
+        // frequently in a running wallet), the stack window was reopened
+        // constantly. Now we scope the seed inside a mutable local +
+        // build the WalletData from a clone-then-zeroize pattern:
+        // WalletData's Drop already zeros its own seed, so once we move
+        // the seed into WalletData we can clear the local immediately.
+        // R-75: master_seed_for_backup now returns Option — None on
+        // watch-only. Save persists the raw sentinel via the internal
+        // accessor because save preserves round-trip fidelity (a
+        // watch-only wallet re-loaded must round-trip to the same
+        // watch-only state). External backup callers must use
+        // master_seed_for_backup and handle the None branch.
+        let mut seed = *keys.raw_master_seed_or_sentinel();
+        // AUDIT (R-115 note, 2026-07-03): `mnemonic_phrase` is
+        // hardcoded to `None` in every save cycle. That means:
+        //   - Wallets CREATED with a mnemonic (Wallet::create)
+        //     persist without the phrase.
+        //   - On subsequent load, the phrase is not recoverable
+        //     even though the seed is — the user can't ever run
+        //     "show my seed phrase" after the first save cycle.
+        //   - Wallets restored FROM a mnemonic via Wallet::restore
+        //     ALSO lose the phrase on their first save.
+        // This is a UX bug rather than a security bug — the seed
+        // IS still on disk, so the wallet still functions and the
+        // BIP39 phrase can be regenerated at import via a fresh
+        // Wallet::from_seed roundtrip. But an operator invoking
+        // "show mnemonic phrase" on an already-saved wallet gets
+        // an error, and support tickets for "I lost my seed
+        // phrase" go up. Not fixing structurally here because
+        // preserving the phrase requires threading it through
+        // Wallet's fields (WalletKeys doesn't currently retain
+        // the phrase — it only retains the derived seed). Follow-
+        // up to add `WalletKeys::mnemonic: Option<Zeroizing<String>>`
+        // is queued separately.
         let data = WalletData {
-            seed,
+            seed,  // Copy'd into WalletData.seed; original local zeroed below.
             current_epoch: keys.current().map(|e| e.epoch).unwrap_or(0),
             scanned_height: self.scanned_height,
             label: self.label.clone(),
             created_at: self.created_at,
             network: self.network.clone(),
             subaddresses: self.subaddress_data.clone(),
-            mnemonic_phrase: None,
+            // R-115 SURGICAL FIX (2026-07-03): preserve the mnemonic
+            // phrase from WalletKeys through save. Prior code
+            // hardcoded `None` here.
+            mnemonic_phrase: keys.mnemonic_phrase().map(|s| s.to_string()),
         };
+        // R-114 fix: wipe the stack copy immediately. WalletData::Drop
+        // wipes its own `.seed` field on drop; this closes the parallel
+        // stack-copy window.
+        seed.zeroize();
         save_wallet(&self.path, &data, password)?;
 
         Ok(())
@@ -867,11 +1046,19 @@ impl SharedWallet {
     }
 
     /// Acquire read lock.
-    /// SECURITY: Recovers from poisoned locks instead of panicking. A poisoned lock
-    /// means a thread panicked during a wallet mutation. We recover the inner data
-    /// because wallet operations are individually atomic (each UTXO add/spend is
-    /// self-contained) and crashing would prevent the user from saving or recovering
-    /// their wallet entirely. This matches the chain.rs recovery strategy.
+    ///
+    /// AUDIT (R-116 fix, 2026-07-02): the prior comment here claimed
+    /// "SECURITY: Recovers from poisoned locks instead of panicking."
+    /// That's a stale doc from a `std::sync::RwLock` era. This uses
+    /// `parking_lot::RwLock`, which does NOT poison — a panic-in-guard
+    /// leaves the mutex intact and the next acquirer gets a normal
+    /// lock. There is nothing to recover from because there is no
+    /// poison state; the false-security comment misled readers into
+    /// thinking a safety net existed. If a real poisoning strategy is
+    /// needed (e.g. because a mutation panicked while wallet state was
+    /// half-updated), that would be a domain-level invariant reset —
+    /// not a lock-poison recovery — and the design belongs on the
+    /// mutation methods, not here.
     fn read_lock(&self) -> parking_lot::RwLockReadGuard<'_, Wallet> {
         self.inner.read()
     }
@@ -946,9 +1133,25 @@ impl SharedWallet {
 
     /// Get a reference to the balance for creating transactions
     /// This returns a clone of the balance since we can't return a reference
-    /// through the RwLock
+    /// through the RwLock.
+    ///
+    /// AUDIT (R-113 note): the clone DUPLICATES `amount_blinding_bytes`
+    /// (secret material) for every UTXO. See [`with_balance`] for a
+    /// zero-clone alternative that runs a closure under the read
+    /// lock and returns the closure's output.
     pub fn balance(&self) -> Balance {
         self.read_lock().balance.clone()
+    }
+
+    /// R-113 SURGICAL FIX (2026-07-03): run `f` with a shared
+    /// reference to the underlying Balance, holding the read lock
+    /// only for the closure's duration. Returns `f`'s output.
+    /// Zero secret-material clones. Callers that only need to
+    /// COMPUTE something from Balance (fee estimate, iterator,
+    /// summed amount) should use this instead of `balance()`.
+    pub fn with_balance<T>(&self, f: impl FnOnce(&Balance) -> T) -> T {
+        let guard = self.read_lock();
+        f(&guard.balance)
     }
 
     /// Get all UTXOs (for export_key_images)
@@ -1147,8 +1350,24 @@ impl SharedWallet {
                 .map(|(addr, amount)| (addr.spend_public_key, addr.view_public_key, *amount))
                 .collect();
 
-        // Get ring size for the height the tx will be mined at.
-        let ring_size = crate::constants::ring_size_at_height(current_height);
+        // Get ring size — R-117 SURGICAL FIX (2026-07-03): use
+        // the CHAIN TIP height, not the wallet's scanned_height.
+        //
+        // Pre-fix code used `current_height = wallet.scanned_height`
+        // for ring-size selection. If the wallet was behind on
+        // scanning during a hard-fork activation window,
+        // `ring_size_at_height(scanned_height)` returned the OLD
+        // ring size while a network-tip-height wallet would use
+        // the new one. A chain analyst observing tx ring-sizes
+        // could then partition "recent-wallet" vs "lagging-wallet"
+        // submissions.
+        //
+        // We now derive ring size from `chain.height()` (the chain
+        // tip), matching what network-tip-height wallets are using.
+        // `current_height` above is still used for decoy min_age
+        // (the wallet-local view of maturity is correct there).
+        let tip_height_for_ring_size = chain.height();
+        let ring_size = crate::constants::ring_size_at_height(tip_height_for_ring_size);
 
         // Get decoy outputs from the chain
         // We need (ring_size - 1) decoys per input, estimate we need up to 5 inputs max
@@ -1279,5 +1498,49 @@ mod tests {
 
         wallet.unlock("test123").unwrap();
         assert!(wallet.is_unlocked());
+    }
+
+    /// R-112 regression: lock() must clear cached balance, history, and
+    /// subaddress data — not just wallet keys — so a post-lock memory
+    /// dump does not leak UTXOs, ring metadata, or subaddress indices.
+    #[test]
+    fn lock_clears_balance_history_and_subaddress_caches() {
+        use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
+        use crate::wallet::balance::UTXO;
+        use crate::wallet::history::TransactionRecord;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.wallet");
+        let (mut wallet, _) = Wallet::create(path.clone(), Some("test123"), "testnet").unwrap();
+
+        wallet.balance.add_utxo(UTXO {
+            tx_hash: Hash::from_bytes([1u8; 32]),
+            output_index: 0,
+            amount: Amount::from_atomic(1_000_000),
+            height: 42,
+            key_image: KeyImage::from_bytes([3u8; 32]),
+            spent: false,
+            amount_blinding_bytes: [7u8; 32],
+            tx_public_key: PublicKey::from_bytes([2u8; 32]),
+            lock_height: None,
+        });
+        wallet.history.add(TransactionRecord::incoming(
+            Hash::from_bytes([5u8; 32]),
+            Amount::from_atomic(1_000_000),
+            42,
+            0,
+            0,
+            None,
+        ));
+        wallet.subaddress_data = Some(super::super::SubaddressData::default());
+
+        assert!(wallet.balance.total().as_atomic() > 0, "precondition: balance seeded");
+        assert!(wallet.subaddress_data.is_some(), "precondition: subaddr seeded");
+
+        wallet.lock();
+
+        assert!(!wallet.is_unlocked(), "wallet should be locked");
+        assert_eq!(wallet.balance.total().as_atomic(), 0, "R-112: balance must be cleared on lock");
+        assert!(wallet.subaddress_data.is_none(), "R-112: subaddress_data must be cleared on lock");
     }
 }

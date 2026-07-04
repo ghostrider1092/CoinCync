@@ -124,7 +124,14 @@ pub fn distribute_fee(total: Amount, congested: bool) -> FeeDistribution {
         (FEE_MINER_NORMAL_PERCENT, FEE_BURN_NORMAL_PERCENT)
     };
 
-    let to_miner = (fee_u128 * miner_pct as u128 / 100) as u64;
+    // The 2026-07-01 audit noted the comment above promised `.min(fee)`
+    // as a defense-in-depth clamp but the code didn't apply it — a
+    // silent doc/code drift. Restored here: if a future constant edit
+    // ever bumps FEE_MINER_*_PERCENT above 100 (there's a compile-time
+    // assert on the burn side but not the miner side), the clamp
+    // prevents the u128→u64 truncation from wrapping into a nonsense
+    // value silently.
+    let to_miner = ((fee_u128 * miner_pct as u128 / 100) as u64).min(fee);
     // Remainder goes to burn — guarantees exact sum with zero rounding loss.
     // No protocol fee (Constitution Article II: 0% dev tax).
     let burned = fee - to_miner;

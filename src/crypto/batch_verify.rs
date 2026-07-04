@@ -246,6 +246,23 @@ impl BatchVerifier {
             None => return false,
         };
 
+        // R-29 fix (2026-07-02): defense-in-depth reject identity
+        // `pseudo_output`. `Commitment::from_bytes` accepts the identity
+        // point (0-encoded compressed Ristretto is a valid decode).
+        // If the caller supplies an identity pseudo_output, then in the
+        // CLSAG verify's aggregate `mu_c * (C_i - C')`, C' is identity
+        // and drops out — collapsing to `mu_c * C_i`. R-1 fixes the
+        // clsag_verify side to reject identity `C_i`, but relying on
+        // that downstream check is fragile: batch-verify is a
+        // second-verification layer used by mempool + block validation
+        // where DEFENSIVE early-out is cheaper than trusting the
+        // downstream check. Reject at this layer too.
+        use curve25519_dalek::traits::Identity;
+        use curve25519_dalek::ristretto::RistrettoPoint;
+        if pseudo_output.as_point().as_point() == &RistrettoPoint::identity() {
+            return false;
+        }
+
         // Call actual CLSAG verification
         clsag_verify(&sig.message, &ring, &pseudo_output, &clsag_sig)
     }
@@ -257,27 +274,34 @@ impl Default for BatchVerifier {
     }
 }
 
-/// Parallel transaction validator
-pub struct ParallelTxValidator {
-    /// Number of worker threads
-    workers: usize,
-    /// Whether to use cache (reserved for future cache integration)
-    _use_cache: bool,
-}
+/// Parallel transaction validator.
+///
+/// AUDIT (2026-07-01): removed the `workers: usize` and `_use_cache: bool`
+/// fields plus the `with_workers()` builder. Both fields were dead:
+///
+/// - `workers` was stored on construction but never used. The par_iter()
+///   calls below hit rayon's *global* thread pool; the field only fooled
+///   callers into thinking `.with_workers(1)` would run single-threaded.
+///   Wiring it up correctly would require `rayon::ThreadPoolBuilder` per
+///   call, which allocates a fresh pool each time and defeats the point.
+///   For anything more nuanced than "use the global pool," callers should
+///   build their own scoped pool.
+///
+/// - `_use_cache` was named with a leading underscore, marking it as
+///   deliberately-unread by the compiler-suppression convention, but it
+///   still occupied space and lied about a capability the type doesn't
+///   have. Batch-level caching lives in `BatchVerifier` (see `use_cache`
+///   there), not here.
+///
+/// The remaining struct is a zero-sized handle whose whole job is to hang
+/// two methods off a nameable type — kept because both methods are part
+/// of the re-exported crypto surface (`crypto::mod` line 131).
+pub struct ParallelTxValidator;
 
 impl ParallelTxValidator {
     /// Create new validator
     pub fn new() -> Self {
-        ParallelTxValidator {
-            workers: num_cpus::get().max(1),
-            _use_cache: true,
-        }
-    }
-
-    /// Set worker count
-    pub fn with_workers(mut self, workers: usize) -> Self {
-        self.workers = workers.max(1);
-        self
+        ParallelTxValidator
     }
 
     /// Validate transactions in parallel
@@ -291,7 +315,7 @@ impl ParallelTxValidator {
             return Vec::new();
         }
 
-        // Parallel validation
+        // Parallel validation on rayon's global thread pool.
         let invalid: Vec<usize> = txs.par_iter()
             .enumerate()
             .filter(|(_, tx)| !validate_fn(tx))
@@ -416,11 +440,12 @@ mod tests {
 
     #[test]
     fn test_parallel_validator() {
+        // Empty input path must return an empty vec without touching rayon.
+        // Post-2026-07-01: ParallelTxValidator is a zero-sized handle;
+        // there's nothing else to introspect here.
         let validator = ParallelTxValidator::new();
-
-        // This would test with actual transactions
-        // For now just verify it compiles
-        assert!(validator.workers > 0);
+        let invalid = validator.validate_transactions(&[], |_| true);
+        assert!(invalid.is_empty());
     }
 
     #[test]

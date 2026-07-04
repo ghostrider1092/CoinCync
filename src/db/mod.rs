@@ -182,8 +182,59 @@ fn get_available_memory_mb() -> usize {
 
     #[cfg(target_os = "windows")]
     {
-        // Use sysinfo or default
-        // For simplicity, return a reasonable default
+        // R-33 fix (2026-07-03): pre-fix code left this block empty
+        // (just a doc comment) and silently fell through to the
+        // 4096 MB default. Consequence: every Windows deployment
+        // got the "4-8 GB RAM" config regardless of actual host
+        // memory — an 8+ GB box never enabled the 1024 MB
+        // aggressive-cache config, and a 2 GB box got a config
+        // that OOMs during IBD.
+        //
+        // Use the Win32 GlobalMemoryStatusEx API directly via the
+        // minimal FFI declaration below — avoids pulling in a large
+        // dependency (`sysinfo`, `windows-sys`) just for one call.
+        // This is the same API sysinfo would ultimately dispatch to.
+        //
+        // Safety: GlobalMemoryStatusEx takes a MEMORYSTATUSEX* and
+        // writes into it. We zero-init the struct with dwLength set
+        // to the struct size (an OS-enforced discriminator). Return
+        // value 0 = failure; we honor it by falling through to the
+        // 4096 default with a tracing::warn.
+        #[repr(C)]
+        struct MemoryStatusEx {
+            dw_length: u32,
+            dw_memory_load: u32,
+            ull_total_phys: u64,
+            ull_avail_phys: u64,
+            ull_total_page_file: u64,
+            ull_avail_page_file: u64,
+            ull_total_virtual: u64,
+            ull_avail_virtual: u64,
+            ull_avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(lpBuffer: *mut MemoryStatusEx) -> i32;
+        }
+
+        let mut status: MemoryStatusEx = unsafe { std::mem::zeroed() };
+        status.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
+        // Safety: pointer is to a stack-owned struct with matching
+        // dw_length. GlobalMemoryStatusEx is documented as thread-safe
+        // and does not retain the pointer past the call.
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        if ok != 0 {
+            let mb = (status.ull_total_phys / (1024 * 1024)) as usize;
+            if mb >= 512 {
+                return mb;
+            }
+        }
+        tracing::warn!(
+            target: "db_config",
+            "get_available_memory_mb: Win32 GlobalMemoryStatusEx returned \
+             failure or an implausible value; falling back to 4096 MB \
+             default. DB cache may be undersized on high-RAM hosts — set \
+             cache_size_mb explicitly via DbConfig if this matters."
+        );
     }
 
     // Default: assume 4 GB
@@ -740,16 +791,38 @@ impl Database {
     /// not at all. Called from `chain.rs` after in-memory UTXO set is already
     /// updated and all fork blocks are validated.
     ///
-    /// LOCKING CONTRACT (caller MUST satisfy): the caller MUST hold
-    /// `Blockchain.inner.write()` for the entire window from gathering the
-    /// reorg diff through to the return of this function. The implementation
-    /// does a pre-transaction "already present" read against committed state
-    /// (line ~349) to implement oldest-wins on output_index — that read is
-    /// only race-free under the chain write lock, because sled's shim TxTree
-    /// reads pass through to committed state (not the pending batch). Without
-    /// the caller's write lock, a concurrent apply_block could insert into
-    /// output_index between the pre-read and the transaction commit, and
-    /// the oldest-wins decision would silently flip.
+    /// # LOCKING CONTRACT (caller MUST satisfy)
+    ///
+    /// The caller MUST hold `Blockchain.inner.write()` for the entire window
+    /// from gathering the reorg diff through to the return of this function.
+    /// The implementation does a pre-transaction "already present" read
+    /// against committed state (line ~349) to implement oldest-wins on
+    /// output_index — that read is only race-free under the chain write
+    /// lock, because sled's shim TxTree reads pass through to committed
+    /// state (not the pending batch). Without the caller's write lock, a
+    /// concurrent apply_block could insert into output_index between the
+    /// pre-read and the transaction commit, and the oldest-wins decision
+    /// would silently flip.
+    ///
+    /// # AUDIT (R-34 fix, 2026-07-03)
+    ///
+    /// Structural fix landed 2026-07-03: the caller at
+    /// chain.rs::attempt_reorg re-acquires `self.inner.write()` via
+    /// `let _reorg_commit_guard = self.inner.write();` at
+    /// chain.rs L~2514 immediately before invoking this function.
+    /// The guard is bound to the enclosing scope, which extends past
+    /// the return of apply_reorg_atomic, so the pre-transaction
+    /// "already present" read at L~411 below is protected against
+    /// concurrent apply_block writers.
+    ///
+    /// The contract is now enforced in TWO layers:
+    ///   1. The caller holds the write lock (verified 2026-07-03).
+    ///   2. This docstring documents the contract for any future
+    ///      caller that might be added.
+    ///
+    /// Fully structural enforcement (a phantom `WriteGuard` witness
+    /// type required by the fn signature) is still a follow-up
+    /// worth doing, but the immediate correctness gap is closed.
     pub fn apply_reorg_atomic(
         &self,
         // Output index entries to remove (disconnected blocks' output stealth keys)
@@ -906,12 +979,29 @@ impl Database {
         self.db.was_recovered()
     }
 
-    /// Export database statistics
+    /// Export database statistics.
+    ///
+    /// AUDIT (R-35 fix, 2026-07-03): the pre-fix inline comment said
+    /// "blocks, utxos, state, keys, wallet, mempool, assets,
+    /// output_index" — a list that did NOT match the current
+    /// `Database` struct fields. `wallet` and `assets` are not
+    /// separate Database fields (never were, once asset support was
+    /// stripped in commit 46f0437). The correct enumeration matches
+    /// the `Database` field list at ~L244: blocks, utxos, state,
+    /// keys, mempool, output_index, filters, tx_index. Also note:
+    /// several of these sub-DBs internally open MULTIPLE kv-trees
+    /// (e.g. UtxoDb opens ~3, BlockDb opens 2), so `tree_count` here
+    /// is the NOMINAL count of top-level Database fields, not the
+    /// physical number of column families / trees the RocksDB shim
+    /// has open. If a metric consumer cares about the physical
+    /// count, they should call `self.db.tree_names().len()` instead.
     pub fn stats(&self) -> DbStats {
         DbStats {
             size_bytes: self.size_on_disk(),
             was_recovered: self.was_recovered(),
-            tree_count: 8, // blocks, utxos, state, keys, wallet, mempool, assets, output_index
+            // 8 top-level Database fields: blocks, utxos, state, keys,
+            // mempool, output_index, filters, tx_index.
+            tree_count: 8,
         }
     }
 }

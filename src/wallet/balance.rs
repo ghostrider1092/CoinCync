@@ -12,7 +12,20 @@ use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+/// Owned UTXO tracked by the wallet.
+///
+/// SECURITY (R-90 fix, 2026-07-02): `Debug` is manually implemented
+/// below to REDACT `amount_blinding_bytes`. Prior code used
+/// `#[derive(Debug)]`, which meant every `println!("{:?}", utxo)`,
+/// `format!("{utxo:?}")`, or error message embedding a UTXO leaked
+/// the amount's Pedersen blinding factor into the log. The blinding
+/// factor is secret material — with it, an observer holding a
+/// wallet-owner's log can recompute the committed amount from the
+/// on-chain commitment (`commit(amount, blinding) == C`). Redacting
+/// at the Debug level closes the class of accidental log leaks;
+/// callers who legitimately need the bytes must reach for
+/// `amount_blinding_bytes` explicitly.
+#[derive(Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct UTXO {
     pub tx_hash: Hash,
     pub output_index: u8,
@@ -24,6 +37,8 @@ pub struct UTXO {
     /// Use `BlindingFactor::from_bytes(utxo.amount_blinding_bytes)` to
     /// reconstruct. Must match the blinding used in the on-chain
     /// commitment, or CLSAG ring signatures will fail validation.
+    ///
+    /// SECRET: never log; Debug impl below redacts this field.
     pub amount_blinding_bytes: [u8; 32],
     /// The tx_public_key from the output that sent us this UTXO.
     /// Used to recompute the one-time spend secret.
@@ -31,6 +46,22 @@ pub struct UTXO {
     /// Optional time lock: output cannot be spent until this block height.
     /// `None` means immediately spendable.
     pub lock_height: Option<u64>,
+}
+
+impl std::fmt::Debug for UTXO {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UTXO")
+            .field("tx_hash", &self.tx_hash)
+            .field("output_index", &self.output_index)
+            .field("amount", &self.amount)
+            .field("height", &self.height)
+            .field("key_image", &self.key_image)
+            .field("spent", &self.spent)
+            .field("amount_blinding_bytes", &"[REDACTED-32B]")
+            .field("tx_public_key", &self.tx_public_key)
+            .field("lock_height", &self.lock_height)
+            .finish()
+    }
 }
 
 /// In-flight reservation on a UTXO. Tracks that the wallet has built and
@@ -399,6 +430,34 @@ mod tests {
         let mut balance = Balance::new();
         balance.add_utxo(make_utxo(500, 0, true));
         assert_eq!(balance.total(), Amount::ZERO);
+    }
+
+    /// R-90 close: `Debug` output MUST redact the amount blinding factor.
+    /// Prior to this fix, `#[derive(Debug)]` printed the blinding bytes
+    /// hex-literal — any error/log embedding a UTXO leaked secret material.
+    #[test]
+    fn utxo_debug_redacts_amount_blinding_bytes() {
+        // Populate with a distinctive, easy-to-search byte pattern.
+        let mut u = make_utxo(1234, 5, false);
+        u.amount_blinding_bytes = [0xDEu8; 32];
+        let s = format!("{:?}", u);
+        assert!(
+            s.contains("[REDACTED-32B]"),
+            "Debug MUST print the redaction marker, got: {}",
+            s
+        );
+        // The distinctive byte must NOT appear anywhere in the Debug
+        // string (in hex-array form or decimal form).
+        assert!(
+            !s.contains("222"),
+            "Debug MUST NOT leak decimal byte value: {}",
+            s
+        );
+        assert!(
+            !s.contains("0xde") && !s.contains("0xDE") && !s.contains("de,"),
+            "Debug MUST NOT leak hex byte value: {}",
+            s
+        );
     }
 
     #[test]

@@ -156,15 +156,28 @@ impl SubaddressManager {
         self.highest_index.insert(0, 0);
     }
 
-    /// Derive the scalar m for a subaddress index
+    /// Derive the scalar m for a subaddress index.
+    ///
+    /// AUDIT (R-85 fix, 2026-07-03): pre-fix code did
+    ///   `[view_secret.as_bytes(), account_bytes, index_bytes].concat()`
+    /// which allocates a heap `Vec<u8>` containing the raw
+    /// view_secret bytes. The Vec drops after hashing WITHOUT
+    /// zeroization, leaving view_secret bytes in freed heap for
+    /// the next allocator hit. Build the buffer explicitly and
+    /// wipe before scope-exit.
     fn derive_scalar(&self, index: SubaddressIndex) -> SecretScalar {
-        let input = [
-            self.view_secret.as_bytes().as_slice(),
-            &index.account.to_le_bytes(),
-            &index.index.to_le_bytes(),
-        ].concat();
+        let mut input = Vec::with_capacity(32 + 8 + 8);
+        input.extend_from_slice(self.view_secret.as_bytes());
+        input.extend_from_slice(&index.account.to_le_bytes());
+        input.extend_from_slice(&index.index.to_le_bytes());
 
         let hash = hash_domain(b"COINCYNC_SUBADDR_v1", &input);
+        // R-85: wipe the heap buffer (contains view_secret bytes)
+        // before it goes out of scope.
+        {
+            use zeroize::Zeroize;
+            input.zeroize();
+        }
         SecretScalar::from_bytes(*hash.as_bytes())
     }
 
@@ -366,14 +379,18 @@ pub fn compute_subaddress_spend_secret(
         return spend_secret.clone();
     }
 
-    // Derive scalar m
-    let input = [
-        view_secret.as_bytes().as_slice(),
-        &index.account.to_le_bytes(),
-        &index.index.to_le_bytes(),
-    ].concat();
+    // R-86 fix (2026-07-03): same view_secret concat-leak class as
+    // R-85 above. Build the buffer explicitly and wipe on scope exit.
+    let mut input = Vec::with_capacity(32 + 8 + 8);
+    input.extend_from_slice(view_secret.as_bytes());
+    input.extend_from_slice(&index.account.to_le_bytes());
+    input.extend_from_slice(&index.index.to_le_bytes());
 
     let hash = hash_domain(b"COINCYNC_SUBADDR_v1", &input);
+    {
+        use zeroize::Zeroize;
+        input.zeroize();
+    }
     let m = SecretScalar::from_bytes(*hash.as_bytes());
 
     // x_i = x + m

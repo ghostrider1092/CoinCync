@@ -39,13 +39,67 @@ impl AddressType {
     pub fn from_byte(b: u8) -> Option<Self> { match b { 0 => Some(AddressType::Standard), 1 => Some(AddressType::Subaddress), 2 => Some(AddressType::Integrated), _ => None } }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, BorshSerialize)]
 pub struct Address {
     pub network: Network,
     pub address_type: AddressType,
     pub spend_public_key: PublicKey,
     pub view_public_key: PublicKey,
     pub payment_id: Option<[u8; 8]>,
+}
+
+// AUDIT (2026-07-02): manual BorshDeserialize (instead of derive) that
+// validates the spend/view public keys are actual Ristretto curve points
+// (not the identity element and not junk bytes). Closes the gap the
+// 2026-07-02 Serde binary fix (commit 6c15d043) explicitly deferred:
+// "the persisted-Address surface is currently wallet-internal ...
+// if a future feature accepts Borsh-encoded Address from a peer, a
+// custom BorshDeserialize impl mirroring this fix will be needed there
+// too." The 2026-07-02 30-scan pass turned up this deferral as an
+// unclosed gap under the "prevent Zcash-shape unchecked-decode bugs"
+// framing — closing proactively before any consumer emerges rather
+// than waiting for one and hoping the follow-up fix lands in time.
+//
+// The derived BorshSerialize above is fine: encoding an already-
+// constructed Address is safe (the invariants were checked at
+// construction). The problem is only on the decode side.
+impl BorshDeserialize for Address {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        // Decode the fields into a raw struct via the derive-equivalent
+        // reads, then validate the public keys are on-curve non-identity
+        // before returning. Any invalid encoding turns into an
+        // InvalidData error at the same layer Borsh's own read errors
+        // surface, so callers using the `?` operator get a uniform
+        // error type.
+        let network = Network::deserialize_reader(reader)?;
+        let address_type = AddressType::deserialize_reader(reader)?;
+        let spend_public_key = PublicKey::deserialize_reader(reader)?;
+        let view_public_key = PublicKey::deserialize_reader(reader)?;
+        let payment_id = <Option<[u8; 8]>>::deserialize_reader(reader)?;
+
+        // Validate both keys are valid Ristretto curve points and
+        // non-identity. Same check `from_bytes_checked` runs (see L107
+        // of this file); factoring out into a helper would be nice but
+        // is a separate refactor.
+        PublicKey::from_bytes_checked(*spend_public_key.as_bytes())
+            .map_err(|e| std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Address.spend_public_key not a valid non-identity Ristretto point: {}", e),
+            ))?;
+        PublicKey::from_bytes_checked(*view_public_key.as_bytes())
+            .map_err(|e| std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Address.view_public_key not a valid non-identity Ristretto point: {}", e),
+            ))?;
+
+        Ok(Address {
+            network,
+            address_type,
+            spend_public_key,
+            view_public_key,
+            payment_id,
+        })
+    }
 }
 
 impl Address {
@@ -170,9 +224,31 @@ impl Serialize for Address {
 impl<'de> Deserialize<'de> for Address {
     fn deserialize<D>(de: D) -> std::result::Result<Self, D::Error> where D: serde::Deserializer<'de> {
         if de.is_human_readable() {
+            // `from_string` calls `from_bytes_checked` internally (see L143).
             Address::from_string(&<String as Deserialize>::deserialize(de)?).map_err(serde::de::Error::custom)
         } else {
-            Address::from_bytes(&<Vec<u8> as Deserialize>::deserialize(de)?).map_err(serde::de::Error::custom)
+            // AUDIT (2026-07-02): use `from_bytes_checked` instead of the
+            // unchecked `from_bytes`. Serde is the entry point for any
+            // non-Borsh deserialization surface (CBOR / MessagePack / any
+            // future RPC-request path that uses a binary Serde format),
+            // so this IS an untrusted-input branch — the exact case
+            // `from_bytes`'s own doc comment (L69–70) warns against:
+            // "Parse address from bytes (unchecked - does not validate
+            // curve points). Use `from_bytes_checked` for untrusted input".
+            // The human-readable branch above already routes through
+            // `from_string` → `from_bytes_checked`, so this closes the
+            // documentation-vs-code drift and makes both Serde paths
+            // consistent. Prior art: Monero addresses validate keypair
+            // membership on deserialization; Zcash Sapling likewise.
+            //
+            // Not touching the derived BorshDeserialize impl at L42 in this
+            // pass — the persisted-Address surface is currently wallet-
+            // internal (wallet.dat sidecars, RPC responses we produced
+            // ourselves), not attacker-controlled. If a future feature
+            // accepts Borsh-encoded Address from a peer, a custom
+            // BorshDeserialize impl mirroring this fix will be needed
+            // there too.
+            Address::from_bytes_checked(&<Vec<u8> as Deserialize>::deserialize(de)?).map_err(serde::de::Error::custom)
         }
     }
 }

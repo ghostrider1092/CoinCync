@@ -152,14 +152,41 @@ impl SparkStore {
     }
 
     /// Add a newly-minted Spark coin to the accumulator.
+    ///
+    /// R-61 CLASS site (2026-07-03).
     pub fn add_coin(&self, entry: SparkCoinEntry) {
         if let Some(p) = &self.persistence {
             let key = entry.coin_id.to_be_bytes();
-            let value = borsh::to_vec(&entry)
-                .expect("SparkCoinEntry borsh encoding is infallible");
-            p.coins
-                .insert(key, value)
-                .expect("spark_coins write failed — consensus storage is dead");
+            let value = match borsh::to_vec(&entry) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        target: "storage::spark::R61",
+                        error = %e,
+                        coin_id = entry.coin_id,
+                        "R-61: SparkCoinEntry borsh serialize failed at coin_id {}. Halting.",
+                        entry.coin_id
+                    );
+                    panic!(
+                        "R-61: SparkCoinEntry borsh serialize failed at coin_id {}: {}",
+                        entry.coin_id, e
+                    );
+                }
+            };
+            if let Err(e) = p.coins.insert(key, value) {
+                tracing::error!(
+                    target: "storage::spark::R61",
+                    error = %e,
+                    coin_id = entry.coin_id,
+                    "R-61: spark_coins write failed at coin_id {}. \
+                     Consensus storage is unavailable. Halting.",
+                    entry.coin_id
+                );
+                panic!(
+                    "R-61: spark_coins write failed at coin_id {}: {}",
+                    entry.coin_id, e
+                );
+            }
         }
         let mut coins = self.coins.write();
         coins.push(entry);
@@ -168,12 +195,26 @@ impl SparkStore {
     }
 
     /// Record that a serial tag has been spent.
+    ///
+    /// R-61 CLASS site (2026-07-03).
     pub fn mark_serial_spent(&self, serial: [u8; 32], height: u64) {
         self.spent_serials.write().insert(serial, height);
         if let Some(p) = &self.persistence {
-            p.serials
-                .insert(serial, height.to_le_bytes())
-                .expect("spark_serials write failed — consensus storage is dead");
+            if let Err(e) = p.serials.insert(serial, height.to_le_bytes()) {
+                tracing::error!(
+                    target: "storage::spark::R61",
+                    error = %e,
+                    serial = hex::encode(serial),
+                    height = height,
+                    "R-61: spark_serials write failed at height {}. \
+                     Consensus storage is unavailable. Halting.",
+                    height
+                );
+                panic!(
+                    "R-61: spark_serials write failed at height {}: {}",
+                    height, e
+                );
+            }
         }
     }
 
@@ -210,11 +251,26 @@ impl SparkStore {
         // enforces the second invariant unconditionally.
         if let Some(prev) = cps.last() {
             if height <= prev.height {
-                tracing::warn!(
-                    "SparkStore: checkpoint height regression: prev={} new={} — \
-                     this should never happen in production (single-writer under \
-                     chain RwLock); if seen, the chain orchestrator may be calling \
-                     out of order or a reorg path is pushing instead of rewinding",
+                // AUDIT (R-67 fix, 2026-07-03): pre-fix `tracing::warn!`
+                // was a soft-alert only. Height regression on the
+                // checkpoint stack means the chain orchestrator is
+                // pushing when it should rewind — that's a CONSENSUS
+                // ORDERING BUG. Upgrade to error-level so ops
+                // dashboards page immediately. Retain the doc trail:
+                // callers rely on strict-monotonic checkpoint heights
+                // for the rewind() → find_checkpoint math (see
+                // rewind()'s pop-until-below scan). A duplicate or
+                // regressed height breaks that scan.
+                tracing::error!(
+                    target: "storage::spark::invariants",
+                    prev_height = prev.height,
+                    new_height = height,
+                    "R-67: SparkStore checkpoint height regression: \
+                     prev={} new={} — this SHOULD never happen in \
+                     production (single-writer under chain RwLock). \
+                     If seen, the chain orchestrator is calling out \
+                     of order or a reorg path is pushing instead of \
+                     rewinding. Reindex / halt-and-investigate.",
                     prev.height, height
                 );
             }

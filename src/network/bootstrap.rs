@@ -925,34 +925,53 @@ fn load_signed_manifest_peers(network: Network) -> Vec<SocketAddr> {
         }
     };
 
-    // SECURITY: bound the manifest size BEFORE reading the whole file into
-    // memory. A misconfigured operator could point COINCYNC_BOOTSTRAP_SIGNED_MANIFEST
-    // at a multi-GB file and OOM the node at startup. Real signed manifests
-    // are <10 KB (a few dozen seed addrs); 10 MB ceiling is ~1000× headroom.
+    // SECURITY: bound the manifest size to prevent OOM at startup. A
+    // misconfigured operator could point COINCYNC_BOOTSTRAP_SIGNED_MANIFEST
+    // at a multi-GB file. Real signed manifests are <10 KB (a few dozen
+    // seed addrs); 10 MB ceiling is ~1000× headroom.
+    //
+    // AUDIT (2026-07-02): switched from `fs::metadata` + `fs::read` to
+    // an open + `Read::take(cap).read_to_end`. The old two-call form
+    // had a TOCTOU race — an attacker with local file access could
+    // truncate the file to <10 MB (passing the metadata check), then
+    // grow it to multi-GB between the metadata call and the read
+    // call, defeating the cap and OOMing the node. `Read::take(cap)`
+    // caps at the OS-level read boundary regardless of runtime file
+    // growth: no matter how big the file is when read is called, at
+    // most `cap+1` bytes leave the kernel. Prior art: Bitcoin Core and
+    // Monero use file-descriptor-based bounded reads (Monero: LMDB
+    // wrapper `check_open`; Bitcoin Core: `AutoFile::read` bounded).
+    //
+    // Threat model note: this file is a local operator-configured path;
+    // an attacker with write access to it typically already has more
+    // dangerous local privileges. Fixing anyway because it costs nothing.
     const MAX_MANIFEST_BYTES: u64 = 10 * 1024 * 1024;
-    match std::fs::metadata(&manifest_path) {
-        Ok(meta) if meta.len() > MAX_MANIFEST_BYTES => {
-            warn!(
-                "Bootstrap manifest {} is {} bytes (over the {} MB ceiling); refusing to load",
-                manifest_path.display(),
-                meta.len(),
-                MAX_MANIFEST_BYTES / (1024 * 1024)
-            );
-            return Vec::new();
-        }
+    let mut file = match std::fs::File::open(&manifest_path) {
+        Ok(f) => f,
         Err(e) => {
-            warn!("Unable to stat bootstrap manifest {}: {}", manifest_path.display(), e);
-            return Vec::new();
-        }
-        Ok(_) => {}
-    }
-    let manifest_bytes = match std::fs::read(&manifest_path) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("Unable to read bootstrap manifest {}: {}", manifest_path.display(), e);
+            warn!("Unable to open bootstrap manifest {}: {}", manifest_path.display(), e);
             return Vec::new();
         }
     };
+    let mut manifest_bytes = Vec::with_capacity(64 * 1024);
+    use std::io::Read;
+    // Read up to `cap + 1` bytes: if we hit cap+1, the file is larger
+    // than the cap and we reject it. The `+ 1` sentinel makes the
+    // "exactly at cap" case unambiguous — a file of exactly the cap
+    // is admitted; anything larger is refused.
+    let read_cap = MAX_MANIFEST_BYTES.saturating_add(1);
+    if let Err(e) = (&mut file).take(read_cap).read_to_end(&mut manifest_bytes) {
+        warn!("Unable to read bootstrap manifest {}: {}", manifest_path.display(), e);
+        return Vec::new();
+    }
+    if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        warn!(
+            "Bootstrap manifest {} is over the {} MB ceiling; refusing to load",
+            manifest_path.display(),
+            MAX_MANIFEST_BYTES / (1024 * 1024)
+        );
+        return Vec::new();
+    }
 
     let mut msg = Vec::with_capacity(BOOTSTRAP_MANIFEST_DOMAIN.len() + manifest_bytes.len());
     msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);

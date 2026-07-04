@@ -259,13 +259,30 @@ impl SparkAccumulator {
 
         let n = n.clamp(SPARK_ANON_SET_MIN, SPARK_ANON_SET_MAX.min(self.coins.len()));
 
+        // AUDIT (2026-07-02): use OsRng for the anonymity-set shuffle,
+        // matching what the rest of this file already does (see all
+        // OsRng usages below and in tests). thread_rng() is a CSPRNG
+        // (ChaCha12 reseeded from OsRng), so this is a hardening not a
+        // bug — but the anonymity-set shuffle is the ONE privacy-critical
+        // randomness surface in Lelantus Spark (the decoy indices leak
+        // if their draws are correlated across spends), so using the
+        // OS RNG directly removes the thread-local-state observation
+        // surface entirely. OsRng is what Monero's crypto_ops::
+        // random_scalar() uses for every privacy-critical draw, and
+        // what dandelion.rs uses for stem-peer selection in this
+        // codebase (see network/dandelion.rs L193, L467, L481).
+        //
+        // Feature-gated behind `sketch-lelantus-spark` (off by default),
+        // so this has no v1.0 activation impact — landing now closes
+        // the gap before any future v1.1 turn-on.
+        let mut rng = rand::rngs::OsRng;
         let mut indices: Vec<usize> = (0..self.coins.len())
             .filter(|&i| i != real_idx)
             .collect();
-        indices.shuffle(&mut rand::thread_rng());
+        indices.shuffle(&mut rng);
         let mut set = indices[..n.saturating_sub(1).min(indices.len())].to_vec();
         set.push(real_idx);
-        set.shuffle(&mut rand::thread_rng());
+        set.shuffle(&mut rng);
         Ok(set)
     }
 }
@@ -509,17 +526,36 @@ pub fn verify_spark_spend(
 
     let h_gen = gen_h();
 
-    // Decode challenges + responses
+    // Decode challenges + responses via PeerScalar — canonical-decode
+    // enforced at the type boundary. See src/crypto/peer_scalars.rs for
+    // the class-of-bug rationale (Monero CVE-2017-14428 shape).
+    //
+    // 2026-07-02: consolidated from the site-specific `from_canonical_bytes`
+    // check landed earlier the same day. PeerScalar makes the fix
+    // structural — every peer-supplied scalar decodes through the same
+    // typed boundary; a future new verifier can't accidentally regress to
+    // `from_bytes_mod_order` because the surrounding code takes PeerScalar
+    // (not raw Scalar or [u8; 32]).
+    //
+    // Feature-gated behind `sketch-lelantus-spark` (off by default in
+    // v1.0), so no v1.0 activation impact — landing before any future
+    // v1.1 turn-on.
+    let n = proof.challenges.len();
+    if proof.responses.len() != n {
+        return Err(Error::SparkVerifyFailed);
+    }
     let c: Vec<Scalar> = proof
         .challenges
         .iter()
-        .map(|b| Scalar::from_bytes_mod_order(*b))
-        .collect();
+        .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
+        .collect::<Result<Vec<_>>>()
+        .map_err(|_| Error::SparkVerifyFailed)?;
     let z: Vec<Scalar> = proof
         .responses
         .iter()
-        .map(|b| Scalar::from_bytes_mod_order(*b))
-        .collect();
+        .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
+        .collect::<Result<Vec<_>>>()
+        .map_err(|_| Error::SparkVerifyFailed)?;
 
     // Recompute L_i = z_i*H + c_i*P_i for every i
     let l: Vec<RistrettoPoint> = (0..n)

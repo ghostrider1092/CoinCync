@@ -45,6 +45,18 @@ pub enum MisbehaviorType {
     /// `STALL_THRESHOLD` consecutive `Full` errors. Penalty scored so the
     /// same peer can't immediately reconnect and resume the same pattern.
     ChronicSendQueueFull,
+    /// Relayed a transaction that was rejected for under-pricing relative
+    /// to the local dynamic fee floor. Kept as a SEPARATE, low-weight
+    /// offense because the dynamic floor (1x→2x→4x→8x as mempool fills)
+    /// can legitimately exceed a peer's fee estimate during burst
+    /// activity, AND because a sybil-spam attacker filling mempool below
+    /// the floor is a known DoS pattern. Per-tx weight is small so honest
+    /// fee-estimator drift doesn't get a peer banned in two strikes, but
+    /// accumulated low-fee spam (~50 strikes) does. Bitcoin Core's
+    /// equivalent is `BLOCK_RELAY_MIN_FEE` silent-drop with no banscore;
+    /// we score it because the dynamic-fee escalation interacts with
+    /// sybil-displacement (see audit finding HIGH #13).
+    LowFeeFlood,
 }
 
 impl MisbehaviorType {
@@ -81,6 +93,9 @@ impl MisbehaviorType {
             // them; this penalty (2 strikes -> ban) ensures they don't
             // immediately reconnect and re-occupy a peer slot.
             MisbehaviorType::ChronicSendQueueFull => 25,
+            // Low fee — tiny per-tx penalty (~50 strikes -> ban). Honest
+            // fee-estimator drift survives; sustained sybil floods don't.
+            MisbehaviorType::LowFeeFlood => 1,
         }
     }
 }
@@ -157,7 +172,18 @@ pub fn classify_invalid_tx_reason(reason: &str) -> MisbehaviorType {
         return MisbehaviorType::ProtocolViolation;
     }
 
-    // Default for tx-level rejections: structural, fee-floor, version, body
+    // Fee-too-low gets its own low-weight bucket (LowFeeFlood). The dynamic
+    // mempool floor (1x→8x as mempool fills) can legitimately exceed the
+    // relaying peer's estimate during congestion bursts, so we don't want
+    // to ban honest peers after 2 strikes. Sybil floods still accumulate
+    // and ban around ~50 strikes. Bitcoin Core silently drops below
+    // `BLOCK_RELAY_MIN_FEE` with no banscore; the small penalty here is
+    // the CoinCync-specific coupling for HIGH #13 anti-sybil.
+    if r.contains("fee too low") || r.contains("feetoolow") || r.contains("min_fee") {
+        return MisbehaviorType::LowFeeFlood;
+    }
+
+    // Default for remaining tx-level rejections: structural, version, body
     // crypto. All are honest-node-catchable, so the peer that relayed it
     // misbehaved.
     MisbehaviorType::InvalidTransaction
@@ -254,9 +280,11 @@ pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
 /// `MisbehaviorType::MessageFlood` to the scorer.
 ///
 /// Limits are calibrated so normal IBD (requesting many blocks) is fine,
-/// but 100 GetBlocks/sec from a single peer triggers a penalty.
-// AUDIT (Phase D): Wired into P2P dispatch loop in `node.rs::handle_connection`.
-#[allow(dead_code)]
+/// but 100 GetBlocks/sec from a single peer triggers a penalty. Wired
+/// into the P2P dispatch loop in `node.rs` (see the `rate_trackers`
+/// HashMap in the message-processor task). Reference: Bitcoin Core
+/// net_processing.cpp `PROCESSMSG_RATE_LIMIT_HASHES` and the per-type
+/// rate gates in `ProcessMessage()`.
 pub struct PeerMessageRateTracker {
     /// (message_type_id, count) for the current window
     counts: HashMap<u8, u32>,
@@ -269,7 +297,6 @@ pub struct PeerMessageRateTracker {
 /// Per-message-type limits (messages per 10-second window).
 /// Heavy request types have lower limits. Data responses are unlimited
 /// (we asked for them).
-#[allow(dead_code)]
 const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (0x01, 50),   // Version — 5/sec
     (0x03, 100),  // GetHeaders — 10/sec
@@ -281,7 +308,6 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (0x10, 30),   // Ping — 3/sec
 ];
 
-#[allow(dead_code)]
 impl PeerMessageRateTracker {
     pub fn new() -> Self {
         PeerMessageRateTracker {

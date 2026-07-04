@@ -160,7 +160,7 @@ mod range_proof_soundness {
             .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
             .collect();
 
-        let parsed = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+        let parsed = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
         assert!(
             verify_range_proofs_dispatch(&commitments, &parsed, 0),
             "valid amount must produce verifiable range proof"
@@ -183,7 +183,7 @@ mod range_proof_soundness {
             .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
             .collect();
 
-        let parsed = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+        let parsed = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
         assert!(
             verify_range_proofs_dispatch(&commitments, &parsed, 0),
             "zero amount must produce verifiable range proof"
@@ -206,7 +206,7 @@ mod range_proof_soundness {
 
         // Verify against commitment to FAKE amount
         let fake_commitment = PedersenCommitment::commit(fake_amount.as_atomic(), &blinding);
-        let parsed = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+        let parsed = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
 
         assert!(
             !verify_range_proofs_dispatch(&[fake_commitment], &parsed, 0),
@@ -236,7 +236,7 @@ mod range_proof_soundness {
             .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
             .collect();
 
-        let parsed = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+        let parsed = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
         assert!(
             verify_range_proofs_dispatch(&commitments, &parsed, 0),
             "aggregated range proof for multiple valid amounts must verify"

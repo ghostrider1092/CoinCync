@@ -17,6 +17,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
 };
 use rand::{RngCore, rngs::OsRng};
+use zeroize::Zeroize;
 
 use crate::primitives::hash_domain;
 use crate::crypto::{SecretScalar, PublicPoint};
@@ -75,9 +76,27 @@ pub fn encrypt_memo(
     let tx_scalar = SecretScalar::from_bytes(*tx_secret_bytes);
     let view_point = PublicPoint::from_bytes(*recipient_view_public_bytes)
         .ok_or(Error::CryptoError("invalid view public key for memo encryption".into()))?;
-    let shared_point = view_point.mul(&tx_scalar);
+    let mut shared_point = view_point.mul(&tx_scalar);
 
-    let key_bytes = derive_memo_key(shared_point.to_bytes().as_slice());
+    // R-16 (R-7 class site) + R-17 fixes (2026-07-02):
+    //   - `shared_point_bytes` is the ECDH shared secret and must be
+    //     wiped after use. Prior code passed
+    //     `shared_point.to_bytes().as_slice()` directly to
+    //     `derive_memo_key`, leaving the temporary [u8; 32] on the
+    //     stack unzeroized after the call.
+    //   - `key_bytes` is the AEAD encryption key. Prior code let it
+    //     drop as a plain `[u8; 32]` without zeroization, leaving
+    //     ChaCha20-Poly1305 key material on the stack for the caller's
+    //     lifetime. Now we bind it as `mut` and zeroize before return.
+    //
+    // R-7 CLASS + R-80 (2026-07-03): also zeroize the `shared_point:
+    // PublicPoint` itself once we're done. This wipes the
+    // RistrettoPoint's internal field elements via
+    // curve25519-dalek 4.1's Zeroize impl.
+    let mut shared_point_bytes = shared_point.to_bytes();
+    let mut key_bytes = derive_memo_key(shared_point_bytes.as_slice());
+    shared_point_bytes.zeroize();
+    shared_point.zeroize();
 
     // 2026-06-03 nonce-reuse defense: generate a fresh random nonce per
     // encryption instead of deriving it deterministically from the ECDH
@@ -126,6 +145,9 @@ pub fn encrypt_memo(
         .encrypt(nonce, memo)
         .map_err(|e| Error::CryptoError(format!("memo encryption failed: {}", e)))?;
 
+    // R-17: zeroize the AEAD key now that the ciphertext is built.
+    key_bytes.zeroize();
+
     // Wire format: nonce || ciphertext (includes 16-byte Poly1305 tag)
     let mut result = Vec::with_capacity(MEMO_NONCE_SIZE + ciphertext.len());
     result.extend_from_slice(&nonce_bytes);
@@ -157,12 +179,21 @@ pub fn decrypt_memo(
     let view_scalar = SecretScalar::from_bytes(*view_secret_bytes);
     let tx_point = PublicPoint::from_bytes(*tx_public_key_bytes)
         .ok_or(Error::CryptoError("invalid tx public key for memo decryption".into()))?;
-    let shared_point = tx_point.mul(&view_scalar);
+    let mut shared_point = tx_point.mul(&view_scalar);
 
     // Key derived from shared point; nonce read from the wire — see the
     // long-form comment in `encrypt_memo` for why the nonce is sender-
     // chosen (random) rather than deterministically derived.
-    let key_bytes = derive_memo_key(shared_point.to_bytes().as_slice());
+    //
+    // R-16 (R-7 class) + R-17 (2026-07-02): wipe both the shared
+    // point bytes and the derived AEAD key from the stack before
+    // returning. See encrypt_memo for the full rationale.
+    // R-7 CLASS + R-80 (2026-07-03): also zeroize the RistrettoPoint
+    // shared_point after use.
+    let mut shared_point_bytes = shared_point.to_bytes();
+    let mut key_bytes = derive_memo_key(shared_point_bytes.as_slice());
+    shared_point_bytes.zeroize();
+    shared_point.zeroize();
 
     let nonce_bytes = &encrypted[..MEMO_NONCE_SIZE];
     let ciphertext = &encrypted[MEMO_NONCE_SIZE..];
@@ -170,9 +201,13 @@ pub fn decrypt_memo(
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    cipher
+    let result = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|_| Error::CryptoError("memo decryption failed (wrong key or corrupted)".into()))
+        .map_err(|_| Error::CryptoError("memo decryption failed (wrong key or corrupted)".into()));
+
+    // R-17: wipe AEAD key after decrypt completes (success or failure).
+    key_bytes.zeroize();
+    result
 }
 
 #[cfg(test)]

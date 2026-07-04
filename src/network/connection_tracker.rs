@@ -54,7 +54,7 @@ pub struct ConnectionTracker {
     connections_per_ip: DashMap<IpAddr, usize>,
     /// HARDENING (Layer 4): Outbound connection count per /16 subnet.
     /// Prevents eclipse attacks by ensuring peer diversity.
-    outbound_per_subnet: DashMap<u16, usize>,
+    outbound_per_subnet: DashMap<u32, usize>,
     /// Current memory usage estimate for P2P buffers.
     memory_used: AtomicUsize,
     /// Memory budget ceiling. `allocate()` refuses requests that would
@@ -100,15 +100,29 @@ impl ConnectionTracker {
     ///
     /// See `docs/security/peer-rate-limits.md` for the threat-model
     /// derivation if/when that doc lands.
-    fn subnet_key(ip: &IpAddr) -> u16 {
+    fn subnet_key(ip: &IpAddr) -> u32 {
         match ip {
             IpAddr::V4(v4) => {
                 let octets = v4.octets();
-                (octets[0] as u16) << 8 | octets[1] as u16
+                // IPv4 /16: first two octets.
+                ((octets[0] as u32) << 8) | (octets[1] as u32)
             }
             IpAddr::V6(v6) => {
+                // AUDIT (2026-07-01): use the first 32 bits (/32) instead of
+                // the first 16 bits (/16). A single IPv6 /16 covers 2^112
+                // addresses — any attacker with even a single /32 allocation
+                // (which is smaller than the typical modern /48 residential
+                // block) can spread outbound connections across many /64s
+                // that all collapse to the same /16 bucket, defeating the
+                // per-bucket cap. `/32` matches Bitcoin Core's `CNetAddr::
+                // GetGroup()` for IPv6 (`GetByte(0), GetByte(1)`), which
+                // was chosen precisely to avoid this coarseness problem.
+                //
+                // Return type is now `u32` (was `u16`) since /32 needs 32
+                // bits; IPv4 /16 still fits and is zero-extended into the
+                // upper half.
                 let segments = v6.segments();
-                segments[0]
+                ((segments[0] as u32) << 16) | (segments[1] as u32)
             }
         }
     }
@@ -192,8 +206,8 @@ impl ConnectionTracker {
     /// observability log so operators can see the eclipse-defense state
     /// without needing a debugger. Cheap — DashMap iteration is O(n) over
     /// at most a few dozen entries in practice.
-    pub fn outbound_subnet_snapshot(&self) -> Vec<(u16, usize)> {
-        let mut snap: Vec<(u16, usize)> = self
+    pub fn outbound_subnet_snapshot(&self) -> Vec<(u32, usize)> {
+        let mut snap: Vec<(u32, usize)> = self
             .outbound_per_subnet
             .iter()
             .map(|e| (*e.key(), *e.value()))

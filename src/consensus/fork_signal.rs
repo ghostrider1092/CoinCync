@@ -254,10 +254,29 @@ impl ForkSignaler {
         Self { locked_in: Default::default() }
     }
 
-    /// Query the state of a deployment at `current_height`.
+    /// Query the state of a deployment at `current_height`. Read-only.
     ///
-    /// `signal_count_fn` returns the number of blocks in the window
-    /// `[window_start, current_height)` that have the given bit set.
+    /// # ⚠ CONTRACT — CALLER MUST OBSERVE THE LOCK-IN
+    ///
+    /// This function does NOT persist lock-in observations. If it returns
+    /// `DeploymentState::LockedIn { at_height }` and the caller does not
+    /// subsequently call [`record_lock_in`](Self::record_lock_in) with the
+    /// same bit, the lock-in status is **lost at the next window
+    /// boundary** because a re-query will count signals in the new
+    /// (fresh) window from scratch. This violates BIP-9 semantics —
+    /// under BIP-9, LOCKED_IN is a persistent state.
+    ///
+    /// The safe pattern for callers driving BIP-9 activation from
+    /// block processing is [`state_and_record`](Self::state_and_record),
+    /// which combines the query with the persistence in one atomic step.
+    /// Only reach for `state()` if you need a side-effect-free query
+    /// (e.g. RPC surface exposing "what state does the network think
+    /// this deployment is in right now?").
+    ///
+    /// # Arguments
+    /// * `signal_count_fn` — closure that returns the number of blocks
+    ///   in `[window_start, current_height)` with the given bit set.
+    ///   The window is aligned to `SIGNAL_WINDOW` boundaries.
     pub fn state<F>(
         &self,
         deployment: &Deployment,
@@ -317,9 +336,46 @@ impl ForkSignaler {
         }
     }
 
-    /// Record that a deployment locked in at `height`.
+    /// Record that a deployment locked in at `height`. Once recorded,
+    /// subsequent [`state`](Self::state) queries for this deployment
+    /// return `LockedIn` or `Active` (depending on `current_height` vs
+    /// `min_activation_height`) rather than re-counting signals.
     pub fn record_lock_in(&mut self, bit: u32, height: u64) {
         self.locked_in.insert(bit, height);
+    }
+
+    /// Query state AND persist a fresh lock-in atomically.
+    ///
+    /// Preferred over `state()` for callers driving activation from block
+    /// processing: eliminates the "forgot to record" bug class where a
+    /// deployment reaches LOCKED_IN in one window but the caller doesn't
+    /// call `record_lock_in` before the next window, causing the state
+    /// machine to re-check signals in the new window and (if signals
+    /// dropped) revert to `Started`. Under BIP-9 semantics that's
+    /// incorrect — LOCKED_IN must be persistent once reached.
+    ///
+    /// Returns the same `DeploymentState` as `state()`. If the returned
+    /// state is `LockedIn { at_height }` and this observation is fresh
+    /// (not previously recorded), the lock-in is persisted before
+    /// returning. Multiple calls in the same window are idempotent —
+    /// only the first `LockedIn` transition records; subsequent calls
+    /// hit the fast path via the internal HashMap check.
+    pub fn state_and_record<F>(
+        &mut self,
+        deployment: &Deployment,
+        current_height: u64,
+        signal_count_fn: F,
+    ) -> DeploymentState
+    where
+        F: Fn(u64, u64, u32) -> u64,
+    {
+        let state = self.state(deployment, current_height, &signal_count_fn);
+        if matches!(state, DeploymentState::LockedIn { .. })
+            && !self.locked_in.contains_key(&deployment.bit)
+        {
+            self.record_lock_in(deployment.bit, current_height);
+        }
+        state
     }
 
     fn window_start(&self, height: u64) -> u64 {
@@ -402,6 +458,61 @@ mod tests {
             matches!(state, DeploymentState::Started { .. }),
             "expected Started, got {:?}", state
         );
+    }
+
+    /// The "forgot to record_lock_in" bug: `state()` returns LockedIn
+    /// but doesn't persist. Re-querying in the next window with the
+    /// signal count dropped below threshold reverts to Started —
+    /// violating BIP-9's persistent-LOCKED_IN semantics. This test
+    /// documents that the bug exists in the read-only `state()` API
+    /// so callers know they must use `state_and_record` or manually
+    /// call `record_lock_in`.
+    #[test]
+    fn state_alone_does_not_persist_lock_in_across_window_boundary() {
+        let signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        // Window W: threshold met — state() sees LockedIn.
+        let s1 = signaler.state(&d, 6_000, |_, _, _| SIGNAL_THRESHOLD);
+        assert!(matches!(s1, DeploymentState::LockedIn { .. }));
+        // Cross into window W+1 with signals below threshold: because
+        // we did NOT call record_lock_in, the state machine re-counts
+        // from scratch and sees Started.
+        let s2 = signaler.state(&d, 6_000 + SIGNAL_WINDOW, |_, _, _| 0);
+        assert!(
+            matches!(s2, DeploymentState::Started { .. }),
+            "read-only state() must not persist lock-in — actual: {:?}", s2
+        );
+    }
+
+    /// The fix: `state_and_record` persists the lock-in atomically, so
+    /// crossing into the next window with dropped signals still
+    /// reports LockedIn (or Active after min_activation_height).
+    #[test]
+    fn state_and_record_persists_lock_in_across_window_boundary() {
+        let mut signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        // Window W: threshold met — state_and_record sees LockedIn AND
+        // persists it.
+        let s1 = signaler.state_and_record(&d, 6_000, |_, _, _| SIGNAL_THRESHOLD);
+        assert!(matches!(s1, DeploymentState::LockedIn { .. }));
+        // Cross into window W+1 with zero signals: still LockedIn
+        // because the persistence held.
+        let s2 = signaler.state(&d, 6_000 + SIGNAL_WINDOW, |_, _, _| 0);
+        assert!(
+            matches!(s2, DeploymentState::LockedIn { .. } | DeploymentState::Active),
+            "state_and_record must persist lock-in — actual: {:?}", s2
+        );
+    }
+
+    /// state_and_record is idempotent — multiple calls in the same or
+    /// later windows don't corrupt the persisted lock-in height.
+    #[test]
+    fn state_and_record_is_idempotent() {
+        let mut signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        let s1 = signaler.state_and_record(&d, 6_000, |_, _, _| SIGNAL_THRESHOLD);
+        let s2 = signaler.state_and_record(&d, 6_100, |_, _, _| SIGNAL_THRESHOLD);
+        assert_eq!(s1, s2, "same-window repeated queries must match");
     }
 
     #[test]

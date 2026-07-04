@@ -222,7 +222,7 @@ fn test_full_transaction_build() {
 
     // CLSAG signature must be present
     assert!(
-        !tx.inputs[0].signature.to_bytes().iter().all(|&b| b == 0),
+        !tx.inputs[0].signature.to_bytes().unwrap().iter().all(|&b| b == 0),
         "CLSAG signature must not be zero"
     );
 

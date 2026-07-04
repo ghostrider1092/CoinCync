@@ -10,9 +10,10 @@
 pub mod disclaimer;
 mod output;
 mod progress;
-// `prompts` depends on the optional `dialoguer` crate — wired in only
-// when the `dialoguer` feature is enabled. Keeps the default build lean.
-#[cfg(feature = "dialoguer")]
+// `prompts` depends on the `dialoguer` crate. Previously optional
+// behind a `dialoguer` feature that was never enabled anywhere, making
+// this module dead code. Made unconditional 2026-07-03 as part of
+// P8-Bw1 so the wallet's hidden-input password prompt can compile.
 pub mod prompts;
 mod shell;
 mod suggest;

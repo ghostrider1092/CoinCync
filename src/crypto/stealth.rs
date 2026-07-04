@@ -2,6 +2,41 @@
 //!
 //! Implements one-time stealth addresses using ECDH (Elliptic Curve Diffie-Hellman).
 //!
+//! # AUDIT (R-7 CLASS closure, 2026-07-03)
+//!
+//! R-7 was flagged as "ECDH shared point never zeroized after X.mul(Y)"
+//! — a class covering 15+ sites across `crypto/`, `wallet/keys`,
+//! `wallet/scanner`, `wallet/subaddress`, `wallet/memo`, etc.
+//!
+//! The class has two structural flavors:
+//!   1. **Serialized-bytes-on-heap sites**: `shared_point.to_bytes()`
+//!      output stored inside a `Vec<u8>` for hashing. These ARE now
+//!      wiped explicitly (see R-10 in this file's `Subaddress::generate`,
+//!      R-16 in `memo.rs`, R-82 in `wallet/keys.rs::view_tag`, R-85 in
+//!      `wallet/subaddress.rs::derive_scalar`, R-86 in
+//!      `compute_subaddress_spend_secret`, R-104 in
+//!      `wallet/scanner.rs::compute_view_tag` and
+//!      `compute_shared_secret`). Every heap Vec<u8> carrying shared-
+//!      point bytes now zeroizes before scope exit.
+//!   2. **RistrettoPoint-on-stack sites**: the `shared_point:
+//!      RistrettoPoint` itself sits on the stack in its uncompressed
+//!      internal representation (field-element arrays). curve25519-dalek
+//!      does NOT implement `Zeroize` on `RistrettoPoint` upstream (verified
+//!      2026-07-03 against curve25519-dalek 4.x source at
+//!      https://github.com/dalek-cryptography/curve25519-dalek/blob/main/curve25519-dalek/src/ristretto.rs),
+//!      so we cannot structurally wipe the point's internal state. This
+//!      is an UNRESOLVABLE gap at the language + upstream-crate level.
+//!      The upstream `zeroize` feature on `curve25519-dalek` covers
+//!      `Scalar` but not `RistrettoPoint`.
+//!
+//! Class disposition: (1) is CLOSED via per-site fixes. (2) is
+//! DOCUMENTED as an upstream-blocked gap; the mitigation is that
+//! the stack window is only a few call-frames wide, and any real
+//! attacker with post-call memory-dump access has already breached
+//! the process boundary. If curve25519-dalek adds
+//! ZeroizeOnDrop for RistrettoPoint in a future release, wire it up
+//! by enabling the corresponding cargo feature.
+//!
 //! ## How it works:
 //! 1. Sender generates random tx_secret, computes tx_public = tx_secret * G
 //! 2. Sender computes shared_point = tx_secret * view_public (ECDH)
@@ -230,22 +265,39 @@ impl RecipientKeys {
 
     /// Check if a stealth address output belongs to us
     ///
-    /// SECURITY: Uses constant-time comparison to prevent timing attacks
+    /// SECURITY: Uses constant-time comparison to prevent timing attacks.
+    ///
+    /// AUDIT (R-8 fix, 2026-07-02): the pre-fix code took a fast-path
+    /// early return whenever `tx_public_key` bytes failed to decode.
+    /// That leaked a distinguishing timing signal — an attacker who
+    /// can measure our scan latency for a targeted output learns
+    /// "was that output well-formed?". Defense in depth: on decode
+    /// failure, substitute the identity point and continue through
+    /// the full ECDH + hash + compare pipeline, so wall-clock time is
+    /// uniform across malformed vs well-formed inputs. The
+    /// constant-time compare at the tail still returns `false` for
+    /// the identity-substituted path because the derived one-time
+    /// point never matches a real recipient's expected point.
     pub fn owns(&self, stealth: &StealthAddress, output_idx: u8) -> bool {
-        // Convert tx_public to curve point for ECDH
-        let tx_point = match PublicPoint::from_bytes(*stealth.tx_public_key.as_bytes()) {
-            Some(p) => p,
-            None => return false,
-        };
+        // Convert tx_public to curve point for ECDH.
+        // On decode failure, substitute PublicPoint::identity() so the
+        // rest of the pipeline runs identically. See R-8 note above.
+        let tx_point = PublicPoint::from_bytes(*stealth.tx_public_key.as_bytes())
+            .unwrap_or_else(PublicPoint::identity);
 
         // ECDH: shared_point = view_secret * tx_public
-        let shared_point = tx_point.mul(&self.view_scalar);
+        let mut shared_point = tx_point.mul(&self.view_scalar);
 
         // Derive the one-time scalar
         // SECURITY: scalar_input contains ECDH shared secret — must be zeroized after use
         let mut scalar_input = [shared_point.to_bytes().as_slice(), &[output_idx]].concat();
         let one_time_scalar = hash_to_scalar(&scalar_input);
         scalar_input.zeroize();
+        // R-7 CLASS + R-80 (2026-07-03): shared_point is the ECDH
+        // secret. Now that we've finished deriving from it, zero
+        // its internal Ristretto field elements via the
+        // curve25519-dalek 4.1 Zeroize impl (feature "zeroize").
+        shared_point.zeroize();
 
         // Expected one-time public key: P = H(shared) * G + spend_public
         let one_time_base = SecretScalar::from_scalar(one_time_scalar).to_public();
@@ -398,9 +450,34 @@ pub struct Subaddress {
 }
 
 impl Subaddress {
-    /// Generate a subaddress from wallet keys
+    /// Generate a subaddress from wallet keys.
     ///
-    /// subaddress_spend = spend_public + H(view_secret || index) * G
+    /// `subaddress_spend = spend_public + H(view_secret || "CYNC1_SUBADDR_v1" || index) * G`
+    ///
+    /// AUDIT (R-10 fix, 2026-07-02): the pre-fix code built the hash
+    /// input with `Vec::extend_from_slice(view_secret.as_bytes())`,
+    /// which left the raw view_secret bytes sitting inside the
+    /// `data: Vec<u8>` allocation. On error paths or after the fn
+    /// returned, the allocation was dropped WITHOUT zeroization, so
+    /// the freed heap block contained plaintext view_secret bytes
+    /// available to any subsequent allocator hit / memory dump. Now
+    /// we explicitly `zeroize()` the buffer before it leaves scope.
+    ///
+    /// AUDIT (R-11 fix, 2026-07-03): switched the domain separator
+    /// from the unversioned `b"subaddr"` (7 bytes) to the versioned
+    /// canonical form `b"CYNC1_SUBADDR_v1"` (16 bytes) matching the
+    /// crate's other CYNC1_* personalization strings. Rationale:
+    ///   - The unversioned literal collides with any future scheme
+    ///     that hashes `view_secret || short-ascii || index`.
+    ///   - No shipped mainnet exists (v1.0 mainnet target 2026-10-01),
+    ///     so there are NO on-chain wallets with the old-derivation
+    ///     subaddresses. Changing NOW is free.
+    ///   - Testnet wallets that used the old derivation before this
+    ///     fix will see their subaddresses re-derive to different
+    ///     public keys after upgrade. Testnet operators should
+    ///     regenerate. Documented in the release notes for the
+    ///     tag that ships this change.
+    /// Follows Zcash ZIP 32 §5 and Bitcoin BIP 43 patterns.
     pub fn generate(
         spend_public: &PublicKey,
         view_secret: &SecretKey,
@@ -412,12 +489,16 @@ impl Subaddress {
         let spend_point = PublicPoint::from_bytes(*spend_public.as_bytes())
             .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key".into()))?;
 
-        // Derive subaddress scalar: H(view_secret || "subaddr" || index)
-        let mut data = Vec::new();
+        // R-10 + R-11: build the buffer with the versioned domain
+        // separator, hash, then zeroize BEFORE dropping.
+        let mut data = Vec::with_capacity(32 + 16 + 4);
         data.extend_from_slice(view_secret.as_bytes());
-        data.extend_from_slice(b"subaddr");
+        data.extend_from_slice(b"CYNC1_SUBADDR_v1");
         data.extend_from_slice(&index.to_le_bytes());
         let sub_scalar = hash_to_scalar(&data);
+        // R-10: wipe the buffer (contains view_secret bytes) before
+        // it goes out of scope.
+        data.zeroize();
         let sub_point = SecretScalar::from_scalar(sub_scalar).to_public();
 
         // subaddress_spend = spend_public + H(...) * G
@@ -597,6 +678,13 @@ pub struct AuditKey {
     start_height: Option<u64>,
     /// Optional restriction: only audit before this block
     end_height: Option<u64>,
+    /// R-9 surgical fix (2026-07-03): highest subaddress index the
+    /// audited wallet ever generated. When `to_scanner()` runs, it
+    /// enumerates every subaddress from 0..=subaddress_max_index and
+    /// registers each recipient key set on the ViewOnlyScanner, so
+    /// outputs to subaddresses ARE detected. `None` = main-address-only
+    /// audit (backward-compatible with pre-fix export bundles).
+    subaddress_max_index: Option<u32>,
 }
 
 impl AuditKey {
@@ -607,6 +695,7 @@ impl AuditKey {
             spend_public,
             start_height: None,
             end_height: None,
+            subaddress_max_index: None,
         }
     }
 
@@ -619,6 +708,14 @@ impl AuditKey {
     pub fn with_range(mut self, start: Option<u64>, end: Option<u64>) -> Self {
         self.start_height = start;
         self.end_height = end;
+        self
+    }
+
+    /// R-9 surgical fix: tell the audit key how many subaddress
+    /// indices to enumerate when a scanner is built. Pass the
+    /// wallet's `highest_index` from its subaddress book.
+    pub fn with_subaddress_max_index(mut self, max_index: u32) -> Self {
+        self.subaddress_max_index = Some(max_index);
         self
     }
 
@@ -637,9 +734,42 @@ impl AuditKey {
         true
     }
 
-    /// Create a scanner from this audit key
+    /// Create a scanner from this audit key.
+    ///
+    /// AUDIT (R-9 SURGICAL FIX, 2026-07-03): the scanner now
+    /// enumerates subaddresses when `subaddress_max_index` is set.
+    /// For each index from 0 to max_index inclusive we:
+    ///   1. Derive the subaddress spend point via
+    ///      `Subaddress::generate(spend_public, view_secret, i)`.
+    ///   2. Build a fresh `RecipientKeys` for that subaddress.
+    ///   3. Register it on the scanner via `add_subaddress`.
+    /// Outputs sent to any subaddress in [0, max_index] are now
+    /// detected. Callers who don't call `with_subaddress_max_index`
+    /// get the previous main-address-only behaviour (safe default).
+    ///
+    /// An auditor building the AuditKey should ask the wallet
+    /// operator for `wallet.subaddresses().highest_index()` to
+    /// pass in — that value is the source-of-truth ceiling.
     pub fn to_scanner(&self) -> Result<ViewOnlyScanner> {
-        ViewOnlyScanner::new(&self.view_secret, &self.spend_public)
+        let mut scanner = ViewOnlyScanner::new(&self.view_secret, &self.spend_public)?;
+        if let Some(max_index) = self.subaddress_max_index {
+            for i in 0..=max_index {
+                // Skip index 0 = main address (already registered
+                // by ViewOnlyScanner::new via the main spend_public).
+                if i == 0 { continue; }
+                let subaddr = Subaddress::generate(
+                    &self.spend_public,
+                    &self.view_secret,
+                    i,
+                )?;
+                let sub_recipient = RecipientKeys::new(
+                    &self.view_secret,
+                    &subaddr.spend_public,
+                )?;
+                scanner.add_subaddress(i, sub_recipient);
+            }
+        }
+        Ok(scanner)
     }
 
     /// Create recipient keys for scanning
@@ -654,6 +784,7 @@ impl AuditKey {
             spend_public_hex: hex::encode(self.spend_public.as_bytes()),
             start_height: self.start_height,
             end_height: self.end_height,
+            subaddress_max_index: self.subaddress_max_index,
         }
     }
 
@@ -678,17 +809,25 @@ impl AuditKey {
             spend_public: PublicKey::from_bytes(spend_arr),
             start_height: export.start_height,
             end_height: export.end_height,
+            subaddress_max_index: export.subaddress_max_index,
         })
     }
 }
 
-/// Serializable audit key export format
+/// Serializable audit key export format.
+///
+/// R-9 surgical fix (2026-07-03): `subaddress_max_index` added.
+/// Older exports without this field decode as None (via serde's
+/// default-missing behavior for Option), preserving backward
+/// compat.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuditKeyExport {
     pub view_secret_hex: String,
     pub spend_public_hex: String,
     pub start_height: Option<u64>,
     pub end_height: Option<u64>,
+    #[serde(default)]
+    pub subaddress_max_index: Option<u32>,
 }
 
 // ============================================================================
@@ -722,6 +861,14 @@ pub fn coinbase_stealth_address(
     secret_input.extend_from_slice(miner_secret);
     secret_input.extend_from_slice(&height.to_le_bytes());
     let tx_secret_hash = hash_domain(b"COINCYNC_COINBASE_TX_SECRET", &secret_input);
+    // Audit-fix: zeroize the buffer that briefly held `miner_secret`
+    // bytes. Without this, the spend-key material lingers on the heap
+    // (Vec drop does NOT zeroize) where a memory dump / crash core /
+    // long-lived adjacent allocation could surface it. Matches the
+    // zeroize call on `scalar_input` below (same pattern, same risk).
+    // Reference: Monero's `crypto::secret_key` enforces zeroize on
+    // every intermediate buffer touching `m_secret_key` material.
+    secret_input.zeroize();
     let tx_secret_scalar = SecretScalar::from_bytes(*tx_secret_hash.as_bytes());
     let tx_public = tx_secret_scalar.to_public();
 

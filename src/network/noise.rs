@@ -41,6 +41,33 @@ pub const NOISE_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
 /// that to 8 KB per attempt.
 const NOISE_HANDSHAKE_FRAME_MAX: usize = 8192;
 
+/// P5-No1 SURGICAL FIX (2026-07-03): create a secret file with
+/// mode 0o600 atomically on Unix, or fall through to `fs::write` on
+/// Windows (where perm-hardening happens post-write via icacls).
+fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        // Best-effort: even if the file already exists with wider perms
+        // from a legacy install, we truncate + write here — but the
+        // caller then also runs `harden_secret_file_permissions` which
+        // re-chmods on Unix as belt-and-suspenders.
+        let mut f = opts.open(path)
+            .map_err(|e| Error::InvalidState(format!("open {} for write: {}", path.display(), e)))?;
+        f.write_all(data)
+            .map_err(|e| Error::InvalidState(format!("write {}: {}", path.display(), e)))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)
+            .map_err(|e| Error::InvalidState(format!("write {}: {}", path.display(), e)))
+    }
+}
+
 fn harden_secret_file_permissions(path: &Path) {
     // Best-effort: the function is fire-and-forget (callers can't act on
     // failure mid-handshake), but failure must be operator-visible —
@@ -211,6 +238,16 @@ impl NodeIdentity {
     }
 
     /// Save to disk.
+    ///
+    /// P5-No1 SURGICAL FIX (2026-07-03): create the secret files with
+    /// mode 0o600 ATOMICALLY on Unix via `OpenOptions::mode()`. Prior
+    /// code did `std::fs::write` (which inherits from umask/parent,
+    /// typically 0644) then called `harden_secret_file_permissions()`
+    /// AFTER — creating a TOCTOU window where another local user
+    /// could read the secret bytes between the write and the chmod.
+    /// The new O_CREAT+mode-0600 path closes the window in a single
+    /// syscall. On Windows we still fall back to the write-then-icacls
+    /// path because Windows doesn't have an equivalent mode-on-create.
     pub fn save(&self, data_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| Error::InvalidState(format!("create data_dir: {}", e)))?;
@@ -219,11 +256,12 @@ impl NodeIdentity {
         let mut data = [0u8; 64];
         data[..32].copy_from_slice(&self.transport_secret_bytes);
         data[32..].copy_from_slice(self.public.as_bytes());
-        std::fs::write(&key_path, &data)
-            .map_err(|e| Error::InvalidState(format!("write node_key: {}", e)))?;
-        std::fs::write(&signing_key_path, &self.anchor_signing_secret_bytes)
-            .map_err(|e| Error::InvalidState(format!("write node_signing_key: {}", e)))?;
 
+        write_secret_file(&key_path, &data)?;
+        write_secret_file(&signing_key_path, &self.anchor_signing_secret_bytes)?;
+
+        // Windows: also run the icacls fallback (no-op on Unix since
+        // the file was already created with 0o600).
         harden_secret_file_permissions(&key_path);
         harden_secret_file_permissions(&signing_key_path);
 

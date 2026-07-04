@@ -2,8 +2,19 @@
 //!
 //! RandomX-only Proof of Work consensus with:
 //! - Single algorithm (RandomX)
-//! - LWMA difficulty adjustment
-//! - Halving emission curve
+//! - Dual-Anchor ASERT-i3-2d difficulty adjustment (see difficulty.rs)
+//! - Asymptotic-with-tail emission curve (see emission/curve.rs)
+//!
+//! AUDIT (2026-07-02 line-by-line pass): fixed two stale doc claims here.
+//! Previous version said "LWMA difficulty adjustment" — that has been
+//! ASERT-i3-2d since well before v1.0.0 and the algorithm-tag was never
+//! updated in this docstring. difficulty.rs's own module header names
+//! the algorithm correctly. Same class of doc-vs-code drift as the
+//! ring_selection.rs gamma cleanup landed in a1b62ec6. Also renamed
+//! "Halving emission curve" to "Asymptotic-with-tail" because that's
+//! what emission/curve.rs actually implements — see base_reward_from_supply
+//! (remaining / EMISSION_DIVISOR, floored at TAIL_EMISSION); there's no
+//! discrete halving event, the curve is continuous with a tail floor.
 
 pub mod block;
 pub mod header;

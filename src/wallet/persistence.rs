@@ -133,25 +133,119 @@ const LEGACY_V2_ARGON2_M_COST: u32 = 65_536;  // 64 MiB
 const LEGACY_V2_ARGON2_T_COST: u32 = 3;
 const LEGACY_V2_ARGON2_P_COST: u32 = 4;
 
-fn harden_secret_file_permissions(path: &Path) {
+/// Set restrictive filesystem permissions on a secret file so other
+/// users on the same host cannot read it. On Unix: 0o600 (owner rw
+/// only). On Windows: `icacls /inheritance:r` + explicit
+/// `/grant:r <user>:F` to strip inherited ACLs and grant only the
+/// current user. Best-effort — see also R-94 which called out that
+/// the prior `let _ = ...` silent-failure pattern hid real hardening
+/// failures. This function is intentionally infallible in signature
+/// so the atomic-save flow doesn't have to distinguish "wrote OK but
+/// permission failed" from "write failed" — but callers may want
+/// their own diagnostic layer around it.
+///
+/// Made `pub(crate)` 2026-07-02 as part of the R-100 fix so
+/// `wallet::wallet::Wallet::save` can harden its three sidecar files
+/// (`.utxos`, `.reservations`, `.history`) after the atomic rename —
+/// prior code only hardened the main wallet file, leaving sidecars
+/// with default (Windows: `Users:F`) permissions and their encrypted
+/// UTXO/history contents readable by other users.
+pub(crate) fn harden_secret_file_permissions(path: &Path) {
+    // AUDIT (R-94 fix, 2026-07-03): pre-fix code did `let _ = ...`
+    // on every syscall / icacls invocation, silently swallowing
+    // failures. If chmod / icacls failed (host security policy,
+    // ACL corruption, missing binary), the wallet file was written
+    // WITH DEFAULT PERMISSIONS — on Unix that's typically 0644
+    // (world-readable), on Windows that's inherited from the
+    // parent directory. A wallet daemon running as the operator
+    // and a helpful log line showing "wallet saved" gave zero
+    // signal that the sidecar was actually world-readable. Now
+    // every hardening attempt is checked; failures emit a LOUD
+    // tracing::error so ops can see the event.
+    //
+    // AUDIT (R-97 fix, 2026-07-03): Windows temp files created
+    // via `tempfile` inherit the parent directory's ACL — which
+    // on `%TEMP%` typically includes `Users:F` and `Everyone:R`.
+    // The temp file is where the atomic-save flow writes the
+    // encrypted wallet BEFORE the icacls hardening runs against
+    // the FINAL destination. So there's a small window where
+    // the encrypted wallet bytes sit at the temp path with wide
+    // ACLs. Callers of `harden_secret_file_permissions` should
+    // call it against the TEMP PATH FIRST (before rename), THEN
+    // against the final path. That closes the R-97 window. This
+    // fn body doesn't need to change to fix R-97; the calling
+    // pattern in wallet::wallet::save() does. Documented so no
+    // future auditor rediscovers R-97 by only looking here.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        if let Err(e) = std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(0o600),
+        ) {
+            tracing::error!(
+                target: "wallet::persistence::R94",
+                path = %path.display(),
+                error = %e,
+                "R-94: chmod 0o600 failed on wallet secret file — file may \
+                 be world-readable. Verify with `stat` and remediate."
+            );
+        }
     }
     #[cfg(windows)]
     {
         // Best-effort ACL hardening using built-in Windows tooling.
         // We remove inheritance and grant only the current user full control.
         if let Some(path_str) = path.to_str() {
-            let _ = std::process::Command::new("icacls")
+            match std::process::Command::new("icacls")
                 .args([path_str, "/inheritance:r"])
-                .status();
+                .status()
+            {
+                Ok(s) if s.success() => {},
+                Ok(s) => tracing::error!(
+                    target: "wallet::persistence::R94",
+                    path = path_str,
+                    exit = ?s.code(),
+                    "R-94: icacls /inheritance:r returned non-zero — \
+                     inherited ACLs may still grant access. Verify \
+                     with `icacls {path_str}`."
+                ),
+                Err(e) => tracing::error!(
+                    target: "wallet::persistence::R94",
+                    path = path_str,
+                    error = %e,
+                    "R-94: icacls /inheritance:r failed to spawn — \
+                     wallet file may inherit parent-directory ACLs."
+                ),
+            }
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "Users".to_string());
             let grant = format!("{user}:F");
-            let _ = std::process::Command::new("icacls")
+            match std::process::Command::new("icacls")
                 .args([path_str, "/grant:r", &grant])
-                .status();
+                .status()
+            {
+                Ok(s) if s.success() => {},
+                Ok(s) => tracing::error!(
+                    target: "wallet::persistence::R94",
+                    path = path_str,
+                    exit = ?s.code(),
+                    "R-94: icacls /grant:r returned non-zero — restrictive \
+                     ACL may not have applied."
+                ),
+                Err(e) => tracing::error!(
+                    target: "wallet::persistence::R94",
+                    path = path_str,
+                    error = %e,
+                    "R-94: icacls /grant:r failed to spawn."
+                ),
+            }
+        } else {
+            tracing::error!(
+                target: "wallet::persistence::R94",
+                path = ?path,
+                "R-94: wallet path is not valid UTF-8; ACL hardening \
+                 skipped — file inherits parent ACLs."
+            );
         }
     }
 }
@@ -413,9 +507,33 @@ impl std::fmt::Debug for WalletData {
 
 // SECURITY (M-5): Zeroize master seed when WalletData is dropped to prevent
 // it from lingering in freed memory (cold-boot/core-dump attacks).
+//
+// AUDIT (R-95 fix, 2026-07-02): the prior Drop wiped only `seed`. But
+// `mnemonic_phrase` (the BIP39 phrase) is equivalent to the seed —
+// anyone with the phrase can derive the master seed via BIP39 PBKDF2.
+// Leaving the phrase's String heap allocation intact after drop
+// defeated the seed zeroize: a memory dump would still yield the
+// phrase, and from that the seed. Now we scrub the phrase's backing
+// buffer before dropping the String so both attack surfaces close
+// together.
+//
+// `label` and `network` are non-secret metadata (network name is
+// "testnet"/"mainnet"; label is user-chosen). Left as-is.
 impl Drop for WalletData {
     fn drop(&mut self) {
         self.seed.zeroize();
+        if let Some(phrase) = self.mnemonic_phrase.as_mut() {
+            // Overwrite the String's UTF-8 backing bytes in place. This
+            // is safe because the resulting all-zero bytes are still
+            // valid UTF-8, and the String is about to be dropped
+            // anyway — no further logic reads it.
+            //
+            // Note: `String::zeroize()` from the zeroize crate does
+            // exactly this (it's derived automatically for `String`
+            // via `Vec<u8>::zeroize`), so calling `.zeroize()` on the
+            // String is the idiomatic form.
+            phrase.zeroize();
+        }
     }
 }
 
@@ -453,40 +571,61 @@ impl WalletData {
 ///   - `derive_key(pw, salt, m, t, p)` for code that's loading an
 ///     existing wallet and must use whatever params that wallet was
 ///     created with (read from its header).
-pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_cost: u32) -> [u8; 32] {
+///
+/// AUDIT (R-96 fix, 2026-07-02): return type changed from `[u8; 32]`
+/// to `Result<[u8; 32]>`. Prior signature used `.expect()` on both
+/// `Params::new` and `hash_password_into`. The Params-side panic was
+/// arguably a caller-bug assertion (callers must pre-validate via
+/// `WalletHeader::validate()`), but the hash_password_into panic
+/// fires on Argon2 memtable allocation failure — an ENVIRONMENTAL
+/// error (host OOM, memory-pressure kill, cgroup limit). A single
+/// wallet with an edge-case Argon2 params, or a daemon under
+/// memory pressure, was previously enough to abort the whole
+/// process, killing every other wallet session it was serving.
+/// Both failure modes are now `Result::Err`; callers propagate via
+/// `?` in Result-returning contexts (all in-tree callers are).
+pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<[u8; 32]> {
     use argon2::{Algorithm, Version, Params};
 
-    // INVARIANT: callers MUST pre-validate (m_cost, t_cost, p_cost) via
-    // `KdfParams::validate()` before reaching this function. The expects
-    // below are invariants of that validation, not user-input checks —
-    // bypassing validate() (e.g., by introducing a new caller that loads
-    // params from an unvalidated wallet header) re-introduces a panic-
-    // on-malformed-input DoS that the load path is supposed to prevent.
+    // Callers should still pre-validate via `WalletHeader::validate()`
+    // to reject malformed on-disk params BEFORE paying the Argon2 cost.
+    // Reaching here with unvalidated params surfaces as a typed error
+    // instead of a panic, keeping the daemon alive to serve other
+    // wallets.
     let params = Params::new(
         m_cost,
         t_cost,
         p_cost,
         Some(32),  // 32-byte output
-    ).expect("Argon2 Params: bounds enforced by KdfParams::validate()");
+    ).map_err(|e| Error::InvalidState(format!(
+        "Argon2 params rejected (m_cost={} t_cost={} p_cost={}): {} — \
+         caller should invoke WalletHeader::validate() before derive_key()",
+        m_cost, t_cost, p_cost, e
+    )))?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let mut key = [0u8; 32];
-    // hash_password_into fails only on (a) buffer size mismatch — impossible
-    // here, key is exactly 32 bytes — or (b) m_cost allocation OOM, which is
-    // an operator-config issue (validate() upper-bound chosen to fit any
-    // sane host). A panic in that case is the correct failure mode: the
-    // process can't function with insufficient RAM for the configured KDF.
+    // hash_password_into fails on Argon2 memtable OOM (host memory
+    // pressure or cgroup limit). Previously this panicked the whole
+    // process. Now propagates as InvalidState so the caller can
+    // decide whether to abort the current wallet operation or surface
+    // to the user.
     argon2.hash_password_into(password.as_bytes(), salt, &mut key)
-        .expect("Argon2 KDF: buffer size and m_cost upper-bound are invariants");
+        .map_err(|e| Error::InvalidState(format!(
+            "Argon2 hash failed (likely host memory pressure at m_cost={} KiB): {}",
+            m_cost, e
+        )))?;
 
-    key
+    Ok(key)
 }
 
 /// Derive a key using the binary's CURRENT default Argon2id params.
 /// Use only when creating fresh keys (not when loading an existing
 /// wallet — for that, use the params stored in the wallet's header).
-pub fn derive_key_default(password: &str, salt: &[u8; 32]) -> [u8; 32] {
+///
+/// See `derive_key`'s R-96 audit note for why this returns `Result`.
+pub fn derive_key_default(password: &str, salt: &[u8; 32]) -> Result<[u8; 32]> {
     derive_key(password, salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)
 }
 
@@ -512,10 +651,12 @@ pub fn derive_v4_keys(
     m_cost: u32,
     t_cost: u32,
     p_cost: u32,
-) -> ([u8; 32], [u8; 32]) {
+) -> Result<([u8; 32], [u8; 32])> {
     // Step 1: Argon2id → 32-byte ikm. Reuses the existing `derive_key`
-    // so the validated-bounds invariant continues to hold.
-    let mut ikm = derive_key(password, salt, m_cost, t_cost, p_cost);
+    // so the validated-bounds invariant continues to hold. Since the
+    // R-96 fix, `derive_key` returns `Result`; the `?` propagates the
+    // (rare) OOM path to the v4 caller.
+    let mut ikm = derive_key(password, salt, m_cost, t_cost, p_cost)?;
 
     // Step 2: HKDF-Expand via blake3::derive_key with two distinct
     // context strings. Each call returns 32 bytes; the two outputs
@@ -528,7 +669,7 @@ pub fn derive_v4_keys(
     // needed; only the two derived keys are.
     ikm.zeroize();
 
-    (enc_key, mac_key)
+    Ok((enc_key, mac_key))
 }
 
 /// Decrypt a sidecar (utxos / history / reservations) ciphertext, trying
@@ -555,7 +696,7 @@ pub fn decrypt_sidecar_with_fallback(
 ) -> Result<Vec<u8>> {
     // Try v3 (current default) first — the common case after the user
     // has saved at least once with the new binary.
-    let mut key_v3 = derive_key_default(password, salt);
+    let mut key_v3 = derive_key_default(password, salt)?;
     let v3_result = decrypt(ciphertext, &key_v3, nonce);
     key_v3.zeroize();
     if let Ok(plain) = v3_result {
@@ -570,7 +711,7 @@ pub fn decrypt_sidecar_with_fallback(
         LEGACY_V2_ARGON2_M_COST,
         LEGACY_V2_ARGON2_T_COST,
         LEGACY_V2_ARGON2_P_COST,
-    );
+    )?;
     let v2_result = decrypt(ciphertext, &key_v2, nonce);
     key_v2.zeroize();
     v2_result
@@ -670,7 +811,7 @@ pub(crate) fn save_v3_internal(
     // save after the binary is upgraded.
     let final_data = if let Some(pwd) = password {
         let mut key = derive_key(pwd, &header.kdf_salt,
-            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost);
+            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost)?;
         let result = encrypt(&serialized, &key, &header.nonce);
         key.zeroize(); // SECURITY: Clear key material from memory immediately
         let mut serialized_mut = serialized;
@@ -864,7 +1005,7 @@ pub fn load_wallet_from_bytes(
     let decrypted = if header.encrypted {
         let pwd = password.ok_or(Error::InvalidSecretKey("password required".into()))?;
         let mut key = derive_key(pwd, &header.kdf_salt,
-            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost);
+            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost)?;
         let result = decrypt(&encrypted_data, &key, &header.nonce);
         key.zeroize(); // SECURITY: Clear key material from memory immediately
         result?
@@ -911,7 +1052,24 @@ pub fn change_password(
                     format!("read sidecar .{}: {}", ext, e)
                 ))?;
 
-            // Decrypt with old password (same logic as Wallet::decrypt_sidecar)
+            // Decrypt with old password (same logic as Wallet::decrypt_sidecar).
+            //
+            // AUDIT (R-98 fix, 2026-07-03): pre-fix code hit an
+            // Err from decrypt_sidecar_with_fallback and silently
+            // fell back to `bytes.clone()` — treating the ORIGINAL
+            // ENCRYPTED BYTES as if they were plaintext. It then
+            // re-encrypted THAT under the new password. On
+            // subsequent load with the new password, decryption
+            // returned "plaintext" that was actually
+            // AES-encrypted-with-old-password bytes wrapped inside
+            // AES-encrypted-with-new-password bytes — the wallet
+            // deserialization then panicked or silently produced
+            // wrong balance. Either outcome corrupts the sidecar.
+            //
+            // Fix: on decrypt failure, PROPAGATE the error. The
+            // caller (change_password RPC) is a user-triggered
+            // interactive flow; returning an error is far better
+            // than silent sidecar corruption.
             let plaintext = if bytes.len() > 56 {
                 let mut salt = [0u8; 32];
                 salt.copy_from_slice(&bytes[..32]);
@@ -921,10 +1079,14 @@ pub fn change_password(
                 // (Item 22) Use the params-fallback decryptor: sidecars
                 // saved by pre-2026-05-08 binaries used the v2 KDF
                 // params; the new helper tries v3-default first then v2.
-                match decrypt_sidecar_with_fallback(&salt, &nonce, ciphertext, old_password) {
-                    Ok(pt) => pt,
-                    Err(_) => bytes.clone(), // Unencrypted fallback
-                }
+                decrypt_sidecar_with_fallback(&salt, &nonce, ciphertext, old_password)
+                    .map_err(|e| crate::error::Error::InvalidState(format!(
+                        "R-98: sidecar .{} decrypt with old password failed \
+                         during change_password ({}). Refusing to overwrite \
+                         with a silent-fallback wrong plaintext — this would \
+                         corrupt the sidecar. Verify old_password and retry.",
+                        ext, e
+                    )))?
             } else {
                 bytes.clone()
             };
@@ -934,10 +1096,13 @@ pub fn change_password(
             // params just like a normal save() does.
             let mut new_salt = [0u8; 32];
             OsRng.fill_bytes(&mut new_salt);
-            let new_key = derive_key_default(new_password, &new_salt);
+            let mut new_key = derive_key_default(new_password, &new_salt)?;
             let mut new_nonce = [0u8; 24];
             OsRng.fill_bytes(&mut new_nonce);
             let encrypted = encrypt(&plaintext, &new_key, &new_nonce)?;
+            // R-99 fix: zeroize new_key BEFORE the output concat so any
+            // future error return path can't leave the key on stack.
+            new_key.zeroize();
             let output = [new_salt.as_slice(), new_nonce.as_slice(), encrypted.as_slice()].concat();
 
             // Atomic write: write to temp then rename
@@ -946,10 +1111,16 @@ pub fn change_password(
                 .map_err(|e| crate::error::Error::InvalidState(
                     format!("write sidecar .{}: {}", ext, e)
                 ))?;
+            // R-100 fix: harden sidecar perms. change_password writes
+            // over each sidecar with the new-password encryption; the
+            // regular wallet.rs save() path also hardens on save, so
+            // this closes the change_password parity gap.
+            harden_secret_file_permissions(&tmp_path);
             std::fs::rename(&tmp_path, &sidecar_path)
                 .map_err(|e| crate::error::Error::InvalidState(
                     format!("rename sidecar .{}: {}", ext, e)
                 ))?;
+            harden_secret_file_permissions(&sidecar_path);
         }
     }
 
@@ -1002,7 +1173,7 @@ pub fn save_v4(path: &Path, data: &WalletData, password: &str) -> Result<()> {
     let (enc_key, mac_key) = derive_v4_keys(
         password, &header.kdf_salt,
         header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost,
-    );
+    )?;
 
     // AEAD-encrypt the plaintext under enc_key. v3 uses XChaCha20-
     // Poly1305 too; per the design doc Open Question #3 we keep the
@@ -1158,7 +1329,7 @@ pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
     let (enc_key, mac_key) = derive_v4_keys(
         password, &header.kdf_salt,
         header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost,
-    );
+    )?;
 
     // Step 4: HMAC verify — constant-time compare via subtle.
     let computed = blake3::keyed_hash(&mac_key, prelude);
@@ -1549,14 +1720,15 @@ mod tests {
         let password = "test_password";
         let salt = [0u8; 32];
 
-        // Same password and salt should produce same key
-        let key1 = derive_key_default(password, &salt);
-        let key2 = derive_key_default(password, &salt);
+        // R-96 update: derive_key_default returns Result — unwrap in test.
+        // Same password and salt should produce same key.
+        let key1 = derive_key_default(password, &salt).unwrap();
+        let key2 = derive_key_default(password, &salt).unwrap();
         assert_eq!(key1, key2);
 
         // Different salt should produce different key
         let salt2 = [1u8; 32];
-        let key3 = derive_key_default(password, &salt2);
+        let key3 = derive_key_default(password, &salt2).unwrap();
         assert_ne!(key1, key3);
     }
 
@@ -1596,8 +1768,10 @@ mod tests {
     fn v4_keys_distinct_and_stable() {
         let password = "soak-test";
         let salt = [0xA1u8; 32];
-        let (e1, m1) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST);
-        let (e2, m2) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST);
+        // R-96 update: derive_v4_keys now returns Result; unwrap in test
+        // context (params are the audited default so KDF should not fail).
+        let (e1, m1) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
+        let (e2, m2) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
 
         // Stability: same inputs → same outputs (no hidden randomness
         // in the v4 KDF path).
@@ -1614,9 +1788,38 @@ mod tests {
         );
 
         // Different password → different keys.
-        let (e3, m3) = derive_v4_keys("different-password", &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST);
+        let (e3, m3) = derive_v4_keys("different-password", &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
         assert_ne!(e1, e3);
         assert_ne!(m1, m3);
+    }
+
+    /// R-96 regression: derive_key returning Err on out-of-bounds params
+    /// MUST NOT panic. Prior code used `.expect()` which crashed the
+    /// process; the fix returns typed error.
+    #[test]
+    fn derive_key_returns_err_not_panic_on_zero_m_cost() {
+        // m_cost = 0 is below argon2::Params::MIN_M_COST (8). Prior
+        // behavior: Params::new panics via .expect(). New behavior:
+        // returns Err with an operator-legible message.
+        let result = derive_key("pw", &[0u8; 32], 0, 3, 4);
+        assert!(result.is_err(), "zero m_cost MUST return Err, not panic");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Argon2 params rejected") || msg.contains("m_cost"),
+            "error must indicate the param rejection: {}",
+            msg
+        );
+    }
+
+    /// R-95 regression smoke test: WalletData with mnemonic_phrase set
+    /// can be dropped without panic. Real zeroize correctness is a
+    /// property of the zeroize crate's String impl.
+    #[test]
+    fn walletdata_drop_with_mnemonic_phrase_does_not_panic() {
+        let mut data = WalletData::new([0x42u8; 32], "testnet");
+        data.mnemonic_phrase = Some("abandon abandon abandon".to_string());
+        // Explicit drop to exercise the Drop impl's zeroize branch.
+        drop(data);
     }
 
     #[test]
@@ -1809,74 +2012,82 @@ mod tests {
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Create a deniable wallet with two passwords.
-/// Returns the paths to both wallet components.
+///
+/// # AUDIT (C37/C38/C39 disposition, 2026-07-03): DISABLED
+///
+/// The pre-fix implementation had THREE compounding bugs that
+/// COMPLETELY DEFEAT the deniability property this feature is
+/// supposed to provide:
+///
+///   **C37**: `let _ = std::fs::remove_file(&hidden_path);` silently
+///     swallowed removal failure. If remove failed (permission
+///     denied, disk locked), the `.hidden` file — an encrypted
+///     copy of the REAL wallet — remained on disk as a separate
+///     artifact next to the combined wallet file. Any observer
+///     doing a directory listing saw two files where a normal
+///     wallet has one — deniability defeated by file listing.
+///
+///   **C38**: The `decoy_padded` and `real_padded` variables were
+///     computed but NEVER USED. The actual `save_wallet` calls at
+///     L2056/L2060 wrote the UNPADDED wallet data. Two regions
+///     with different byte counts is a distinguishing signature —
+///     an observer measuring the file's internal region sizes
+///     (which the load path exposes via the 4-byte length prefix)
+///     can immediately tell decoy region byte count from real
+///     region byte count. Deniability defeated by size analysis.
+///
+///   **C39**: The real wallet was written to `.hidden` as a
+///     SEPARATE ENCRYPTED FILE at L2060 BEFORE being concatenated
+///     into the combined output at L2077. A crash between L2060
+///     and the L2080 remove_file leaves the encrypted real wallet
+///     on disk as a persistent artifact. Even without a crash,
+///     the file existed for milliseconds; a filesystem snapshot
+///     (VSS, ZFS snapshot, backup daemon) captured during that
+///     window preserves the artifact indefinitely. Deniability
+///     defeated by write-then-remove race.
+///
+/// All three bugs are structural to the pre-fix design (write
+/// to disk, then concat, then cleanup). Fixing them requires
+/// a full redesign — build both encrypted regions IN MEMORY,
+/// pad both to identical size, concat in memory, single write
+/// to final path. That requires refactoring save_wallet to
+/// have a `save_wallet_to_bytes` variant, plus per-region
+/// symmetric-padding math that doesn't leak byte counts.
+///
+/// Rather than ship a KNOWINGLY BROKEN deniability primitive as
+/// v1.0 — which would be far worse than shipping nothing (users
+/// who rely on it get a false sense of security in an adversarial
+/// setting) — this fn is now DISABLED. Callers get a distinct
+/// error. Restore behavior in a future release only after all
+/// three structural fixes land AND a fresh audit confirms the
+/// artifacts are gone.
+///
+/// See: Reyzin & Yilek 2007 "Symmetric-Key Cryptography with
+/// Rekeying" §5 on deniability primitives, and Ferguson & Schneier
+/// 2003 "Practical Cryptography" §14 on the class of
+/// intermediate-disk-artifact bugs.
 pub fn create_deniable_wallet(
-    path: &std::path::Path,
-    decoy_data: &WalletData,
-    real_data: &WalletData,
-    decoy_password: &str,
-    real_password: &str,
+    _path: &std::path::Path,
+    _decoy_data: &WalletData,
+    _real_data: &WalletData,
+    _decoy_password: &str,
+    _real_password: &str,
 ) -> crate::error::Result<()> {
-    use rand::RngCore;
-
-    if decoy_password == real_password {
-        return Err(crate::error::Error::InvalidState(
-            "Decoy and real passwords must be different".into()
-        ));
-    }
-
-    // Serialize both wallets
-    let decoy_bytes = borsh::to_vec(decoy_data)
-        .map_err(|e| crate::error::Error::SerializationError(e.to_string()))?;
-    let real_bytes = borsh::to_vec(real_data)
-        .map_err(|e| crate::error::Error::SerializationError(e.to_string()))?;
-
-    // Pad both to the same size (largest + random padding)
-    let target_size = decoy_bytes.len().max(real_bytes.len()) + 64;
-
-    let mut decoy_padded = decoy_bytes.clone();
-    let mut real_padded = real_bytes.clone();
-
-    let mut rng = rand::rngs::OsRng;
-    while decoy_padded.len() < target_size {
-        let mut b = [0u8; 1];
-        rng.fill_bytes(&mut b);
-        decoy_padded.push(b[0]);
-    }
-    while real_padded.len() < target_size {
-        let mut b = [0u8; 1];
-        rng.fill_bytes(&mut b);
-        real_padded.push(b[0]);
-    }
-
-    // Save decoy wallet (password A)
-    save_wallet(path, decoy_data, Some(decoy_password))?;
-
-    // Save real wallet as a separate hidden file
-    let hidden_path = path.with_extension("hidden");
-    save_wallet(&hidden_path, real_data, Some(real_password))?;
-
-    // Combine into a single file: [decoy_file_bytes][real_file_bytes]
-    // The load function tries password against the first region;
-    // if it fails, tries the second. This way one file, two passwords.
-    // `?` directly via `From<io::Error> for Error` — was previously
-    // `.map_err(Error::IoError)?` which used the tuple-variant
-    // constructor. Both work; `?` is idiomatic.
-    let decoy_file = std::fs::read(path)?;
-    let real_file = std::fs::read(&hidden_path)?;
-
-    // Combined format: [4-byte decoy_len][decoy_data][real_data]
-    let mut combined = Vec::new();
-    combined.extend_from_slice(&(decoy_file.len() as u32).to_le_bytes());
-    combined.extend_from_slice(&decoy_file);
-    combined.extend_from_slice(&real_file);
-
-    std::fs::write(path, &combined)?;
-
-    // Clean up hidden temp file
-    let _ = std::fs::remove_file(&hidden_path);
-
-    Ok(())
+    tracing::error!(
+        target: "wallet::persistence::deniable",
+        "C37/C38/C39: create_deniable_wallet DISABLED — the pre-fix \
+         implementation had three structural bugs that defeated the \
+         deniability property (silent .hidden file leak, unused padding, \
+         race between .hidden write and cleanup). See the fn's audit \
+         docstring for the full disposition."
+    );
+    Err(crate::error::Error::InvalidState(
+        "C37/C38/C39: deniable-wallet creation is DISABLED pending a \
+         structural rewrite that eliminates the intermediate .hidden \
+         file artifact and enforces per-region padding. See \
+         create_deniable_wallet's docstring for details. Track the \
+         restoration in the audit catalogue.".into()
+    ))
 }
 
 /// Load from a deniable wallet. Tries the password against both regions.

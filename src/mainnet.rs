@@ -77,20 +77,30 @@ pub const MAINNET_GENESIS_HASH: [u8; 32] = [
     0xa7, 0xda, 0x82, 0xe4, 0xd5, 0xc0, 0x33, 0x68,
 ];
 
-/// Mainnet emission parameters (mirrors constants.rs — single source of truth)
-pub mod emission {
-    /// Initial block reward (in atomic units)
-    pub const INITIAL_REWARD: u64 = 50_000_000_000; // 50 CYNC
-
-    /// Tail emission (perpetual, in atomic units per block)
-    pub const TAIL_EMISSION: u64 = 600_000_000; // 0.6 CYNC
-
-    /// Blocks until tail emission begins
-    pub const TAIL_EMISSION_HEIGHT: u64 = 2_000_000;
-
-    /// Reward decay factor per year (in basis points, 10000 = 100%)
-    pub const ANNUAL_DECAY: u64 = 8500; // 85% (15% reduction per year)
-}
+// AUDIT (2026-07-02): removed the `pub mod emission { ... }` block that
+// previously lived here. It was dead code — zero references across the
+// repo (grep for `mainnet::emission::TAIL_EMISSION` / `INITIAL_REWARD`
+// / `TAIL_EMISSION_HEIGHT` / `ANNUAL_DECAY` yields nothing). The live
+// emission curve reads `crate::constants::TAIL_EMISSION` (see
+// src/emission/curve.rs L75).
+//
+// The bigger problem was value drift: the removed `TAIL_EMISSION`
+// declared 600_000_000 (0.0006 CYNC) while the authoritative
+// `constants::TAIL_EMISSION` is 600_000_000_000 (0.6 CYNC). A 1000×
+// mismatch on the same conceptual constant, sitting in a file named
+// `mainnet.rs` where any future refactor might reach for the "obvious"
+// module-scoped copy. The comment above the block claimed it "mirrors
+// constants.rs — single source of truth", which the value directly
+// contradicted.
+//
+// Removed rather than corrected: keeping a second declaration would
+// re-invite the drift. If future work needs mainnet-scoped emission
+// overrides, `constants.rs` is the place — its per-network parameters
+// are already the single source of truth the docstring claimed this
+// block was. Same removal was NOT made to `testnet.rs` in this pass
+// because that file is `critical_files.lock`-protected; the mainnet
+// removal alone eliminates the higher-risk "future code lands on the
+// mainnet path and picks the wrong constant" scenario.
 
 /// Mainnet configuration
 #[derive(Clone, Debug)]

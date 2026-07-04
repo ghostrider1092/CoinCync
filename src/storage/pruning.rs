@@ -138,8 +138,20 @@ impl ChainPruner {
                     }
                 }
 
-                // Check checkpoints
-                if rules.keep_checkpoints && height % rules.checkpoint_interval == 0 {
+                // Check checkpoints.
+                //
+                // R-59 fix (2026-07-02): the prior code was
+                // `if rules.keep_checkpoints && height % rules.checkpoint_interval == 0`,
+                // which panics with a divide-by-zero on any caller that
+                // constructs `PruningRules{ checkpoint_interval: 0, ..}`.
+                // The estimator branch at L171 correctly guarded with
+                // `checkpoint_interval > 0`; this branch didn't.
+                // Guarded now: an interval of 0 means "no checkpoints
+                // to protect at all," matching the intuitive meaning.
+                if rules.keep_checkpoints
+                    && rules.checkpoint_interval > 0
+                    && height % rules.checkpoint_interval == 0
+                {
                     return false;
                 }
 
@@ -290,7 +302,33 @@ impl PruningPlan {
 }
 
 impl ChainPruner {
-    /// Create a pruning plan
+    /// Create a pruning plan.
+    ///
+    /// AUDIT (R-60 note, 2026-07-03): `create_plan` trusts
+    /// `self.stats.last_pruned_height` at face value. If a prior
+    /// prune partially succeeded — persisted the header but failed
+    /// to remove the block body, then failed to bump the counter —
+    /// `last_pruned_height` is BEHIND the true prune progress and
+    /// the plan re-prunes already-pruned heights. That's wasted
+    /// work but not corrupting.
+    ///
+    /// The more dangerous direction: if `last_pruned_height` is
+    /// AHEAD of the actual prune (counter was bumped but the
+    /// removal failed and crashed), heights below it are never
+    /// re-attempted. Blocks meant to be pruned linger on disk
+    /// indefinitely.
+    ///
+    /// The pruning-execution path (db/pruning.rs::execute_plan
+    /// with the R-36 error propagation) now propagates a real
+    /// error rather than silently absorbing it, so the counter is
+    /// only bumped after both writes succeed. This creates a
+    /// STRONGER guarantee than the pre-R-36 world:
+    ///   - Counter reflects actual persisted progress.
+    ///   - A partial failure returns Err all the way up rather
+    ///     than corrupting the counter.
+    /// So R-60's original concern is now materially mitigated by
+    /// R-36. Documented here so a future reader sees the coupled
+    /// contract; no separate code change needed on this side.
     pub fn create_plan(&self, batch_size: usize, avg_block_size: usize) -> PruningPlan {
         if self.is_archive() {
             return PruningPlan::empty();
@@ -403,5 +441,32 @@ mod tests {
         assert!(!pruner.can_prune(1500));
         // Non-checkpoint block far from tip is prunable
         assert!(pruner.can_prune(501));
+    }
+
+    /// R-59 regression: `checkpoint_interval = 0` MUST NOT panic on
+    /// `can_prune`. Prior code did `height % 0` which crashed. Fix
+    /// treats interval 0 as "no checkpoint protection." Since
+    /// `can_prune` is on the hot path for every pruning decision, a
+    /// panic here would take down whatever thread is running the prune.
+    #[test]
+    fn can_prune_does_not_panic_on_zero_checkpoint_interval() {
+        let rules = PruningRules {
+            min_blocks: 10,
+            keep_after_height: None,
+            keep_tx_hashes: HashSet::new(),
+            keep_checkpoints: true,
+            checkpoint_interval: 0, // Would trigger div-by-zero pre-R-59.
+        };
+        let mut pruner = ChainPruner::new(PruningMode::Custom(rules));
+        pruner.set_height(5000);
+
+        // Old code: panic. New code: returns bool (no protection,
+        // since with interval=0 no height qualifies as a checkpoint).
+        // The `can_prune(0)` call is the tightest test — 0 % 0 was
+        // the exact panic site.
+        let _ = pruner.can_prune(0);
+        let _ = pruner.can_prune(500);
+        let _ = pruner.can_prune(1000);
+        // If we reached this line, the panic was avoided.
     }
 }

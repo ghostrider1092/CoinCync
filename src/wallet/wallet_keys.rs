@@ -30,10 +30,29 @@ pub struct WalletKeys {
     epochs: Vec<KeyEpoch>,
     /// Watch-only mode (no spending capability).
     watch_only: bool,
+    /// R-115 SURGICAL FIX (2026-07-03): BIP39 mnemonic phrase
+    /// this wallet was created / restored FROM. Kept in memory so
+    /// `Wallet::save` can persist it through `WalletData.mnemonic_phrase`
+    /// on every save cycle, rather than always writing `None`.
+    /// Wrapped in `Zeroizing<String>` so heap bytes are wiped when
+    /// the WalletKeys drops. `None` for wallets that never carried
+    /// a mnemonic (e.g. watch-only, restored-from-seed-only).
+    mnemonic_phrase: Option<zeroize::Zeroizing<String>>,
 }
 
 impl WalletKeys {
     /// Generate a fresh wallet with a cryptographically-random seed.
+    ///
+    /// AUDIT (R-73 fix, 2026-07-03): the pre-fix code did
+    ///   let mut seed = [0u8; 32];
+    ///   rng.fill_bytes(&mut seed);
+    ///   let mut wallet = WalletKeys { master_seed: seed, ... };
+    /// The `seed` was `Copy`-moved into the struct field. The stack
+    /// slot for `seed` still contained the raw master-seed bytes,
+    /// unzeroized after the copy. Every subsequent stack frame that
+    /// reused that memory could observe the seed until overwritten.
+    /// Explicit zeroize of the stack copy AFTER the field write closes
+    /// the window.
     pub fn new<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
@@ -42,19 +61,35 @@ impl WalletKeys {
             current_epoch: 0,
             epochs: Vec::new(),
             watch_only: false,
+            mnemonic_phrase: None,
         };
+        // R-73: wipe the stack copy of the master seed. The copy in
+        // wallet.master_seed remains (wrapped in a Zeroize-on-Drop
+        // field type at the struct level — see struct definition).
+        use zeroize::Zeroize;
+        seed.zeroize();
         wallet.derive_epoch(0);
         wallet
     }
 
     /// Restore a wallet from a 32-byte master seed.
-    pub fn from_seed(seed: [u8; 32]) -> Self {
+    ///
+    /// AUDIT (R-73 fix, 2026-07-03): same class as `new` above. The
+    /// caller-provided `seed: [u8; 32]` is Copy-moved into the struct
+    /// field; the caller's stack copy is out of our reach, but the
+    /// parameter binding here IS. Zeroize it after the field write.
+    pub fn from_seed(mut seed: [u8; 32]) -> Self {
         let mut wallet = WalletKeys {
             master_seed: seed,
             current_epoch: 0,
             epochs: Vec::new(),
             watch_only: false,
+            mnemonic_phrase: None,
         };
+        // R-73: wipe the local `seed` binding. The caller is
+        // responsible for wiping their own upstream copy.
+        use zeroize::Zeroize;
+        seed.zeroize();
         wallet.derive_epoch(0);
         wallet
     }
@@ -71,13 +106,25 @@ impl WalletKeys {
         // the trivially guessable all-zero scalar. It's still unusable
         // because it won't match `spend_public`, but an attacker can't
         // predict it from the constant alone.
-        let placeholder_hash = blake3::hash(
-            &[
-                b"COINCYNC_WATCHONLY_PLACEHOLDER_v1".as_slice(),
-                view_secret.as_bytes(),
-            ]
-            .concat(),
+        //
+        // AUDIT (R-74 fix, 2026-07-03): the pre-fix code did
+        //   [b"...", view_secret.as_bytes()].concat()
+        // which allocates a heap Vec<u8> containing the raw
+        // view_secret bytes. The Vec is dropped after hashing but
+        // NOT zeroized — the freed heap block sits in the allocator
+        // pool with plaintext view_secret bytes readable by the next
+        // allocation that lands on the same slot. Now we build the
+        // buffer explicitly and zeroize it before it goes out of scope.
+        let mut hash_input = Vec::with_capacity(
+            b"COINCYNC_WATCHONLY_PLACEHOLDER_v1".len() + 32,
         );
+        hash_input.extend_from_slice(b"COINCYNC_WATCHONLY_PLACEHOLDER_v1");
+        hash_input.extend_from_slice(view_secret.as_bytes());
+        let placeholder_hash = blake3::hash(&hash_input);
+        {
+            use zeroize::Zeroize;
+            hash_input.zeroize();
+        }
         let epoch = KeyEpoch {
             epoch: 0,
             spend_secret: SecretKey::from_bytes(*placeholder_hash.as_bytes()),
@@ -91,12 +138,29 @@ impl WalletKeys {
             current_epoch: 0,
             epochs: vec![epoch],
             watch_only: true,
+            mnemonic_phrase: None,
         }
     }
 
     /// True if this wallet cannot spend.
     pub fn is_watch_only(&self) -> bool {
         self.watch_only
+    }
+
+    /// R-115 SURGICAL FIX (2026-07-03): set the mnemonic phrase
+    /// this wallet was created from. Called by `Wallet::create` /
+    /// `Wallet::restore_from_mnemonic` after key derivation.
+    /// Subsequent `Wallet::save` calls will persist this phrase
+    /// through `WalletData.mnemonic_phrase`.
+    pub fn set_mnemonic_phrase(&mut self, phrase: String) {
+        self.mnemonic_phrase = Some(zeroize::Zeroizing::new(phrase));
+    }
+
+    /// R-115: read back the stored phrase. `None` if this wallet
+    /// was never annotated with one (watch-only, restored from
+    /// raw seed, loaded from a pre-R-115 save file).
+    pub fn mnemonic_phrase(&self) -> Option<&str> {
+        self.mnemonic_phrase.as_deref().map(|s| s.as_str())
     }
 
     /// Derive keys for a specific epoch.
@@ -155,8 +219,42 @@ impl WalletKeys {
     /// **CRITICAL**: the seed derives every key in the wallet. Exposure
     /// means complete loss of funds and privacy. Never log, transmit
     /// unencrypted, or copy to swap / clipboard.
-    pub fn master_seed_for_backup(&self) -> &[u8; 32] {
+    ///
+    /// AUDIT (R-75 fix, 2026-07-03): the pre-fix impl returned
+    /// `&self.master_seed` unconditionally. For a watch-only wallet
+    /// (see `watch_only()` at ~L66), `master_seed` is the SENTINEL
+    /// value `[0xFF; 32]` — that's not a real seed. A caller that
+    /// invokes `master_seed_for_backup()` on a watch-only wallet
+    /// gets back a `[0xFF; 32]` block that looks like a valid seed;
+    /// if the caller writes it to a backup file, restores from it
+    /// later, and rederives keys from `[0xFF; 32]`, they get a
+    /// well-formed but WRONG wallet — a silent corruption of the
+    /// backup semantics. Return `None` for watch-only wallets so
+    /// callers explicitly branch on availability rather than
+    /// serialize a sentinel by accident.
+    ///
+    /// Callers that need the raw sentinel for internal reasons can
+    /// use `raw_master_seed_or_sentinel()` (which is deliberately
+    /// named to make the misuse loud in code review).
+    pub fn master_seed_for_backup(&self) -> Option<&[u8; 32]> {
+        if self.watch_only {
+            tracing::warn!(
+                target: "wallet::keys::R75",
+                "master_seed_for_backup called on watch-only wallet — \
+                 returning None to prevent backup of the [0xFF; 32] sentinel"
+            );
+            return None;
+        }
         tracing::trace!("Master seed accessed - ensure proper security handling");
+        Some(&self.master_seed)
+    }
+
+    /// Raw access to the master seed field for internal callers that
+    /// KNOW they may receive the watch-only sentinel and handle it
+    /// correctly (e.g. the WalletData serialization path preserves
+    /// the sentinel so load can reconstruct a watch-only wallet).
+    /// Do NOT use for backups.
+    pub fn raw_master_seed_or_sentinel(&self) -> &[u8; 32] {
         &self.master_seed
     }
 

@@ -137,7 +137,22 @@ impl ParallelProofVerifier {
         self.proofs.clear();
     }
 
-    /// Verify all proofs in parallel
+    /// Verify all proofs in parallel.
+    ///
+    /// AUDIT (R-30 fix, 2026-07-02): This function has a NON-OBVIOUS
+    /// SIDE EFFECT: after verification, `self.proofs` is CLEARED via
+    /// `self.proofs.clear()` at the end of the function (~L248). The
+    /// prior docstring made no mention of this — a caller reading
+    /// only the signature could reasonably expect `verify_all` to be
+    /// idempotent (call twice, get the same result). Second call
+    /// returns "0 proofs verified" and looks like success. That was
+    /// a silent trap.
+    ///
+    /// Semantics now made explicit: `verify_all` CONSUMES the
+    /// pending-proof queue. A caller who wants to re-verify must
+    /// re-add each proof via `add_proof` before calling again. A
+    /// caller who wants to inspect the queue after verification
+    /// must snapshot BEFORE the call (`let n = verifier.proofs.len()`).
     pub fn verify_all(&mut self) -> ParallelVerifyResult {
         let start = Instant::now();
         let total = self.proofs.len();

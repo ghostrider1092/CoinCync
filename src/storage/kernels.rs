@@ -116,16 +116,65 @@ impl KernelStore {
     }
 
     /// Append a kernel that has survived cut-through pruning.
+    ///
+    /// AUDIT (R-61 CLASS site, 2026-07-03): the previous `.expect()`
+    /// calls panicked the whole node with a bare message. Panicking
+    /// IS the semantically-correct response — a consensus-storage
+    /// write failure means the node can't produce a valid state
+    /// snapshot and continuing would silently corrupt the chain.
+    /// But the bare-panic path lost the structured context that ops
+    /// needed to triage (disk full? WAL corruption? RocksDB open
+    /// state?). Emit a tracing::error with structured fields
+    /// BEFORE the panic so the crash log carries real signal, and
+    /// give the panic message an operator-actionable summary.
+    ///
+    /// Follow-up (deferred): return `Result<(), Error>` and let
+    /// the caller decide (chain.rs::apply_block currently would
+    /// convert the error to a block-rejection outcome). Deferred
+    /// because the calling site is inside a `write()` guard that
+    /// makes rollback nontrivial without a per-store transaction
+    /// primitive.
     pub fn append(&self, kernel: MwKernel) {
         let mut kernels = self.kernels.write();
         let idx = kernels.len() as u64;
         if let Some(p) = &self.persistence {
             let key = idx.to_be_bytes();
-            let value = borsh::to_vec(&kernel)
-                .expect("MwKernel borsh encoding is infallible");
-            p.kernels
-                .insert(key, value)
-                .expect("mw_kernels write failed — consensus storage is dead");
+            let value = match borsh::to_vec(&kernel) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        target: "storage::kernels::R61",
+                        error = %e,
+                        kernel_idx = idx,
+                        "R-61: MwKernel borsh serialize failed at idx {}. \
+                         Borsh serialization is infallible for well-formed \
+                         MwKernel; this indicates upstream memory corruption \
+                         or a bug in MwKernel construction. Halting.",
+                        idx
+                    );
+                    panic!(
+                        "R-61: MwKernel borsh serialize failed at idx {}: {}",
+                        idx, e
+                    );
+                }
+            };
+            if let Err(e) = p.kernels.insert(key, value) {
+                tracing::error!(
+                    target: "storage::kernels::R61",
+                    error = %e,
+                    kernel_idx = idx,
+                    "R-61: mw_kernels write failed at idx {}. Consensus \
+                     storage is unavailable — likely disk full, WAL \
+                     corruption, or RocksDB open state issue. Halting to \
+                     preserve on-disk state; SIGTERM handler will flush \
+                     cleanly. Investigate disk + RocksDB state before restart.",
+                    idx
+                );
+                panic!(
+                    "R-61: mw_kernels write failed at idx {}: {}",
+                    idx, e
+                );
+            }
         }
         kernels.push(kernel);
         *self.root.write() = Self::compute_root(&kernels);
@@ -172,6 +221,31 @@ impl KernelStore {
     /// chain reorg path treats `false` as a signal that the store
     /// could not be rolled back and the operator must be warned,
     /// matching the `ShieldedStore` / `SparkStore` contract.
+    /// Rewind the kernel store to the last checkpoint.
+    ///
+    /// AUDIT (R-62 fix, 2026-07-03): the pre-fix code
+    ///   (a) popped a checkpoint,
+    ///   (b) truncated the in-memory `kernels` vec,
+    ///   (c) recomputed the root,
+    ///   (d) iterated the on-disk kernels and issued individual
+    ///       `remove` calls, silently discarding each error via
+    ///       `let _ = ...` (see R-63 class).
+    /// A crash between any of these steps left the in-memory state
+    /// and the on-disk state inconsistent:
+    ///   - Between (b) and (c): in-mem truncated, root not
+    ///     recomputed → header commit uses the wrong root.
+    ///   - Between (c) and (d): in-mem truncated + root correct,
+    ///     but disk still has the extra kernels; on restart, load
+    ///     replays them and diverges from the committed root.
+    /// Fix: R-63 site is treated below (per-item remove errors are
+    /// now surfaced via a warn AND collected — see the log at the
+    /// end). The (b)→(c)→(d) atomicity gap is documented; a
+    /// structural fix requires the persistence layer to expose a
+    /// batch-delete-range primitive that runs atomically with a
+    /// "set root" write. Deferred pending shim extension. The
+    /// in-memory state IS correctly ordered (truncate BEFORE root
+    /// recompute), so an in-flight rewind is safe; only a crash
+    /// mid-rewind is problematic.
     pub fn rewind(&self) -> bool {
         let mut checkpoints = self.checkpoints.write();
         // Pop the checkpoint guarding the block being disconnected.
@@ -199,9 +273,40 @@ impl KernelStore {
         // Clean the backing column family. Kernels are persisted under
         // their vector index as a BE u64 key (see `append`), so the
         // dropped kernels are exactly keys `split_at..old_len`.
+        //
+        // R-63 fix (2026-07-03): pre-fix code did `let _ = p.kernels.remove(...)`,
+        // silently discarding every failure. A partial rewind that
+        // left orphan kernels on disk would then get REPLAYED on
+        // next open, corrupting the committed root. Now we track
+        // failures and emit a loud tracing::error so ops see the
+        // event. We don't return `false` because the in-memory
+        // state IS correctly rewound and rejecting the caller
+        // would produce a worse divergence (in-memory rolled back,
+        // caller thinks it wasn't).
         if let Some(p) = &self.persistence {
+            let mut remove_failures = 0usize;
             for idx in split_at..old_len {
-                let _ = p.kernels.remove((idx as u64).to_be_bytes());
+                if let Err(e) = p.kernels.remove((idx as u64).to_be_bytes()) {
+                    remove_failures += 1;
+                    tracing::error!(
+                        target: "storage::kernels",
+                        idx = idx,
+                        error = %e,
+                        "R-63: rewind failed to remove on-disk kernel {} — \
+                         disk may replay orphan kernel on next open, \
+                         corrupting committed root. Reindex required.",
+                        idx
+                    );
+                }
+            }
+            if remove_failures > 0 {
+                tracing::error!(
+                    target: "storage::kernels",
+                    remove_failures = remove_failures,
+                    kernels_range = format!("{}..{}", split_at, old_len),
+                    "R-63: {} kernel removes failed during rewind",
+                    remove_failures
+                );
             }
         }
 

@@ -24,14 +24,36 @@ use super::fee_market::{congestion_multiplier, distribute_fee};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Whether fast-sync checkpoint crypto skip is enabled.
+///
+/// AUDIT-CRITICAL: this is the only path that lets validation skip cryptographic
+/// verification of blocks. Previously controlled by a runtime env var
+/// (`COINCYNC_ALLOW_CHECKPOINT_CRYPTO_SKIP`) — an attacker or misconfigured
+/// operator setting that variable could silently allow invalid blocks past
+/// validation. Replaced with a compile-time feature (`insecure-fast-sync`) so
+/// production builds physically cannot enable the skip.
+///
+/// Prior art: Bitcoin Core's `-assumevalid` is a config-file flag (not env)
+/// AND only skips signature verification, not all crypto. Zcash's zebrad uses
+/// a compile-time feature. This function follows zebrad's model.
+///
+/// To build with fast-sync (dev/testnet bootstrap only):
+///   cargo build --features insecure-fast-sync
+/// Production release builds MUST NOT enable this feature. CI must reject any
+/// release artifact built with it.
+#[cfg(feature = "insecure-fast-sync")]
 fn allow_checkpoint_crypto_skip() -> bool {
-    std::env::var("COINCYNC_ALLOW_CHECKPOINT_CRYPTO_SKIP")
-        .ok()
-        .map(|v| {
-            let t = v.trim();
-            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
-        })
-        .unwrap_or(false)
+    tracing::warn!(
+        "SECURITY: build has insecure-fast-sync feature enabled — crypto \
+         verification may be skipped for blocks under checkpoint. NEVER ship \
+         a release binary with this feature."
+    );
+    true
+}
+
+#[cfg(not(feature = "insecure-fast-sync"))]
+fn allow_checkpoint_crypto_skip() -> bool {
+    false
 }
 
 /// Block validation result
@@ -131,65 +153,22 @@ pub fn validate_block_with_checkpoint_for_network(
     checkpoint_height: Option<u64>,
     expected_network: crate::config::NetworkType,
 ) -> Result<BlockValidation> {
+    // AUDIT (2026-07-01, follow-on to H1): validate_block was a ~600-line
+    // monolith of 19 distinct checks. Refactored to a driver + named
+    // sub-check helpers that mirror validate_transaction's structure. Each
+    // helper returns early (via `bool` sentinel or `Option`) if the check
+    // is fatal enough that later checks would produce meaningless errors
+    // — the same short-circuit behavior the original had, made explicit.
+    //
+    // Prior art: Bitcoin Core's ContextualCheckBlock + CheckBlock split.
+
     let mut result = BlockValidation::ok();
 
-    // SECURITY (NetworkTag): FIRST CHECK — reject wrong-network blocks before
-    // any expensive crypto. A 4-byte comparison that catches misconfigured peers,
-    // cross-network attacks, and testnet/mainnet contamination instantly.
-    //
-    // FIX #43: check against THIS node's specific network magic, not just
-    // "any known network". Previously a testnet node would accept a mainnet
-    // block as having "valid magic" (because mainnet is also a known
-    // network) — providing no defense against cross-network contamination.
-    // Now we compare against the compile-time-selected expected magic.
-    // Genesis blocks (height 0) with zero magic are accepted for backwards compat.
-    if block.header.network_magic != [0u8; 4] || block.height() > 0 {
-        let expected_magic = expected_network.magic_bytes();
-
-        if block.header.network_magic != expected_magic {
-            result.add_error(format!(
-                "Wrong network magic {:?} — expected {:?} (this is a {} node)",
-                block.header.network_magic,
-                expected_magic,
-                expected_network.name()
-            ));
-            return Ok(result);
-        }
+    if !check_block_network_magic(block, expected_network, &mut result) {
+        return Ok(result);
     }
-
-    // CONSENSUS CHECKPOINT (CIP-009 Path B) — hard reorg defense.
-    //
-    // The `CONSENSUS_CHECKPOINTS` table in `constants.rs` carries
-    // hardcoded (height, block_hash) pairs that ALL honest nodes
-    // refuse to contradict. If a block at one of those heights
-    // proposes a different hash, reject the whole block here, before
-    // any expensive cryptographic verification — the attacker has
-    // already failed.
-    //
-    // Distinct from the "fast-sync" `checkpoint_height` parameter
-    // below, which controls whether to SKIP crypto for blocks under
-    // a known-good ancestor. Consensus checkpoints REJECT chains
-    // that rewrite past them; fast-sync checkpoints just speed up
-    // verification of blocks below them. Both can be active
-    // simultaneously and they don't interfere.
-    //
-    // Genesis (height 0) is exempt by construction: the table can
-    // include height 0 if desired, but a chain whose genesis differs
-    // from a recorded checkpoint would never have produced a block
-    // we'd be validating in the first place.
-    if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(block.height()) {
-        let actual_hash = block.hash();
-        if actual_hash.as_bytes() != expected_hash {
-            result.add_error(format!(
-                "consensus checkpoint mismatch at height {}: \
-                 expected {} but got {} — refusing to accept reorg \
-                 chain that contradicts a hardcoded checkpoint",
-                block.height(),
-                hex::encode(expected_hash),
-                hex::encode(actual_hash.as_bytes()),
-            ));
-            return Ok(result);
-        }
+    if !check_block_consensus_checkpoint(block, &mut result) {
+        return Ok(result);
     }
 
     // Determine if we're in fast-sync mode (below checkpoint)
@@ -213,8 +192,10 @@ pub fn validate_block_with_checkpoint_for_network(
                     block.height(), checkpoint_height.unwrap_or(0));
             } else if fast_sync_requested {
                 tracing::warn!(
-                    "Checkpoint crypto skip requested but disabled by policy at height {}. \
-                     Set COINCYNC_ALLOW_CHECKPOINT_CRYPTO_SKIP=1 only for explicitly trusted bootstrap flows.",
+                    "Checkpoint crypto skip requested at height {} but this build \
+                     does not have the insecure-fast-sync feature — full verification \
+                     will run. Rebuild with `--features insecure-fast-sync` only for \
+                     explicitly trusted dev/testnet bootstrap flows.",
                     block.height()
                 );
             } else {
@@ -248,88 +229,17 @@ pub fn validate_block_with_checkpoint_for_network(
         }
     }
 
-    // Validate size
     let size = block.size();
-    if size > MAX_BLOCK_SIZE {
-        result.add_error(format!("Block too large: {} > {}", size, MAX_BLOCK_SIZE));
-    }
-
-    // SECURITY: Block weight validation that accounts for ring signature verification cost.
-    // Ring signatures are O(ring_size) to verify, so a block with many high-ring-size txs
-    // takes disproportionately long to validate relative to its byte size.
-    // Weight = sum of (ring_members_count * RING_SIG_WEIGHT + byte_size) per tx.
-    // Maximum weight is 4x the max block size (prevents CPU-exhaustion attacks).
-    //
-    // FIX #46: run the weight check UNCONDITIONALLY, not only outside
-    // fast-sync. The weight check is a pure structural check — it has no
-    // cryptographic cost; it's just arithmetic over sizes and ring
-    // counts. Fast-sync is exactly the path where DoS risk is HIGHEST
-    // (block throughput is maximised) and where a cheap pre-flight
-    // check is most valuable. Only the CRYPTOGRAPHIC verification
-    // (CLSAG, range proofs, signatures) should skip below the
-    // checkpoint via the separate `fast_sync` branches below.
-    {
-        const RING_SIG_WEIGHT: usize = 256; // ~cost of verifying one ring member
-        const MAX_BLOCK_WEIGHT: usize = MAX_BLOCK_SIZE * 4;
-
-        let block_weight: usize = block.transactions.iter().map(|tx| {
-            let ring_members: usize = tx.inputs.iter()
-                .map(|input| input.ring_members.len())
-                .sum();
-            tx.size() + ring_members * RING_SIG_WEIGHT
-        }).sum();
-
-        if block_weight > MAX_BLOCK_WEIGHT {
-            result.add_error(format!(
-                "Block weight too high: {} > {} (ring sig verification cost exceeds limit)",
-                block_weight, MAX_BLOCK_WEIGHT
-            ));
-        }
-    }
-
-    // Validate transaction count
-    if block.transactions.len() > MAX_TXS_PER_BLOCK {
-        result.add_error(format!(
-            "Too many transactions: {} > {}",
-            block.transactions.len(),
-            MAX_TXS_PER_BLOCK
-        ));
-    }
-
-    // Validate has coinbase
-    if block.transactions.is_empty() {
-        result.add_error("Missing coinbase transaction");
+    check_block_size(size, &mut result);
+    check_block_weight(block, &mut result);
+    check_block_tx_count(block, &mut result);
+    if !check_block_has_coinbase(block, &mut result) {
         return Ok(result);
     }
-
-    // First transaction must be coinbase (using safe access)
-    match block.transactions.first() {
-        Some(first_tx) if !first_tx.is_coinbase() => {
-            result.add_error("First transaction must be coinbase");
-        }
-        None => {
-            // Should not reach here due to earlier empty check, but be safe
-            result.add_error("Block has no transactions");
-        }
-        _ => {} // First tx is valid coinbase
-    }
-
-    // Validate merkle root
+    check_block_first_tx_is_coinbase(block, &mut result);
     let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
-    let computed_root = merkle_root(&tx_hashes);
-    if computed_root != block.header.tx_root {
-        result.add_error("Invalid merkle root");
-    }
-
-    // Stage 6 (Constitution Article III — Mandatory Privacy): every
-    // non-coinbase tx must have Pedersen-committed amounts, a stealth
-    // address, and at least one privacy-preserving input. Rejection is
-    // structural and fast — no ring-sig / range-proof verification is
-    // performed here, only field-shape checks that catch transparent or
-    // naked transactions before the expensive crypto runs.
-    if let Err(e) = crate::consensus::privacy_policy::enforce_privacy_policy(block) {
-        result.add_error(format!("Privacy policy violation: {}", e));
-    }
+    check_block_merkle_root(block, &tx_hashes, &mut result);
+    check_block_privacy_policy(block, &mut result);
 
     // Validate coinbase reward
     let expected_reward = calculate_block_reward(block.height());
@@ -376,18 +286,7 @@ pub fn validate_block_with_checkpoint_for_network(
         }
     };
 
-    // H6: Defense-in-depth tail supply check.
-    // After year 12 (tail phase), the reward must not exceed TAIL_EMISSION.
-    if block.height() > crate::constants::BLOCKS_PER_YEAR * 12 {
-        if expected_reward.as_atomic() > crate::constants::TAIL_EMISSION {
-            result.add_error(format!(
-                "Tail phase reward {} exceeds TAIL_EMISSION {} at height {}",
-                expected_reward.as_atomic(),
-                crate::constants::TAIL_EMISSION,
-                block.height()
-            ));
-        }
-    }
+    check_block_tail_supply(block, expected_reward, &mut result);
 
     if let Some(coinbase) = block.coinbase() {
         // Coinbase output validation
@@ -563,22 +462,8 @@ pub fn validate_block_with_checkpoint_for_network(
         );
     }
 
-    // SECURITY: Check for duplicate transaction hashes within this block.
-    // A malicious miner could attempt to include the same transaction twice
-    // to double-count fees or cause state inconsistencies.
-    //
-    // FIX #48: reuse `tx_hashes` computed earlier for the merkle-root
-    // check rather than calling `tx.hash()` a second time per transaction.
-    // For a large block (~5000 txs) this halves the hashing work in the
-    // dedup path — hashing is cheap per tx but the savings compound
-    // during IBD. Note: `tx_hashes` is computed above (~line 259) and
-    // is still in scope here.
-    let mut seen_tx_hashes = std::collections::HashSet::new();
-    for hash in &tx_hashes {
-        if !seen_tx_hashes.insert(*hash) {
-            result.add_error("Duplicate transaction hash in block".to_string());
-        }
-    }
+    check_block_duplicate_tx_hashes(&tx_hashes, &mut result);
+    check_block_duplicate_key_images(block, &mut result);
 
     // SECURITY: Two-phase key image validation:
     //
@@ -777,19 +662,239 @@ pub fn validate_block_with_checkpoint_for_network(
     Ok(result)
 }
 
-/// Validate block header
+// ── validate_block sub-checks (AUDIT 2026-07-01, follow-on to H1) ──
+//
+// Each helper is called in the same order the previous monolithic
+// function used, with bit-identical error strings. Helpers that return
+// `bool` return `false` when the check is fatal enough that later
+// checks would produce meaningless errors (matches the original's
+// `return Ok(result)` short-circuit pattern).
+
+/// FIRST CHECK: network magic. A 4-byte comparison that catches
+/// misconfigured peers, cross-network attacks, and testnet/mainnet
+/// contamination instantly. Runs before any expensive crypto.
+///
+/// FIX #43: check against THIS node's specific network magic, not just
+/// "any known network" — previously a testnet node would accept a
+/// mainnet block as having "valid magic". Genesis blocks (height 0)
+/// with zero magic are accepted for backwards compat.
+///
+/// Returns `false` on failure — mismatched magic is fatal and no
+/// subsequent check would make sense.
+fn check_block_network_magic(
+    block: &Block,
+    expected_network: crate::config::NetworkType,
+    result: &mut BlockValidation,
+) -> bool {
+    if block.header.network_magic == [0u8; 4] && block.height() == 0 {
+        return true;
+    }
+    let expected_magic = expected_network.magic_bytes();
+    if block.header.network_magic != expected_magic {
+        result.add_error(format!(
+            "Wrong network magic {:?} — expected {:?} (this is a {} node)",
+            block.header.network_magic,
+            expected_magic,
+            expected_network.name()
+        ));
+        return false;
+    }
+    true
+}
+
+/// CIP-009 Path B consensus checkpoint: reject any block at a hardcoded
+/// (height, hash) pair whose hash doesn't match. Runs before any
+/// cryptographic verification.
+///
+/// Distinct from the fast-sync `checkpoint_height` parameter, which
+/// controls whether to SKIP crypto for blocks under a known-good
+/// ancestor. Consensus checkpoints REJECT chains that rewrite past
+/// them; fast-sync checkpoints just speed up verification.
+///
+/// Returns `false` on failure — checkpoint mismatch is fatal.
+fn check_block_consensus_checkpoint(block: &Block, result: &mut BlockValidation) -> bool {
+    if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(block.height()) {
+        let actual_hash = block.hash();
+        if actual_hash.as_bytes() != expected_hash {
+            result.add_error(format!(
+                "consensus checkpoint mismatch at height {}: \
+                 expected {} but got {} — refusing to accept reorg \
+                 chain that contradicts a hardcoded checkpoint",
+                block.height(),
+                hex::encode(expected_hash),
+                hex::encode(actual_hash.as_bytes()),
+            ));
+            return false;
+        }
+    }
+    true
+}
+
+/// Block size within `MAX_BLOCK_SIZE`.
+fn check_block_size(size: usize, result: &mut BlockValidation) {
+    if size > MAX_BLOCK_SIZE {
+        result.add_error(format!("Block too large: {} > {}", size, MAX_BLOCK_SIZE));
+    }
+}
+
+/// Block weight accounts for ring-signature verification cost, not
+/// just byte size. Weight = sum of (ring_members_count * RING_SIG_WEIGHT
+/// + byte_size) per tx. Max weight is 4× the max block size
+/// (prevents CPU-exhaustion attacks).
+///
+/// FIX #46: runs UNCONDITIONALLY (not only outside fast-sync). The
+/// weight check is a pure structural check with no cryptographic cost
+/// — fast-sync is exactly the path where DoS risk is highest and a
+/// cheap pre-flight check is most valuable.
+fn check_block_weight(block: &Block, result: &mut BlockValidation) {
+    const RING_SIG_WEIGHT: usize = 256; // ~cost of verifying one ring member
+    const MAX_BLOCK_WEIGHT: usize = MAX_BLOCK_SIZE * 4;
+
+    let block_weight: usize = block.transactions.iter().map(|tx| {
+        let ring_members: usize = tx.inputs.iter()
+            .map(|input| input.ring_members.len())
+            .sum();
+        tx.size() + ring_members * RING_SIG_WEIGHT
+    }).sum();
+
+    if block_weight > MAX_BLOCK_WEIGHT {
+        result.add_error(format!(
+            "Block weight too high: {} > {} (ring sig verification cost exceeds limit)",
+            block_weight, MAX_BLOCK_WEIGHT
+        ));
+    }
+}
+
+/// Transaction count within `MAX_TXS_PER_BLOCK`.
+fn check_block_tx_count(block: &Block, result: &mut BlockValidation) {
+    if block.transactions.len() > MAX_TXS_PER_BLOCK {
+        result.add_error(format!(
+            "Too many transactions: {} > {}",
+            block.transactions.len(),
+            MAX_TXS_PER_BLOCK
+        ));
+    }
+}
+
+/// Block has at least one transaction (a coinbase).
+///
+/// Returns `false` if the block has no transactions — no later check
+/// would make sense.
+fn check_block_has_coinbase(block: &Block, result: &mut BlockValidation) -> bool {
+    if block.transactions.is_empty() {
+        result.add_error("Missing coinbase transaction");
+        return false;
+    }
+    true
+}
+
+/// First transaction must be a coinbase.
+fn check_block_first_tx_is_coinbase(block: &Block, result: &mut BlockValidation) {
+    match block.transactions.first() {
+        Some(first_tx) if !first_tx.is_coinbase() => {
+            result.add_error("First transaction must be coinbase");
+        }
+        None => {
+            // check_block_has_coinbase should have caught this, but be safe.
+            result.add_error("Block has no transactions");
+        }
+        _ => {}
+    }
+}
+
+/// Merkle root of transaction hashes matches the header's `tx_root`.
+fn check_block_merkle_root(block: &Block, tx_hashes: &[Hash], result: &mut BlockValidation) {
+    let computed_root = merkle_root(tx_hashes);
+    if computed_root != block.header.tx_root {
+        result.add_error("Invalid merkle root");
+    }
+}
+
+/// Constitution Article III (mandatory privacy): every non-coinbase
+/// tx must have Pedersen-committed amounts, a stealth address, and at
+/// least one privacy-preserving input. Structural check only — no
+/// ring-sig / range-proof verification here.
+fn check_block_privacy_policy(block: &Block, result: &mut BlockValidation) {
+    if let Err(e) = crate::consensus::privacy_policy::enforce_privacy_policy(block) {
+        result.add_error(format!("Privacy policy violation: {}", e));
+    }
+}
+
+/// H6 defense-in-depth: after year 12 (tail phase), the coinbase
+/// reward must not exceed `TAIL_EMISSION`. This is redundant with the
+/// emission curve calculation but catches any future emission-curve bug
+/// that returns too-high values in the tail phase.
+fn check_block_tail_supply(block: &Block, expected_reward: Amount, result: &mut BlockValidation) {
+    if block.height() > crate::constants::BLOCKS_PER_YEAR * 12
+        && expected_reward.as_atomic() > crate::constants::TAIL_EMISSION
+    {
+        result.add_error(format!(
+            "Tail phase reward {} exceeds TAIL_EMISSION {} at height {}",
+            expected_reward.as_atomic(),
+            crate::constants::TAIL_EMISSION,
+            block.height()
+        ));
+    }
+}
+
+/// Duplicate transaction hashes within a block — a malicious miner
+/// could try to include the same tx twice to double-count fees or
+/// cause state inconsistencies.
+///
+/// FIX #48: reuses the `tx_hashes` vec computed for the merkle-root
+/// check rather than calling `tx.hash()` a second time per tx.
+fn check_block_duplicate_tx_hashes(tx_hashes: &[Hash], result: &mut BlockValidation) {
+    let mut seen = std::collections::HashSet::with_capacity(tx_hashes.len());
+    for hash in tx_hashes {
+        if !seen.insert(*hash) {
+            result.add_error("Duplicate transaction hash in block".to_string());
+        }
+    }
+}
+
+/// Phase 1 key image validation: reject blocks with in-block duplicate
+/// key images. Phase 2 (per-tx UTXO check) runs in `validate_transaction`.
+///
+/// Fast O(n) HashSet check — rejects blocks with internal double-spends
+/// before expensive cryptographic verification.
+fn check_block_duplicate_key_images(block: &Block, result: &mut BlockValidation) {
+    let mut seen = std::collections::HashSet::new();
+    for tx in &block.transactions {
+        for ki in tx.key_images() {
+            if !seen.insert(ki) {
+                result.add_error(format!("Duplicate key image in block: {}", ki));
+            }
+        }
+    }
+}
+
+/// Validate block header.
+///
+/// AUDIT (2026-07-01, follow-on to validate_block refactor): split into
+/// named sub-checks that mirror `validate_block_with_checkpoint_for_network`'s
+/// structure. Each sub-check accumulates errors into the same
+/// `BlockValidation` sink and returns early only when a later check would
+/// depend on the earlier one (currently: system-clock failure short-
+/// circuits the future-timestamp check).
 fn validate_header(
     header: &BlockHeader,
     prev_header: Option<&BlockHeader>,
     result: &mut BlockValidation,
 ) {
-    // FIX #47: treat block_version_at_height as a MINIMUM, not a strict
-    // equality. Previously the check `header.version != expected_version`
-    // rejected any version-bump block mined the block before the fork
-    // activation: a miner producing a V2 block at (activation_height - 1)
-    // would be rejected by this gate even though the block is otherwise
-    // valid for the upgrade. Accepting any version >= min allows smooth
-    // activation; downgrades (version < min) are still rejected.
+    check_header_version_min(header, result);
+    check_header_vs_prev(header, prev_header, result);
+    check_header_checkpoint_vote(header, result);
+    check_header_future_timestamp(header, result);
+}
+
+/// FIX #47: treat `block_version_at_height` as a MINIMUM, not strict
+/// equality. Previously `header.version != expected_version` rejected any
+/// version-bump block mined the block BEFORE fork activation — a miner
+/// producing a V2 block at `activation_height - 1` was refused even
+/// though the block was otherwise valid for the upgrade. Accepting any
+/// version >= min allows smooth activation; downgrades are still
+/// rejected via `check_header_vs_prev`.
+fn check_header_version_min(header: &BlockHeader, result: &mut BlockValidation) {
     let min_version = block_version_at_height(header.height);
     if header.version < min_version {
         result.add_error(format!(
@@ -797,50 +902,56 @@ fn validate_header(
             header.version, min_version, header.height
         ));
     }
+}
 
-    // Check against previous header
-    if let Some(prev) = prev_header {
-        // SECURITY: Block version cannot decrease (prevent downgrade attacks)
-        if header.version < prev.version {
-            result.add_error(format!(
-                "Block version cannot decrease: v{} -> v{}",
-                prev.version, header.version
-            ));
-        }
-        // Height must be exactly one more
-        if header.height != prev.height + 1 {
-            result.add_error(format!(
-                "Invalid height: expected {}, got {}",
-                prev.height + 1,
-                header.height
-            ));
-        }
-
-        // Previous hash must match
-        if header.prev_hash != prev.hash() {
-            result.add_error("Previous hash mismatch");
-        }
-
-        // Timestamp must be greater than previous
-        // SECURITY: This check, combined with the height-by-height validation during
-        // block processing, ensures chain-wide timestamp monotonicity by induction:
-        // - Each new block must have timestamp > previous block
-        // - Therefore: block[n].timestamp > block[n-1].timestamp > ... > block[0].timestamp
-        //
-        // During reorganizations, the new chain is validated block-by-block from the
-        // fork point, ensuring monotonicity is maintained on the new chain as well.
-        if header.timestamp <= prev.timestamp {
-            result.add_error("Timestamp not greater than previous block");
-        }
-    } else {
-        // Genesis block checks
+/// Header-vs-previous-header checks:
+/// * Version cannot decrease (downgrade attack protection).
+/// * Height must be exactly `prev.height + 1`.
+/// * `prev_hash` must equal `prev.hash()`.
+/// * Timestamp must be strictly greater than previous. Combined with
+///   height-by-height validation during block processing, this
+///   guarantees chain-wide timestamp monotonicity by induction. During
+///   reorgs, the new chain is validated block-by-block from the fork
+///   point so monotonicity is maintained on the new chain too.
+///
+/// Genesis (no prev_header): only checks that height is 0.
+fn check_header_vs_prev(
+    header: &BlockHeader,
+    prev_header: Option<&BlockHeader>,
+    result: &mut BlockValidation,
+) {
+    let Some(prev) = prev_header else {
         if header.height != 0 {
             result.add_error("Non-genesis block without parent");
         }
+        return;
+    };
+    if header.version < prev.version {
+        result.add_error(format!(
+            "Block version cannot decrease: v{} -> v{}",
+            prev.version, header.version
+        ));
     }
+    if header.height != prev.height + 1 {
+        result.add_error(format!(
+            "Invalid height: expected {}, got {}",
+            prev.height + 1,
+            header.height
+        ));
+    }
+    if header.prev_hash != prev.hash() {
+        result.add_error("Previous hash mismatch");
+    }
+    if header.timestamp <= prev.timestamp {
+        result.add_error("Timestamp not greater than previous block");
+    }
+}
 
-    // SECURITY (CC-L1): Validate checkpoint_vote if present.
-    // Checkpoint vote must reference a height that already exists (not future).
+/// SECURITY (CC-L1): `checkpoint_vote` must reference a height that
+/// already exists — not the current block's height and not any future
+/// height. Voting for a block that hasn't been mined yet is either a
+/// bug or an attack.
+fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidation) {
     if let Some((cp_height, _cp_hash)) = &header.checkpoint_vote {
         if *cp_height >= header.height {
             result.add_error(format!(
@@ -849,41 +960,40 @@ fn validate_header(
             ));
         }
     }
+}
 
-    // Check timestamp is not too far in future
-    // SECURITY: System time failure must not allow timestamp bypass
+/// Reject block timestamps too far in the future.
+///
+/// SPEC: the bound is INCLUSIVE — `timestamp == current_time +
+/// MAX_TIMESTAMP_DRIFT` is accepted, only strictly-greater is rejected.
+/// Matches Bitcoin Core's `nMaxFutureBlockTime` semantics (pow.cpp) and
+/// the NTP/RFC 5905 convention where the drift bound IS the tolerable
+/// window, not one tick less. Switching to `>=` would reject legitimate
+/// blocks whose timestamp exactly hits the boundary with no security gain.
+///
+/// SECURITY: genesis (height 0) is exempt. The genesis timestamp is a
+/// protocol constant hardcoded in the binary (`{testnet,mainnet}_genesis`)
+/// with trust established by the `{TESTNET,MAINNET}_GENESIS_HASH` match
+/// in `Blockchain::init_genesis`. Mainnet genesis intentionally carries
+/// a future-dated activation timestamp (launch date) and must not be
+/// rejected on pre-launch clock comparisons.
+///
+/// SECURITY: system clock failure adds an error but does NOT panic —
+/// nodes on badly-configured hosts still process blocks (validation of
+/// crypto and consensus rules is orthogonal to wall-clock).
+fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidation) {
     let current_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(e) => {
-            // System clock is before UNIX epoch - this is a critical error
             result.add_error(format!("System clock error: {}. Cannot validate block timestamps.", e));
-            return; // Cannot proceed with timestamp validation
+            return;
         }
     };
-
-    // Sanity check: current time should be reasonably recent (after 2020)
+    // Sanity: current time should be reasonably recent (after 2020).
     const MIN_REASONABLE_TIME: u64 = 1577836800; // 2020-01-01 00:00:00 UTC
     if current_time < MIN_REASONABLE_TIME {
         result.add_warning("System clock appears to be set incorrectly (before 2020)");
     }
-
-    // SECURITY: exempt the genesis block (height = 0) from the
-    // future-timestamp check. The genesis timestamp is a protocol constant
-    // that ships hardcoded in the binary (see `testnet_genesis()` and
-    // `mainnet_genesis()`), and trust in that constant is established by
-    // the hardcoded `{TESTNET,MAINNET}_GENESIS_HASH` bytes + the hash-match
-    // check in `Blockchain::init_genesis`. Mainnet genesis in particular
-    // intentionally carries a future-dated activation timestamp (the launch
-    // date) and must not be rejected on pre-launch clock comparisons.
-    // Non-genesis blocks are still bounded by `MAX_TIMESTAMP_DRIFT`.
-    //
-    // SPEC: the bound is INCLUSIVE — `timestamp == current_time +
-    // MAX_TIMESTAMP_DRIFT` is accepted, only strictly-greater is
-    // rejected. Matches Bitcoin Core's `nMaxFutureBlockTime` semantics
-    // (pow.cpp) and the NTP/RFC 5905 convention where the drift bound
-    // IS the tolerable window, not one tick less. Switching to `>=`
-    // would reject legitimate blocks whose timestamp exactly hits the
-    // boundary, with no security gain.
     if header.height > 0 && header.timestamp > current_time + MAX_TIMESTAMP_DRIFT {
         result.add_error("Block timestamp too far in future");
     }
@@ -1041,52 +1151,92 @@ pub fn validate_transaction(
     utxos: &UtxoSet,
     current_height: u64,
 ) -> Result<()> {
-    // ── Version range enforcement ──────────────────────────────────────
-    // Reject tx.version == 0 and tx.version > MAX_TX_VERSION.
-    //
-    // 2026-06-03 bug found during critical-file review: previously this
-    // function only checked the V2 *activation* gate (below). The upper
-    // bound and the version==0 reject lived ONLY in
-    // `validate_transaction_basic`, which runs on mempool admission — not
-    // on block validation. A miner could therefore include a tx with
-    // version=0 or version=255 directly in a mined block; block
-    // validation calls `validate_transaction` (see validate_block at
-    // line ~698), which would let any future / unknown version through
-    // as long as the crypto held.
-    //
-    // Why this matters for future hard forks: a v1.0 node receiving a
-    // version=3 tx in a v1.1 block must NOT accept it (the on-wire shape
-    // could differ across versions, and silent acceptance would split
-    // consensus at the fork). With this gate, a future hard fork that
-    // introduces version=3 must explicitly bump MAX_TX_VERSION in the
-    // upgraded code — a flag-day rejection on stale nodes is the correct
-    // behaviour. Coinbase included: a coinbase with version=99 was
-    // previously waved through by the `is_coinbase()` early-return.
-    if tx.version == 0 || tx.version > MAX_TX_VERSION {
-        return Err(Error::InvalidTxVersion(tx.version));
-    }
+    // AUDIT (2026-06-30 H1): the previous single-function form was 640
+    // lines and reviewer-hostile. Broken into named sub-checks. Evaluation
+    // order and error types are BIT-IDENTICAL to the previous flow — this
+    // is a mechanical extraction, not a semantic change. Each sub-check
+    // is a private helper in this file with a docstring explaining what
+    // it enforces. Prior art: Bitcoin Core's `CheckTransaction()` is
+    // under 100 lines with sub-checks in separate functions.
 
-    // Coinbase has no inputs to validate
+    // Version range: reject version==0 or version > MAX_TX_VERSION. Runs
+    // BEFORE the coinbase early return so a version-99 coinbase is still
+    // rejected. See detailed rationale in check_tx_version_range.
+    check_tx_version_range(tx)?;
+
+    // Coinbase has no inputs — everything below this line assumes
+    // non-coinbase inputs exist.
     if tx.is_coinbase() {
         return Ok(());
     }
 
-    // ── Version enforcement ─────────────────────────────────────────────
-    // V2 transactions are only valid at/above the activation height.
-    // V1 transactions remain valid at all heights (backward compat).
-    // Rejecting V2 below activation prevents pre-fork asset tx injection.
+    check_tx_v2_activation(tx, current_height)?;
+    check_tx_input_output_counts(tx, current_height)?;
+    check_tx_io_ratio_legacy(tx)?;
+    check_tx_uniform_shape(tx, current_height)?;
+    check_tx_no_double_spend(tx, utxos)?;
+    check_tx_ring_members(tx, utxos, current_height)?;
+    check_tx_ring_size_and_unique_members(tx, utxos, current_height)?;
+    check_tx_ring_signatures(tx)?;
+    check_tx_range_proofs(tx, current_height)?;
+    check_tx_balance_proof(tx)?;
+    Ok(())
+}
+
+// ── validate_transaction sub-checks (AUDIT 2026-06-30 H1) ──────────
+//
+// Each sub-check is called in the exact same order the previous monolithic
+// function used. Errors are the same types. Semantic behavior is identical.
+// Kept as private helpers in this file (not moved to a sub-module) so
+// they retain access to file-private types and don't force `pub(crate)`
+// changes on internal helpers.
+
+/// Version range: `1 <= tx.version <= MAX_TX_VERSION`.
+///
+/// Runs BEFORE the coinbase early-return so a coinbase with an unknown
+/// version can't sneak past.
+///
+/// 2026-06-03 bug found during critical-file review: previously this
+/// function only checked the V2 *activation* gate. The upper bound and
+/// the version==0 reject lived ONLY in `validate_transaction_basic`,
+/// which runs on mempool admission — not on block validation. A miner
+/// could therefore include a tx with version=0 or version=255 directly
+/// in a mined block; block validation calls `validate_transaction` (see
+/// validate_block), which would let any future / unknown version through
+/// as long as the crypto held.
+///
+/// Why this matters for future hard forks: a v1.0 node receiving a
+/// version=3 tx in a v1.1 block must NOT accept it (the on-wire shape
+/// could differ across versions, and silent acceptance would split
+/// consensus at the fork).
+fn check_tx_version_range(tx: &Transaction) -> Result<()> {
+    if tx.version == 0 || tx.version > MAX_TX_VERSION {
+        return Err(Error::InvalidTxVersion(tx.version));
+    }
+    Ok(())
+}
+
+/// V2 transactions are only valid at or above `V2_TX_ACTIVATION_HEIGHT`.
+/// V1 transactions remain valid at all heights (backward compat).
+/// Rejecting V2 below activation prevents pre-fork asset tx injection.
+fn check_tx_v2_activation(tx: &Transaction, current_height: u64) -> Result<()> {
     if tx.version >= 2 && current_height < crate::constants::V2_TX_ACTIVATION_HEIGHT {
         return Err(Error::InvalidState(format!(
             "V2 transactions not allowed below activation height {} (current: {})",
             crate::constants::V2_TX_ACTIVATION_HEIGHT, current_height
         )));
     }
-    // Must have inputs
+    Ok(())
+}
+
+/// Non-empty inputs + outputs, both within `MAX_TX_INPUTS`/`MAX_TX_OUTPUTS`.
+///
+/// `current_height` is used for the v1.0.12 audit-follow-up #4 fork gate
+/// on encrypted_amount + encrypted_memo per-output size checks.
+fn check_tx_input_output_counts(tx: &Transaction, current_height: u64) -> Result<()> {
     if tx.inputs.is_empty() {
         return Err(Error::InvalidInputCount { count: 0, max: crate::constants::MAX_TX_INPUTS });
     }
-
-    // Must have outputs
     if tx.outputs.is_empty() {
         return Err(Error::InvalidOutputCount { count: 0, max: crate::constants::MAX_TX_OUTPUTS });
     }
@@ -1161,18 +1311,33 @@ pub fn validate_transaction(
             max: crate::constants::MAX_TX_INPUTS,
         });
     }
-
-    // Check output count
     if tx.outputs.len() > crate::constants::MAX_TX_OUTPUTS {
         return Err(Error::InvalidOutputCount {
             count: tx.outputs.len(),
             max: crate::constants::MAX_TX_OUTPUTS,
         });
     }
+    Ok(())
+}
 
-    // SECURITY: Reject extreme input/output ratios that could indicate
-    // dust attacks or chain analysis attempts. Normal transactions rarely
-    // exceed 16:1 ratio in either direction.
+/// Legacy 32:1 input/output ratio check.
+///
+/// AUDIT (2026-06-30 M4): redundant with `check_tx_uniform_shape`, which
+/// enforces exact 2-in/2-out or 2-in/3-out for the dominant Transfer/Churn
+/// types starting at height 0 (`UNIFORM_TX_SHAPE_HEIGHT`). This check only
+/// fires for non-Transfer/Churn tx types.
+///
+/// Original justification ("dust attacks or chain analysis attempts") was
+/// weak — CoinJoin/Whirlpool-style batching legitimately exceed high ratios
+/// in transparent chains. On CoinCync the uniform-shape rule blocks the
+/// theoretical dust vector at genesis, so this check is functionally dead
+/// code for all typical traffic.
+///
+/// Left in place because REMOVING a consensus rule requires a hard fork
+/// and the removal has no observable benefit (uniform-shape dominates).
+/// Prior art: Bitcoin has no I/O ratio rule; Monero has no I/O ratio rule
+/// (uses TX_MAX_SIZE instead).
+fn check_tx_io_ratio_legacy(tx: &Transaction) -> Result<()> {
     let ratio_limit = 32usize;
     if tx.inputs.len() > tx.outputs.len().saturating_mul(ratio_limit) {
         return Err(Error::InvalidTransaction(format!(
@@ -1186,89 +1351,127 @@ pub fn validate_transaction(
             tx.outputs.len(), tx.inputs.len(), ratio_limit
         )));
     }
+    Ok(())
+}
 
-    // M6 (audit fix + forward-looking bug): Uniform shape enforcement.
-    //
-    // CoinCync has TWO standard transaction shapes that BOTH form their own
-    // anonymity set:
-    //
-    //   - CYNC Transfer/Churn: 2 inputs, 2 outputs
-    //   - Asset Transfer:      2 inputs, 3 outputs  (CYNC fee in,
-    //                                                asset out + CYNC change + asset change)
-    //
-    // Both are TxType::Transfer at the borsh level (no separate AssetTransfer
-    // variant exists, and adding one would be a hard-fork-only consensus change).
-    // The wallet builds asset txs as 2-in/3-out — see `create_asset_transaction`
-    // in src/wallet/send.rs which calls `estimate_tx_size(2, 3, ring_size)`.
-    //
-    // Without this dual-shape allowance, all asset transfers would start failing
-    // validation at UNIFORM_TX_SHAPE_HEIGHT — the previous code only accepted
-    // 2-in/2-out, which would brick the asset subsystem at block 50,000.
-    //
-    // Privacy: each shape has its own anonymity set. A 2-in/2-out tx is one of
-    // many CYNC transfers; a 2-in/3-out tx is one of many asset transfers.
-    // An observer cannot distinguish individual asset txs from each other,
-    // and cannot tell which specific asset is being transferred (the asset
-    // commitments hide that). The privacy story remains intact.
-    if current_height >= crate::constants::UNIFORM_TX_SHAPE_HEIGHT {
-        let requires_uniform = matches!(tx.tx_type, TxType::Transfer | TxType::Churn);
-        if requires_uniform {
-            // Inputs must always be exactly STANDARD_INPUT_COUNT (== 2).
-            if tx.inputs.len() != crate::constants::STANDARD_INPUT_COUNT {
-                return Err(Error::InvalidTransaction(format!(
-                    "Post-activation Transfer/Churn must have exactly {} inputs, got {}",
-                    crate::constants::STANDARD_INPUT_COUNT, tx.inputs.len()
-                )));
-            }
-            // Outputs must be EITHER STANDARD_OUTPUT_COUNT (CYNC, == 2) OR
-            // STANDARD_OUTPUT_COUNT + 1 (asset transfer == 3). Anything else
-            // is non-uniform and reduces privacy.
-            let cync_shape  = crate::constants::STANDARD_OUTPUT_COUNT;
-            let asset_shape = crate::constants::STANDARD_OUTPUT_COUNT + 1;
-            if tx.outputs.len() != cync_shape && tx.outputs.len() != asset_shape {
-                return Err(Error::InvalidTransaction(format!(
-                    "Post-activation Transfer/Churn must have exactly {} outputs (CYNC) \
-                     or {} outputs (asset), got {}",
-                    cync_shape, asset_shape, tx.outputs.len()
-                )));
-            }
-            // Churn is always pure CYNC — if a churn tx tries to use the asset
-            // shape (3 outputs), reject it. Churns by definition spend and
-            // re-receive the SAME CYNC, never assets.
-            if matches!(tx.tx_type, TxType::Churn) && tx.outputs.len() != cync_shape {
-                return Err(Error::InvalidTransaction(format!(
-                    "Churn must have exactly {} outputs (CYNC shape), got {}",
-                    cync_shape, tx.outputs.len()
-                )));
-            }
-        }
+/// Uniform-shape enforcement (M6, forward-looking bug fix).
+///
+/// CoinCync has TWO standard transaction shapes that BOTH form their own
+/// anonymity set:
+///   - CYNC Transfer/Churn: 2 inputs, 2 outputs
+///   - Asset Transfer:      2 inputs, 3 outputs (CYNC fee in, asset out +
+///                                               CYNC change + asset change)
+///
+/// Both are `TxType::Transfer` at the borsh level (no separate AssetTransfer
+/// variant exists, and adding one would be a hard-fork-only consensus
+/// change). The wallet builds asset txs as 2-in/3-out — see
+/// `create_asset_transaction` in `src/wallet/send.rs`.
+///
+/// Without this dual-shape allowance, all asset transfers would start
+/// failing validation at `UNIFORM_TX_SHAPE_HEIGHT` — the previous code only
+/// accepted 2-in/2-out, which would brick the asset subsystem at block
+/// 50,000.
+///
+/// Privacy: each shape has its own anonymity set. A 2-in/2-out tx is one
+/// of many CYNC transfers; a 2-in/3-out tx is one of many asset transfers.
+/// An observer cannot distinguish individual asset txs from each other,
+/// and cannot tell which specific asset is being transferred (the asset
+/// commitments hide that). The privacy story remains intact.
+fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
+    if current_height < crate::constants::UNIFORM_TX_SHAPE_HEIGHT {
+        return Ok(());
     }
+    let requires_uniform = matches!(tx.tx_type, TxType::Transfer | TxType::Churn);
+    if !requires_uniform {
+        return Ok(());
+    }
+    // Inputs must always be exactly STANDARD_INPUT_COUNT (== 2).
+    if tx.inputs.len() != crate::constants::STANDARD_INPUT_COUNT {
+        return Err(Error::InvalidTransaction(format!(
+            "Post-activation Transfer/Churn must have exactly {} inputs, got {}",
+            crate::constants::STANDARD_INPUT_COUNT, tx.inputs.len()
+        )));
+    }
+    // Outputs must be EITHER STANDARD_OUTPUT_COUNT (CYNC, == 2) OR
+    // STANDARD_OUTPUT_COUNT + 1 (asset transfer == 3). Anything else is
+    // non-uniform and reduces privacy.
+    let cync_shape  = crate::constants::STANDARD_OUTPUT_COUNT;
+    let asset_shape = crate::constants::STANDARD_OUTPUT_COUNT + 1;
+    if tx.outputs.len() != cync_shape && tx.outputs.len() != asset_shape {
+        return Err(Error::InvalidTransaction(format!(
+            "Post-activation Transfer/Churn must have exactly {} outputs (CYNC) \
+             or {} outputs (asset), got {}",
+            cync_shape, asset_shape, tx.outputs.len()
+        )));
+    }
+    // Churn is always pure CYNC — if a churn tx tries to use the asset
+    // shape (3 outputs), reject it. Churns by definition spend and
+    // re-receive the SAME CYNC, never assets.
+    if matches!(tx.tx_type, TxType::Churn) && tx.outputs.len() != cync_shape {
+        return Err(Error::InvalidTransaction(format!(
+            "Churn must have exactly {} outputs (CYNC shape), got {}",
+            cync_shape, tx.outputs.len()
+        )));
+    }
+    Ok(())
+}
 
-    // Check for double-spend (key image already used in the chain)
-    // AND for in-tx duplicate key_images (two inputs of the SAME tx sharing a
-    // key_image). 2026-06-03 bug found during code review: the previous code
-    // only checked against `utxos.contains_key_image()` — which is empty for
-    // the current tx's own inputs since they're not committed yet. So a tx
-    // with inputs [K, K, X] would pass mempool admission (waste capacity)
-    // and only fail at block-validation time (validate_block has its own
-    // cross-tx duplicate check at validation.rs:582). DoS vector, not a
-    // theft vector (the block-level check still catches it), but worth
-    // closing at admission to stop wasting mempool space + miner cycles.
+/// Double-spend check: in-tx duplicate key_images + chain-level key_image
+/// collision.
+///
+/// 2026-06-03 bug fix: previously only checked against
+/// `utxos.contains_key_image()` — which is empty for the current tx's own
+/// inputs since they're not committed yet. So a tx with inputs [K, K, X]
+/// would pass mempool admission (waste capacity) and only fail at
+/// block-validation time (`validate_block` has its own cross-tx duplicate
+/// check). DoS vector, not a theft vector (the block-level check still
+/// catches it), but worth closing at admission.
+///
+/// SECURITY (M-18 echo): the error message is intentionally generic and
+/// doesn't reveal the duplicated key_image to the submitter.
+fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
     let mut seen_in_tx = std::collections::HashSet::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
-        // In-tx duplicate check (NEW, 2026-06-03)
         if !seen_in_tx.insert(input.key_image) {
-            // SECURITY (M-18 echo): Generic error to avoid revealing the
-            // duplicated key_image to the submitter. The attacker either
-            // already knows (they made the tx) or shouldn't learn from us.
             return Err(Error::DuplicateKeyImage("duplicate key image detected".into()));
         }
-        // Chain-level double-spend check (existing)
         if utxos.contains_key_image(&input.key_image) {
             return Err(Error::DuplicateKeyImage("duplicate key image detected".into()));
         }
     }
+    Ok(())
+}
 
+/// Validate every ring member of every input.
+///
+/// SECURITY (CRIT-5 + HIGH-4): ring members must (a) exist as an output on
+/// this chain, (b) have a commitment matching the on-chain output, (c)
+/// respect coinbase maturity if the output is a coinbase, and (d) respect
+/// the output's time-lock.
+///
+/// Ring members referencing non-existent outputs could be used to forge
+/// ring signatures. Immature coinbase outputs must not appear in rings to
+/// prevent miners from spending rewards immediately.
+///
+/// CRIT-R4-1: verifying the on-chain commitment matches the ring-member
+/// commitment closes an inflation vector — without it, an attacker could
+/// substitute a forged commitment with an inflated amount, and the CLSAG
+/// + balance proof would still verify (they're internally consistent).
+///
+/// Two lookup paths: live UTXO set (`get_output_by_stealth`), then the
+/// permanent output index that retains ALL historical outputs
+/// (`get_output_index_entry`). Pre-`STRICT_RING_MEMBER_HEIGHT`, ring
+/// members not found in either are logged and allowed (bootstrap gap).
+///
+/// v1.0.12 #5/8 (fork-gated by HARD_FORK_V1_0_12_HEIGHT): also runs the
+/// dup-stealth-address check on tx.outputs at the top of this function,
+/// since we already have (tx, utxos, current_height) in scope here. See
+/// the inline docstring below for the full rationale.
+fn check_tx_ring_members(
+    tx: &Transaction,
+    utxos: &UtxoSet,
+    current_height: u64,
+) -> Result<()> {
     // v1.0.12 #5/8 (backport of v1.0.12-release 5aeb27dd): reject
     // duplicate stealth addresses across this tx's outputs AND
     // collisions with any existing on-chain output's stealth address.
@@ -1327,20 +1530,11 @@ pub fn validate_transaction(
         }
     }
 
-    // SECURITY (CRIT-5 + HIGH-4): Validate ring members exist in UTXO set and
-    // enforce coinbase maturity. Ring members referencing non-existent outputs
-    // could be used to forge ring signatures. Immature coinbase outputs must
-    // not appear in rings to prevent miners from spending rewards immediately.
     for (input_idx, input) in tx.inputs.iter().enumerate() {
         for (member_idx, member) in input.ring_members.iter().enumerate() {
             let stealth_bytes = member.public_key.as_bytes();
             match utxos.get_output_by_stealth(stealth_bytes) {
                 Some(output_ref) => {
-                    // SECURITY (CRIT-R4-1): Verify ring member commitment matches on-chain
-                    // commitment. Without this check, an attacker can substitute a forged
-                    // commitment with an inflated amount, and the CLSAG + balance proof
-                    // would still verify (they're internally consistent). This enables
-                    // unlimited supply inflation.
                     if member.commitment != output_ref.output.commitment {
                         return Err(Error::InvalidTransaction(format!(
                             "Input {} ring member {} commitment mismatch \
@@ -1348,50 +1542,24 @@ pub fn validate_transaction(
                             input_idx, member_idx
                         )));
                     }
-                    // Check coinbase maturity.
-                    //
-                    // CONSENSUS HARD FORK (MIN_OUTPUT_AGE 10 → 100,
-                    // activates at `MIN_OUTPUT_AGE_HARDFORK_HEIGHT`):
-                    // read the required age via the height-keyed
-                    // helper so blocks BEFORE activation still validate
-                    // against the old 10-block floor, and blocks AT OR
-                    // AFTER activation enforce the new 100-block floor.
-                    // The validator's `current_height` here is the
-                    // height of the block being validated — that's the
-                    // right input because activation is "applies to
-                    // blocks at this height and later".
-                    if output_ref.is_coinbase {
-                        let age = current_height.saturating_sub(output_ref.height);
-                        let required = crate::constants::min_output_age_at_height(current_height);
-                        if age < required {
-                            return Err(Error::InvalidTransaction(format!(
-                                "Input {} ring member {} references immature coinbase output \
-                                 (height {}, age {} < required {})",
-                                input_idx, member_idx, output_ref.height,
-                                age, required
-                            )));
-                        }
-                    }
-                    // Check time lock: locked outputs cannot appear in rings
-                    // (prevents privacy leak — using a locked output as a decoy
-                    // reveals it is not the real spend)
-                    if let Some(lh) = output_ref.output.lock_height {
-                        if current_height < lh {
-                            return Err(Error::InvalidTransaction(format!(
-                                "Input {} ring member {} references time-locked output \
-                                 (unlocks at height {}, current {})",
-                                input_idx, member_idx, lh, current_height
-                            )));
-                        }
-                    }
+                    check_ring_member_coinbase_maturity(
+                        output_ref.is_coinbase,
+                        output_ref.height,
+                        current_height,
+                        input_idx,
+                        member_idx,
+                    )?;
+                    check_ring_member_time_lock(
+                        output_ref.output.lock_height,
+                        current_height,
+                        input_idx,
+                        member_idx,
+                    )?;
                 }
                 None => {
-                    // Ring member not found in UTXO set — check the permanent
-                    // output index which retains ALL historical outputs (spent
-                    // outputs are kept so ring members can still be validated).
+                    // Not in live UTXO — try the permanent output index.
                     match utxos.get_output_index_entry(stealth_bytes) {
                         Some(idx_entry) => {
-                            // Output existed on-chain. Validate commitment match.
                             if member.commitment != idx_entry.commitment {
                                 return Err(Error::InvalidTransaction(format!(
                                     "Input {} ring member {} commitment mismatch \
@@ -1399,42 +1567,25 @@ pub fn validate_transaction(
                                     input_idx, member_idx
                                 )));
                             }
-                            // Check coinbase maturity
-                            //
                             // BUG FIX 2026-06-03: previously used the raw
-                            // `MIN_OUTPUT_AGE` constant (always 10) instead
-                            // of the height-keyed helper. That meant for
-                            // SPENT coinbase outputs referenced as decoys,
-                            // the post-fork 100-block floor was never
-                            // enforced — only the live-UTXO branch above
-                            // got the helper. Now both branches use the
-                            // same height-keyed read, so the
-                            // MIN_OUTPUT_AGE 10 → 100 hard fork actually
-                            // applies uniformly at the activation height.
-                            // Verified the live-UTXO branch at line 1133
-                            // uses the same call.
-                            if idx_entry.is_coinbase {
-                                let age = current_height.saturating_sub(idx_entry.height);
-                                let required = crate::constants::min_output_age_at_height(current_height);
-                                if age < required {
-                                    return Err(Error::InvalidTransaction(format!(
-                                        "Input {} ring member {} references immature coinbase \
-                                         output (height {}, age {} < required {})",
-                                        input_idx, member_idx, idx_entry.height,
-                                        age, required
-                                    )));
-                                }
-                            }
-                            // Check time lock
-                            if let Some(lh) = idx_entry.lock_height {
-                                if current_height < lh {
-                                    return Err(Error::InvalidTransaction(format!(
-                                        "Input {} ring member {} references time-locked output \
-                                         (unlocks at height {}, current {})",
-                                        input_idx, member_idx, lh, current_height
-                                    )));
-                                }
-                            }
+                            // `MIN_OUTPUT_AGE` constant (always 10) on this
+                            // branch instead of the height-keyed helper —
+                            // spent coinbase outputs as ring decoys never
+                            // got the post-fork 100-block floor. Now both
+                            // branches use the shared helper below.
+                            check_ring_member_coinbase_maturity(
+                                idx_entry.is_coinbase,
+                                idx_entry.height,
+                                current_height,
+                                input_idx,
+                                member_idx,
+                            )?;
+                            check_ring_member_time_lock(
+                                idx_entry.lock_height,
+                                current_height,
+                                input_idx,
+                                member_idx,
+                            )?;
                         }
                         None => {
                             // Output never existed on this chain.
@@ -1445,13 +1596,7 @@ pub fn validate_transaction(
                                     input_idx, member_idx
                                 )));
                             } else {
-                                // H3: Pre-activation — warn and allow for backward compat.
-                                // SECURITY TRADEOFF: Before STRICT_RING_MEMBER_HEIGHT, ring
-                                // members referencing non-existent outputs are permitted so
-                                // that the young chain can bootstrap. This is a known gap
-                                // that closes automatically at STRICT_RING_MEMBER_HEIGHT.
-                                // Transactions accepted under this relaxed rule should be
-                                // considered for future revalidation once the chain matures.
+                                // H3: Pre-activation known bootstrap gap.
                                 tracing::warn!(
                                     "Ring member {}.{} not found in output index \
                                      (pre-activation height {}, allowing — \
@@ -1465,8 +1610,85 @@ pub fn validate_transaction(
             }
         }
     }
+    Ok(())
+}
 
-    // Check ring size and duplicate ring members
+/// Coinbase maturity check for a ring member.
+///
+/// Extracted 2026-07-01: previously duplicated between the live-UTXO
+/// and spent-output-index branches of `check_tx_ring_members`, with a
+/// silent bug where the spent-index branch used the raw `MIN_OUTPUT_AGE`
+/// constant (always 10) instead of the height-keyed helper. Unifying
+/// through this function guarantees both branches enforce the same
+/// hard-fork ramp.
+///
+/// CONSENSUS HARD FORK: MIN_OUTPUT_AGE 10 → 100 activates at
+/// `MIN_OUTPUT_AGE_HARDFORK_HEIGHT`. The height-keyed helper returns 10
+/// before activation and 100 after, so blocks before the fork validate
+/// against the old floor and blocks at/after enforce the new one.
+///
+/// Prior art: Bitcoin's coinbase maturity (`COINBASE_MATURITY = 100`
+/// blocks) uses the same pattern — enforced identically wherever a
+/// coinbase output is spent, whether live or historical.
+fn check_ring_member_coinbase_maturity(
+    is_coinbase: bool,
+    output_height: u64,
+    current_height: u64,
+    input_idx: usize,
+    member_idx: usize,
+) -> Result<()> {
+    if !is_coinbase {
+        return Ok(());
+    }
+    let age = current_height.saturating_sub(output_height);
+    let required = crate::constants::min_output_age_at_height(current_height);
+    if age < required {
+        return Err(Error::InvalidTransaction(format!(
+            "Input {} ring member {} references immature coinbase output \
+             (height {}, age {} < required {})",
+            input_idx, member_idx, output_height, age, required
+        )));
+    }
+    Ok(())
+}
+
+/// Time-lock check for a ring member.
+///
+/// Extracted 2026-07-01: previously duplicated between the live-UTXO
+/// and spent-output-index branches of `check_tx_ring_members`.
+///
+/// Time-locked outputs cannot appear in rings because using a locked
+/// output as a decoy reveals it is NOT the real spend — the spending
+/// tx must be spending a spendable output, so a locked ring member
+/// gives away the anonymity set.
+fn check_ring_member_time_lock(
+    lock_height: Option<u64>,
+    current_height: u64,
+    input_idx: usize,
+    member_idx: usize,
+) -> Result<()> {
+    if let Some(lh) = lock_height {
+        if current_height < lh {
+            return Err(Error::InvalidTransaction(format!(
+                "Input {} ring member {} references time-locked output \
+                 (unlocks at height {}, current {})",
+                input_idx, member_idx, lh, current_height
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Ring size matches `effective_ring_size(current_height, output_count)`
+/// AND ring members are unique per-input.
+///
+/// Duplicate public keys would reduce the effective ring size, degrading
+/// privacy and potentially enabling signature forgery.
+fn check_tx_ring_size_and_unique_members(
+    tx: &Transaction,
+    utxos: &UtxoSet,
+    current_height: u64,
+) -> Result<()> {
     for (input_idx, input) in tx.inputs.iter().enumerate() {
         // v1.0.12 #6/8 (backport of v1.0.12-release 1d27d3c8): use
         // monotonic `total_outputs_ever()` instead of the live
@@ -1533,10 +1755,6 @@ pub fn validate_transaction(
                 got: input.ring_members.len(),
             });
         }
-
-        // SECURITY: Reject duplicate ring members within the same input.
-        // Duplicate public keys would reduce the effective ring size,
-        // degrading privacy and potentially enabling signature forgery.
         let mut seen_keys = std::collections::HashSet::new();
         for member in &input.ring_members {
             if !seen_keys.insert(*member.public_key.as_bytes()) {
@@ -1546,42 +1764,51 @@ pub fn validate_transaction(
             }
         }
     }
+    Ok(())
+}
 
-    // Verify ring signatures for each input in parallel
-    // Ring signature verification is cryptographically expensive
-    // and each input can be verified independently.
-    //
-    // SECURITY: Use SeqCst ordering to ensure visibility across threads.
-    // Relaxed ordering could allow threads to miss the failure flag being set,
-    // potentially allowing invalid signatures to pass validation in edge cases.
+/// Verify every input's CLSAG ring signature in parallel via rayon.
+///
+/// SECURITY: uses `SeqCst` ordering on the shared failure flag so threads
+/// see the "abort" signal reliably. Relaxed ordering could let threads
+/// miss the failure flag being set, potentially allowing invalid
+/// signatures to pass validation in edge cases.
+fn check_tx_ring_signatures(tx: &Transaction) -> Result<()> {
     let all_sigs_valid = AtomicBool::new(true);
     let failed_idx = std::sync::atomic::AtomicUsize::new(usize::MAX);
-
     tx.inputs.par_iter().enumerate().for_each(|(idx, input)| {
         if all_sigs_valid.load(Ordering::SeqCst) {
             if !verify_ring_signature(tx, input, idx) {
                 all_sigs_valid.store(false, Ordering::SeqCst);
-                // Store the first failed index
                 failed_idx.fetch_min(idx, Ordering::SeqCst);
             }
         }
     });
-
     if !all_sigs_valid.load(Ordering::SeqCst) {
         let idx = failed_idx.load(Ordering::SeqCst);
         return Err(Error::InvalidSignature(format!(
             "Ring signature verification failed for input {}", idx
         )));
     }
+    Ok(())
+}
 
-    // Verify range proofs for all outputs (proves amounts are non-negative)
-    // C-2 FIX: pass current_height to enforce BP+ activation gate
+/// Verify range proofs for all outputs (proves amounts are non-negative).
+///
+/// C-2 fix: passes `current_height` to enforce the Bulletproofs+ activation
+/// gate — pre-activation uses the legacy proof format, post-activation
+/// uses BP+ which is ~50% smaller.
+fn check_tx_range_proofs(tx: &Transaction, current_height: u64) -> Result<()> {
     if !verify_output_range_proofs(tx, current_height) {
         return Err(Error::RangeProofInvalid);
     }
+    Ok(())
+}
 
-    // Verify balance proof: sum(input commitments) == sum(output commitments) + fee_commitment
-    // This is the core privacy-preserving balance check using Pedersen commitment arithmetic
+/// Verify balance proof: sum(input commitments) == sum(output commitments)
+/// + fee_commitment. Core privacy-preserving balance check via Pedersen
+/// commitment arithmetic.
+fn check_tx_balance_proof(tx: &Transaction) -> Result<()> {
     if !verify_balance_proof(tx) {
         return Err(Error::CommitmentMismatch);
     }
@@ -1604,8 +1831,18 @@ pub(crate) fn verify_ring_signature(tx: &Transaction, input: &crate::transaction
     // Message is the transaction hash (excluding signatures)
     let message = tx.signing_hash();
 
-    // Serialize signature for cache key
-    let sig_bytes = input.signature.to_bytes();
+    // Serialize signature for cache key. AUDIT (2026-06-30 H3): to_bytes
+    // now returns Result — a serialization failure at this point means the
+    // signature struct is corrupted in memory (impossible for a validated
+    // signature, but a real audit finding if we silently continued with
+    // empty bytes). Fail closed.
+    let sig_bytes = match input.signature.to_bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("ClsagSignature serialization failed during verification (bug): {}", e);
+            return false;
+        }
+    };
 
     // Check cache first
     let cache_key = ring_sig_cache_key(message.as_bytes(), &sig_bytes);
@@ -2184,5 +2421,94 @@ mod tests {
             "expected a coinbase-related error, got: {:?}",
             result.errors
         );
+    }
+
+    // ── Regression tests for the ring-member helpers ──────────────
+    //
+    // These extract-and-test tests exist because the 2026-06-03 bug
+    // in this same file's `check_tx_ring_members` (spent-index branch
+    // using MIN_OUTPUT_AGE constant while live-UTXO branch used the
+    // height-keyed helper) went undetected until manual review. Now
+    // that the maturity check is a single shared helper, one test
+    // covers both branches. Adding these regression tests documents
+    // the exact semantics: coinbase-only, height-keyed floor, time-
+    // lock rejection.
+
+    #[test]
+    fn ring_member_non_coinbase_maturity_always_ok() {
+        // Non-coinbase outputs: maturity check must be a no-op regardless
+        // of age or current_height. Only coinbase outputs are gated.
+        assert!(check_ring_member_coinbase_maturity(
+            /* is_coinbase */ false,
+            /* output_height */ 0,
+            /* current_height */ 0,
+            0, 0,
+        ).is_ok());
+        assert!(check_ring_member_coinbase_maturity(
+            false, 100, 100, 0, 0,
+        ).is_ok());
+    }
+
+    #[test]
+    fn ring_member_coinbase_matures_after_min_age() {
+        // Get the height-keyed floor at height 1000 (should be MIN_OUTPUT_AGE
+        // or 100 depending on activation status). We construct a coinbase
+        // output at (current_height - required_age) which is exactly at the
+        // maturity threshold — must pass.
+        let current = 1_000u64;
+        let required = crate::constants::min_output_age_at_height(current);
+        let output_height = current - required; // exactly at maturity
+        assert!(check_ring_member_coinbase_maturity(
+            true, output_height, current, 0, 0,
+        ).is_ok(), "coinbase at exactly minimum age must validate");
+    }
+
+    #[test]
+    fn ring_member_coinbase_immature_below_floor() {
+        // One below the maturity floor: must return an error mentioning
+        // "immature coinbase".
+        let current = 1_000u64;
+        let required = crate::constants::min_output_age_at_height(current);
+        // Guard against underflow if `required` is somehow larger than
+        // current in a weird constants edit — the test would still be
+        // meaningful, just needs different arithmetic.
+        assert!(required > 0, "test invariant: required age > 0");
+        let output_height = current - required + 1; // one block too young
+        let err = check_ring_member_coinbase_maturity(
+            true, output_height, current, 3, 7,
+        ).expect_err("immature coinbase must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("immature coinbase"),
+            "expected 'immature coinbase' in error, got: {}", msg);
+        assert!(msg.contains("Input 3") && msg.contains("ring member 7"),
+            "error must include the input+member indices, got: {}", msg);
+    }
+
+    #[test]
+    fn ring_member_time_lock_none_is_ok() {
+        // No lock set — must be OK at any height.
+        assert!(check_ring_member_time_lock(None, 0, 0, 0).is_ok());
+        assert!(check_ring_member_time_lock(None, u64::MAX, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn ring_member_time_lock_past_unlock_ok() {
+        // Lock height has passed — output is spendable AND usable as a
+        // ring member decoy.
+        assert!(check_ring_member_time_lock(Some(100), 100, 0, 0).is_ok(),
+            "current_height == lock_height must be OK (unlocks at that height)");
+        assert!(check_ring_member_time_lock(Some(100), 200, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn ring_member_time_lock_before_unlock_rejected() {
+        // Lock height still ahead — must reject with a "time-locked" error.
+        let err = check_ring_member_time_lock(Some(200), 100, 5, 3)
+            .expect_err("time-locked output must not be usable as ring member");
+        let msg = err.to_string();
+        assert!(msg.contains("time-locked"),
+            "expected 'time-locked' in error, got: {}", msg);
+        assert!(msg.contains("Input 5") && msg.contains("ring member 3"),
+            "error must include the input+member indices, got: {}", msg);
     }
 }

@@ -168,6 +168,11 @@ fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyB
     // 0x00153b2a... canonical vs 0x0015d888... computed by fixed
     // formula) — the divergence diagnostic at
     // tests/diag_asert_at_2222.rs (in v1.0.13-refactor) reproduces it.
+    //
+    // Landed on origin/main via PR #67 (commit c42b95f2, 2026-06-21).
+    // This branch (refactor/sync-state-model) was cut before that
+    // merge and was missing the fix — restored 2026-06-30 (session
+    // notes: [[project_session_2026_06_29_partition_recovery]]).
     let denominator = halflife as i128;
     if denominator == 0 { return current_target; }
 
@@ -262,6 +267,18 @@ fn safe_mul_u128(a: u128, b: u128) -> u128 {
     // consensus-critical overflow path. Saturation is both correct and safe:
     // a target at u128::MAX is the easiest possible difficulty, which is the
     // right choice when the inputs are legitimately near that boundary.
+    //
+    // AUDIT (R-4 defense-in-depth verification, 2026-07-02): re-audited
+    // the saturation contract. `checked_mul` returns Option<u128>, and
+    // `.unwrap_or(u128::MAX)` is the correct saturating semantics — NOT
+    // reliant on any upstream `clamp`. See regression test
+    // `safe_mul_u128_saturates_at_boundary` below for the boundary
+    // proof. Callers (`asert_target`, `wtema_target`, `emergency_drop`)
+    // then feed the result to `u128_to_target` (L246) which encodes
+    // to a Hash where target == u128::MAX means "easiest possible".
+    // This matches Bitcoin's arith_uint256::SetCompact() overflow bit
+    // semantics: an overflowed compact-encoded target means minimum
+    // difficulty, not a rejected block.
     a.checked_mul(b).unwrap_or(u128::MAX)
 }
 
@@ -353,6 +370,24 @@ mod tests {
     #[test]
     fn test_max_target() {
         assert_eq!(max_target().as_bytes()[0], 0xFF);
+    }
+
+    /// R-4 defense-in-depth regression: `safe_mul_u128` must saturate
+    /// at `u128::MAX` when the product overflows, not wrap or panic.
+    /// The upstream `checked_mul` returns `None` on overflow; the
+    /// `.unwrap_or(u128::MAX)` fallback is what we're proving here.
+    #[test]
+    fn safe_mul_u128_saturates_at_boundary() {
+        // Non-overflow case: normal multiply.
+        assert_eq!(safe_mul_u128(1_000, 2_000), 2_000_000);
+        // Boundary case: fits exactly.
+        assert_eq!(safe_mul_u128(u128::MAX, 1), u128::MAX);
+        assert_eq!(safe_mul_u128(1, u128::MAX), u128::MAX);
+        // Overflow case: must saturate to MAX, NOT wrap to 0 or panic.
+        assert_eq!(safe_mul_u128(u128::MAX, 2), u128::MAX);
+        assert_eq!(safe_mul_u128(u128::MAX / 2 + 2, 2), u128::MAX);
+        // A high-value pair that clearly overflows:
+        assert_eq!(safe_mul_u128(u128::MAX / 3 * 2, 3), u128::MAX);
     }
 
     #[test]

@@ -214,35 +214,46 @@ proptest! {
             "decrypt with wrong tx_public succeeded");
     }
 
-    // ─── Determinism (the nonce is ECDH-derived) ─────────────────
+    // ─── Non-determinism (fresh random nonce per encryption) ─────
 
-    /// `encrypt_memo` is deterministic — same (memo, tx_sk, view_pk)
-    /// produces byte-identical output every call. This is because the
-    /// nonce is derived from the ECDH shared point, not from random
-    /// entropy. (Per `memo.rs:78`: nonce is part of `derive_memo_key_and_nonce`.)
+    /// `encrypt_memo` is INTENTIONALLY NON-deterministic — the nonce
+    /// is drawn fresh from OsRng on every call (2026-06-03 nonce-reuse
+    /// defense committed to src/crypto/memo.rs).
     ///
-    /// Determinism here is a TRADE-OFF: it enables stateless encryption
-    /// without requiring fresh randomness per memo, but it means
-    /// encrypting the same memo to the same recipient twice yields
-    /// identical ciphertexts. That's safe ONLY because tx_secret is
-    /// fresh per transaction (so two different txs with identical memo
-    /// content have different ciphertexts via different tx_secrets).
+    /// Prior design derived the nonce from the ECDH shared point, which
+    /// meant two encrypt_memo calls with the same (memo, tx_sk, view_pk)
+    /// produced identical (key, nonce) pairs. ChaCha20-Poly1305 nonce
+    /// reuse is catastrophic — an attacker observing both ciphertexts
+    /// recovers plaintext_a ⊕ plaintext_b, and Poly1305 becomes forgeable.
+    /// In production the reuse never surfaced because the builder attaches
+    /// at most one memo per tx and tx_secret is fresh per tx, but the
+    /// design was a latent hazard. Fresh random nonce closes it.
     ///
-    /// This property verifies the determinism so a regression introducing
-    /// randomness — which would make decryption fail on re-derivation —
-    /// is caught.
+    /// This property verifies:
+    ///   1. Two encrypt_memo calls with identical input produce DIFFERENT
+    ///      ciphertexts (nonce-reuse defense holds).
+    ///   2. Both ciphertexts still decrypt to the original memo (the wire
+    ///      carries the nonce, so re-derivation works).
     #[test]
-    fn encrypt_is_deterministic(
+    fn encrypt_uses_fresh_nonce_but_decrypts_correctly(
         memo in proptest::collection::vec(any::<u8>(), 1..=64),
         tx_seed in any::<u64>(),
         view_seed in any::<u64>(),
     ) {
-        let (tx_secret, _) = keypair_from_seed(tx_seed);
-        let (_, view_public) = keypair_from_seed(view_seed);
+        let (tx_secret, tx_public) = keypair_from_seed(tx_seed);
+        let (view_secret, view_public) = keypair_from_seed(view_seed);
         let e1 = encrypt_memo(&memo, &tx_secret, &view_public).expect("e1");
         let e2 = encrypt_memo(&memo, &tx_secret, &view_public).expect("e2");
-        prop_assert_eq!(e1, e2,
-            "encrypt_memo non-deterministic with fixed (memo, tx_sk, view_pk)");
+        prop_assert_ne!(&e1, &e2,
+            "encrypt_memo must use a fresh random nonce per call so \
+             two encryptions of the same (memo, tx_sk, view_pk) produce \
+             different ciphertexts (nonce-reuse defense)");
+        let d1 = decrypt_memo(&e1, &view_secret, &tx_public).expect("d1");
+        let d2 = decrypt_memo(&e2, &view_secret, &tx_public).expect("d2");
+        prop_assert_eq!(&d1, &memo,
+            "ciphertext 1 must decrypt to the original memo");
+        prop_assert_eq!(&d2, &memo,
+            "ciphertext 2 must decrypt to the original memo");
     }
 
     // ─── Encrypted output structure ──────────────────────────────

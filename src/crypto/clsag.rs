@@ -54,19 +54,20 @@ impl ClsagSignature {
         self.responses.len()
     }
 
-    /// Serialize signature to bytes
+    /// Serialize signature to bytes.
     ///
-    /// Returns empty vec on serialization failure (should never happen for valid
-    /// signatures). Logs an error so the issue is visible without crashing the node.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        borsh::to_vec(self).unwrap_or_else(|e| {
-            tracing::error!("ClsagSignature serialization failed (bug): {}", e);
-            Vec::new()
-        })
-    }
-
-    /// Try to serialize signature to bytes, returning Result
-    pub fn try_to_bytes(&self) -> Result<Vec<u8>> {
+    /// AUDIT (2026-06-30 H3): previously two methods existed — `to_bytes()`
+    /// which returned an empty `Vec` on serialization failure, and
+    /// `try_to_bytes()` which returned `Result`. Callers could accidentally
+    /// use the silent-empty variant and then feed the empty bytes into
+    /// downstream hashing / cache keying, opening a class of "empty
+    /// signature accidentally cached" bugs. Consolidated into one method
+    /// that forces the caller to handle serialization failure via `Result`.
+    ///
+    /// Prior art: Bitcoin Core aborts on serialization failure (impossible-
+    /// in-practice case, but abort > silent-empty). Monero uses exceptions.
+    /// Zebrad returns `Result` from all serialization paths.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         borsh::to_vec(self).map_err(|e| Error::SerializationError(e.to_string()))
     }
 
@@ -223,7 +224,14 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
 
     // Compute aggregate public keys for each ring member
     // W_i = mu_p * P_i + mu_c * (C_i - C')
-    // Using commitment difference ensures the value components cancel
+    // Using commitment difference ensures the value components cancel.
+    //
+    // AUDIT NOTE (2026-07-01): investigated whether `.sub` here could
+    // panic on invalid input. It cannot: `Commitment` stores a decompressed
+    // `RistrettoPoint`, and `.sub` is infallible point subtraction. The
+    // panicking `.sub`/`.add` API on `PedersenCommitment` in
+    // `bulletproofs.rs` operates on COMPRESSED bytes and CAN fail
+    // decompression — but that's a different type not used here.
     let aggregate_keys: Vec<RistrettoPoint> = ring.iter()
         .map(|m| {
             let p = m.public_key.as_point();
@@ -325,6 +333,30 @@ pub fn clsag_verify(
         return false;
     }
 
+    // R-1 fix (2026-07-02): reject identity ring-member public keys AND
+    // commitments. The pre-fix verifier only checked key_image and
+    // commitment_image; if any `ring[i].public_key` was the identity
+    // point, the aggregate key
+    //     W_i = mu_p * P_i + mu_c * (C_i - C')
+    // collapsed to `mu_c * (C_i - C')`, letting an attacker who controls
+    // the ring construction skip the P-contribution and construct a
+    // valid-looking signature without knowing a discrete log. Identity
+    // ring members are the ring-signature analogue of the classic small-
+    // subgroup / identity-input attacks against Schnorr / EdDSA (see
+    // Monero's Möser/Soukhov 2018 discussion of subgroup checks on
+    // aggregated points, and Bitcoin Core's `Consensus::verify_taproot`
+    // identity check on the internal key). Reject the whole signature
+    // here so the invariant is enforced structurally, not by luck of the
+    // downstream challenge closure.
+    for member in ring {
+        if member.public_key.as_point() == &RistrettoPoint::identity() {
+            return false;
+        }
+        if member.commitment.as_point().as_point() == &RistrettoPoint::identity() {
+            return false;
+        }
+    }
+
     // SECURITY: Parse responses, silently dropping any non-canonical
     // scalars (those whose byte representation exceeds the curve order ℓ
     // — RFC 8032 §5.1.7). The `len() != n` check on the next line then
@@ -334,22 +366,32 @@ pub fn clsag_verify(
     // signature that hashes/verifies to the same logical signature but
     // differs bit-for-bit (would otherwise enable double-spend via
     // tx-id confusion or break uniqueness invariants downstream).
-    let responses: Vec<Scalar> = signature.responses.iter()
-        .filter_map(|b| {
-            let opt: Option<Scalar> = Scalar::from_canonical_bytes(*b).into();
-            opt
-        })
-        .collect();
+    // Canonical scalar decode via PeerScalar (2026-07-02 structural
+    // consolidation). See src/crypto/peer_scalars.rs for rationale.
+    // The previous filter_map pattern SILENTLY DROPPED non-canonical
+    // scalars from the collected vec, and the outer len check caught
+    // that only if it changed the count — a subtle correctness gap
+    // where partial rejection could still produce a wrong-length ring.
+    // PeerScalar::decode returning Result short-circuits with `?`
+    // semantics via the `_or return false` pattern here (we're in a
+    // `fn -> bool` verifier), so any non-canonical byte string fails
+    // the whole verification, not just its slot.
+    let responses: Vec<Scalar> = match signature.responses.iter()
+        .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
+        .collect::<crate::error::Result<Vec<_>>>()
+    {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
 
     if responses.len() != n {
         return false;
     }
 
-    // Parse c1
-    let c1_opt: Option<Scalar> = Scalar::from_canonical_bytes(signature.c1).into();
-    let c1 = match c1_opt {
-        Some(s) => s,
-        None => return false,
+    // Parse c1 via PeerScalar (same class as above).
+    let c1 = match crate::crypto::PeerScalar::decode(signature.c1) {
+        Ok(p) => *p.as_scalar(),
+        Err(_) => return false,
     };
 
     // SECURITY (A6-ZERO-CHALLENGE): Reject zero challenge to maintain binding between
@@ -526,21 +568,26 @@ pub fn simple_ring_verify(
         return false;
     }
 
-    let responses: Vec<Scalar> = signature.responses.iter()
-        .filter_map(|b| {
-            let opt: Option<Scalar> = Scalar::from_canonical_bytes(*b).into();
-            opt
-        })
-        .collect();
+    // Canonical scalar decode via PeerScalar (2026-07-02 structural
+    // consolidation — sibling of the responses-path in the main verify).
+    // Same filter_map-drops-silently vulnerability the primary verifier
+    // had; same PeerScalar-Result fix.
+    let responses: Vec<Scalar> = match signature.responses.iter()
+        .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
+        .collect::<crate::error::Result<Vec<_>>>()
+    {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
 
     if responses.len() != n {
         return false;
     }
 
-    let c0_opt: Option<Scalar> = Scalar::from_canonical_bytes(signature.c0).into();
-    let c0 = match c0_opt {
-        Some(s) => s,
-        None => return false,
+    // Canonical decode via PeerScalar (2026-07-02 structural consolidation).
+    let c0 = match crate::crypto::PeerScalar::decode(signature.c0) {
+        Ok(p) => *p.as_scalar(),
+        Err(_) => return false,
     };
 
     // SECURITY (A6-ZERO-CHALLENGE): Reject zero challenge in simple ring signature
@@ -737,12 +784,59 @@ mod tests {
 
         let sig = clsag_sign(message, &ring, 0, &secret, &blinding_diff, &pseudo_output, &mut OsRng).unwrap();
 
-        // Serialize and deserialize
-        let bytes = sig.to_bytes();
+        // Serialize and deserialize (to_bytes now returns Result per
+        // 2026-06-30 H3 fix — a validated signature can't fail to
+        // serialize, so unwrap is fine in test context).
+        let bytes = sig.to_bytes().unwrap();
         let sig2 = ClsagSignature::from_bytes(&bytes).unwrap();
 
         // Should still verify
         assert!(clsag_verify(message, &ring, &pseudo_output, &sig2));
+    }
+
+    /// R-1 regression: a valid CLSAG signature over a ring must not
+    /// verify if any ring-member public_key is mutated to the identity
+    /// point. The pre-fix verifier only rejected an identity
+    /// key_image / commitment_image; identity ring members were
+    /// silently accepted, letting `mu_p * P_i` fall out of the
+    /// aggregate and breaking discrete-log soundness.
+    #[test]
+    fn clsag_verify_rejects_identity_ring_public_key() {
+        use crate::crypto::PublicPoint;
+
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(1000, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(1000, &z_pseudo);
+        let blinding_diff = SecretScalar::from_scalar(
+            z_real.as_scalar() - z_pseudo.as_scalar(),
+        );
+        let decoy = SecretScalar::random(&mut OsRng).to_public();
+        let decoy_commitment = Commitment::commit(1000, &SecretScalar::random(&mut OsRng));
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(decoy, decoy_commitment),
+        ];
+        let message = b"R-1 identity ring member test";
+        let sig = clsag_sign(message, &ring, 0, &secret, &blinding_diff, &pseudo_output, &mut OsRng).unwrap();
+        assert!(clsag_verify(message, &ring, &pseudo_output, &sig),
+            "sanity: unmodified ring verifies");
+
+        // Mutate the decoy public key to the identity point via the
+        // library's dedicated constructor. An attacker constructing
+        // a malicious ring would inject this.
+        let mut malicious_ring = ring.clone();
+        malicious_ring[1] = RingMember::new(
+            PublicPoint::identity(),
+            malicious_ring[1].commitment.clone(),
+        );
+
+        assert!(
+            !clsag_verify(message, &malicious_ring, &pseudo_output, &sig),
+            "R-1: verifier must reject identity ring-member public_key"
+        );
     }
 
     #[test]

@@ -240,7 +240,7 @@ fn tier10_range_proof_not_portable() {
     ).unwrap();
 
     // Verify it works with original commitment
-    let proof_ref = coincync::crypto::RangeProof::from_bytes(&proof1.to_bytes()).unwrap();
+    let proof_ref = coincync::crypto::RangeProof::from_bytes(&proof1.try_to_bytes().unwrap()).unwrap();
     assert!(
         verify_range_proofs_dispatch(&[commitment1.clone()], &proof_ref, 0),
         "Original proof must verify"

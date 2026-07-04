@@ -281,20 +281,28 @@ impl LightWalletServer {
                 let digest = BlockDigest::from_block(&block);
 
                 for output in &digest.outputs {
-                    // View tag pre-filtering: reject 255/256 outputs instantly
-                    // This is the fast path — only 1/256 outputs pass
-                    let expected_tag = compute_view_tag(
-                        &output.tx_public_key,
-                        &view_pub,
-                        output.output_index,
-                    );
-
-                    if output.view_tag != expected_tag {
-                        continue; // Not ours — 99.6% of outputs hit this
-                    }
-
-                    // View tag matched — do full ECDH check
-                    // This is the slow path — ~0.4% of outputs reach here
+                    // P8-Lw1 (2026-07-03): view-tag pre-filter REMOVED.
+                    // The sender's view_tag is
+                    //   H("COINCYNC_VIEWTAG_v2", ECDH(tx_secret, view_public) || idx)
+                    // — see transaction/builder.rs::compute_view_tag. The
+                    // server holds only `view_public`, so it CANNOT
+                    // compute the ECDH shared point (needs view_secret
+                    // OR tx_secret, neither of which are available here).
+                    // The previous filter compared the sender's ECDH
+                    // view_tag against a wholly different value
+                    // (H(tx_pub || view_pub || idx)), so it rejected
+                    // ~255/256 outputs at random and passed 1/256 of
+                    // wrong outputs as "candidates" — real user outputs
+                    // effectively never matched.
+                    //
+                    // Correct behaviour for a `view_pub`-only server: no
+                    // filter, return every output as a candidate. The
+                    // caller is expected to run the ECDH-based scan
+                    // client-side using the view_SECRET they hold; see
+                    // `wallet::lightsync::LightWalletSync`. Client-side
+                    // scanning is O(outputs) with a fast view-tag reject
+                    // there, so the extra bandwidth is the trade-off for
+                    // never leaking the view_secret to the server.
                     if is_output_for_keys(&output.tx_public_key, &output.stealth_address, &view_pub, &spend_pub, output.output_index) {
                         detected.push(DetectedOutput {
                             tx_hash: hex::encode(output.tx_hash.as_bytes()),
@@ -453,8 +461,13 @@ fn parse_public_key(hex_str: &str) -> std::result::Result<PublicKey, String> {
     Ok(PublicKey::from_bytes(arr))
 }
 
-/// Compute the expected view tag for fast pre-filtering.
-/// View tag = first byte of H(ECDH_shared_secret || output_index)
+/// DO NOT USE for scan filtering. This function is not the sender's
+/// view_tag algorithm; it hashes public keys directly rather than the
+/// ECDH shared point. It is retained solely because the module tests
+/// exercise its determinism property. See `transaction::builder::compute_view_tag`
+/// for the real algorithm (which requires `tx_secret` or `view_secret`).
+/// P8-Lw1 (2026-07-03) removed this from the scan path.
+#[allow(dead_code)]
 fn compute_view_tag(tx_pub: &PublicKey, view_pub: &PublicKey, output_index: u8) -> u8 {
     use crate::primitives::hash_data;
     let mut data = Vec::with_capacity(65);

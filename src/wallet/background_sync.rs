@@ -783,6 +783,10 @@ pub fn spawn_background_sync(
             // isn't advanced past the orphaned block. The recovery path
             // then rewinds current_height down to the fork point.
             let mut reorg_recovery_done = false;
+            // Fetch returned Ok(None) — block not yet available at the
+            // node. Signals the post-batch handler to back off before
+            // retrying so we don't hot-loop against the fetcher.
+            let mut fetch_stalled = false;
 
             for height in batch_start..batch_end {
                 match fetcher.fetch_block(height).await {
@@ -858,8 +862,16 @@ pub fn spawn_background_sync(
                         }
                     }
                     Ok(None) => {
-                        // Block not available yet — update target and pause
-                        manager.update_target(height);
+                        // Block not available yet at the node. Do NOT
+                        // shrink `target_height` here: it represents the
+                        // chain tip we're still syncing toward, and
+                        // lowering it to `height` pins target==current
+                        // (state stays Syncing, next_batch_range then
+                        // returns None indefinitely) until an explicit
+                        // UpdateTarget command arrives. Instead, break
+                        // the batch and let the post-batch handler back
+                        // off before we retry from the same position.
+                        fetch_stalled = true;
                         break;
                     }
                     Err(e) => {
@@ -902,6 +914,14 @@ pub fn spawn_background_sync(
                 // Back off on errors
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 manager.resume(); // Try to continue
+            }
+
+            // Fetcher returned Ok(None) — the block we asked for isn't
+            // available at the node yet. Back off before retrying so we
+            // don't hot-loop the RPC. Independent of `had_error` (which
+            // only fires on transport failures).
+            if fetch_stalled && !had_error {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
 
             // Rate limiting

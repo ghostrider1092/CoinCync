@@ -766,7 +766,28 @@ async fn start_node(
                             // transitions + reorg-induced maturity
                             // changes. Belt-and-suspenders for the
                             // miner-side filter in mining/template.rs.
-                            event_mempool.shadow_evict_invalid(event_chain.as_ref());
+                            //
+                            // Wrapped in spawn_blocking to move the
+                            // synchronous parking_lot::RwLock contention
+                            // off the tokio worker thread. Previously
+                            // `shadow_evict_invalid` ran inline on the
+                            // worker; under sustained block flow it would
+                            // hold the chain RwLock for the duration of
+                            // the mempool walk, blocking other tokio
+                            // tasks (RPC, network reads) on the same
+                            // worker. Bitcoin Core's `MaybeUpdateMempool
+                            // ForReorg` runs on a separate background
+                            // thread for the same reason.
+                            //
+                            // We .await the join so the post-block
+                            // notifications below see the updated
+                            // mempool state, but the worker is freed
+                            // during the blocking work.
+                            let evict_mempool = event_mempool.clone();
+                            let evict_chain = event_chain.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                evict_mempool.shadow_evict_invalid(evict_chain.as_ref());
+                            }).await;
 
                             // Notify IBD sync manager so it advances its
                             // local_height cursor and releases the next
@@ -981,14 +1002,41 @@ async fn start_node(
         });
     }
 
-    info!("Node is running. Ctrl-C to stop.");
+    info!("Node is running. Ctrl-C or systemctl stop to shut down.");
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install ctrl-c handler");
+    // AUDIT 2026-06-30 (C2 root cause): catch SIGTERM as well as SIGINT
+    // on Unix. The previous `tokio::signal::ctrl_c()` only catches SIGINT
+    // — which means `systemctl stop coincync-node` (SIGTERM) bypassed
+    // the entire graceful shutdown path, hard-killing the process without
+    // flushing RocksDB. That was the actual mechanism behind the
+    // 2026-06-30 zombie state: WAL entries never made it to SST, next
+    // startup hung on WAL replay.
+    //
+    // Prior art: Bitcoin Core's daemon installs handlers for SIGINT,
+    // SIGTERM, and SIGHUP in `init.cpp::AppInit()`. All three route
+    // to the same `StartShutdown()` path.
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate()
+        ).expect("failed to install SIGTERM handler");
 
-    info!("Shutdown signal received, stopping node...");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("SIGINT received (Ctrl+C), stopping node...");
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received (systemctl stop / kill), stopping node...");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install ctrl-c handler");
+        info!("Ctrl+C received, stopping node...");
+    }
 
     // AUDIT 2026-06-05 #14 — persist mempool before exit so unconfirmed
     // txs survive the restart. Failure is logged but not fatal — the
@@ -1017,6 +1065,58 @@ async fn start_node(
         }
     }
 
+    // AUDIT 2026-06-30 (C2): explicit RocksDB flush before force-exit —
+    // root cause of the 2026-06-30 zombie state where stop-tar-start
+    // cycles left coincync-node running with an unresponsive RPC.
+    //
+    // The previous claim "RocksDB has its own atomic-write guarantees"
+    // is true for individual writes, but NOT for the WAL between memtable
+    // flushes. On a hard `process::exit(0)`, Rust does not run `Drop` for
+    // the `Arc<Database>` — the OS reaps the process and RocksDB never
+    // gets to flush pending WAL entries to SST files. On next startup,
+    // RocksDB attempts WAL replay, which can hang (WAL truncated by tar
+    // capturing mid-write) or produce an inconsistent state that leaves
+    // the RPC unresponsive while the DB is stuck in recovery.
+    //
+    // The fix is a two-step graceful drain BEFORE the hard exit:
+    //   1. `db.flush()` — force memtable → SST + WAL truncation
+    //   2. `cancel_all_background_work(wait=true)` — let compactions
+    //      complete instead of leaving them mid-run
+    //
+    // Both are best-effort with a short deadline; if either hangs we
+    // still force-exit to preserve the "restart works even if disk is
+    // broken" property. But under normal conditions this eliminates the
+    // WAL-replay-hang failure mode entirely.
+    //
+    // Prior art: Bitcoin Core's `Shutdown()` explicitly calls
+    // `pcoinsdbview->Flush()` and `pblocktree->Sync()` before returning
+    // to main. Zebrad's `RpcServer::stop_service` explicitly awaits DB
+    // drain. Same pattern here.
+    info!("Draining RocksDB before exit...");
+    let flush_deadline = std::time::Duration::from_secs(10);
+    let flush_start = std::time::Instant::now();
+    match tokio::time::timeout(flush_deadline, tokio::task::spawn_blocking({
+        let db = db.clone();
+        move || db.flush_best_effort()
+    })).await {
+        Ok(Ok(())) => {
+            info!(
+                flush_ms = flush_start.elapsed().as_millis(),
+                "RocksDB flushed cleanly, exiting"
+            );
+        }
+        Ok(Err(join_err)) => {
+            error!("RocksDB flush task panicked: {} — exiting anyway", join_err);
+        }
+        Err(_) => {
+            warn!(
+                "RocksDB flush did not complete within {}s — force-exiting. \
+                 Next startup may need to replay WAL.",
+                flush_deadline.as_secs()
+            );
+        }
+    }
+
     // 2026-06-10 (Crucible Cycle 01 Finding #4): force the process to
     // exit. The previous code returned `Ok(())` and relied on the
     // `#[tokio::main]` runtime to drop, which in turn would abort all
@@ -1027,12 +1127,6 @@ async fn start_node(
     // visible symptom: "Shutdown signal received, stopping node..."
     // logged, then no exit. SIGINT had to be repeated or the terminal
     // killed to actually stop the process.
-    //
-    // The graceful shutdown above persists the mempool, which is the
-    // only state that must survive a restart. After that, force-exit
-    // is correct — RocksDB has its own atomic-write guarantees, the
-    // chain database is consistent on disk, and the P2P state is
-    // ephemeral by design.
     //
     // Process exits with code 0 (clean shutdown). Don't change to
     // non-zero — operators (and systemd) treat that as a crash and

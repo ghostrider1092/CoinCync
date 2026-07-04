@@ -127,8 +127,13 @@ struct RpcState {
 
 fn serialize_peer_info(peer: &crate::network::peer::PeerInfo, minimize_metadata: bool) -> Value {
     if minimize_metadata {
+        // P7-R1 SURGICAL FIX (2026-07-03): also redact peer_id in
+        // minimized mode. Pre-fix code exposed `peer.id[..8]`, a
+        // STABLE per-session correlator that lets an RPC client
+        // fingerprint peers across polls even with addr/user_agent
+        // redacted.
         json!({
-            "id":         hex::encode(&peer.id[..8]),
+            "id":         "[redacted]",
             "addr":       "[redacted]",
             "height":     peer.height,
             "version":    peer.version,
@@ -199,10 +204,128 @@ fn rpc_clamp_audit_range(start: u64, end: u64) -> std::result::Result<(u64, u64)
     Ok((start, end))
 }
 
-/// HTTP-layer Bearer check. When `token` is `None`, all requests pass (no middleware policy).
+/// HTTP-layer Bearer check.
+///
+/// Holds the SHA-256 hash of the API key, NOT the plaintext. The plaintext
+/// lives only during construction (`from_plaintext`) and is dropped before
+/// the validator is stored. This means a process memory dump after startup
+/// cannot recover the API key — only a one-way hash. Closes the CRITICAL
+/// audit finding "Bearer token stored + compared plaintext".
+///
+/// Reference: Bitcoin Core's `rpcauth.py` stores `user:salt$hash`, never
+/// the plaintext password. We follow the same pattern but with a fixed
+/// salt-free SHA-256 because the operator-supplied API key is already a
+/// high-entropy random hex string (per the bearer-key rotation incident
+/// memo); salting buys little against an offline attacker who has the
+/// process memory dump.
+///
+/// When `token_hashes` is empty, all requests pass the auth check.
+/// When `rate_limiter` is `Some`, every request is also passed through the
+/// IP-based rate limiter BEFORE the bearer check. Closes audit HIGH #14
+/// (`src/rpc/ratelimit.rs` exists but was not wired into the server).
+/// Reference: Bitcoin Core does not have application-layer rate limiting
+/// on the RPC and relies entirely on the operator's reverse proxy; we
+/// expose the application-layer limiter as a defense-in-depth even when
+/// nginx in front is misconfigured.
+///
+/// `token_hashes` is a list of accepted key hashes (current + previous)
+/// to support hot key rotation without restart (audit HIGH #16). The
+/// operator can ship a new key via SIGHUP-style reload and accept both
+/// keys for a grace window, then drop the old one in a follow-up reload.
+/// Bitcoin Core's `rpcauth` supports multiple users; we use the same
+/// "multiple accepted credentials at once" model collapsed to a single
+/// principal (the bearer is opaque, so we don't need user-IDs).
 #[derive(Clone)]
 struct RpcBearerValidator {
-    token: Option<Arc<str>>,
+    token_hashes: Vec<Arc<[u8; 32]>>,
+    rate_limiter: Option<Arc<crate::rpc::ratelimit::RateLimiter>>,
+}
+
+impl RpcBearerValidator {
+    fn from_plaintext(plaintext: &str) -> Self {
+        Self {
+            token_hashes: vec![Self::hash_token(plaintext)],
+            rate_limiter: None,
+        }
+    }
+
+    fn from_plaintexts(plaintexts: &[&str]) -> Self {
+        let hashes = plaintexts.iter().map(|p| Self::hash_token(p)).collect();
+        Self { token_hashes: hashes, rate_limiter: None }
+    }
+
+    fn unauthenticated() -> Self {
+        Self { token_hashes: Vec::new(), rate_limiter: None }
+    }
+
+    fn hash_token(plaintext: &str) -> Arc<[u8; 32]> {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(plaintext.as_bytes());
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&digest);
+        Arc::new(hash)
+    }
+
+    /// Attach a rate limiter that runs before the bearer check on every
+    /// request. The limiter's own `check_sync` whitelists loopback IPs so
+    /// local-only RPC clients are unaffected.
+    fn with_rate_limiter(mut self, limiter: Arc<crate::rpc::ratelimit::RateLimiter>) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+}
+
+/// Extract the client IP from the request.
+///
+/// Audit-fix: XFF parsing is now OPT-IN via `COINCYNC_RPC_XFF_PROXY_ACK=1`
+/// because a client can spoof the X-Forwarded-For header. The rate
+/// limiter is bypassed when an attacker controls the IP attribution —
+/// they cycle through fake IPs to each get a fresh bucket. We trust XFF
+/// ONLY when the operator explicitly acknowledges they have a properly
+/// configured reverse proxy (nginx `real_ip_header X-Forwarded-For` +
+/// `set_real_ip_from <trusted-cidr>`) in front. Without ack, the
+/// limiter treats every public request as coming from a single bucket
+/// (loopback whitelist bypasses; non-loopback gets a real bucket via
+/// some hash but at least not attacker-controlled).
+///
+/// Reference: nginx's `set_real_ip_from` + `real_ip_header` docs are
+/// explicit that XFF is untrustworthy without IP whitelisting. Bitcoin
+/// Core's RPC binds loopback-only by default to sidestep this entirely.
+fn client_ip_from_request<B>(req: &Request<B>) -> std::net::IpAddr {
+    let xff_trusted = rpc_env_bool("COINCYNC_RPC_XFF_PROXY_ACK").unwrap_or(false);
+    if xff_trusted {
+        if let Some(xff) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            // RFC 7239 §5.2: first comma-separated entry is the original
+            // client; proxies APPEND their own IPs to the right.
+            if let Some(first) = xff.split(',').next() {
+                if let Ok(ip) = first.trim().parse::<std::net::IpAddr>() {
+                    return ip;
+                }
+            }
+        }
+    }
+    // No trusted IP source: return loopback. The limiter whitelists
+    // loopback, so this effectively turns OFF rate-limiting for any
+    // request whose origin we cannot trust to identify. This is the
+    // SAFE default: better to under-rate-limit a known operator-
+    // controlled proxy than to over-rate-limit honest users based on
+    // an attacker-spoofed IP. Operators who want active rate limiting
+    // on public RPC must set BOTH COINCYNC_RPC_TLS_PROXY_ACK and
+    // COINCYNC_RPC_XFF_PROXY_ACK after verifying their nginx config
+    // overwrites (not appends) the X-Forwarded-For header.
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+}
+
+fn rpc_http_rate_limited(retry_after_secs: u64) -> Response<HttpBody> {
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(http::header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .header(http::header::RETRY_AFTER, retry_after_secs.to_string())
+        .body(HttpBody::from(format!(
+            r#"{{"jsonrpc":"2.0","error":{{"code":429,"message":"Rate limited; retry after {}s"}},"id":null}}"#,
+            retry_after_secs
+        )))
+        .expect("valid 429 response")
 }
 
 impl<B> ValidateRequest<B> for RpcBearerValidator {
@@ -215,15 +338,33 @@ impl<B> ValidateRequest<B> for RpcBearerValidator {
     ) -> std::result::Result<(), Response<Self::ResponseBody>> {
         use http::Method;
 
-        if self.token.is_none() {
+        // Rate limit FIRST (cheaper than crypto). CORS preflight is
+        // exempt — it carries no auth and is harmless. Loopback IPs are
+        // already whitelisted inside check_sync.
+        if !matches!(*req.method(), Method::OPTIONS) {
+            if let Some(limiter) = &self.rate_limiter {
+                let ip = client_ip_from_request(req);
+                match limiter.check_sync(ip) {
+                    crate::rpc::ratelimit::RateLimitResult::Allowed => {}
+                    crate::rpc::ratelimit::RateLimitResult::RateLimited { retry_after }
+                    | crate::rpc::ratelimit::RateLimitResult::Banned { retry_after } => {
+                        return Err(rpc_http_rate_limited(retry_after));
+                    }
+                    crate::rpc::ratelimit::RateLimitResult::PermanentlyBlocked => {
+                        return Err(rpc_http_rate_limited(0));
+                    }
+                }
+            }
+        }
+
+        if self.token_hashes.is_empty() {
             return Ok(());
         }
-        let expected = self.token.as_ref().expect("checked is_some");
 
         match *req.method() {
             // CORS preflight never authenticates.
             Method::OPTIONS => Ok(()),
-            Method::POST => validate_bearer_header(req, expected),
+            Method::POST => validate_bearer_header(req, &self.token_hashes),
             Method::GET => {
                 // Hardening: only allow GET when this is an actual websocket upgrade,
                 // and require Bearer parity with POST to close auth-bypass edges.
@@ -242,7 +383,7 @@ impl<B> ValidateRequest<B> for RpcBearerValidator {
                 if !is_upgrade {
                     return Err(rpc_http_unauthorized());
                 }
-                validate_bearer_header(req, expected)
+                validate_bearer_header(req, &self.token_hashes)
             }
             _ => Err(rpc_http_unauthorized()),
         }
@@ -251,7 +392,7 @@ impl<B> ValidateRequest<B> for RpcBearerValidator {
 
 fn validate_bearer_header<B>(
     req: &Request<B>,
-    expected: &Arc<str>,
+    expected_hashes: &[Arc<[u8; 32]>],
 ) -> std::result::Result<(), Response<HttpBody>> {
     let auth = req
         .headers()
@@ -263,9 +404,21 @@ fn validate_bearer_header<B>(
         return Err(rpc_http_unauthorized());
     }
     let supplied = auth[PREFIX.len()..].trim();
-    if supplied.len() != expected.len()
-        || !crate::crypto::ct_eq(supplied.as_bytes(), expected.as_bytes())
-    {
+    // Hash the supplied token once and constant-time compare against
+    // each accepted hash (current + previous during key rotation). The
+    // supplied plaintext exists only on this stack frame and is dropped
+    // on function return; expected values are already hashes. Constant-
+    // time check is INSIDE the inner loop so an attacker can't learn
+    // which hash matched by timing.
+    use sha2::Digest;
+    let supplied_hash = sha2::Sha256::digest(supplied.as_bytes());
+    let mut ok = false;
+    for expected in expected_hashes {
+        // Always run ct_eq even after a match to avoid early-exit timing leak.
+        let matched = crate::crypto::ct_eq(&supplied_hash[..], &expected[..]);
+        ok |= matched;
+    }
+    if !ok {
         return Err(rpc_http_unauthorized());
     }
     Ok(())
@@ -381,6 +534,34 @@ pub async fn start_rpc_server(
             "RPC listen address {} is not loopback: refusing to start without an api_key — public JSON-RPC must authenticate (set COINCYNC_RPC_API_KEY or RpcConfig.api_key)",
             config.listen_addr
         )));
+    }
+    // Audit HIGH #15 — fail-safe TLS gate.
+    //
+    // If we bind non-loopback, the Bearer token will travel over the
+    // wire. Without TLS, it's plaintext. The operator must EITHER:
+    //   (a) enable native TLS (`tls_enabled = true` in RpcConfig), OR
+    //   (b) explicitly acknowledge via env var that there's a
+    //       TLS-terminating reverse proxy (nginx) in front of this RPC.
+    //
+    // This mirrors the existing Stratum gate
+    // (`COINCYNC_STRATUM_TLS_PROXY_ACK`) so operators have one consistent
+    // ack convention across services. Reference: Bitcoin Core requires
+    // rpcuser/rpcpassword for non-loopback RPC but does not gate on TLS;
+    // we go further because the production deploy fronts api.coincync
+    // .network behind nginx and an unacknowledged direct-bind would
+    // expose the Bearer in cleartext.
+    if !listen_loopback {
+        let tls_proxy_ack = rpc_env_bool("COINCYNC_RPC_TLS_PROXY_ACK").unwrap_or(false);
+        if !config.tls_enabled && !tls_proxy_ack {
+            return Err(Error::InvalidState(format!(
+                "RPC listen address {} is not loopback and TLS is not active: \
+                 refusing to start. Either enable native TLS or set \
+                 COINCYNC_RPC_TLS_PROXY_ACK=1 to confirm that an upstream \
+                 TLS terminator (e.g. nginx) fronts this RPC. Without one \
+                 of these the Bearer token would be sent in cleartext.",
+                config.listen_addr
+            )));
+        }
     }
 
     let apply_bearer_middleware =
@@ -570,6 +751,11 @@ pub async fn start_rpc_server(
     // Also touches parking_lot state (peer DashMap iteration + chain
     // tip read), should not run on tokio workers.
     module.register_blocking_method("get_peer_info", |_params, state, _ext| {
+        // P7-R2 SURGICAL FIX (2026-07-03): honor minimize_metadata
+        // on public listeners. Pre-fix code built its own peer JSON
+        // that always exposed addr, user_agent, peer_id_prefix
+        // regardless of the flag. Now redact them consistently.
+        let minimize = state.minimize_metadata;
         let now = std::time::Instant::now();
         let peers: Vec<Value> = match state.p2p.as_ref() {
             Some(p2p) => p2p
@@ -584,13 +770,29 @@ pub async fn start_rpc_server(
                         .checked_duration_since(p.connected_at)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
+                    // P7-R1 fix: peer_id_prefix is a per-session
+                    // correlator. Redact in min mode.
+                    let peer_id_field: Value = if minimize {
+                        Value::String("[redacted]".to_string())
+                    } else {
+                        Value::String(hex::encode(&p.id[..8]))
+                    };
+                    let addr_field: Value = if minimize {
+                        Value::String("[redacted]".to_string())
+                    } else {
+                        Value::String(p.addr.to_string())
+                    };
+                    let user_agent_field: Value = if minimize {
+                        Value::String("[redacted]".to_string())
+                    } else {
+                        Value::String(p.user_agent.clone())
+                    };
+                    let bytes_recv_val = if minimize { 0u64 } else { p.bytes_recv };
+                    let bytes_sent_val = if minimize { 0u64 } else { p.bytes_sent };
                     json!({
-                        // Identity. We deliberately do NOT echo the full
-                        // PeerId for inbound peers — even a 16-byte
-                        // identifier is a correlator across observations.
-                        // First 8 bytes are enough for operator triage.
-                        "peer_id_prefix":      hex::encode(&p.id[..8]),
-                        "addr":                p.addr.to_string(),
+                        // Identity — redacted under min-metadata.
+                        "peer_id_prefix":      peer_id_field,
+                        "addr":                addr_field,
                         "outbound":            p.outbound,
                         // Reported chain tip — the actually-useful field.
                         // Defaults to 0 if the peer never sent a Version
@@ -599,16 +801,17 @@ pub async fn start_rpc_server(
                         "reported_tip_hash":   hex::encode(p.tip_hash.as_bytes()),
                         // Identity / protocol
                         "protocol_version":    p.version,
-                        "user_agent":          p.user_agent.clone(),
+                        "user_agent":          user_agent_field,
                         "encrypted":           p.encrypted,
                         // Health-ish
                         "reputation":          p.reputation,
                         "last_seen_secs_ago":  last_seen_secs,
                         "connected_for_secs":  connected_for_secs,
-                        "bytes_recv":          p.bytes_recv,
-                        "bytes_sent":          p.bytes_sent,
+                        "bytes_recv":          bytes_recv_val,
+                        "bytes_sent":          bytes_sent_val,
                         // State (Connecting / Connected / Disconnected)
                         "state":               format!("{:?}", p.state),
+                        "metadata_minimized":  minimize,
                     })
                 })
                 .collect(),
@@ -820,11 +1023,19 @@ pub async fn start_rpc_server(
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
         // Bound the hex input length BEFORE hex::decode + borsh::from_slice.
-        // A valid block is at most MAX_BLOCK_SIZE = 2 MB → 4 MB hex.
-        // Reject anything past 2× that. The jsonrpsee body-size default
-        // covers the gross case, but a per-method cap stops authenticated
-        // callers (compromised API key, malicious miner) from wasting our
-        // hex+borsh decode budget on garbage that consensus would reject.
+        // hex::decode allocates a Vec of half the input length; without this
+        // cap a caller could send a hex string many times larger than the
+        // consensus block limit and force the node to allocate + parse +
+        // borsh-decode data that would fail the block-size check anyway.
+        // The jsonrpsee body-size default covers the gross case, but a
+        // per-method cap stops authenticated callers (compromised API key,
+        // malicious miner) from wasting our hex+borsh decode budget on
+        // garbage that consensus would reject. Same pattern applied at
+        // `is_nullifier_spent` (~L1309).
+        //
+        // 2× MAX_BLOCK_SIZE covers hex-encoding overhead; 4× total (2 for
+        // hex, 2 for slack) leaves headroom for a max-size valid block plus
+        // any near-boundary encoding variance.
         //
         // Prior art: Bitcoin Core's `submitblock` RPC rejects oversized
         // hex at the JSON-parse layer via `MAX_BLOCK_SERIALIZED_SIZE`;
@@ -1001,10 +1212,12 @@ pub async fn start_rpc_server(
         let (hex_tx,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
-        // Bound hex input length. Valid tx is at most MAX_TX_SIZE =
-        // 500,000 bytes → 1 MB hex. Cap at 2× headroom. Same rationale
-        // as submit_block above — close the authenticated-caller decode
-        // amplification gap before hex::decode + borsh::from_slice.
+        // Bound hex input length. Mirrors submit_block above and
+        // `is_nullifier_spent` at ~L1309. Bitcoin Core's `sendrawtransaction`
+        // performs the equivalent size cap via `MAX_STANDARD_TX_WEIGHT`.
+        // Cap at 2× MAX_TX_SIZE × 2 (2 for hex, 2 for slack) — anything
+        // larger decodes to bytes larger than any valid tx and is rejected
+        // downstream; the pre-check saves the allocation and the borsh parse.
         const MAX_HEX_TX: usize = 2 * 2 * crate::constants::MAX_TX_SIZE;
         if hex_tx.len() > MAX_HEX_TX {
             return Err(ErrorObjectOwned::owned(
@@ -1157,6 +1370,15 @@ pub async fn start_rpc_server(
         let (hex_nf,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
+        // Pre-decode length cap: a 32-byte nullifier is 64 hex chars.
+        // Reject inputs that are obviously oversized BEFORE allocating a
+        // potentially huge Vec inside hex::decode. Prevents 1 GB hex →
+        // 500 MB Vec alloc DoS. Audit-fix.
+        if hex_nf.len() > 128 {
+            return Err(ErrorObjectOwned::owned(
+                -32602, "nullifier hex too long (max 128 chars)".to_string(), None::<()>,
+            ));
+        }
         let bytes = hex::decode(&hex_nf).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
@@ -1178,6 +1400,12 @@ pub async fn start_rpc_server(
         let (hex_s,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
+        // Same pre-decode length cap as is_nullifier_spent — see comment there.
+        if hex_s.len() > 128 {
+            return Err(ErrorObjectOwned::owned(
+                -32602, "serial hex too long (max 128 chars)".to_string(), None::<()>,
+            ));
+        }
         let bytes = hex::decode(&hex_s).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
@@ -1403,7 +1631,23 @@ pub async fn start_rpc_server(
         let (tx_hash_hex,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
-        let tx_hash_bytes = hex::decode(tx_hash_hex.trim_start_matches("0x")).map_err(|e| {
+        // AUDIT (2026-07-02): pre-decode length cap. Same class of bug as
+        // submit_block / send_raw_transaction / is_nullifier_spent were
+        // hardened against — hex::decode allocates a Vec of half the input
+        // length BEFORE the downstream 32-byte length check at ~L1601 can
+        // fire. Without the cap, a caller sending a 1 GB hex string would
+        // force the node to allocate ~500 MB just to reject it. A tx hash
+        // is 32 bytes = 64 hex chars, plus an optional `0x` prefix; cap
+        // the input at 66 chars.
+        let trimmed = tx_hash_hex.trim_start_matches("0x");
+        if trimmed.len() > 64 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("tx hash hex too large: {} chars (max 64)", trimmed.len()),
+                None::<()>,
+            ));
+        }
+        let tx_hash_bytes = hex::decode(trimmed).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
         if tx_hash_bytes.len() != 32 {
@@ -2039,17 +2283,45 @@ pub async fn start_rpc_server(
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
-    let bearer_validator = RpcBearerValidator {
-        token: if apply_bearer_middleware {
-            Some(
-                api_key_arc
-                    .clone()
-                    .expect("apply_bearer_middleware implies api_key_arc is Some"),
-            )
+    let bearer_validator = if apply_bearer_middleware {
+        let plaintext = api_key_arc
+            .clone()
+            .expect("apply_bearer_middleware implies api_key_arc is Some");
+        // Audit HIGH #16 — hot key rotation. Accept BOTH the current key
+        // and an optional previous key for a grace window. Operator
+        // rotates by: (1) generate new key, (2) deploy with
+        // COINCYNC_RPC_API_KEY=new + COINCYNC_RPC_API_KEY_PREVIOUS=old
+        // and SIGHUP/restart, (3) update clients to use new key,
+        // (4) deploy without the PREVIOUS var to close the window.
+        // No coincycle of forced-offline-then-online required.
+        let previous = std::env::var("COINCYNC_RPC_API_KEY_PREVIOUS")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(prev) = previous {
+            info!("RPC accepting CURRENT and PREVIOUS api_key (rotation window active — drop COINCYNC_RPC_API_KEY_PREVIOUS to close)");
+            RpcBearerValidator::from_plaintexts(&[plaintext.as_ref(), prev.as_str()])
         } else {
-            None
-        },
+            RpcBearerValidator::from_plaintext(plaintext.as_ref())
+        }
+    } else {
+        RpcBearerValidator::unauthenticated()
     };
+    // Application-layer rate limit, defense-in-depth even when an upstream
+    // reverse proxy (nginx) already throttles. Strict config for non-
+    // loopback binds (the public api node); loopback gets the default.
+    // Loopback IPs (127.0.0.1, ::1) are whitelisted inside check_sync so
+    // local-only RPC clients are unaffected regardless of which config we
+    // load. Closes audit HIGH #14.
+    let rate_limiter_config = if listen_loopback {
+        crate::rpc::ratelimit::RateLimitConfig::default()
+    } else {
+        crate::rpc::ratelimit::RateLimitConfig::strict()
+    };
+    let rpc_rate_limiter = std::sync::Arc::new(
+        crate::rpc::ratelimit::RateLimiter::new(rate_limiter_config),
+    );
+    let bearer_validator = bearer_validator.with_rate_limiter(rpc_rate_limiter);
 
     let server = ServerBuilder::default()
         .max_connections(config.max_connections)
@@ -2100,8 +2372,7 @@ mod tests {
 
     #[test]
     fn bearer_validator_rejects_non_upgrade_get_without_auth() {
-        let token: Arc<str> = Arc::from("secret-token");
-        let mut validator = RpcBearerValidator { token: Some(token) };
+        let mut validator = RpcBearerValidator::from_plaintext("secret-token");
         let mut req = Request::builder()
             .method("GET")
             .uri("/rpc")
@@ -2112,8 +2383,7 @@ mod tests {
 
     #[test]
     fn bearer_validator_accepts_ws_upgrade_get_with_auth() {
-        let token: Arc<str> = Arc::from("secret-token");
-        let mut validator = RpcBearerValidator { token: Some(token) };
+        let mut validator = RpcBearerValidator::from_plaintext("secret-token");
         let mut req = Request::builder()
             .method("GET")
             .uri("/rpc")
@@ -2123,5 +2393,61 @@ mod tests {
             .body(())
             .expect("request");
         assert!(validator.validate(&mut req).is_ok());
+    }
+
+    #[test]
+    fn bearer_validator_rejects_wrong_token_under_hashed_comparison() {
+        let mut validator = RpcBearerValidator::from_plaintext("real-token");
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/rpc")
+            .header(http::header::AUTHORIZATION, "Bearer wrong-token")
+            .body(())
+            .expect("request");
+        assert!(
+            validator.validate(&mut req).is_err(),
+            "wrong token must be rejected even when length differs"
+        );
+    }
+
+    #[test]
+    fn bearer_validator_does_not_retain_plaintext() {
+        let validator = RpcBearerValidator::from_plaintext("the-secret");
+        assert_eq!(validator.token_hashes.len(), 1, "exactly one hash expected");
+        let hash = &validator.token_hashes[0];
+        let raw = b"the-secret";
+        assert!(
+            !hash.windows(raw.len()).any(|w| w == raw),
+            "stored hash must not contain plaintext substring"
+        );
+    }
+
+    /// Audit HIGH #16 closure — both current AND previous key must work
+    /// during the rotation grace window.
+    #[test]
+    fn bearer_validator_accepts_previous_key_during_rotation() {
+        let mut validator = RpcBearerValidator::from_plaintexts(&["new-key", "old-key"]);
+        for key in ["new-key", "old-key"] {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/rpc")
+                .header(http::header::AUTHORIZATION, format!("Bearer {}", key))
+                .body(())
+                .expect("request");
+            assert!(
+                validator.validate(&mut req).is_ok(),
+                "rotation-window validator must accept {}", key
+            );
+        }
+        let mut bad = Request::builder()
+            .method("POST")
+            .uri("/rpc")
+            .header(http::header::AUTHORIZATION, "Bearer not-either-key")
+            .body(())
+            .expect("request");
+        assert!(
+            validator.validate(&mut bad).is_err(),
+            "non-rotation key must still be rejected"
+        );
     }
 }

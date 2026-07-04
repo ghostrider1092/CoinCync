@@ -20,6 +20,7 @@ use rand::rngs::OsRng;
 use sha3::{Digest, Sha3_512};
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
+use zeroize::Zeroize;
 
 use crate::primitives::{Hash, PublicKey, SecretKey, hash_domain};
 use crate::crypto::{
@@ -133,10 +134,22 @@ pub fn create_balance_proof(
     let d = blinding.sub(&adjusted_blinding);
 
     // Schnorr: R = k*G, c = H(R || delta || C'), s = k - c*d
+    //
+    // AUDIT (R-18 fix, 2026-07-02): the pre-fix code did
+    //   `let k_scalar = SecretScalar::random(...); let k = *k_scalar.as_scalar();`
+    // which copies the Schnorr nonce OUT of its `ZeroizeOnDrop`
+    // wrapper into a raw `Scalar` on the stack. When `k_scalar`
+    // dropped, its ZeroizeOnDrop wiped its own copy — but the raw
+    // `k: Scalar` at L137 remained on the stack unzeroized. Schnorr
+    // nonce recovery is fatal (nonce reveal → private key: see
+    // Sony PS3 ECDSA disaster 2010, MtGox ECDSA-r reuse 2013,
+    // Bitcoin's BIP 340 §Security "Any leakage of k is fatal"). We
+    // now operate on `k_scalar.as_scalar()` throughout and explicitly
+    // zeroize the derived `d_scalar` + `blinding_diff_bytes` (R-19)
+    // before return.
     let k_scalar = SecretScalar::random(&mut OsRng);
-    let k = *k_scalar.as_scalar();
 
-    let r_point = (k * curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT).compress();
+    let r_point = (k_scalar.as_scalar() * curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT).compress();
 
     // Challenge (64-byte SHA3-512 hash to avoid modular reduction bias)
     let mut challenge_hasher = Sha3_512::new();
@@ -147,9 +160,18 @@ pub fn create_balance_proof(
     challenge_hasher.update(&threshold.to_le_bytes());
     let c = Scalar::from_bytes_mod_order_wide(&challenge_hasher.finalize().into());
 
-    // Response: s = k - c * d
-    let d_scalar = Scalar::from_bytes_mod_order(d.to_bytes());
-    let s = k - c * d_scalar;
+    // Response: s = k - c * d.
+    //
+    // AUDIT (R-19 fix, 2026-07-02): `d.to_bytes()` materialises the
+    // blinding difference (r - r') as raw bytes on the stack. The
+    // difference is not itself a private key, but it's linear in
+    // both blinding factors — an attacker who learns `d` and knows
+    // one of the blindings recovers the other. Zeroize the byte
+    // buffer explicitly after we're done deriving `d_scalar`.
+    let mut blinding_diff_bytes = d.to_bytes();
+    let d_scalar = Scalar::from_bytes_mod_order(blinding_diff_bytes);
+    blinding_diff_bytes.zeroize();
+    let s = k_scalar.as_scalar() - c * d_scalar;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -200,10 +222,17 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
     challenge_hasher.update(&proof.threshold.to_le_bytes());
     let c = Scalar::from_bytes_mod_order_wide(&challenge_hasher.finalize().into());
 
-    // Verify Schnorr: s*G + c*(delta - C') == R
-    let s = Scalar::from_bytes_mod_order(proof.schnorr_s);
+    // Verify Schnorr: s*G + c*(delta - C') == R.
+    //
+    // Canonical scalar decode via PeerScalar (2026-07-02 structural fix
+    // consolidating the site-by-site canonical checks introduced earlier
+    // the same day). See src/crypto/peer_scalars.rs for the class-of-bug
+    // rationale (Monero CVE-2017-14428 shape). PeerScalar::decode returns
+    // Err if the 32-byte input isn't a canonical curve25519 encoding — no
+    // silent mod-order reduction.
+    let s = crate::crypto::PeerScalar::decode(proof.schnorr_s)?;
     let diff = delta - adjusted;
-    let lhs = s * curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT + c * diff;
+    let lhs = s.as_scalar() * curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT + c * diff;
 
     // SECURITY (C11-FIX): Constant-time comparison prevents timing side-channel attacks
     if lhs.compress().as_bytes().ct_eq(r_point.compress().as_bytes()).unwrap_u8() != 1 {
@@ -335,9 +364,11 @@ pub fn verify_ownership_proof(proof: &OwnershipProof) -> Result<bool> {
     );
     let c = hash_to_scalar(challenge_hash.as_bytes());
 
-    // Verify: s*G == R + c*P
-    let s = SecretScalar::from_bytes(proof.schnorr_s);
-    let lhs = s.to_public(); // s*G
+    // Verify: s*G == R + c*P.
+    // Canonical scalar decode via PeerScalar (2026-07-02 structural consolidation).
+    let s = crate::crypto::PeerScalar::decode(proof.schnorr_s)?;
+    let s_wrapped = crate::crypto::SecretScalar::from_scalar(*s.as_scalar());
+    let lhs = s_wrapped.to_public(); // s*G
 
     let c_scalar = SecretScalar::from_scalar(c);
     let cp = p_point.mul(&c_scalar); // c*P
@@ -360,6 +391,33 @@ pub fn verify_ownership_proof(proof: &OwnershipProof) -> Result<bool> {
 ///
 /// This leverages the homomorphic property of Pedersen commitments:
 /// sum(C_i) = sum(v_i)*H + sum(r_i)*G = total*H + r_sum*G
+///
+/// # SECURITY WARNING (R-20 fix, 2026-07-02)
+///
+/// `sum_blinding` (r_sum) is TRANSMITTED IN CLEARTEXT as part of this
+/// struct. `r_sum` is the algebraic sum of every included output's
+/// blinding factor. Whoever sees a SumProof:
+///
+///   - Can recompute every included output's commitment opening if
+///     they ALSO know the per-output amounts (from other disclosures
+///     or on-chain view keys).
+///   - Can PROVE that a wallet controls those outputs by re-checking
+///     `sum(C_i) == commit(claimed_total, r_sum)`.
+///   - CANNOT decrypt other unrelated outputs (r_sum only covers the
+///     N declared outputs).
+///
+/// This trade-off is deliberate — the SumProof is designed for audit
+/// / tax-reporting flows where the wallet holder VOLUNTARILY discloses
+/// ownership of a batch of outputs. But callers must understand:
+/// sending a SumProof over an insecure channel gives the recipient
+/// PERMANENT provable evidence that this wallet received these
+/// specific outputs. Do NOT create SumProofs for reasons other than
+/// intentional disclosure, and do NOT store them alongside the wallet
+/// file (a leaked file leaks r_sum → cross-audit-scenario correlation).
+///
+/// The pre-fix docstring was silent on the secret-transmission
+/// property, which made it look like a zero-knowledge proof (which it
+/// isn't — this is a disclosure proof, not a ZK proof).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SumProof {
     /// The claimed total amount
@@ -629,7 +687,9 @@ pub fn verify_source_proof(proof: &SourceProof) -> Result<bool> {
     );
     let c = hash_to_scalar(challenge_hash.as_bytes());
 
-    let s = SecretScalar::from_bytes(proof.s);
+    // Canonical scalar decode via PeerScalar (2026-07-02 structural consolidation).
+    let s_peer = crate::crypto::PeerScalar::decode(proof.s)?;
+    let s = crate::crypto::SecretScalar::from_scalar(*s_peer.as_scalar());
     let c_scalar = SecretScalar::from_scalar(c);
 
     // Check 1: s*G + c*P == R1
@@ -637,17 +697,27 @@ pub fn verify_source_proof(proof: &SourceProof) -> Result<bool> {
     let cp = p.mul(&c_scalar);
     let check1 = sg.add(&cp);
 
-    if check1.to_bytes() != r1.to_bytes() {
-        return Ok(false);
-    }
+    // R-21 fix (2026-07-02): use constant-time comparison for BOTH
+    // check1 and check2. The pre-fix code used raw `!=` on check1,
+    // which is a non-ct byte comparison and breaks the C11-FIX
+    // policy the check2 comment cites. Under the pre-fix code, an
+    // attacker with fine-grained timing access could distinguish
+    // "check1 failed early" from "check1 passed, check2 ran" —
+    // narrowing the failure mode leaks structural information about
+    // the proof state. Also: we must NOT short-circuit — compute
+    // both checks in constant time and AND them, or the wall-clock
+    // still leaks (fewer instructions when check1 fails).
+    let check1_ok = check1.to_bytes().ct_eq(&r1.to_bytes());
 
     // Check 2: s*H_p(P) + c*I == R2
     let s_hp = hp.mul(&s);
     let c_i = i.mul(&c_scalar);
     let check2 = s_hp.add(&c_i);
 
-    // SECURITY (C11-FIX): Constant-time comparison prevents timing side-channel attacks
-    Ok(check2.to_bytes().ct_eq(&r2.to_bytes()).unwrap_u8() == 1)
+    // SECURITY (C11-FIX + R-21): both comparisons ct_eq, ANDed with
+    // constant-time subtle::Choice.
+    let check2_ok = check2.to_bytes().ct_eq(&r2.to_bytes());
+    Ok((check1_ok & check2_ok).unwrap_u8() == 1)
 }
 
 // =============================================================================

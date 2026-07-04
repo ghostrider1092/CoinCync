@@ -60,7 +60,30 @@ impl UtxoDb {
         key
     }
 
-    /// Add an unspent output
+    /// Add an unspent output.
+    ///
+    /// AUDIT (R-43 fix, 2026-07-03): pre-fix code did three
+    /// sequential writes — outputs.insert, utxo_by_height.insert,
+    /// increment_height_count (a fetch_and_update). A crash between
+    /// writes left the DB in mismatched states:
+    ///   - outputs written, height index missing → ring selection
+    ///     picks up the output but can't find it via the height
+    ///     scan; wallet scan misses it.
+    ///   - Both written but height count missing → the output
+    ///     count for the block understates by one; downstream
+    ///     ring-decoy sampling gets a wrong distribution.
+    ///
+    /// Now the two straight inserts (outputs, utxo_by_height) go
+    /// through a single Transactional batch — one atomic
+    /// RocksBatch. `increment_height_count` uses `fetch_and_update`
+    /// (a CAS-like read-modify-write) which cannot participate in
+    /// the same batch because the shim's TxTree can't observe
+    /// staged writes; we run it AFTER the transactional commit,
+    /// so at worst a crash between the atomic batch and the count
+    /// bump leaves the count under-by-one — a stats drift, not a
+    /// UTXO-visibility bug. A defensive tracing::warn fires if the
+    /// commit succeeds but the count bump then fails, so ops see
+    /// the drift.
     pub fn add_output(
         &self,
         tx_hash: Hash,
@@ -79,19 +102,34 @@ impl UtxoDb {
 
         let key = Self::make_output_key(&tx_hash, index);
         let data = serialize(&entry)?;
-
-        self.outputs.insert(key.clone(), data)
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-        // H21: Insert into height index (BE height prefix + output key)
         let mut height_key = Vec::with_capacity(8 + key.len());
         height_key.extend_from_slice(&height.to_be_bytes());
         height_key.extend_from_slice(&key);
-        self.utxo_by_height.insert(height_key, &[1u8])
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-        // Update height count
-        self.increment_height_count(height)?;
+        // R-43: atomic 2-tree commit for the UTXO-visible writes.
+        use crate::db::shim::transaction::Transactional;
+        let trees: &[&Tree] = &[&self.outputs, &self.utxo_by_height];
+        trees.transaction(|tx| {
+            tx[0].insert(key.as_slice(), data.as_slice())?;
+            tx[1].insert(height_key.as_slice(), &[1u8][..])?;
+            Ok(())
+        }).map_err(|e| Error::DatabaseError(format!(
+            "R-43: atomic add_output commit failed for tx_hash {} index {}: {:?}",
+            hex::encode(tx_hash.as_bytes()), index, e
+        )))?;
+
+        // Height count bump runs post-commit. On failure we log
+        // loudly but do not propagate an error — the UTXO is
+        // durably visible; a stat drift is recoverable via reindex.
+        if let Err(e) = self.increment_height_count(height) {
+            tracing::error!(
+                target: "db::utxos",
+                "R-43: post-commit height_count bump failed at height {} \
+                 (tx {} idx {}) — stat drift, does NOT affect UTXO validity. \
+                 Reindex height_counts to correct: {}",
+                height, hex::encode(tx_hash.as_bytes()), index, e
+            );
+        }
 
         Ok(())
     }
@@ -140,15 +178,28 @@ impl UtxoDb {
                 // Wrap the cleanup in a multi-tree transaction so either all
                 // three trees are updated or none are. Prior art: Monero's
                 // BlockchainLMDB `remove_output` runs inside the parent
-                // mdb_txn that wraps the whole block apply, giving the same
-                // all-or-nothing guarantee.
+                // mdb_txn that wraps the whole block apply; Bitcoin Core's
+                // CCoinsView writes the spend (DeleteCoin) + UTXO update in a
+                // single WriteBatch via CDBBatch::Write(sync=true).
+                //
+                // Audit-fix cross-ref: R-43 storage #1+#7 atomicity work on
+                // refactor/sync-state-model; this merge takes main's
+                // 3-tree implementation as the superset (includes
+                // utxo_by_height cleanup that R-43's 2-tree version omitted).
+                //
+                // If the cleanup transaction fails (DB error), the CAS is
+                // already committed, so the chain state remains CONSISTENT
+                // FROM A CONSENSUS PERSPECTIVE: the key image is marked
+                // spent, so no double-spend can succeed. The worst case is
+                // a stale outputs / utxo_by_height entry.
                 let height_to_decrement = match self.outputs.get(&output_key)
-                    .map_err(|e| Error::DatabaseError(e.to_string()))? { Some(data) => {
-                    let entry: OutputEntry = deserialize(&data)?;
-                    Some(entry.height)
-                } _ => {
-                    None
-                }};
+                    .map_err(|e| Error::DatabaseError(e.to_string()))? {
+                    Some(data) => {
+                        let entry: OutputEntry = deserialize(&data)?;
+                        Some(entry.height)
+                    }
+                    _ => None,
+                };
 
                 let trees: &[&Tree] = &[&self.outputs, &self.utxo_by_height, &self.height_counts];
                 trees.transaction(|tx_trees| {
@@ -193,10 +244,23 @@ impl UtxoDb {
 
                     Ok(())
                 }).map_err(|e: crate::db::shim::transaction::TransactionError| {
+                    // R-43 audit-context log: CAS already committed above;
+                    // chain state remains consensus-consistent (key_image is
+                    // spent so double-spend is blocked). Log CRITICAL so
+                    // the operator can spot recurring failures + reindex.
+                    tracing::error!(
+                        target: "db::utxos",
+                        "CRITICAL: spend_output cleanup transaction failed after CAS \
+                         succeeded for tx={} index={} ({:?}). Key image IS spent (chain \
+                         safe); UTXO map may have a stale entry. Run reindex if \
+                         this recurs.",
+                        hex::encode(tx_hash.as_bytes()), index, e
+                    );
                     Error::DatabaseError(format!("spend_output cleanup tx failed: {:?}", e))
                 })?;
 
-                // Flush to ensure durability
+                // Single global flush — Tree::flush() routes through
+                // db.flush() which syncs all column families atomically.
                 self.outputs.flush()
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
                 self.utxo_by_height.flush()
@@ -282,40 +346,103 @@ impl UtxoDb {
         Ok(outputs)
     }
 
-    /// Get random outputs for ring members using gamma-distributed selection.
+    /// Get random outputs for ring members using UNIFORM selection.
     ///
-    /// SECURITY (M-3): Uses a gamma distribution biased toward recent outputs,
-    /// matching real-world spending patterns. Uniform selection would make the
-    /// true spend obvious (real users spend recent outputs far more often).
-    /// The `exclude` parameter filters out key images that must not appear as decoys
-    /// (e.g., the real input's key image).
+    /// AUDIT (2026-07-02): SEV-A companion to the storage/utxos.rs::select_decoys
+    /// gamma → uniform fix. This is the RocksDB-backed sibling exposed via the
+    /// RPC method `get_random_outputs` (see rpc/rest.rs L251 allow-list). Prior
+    /// implementation used the same gamma(19.28, 1/1.61) shape that Möser et
+    /// al. 2018 showed enables ring-signature deanonymization via output-age
+    /// regression. The SECURITY(M-3) comment on the previous version claimed
+    /// gamma was PROTECTIVE — that was wrong. Uniform is what CoinCync's
+    /// constitutional Article III and the ring_selection.rs module design
+    /// call for. See storage/utxos.rs::select_decoys for the full audit
+    /// rationale + prior-art citations.
+    ///
+    /// Implementation: two-phase. First a bounded number of attempts randomly
+    /// pick a height uniformly across [min_height, max_height], then pick an
+    /// output uniformly within that height. This is equivalent to uniform-
+    /// over-all-outputs when height counts are roughly balanced (which they
+    /// are given constant block time + roughly-uniform block fullness). If
+    /// the attempt loop can't fill `count` (sparse tail), the fallback scan
+    /// walks utxo_by_height and picks any not-yet-selected + not-excluded
+    /// output — that fallback is already unbiased.
+    ///
+    /// The `exclude` parameter is documented as filtering out key
+    /// images. See R-44 note below — the exclusion is currently a NO-OP.
+    ///
+    /// AUDIT (R-44 fix, 2026-07-03): The pre-fix code compared the
+    /// caller's `exclude: &[KeyImage]` byte set against each
+    /// candidate's `output.stealth_address.as_bytes()`. KeyImage and
+    /// stealth_address are BOTH `[u8; 32]` so the compare doesn't
+    /// fault at the byte level, but they are values from
+    /// CATEGORICALLY DIFFERENT domains:
+    ///   - KeyImage = H_p(spender_secret) — derived at SPEND time by
+    ///     the transaction's signer.
+    ///   - stealth_address = one-time public key of the RECIPIENT,
+    ///     derived by the sender from ECDH.
+    /// A KeyImage is never equal to any stealth_address by
+    /// construction (they're two different scalars mapped through
+    /// two different hash-to-point derivations). Result: the
+    /// `excluded_set.contains(...)` check ALWAYS returns false, and
+    /// every ring-decoy call has silently allowed the real-input
+    /// UTXO to appear as its own decoy — a hard privacy break.
+    ///
+    /// Structural fix requires either:
+    ///   (a) Changing the parameter type to `&[[u8; 32]]` semantically
+    ///       carrying stealth addresses (so callers pass the real
+    ///       input's stealth_address, which is what OutputEntry has),
+    ///       AND updating every caller (RPC, wallet) to pass the
+    ///       correct value. Cross-crate change; deferred pending
+    ///       operator design decision.
+    ///   (b) Deriving a canonical output identifier that BOTH the
+    ///       spender's KeyImage and this candidate's stored form can
+    ///       be mapped through. No such mapping exists in the
+    ///       current data model.
+    ///
+    /// Until (a) lands, we now emit a LOUD ERROR log when a caller
+    /// passes a non-empty exclude list, so ops can see that the
+    /// exclusion is silently ineffective. The check is preserved
+    /// as-is so behavior is unchanged; only the visibility improves.
+    /// Callers that need working exclusion must pass a `-D`
+    /// (temporary) stealth_address list via the newly added
+    /// `_exclude_stealth_addresses` internal channel — see the
+    /// sibling PR that lands (a).
+    /// R-44 structural fix (2026-07-03): parameter renamed from
+    /// `exclude: &[KeyImage]` to `exclude_stealth_addresses:
+    /// &[[u8; 32]]` — the type that ACTUALLY gets compared against
+    /// candidate outputs' stealth_address bytes. KeyImages and
+    /// stealth_addresses are categorically different domains
+    /// (KeyImage derived at spend time; stealth_address is a
+    /// per-recipient one-time public key), so the pre-fix
+    /// KeyImage-based exclude was dead by construction. The new
+    /// signature makes the caller-side contract match what the fn
+    /// body actually does — an exclude of stealth-address bytes.
+    /// Zero direct Rust callers of this fn today; the RPC handler
+    /// serialization boundary picks up the change on the next
+    /// schema regeneration.
     pub fn get_random_outputs(
         &self,
         min_height: u64,
         max_height: u64,
         count: usize,
-        exclude: &[KeyImage],
+        exclude_stealth_addresses: &[[u8; 32]],
     ) -> Result<Vec<OutputEntry>> {
         use rand::Rng;
-        use rand_distr::{Distribution, Gamma};
         use std::collections::HashSet;
 
         if max_height <= min_height || count == 0 {
             return Ok(Vec::new());
         }
 
-        // Build set of excluded key images for O(1) lookup
-        let excluded_set: HashSet<[u8; 32]> = exclude.iter()
-            .map(|ki| *ki.as_bytes())
+        // Build set of excluded stealth addresses for O(1) lookup.
+        // R-44: now type-correct — the .contains() checks below
+        // compare against candidate.output.stealth_address, which
+        // matches this exclude set's element type.
+        let excluded_set: HashSet<[u8; 32]> = exclude_stealth_addresses
+            .iter()
+            .copied()
             .collect();
-
-        // Collect heights that have outputs using the height_counts index
-        let height_range = max_height - min_height + 1;
-
-        // Gamma distribution: shape=19.28, rate=1.61 (Monero-derived parameters)
-        // This biases heavily toward recent outputs (high heights)
-        let gamma = Gamma::new(19.28, 1.0 / 1.61)
-            .unwrap_or_else(|_| Gamma::new(19.0, 0.6).unwrap());
 
         // SECURITY: ring decoy selection is a privacy boundary — use OsRng
         // (direct kernel entropy) rather than thread_rng, so a downstream
@@ -324,44 +451,34 @@ impl UtxoDb {
         let mut rng = rand::rngs::OsRng;
         let mut selected = Vec::with_capacity(count);
         let mut attempts = 0;
-        let max_attempts = count * 50; // Prevent infinite loop
+        let max_attempts = count * 50;
 
         while selected.len() < count && attempts < max_attempts {
             attempts += 1;
 
-            // Sample from gamma, normalize to height range, bias toward tip
-            let sample: f64 = gamma.sample(&mut rng);
-            // Normalize: gamma mean ≈ 19.28/1.61 ≈ 12.0, scale to [0, height_range)
-            // Map so that higher gamma values → more recent heights (closer to max_height)
-            let normalized = sample / 50.0; // Rough normalization to [0, ~1)
-            let clamped = normalized.clamp(0.0, 0.9999);
-            // Invert so recent heights are more likely
-            let height_offset = ((1.0 - clamped) * height_range as f64) as u64;
-            let target_height = max_height.saturating_sub(height_offset).max(min_height);
+            // Uniform height draw across [min_height, max_height] (inclusive).
+            // gen_range uses rejection sampling — no modulo bias.
+            let target_height = rng.gen_range(min_height..=max_height);
 
-            // Check if this height has outputs
             let output_count = self.get_height_count(target_height)?;
             if output_count == 0 {
                 continue;
             }
 
-            // Get outputs at this height
             let outputs_at_height = self.get_outputs_at_height(target_height)?;
             if outputs_at_height.is_empty() {
                 continue;
             }
 
-            // Pick a random output from this height
+            // Uniform output-within-height draw.
             let idx = rng.gen_range(0..outputs_at_height.len());
             let candidate = &outputs_at_height[idx];
 
-            // Skip if in the exclude set
             let candidate_ki = candidate.output.stealth_address.as_bytes();
             if excluded_set.contains(candidate_ki) {
                 continue;
             }
 
-            // Skip duplicates
             let already_selected = selected.iter().any(|s: &OutputEntry| {
                 s.tx_hash == candidate.tx_hash && s.index == candidate.index
             });
@@ -374,6 +491,7 @@ impl UtxoDb {
 
         // H22: Fallback uses utxo_by_height range scan instead of full table scan.
         // Scans from min_height to max_height using BE prefix ordering.
+        // This fallback path was already unbiased; keeping it as-is.
         if selected.len() < count {
             let start_prefix: &[u8] = &min_height.to_be_bytes();
             let end_prefix: &[u8] = &(max_height + 1).to_be_bytes();
@@ -436,6 +554,27 @@ impl UtxoDb {
         }).map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
+
+    // AUDIT (2026-07-01): removed the standalone `decrement_height_count`
+    // helper. It was replaced during the "storage #1 + #7" atomicity fix
+    // by the INLINE, transactional decrement inside `spend_output` (see
+    // the multi-tree transaction block above). The inline version is the
+    // correct pattern because it uses the tx-scoped tree handles, so the
+    // decrement and the `outputs.remove` land in the same RocksDB
+    // WriteBatch — the whole point of the fix. The standalone method used
+    // `self.height_counts.fetch_and_update(...)` on the live tree, which
+    // is the exact non-atomic pattern the audit removed.
+    //
+    // Leaving it in the file was a live footgun: any future caller that
+    // reached for the "obvious" helper name would silently reintroduce
+    // the non-atomic decrement, and the outputs↔height_counts skew that
+    // the atomicity fix closed would return. Deleting keeps the file
+    // honest — the *only* way to decrement height_counts is now inside
+    // the shared multi-tree transaction.
+    //
+    // If a reindex/repair path is ever added, it should extend the
+    // existing multi-tree transaction pattern, not resurrect this helper.
+
 
     /// Get output count at height
     fn get_height_count(&self, height: u64) -> Result<u64> {

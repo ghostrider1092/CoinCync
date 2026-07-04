@@ -251,7 +251,25 @@ pub const MAX_MEMPOOL_BYTES: usize = 300 * 1024 * 1024;
 pub const MAX_MEMPOOL_TXS: usize = 100_000;
 
 /// How many blocks after which a mempool tx expires.
-pub const TX_EXPIRY_BLOCKS: u64 = 500;
+///
+/// AUDIT (2026-07-02): value changed from 500 to 288 to align with the
+/// value actually used by the live code path. The mempool's
+/// `expire_old_transactions` had been shadowing this public constant
+/// with a local `const TX_EXPIRY_BLOCKS: u64 = 288;` (mempool.rs L284)
+/// carrying the comment "~9.6 hours at 120s blocks" — 288 * 120 =
+/// 34,560s = 9.6h, which matches. The 500 value would have been
+/// 60,000s = 16.67h, which does not match any documented budget.
+/// wallet/balance.rs L51 and L64 also reference "mempool's
+/// TX_EXPIRY_BLOCKS (288)" in comments, so 288 is the value the wider
+/// codebase already assumes. Aligning the public constant to reality
+/// removes a live footgun: any future caller that reaches for the
+/// "obvious" public constant would otherwise get the wrong value and
+/// silently disagree with the mempool's actual behavior. Mempool now
+/// imports this constant instead of shadowing.
+///
+/// Not a consensus rule (mempool state is node-local, not chained), so
+/// no hard-fork implication.
+pub const TX_EXPIRY_BLOCKS: u64 = 288;
 
 // =============================================================================
 // P2P Configuration
@@ -1016,6 +1034,29 @@ const _: () = assert!(FEE_BURN_CONGESTED_PERCENT >= FEE_BURN_NORMAL_PERCENT,
 const _: () = assert!(
     FEE_PROTOCOL_NORMAL_PERCENT == 0 && FEE_PROTOCOL_CONGESTED_PERCENT == 0,
     "UNCONSTITUTIONAL: Article II / Article XVI / Right XIV — no third fee destination; only miner + burn permitted"
+);
+
+// AUDIT (2026-07-01): the miner share must be a valid percentage.
+// `distribute_fee` computes `fee * miner_pct / 100` in u128 then narrows
+// to u64. If `miner_pct` exceeded 100, the narrow could produce a value
+// > `fee` and `let burned = fee - to_miner` would underflow. The
+// runtime `.min(fee)` in `distribute_fee` catches this, but a
+// compile-time bound closes the loop and prevents anyone editing this
+// file from silently breaking the invariant.
+const _: () = assert!(
+    FEE_MINER_NORMAL_PERCENT <= 100 && FEE_MINER_CONGESTED_PERCENT <= 100,
+    "FEE_MINER_*_PERCENT constants must be valid percentages (<= 100); \
+     otherwise distribute_fee's u128->u64 narrow can produce to_miner > fee \
+     and the burn calculation underflows"
+);
+const _: () = assert!(
+    FEE_MINER_NORMAL_PERCENT + FEE_BURN_NORMAL_PERCENT == 100,
+    "FEE_MINER_NORMAL_PERCENT + FEE_BURN_NORMAL_PERCENT must equal 100 — \
+     any gap goes to protocol which the previous assert forbids"
+);
+const _: () = assert!(
+    FEE_MINER_CONGESTED_PERCENT + FEE_BURN_CONGESTED_PERCENT == 100,
+    "FEE_MINER_CONGESTED_PERCENT + FEE_BURN_CONGESTED_PERCENT must equal 100"
 );
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -82,11 +82,27 @@ impl KeyDb {
         })
     }
 
-    /// Store encrypted spend key for epoch
+    /// Store encrypted spend key for epoch.
+    ///
+    /// AUDIT (R-37 fix, 2026-07-03): pre-fix code did NOT flush after
+    /// the insert, so a wallet-daemon crash (or an OS power loss) in
+    /// the ~seconds-scale RocksDB write-buffer window between the
+    /// insert and the next natural flush would LOSE THE SPEND KEY.
+    /// Without a backup, that means the wallet becomes unspendable
+    /// for that epoch — funds locked forever. For wallet-critical
+    /// writes we accept the flush latency (single fsync per key
+    /// rotation is a few ms, and rotations are rare) in exchange for
+    /// durability.
     pub fn store_spend_key(&self, epoch: u64, encrypted: &EncryptedKey) -> Result<()> {
         let data = serialize(encrypted)?;
         self.spend_keys.insert(&epoch.to_be_bytes(), data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        // R-37: force durability before returning — the caller
+        // treats this fn as "the key is safely on disk".
+        self.spend_keys.flush()
+            .map_err(|e| Error::DatabaseError(format!(
+                "R-37: spend_key flush failed at epoch {}: {}", epoch, e
+            )))?;
         Ok(())
     }
 
@@ -200,12 +216,40 @@ impl KeyDb {
         }
     }
 
-    /// Delete keys for epoch (for key rotation/deletion)
+    /// Delete keys for epoch (for key rotation/deletion).
+    ///
+    /// AUDIT (R-38 fix, 2026-07-03): pre-fix code did the two removes
+    /// as separate operations. A crash between the spend_key remove
+    /// and the view_key remove left the DB with a view_key whose
+    /// spend_key had been deleted — the wallet could see incoming
+    /// funds but not spend them, and the state would look permanent
+    /// on next open. Now we bundle both removes into a single
+    /// RocksDB WriteBatch via the shim's Transactional trait so the
+    /// two operations land together or not at all.
+    ///
+    /// Also flushes after commit to ensure the delete is durable
+    /// before the caller treats the epoch as "gone" — key deletion
+    /// is a security-visible action (secure erasure of an ex-active
+    /// key), so any window where the key resurrects after a crash is
+    /// a security regression.
     pub fn delete_epoch_keys(&self, epoch: u64) -> Result<()> {
-        self.spend_keys.remove(&epoch.to_be_bytes())
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.view_keys.remove(&epoch.to_be_bytes())
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        use crate::db::shim::transaction::Transactional;
+
+        let epoch_key = epoch.to_be_bytes();
+        let trees_slice: &[&Tree] = &[&self.spend_keys, &self.view_keys];
+        trees_slice.transaction(|tx| {
+            tx[0].remove(&epoch_key[..])?;
+            tx[1].remove(&epoch_key[..])?;
+            Ok(())
+        }).map_err(|e| Error::DatabaseError(format!(
+            "R-38: atomic delete_epoch_keys failed at epoch {}: {:?}", epoch, e
+        )))?;
+        // Force fsync: an unerased ex-active key is a security
+        // regression, so we accept the flush latency.
+        self.spend_keys.flush()
+            .map_err(|e| Error::DatabaseError(format!(
+                "R-38: flush after delete_epoch_keys failed at epoch {}: {}", epoch, e
+            )))?;
         Ok(())
     }
 

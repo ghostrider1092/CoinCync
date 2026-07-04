@@ -244,9 +244,16 @@ pub struct Mempool {
 }
 
 impl Mempool {
-    /// Create a new mempool with default max size (100 MB)
+    /// Create a new mempool with default max size.
+    ///
+    /// Default sourced from `constants::MAX_MEMPOOL_BYTES` (300 MB) for
+    /// Bitcoin Core parity (DEFAULT_MAX_MEMPOOL_SIZE = 300 MB). Prior to
+    /// this fix, `Mempool::new` hardcoded 100 MB which silently diverged
+    /// from `constants::MAX_MEMPOOL_BYTES` — the constant was authoritative
+    /// in name only. Reference: Bitcoin Core src/policy/policy.h
+    /// `DEFAULT_MAX_MEMPOOL_SIZE_MB`.
     pub fn new() -> Self {
-        Self::with_max_size(100 * 1024 * 1024)
+        Self::with_max_size(crate::constants::MAX_MEMPOOL_BYTES)
     }
 
     /// Create a new mempool with specified max size
@@ -273,8 +280,17 @@ impl Mempool {
     /// TX_EXPIRY_BLOCKS blocks (~9.6 hours at 120s blocks). This prevents
     /// the mempool from accumulating stale transactions that will never
     /// be mined (e.g., fee too low for current conditions).
+    ///
+    /// AUDIT (2026-07-02): switched from a local `const TX_EXPIRY_BLOCKS
+    /// = 288` shadow to `crate::constants::TX_EXPIRY_BLOCKS`. The public
+    /// constant had been declared as 500 (in constants.rs L182) while
+    /// this local shadow used 288, so the wider codebase (see
+    /// wallet/balance.rs L51 and L64) had learned to reference "the
+    /// mempool's TX_EXPIRY_BLOCKS (288)" from *this* file's local
+    /// value — the public constant was orphaned and its value was a
+    /// lie. Public constant is now aligned to 288 and imported here.
     fn expire_old_transactions(&mut self, current_height: u64) {
-        const TX_EXPIRY_BLOCKS: u64 = 288; // ~9.6 hours at 120s blocks
+        use crate::constants::TX_EXPIRY_BLOCKS;
 
         let expired: Vec<Hash> = self.transactions.iter()
             .filter(|(_, entry)| {
@@ -318,22 +334,33 @@ impl Mempool {
         err
     }
 
-    /// Add a transaction to the mempool with FULL crypto verification.
-    /// This is the only public path; production code must use this.
-    ///
-    /// Phase A8 (audit fix): Crypto verification was extracted into a private
-    /// helper `verify_crypto_for_admission` so a `#[cfg(test)] add_skip_crypto`
-    /// variant can exercise the same admission/RBF/key-image-conflict path
-    /// with garbage range proofs. This is a deliberate, narrow test escape
-    /// Alias for `add` — kept because `rpc/server.rs` and `rpc/node_api.rs`
-    /// (ported from 2.0) call `mempool.accept(tx)`.
+    /// Alias for [`add`](Self::add) — kept because `rpc/server.rs` and
+    /// `rpc/node_api.rs` (ported from 2.0) call `mempool.accept(tx)`.
     #[inline]
     pub fn accept(&mut self, tx: Transaction) -> Result<Hash> {
         self.add(tx)
     }
 
-    /// hatch — not a production code path. The escape hatch is gated by
-    /// `#[cfg(test)]` so it cannot be called from any non-test compilation.
+    /// Add a transaction to the mempool with FULL crypto verification.
+    /// This is the only public admission path; production code must use this
+    /// (or the `accept` alias above).
+    ///
+    /// Phase A8 (audit fix): Crypto verification was extracted into a
+    /// private helper `verify_crypto_for_admission` so a
+    /// `#[cfg(any(test, feature = "test-utilities"))] add_skip_signatures`
+    /// variant can exercise the same admission / RBF / key-image-conflict
+    /// path with garbage range proofs. That is a deliberate, narrow test
+    /// escape hatch — not a production code path. It is gated by
+    /// `#[cfg(any(test, feature = "test-utilities"))]` so it cannot be
+    /// called from any non-test compilation.
+    ///
+    /// AUDIT (2026-07-01): rewrote the docblock. Previously the doc
+    /// comment for `add` had been split across the `accept` alias
+    /// declaration — the "Alias for add" sentence had been pasted mid-
+    /// paragraph, orphaning the "escape hatch — not a production code
+    /// path" clause on top of `add`'s signature (starting with the word
+    /// "hatch"). No behavior change; the two functions and their
+    /// contracts are unchanged. Only the prose was untangled.
     pub fn add(&mut self, tx: Transaction) -> Result<Hash> {
         let tx_hash = tx.hash();
 
@@ -562,8 +589,36 @@ impl Mempool {
             self.evict_lowest_fee();
             eviction_attempts += 1;
 
-            // If eviction didn't reduce size or we hit the limit, stop
+            // If eviction didn't reduce size or we hit the limit, stop.
+            // Log loudly so operators see why admission stalled — silent
+            // rejection masked the cause in prior incidents. Throttled
+            // to once per 5 seconds to avoid disk-fill during sustained
+            // low-fee floods (audit-fix: previously could emit 10k+
+            // WARN/s). Reference: Bitcoin Core CTxMemPool::TrimToSize
+            // logs at LogPrintf level WITHOUT per-attempt throttling
+            // because their log facility has built-in deduplication.
             if self.current_size >= prev_size || eviction_attempts >= MAX_EVICTION_ATTEMPTS {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static LAST_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
+                const WARN_THROTTLE_SECS: u64 = 5;
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let last = LAST_WARN_UNIX.load(Ordering::Relaxed);
+                if now_secs.saturating_sub(last) >= WARN_THROTTLE_SECS {
+                    LAST_WARN_UNIX.store(now_secs, Ordering::Relaxed);
+                    tracing::warn!(
+                        target: "mempool",
+                        "Admission rejected: eviction exhausted after {} attempts. \
+                         current_size={} max_size={} incoming_tx_size={}. \
+                         Either incoming tx fee-rate is below the floor or all \
+                         resident entries are equal-or-higher fee. \
+                         (Log throttled to once per {}s.)",
+                        eviction_attempts, self.current_size, self.max_size, size,
+                        WARN_THROTTLE_SECS,
+                    );
+                }
                 let err = Error::MempoolFull;
                 return Err(self.reject(tx_hash, err));
             }
@@ -851,9 +906,14 @@ impl Mempool {
             };
         }
 
-        // Collect all fee_per_byte values, sorted ascending (BTreeMap order)
-        let mut fees: Vec<u64> = self.by_fee.keys().map(|(fpb, _)| *fpb).collect();
-        fees.sort_unstable();
+        // Collect all fee_per_byte values, ALREADY sorted ascending.
+        // `by_fee` is BTreeMap<(fee_per_byte, Hash), _>; key iteration
+        // visits in tuple-ascending order, which is (fee_per_byte asc,
+        // tied by hash asc). Extracting just fee_per_byte preserves the
+        // ascending order. No `sort_unstable()` needed — that was an
+        // O(N) no-op the audit caught. Reference: std::collections
+        // BTreeMap docs guarantee sorted iteration.
+        let fees: Vec<u64> = self.by_fee.keys().map(|(fpb, _)| *fpb).collect();
 
         let n = fees.len();
         let percentile = |pct: usize| -> u64 {
@@ -986,8 +1046,31 @@ impl Mempool {
         let data = borsh::to_vec(&txs)
             .map_err(|e| Error::SerializationError(e.to_string()))?;
         let path = data_dir.join("mempool.dat");
-        std::fs::write(&path, &data)
-            .map_err(|e| Error::DatabaseError(format!("Failed to write mempool.dat: {}", e)))?;
+
+        // Atomic write: write to .tmp first, then rename onto the target
+        // path. A crash mid-write would leave a partial .tmp file (which
+        // we ignore on next startup because we only read .dat), preserving
+        // the previous good mempool.dat. Reference: Bitcoin Core's
+        // `DumpMempool` uses the same temp-file + rename pattern via
+        // `RenameOver`. Direct `fs::write` (the pre-fix behavior) would
+        // corrupt mempool.dat on power loss, then line 1042 (silent file
+        // removal on parse failure) would drop ALL pending txs on
+        // restart — confirmed transaction loss for users.
+        let tmp_path = path.with_extension("dat.tmp");
+        std::fs::write(&tmp_path, &data)
+            .map_err(|e| Error::DatabaseError(format!(
+                "Failed to write mempool.dat.tmp: {}", e
+            )))?;
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|e| {
+                // Best-effort cleanup of the stranded temp file. We do
+                // NOT propagate this error — the original rename error
+                // is the meaningful one for the caller.
+                let _ = std::fs::remove_file(&tmp_path);
+                Error::DatabaseError(format!(
+                    "Failed to atomically rename mempool.dat.tmp \u{2192} mempool.dat: {}", e
+                ))
+            })?;
         Ok(count)
     }
 
@@ -1127,6 +1210,24 @@ impl SharedMempool {
         tx: Transaction,
         chain: &crate::chain::SharedBlockchain,
     ) -> Result<Hash> {
+        // Audit MEDIUM #26: cheap precheck FIRST, expensive chain
+        // validator second. Trivially-invalid txs (coinbase-shaped from
+        // network, oversized, missing privacy fields, zero stealth
+        // address) used to walk the full UTXO set + height-gated rules
+        // before being rejected — wasteful CPU on attacker-controlled
+        // garbage. The precheck is the same structural+privacy gate
+        // that runs in Mempool::preflight_check but inlined here so we
+        // don't need to acquire the mempool write lock first. Reference:
+        // Bitcoin Core's `AcceptToMemoryPool` orders `CheckTransaction`
+        // (structural) before `Consensus::CheckTxInputs` (UTXO walk).
+        if tx.is_coinbase() {
+            return Err(Error::InvalidMessage(
+                "coinbase transactions cannot enter mempool".into(),
+            ));
+        }
+        crate::consensus::validate_transaction_basic(&tx)?;
+        crate::consensus::privacy_policy::check_tx_privacy(&tx)?;
+
         // 2026-06-07: run the FULL chain validator at submission time.
         // The previous code only checked key-image-spent — it missed
         // every height-gated rule (coinbase maturity, ring member

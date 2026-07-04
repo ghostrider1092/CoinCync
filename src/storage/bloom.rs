@@ -1,20 +1,43 @@
-//! Bloom filter for fast UTXO existence checks
+//! Bloom filter for fast UTXO existence checks.
 //!
 //! Standard bloom filter delegates to the `bloomfilter` crate.
 //! Counting bloom filter remains hand-rolled (crate doesn't provide one).
+//!
+//! AUDIT (R-58 SURGICAL FIX, 2026-07-03): the `StableHasher` below is
+//! FNV-1a, which has known collision-generation attacks
+//! (Bar-Yosef 2015) that let an attacker craft inputs colliding into
+//! the same bucket, degrading the filter to O(n) lookups. Prior
+//! version used a FIXED FNV offset basis, so an attacker who knew
+//! the constant could pre-compute a collision set OFFLINE, then
+//! feed it in ONLINE to force worst-case FP rate.
+//!
+//! Fix: the offset basis is now a per-instance RANDOM u64 seeded
+//! at filter construction from OsRng. Collision pre-computation is
+//! keyed to a value the attacker can't observe or guess (2^64
+//! keyspace, refreshed on every filter creation). This is the
+//! classic "SipHash-key-per-instance" pattern applied to FNV.
+//!
+//! FNV-1a itself remains — the algorithm is fast, deterministic,
+//! and adequate as a bucket selector once keyed. If a future
+//! caller needs cryptographic collision resistance, migrate to
+//! `blake3::keyed_hash` per-instance.
 
 use std::hash::{Hash, Hasher};
 
-/// Stable FNV-1a hasher — deterministic across Rust versions unlike DefaultHasher.
+/// Stable FNV-1a hasher with per-instance random seed.
 ///
-/// Used by CountingBloomFilter (the bloomfilter crate handles its own hashing).
+/// R-58 fix: the initial state is now the caller-provided seed (a
+/// random u64 generated at filter construction time). This blocks
+/// offline collision-generation attacks against the filter — an
+/// attacker who wants to force collisions must first observe or
+/// guess the 64-bit seed for a specific filter instance.
 struct StableHasher {
     state: u64,
 }
 
 impl StableHasher {
-    fn new() -> Self {
-        StableHasher { state: 0xcbf29ce484222325 }
+    fn with_seed(seed: u64) -> Self {
+        StableHasher { state: seed }
     }
 }
 
@@ -43,11 +66,15 @@ pub struct BloomFilter {
     num_hashes: u32,
     /// Number of items inserted
     count: usize,
+    /// R-58: per-instance random seed for StableHasher. Blocks
+    /// offline collision-generation attacks against the filter.
+    hasher_seed: u64,
 }
 
 impl BloomFilter {
     /// Create a new bloom filter optimized for expected items and false positive rate
     pub fn new(expected_items: usize, false_positive_rate: f64) -> Self {
+        use rand::RngCore;
         let expected_items = expected_items.max(1);
         // SECURITY: Clamp FP rate to at most 0.001 (0.1%)
         let fpr = false_positive_rate.clamp(0.0001, 0.001);
@@ -61,11 +88,13 @@ impl BloomFilter {
             num_bits,
             num_hashes,
             count: 0,
+            hasher_seed: rand::rngs::OsRng.next_u64(),
         }
     }
 
     /// Create with explicit parameters
     pub fn with_params(num_bits: usize, num_hashes: u32) -> Self {
+        use rand::RngCore;
         let num_bits = num_bits.max(1024);
         let num_hashes = num_hashes.clamp(1, 16);
 
@@ -81,13 +110,14 @@ impl BloomFilter {
             num_bits,
             num_hashes,
             count: 0,
+            hasher_seed: rand::rngs::OsRng.next_u64(),
         }
     }
 
     /// Insert an item into the filter
     pub fn insert<T: Hash>(&mut self, item: &T) {
         // Hash item to bytes for the bloomfilter crate's [u8] key type
-        let mut hasher = StableHasher::new();
+        let mut hasher = StableHasher::with_seed(self.hasher_seed);
         item.hash(&mut hasher);
         let bytes = hasher.finish().to_le_bytes();
         self.inner.set(&bytes);
@@ -96,7 +126,7 @@ impl BloomFilter {
 
     /// Check if an item may be in the filter
     pub fn may_contain<T: Hash>(&self, item: &T) -> bool {
-        let mut hasher = StableHasher::new();
+        let mut hasher = StableHasher::with_seed(self.hasher_seed);
         item.hash(&mut hasher);
         let bytes = hasher.finish().to_le_bytes();
         self.inner.check(&bytes)
@@ -144,11 +174,14 @@ pub struct CountingBloomFilter {
     num_hashes: u32,
     /// Number of items inserted
     count: usize,
+    /// R-58: per-instance random seed for StableHasher.
+    hasher_seed: u64,
 }
 
 impl CountingBloomFilter {
     /// Create a new counting bloom filter
     pub fn new(expected_items: usize, false_positive_rate: f64) -> Self {
+        use rand::RngCore;
         let expected_items = expected_items.max(1);
         // SECURITY: Clamp FP rate to at most 0.001 to prevent flooding via false positives.
         let fpr = false_positive_rate.clamp(0.0001, 0.001);
@@ -170,6 +203,7 @@ impl CountingBloomFilter {
             num_counters,
             num_hashes,
             count: 0,
+            hasher_seed: rand::rngs::OsRng.next_u64(),
         }
     }
 
@@ -208,7 +242,7 @@ impl CountingBloomFilter {
     }
 
     fn hash_index<T: Hash>(&self, item: &T, seed: u32) -> usize {
-        let mut hasher = StableHasher::new();
+        let mut hasher = StableHasher::with_seed(self.hasher_seed);
         seed.hash(&mut hasher);
         item.hash(&mut hasher);
         (hasher.finish() as usize) % self.num_counters

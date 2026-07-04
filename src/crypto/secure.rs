@@ -139,6 +139,23 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// across different platforms and compilers.
 ///
 /// Note: Length comparison is NOT constant-time (lengths are typically public).
+///
+/// AUDIT (R-25 note, 2026-07-02): the `subtle` crate provides
+/// `ConstantTimeGreater` and `ConstantTimeLess` traits, but only on
+/// individual scalar types (u8/u32/…), NOT on `&[u8]`. There is no
+/// upstream ct-cmp for slice arguments — every consumer either
+/// hand-rolls the byte loop the way we do here, or uses only
+/// `ConstantTimeEq` (which returns `Choice`, not `Ordering`). Since
+/// this callsite needs a three-way `Ordering` result (used by
+/// canonicity checks in `PeerScalar::decode`), we hand-roll the
+/// two-directional per-byte compare and reduce with `Choice`
+/// primitives. This has been re-verified against the subtle-crate
+/// contract 2026-07-02.
+///
+/// AUDIT (R-26 historical, 2026-07-02): the prior `2*gt + (1 - lt)`
+/// formula was buggy — see the block comment at ~L186. The current
+/// `1 + gt - lt` mapping is verified against all three reachable
+/// states in the `ct_cmp_returns_correct_ordering` test below.
 #[inline(never)]
 pub fn ct_cmp(a: &[u8], b: &[u8]) -> Ordering {
     use subtle::{Choice, ConditionallySelectable};
@@ -176,16 +193,27 @@ pub fn ct_cmp(a: &[u8], b: &[u8]) -> Ordering {
         undecided = undecided & bytes_equal;
     }
 
-    // Convert Choice values to Ordering
-    // SECURITY: Use array lookup to avoid branches (constant-time)
-    // Index: gt=1,lt=0 => 2 (Greater); gt=0,lt=1 => 0 (Less); gt=0,lt=0 => 1 (Equal)
+    // Convert Choice values to Ordering.
+    //
+    // SECURITY: Use array lookup to avoid branches (constant-time). Only three
+    // (gt, lt) states are reachable — (0,0) Equal, (0,1) Less, (1,0) Greater —
+    // because per-byte `x_lt_y_bit & x_gt_y_bit` is always 0 (a byte cannot be
+    // both less than and greater than another byte).
+    //
+    // AUDIT (2026-07-01): the previous formula `2*gt + (1 - lt)` produced
+    // idx=3 for the Greater case (2*1 + 1 = 3), and only worked because a
+    // trailing `.min(2)` silently clamped the out-of-range index. That is a
+    // correctness bug masked by a bandaid clamp. Rewrote as `1 + gt - lt`,
+    // which maps the three reachable states directly to {0, 1, 2} without
+    // any clamp:
+    //   (0,0) → 1 → Equal
+    //   (0,1) → 0 → Less
+    //   (1,0) → 2 → Greater
     let orderings = [Ordering::Less, Ordering::Equal, Ordering::Greater];
-    let gt_val: u8 = gt.unwrap_u8();
-    let lt_val: u8 = lt.unwrap_u8();
-    // Compute index: 2*gt + (1 - lt) = 2*gt + 1 - lt (when gt and lt are 0 or 1)
-    // gt=0,lt=0 => 1 (Equal); gt=0,lt=1 => 0 (Less); gt=1,lt=0 => 2 (Greater)
-    let idx = ((gt_val as usize) << 1) + (1 - lt_val as usize);
-    orderings[idx.min(2)]
+    let gt_val = gt.unwrap_u8() as usize;
+    let lt_val = lt.unwrap_u8() as usize;
+    let idx = 1 + gt_val - lt_val;
+    orderings[idx]
 }
 
 /// Constant-time selection for bytes

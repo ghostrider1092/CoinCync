@@ -485,17 +485,35 @@ impl DandelionRouter {
         now + capped.max(1) // minimum 1 second
     }
 
-    /// Enforce stempool size limit by evicting oldest entries.
+    /// Enforce stempool size limit.
     ///
-    /// FIX: Single O(n) pass to find oldest, then remove — was O(n²) from
-    /// calling min_by_key() inside a while loop.
+    /// P5-D2 SURGICAL FIX (2026-07-03): eviction now prefers
+    /// PEER-SOURCED entries (source.is_some()) over LOCAL entries
+    /// (source.is_none()). Pre-fix code evicted strictly by
+    /// added_at — the OLDEST entry first — which meant an
+    /// attacker who floods the stempool with fresh fake txs
+    /// evicts OUR OWN local txs (which are older by definition)
+    /// before their attack txs. Our own txs then never fluff and
+    /// silently disappear.
+    ///
+    /// New policy: (1) evict oldest peer-sourced entry first;
+    /// (2) only fall back to evicting local entries if no peer
+    /// entries exist. This means an attacker's flood eats their
+    /// own oldest txs before touching ours.
     fn enforce_stempool_limit(&mut self) {
         while self.stempool.len() >= MAX_STEMPOOL {
-            // Single O(n) scan to find the oldest entry
-            let oldest_hash = self.stempool.iter()
+            // Prefer evicting a peer-sourced entry.
+            let victim = self.stempool.iter()
+                .filter(|(_, e)| e.source.is_some())
                 .min_by_key(|(_, e)| e.added_at)
-                .map(|(h, _)| *h);
-            match oldest_hash {
+                .map(|(h, _)| *h)
+                // Fall back to local entries only if the stempool
+                // is entirely local (unusual — means only our own
+                // txs are in flight).
+                .or_else(|| self.stempool.iter()
+                    .min_by_key(|(_, e)| e.added_at)
+                    .map(|(h, _)| *h));
+            match victim {
                 Some(h) => { self.stempool.remove(&h); }
                 None => break,
             }

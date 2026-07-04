@@ -24,21 +24,39 @@ pub fn generate_peer_id() -> PeerId {
     id
 }
 
-/// Peer connection state
+/// Peer connection state.
+///
+/// AUDIT (2026-07-02): removed 3 dead variants (`Handshaking`,
+/// `Disconnecting`, `Disconnected`). Grep-verified across the entire
+/// repo (src/ + tests/): zero writes and zero reads for any of them.
+/// The observed lifecycle is a strict 3-state progression:
+///
+///   Connecting → VersionReceived → Connected
+///
+/// with `Connecting` set at `network/peer.rs:108`, `VersionReceived`
+/// at `network/node.rs:3091` (handle_version), and `Connected` at
+/// `network/node.rs:3132` (handle_verack). "Handshaking" and
+/// "Disconnecting" appear to have been part of an early state-machine
+/// sketch that was never wired up — a common code-history shape.
+/// "Disconnected" reflected a not-implemented graceful-shutdown path;
+/// today, peer teardown drops the peer struct directly rather than
+/// transitioning through a Disconnected state.
+///
+/// The removal is safe: `PeerState` is not Borsh-persisted (grep
+/// confirms no `BorshSerialize`/`BorshDeserialize` derive on the
+/// enum), so the discriminant renumbering has no on-disk-format
+/// implication. If a future feature needs a Disconnecting handshake
+/// (e.g. Noise-level goodbye frame) or a Disconnected-with-reason
+/// terminal state, those variants should be added back with real
+/// write/read sites at the same time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerState {
-    /// Connection pending
+    /// Connection pending (TCP not yet up).
     Connecting,
-    /// Handshake in progress
-    Handshaking,
-    /// Version message received, awaiting Verack
+    /// Version message received, awaiting Verack.
     VersionReceived,
-    /// Connected and ready
+    /// Connected and ready.
     Connected,
-    /// Disconnecting
-    Disconnecting,
-    /// Disconnected
-    Disconnected,
 }
 
 /// Peer information

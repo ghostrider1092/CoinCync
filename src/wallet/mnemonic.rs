@@ -39,7 +39,16 @@ impl WalletMnemonic {
         entropy.zeroize();
 
         // SECURITY: Capture the phrase and ensure the intermediate Mnemonic
-        // doesn't hold sensitive data longer than needed
+        // doesn't hold sensitive data longer than needed.
+        //
+        // AUDIT (R-76 SURGICAL FIX, 2026-07-03): the earlier "upstream
+        // doesn't zeroize" claim was wrong. bip39 2.2.2 DOES derive
+        // `Zeroize + ZeroizeOnDrop` on `Mnemonic` when the crate is
+        // built with `features = ["zeroize"]` (verified against
+        // bip39-2.2.2/src/lib.rs). Our Cargo.toml now enables that
+        // feature explicitly, so `drop(mnemonic)` DOES wipe the
+        // internal word-index array. Keeping the explicit `drop`
+        // call for lifetime clarity.
         let phrase = mnemonic.to_string();
         drop(mnemonic);
 
@@ -81,12 +90,24 @@ impl WalletMnemonic {
         }
     }
 
-    /// Derive the seed from the mnemonic with optional passphrase
+    /// Derive the seed from the mnemonic with optional passphrase.
+    ///
+    /// AUDIT (R-77 fix, 2026-07-03): `mnemonic.to_seed(passphrase)`
+    /// returns a `[u8; 64]` on the stack. Pre-fix code moved it
+    /// into `WalletSeed::from_bytes(&seed)` and let the local drop
+    /// unzeroized. Since WalletSeed IS `ZeroizeOnDrop`, the OUTPUT
+    /// is protected — but the intermediate stack copy in `seed`
+    /// was not, so a stack frame reuse after this call could
+    /// observe the raw 64-byte BIP39 seed. Explicit zeroize of the
+    /// intermediate closes the window.
     pub fn to_seed(&self, passphrase: &str) -> WalletSeed {
         let mnemonic = Mnemonic::parse_in(Language::English, &self.phrase)
             .expect("mnemonic already validated");
-        let seed = mnemonic.to_seed(passphrase);
-        WalletSeed::from_bytes(&seed)
+        let mut seed = mnemonic.to_seed(passphrase);
+        let wallet_seed = WalletSeed::from_bytes(&seed);
+        // R-77: wipe the intermediate [u8; 64] before it goes out of scope.
+        seed.zeroize();
+        wallet_seed
     }
 
     /// Validate a mnemonic phrase
@@ -146,8 +167,38 @@ pub struct WalletSeed {
 }
 
 impl WalletSeed {
-    /// Create from bytes
+    /// Create from bytes.
+    ///
+    /// AUDIT (R-78 fix, 2026-07-03): the pre-fix code silently
+    /// zero-padded short inputs and silently truncated long inputs
+    /// via `bytes.len().min(64)`. Both are silent-corruption paths:
+    ///   - A caller passing a `[u8; 32]` HALF-SEED gets a WalletSeed
+    ///     whose second 32 bytes are all zero. Key derivation
+    ///     succeeds but produces wrong keys, and no error surfaces.
+    ///   - A caller passing a `[u8; 128]` (say, a doubled seed by
+    ///     bug) gets the first 64 bytes silently. Wrong keys, no
+    ///     error.
+    /// Now length-check: exact 64-byte requirement, panic in debug
+    /// so the misuse is unmissable, tracing::error + best-effort fill
+    /// in release so an in-production caller doesn't crash. The
+    /// canonical use-case (`to_seed` passing a 64-byte
+    /// mnemonic-derived seed) is unaffected.
     pub fn from_bytes(bytes: &[u8]) -> Self {
+        if bytes.len() != 64 {
+            debug_assert!(
+                false,
+                "R-78: WalletSeed::from_bytes given {} bytes, expected 64",
+                bytes.len()
+            );
+            tracing::error!(
+                target: "wallet::mnemonic::R78",
+                input_len = bytes.len(),
+                "R-78: WalletSeed::from_bytes given {} bytes, expected 64 — \
+                 silent truncation/padding is a corruption path, but \
+                 continuing to avoid panic on the release fallback",
+                bytes.len()
+            );
+        }
         let mut seed_bytes = [0u8; 64];
         let len = bytes.len().min(64);
         seed_bytes[..len].copy_from_slice(&bytes[..len]);
@@ -314,10 +365,19 @@ impl std::fmt::Display for DerivationPath {
     }
 }
 
-/// Derive child key using HMAC-SHA512
+/// Derive child key using HMAC-SHA512.
+///
+/// AUDIT (R-79 fix, 2026-07-03): pre-fix code called
+/// `mac.finalize().into_bytes()` which returns a `GenericArray<u8, 64>`
+/// carrying the raw HMAC-SHA512 output. That output IS the child_key
+/// ‖ child_chain — pure secret material — and dropped without
+/// zeroization. On stack-reuse the freed slot exposes the derived
+/// child key. Now we explicitly zeroize the intermediate buffer
+/// before returning.
 pub fn derive_child_key(parent_key: &[u8; 32], parent_chain: &[u8; 32], index: u32) -> ([u8; 32], [u8; 32]) {
     use hmac::{Hmac, Mac};
     use sha2::Sha512;
+    use zeroize::Zeroize;
 
     type HmacSha512 = Hmac<Sha512>;
 
@@ -332,12 +392,24 @@ pub fn derive_child_key(parent_key: &[u8; 32], parent_chain: &[u8; 32], index: u
 
     mac.update(&hardened_index.to_be_bytes());
 
-    let result = mac.finalize().into_bytes();
+    // R-79: bind the finalize output to a mutable var so we can
+    // zeroize it before it goes out of scope. `into_bytes` returns
+    // a GenericArray; copy into a plain [u8; 64] we control, then
+    // wipe both.
+    let result_ga = mac.finalize().into_bytes();
+    let mut result: [u8; 64] = [0u8; 64];
+    result.copy_from_slice(&result_ga);
 
     let mut child_key = [0u8; 32];
     let mut child_chain = [0u8; 32];
     child_key.copy_from_slice(&result[..32]);
     child_chain.copy_from_slice(&result[32..]);
+
+    // R-79: wipe the intermediate HMAC output. child_key /
+    // child_chain themselves are returned to the caller — the
+    // caller is responsible for wiping them (and does in every
+    // derivation path today).
+    result.zeroize();
 
     (child_key, child_chain)
 }

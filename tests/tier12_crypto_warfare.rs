@@ -88,7 +88,7 @@ fn attack_pedersen_homomorphism_no_overflow() {
     // that we can verify (some implementations allow max range)
     // What matters is the overall system is sound
     if let Ok(proof) = proof_max {
-        let proof_ref = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+        let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
         let _valid = verify_range_proofs_dispatch(&[c_max], &proof_ref, 0);
         // If it verifies, that's fine — u64::MAX is within [0, 2^64)
         // The attack would be making it verify for a DIFFERENT commitment
@@ -117,7 +117,7 @@ fn attack_bulletproof_only_proves_committed_value() {
     let proof = create_aggregated_range_proof_for_height(
         &[amount], &[bf.clone()], &mut rng, 0
     ).unwrap();
-    let proof_ref = RangeProof::from_bytes(&proof.to_bytes()).unwrap();
+    let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
 
     // Verify with correct commitment — must pass
     assert!(verify_range_proofs_dispatch(&[commit.clone()], &proof_ref, 0));
@@ -240,7 +240,7 @@ fn attack_truncated_range_proof_rejected() {
     let proof = create_aggregated_range_proof_for_height(
         &[amount], &[bf], &mut rng, 0
     ).unwrap();
-    let proof_bytes = proof.to_bytes();
+    let proof_bytes = proof.try_to_bytes().unwrap();
 
     // Try truncating at every 10% interval
     for pct in (10..100).step_by(10) {

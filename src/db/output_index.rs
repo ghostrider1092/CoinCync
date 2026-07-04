@@ -25,6 +25,27 @@ pub struct OutputIndexEntry {
     pub lock_height: Option<u64>,
 }
 
+impl OutputIndexEntry {
+    /// Sanity-check invariants on a deserialized entry. Audit fix: a
+    /// corrupt DB or malformed reorg cannot set `lock_height < height`
+    /// (the output is locked until lock_height — values before creation
+    /// would mean "already-unlocked at birth", undefined semantically).
+    /// If callers see Err here, the entry is corrupt and the ring-
+    /// member lookup must fail closed (reject the spend) rather than
+    /// optimistically accept a bogus output.
+    ///
+    /// Reference: Bitcoin Core's CCoinsViewCache validates each
+    /// deserialized Coin's nHeight + fCoinBase consistency on read.
+    pub fn validate(&self) -> std::result::Result<(), &'static str> {
+        if let Some(lh) = self.lock_height {
+            if lh < self.height {
+                return Err("OutputIndexEntry: lock_height < creation height");
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Persistent output index database
 pub struct OutputIndexDb {
     /// stealth_address_bytes -> OutputIndexEntry
@@ -45,25 +66,56 @@ impl OutputIndexDb {
     /// If the stealth address already exists, the entry is NOT overwritten.
     /// This matches the in-memory stealth_index behavior where old coinbase
     /// outputs sharing the same stealth address keep the oldest entry.
+    ///
+    /// AUDIT (R-42 fix, 2026-07-03): the pre-fix code did
+    /// `contains_key` + branch + `insert` as two separate RocksDB
+    /// calls with no atomicity between them. Two concurrent inserts
+    /// racing on the same `stealth` could both observe "not
+    /// present" and both proceed to insert — the LATER write wins,
+    /// silently violating oldest-wins. In the reorg path where
+    /// `apply_reorg_atomic` pre-reads then inserts, that becomes a
+    /// consensus-visible corruption. Use CAS
+    /// (`compare_and_swap(key, None, Some(data))`) so the observe
+    /// + insert is a single atomic op. CAS returns Ok(Ok(())) on
+    /// success, Ok(Err(_)) on "already exists" (the desired
+    /// oldest-wins outcome), and Err(_) on DB failure. We map
+    /// Ok(Err(_)) to Ok(()) because it's the intended no-op.
     pub fn insert(&self, stealth: &[u8; 32], entry: &OutputIndexEntry) -> Result<()> {
-        // Only insert if not already present (oldest wins)
-        if self.tree.contains_key(stealth)
-            .map_err(|e| Error::DatabaseError(e.to_string()))? {
-            return Ok(());
-        }
-
         let data = serialize(entry)?;
-        self.tree.insert(stealth, data)
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-        Ok(())
+        match self.tree.compare_and_swap(stealth, None as Option<&[u8]>, Some(data.as_slice())) {
+            Ok(Ok(())) => Ok(()),
+            // CAS observed an existing entry — oldest wins, no-op is
+            // the intended outcome.
+            Ok(Err(_)) => Ok(()),
+            Err(e) => Err(Error::DatabaseError(format!(
+                "R-42: CAS insert on output_index failed for stealth {}: {}",
+                hex::encode(stealth), e
+            ))),
+        }
     }
 
-    /// Get an output entry by stealth address
+    /// Get an output entry by stealth address.
+    ///
+    /// Validates invariants on read so corrupt entries fail-closed
+    /// (audit-fix). A corrupt `lock_height < height` would otherwise
+    /// be treated as "always unlocked", letting an attacker spend a
+    /// time-locked output. Reject corrupt entries by returning Err.
     pub fn get(&self, stealth: &[u8; 32]) -> Result<Option<OutputIndexEntry>> {
         match self.tree.get(stealth) {
             Ok(Some(data)) => {
                 let entry: OutputIndexEntry = deserialize(&data)?;
+                if let Err(reason) = entry.validate() {
+                    tracing::error!(
+                        target: "db::output_index",
+                        "CORRUPT OutputIndexEntry for stealth {}: {} \
+                         (height={}, lock_height={:?}). Rejecting lookup; \
+                         operator should reindex.",
+                        hex::encode(stealth), reason, entry.height, entry.lock_height
+                    );
+                    return Err(Error::DatabaseError(format!(
+                        "corrupt output_index entry: {}", reason
+                    )));
+                }
                 Ok(Some(entry))
             }
             Ok(None) => Ok(None),

@@ -13,6 +13,7 @@ pub mod peer;
 pub mod block_filter;
 pub mod scoring;
 pub mod sync;
+pub mod eviction;
 pub mod dht;
 pub mod noise;
 pub mod protocol;

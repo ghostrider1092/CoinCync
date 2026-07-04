@@ -27,36 +27,97 @@ use super::{Balance, UTXO, KeyEpoch};
 
 use rand::{Rng, RngCore, CryptoRng, seq::SliceRandom};
 
+/// AUDIT (R-105 note, 2026-07-03): `COINCYNC_WALLET_ALLOW_WEAK_PRIVACY`
+/// is an ENVIRONMENT VARIABLE that disables the strict-privacy policy
+/// GLOBALLY for the whole process — the wallet daemon starts under a
+/// specific env, and every send() in the process inherits the setting.
+/// A per-invocation consent flow (the user acknowledges the reduced
+/// privacy for THIS specific tx via a CLI flag / RPC parameter) would
+/// be safer, because the operator's decision to enable weak privacy
+/// for one debug session persists across all future sends without
+/// re-prompting.
+///
+/// Pre-fix code had no comment about the risk. Now, if the fallback
+/// fires, we emit a LOUD error log naming the env variable — so at
+/// least the operator sees each degraded-privacy tx in structured
+/// logs and can page. A structural fix (per-invocation flag) is
+/// deferred pending an RPC schema decision.
 fn strict_wallet_privacy_enabled() -> bool {
-    std::env::var("COINCYNC_WALLET_ALLOW_WEAK_PRIVACY")
-        .ok()
-        .map(|v| {
-            let t = v.trim();
-            !(t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes"))
-        })
-        .unwrap_or(true)
+    let allow_weak = std::env::var("COINCYNC_WALLET_ALLOW_WEAK_PRIVACY").ok();
+    if let Some(ref v) = allow_weak {
+        let t = v.trim();
+        if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") {
+            // R-105: loud + structured so log aggregation catches it.
+            tracing::error!(
+                target: "wallet::send::R105",
+                env_var = "COINCYNC_WALLET_ALLOW_WEAK_PRIVACY",
+                env_value = %v,
+                "R-105: strict-privacy policy DISABLED via env var. \
+                 Every send() in this process runs with weakened \
+                 anonymity-set + ring-size constraints. This is \
+                 process-global, NOT per-invocation. If you didn't \
+                 intend this, unset the env var and restart."
+            );
+            return false;
+        }
+    }
+    true
+}
+
+/// Per-invocation privacy consent.
+///
+/// R-105 SURGICAL FIX (2026-07-03): callers can opt into weak
+/// privacy for a SINGLE tx via `PrivacyConsent::AllowWeakThisTx`.
+/// Previous env-var-only path stays as the process-wide override,
+/// but a per-tx toggle avoids the "one debug session leaks into
+/// every future send" trap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrivacyConsent {
+    /// Strict privacy required. Default.
+    #[default]
+    Strict,
+    /// Allow weak privacy for THIS invocation only. Emit an
+    /// error-level log so ops see the consent event.
+    AllowWeakThisTx,
 }
 
 fn enforce_wallet_privacy_policy(
     ring_size: usize,
     available_unique_outputs: usize,
+    consent: PrivacyConsent,
 ) -> Result<()> {
+    // R-105: per-invocation consent short-circuits the strict
+    // check. Emit a distinct log so audit trails can distinguish
+    // per-tx consent from process-global env override.
+    if consent == PrivacyConsent::AllowWeakThisTx {
+        tracing::error!(
+            target: "wallet::send::R105",
+            event = "per_tx_weak_privacy_consent",
+            ring_size = ring_size,
+            available_unique_outputs = available_unique_outputs,
+            "R-105: per-tx weak-privacy consent granted for this send. \
+             Recorded so the audit trail carries the consent event."
+        );
+        return Ok(());
+    }
     if !strict_wallet_privacy_enabled() {
         return Ok(());
     }
     if ring_size < BOOTSTRAP_MIN_RING_SIZE {
         return Err(Error::InvalidState(format!(
             "privacy policy: effective ring size {} below minimum {}. \
-             Refusing weak-privacy spend; wait for more decoys or set \
-             COINCYNC_WALLET_ALLOW_WEAK_PRIVACY=1.",
+             Refusing weak-privacy spend; wait for more decoys, set \
+             COINCYNC_WALLET_ALLOW_WEAK_PRIVACY=1, or pass \
+             PrivacyConsent::AllowWeakThisTx.",
             ring_size, BOOTSTRAP_MIN_RING_SIZE
         )));
     }
     if available_unique_outputs + 1 < BOOTSTRAP_MIN_RING_SIZE {
         return Err(Error::InvalidState(format!(
             "privacy policy: only {} unique decoys available (need at least {}). \
-             Refusing weak-privacy spend; wait for chain growth or set \
-             COINCYNC_WALLET_ALLOW_WEAK_PRIVACY=1.",
+             Refusing weak-privacy spend; wait for chain growth, set \
+             COINCYNC_WALLET_ALLOW_WEAK_PRIVACY=1, or pass \
+             PrivacyConsent::AllowWeakThisTx.",
             available_unique_outputs,
             BOOTSTRAP_MIN_RING_SIZE - 1
         )));
@@ -264,7 +325,7 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     // smaller than the target — effective_ring_size lowers the requirement
     // (minimum 2) during the bootstrap period (height < 10,000).
     let ring_size = effective_ring_size(current_height, deduped_pool.len() + 1);
-    enforce_wallet_privacy_policy(ring_size, deduped_pool.len())?;
+    enforce_wallet_privacy_policy(ring_size, deduped_pool.len(), PrivacyConsent::Strict)?;
 
     // Post-activation: fixed 2 inputs, 2 outputs. Pre-activation: variable.
     let input_count_est = if uniform { STANDARD_INPUT_COUNT } else { 1 };
@@ -273,7 +334,30 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
 
     // Integer-only fee calculation: scale multiplier to avoid float arithmetic.
     // fee_multiplier=1.0 → 100, 1.5 → 150, etc. Clamp minimum at 1.0 (100).
-    let multiplier_x100 = (fee_multiplier.max(1.0) * 100.0).min(10000.0) as u64;
+    //
+    // AUDIT (R-106 fix, 2026-07-03): pre-fix code was
+    //   `(fee_multiplier.max(1.0) * 100.0).min(10000.0) as u64;`
+    // Problem: `NaN.max(1.0)` returns NaN (IEEE 754 quirk — max
+    // propagates NaN, doesn't collapse to the operand). Then
+    // `NaN * 100.0` is NaN, `NaN.min(10000.0)` is NaN, and
+    // `NaN as u64` is 0. Result: an accidental NaN multiplier
+    // (caller passes an uninitialized float, JSON parser returns
+    // NaN for the string "NaN", etc.) produces ZERO FEE — the
+    // wallet then submits a tx that will be REJECTED by mempool's
+    // minimum-fee rule, silently. Explicit NaN check with a
+    // fallback to 1.0 (the neutral multiplier), plus a warn so
+    // the caller sees it happened.
+    let sanitized_multiplier = if fee_multiplier.is_nan() {
+        tracing::warn!(
+            target: "wallet::send::R106",
+            "R-106: fee_multiplier is NaN; falling back to 1.0 (neutral). \
+             Caller likely passed an uninitialized or malformed float."
+        );
+        1.0
+    } else {
+        fee_multiplier
+    };
+    let multiplier_x100 = (sanitized_multiplier.max(1.0) * 100.0).min(10000.0) as u64;
     let initial_fee = Amount::from_atomic(
         (initial_size as u64)
             .saturating_mul(MIN_FEE_PER_BYTE)
@@ -329,9 +413,15 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
         });
     }
 
-    // SECURITY: Filter to native CYNC UTXOs only. available_utxos() returns ALL
-    // assets, so a CYNC transfer could accidentally select non-native UTXOs,
-    // creating an invalid transaction or burning user assets.
+    // AUDIT (R-107 fix, 2026-07-02): the prior comment here claimed a
+    // "SECURITY: Filter to native CYNC UTXOs only" security check —
+    // but the code that follows performs no filter. The claim was
+    // stale: v2's confidential-asset layer was removed in the asset
+    // strip (commit 46f0437, see wallet::balance module docstring), so
+    // every UTXO the wallet holds is implicitly CYNC and there's
+    // nothing to filter against. Keeping the false-security comment
+    // was worse than no comment at all — it read to auditors like a
+    // defense that isn't there.
     let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
     let mut selected = if uniform {
         select_utxos_uniform(&utxos, initial_needed, rng)?
@@ -516,7 +606,7 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
         .collect();
 
     let ring_size = effective_ring_size(current_height, deduped_pool.len() + 1);
-    enforce_wallet_privacy_policy(ring_size, deduped_pool.len())?;
+    enforce_wallet_privacy_policy(ring_size, deduped_pool.len(), PrivacyConsent::Strict)?;
     let initial_size = estimate_tx_size(1, 4, ring_size); // 1 vesting + 1 change + up to 2 dummies
     let initial_fee = Amount::from_atomic(initial_size as u64 * MIN_FEE_PER_BYTE);
     let total_needed = amount.saturating_add(initial_fee);
@@ -528,9 +618,12 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
         });
     }
 
-    // SECURITY (BUG-13): Filter to native CYNC UTXOs only. Previously used
-    // available_utxos() which returns ALL asset types, potentially burning
-    // non-native asset tokens in a CYNC vesting transaction.
+    // AUDIT (R-107 fix, 2026-07-02): same stale "SECURITY (BUG-13):
+    // Filter to native CYNC UTXOs only" comment as the equivalent
+    // callsite in `create_privacy_transaction_with_options`. Asset
+    // support was removed in the asset strip, so no filter is
+    // needed or applied here. Wording corrected so auditors don't
+    // read a not-present filter as an actual security check.
     let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
     let selected = select_utxos(&utxos, total_needed, CoinSelection::OldestFirst, rng)?;
 
@@ -637,11 +730,14 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
 
     // Use effective_ring_size to handle young chains with few unique outputs
     let ring_size = effective_ring_size(current_height, deduped_pool.len() + 1);
-    enforce_wallet_privacy_policy(ring_size, deduped_pool.len())?;
+    enforce_wallet_privacy_policy(ring_size, deduped_pool.len(), PrivacyConsent::Strict)?;
 
     let uniform = current_height >= UNIFORM_TX_SHAPE_HEIGHT;
 
-    // SECURITY (BUG-13): Filter to native CYNC UTXOs only for churn transactions.
+    // AUDIT (R-107 fix, 2026-07-02): third and last stale asset-strip
+    // residue comment in this file. Same shape as the two earlier
+    // sites — asset support was removed and no filter is applied
+    // (or needed).
     let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
     let selected = if uniform {
         // Uniform mode: exactly 2 inputs
@@ -961,14 +1057,30 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
     Ok(vec![utxos[i], utxos[j]])
 }
 
-/// Select decoys using temporal binning for improved privacy.
+/// Select ring decoys via UNIFORM Fisher-Yates through the RingSelector.
 ///
-/// Select ring decoys using gamma distribution via RingSelector.
+/// **Closes C40 (audit-catalogue) 2026-07-02.** The prior docstring here
+/// said "gamma distribution (shape=19.28, scale=1/1.61)" — that was
+/// stale after the Wave 15 gamma → uniform migration and directly
+/// contradicted `crypto::ring_selection`'s module-header design comment
+/// (uniform-only, see `src/crypto/ring_selection.rs` L3-22). Uniform is
+/// what CoinCync's constitutional Article III and the Möser-2018
+/// attack-model rationale actually call for; gamma is the very
+/// distribution that paper weaponizes for deanonymization.
 ///
-/// Delegates to `crypto::RingSelector` which uses a gamma distribution
-/// (shape=19.28, scale=0.621) to bias decoy selection toward recent outputs,
-/// matching real spending patterns. This makes the real signer statistically
-/// indistinguishable from decoys.
+/// Delegates to `crypto::RingSelector` which performs a Fisher-Yates
+/// partial shuffle over the eligible decoy pool (unbiased sampling with
+/// `rng.gen_range(0..=i)` — rejection-sampled, no modulo bias). Every
+/// eligible output has exactly equal probability of appearing in the
+/// returned set. The observer gains ZERO information from the age
+/// distribution of the ring.
+///
+/// Prior art:
+///   • Miller et al. 2017 — ring members must have indistinguishable age
+///     from the real spend
+///   • Möser et al. 2018 — 85%+ accuracy identifying real Monero spends
+///     under gamma-biased selection
+///   • MRL uniform-selection recommendation
 ///
 /// Returns (decoys, real_position) — the decoy list and the index where
 /// the real output should be inserted in the ring.
@@ -1050,10 +1162,22 @@ pub fn estimate_tx_size(input_count: usize, output_count: usize, ring_size: usiz
     let inputs_total = input_count * input_size;
 
     // Output (borsh): stealth (32) + tx_pub (32) + commitment (32) + enc_amount vec (4+8)
-    //   + view_tag (1) + asset_commitment (32) + encrypted_asset vec (4+32)
+    //   + view_tag (1) + lock_height Option<u64> (1+8)
+    //
+    // AUDIT (R-109 fix, 2026-07-03): pre-fix code included
+    //   + asset_commitment (32) + encrypted_asset vec (4+32)
     //   + asset_surjection_proof vec (4+0) + encrypted_asset_audit vec (4+0)
-    //   + lock_height Option<u64> (1+8)
-    let output_size = 32 + 32 + 32 + 12 + 1 + 32 + 36 + 4 + 4 + 9;
+    // → total = 32 + 32 + 32 + 12 + 1 + 32 + 36 + 4 + 4 + 9 = 194 bytes/output
+    // But asset support was STRIPPED in commit 46f0437 — the TxOutput
+    // struct no longer carries asset_commitment / encrypted_asset /
+    // surjection_proof / audit fields. The pre-fix estimator kept
+    // counting those bytes and overestimated the wire size by
+    // 32+36+4+4 = 76 bytes per output. With a 2x safety margin
+    // that's ~152 bytes/output of PHANTOM SIZE. At MIN_FEE_PER_BYTE
+    // the wallet overpays fees by ~152 * MIN_FEE_PER_BYTE per output
+    // on every send.
+    // Corrected: 32 + 32 + 32 + 12 + 1 + 9 = 118 bytes/output.
+    let output_size = 32 + 32 + 32 + 12 + 1 + 9;
     let outputs_total = output_count * output_size;
 
     // Range proof: ~672 base + 64 per output for aggregated proof
@@ -1125,7 +1249,7 @@ mod tests {
     fn test_privacy_policy_rejects_weak_ring_when_strict() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         std::env::remove_var("COINCYNC_WALLET_ALLOW_WEAK_PRIVACY");
-        let err = enforce_wallet_privacy_policy(2, 1).unwrap_err();
+        let err = enforce_wallet_privacy_policy(2, 1, PrivacyConsent::Strict).unwrap_err();
         assert!(format!("{err}").contains("privacy policy"));
     }
 
@@ -1133,7 +1257,7 @@ mod tests {
     fn test_privacy_policy_can_be_overridden_for_dev() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         std::env::set_var("COINCYNC_WALLET_ALLOW_WEAK_PRIVACY", "1");
-        let ok = enforce_wallet_privacy_policy(2, 1);
+        let ok = enforce_wallet_privacy_policy(2, 1, PrivacyConsent::Strict);
         std::env::remove_var("COINCYNC_WALLET_ALLOW_WEAK_PRIVACY");
         assert!(ok.is_ok());
     }

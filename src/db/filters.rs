@@ -68,28 +68,48 @@ impl FilterDb {
 
     /// Build and store a filter for a block.
     /// Returns the filter for immediate use.
+    ///
+    /// AUDIT (R-47 fix, 2026-07-03): pre-fix code did two separate
+    /// writes — filter insert, then (every 1000 blocks) checkpoint
+    /// insert. A crash between them left the filter tree ahead of
+    /// checkpoints, so a personal-node consumer that fetched the
+    /// filter and cross-checked against the checkpoint tree got a
+    /// "checkpoint missing" for a height where the filter did land
+    /// — legitimate-looking but wrong. Bundle both writes in a
+    /// single Transactional batch. `tip_height` update is in-memory
+    /// only, so it doesn't need to be part of the atomic set.
     pub fn build_and_store(&mut self, block: &Block, prev_filter_hash: Hash) -> Result<BlockFilter> {
         let filter = BlockFilter::from_block(block, prev_filter_hash);
         let height = filter.height;
 
         let data = serialize(&filter)?;
-        self.filters.insert(&height.to_be_bytes(), data)
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-        if height > self.tip_height {
-            self.tip_height = height;
-        }
-
-        // Store checkpoint every 1000 blocks
-        if height % 1000 == 0 {
+        let height_key = height.to_be_bytes();
+        let checkpoint_pair = if height % 1000 == 0 {
             let checkpoint = FilterCheckpoint {
                 height,
                 block_hash: filter.block_hash,
                 filter_hash: filter.filter_hash(),
             };
-            let cp_data = serialize(&checkpoint)?;
-            self.checkpoints.insert(&height.to_be_bytes(), cp_data)
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+            Some(serialize(&checkpoint)?)
+        } else {
+            None
+        };
+
+        use crate::db::shim::transaction::Transactional;
+        let trees: &[&Tree] = &[&self.filters, &self.checkpoints];
+        trees.transaction(|tx| {
+            tx[0].insert(&height_key[..], data.as_slice())?;
+            if let Some(ref cp_data) = checkpoint_pair {
+                tx[1].insert(&height_key[..], cp_data.as_slice())?;
+            }
+            Ok(())
+        }).map_err(|e| Error::DatabaseError(format!(
+            "R-47: atomic filter+checkpoint commit failed at height {}: {:?}",
+            height, e
+        )))?;
+
+        if height > self.tip_height {
+            self.tip_height = height;
         }
 
         Ok(filter)
@@ -122,19 +142,47 @@ impl FilterDb {
         Ok(filters)
     }
 
-    /// Get the previous filter hash for chaining.
-    pub fn prev_filter_hash(&self, height: u64) -> Hash {
-        if height == 0 {
-            return Hash::default();
-        }
-        self.get(height - 1)
-            .ok()
-            .flatten()
-            .map(|f| f.filter_hash())
-            .unwrap_or_default()
-    }
+    // AUDIT (2026-07-01): removed the `prev_filter_hash(height) -> Hash`
+    // helper. Two problems:
+    //
+    //   1. Zero external callers. The one code path that chains filters —
+    //      `network/node.rs` line ~3936 — carries its own `prev_filter_hash`
+    //      variable through the build loop and never calls this method.
+    //      Delete it and the chain-continuity API surface stays honest.
+    //
+    //   2. Silent error-swallowing footgun. The old body was
+    //      `self.get(height - 1).ok().flatten().map(...).unwrap_or_default()`
+    //      which coerces any RocksDB error (I/O failure, WAL corruption,
+    //      partial-page read) into `Hash::default()` — a valid-looking
+    //      "no filter yet" answer. Any future caller wiring this into
+    //      chain-continuity validation would silently accept a zeroed
+    //      link across the corruption point. Removing the method is
+    //      safer than "fix" via `?`-propagation, because there is no
+    //      caller to accept the new `Result<Hash>` signature and the
+    //      silent-error variant would be one refactor away from
+    //      returning.
+    //
+    // If a caller ever needs prev-filter-hash lookup, wire it directly
+    // via `self.get(height - 1)?` — that call is already `Result`-returning
+    // and will surface a rocksdb::Error properly. Reference: Bitcoin
+    // Core's `GetFilterHeader` returns `Status`, not a coerced default.
 
     /// Get filter checkpoints for verification.
+    ///
+    /// AUDIT (R-48 fix, 2026-07-03): the pre-fix code hit an
+    /// iterator error and did `tracing::warn!(...); break;` —
+    /// silently returning the partial list of checkpoints
+    /// collected so far. A downstream consumer (checkpoint-cross-
+    /// check for personal nodes) would then verify against a
+    /// TRUNCATED checkpoint list and think the missing tail is
+    /// legitimate. If the tail contained the checkpoint the
+    /// consumer needed, that's a silent verification bypass.
+    ///
+    /// Fix: on iterator error, return `Err(...)` immediately.
+    /// Consumers get an explicit signal that the checkpoint set
+    /// is unreadable and can decide whether to retry, block, or
+    /// fall through to a slower verification path. NEVER silently
+    /// truncate a consensus-relevant list.
     pub fn get_checkpoints(&self) -> Result<Vec<FilterCheckpoint>> {
         let mut checkpoints = Vec::new();
         for item in self.checkpoints.iter() {
@@ -144,8 +192,11 @@ impl FilterDb {
                     checkpoints.push(cp);
                 }
                 Err(e) => {
-                    tracing::warn!("Error reading filter checkpoint: {}", e);
-                    break;
+                    return Err(Error::DatabaseError(format!(
+                        "R-48: filter-checkpoint iteration failed after {} entries — \
+                         refusing to return a truncated checkpoint set. Underlying: {}",
+                        checkpoints.len(), e
+                    )));
                 }
             }
         }

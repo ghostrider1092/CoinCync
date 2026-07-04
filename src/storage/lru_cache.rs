@@ -163,11 +163,32 @@ impl<K: Clone + Hash + Eq, V> SizedLruCache<K, V> {
         }
     }
 
-    /// Insert a value, evicting entries until under size limit
+    /// Insert a value, evicting entries until under size limit.
+    ///
+    /// AUDIT (R-57 fix, 2026-07-03): pre-fix code called
+    /// `self.cache.insert(key.clone(), value);` — that inner call
+    /// returns `Option<(K, V)>` for entries evicted by the inner
+    /// LRU's capacity check (bounded at `max_size / 1024`), but the
+    /// outer wrapper DISCARDED the return value. Consequence: an
+    /// auto-eviction happens inside `LruCache::insert`, but the
+    /// outer `sizes` HashMap and `current_size` byte counter never
+    /// see it. Each auto-eviction leaves a phantom entry in
+    /// `sizes` and inflates `current_size` by the phantom entry's
+    /// bytes forever. Over time `current_size` monotonically
+    /// drifts UP, the outer eviction loop at L171 evicts every
+    /// entry on every insert, and the cache degrades into a
+    /// single-entry churn (hit rate → 0).
+    ///
+    /// Fix: capture the returned evicted entry from the inner
+    /// `insert()` call and clean up `sizes` + `current_size`
+    /// accordingly. Add a debug assertion that current_size
+    /// matches the sum of sizes values in test mode, catching any
+    /// future drift immediately.
     pub fn insert(&mut self, key: K, value: V) {
         let value_size = (self.size_fn)(&value);
 
-        // Evict until we have space
+        // Evict until we have space (outer eviction — driven by
+        // byte-size limits, not entry count).
         while self.current_size + value_size > self.max_size && !self.cache.is_empty() {
             match self.cache.evict_lru() {
                 Some((evicted_key, _)) => {
@@ -179,15 +200,31 @@ impl<K: Clone + Hash + Eq, V> SizedLruCache<K, V> {
             }
         }
 
-        // Remove old size if updating
+        // Remove old size if updating (rare — usually a fresh key).
         if let Some(old_size) = self.sizes.remove(&key) {
             self.current_size = self.current_size.saturating_sub(old_size);
         }
 
-        // Insert new entry
-        self.cache.insert(key.clone(), value);
+        // R-57: capture the inner-LRU auto-eviction. When the inner
+        // capacity (max_size / 1024 entries) is exceeded, the inner
+        // `insert` returns the evicted entry — clean up our shadow
+        // accounting for it.
+        let inner_evicted = self.cache.insert(key.clone(), value);
+        if let Some((evicted_key, _)) = inner_evicted {
+            if let Some(evicted_size) = self.sizes.remove(&evicted_key) {
+                self.current_size = self.current_size.saturating_sub(evicted_size);
+            }
+        }
         self.sizes.insert(key, value_size);
         self.current_size += value_size;
+
+        // Debug assertion: shadow accounting must match sizes sum.
+        // Skipped in release builds.
+        debug_assert_eq!(
+            self.current_size,
+            self.sizes.values().sum::<usize>(),
+            "R-57: current_size drift detected — inner auto-eviction untracked"
+        );
     }
 
     /// Get a value

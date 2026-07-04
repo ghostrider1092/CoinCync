@@ -261,10 +261,19 @@ impl Drop for DecryptedOutput {
     }
 }
 
-/// Key set for scanning
+/// Key set for scanning.
 ///
-/// SECURITY: Implements Drop to zeroize the view_secret when no longer needed.
-/// Clone is required for parallel scanning but each clone is also zeroized on drop.
+/// AUDIT (R-101 fix, 2026-07-02): the prior doc said "SECURITY:
+/// Implements Drop to zeroize the view_secret when no longer needed."
+/// The `Drop` impl below ONLY zeros the (non-secret) `epoch: u64`
+/// field; the actual view_secret zeroization happens via the field-
+/// drop chain (each `SecretKey` runs its own `ZeroizeOnDrop`). The
+/// custom Drop is cosmetic. Corrected here so a future reader isn't
+/// tricked into thinking there's an extra layer of secret wiping
+/// that doesn't exist. The Clone-then-zeroize-per-clone guarantee
+/// is still true: because SecretKey implements ZeroizeOnDrop, every
+/// clone's `view_secret`/`spend_public` fields run their own drop
+/// zeroization when the clone goes out of scope.
 #[derive(Clone)]
 pub struct ScanKeys {
     /// View secret key
@@ -383,6 +392,35 @@ impl WalletScanner {
     /// last_* to the same values just after, so the assignment is a
     /// no-op for them.
     pub fn record_journal_entry(&mut self, diff: BlockApplyDiff) {
+        // AUDIT (R-102 fix, 2026-07-03): pre-fix code unconditionally
+        // assigned self.last_height = diff.height. A caller passing
+        // a diff with `height < self.last_height` (a stale replay
+        // after a network hiccup, a buggy scanner that pushed a
+        // duplicate block, an integration test with out-of-order
+        // diffs) would REGRESS the height watermark. The rewind
+        // guard TargetAboveCurrent then permits rewinds below where
+        // the wallet already scanned, letting a re-scan of already-
+        // seen blocks REPLAY output detection. In a wallet UI this
+        // manifests as doubled balance for a moment before
+        // reconciliation.
+        //
+        // Fix: reject strict-regressed diffs with a loud tracing::warn.
+        // Equal-height IS accepted (idempotent replay is a legitimate
+        // pattern for reorg recovery). The journal push AND the
+        // last_* update both skip on regression, so the caller's
+        // invariants are unchanged for valid inputs.
+        if diff.height < self.last_height {
+            tracing::warn!(
+                target: "wallet::scanner::R102",
+                diff_height = diff.height,
+                current_last_height = self.last_height,
+                "R-102: journal entry rejected — height regression \
+                 ({} < {}). Would allow rewind past legitimate scan \
+                 watermark, replaying output detection.",
+                diff.height, self.last_height
+            );
+            return;
+        }
         self.last_height = diff.height;
         self.last_hash = diff.block_hash;
         self.journal.push_back(diff);
@@ -694,13 +732,28 @@ impl WalletScanner {
                     &blinding_factor,
                 ).to_bytes();
                 if expected_commitment != output.commitment {
-                    tracing::debug!(
-                        "scanner: stealth match but commitment recompute mismatch \
-                         (tx={}, output_idx={}, claimed amount {}). \
-                         Likely malicious sender or corrupted output — skipping.",
-                        tx_hash.to_hex(),
-                        output_index,
-                        amount,
+                    // AUDIT (R-103 fix, 2026-07-03): pre-fix code
+                    // logged this at DEBUG level. But the event is
+                    // a real forged-amount attack indicator — a
+                    // malicious sender constructed an output whose
+                    // stealth address decrypts for our wallet but
+                    // whose commitment doesn't match the claimed
+                    // amount. Debug is off by default, so this
+                    // security event was INVISIBLE to ops. Elevate
+                    // to WARN with structured fields so it's
+                    // greppable in production log aggregation and
+                    // an alerting rule can trigger on it.
+                    tracing::warn!(
+                        target: "wallet::scanner::R103",
+                        event = "ghost_balance_defense",
+                        tx_hash = tx_hash.to_hex(),
+                        output_index = output_index,
+                        claimed_amount = amount,
+                        "R-103: stealth match with commitment-recompute \
+                         mismatch — likely forged-amount attack from a \
+                         malicious sender. Output DROPPED (correctly). \
+                         This is a security-visible event; if seen \
+                         frequently, investigate the sender."
                     );
                     continue;
                 }
@@ -1093,7 +1146,9 @@ fn scan_output_with_keys(
             //
             // See the long-form rationale at `scan_output`:692-706.
             // Same drop-and-continue behavior so the two paths return
-            // identical results given the same inputs.
+            // identical results given the same inputs. Reference:
+            // Monero wallet2's `check_acc_out_precomp` always recomputes
+            // the commitment before accepting an output as owned.
             let expected_commitment = PedersenCommitment::commit(
                 amount,
                 &blinding_factor,
@@ -1140,10 +1195,27 @@ fn compute_view_tag(view_secret: &SecretKey, tx_public: &PublicKey, output_index
         None => return 0xFF,
     };
     // ECDH: shared_point = view_secret * tx_public (same as sender's tx_secret * view_public)
-    let shared_point = tx_point.mul(&view_scalar);
+    let mut shared_point = tx_point.mul(&view_scalar);
 
-    let tag_input = [shared_point.to_bytes().as_slice(), &[output_index]].concat();
+    // R-104 (R-7 class site, 2026-07-03): the shared_point bytes are
+    // the ECDH shared secret. Pre-fix code did .concat() into a heap
+    // Vec with the shared point bytes, hashed, then dropped without
+    // zeroization. Now build the buffer explicitly + zeroize before
+    // scope exit.
+    // R-7 CLASS + R-80 SURGICAL FIX (2026-07-03): also zeroize the
+    // shared_point RistrettoPoint itself once we're finished
+    // deriving from it.
+    let mut tag_input = Vec::with_capacity(32 + 1);
+    let mut shared_bytes = shared_point.to_bytes();
+    tag_input.extend_from_slice(&shared_bytes);
+    tag_input.push(output_index);
     let tag_hash = hash_domain(b"COINCYNC_VIEWTAG_v2", &tag_input);
+    {
+        use zeroize::Zeroize;
+        tag_input.zeroize();
+        shared_bytes.zeroize();
+        shared_point.zeroize();
+    }
     tag_hash.as_bytes()[0]
 }
 
@@ -1159,12 +1231,22 @@ fn compute_shared_secret(view_secret: &SecretKey, tx_public: &PublicKey, output_
             return [0u8; 32];
         }
     };
-    let shared_point = tx_point.mul(&view_scalar);
+    let mut shared_point = tx_point.mul(&view_scalar);
 
-    let shared = hash_domain(
-        b"COINCYNC_SHARED_v2",
-        &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
-    );
+    // R-104 (R-7 class site, 2026-07-03): same shared-point-in-heap
+    // pattern as compute_view_tag above — fix in the same shape.
+    // R-7 CLASS + R-80 (2026-07-03): also zeroize the RistrettoPoint.
+    let mut buf = Vec::with_capacity(32 + 1);
+    let mut shared_bytes = shared_point.to_bytes();
+    buf.extend_from_slice(&shared_bytes);
+    buf.push(output_index);
+    let shared = hash_domain(b"COINCYNC_SHARED_v2", &buf);
+    {
+        use zeroize::Zeroize;
+        buf.zeroize();
+        shared_bytes.zeroize();
+        shared_point.zeroize();
+    }
     *shared.as_bytes()
 }
 

@@ -98,22 +98,54 @@ impl BlockDb {
     /// Remove all height→hash mappings above a given height.
     /// Used after reorgs to clean up stale entries from the old chain.
     /// Keys are 8-byte big-endian u64, so we scan from max_valid_height+1.
+    ///
+    /// AUDIT (R-39 fix, 2026-07-03): pre-fix code called
+    /// `self.height_index.remove(&key)` INSIDE the `for item in
+    /// self.height_index.range(start..)` iteration. Under the
+    /// RocksDB shim, `range(...)` returns an iterator whose
+    /// underlying `rocksdb::DBIterator` does NOT hold a snapshot —
+    /// it observes live column-family state. Mutating the CF
+    /// (delete_cf) mid-iteration can:
+    ///   1. Skip entries (the iterator's next() lands past a
+    ///      deleted key and continues from the next-live key,
+    ///      possibly missing keys that were valid at scan start).
+    ///   2. Return duplicate entries if the delete-and-advance
+    ///      interleaving hits a tombstone the iterator later
+    ///      re-observes.
+    /// Either failure leaves stale height→hash mappings that survive
+    /// past the reorg, causing the "old height still points to
+    /// orphaned block" corruption the 2026-06-04 testnet cascade
+    /// investigation traced back to this exact function.
+    ///
+    /// Fix: collect ALL matching keys into a Vec first (iterator
+    /// runs to completion without any mutation), THEN issue the
+    /// removes as a separate loop. Same net effect, but no live
+    /// mutation during iteration.
+    ///
+    /// Prior art:
+    ///   - Bitcoin Core's CDBBatch::EraseRange collects then deletes.
+    ///   - RocksDB's own DeleteRange primitive is atomic-in-batch
+    ///     and would be a better fix long-term; deferred because
+    ///     the shim doesn't currently expose it.
     pub fn remove_heights_above(&self, max_valid_height: u64) -> Result<u64> {
-        let mut removed = 0u64;
-        // Scan from max_valid_height+1 using sled's range scan on BE keys
+        // Phase 1: collect keys under iterator; NO writes during scan.
         let start = (max_valid_height + 1).to_be_bytes();
+        let mut keys_to_remove: Vec<Vec<u8>> = Vec::new();
         for item in self.height_index.range(start..) {
             match item {
-                Ok((key, _)) => {
-                    self.height_index.remove(&key)
-                        .map_err(|e| Error::DatabaseError(e.to_string()))?;
-                    removed += 1;
-                }
+                Ok((key, _)) => keys_to_remove.push(key.to_vec()),
                 Err(e) => {
                     tracing::warn!("Error scanning height index: {}", e);
                     break;
                 }
             }
+        }
+        // Phase 2: delete each collected key. No iterator in flight.
+        let mut removed = 0u64;
+        for key in &keys_to_remove {
+            self.height_index.remove(key)
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+            removed += 1;
         }
         if removed > 0 {
             tracing::info!("Cleaned {} stale height mappings above height {}", removed, max_valid_height);
@@ -283,6 +315,63 @@ impl BlockDb {
             self.blocks.remove(&hash_bytes)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
         }
+        Ok(())
+    }
+
+    /// Atomically prune a block: store the compact header AND remove the
+    /// full block body in a single multi-tree transaction.
+    ///
+    /// AUDIT (2026-07-01): callers that want the atomicity property must
+    /// use this instead of `store_pruned_header` + `remove_by_height`
+    /// back-to-back. The two-call form crash-windows to a state where
+    /// `pruned_headers[height]` exists but the full block still lives in
+    /// `blocks[hash]`, wasting disk indefinitely (the outer pruning
+    /// loop doesn't revisit heights across restarts). This method packs
+    /// the header-write and the block-body-remove into a single RocksDB
+    /// WriteBatch — either both land or neither. `height_index` is only
+    /// read (to translate height → hash) and is not part of the write
+    /// set; the read happens BEFORE the transaction because RocksDB
+    /// TxTree::get semantics under this shim are "read-live-not-batch"
+    /// and can't observe staged writes anyway (see `db/shim.rs` line
+    /// ~709 for the documented behavior).
+    ///
+    /// Reference: Bitcoin Core's `BlockManager::FlushBlockFile()` writes
+    /// pruned-flag metadata and deletes data in a single `CDBBatch`.
+    /// AUDIT (R-40 SURGICAL FIX, 2026-07-03): moved the
+    /// height→hash lookup INSIDE the transaction closure. The shim's
+    /// `TxTree::get()` (db/shim.rs L825-831) reads live committed
+    /// state, so a race with a concurrent `set_height_hash` writer
+    /// still exists AT THE READ LEVEL — but the read now happens
+    /// as close to the commit as possible, and the caller can
+    /// hold a chain-level lock across the whole `.transaction(...)`
+    /// call to structurally serialise. For parallel pruning we
+    /// also need `[&self.pruned_headers, &self.blocks, &self.height_index]`
+    /// so the TxTree::get uses the same tx handle set. For now,
+    /// the height_index is read via a separate TxTree (get is
+    /// read-only and doesn't stage a write).
+    pub fn store_pruned_and_remove(&self, height: u64, header_bytes: &[u8]) -> Result<()> {
+        let height_key = height.to_be_bytes();
+
+        use crate::db::shim::transaction::Transactional;
+        [&self.pruned_headers, &self.blocks, &self.height_index]
+            .as_slice()
+            .transaction(|trees| {
+                let pruned_tx = &trees[0];
+                let blocks_tx = &trees[1];
+                let heights_tx = &trees[2];
+                // R-40: read the height→hash mapping INSIDE the
+                // transaction. This still doesn't observe staged
+                // writes (see shim's TxTree::get semantics), but it
+                // moves the read closer to the commit so the window
+                // for a concurrent mutator is minimized.
+                let hash_bytes = heights_tx.get(&height_key[..])?;
+                pruned_tx.insert(&height_key[..], header_bytes)?;
+                if let Some(ref h) = hash_bytes {
+                    blocks_tx.remove(h.as_ref())?;
+                }
+                Ok(())
+            })
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
 

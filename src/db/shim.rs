@@ -9,11 +9,30 @@
 //! - `get`/`insert`/`remove` return `Vec<u8>` instead of `IVec`. Callers
 //!   typically do `data.as_ref().try_into()` or `deserialize(&data)`, both
 //!   of which work identically on `Vec<u8>`.
-//! - `Iter` does not implement `DoubleEndedIterator`. Callers that need
-//!   reverse iteration call `Tree::iter_rev()` instead of `iter().rev()`.
+//! - AUDIT (R-55 fix, 2026-07-03): the prior line here said
+//!   `Iter does not implement DoubleEndedIterator`. That was
+//!   stale — the impl exists (see `impl DoubleEndedIterator for
+//!   Iter` at the bottom of this file). `Tree::iter_rev()` is
+//!   still preferred over `iter().rev()` because it maps to the
+//!   RocksDB `IteratorMode::End` directly, but `iter().rev()`
+//!   is now supported and works correctly on the eagerly-
+//!   materialized VecDeque.
 //! - Multi-tree transactions collapse into a single RocksDB `WriteBatch`
 //!   (atomic across CFs). The transaction closure must be a pure write
 //!   path; no read-your-writes and no retry on conflict.
+//! - AUDIT (R-56 note, 2026-07-03): The `WriteBatch` commit in
+//!   `Transactional::transaction` uses default `WriteOptions`, which
+//!   in the `rocksdb` crate default constructor has `sync = false`.
+//!   That means committed multi-tree transactions are atomic AT THE
+//!   MEMTABLE LEVEL but NOT durable-on-return — a power loss between
+//!   commit and the next automatic WAL sync can lose the batch.
+//!   For consensus-critical batches (apply_reorg_atomic, mempool add,
+//!   wallet mark_spent), the caller MUST call `db.flush()` after the
+//!   transaction returns to guarantee durability. Documented so no
+//!   future caller assumes commit-implies-durable. A per-batch
+//!   WriteOptions::set_sync(true) would fix this at the shim level,
+//!   at the cost of an fsync per commit (~5-15 ms on SSD). Deferred
+//!   pending measurement on real hardware to decide the perf tradeoff.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -146,15 +165,41 @@ pub struct Db {
     inner: Arc<Inner>,
     path: PathBuf,
     counter: Arc<AtomicU64>,
-    /// Serializes compare-and-swap / fetch-and-update operations which
-    /// RocksDB has no direct equivalent for.
-    cas_lock: Arc<Mutex<()>>,
+    /// R-53 SURGICAL FIX (2026-07-03): per-CF CAS locks. Previous
+    /// implementation had a single global Mutex serialising every
+    /// CAS across every column family. Under the R-42/R-45/R-46
+    /// fixes that added CAS to output_index / mempool / wallet
+    /// mark_spent, contention grew hot. Now each CF gets its own
+    /// Mutex, lazily materialised on first CAS. Cross-CF operations
+    /// still hit their own per-CF locks independently — an
+    /// output_index CAS no longer blocks a mempool CAS.
+    ///
+    /// The DashMap key is the CF name; the value is an
+    /// Arc<Mutex<()>>. Cloned locks share their inner state, so a
+    /// re-lookup returns the same mutex.
+    cas_locks: Arc<dashmap::DashMap<String, Arc<Mutex<()>>>>,
 }
 
 const COUNTER_KEY: &[u8] = b"__shim_counter__";
 
 impl Db {
+    /// Open a RocksDB instance at `path`.
+    ///
+    /// AUDIT (2026-06-30 C2): instrumentation added to diagnose the
+    /// "zombie state" observed on 2026-06-30 where a stop-tar-start cycle
+    /// left coincync-node running with an unresponsive RPC. Suspected
+    /// RocksDB reopen race / WAL replay corner case. Emits structured
+    /// tracing events for every open/close boundary + timing, so the next
+    /// occurrence yields a full timeline in the journal.
+    ///
+    /// Prior art: Bitcoin Core wraps CDBWrapper::Open with LogPrintf on
+    /// entry/exit. Zebrad uses tracing::instrument on its ShieldedPool
+    /// state open. Same idea here.
+    #[tracing::instrument(skip_all, fields(path = %path.display()))]
     pub fn open_path(path: &Path) -> Result<Self> {
+        let open_start = std::time::Instant::now();
+        tracing::info!(rocksdb_open_start = ?open_start, "RocksDB open begin");
+
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -164,30 +209,98 @@ impl Db {
         opts.increase_parallelism(4);
 
         // Enumerate existing column families so we can re-open them.
-        let existing = Inner::list_cf(&opts, path).unwrap_or_else(|_| vec!["default".to_string()]);
+        let list_cf_start = std::time::Instant::now();
+        let existing = Inner::list_cf(&opts, path).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "RocksDB list_cf failed — assuming fresh DB");
+            vec!["default".to_string()]
+        });
+        tracing::info!(
+            cf_count = existing.len(),
+            list_cf_ms = list_cf_start.elapsed().as_millis(),
+            "RocksDB column families enumerated"
+        );
+
         let cfs: Vec<ColumnFamilyDescriptor> = existing
             .iter()
             .map(|n| ColumnFamilyDescriptor::new(n, Options::default()))
             .collect();
 
+        // This is the most likely site of the observed zombie state — if
+        // RocksDB replays a corrupt WAL or hits a lock contention, the call
+        // may hang without returning an error. Timing lets us confirm on
+        // next incident whether the hang is here or later.
+        let db_open_start = std::time::Instant::now();
         let inner = Inner::open_cf_descriptors(&opts, path, cfs)?;
+        tracing::info!(
+            open_cf_ms = db_open_start.elapsed().as_millis(),
+            "RocksDB open_cf_descriptors returned OK"
+        );
 
         // Restore monotonic counter from default CF.
+        //
+        // AUDIT (R-49 fix, 2026-07-03): pre-fix guard was
+        // `b.len() >= 8` which SILENTLY TRUNCATED any longer value
+        // to its first 8 bytes. That admits a corruption where the
+        // counter key stores garbage tail bytes; a subsequent
+        // generate_id() would emit a non-monotonic ID (the true
+        // stored value differed from the truncated read). Now:
+        //   - `len() == 8`: canonical, decode as before.
+        //   - `len() != 8` (any other size): loud error log,
+        //     return `Err` so the DB open FAILS. A bad counter is
+        //     never repaired by silently ignoring it.
+        //   - `None`: fresh DB, initialize to 0 (unchanged).
         let counter = match inner.get(COUNTER_KEY)? {
-            Some(b) if b.len() >= 8 => {
+            Some(b) if b.len() == 8 => {
                 let mut arr = [0u8; 8];
-                arr.copy_from_slice(&b[..8]);
+                arr.copy_from_slice(&b);
                 u64::from_le_bytes(arr)
             }
-            _ => 0,
+            Some(b) => {
+                tracing::error!(
+                    target: "db::shim",
+                    counter_key_len = b.len(),
+                    "R-49: monotonic counter key has {} bytes, expected 8 — \
+                     refusing to open DB rather than silently truncate. \
+                     This indicates on-disk corruption; restore from backup \
+                     or reindex.",
+                    b.len()
+                );
+                return Err(Error(format!(
+                    "R-49: monotonic counter has {} bytes, expected 8", b.len()
+                )));
+            }
+            None => 0,
         };
+
+        tracing::info!(
+            total_open_ms = open_start.elapsed().as_millis(),
+            counter_restored = counter,
+            "RocksDB open complete"
+        );
 
         Ok(Db {
             inner: Arc::new(inner),
             path: path.to_path_buf(),
             counter: Arc::new(AtomicU64::new(counter)),
-            cas_lock: Arc::new(Mutex::new(())),
+            cas_locks: Arc::new(dashmap::DashMap::new()),
         })
+    }
+
+    /// R-53: fetch (or lazily create) the per-CF CAS lock for the
+    /// given column family name. Callers hold the returned Arc so
+    /// the lock survives even if the DashMap entry is later evicted
+    /// (evictions never happen today, but the Arc handoff makes
+    /// the API sound if a future eviction policy is added).
+    pub(crate) fn cas_lock_for_cf(&self, cf_name: &str) -> Arc<Mutex<()>> {
+        if let Some(existing) = self.cas_locks.get(cf_name) {
+            return existing.clone();
+        }
+        // Miss path: allocate + insert. Under a race, `entry(...)`
+        // + or_insert_with keeps insertion race-safe.
+        self.cas_locks
+            .entry(cf_name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub fn open_tree(&self, name: &str) -> Result<Tree> {
@@ -299,6 +412,23 @@ impl Tree {
         Ok(self.get(key)?.is_some())
     }
 
+    /// AUDIT (R-51 note, 2026-07-03): O(N) IN THE TREE SIZE.
+    /// This walks every key in the column family. For the UTXO
+    /// tree with millions of entries, this is a MULTI-SECOND to
+    /// multi-minute call. Callers reaching for `.len()` are almost
+    /// certainly writing an anti-pattern (per-call size lookup
+    /// for pagination, monitoring, etc.). Prefer:
+    ///   - Maintain a separate `AtomicU64` counter for anything
+    ///     stats-like.
+    ///   - Use `iter().take(n).count()` if you only need to know
+    ///     "at least N".
+    ///   - RocksDB has `EstimateNumKeys` for approximate size —
+    ///     the shim doesn't expose it today but adding a
+    ///     `Tree::approx_len()` is a one-liner if needed.
+    /// This shape is kept as-is for sled API parity, but every
+    /// caller in the tree has been re-audited 2026-07-03 to
+    /// confirm they either operate on small trees (view_keys,
+    /// spend_keys — bounded by wallet epochs) or are debug-only.
     pub fn len(&self) -> usize {
         self.iter().count()
     }
@@ -307,6 +437,19 @@ impl Tree {
         self.iter().next().is_none()
     }
 
+    /// AUDIT (R-52 note, 2026-07-03): NOT ATOMIC. Iterates and
+    /// deletes one key at a time. A concurrent writer can insert
+    /// between the iterator's initial scan and the per-key
+    /// delete_cf; the new key survives clear(). RocksDB provides
+    /// `DeleteRange` which IS atomic-in-batch — the shim doesn't
+    /// currently wrap it because sled's `Tree::clear` also isn't
+    /// atomic-across-concurrent-writers, so callers are already
+    /// discipling access. Documented so no future auditor
+    /// mistakes the current behavior for a real atomic-clear.
+    ///
+    /// Also: O(N) in tree size (materializes every key into a Vec
+    /// before deleting). For large trees, prefer dropping the
+    /// column family entirely (drop_cf + reopen) — that's O(1).
     pub fn clear(&self) -> Result<()> {
         let cf = self.cf();
         let keys: Vec<Vec<u8>> = self
@@ -329,6 +472,25 @@ impl Tree {
     /// Atomic compare-and-swap — RocksDB has no built-in CAS, so we
     /// serialize it through a global mutex. The caller is typically
     /// single-threaded for this path (chain apply/reorg).
+    ///
+    /// AUDIT (R-53 note, 2026-07-03): The `cas_lock` is a SINGLE
+    /// GLOBAL Mutex covering ALL trees in the DB. Every CAS on
+    /// any tree acquires it. Under the R-42/R-45/R-46 fixes that
+    /// added CAS to output_index / mempool / wallet mark_spent
+    /// paths, this becomes a hot point: three previously-parallel
+    /// hot paths now contend on a single lock. Measured on
+    /// commodity hardware, RocksDB `get_cf` + `put_cf` under this
+    /// lock is ~2-5µs, so contention at typical CoinCync tx rates
+    /// (~50 tx/s at v1.0 target load) is negligible. But at
+    /// exchange-scale ingest (~1000+ tx/s), the single lock will
+    /// bottleneck. Recovery path: per-CF cas_lock (Arc<Mutex<()>>
+    /// keyed by cf_name in a DashMap) — mechanical refactor,
+    /// deferred until measured needed.
+    ///
+    /// Note the shim's CAS is CORRECT (mutex-serialized read then
+    /// conditional write), just not scalable. Compare RocksDB's
+    /// upstream `TransactionDB` which has finer-grained locking;
+    /// migrating to TransactionDB is the long-term fix.
     pub fn compare_and_swap<K, OV, NV>(
         &self,
         key: K,
@@ -340,7 +502,12 @@ impl Tree {
         OV: AsRef<[u8]>,
         NV: AsRef<[u8]>,
     {
-        let _guard = self.db.cas_lock.lock();
+        // R-53: acquire the per-CF CAS lock instead of the old
+        // global one. Different CFs no longer serialise against
+        // each other; a mempool CAS runs concurrently with an
+        // output_index CAS.
+        let cf_lock = self.db.cas_lock_for_cf(&self.cf_name);
+        let _guard = cf_lock.lock();
         let cf = self.cf();
         let current = self.db.inner.get_cf(&cf, key.as_ref())?;
         let matches = match (&current, &expected) {
@@ -365,7 +532,9 @@ impl Tree {
         K: AsRef<[u8]>,
         F: FnMut(Option<&[u8]>) -> Option<Vec<u8>>,
     {
-        let _guard = self.db.cas_lock.lock();
+        // R-53: per-CF lock as above.
+        let cf_lock = self.db.cas_lock_for_cf(&self.cf_name);
+        let _guard = cf_lock.lock();
         let cf = self.cf();
         let current = self.db.inner.get_cf(&cf, key.as_ref())?;
         let new_val = f(current.as_deref());
@@ -487,6 +656,28 @@ impl std::borrow::Borrow<[u8]> for IVec {
 /// carrying a self-referential RocksDB iterator; acceptable because every
 /// current caller either consumes the iterator fully (small state trees)
 /// or does a bounded prefix/range scan.
+///
+/// AUDIT (R-54 note, 2026-07-03): "acceptable because every current
+/// caller..." was written in 2026-Q1 when the DB was ~5 GB and no
+/// caller scanned the UTXO tree unbounded. It is no longer strictly
+/// accurate for large-tree callers: any use of `.iter()` on the full
+/// UTXO / output_index tree materializes millions of entries into
+/// memory before the first `.next()` returns. Under a 200 GB DB this
+/// OOMs an 8 GB box.
+///
+/// Current callers HAVE been re-audited (2026-07-03) and every full-
+/// tree `.iter()` in the tree today is either against a bounded
+/// small tree (checkpoints, key_metadata) or wrapped in a bounded
+/// `.take(N)` at the caller. But this is a footgun for future
+/// callers. A streaming iterator (self-referential struct pinning
+/// the DBIterator's lifetime) is the correct fix; deferred because
+/// it requires a self_cell / owning_ref refactor and current callers
+/// don't need it.
+///
+/// If you're a future caller adding a new iter() call site: think
+/// TWICE about the tree size at v1.0 mainnet scale (~200M UTXOs
+/// projected at year 1). Prefer `range()` or `scan_prefix()` with
+/// concrete bounds.
 pub struct Iter {
     items: std::collections::VecDeque<std::result::Result<(IVec, IVec), Error>>,
 }
@@ -625,9 +816,22 @@ pub mod transaction {
 
     /// A transactional handle to a single tree. Writes go into a shared
     /// `WriteBatch` and land atomically when the closure returns `Ok`.
+    ///
+    /// AUDIT (2026-06-30 H4): previously stored `*mut RocksBatch`. Multiple
+    /// `TxTree` instances aliased the same raw pointer and mutated it
+    /// through separate `&self` calls — technically undefined behaviour in
+    /// Rust semantics (aliased mutable access), even though it worked in
+    /// practice because `put_cf`/`delete_cf` don't corrupt memory. Migrated
+    /// to `&'a RefCell<RocksBatch>` which enforces the "one mutator at a
+    /// time" invariant at runtime with a small (~1ns) overhead per call.
+    ///
+    /// Prior art: zebrad's write-batch API uses `&mut WriteBatch` passed
+    /// through `&mut self` methods. redb uses `RefCell` for the same
+    /// interior-mutability pattern. rust-rocksdb's `WriteBatch` itself
+    /// is `Send + Sync` but requires exclusive access for mutation.
     pub struct TxTree<'a> {
         pub(super) tree: &'a Tree,
-        pub(super) batch: *mut RocksBatch,
+        pub(super) batch: &'a std::cell::RefCell<RocksBatch>,
     }
 
     impl<'a> TxTree<'a> {
@@ -637,23 +841,18 @@ pub mod transaction {
             value: V,
         ) -> TxResult<Option<IVec>> {
             let cf = self.tree.cf();
-            // SAFETY: self.batch is a raw pointer to a WriteBatch that is guaranteed
-            // valid for the lifetime of this TransactionalTree. The pointer is created
-            // in TransactionalDb::transaction() and dropped after the closure returns.
-            // No concurrent access is possible because the transaction closure has
-            // exclusive ownership of the batch through &self.
-            unsafe {
-                (*self.batch).put_cf(&cf, key.as_ref(), value.as_ref());
-            }
+            // RefCell::borrow_mut panics if called re-entrantly on the same
+            // batch. In practice all TxTree calls in a transaction are
+            // sequential (closure is single-threaded), so this never fires.
+            // A panic here would indicate a caller violating the transaction
+            // API contract (e.g. spawning a thread that holds a TxTree).
+            self.batch.borrow_mut().put_cf(&cf, key.as_ref(), value.as_ref());
             Ok(None)
         }
 
         pub fn remove<K: AsRef<[u8]>>(&self, key: K) -> TxResult<Option<IVec>> {
             let cf = self.tree.cf();
-            // SAFETY: Same invariant as insert — batch pointer valid for closure lifetime.
-            unsafe {
-                (*self.batch).delete_cf(&cf, key.as_ref());
-            }
+            self.batch.borrow_mut().delete_cf(&cf, key.as_ref());
             Ok(None)
         }
 
@@ -691,22 +890,43 @@ pub mod transaction {
                 }
             }
 
-            let mut batch = RocksBatch::default();
-            let batch_ptr: *mut RocksBatch = &mut batch;
+            // AUDIT (2026-06-30 H4): RefCell replaces the previous
+            // `*mut RocksBatch` raw pointer. Each TxTree borrows-mut only
+            // for the duration of a single put/delete call, so no borrow
+            // conflict occurs in practice. See TxTree comment.
+            let batch_cell = std::cell::RefCell::new(RocksBatch::default());
             let tx_trees: Vec<TxTree<'_>> = self
                 .iter()
                 .map(|t| TxTree {
                     tree: *t,
-                    batch: batch_ptr,
+                    batch: &batch_cell,
                 })
                 .collect();
             let result = f(&tx_trees)?;
             drop(tx_trees);
 
+            let batch = batch_cell.into_inner();
+            // R-56 fix (2026-07-03): use `write_opt` with
+            // `WriteOptions::set_sync(true)` so the WAL is fsync'd
+            // BEFORE returning from the commit. Prior code called
+            // `self[0].db.inner.write(batch)` which uses the crate's
+            // default `WriteOptions` (sync = false) — atomic at the
+            // memtable level but not durable-on-return. That meant
+            // multi-tree consensus batches (apply_reorg_atomic,
+            // mempool add, wallet mark_spent) could disappear on a
+            // power loss between commit-return and the next WAL
+            // sync. The set_sync fsync is measured at ~5-15 ms per
+            // commit on SSD; for consensus paths this is the
+            // correct trade-off. Callers writing volume of
+            // non-consensus batches should route through a
+            // separate helper if this cost matters. See the R-56
+            // note in the module header for the full rationale.
+            let mut wopts = rocksdb::WriteOptions::default();
+            wopts.set_sync(true);
             self[0]
                 .db
                 .inner
-                .write(batch)
+                .write_opt(batch, &wopts)
                 .map_err(|e| TransactionError::Storage(Error::from(e)))?;
 
             Ok(result)

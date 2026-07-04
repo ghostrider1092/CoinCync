@@ -694,15 +694,36 @@ impl Blockchain {
                             tracing::info!("Building tx index for {} blocks...", state.height + 1);
                             let start = std::time::Instant::now();
                             let mut indexed = 0u64;
+                            let mut failed = 0u64;
                             for h in 0..=state.height {
                                 if let Some(block) = self.get_block_by_height(h) {
                                     for (idx, tx) in block.transactions.iter().enumerate() {
-                                        let _ = db.index_tx(tx.hash().as_bytes(), h, idx as u32);
-                                        indexed += 1;
+                                        if let Err(e) = db.index_tx(tx.hash().as_bytes(), h, idx as u32) {
+                                            failed += 1;
+                                            // Log per-failure at DEBUG to avoid log
+                                            // spam during a corrupt-DB rebuild, but
+                                            // a non-zero `failed` count at the end
+                                            // surfaces the issue at WARN.
+                                            tracing::debug!(
+                                                target: "chain::tx_index_rebuild",
+                                                "index_tx failed at h={} idx={}: {}",
+                                                h, idx, e
+                                            );
+                                        } else {
+                                            indexed += 1;
+                                        }
                                     }
                                 }
                             }
-                            tracing::info!("Tx index built: {} txs in {:.2}s", indexed, start.elapsed().as_secs_f64());
+                            if failed > 0 {
+                                tracing::warn!(
+                                    "Tx index rebuild: {} indexed, {} FAILED in {:.2}s. \
+                                     Failed lookups will return None until next rebuild.",
+                                    indexed, failed, start.elapsed().as_secs_f64()
+                                );
+                            } else {
+                                tracing::info!("Tx index built: {} txs in {:.2}s", indexed, start.elapsed().as_secs_f64());
+                            }
                         }
                     }
 
@@ -803,7 +824,26 @@ impl Blockchain {
                             total_burned: 0,
                             last_checkpoint,
                         };
-                        let _ = db.state.save_state(&state);
+                        if let Err(e) = db.state.save_state(&state) {
+                            // Surfacing this previously-silent error closes the
+                            // audit finding "let _ = save_state drops critical
+                            // persistence error." If save_state fails after a
+                            // truncation, the on-disk tip will be ahead of the
+                            // in-memory truncated state — on restart the chain
+                            // re-loads the stale tip, masking the truncation.
+                            // We can't abort here (we're mid-truncation, the
+                            // in-memory state is correct), but at least the
+                            // operator gets a CRITICAL log line. Reference:
+                            // Bitcoin Core's `AbortNode()` after `CCoinsView::
+                            // Flush()` failure on tip commit.
+                            tracing::error!(
+                                target: "chain::persistence",
+                                "CRITICAL: save_state failed after truncation to height {} ({}). \
+                                 Restart will reload stale on-disk tip. Manual operator \
+                                 intervention required.",
+                                good_height, e
+                            );
+                        }
                         tracing::warn!(
                             "Chain truncated to height {}. Node will re-sync missing blocks.",
                             good_height
@@ -1222,11 +1262,32 @@ impl Blockchain {
                         }
                         // Subtract emission
                         let emission = calculate_block_reward(h);
-                        // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption
-inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) {
-    Ok(v) => v,
-    Err(_) => { tracing::error!("CORRUPTION: supply underflow on rollback — subtract {} from {}", emission, inner.stats.total_supply); Amount::from_atomic(0) }
-};
+                        // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
+                        //
+                        // AUDIT (2026-07-02): third site of the self-defeating supply-
+                        // underflow gate. Two sibling sites (~L2002 and ~L2228) were
+                        // fixed in the 2026-07-01 pass; a `replace_all` used at the
+                        // time missed this one (and the one at ~L2352) because the
+                        // whitespace indentation differed (24 spaces here vs 32
+                        // at the fixed sites). Doc-vs-code drift audit flagged the
+                        // miss on the second pass. Same rationale as the fixed
+                        // sites: `.unwrap_or_else(|_| panic!(...))` instead of a
+                        // match with an `Amount::from_atomic(0)` error arm — the
+                        // silent clamp defeats the point of `checked_sub` and
+                        // corrupts every downstream supply read. See fixed sites'
+                        // audit block for the full rationale + prior art citations
+                        // (Bitcoin Core assert, Monero verification_context.h
+                        // defensive panic, zebrad expect on chain invariants).
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
+    .unwrap_or_else(|_| panic!(
+        "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
+         tried to subtract emission={} from total_supply={} at height being disconnected. \
+         In-memory supply state is unrecoverable; halting to preserve on-disk state \
+         (SIGTERM handler will flush RocksDB cleanly). Restart the node — the persisted \
+         chain will re-derive supply correctly. If this recurs on restart, the on-disk \
+         chain state is corrupt and requires a reindex.",
+        emission, inner.stats.total_supply
+    ));
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -1321,7 +1382,19 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                 total_burned: 0,
                 last_checkpoint,
             };
-            let _ = db.state.save_state(&state);
+            if let Err(e) = db.state.save_state(&state) {
+                // Surface previously-silent error after rollback. The
+                // in-memory tip is correct; the on-disk tip is now stale.
+                // Restart would reload stale state. See sibling error
+                // path above for the same pattern + Bitcoin Core
+                // AbortNode reference.
+                tracing::error!(
+                    target: "chain::persistence",
+                    "CRITICAL: save_state failed after rollback to height {} ({}). \
+                     Restart will reload stale tip. Manual intervention required.",
+                    inner.stats.height, e
+                );
+            }
         }
 
         tracing::info!(
@@ -1649,7 +1722,23 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
 
                     // Track supply: new emission (net of burns) enters circulation
                     let emission = calculate_block_reward(block.header.height);
-                    inner.stats.total_supply = inner.stats.total_supply.saturating_add(emission);
+                    // AUDIT (2026-07-01): checked_add + panic for symmetry with the
+                    // reorg-rollback path's checked_sub + panic (fixed same day).
+                    // saturating_add silently clamps at u64::MAX; if emission ever
+                    // returns a corrupt large value (bug in calculate_block_reward),
+                    // the silent clamp hides it and every subsequent supply query
+                    // returns u64::MAX until the process is bounced. Panicking on
+                    // overflow surfaces the corruption exactly once, at the site.
+                    // Prior art matches the SEV-A rollback fix comment above.
+                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission)
+                        .unwrap_or_else(|_| panic!(
+                            "CONSENSUS CORRUPTION: supply overflow on block connect — \
+                             tried to add emission={} to total_supply={}. Emission is \
+                             deterministic from height and cannot be attacker-controlled; \
+                             this indicates a bug in calculate_block_reward or on-disk \
+                             corruption. Halting for RocksDB flush + operator triage.",
+                            emission, inner.stats.total_supply
+                        ));
 
                     // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
                     // CIP-009.D Interp-B contract: checkpoint each Phase-2
@@ -1681,10 +1770,31 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                 // Post-lock work: persist to database, record checkpoints.
                 self.persist_output_index(&block.transactions, block.header.height);
 
-                // Index transactions for O(1) lookup by hash
+                // Index transactions for O(1) lookup by hash.
+                //
+                // Audit fix: previously `let _ =` silently dropped index
+                // errors, so a transient DB error here could leave the
+                // tx_index missing entries even though the block was
+                // accepted to the chain. The on-chain tx becomes
+                // unfindable by hash (explorer + wallet sync break).
+                // We now log warn per-failure so an operator notices.
+                //
+                // The deeper fix (move index_tx INSIDE the block-apply
+                // RocksDB WriteBatch) is deferred — it requires
+                // refactoring `commit_block_to_db` to take the entire
+                // tx_index update set as a batch parameter. Reference:
+                // Bitcoin Core indexes `tx→block` via `LookupBlockIndex`
+                // inside `ConnectBlock`'s atomic batch (txindex/coinstats).
                 if let Some(ref db) = self.db {
                     for (idx, tx) in block.transactions.iter().enumerate() {
-                        let _ = db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32);
+                        if let Err(e) = db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32) {
+                            tracing::warn!(
+                                target: "chain::tx_index",
+                                "tx_index insert failed for tx {} at height {}: {} \
+                                 (block accepted; explorer/wallet may miss this tx by hash)",
+                                hex::encode(tx.hash().as_bytes()), block.header.height, e
+                            );
+                        }
                     }
                 }
 
@@ -1816,8 +1926,35 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                 inner.stats.total_difficulty
             };
 
-            if fork_cumulative > current_total_difficulty {
-                // Fork has more work - perform chain reorganization (standard Nakamoto rule)
+            // Fork choice: cumulative work first (Nakamoto), then a
+            // deterministic tiebreak on equal work. Without a tiebreak, two
+            // chains of identical work never reorg, and a withheld
+            // equal-work fork can sit forever.
+            //
+            // Tiebreak: prefer the tip whose hash is lexicographically
+            // SMALLER (i.e. more leading zeros = "luckier" PoW). This is
+            // independent of network arrival timing, so honest nodes
+            // converge to the same tie-winning chain regardless of which
+            // half of the partition they're in. It also resists
+            // "fresher-timestamp" tiebreaks that incentivize timestamp
+            // manipulation. Reference: Bitcoin Core ChainstateManager::
+            // FindMostWorkChain uses `nSequenceId` (per-node arrival order)
+            // for ties, which is non-deterministic across the network and
+            // a known consensus-irrelevant choice; we improve on it with a
+            // network-deterministic rule. zebrad similarly uses hash-as-
+            // tiebreak in its non-finalized state.
+            let take_fork = if fork_cumulative > current_total_difficulty {
+                true
+            } else if fork_cumulative == current_total_difficulty {
+                let current_tip_hash = self.tip().hash;
+                let fork_tip = block.hash();
+                fork_tip.as_bytes() < current_tip_hash.as_bytes()
+            } else {
+                false
+            };
+            if take_fork {
+                // Fork has more work (or wins the deterministic tiebreak) —
+                // perform chain reorganization (standard Nakamoto rule).
 
                 // Find the common ancestor (fork point). `None` means DB
                 // corruption (cycle or missing parent during walk); reject
@@ -1949,11 +2086,39 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                                 disconnected_tx_lists.push(txs);
                                 // Subtract this block's emission from supply
                                 let emission = calculate_block_reward(h);
-                                // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption
-inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) {
-    Ok(v) => v,
-    Err(_) => { tracing::error!("CORRUPTION: supply underflow on rollback — subtract {} from {}", emission, inner.stats.total_supply); Amount::from_atomic(0) }
-};
+                                // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
+                                //
+                                // AUDIT (2026-07-01): the previous error arm zeroed the supply
+                                // (`Amount::from_atomic(0)`) and continued. That defeated the whole
+                                // point of the checked_sub: the "checked" branch, when it fires,
+                                // was doing saturating-to-zero with an extra log line. If
+                                // `total_supply < emission_of_block_being_rolled_back`, the
+                                // in-memory state is proven corrupt (we're rolling back more
+                                // coinbase than we ever minted). Continuing from a zeroed supply
+                                // is worse than halting: every downstream check against the supply
+                                // cap becomes wrong, and any RPC reader gets a fabricated answer.
+                                //
+                                // Prior art:
+                                //   • Bitcoin Core: `assert(nBitsCurrent > 0)` / `assert(nMoneySupply >= 0)`
+                                //     — silent corruption is a stop condition, not a warning.
+                                //   • Monero: defensive panics in coinbase-emission accounting
+                                //     (`src/cryptonote_basic/verification_context.h`).
+                                //   • zebrad: `expect("chain state invariant")` on supply math.
+                                //
+                                // Halting via panic is safe here because the SIGTERM/SIGINT
+                                // handlers on this node flush RocksDB cleanly on shutdown
+                                // (the tokio signal handler installed for the 2026-06 zombie-
+                                // state fix). See operator rule `no self-defeating gates`.
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
+    .unwrap_or_else(|_| panic!(
+        "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
+         tried to subtract emission={} from total_supply={} at height being disconnected. \
+         In-memory supply state is unrecoverable; halting to preserve on-disk state \
+         (SIGTERM handler will flush RocksDB cleanly). Restart the node — the persisted \
+         chain will re-derive supply correctly. If this recurs on restart, the on-disk \
+         chain state is corrupt and requires a reindex.",
+        emission, inner.stats.total_supply
+    ));
                             }
                         }
                         if let Some(removed_hash) = inner.height_to_hash.remove(&h) {
@@ -2101,7 +2266,23 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
 
                         // Add this fork block's emission to supply
                         let emission = calculate_block_reward(fork_block.header.height);
-                        inner.stats.total_supply = inner.stats.total_supply.saturating_add(emission);
+                        // AUDIT (2026-07-01): checked_add + panic for symmetry with the
+                    // reorg-rollback path's checked_sub + panic (fixed same day).
+                    // saturating_add silently clamps at u64::MAX; if emission ever
+                    // returns a corrupt large value (bug in calculate_block_reward),
+                    // the silent clamp hides it and every subsequent supply query
+                    // returns u64::MAX until the process is bounced. Panicking on
+                    // overflow surfaces the corruption exactly once, at the site.
+                    // Prior art matches the SEV-A rollback fix comment above.
+                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission)
+                        .unwrap_or_else(|_| panic!(
+                            "CONSENSUS CORRUPTION: supply overflow on block connect — \
+                             tried to add emission={} to total_supply={}. Emission is \
+                             deterministic from height and cannot be attacker-controlled; \
+                             this indicates a bug in calculate_block_reward or on-disk \
+                             corruption. Halting for RocksDB flush + operator triage.",
+                            emission, inner.stats.total_supply
+                        ));
                     }
 
                     // SECURITY (BUG-2/BUG-4): If fork validation failed, rollback to pre-reorg state.
@@ -2131,11 +2312,39 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                                 self.rewind_phase2_stores(fork_block.header.height);
                                 // Subtract the emission we added for this fork block
                                 let emission = calculate_block_reward(fork_block.header.height);
-                                // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption
-inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) {
-    Ok(v) => v,
-    Err(_) => { tracing::error!("CORRUPTION: supply underflow on rollback — subtract {} from {}", emission, inner.stats.total_supply); Amount::from_atomic(0) }
-};
+                                // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
+                                //
+                                // AUDIT (2026-07-01): the previous error arm zeroed the supply
+                                // (`Amount::from_atomic(0)`) and continued. That defeated the whole
+                                // point of the checked_sub: the "checked" branch, when it fires,
+                                // was doing saturating-to-zero with an extra log line. If
+                                // `total_supply < emission_of_block_being_rolled_back`, the
+                                // in-memory state is proven corrupt (we're rolling back more
+                                // coinbase than we ever minted). Continuing from a zeroed supply
+                                // is worse than halting: every downstream check against the supply
+                                // cap becomes wrong, and any RPC reader gets a fabricated answer.
+                                //
+                                // Prior art:
+                                //   • Bitcoin Core: `assert(nBitsCurrent > 0)` / `assert(nMoneySupply >= 0)`
+                                //     — silent corruption is a stop condition, not a warning.
+                                //   • Monero: defensive panics in coinbase-emission accounting
+                                //     (`src/cryptonote_basic/verification_context.h`).
+                                //   • zebrad: `expect("chain state invariant")` on supply math.
+                                //
+                                // Halting via panic is safe here because the SIGTERM/SIGINT
+                                // handlers on this node flush RocksDB cleanly on shutdown
+                                // (the tokio signal handler installed for the 2026-06 zombie-
+                                // state fix). See operator rule `no self-defeating gates`.
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
+    .unwrap_or_else(|_| panic!(
+        "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
+         tried to subtract emission={} from total_supply={} at height being disconnected. \
+         In-memory supply state is unrecoverable; halting to preserve on-disk state \
+         (SIGTERM handler will flush RocksDB cleanly). Restart the node — the persisted \
+         chain will re-derive supply correctly. If this recurs on restart, the on-disk \
+         chain state is corrupt and requires a reindex.",
+        emission, inner.stats.total_supply
+    ));
                             }
                         }
 
@@ -2249,11 +2458,26 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                             // Inert while stores are None.
                             self.rewind_phase2_stores(fork_block.header.height);
                             let emission = calculate_block_reward(fork_block.header.height);
-                            // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption
-inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) {
-    Ok(v) => v,
-    Err(_) => { tracing::error!("CORRUPTION: supply underflow on rollback — subtract {} from {}", emission, inner.stats.total_supply); Amount::from_atomic(0) }
-};
+                            // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
+                            //
+                            // AUDIT (2026-07-02): fourth (and final located) site of
+                            // the self-defeating supply-underflow gate. Missed by the
+                            // 2026-07-01 `replace_all` pass because the surrounding
+                            // whitespace indentation was 28 spaces here vs the 32
+                            // spaces at the sites that DID get fixed then (~L2002 /
+                            // ~L2228). Doc-vs-code drift audit picked this up on the
+                            // second pass. Same rationale + prior art as the fixed
+                            // sites' audit blocks.
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
+    .unwrap_or_else(|_| panic!(
+        "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
+         tried to subtract emission={} from total_supply={} at fork block being disconnected. \
+         In-memory supply state is unrecoverable; halting to preserve on-disk state \
+         (SIGTERM handler will flush RocksDB cleanly). Restart the node — the persisted \
+         chain will re-derive supply correctly. If this recurs on restart, the on-disk \
+         chain state is corrupt and requires a reindex.",
+        emission, inner.stats.total_supply
+    ));
                         }
 
                         // Remove fork block height mappings
@@ -2297,9 +2521,30 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                         let tip_batch = UtxoSet::batch_from_block(block.header.height, &block.transactions);
                         inner.utxos.apply_batch(tip_batch);
 
-                        // Add triggering block's emission to supply
+                        // Add triggering block's emission to supply.
+                        //
+                        // AUDIT (2026-07-02): third and final site of the
+                        // supply-add symmetry fix. Wave 3 (commit 27ba4385)
+                        // claimed to switch all three connect-path
+                        // `saturating_add` sites to `checked_add + panic`,
+                        // but that pass only reached 2 of 3 (the sites at
+                        // ~L1644 and ~L2188). This third one — the
+                        // triggering-block emission add applied after a
+                        // successful reorg — was missed by the same
+                        // replace_all-vs-indentation drift that also missed
+                        // 2 SEV-A subtract sites on this file. Both categories
+                        // are now uniform. Grep-verified: 0 remaining
+                        // `total_supply.saturating_add` in this file.
                         let tip_emission = calculate_block_reward(block.header.height);
-                        inner.stats.total_supply = inner.stats.total_supply.saturating_add(tip_emission);
+                        inner.stats.total_supply = inner.stats.total_supply.checked_add(tip_emission)
+                            .unwrap_or_else(|_| panic!(
+                                "CONSENSUS CORRUPTION: supply overflow on reorg tip apply — \
+                                 tried to add tip_emission={} to total_supply={}. Emission is \
+                                 deterministic from height and cannot be attacker-controlled; \
+                                 this indicates a bug in calculate_block_reward or on-disk \
+                                 corruption. Halting for RocksDB flush + operator triage.",
+                                tip_emission, inner.stats.total_supply
+                            ));
 
                         // Update tip to the new fork head
                         inner.tip = ChainTip {
@@ -2355,6 +2600,25 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                 // chain state, and tx_index mutations all land atomically.
                 // A crash at ANY point during this block either commits everything
                 // or nothing — no partial state visible after restart.
+                //
+                // R-34 fix (2026-07-03): re-acquire the chain write lock
+                // for the diff-collect + apply_reorg_atomic window. Prior
+                // code released the write guard at the closing `}` of the
+                // earlier scope (~L2501) and ran apply_reorg_atomic without
+                // any lock; a concurrent apply_block from another ingester
+                // path could race the "already-present" pre-read that
+                // apply_reorg_atomic does at db/mod.rs:411 to implement
+                // oldest-wins on output_index. Holding the write lock here
+                // structurally serialises reorg-commit against every other
+                // chain mutator.
+                //
+                // The guard is bound inside an INNER SCOPE so it drops
+                // before the post-commit `inner_stats_for_log(&self.inner)`
+                // call below (which takes a read lock — a still-held
+                // write guard would deadlock it under parking_lot's
+                // non-re-entrant RwLock).
+                {
+                    let _reorg_commit_guard = self.inner.write();
                 if let Some(ref db) = self.db {
                     // 1. Collect output_index removals (disconnected blocks)
                     let mut oi_removals: Vec<[u8; 32]> = Vec::new();
@@ -2449,6 +2713,8 @@ inner.stats.total_supply = match inner.stats.total_supply.checked_sub(emission) 
                     }
                     self.persist_output_index(&block.transactions, block.header.height);
                 }
+                } // R-34: close the write-guard scope so
+                  // inner_stats_for_log below can take a read lock.
 
                 // Structured divergence detection log — reorg completed
                 let stats_snapshot = inner_stats_for_log(&self.inner);

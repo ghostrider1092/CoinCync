@@ -52,6 +52,14 @@ rolling-finality = ["dep:coincync-rolling-finality"]
 # Test/diagnostic knobs. Opt-in, off by default.
 test-vdf        = []
 test-utilities  = []
+# INSECURE — dev/testnet bootstrap only. Enables the checkpoint crypto skip
+# in `src/consensus/validation.rs::allow_checkpoint_crypto_skip`. Previously
+# controlled by a runtime env var; converted to compile-time feature so a
+# production build physically cannot enable the skip. CI must reject any
+# release artifact built with this feature. Prior art: zebrad's fast-sync
+# feature gate. See feedback_snapshot_procedure.md / H2 in the 2026-06-30
+# audit for rationale.
+insecure-fast-sync = []
 # Sketch features â€” implementations reserved for post-mainnet CIPs.
 # All gated modules are off by default and not part of the production
 # audit perimeter. See docs/cip/.
@@ -62,7 +70,7 @@ sketch-lelantus-spark     = []   # CIP-005 (gates src/crypto/lelantus_spark.rs)
 
 [dependencies]
 # â”€â”€ Elliptic curves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-curve25519-dalek    = { version = "4", features = ["serde", "rand_core"] }
+curve25519-dalek    = { version = "4", features = ["serde", "rand_core", "zeroize"] }
 ed25519-dalek       = { version = "2", features = ["serde", "rand_core"] }
 x25519-dalek        = { version = "2", features = ["serde", "static_secrets"] }
 
@@ -148,7 +156,7 @@ frost-ed25519 = "3"
 frost-core = "3"
 
 # â”€â”€ BIP39/BIP32 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-bip39        = "2"
+bip39        = { version = "2", features = ["zeroize"] }
 
 # â”€â”€ Big int â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 uint            = "0.9"
@@ -185,7 +193,7 @@ ordered-float = "4"
 # â”€â”€ CLI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 colored   = "2"
 indicatif = { version = "0.18", features = ["tokio"] }
-dialoguer = { version = "0.12", features = ["password"], optional = true }
+dialoguer = { version = "0.12", features = ["password"] }
 console   = "0.15"
 rustyline = "13"
 strsim    = "0.11"
@@ -314,3 +322,26 @@ correctness  = { level = "warn",  priority = -1 }
 suspicious   = { level = "warn",  priority = -1 }
 unwrap_used  = "allow"
 expect_used  = "allow"
+
+# AUDIT (2026-06-30 M1+M2): individually-enabled lints that catch the
+# specific bug classes we've hit in consensus code without spraying
+# warnings across the whole codebase.
+#
+# - cast_possible_truncation / cast_sign_loss / cast_lossless: exactly the
+#   class of bug behind the 2026-06-15 S1 ASERT denominator issue
+#   (dimensionally wrong int cast × unit).
+# - unwrap_in_result: flags .unwrap() calls inside functions that already
+#   return Result, where propagating the error via ? is nearly always
+#   correct. Fires far less than unwrap_used and never in test-only code.
+# - dbg_macro / print_stdout: catches dev-time leftovers.
+#
+# Keep at warn (not deny) initially — deny would fail the build on the ~600
+# existing occurrences. Migrate to deny gradually as each subsystem is
+# cleaned up (add #[deny(clippy::cast_possible_truncation)] at module scope
+# once that module is clean).
+cast_possible_truncation = "warn"
+cast_sign_loss           = "warn"
+cast_lossless            = "warn"
+unwrap_in_result         = "warn"
+dbg_macro                = "warn"
+print_stdout             = "warn"

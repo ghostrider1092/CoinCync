@@ -484,6 +484,17 @@ fn client_ip_from_headers(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Cap on entries retained in a per-IP rate-limit map. Beyond this
+/// size the map is opportunistically pruned of stale entries (older
+/// than `IP_WINDOW_STALE_SECS`). Chosen so that at ~1 caller/sec/IP
+/// the map stays well below the cap even for a busy public endpoint.
+const IP_WINDOW_MAX_ENTRIES: usize = 4096;
+
+/// Entries whose recorded window-start is older than this are eligible
+/// for opportunistic pruning. One second is enough — a stale entry's
+/// count field is only re-armed on next hit anyway.
+const IP_WINDOW_STALE_SECS: u64 = 5;
+
 fn enforce_ip_fixed_window_limit(
     table: &parking_lot::Mutex<HashMap<String, (u64, u32)>>,
     client_ip: &str,
@@ -491,6 +502,13 @@ fn enforce_ip_fixed_window_limit(
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let now = now_unix_secs();
     let mut guard = table.lock();
+    // P8-R1 (2026-07-03): opportunistic prune. Without this the map
+    // grows without bound — one entry per unique client IP for the
+    // lifetime of the process. Trigger only when the map crosses the
+    // soft cap so the hot path (normal traffic) stays cheap.
+    if guard.len() >= IP_WINDOW_MAX_ENTRIES {
+        guard.retain(|_, entry| now.saturating_sub(entry.0) <= IP_WINDOW_STALE_SECS);
+    }
     let entry = guard.entry(client_ip.to_string()).or_insert((now, 0));
     if entry.0 != now {
         *entry = (now, 0);

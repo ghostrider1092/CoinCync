@@ -93,8 +93,32 @@ pub fn generate_self_signed_cert(
 
     std::fs::write(&cert_path, cert.pem())
         .map_err(|e| Error::TlsError(format!("write cert: {}", e)))?;
-    std::fs::write(&key_path, key_pair.serialize_pem())
-        .map_err(|e| Error::TlsError(format!("write key: {}", e)))?;
+    // P8-T1 (2026-07-03): create the key with owner-only permissions
+    // atomically at open(2) time. Previously we did fs::write + chmod,
+    // which opens a race where another local process can read the
+    // freshly-created key before the chmod lands. Mirrors the
+    // write_secret_file pattern applied to noise.rs::write_secret_file
+    // (P5-No1). On Windows fs::write is retained + the follow-on
+    // set_readonly call (there's no clean create-time ACL primitive
+    // in the std API worth wiring here — the guarantee is best-effort
+    // on that platform).
+    let key_pem = key_pair.serialize_pem();
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut f = opts.open(&key_path)
+            .map_err(|e| Error::TlsError(format!("open key: {}", e)))?;
+        f.write_all(key_pem.as_bytes())
+            .map_err(|e| Error::TlsError(format!("write key: {}", e)))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&key_path, key_pem)
+            .map_err(|e| Error::TlsError(format!("write key: {}", e)))?;
+    }
 
     set_restrictive_permissions(&key_path)?;
 
