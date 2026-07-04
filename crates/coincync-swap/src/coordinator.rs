@@ -1098,17 +1098,30 @@ fn socks5_connect_domain(
         )));
     }
 
-    // `(target_host, target_port)` -> ATYP=DOMAINNAME via the crate's
-    // `ToTargetAddr` impl for `(&str, u16)`. No client-side DNS
-    // resolution happens — the host string is sent verbatim to the
-    // proxy. This is the critical Tor property; see the ATYP=3 path
-    // in the audit-prep doc §5 priority 9.
-    let s = socks::Socks5Stream::connect(proxy_addr, (target_host, target_port))
-        .map_err(|e| {
-            Error::Rpc(format!(
-                "SOCKS5 CONNECT to {target_host}:{target_port} via {proxy_addr}: {e}"
-            ))
-        })?;
+    // Force ATYP=DOMAINNAME by constructing `TargetAddr::Domain`
+    // explicitly. The convenient `(&str, u16)` inference in socks 0.3
+    // has an IP fast-path — `impl ToTargetAddr for (&str, u16)` calls
+    // `str::parse::<Ipv4Addr>()` and, on success, downgrades to
+    // `TargetAddr::Ip` (ATYP=IPV4). That silently defeats the Tor
+    // property this function promises: whenever the target host happens
+    // to look like a v4 literal (e.g. loopback tests, or any caller
+    // that passes an IP thinking the docs meant what they said), the
+    // wire packet leaks the client-side numeric representation instead
+    // of routing hostname resolution through the exit. Pinning
+    // `TargetAddr::Domain` here removes that footgun uniformly —
+    // matches Bitcoin Core (`netbase.cpp::Socks5`) and Monero
+    // (`net/socks.cpp`), both of which unconditionally emit ATYP=0x03
+    // for hostname-shaped SOCKS5 CONNECTs. See the ATYP=3 path in the
+    // audit-prep doc §5 priority 9.
+    let s = socks::Socks5Stream::connect(
+        proxy_addr,
+        socks::TargetAddr::Domain(target_host.to_owned(), target_port),
+    )
+    .map_err(|e| {
+        Error::Rpc(format!(
+            "SOCKS5 CONNECT to {target_host}:{target_port} via {proxy_addr}: {e}"
+        ))
+    })?;
 
     let stream = s.into_inner();
     stream
@@ -1894,6 +1907,42 @@ fn run_verifier(action: HandshakeAction, verifier: AdaptorVerifier<'_>) -> Resul
 mod tests {
     use super::*;
 
+    /// Wait for a spawned test thread to finish, but bound the wait
+    /// so a stuck socket read (or any missed-handshake flake) cannot
+    /// hang CI for the full 2-hour job timeout. On success the thread's
+    /// return value is handed back; on panic the payload is re-raised
+    /// on the current thread — same observable behaviour as
+    /// `handle.join().unwrap()`. On timeout we panic with a label
+    /// identifying which worker hung, so the test failure diagnoses
+    /// itself instead of dying at the CI-runner limit.
+    ///
+    /// The joined thread is not force-killed (std has no safe primitive
+    /// for that). It leaks until the test process exits — acceptable
+    /// for test code, and strictly better than a silent 2h hang.
+    fn join_with_timeout<T: Send + 'static>(
+        handle: std::thread::JoinHandle<T>,
+        timeout: std::time::Duration,
+        label: &str,
+    ) -> T {
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel();
+        // Move `handle` into a helper thread so we can observe the
+        // result via a channel — `JoinHandle::join` consumes the
+        // handle by value and would otherwise block the test thread
+        // unconditionally.
+        std::thread::spawn(move || {
+            let _ = tx.send(handle.join());
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(v)) => v,
+            Ok(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
+            Err(_) => panic!(
+                "join_with_timeout: '{label}' thread did not complete within {timeout:?} \
+                 (probable flake: unbounded socket read or missed handshake wire)"
+            ),
+        }
+    }
+
     fn safe_params() -> SwapParameters {
         SwapParameters {
             cync_amount: 100_000_000,
@@ -2312,8 +2361,8 @@ btc_network: "regtest".to_string(),
             bob_tx.send(coord.session().clone()).expect("bob send");
         });
 
-        alice_handle.join().expect("alice thread");
-        bob_handle.join().expect("bob thread");
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let alice_session = alice_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("alice session snapshot");
@@ -2470,8 +2519,8 @@ btc_network: "regtest".to_string(),
                 .expect("bob send");
         });
 
-        alice_handle.join().expect("alice thread");
-        bob_handle.join().expect("bob thread");
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let (alice_session, alice_sees_bob) = alice_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("alice snapshot");
@@ -2765,8 +2814,8 @@ btc_network: "regtest".to_string(),
             bob_tx.send(coord.session().clone()).unwrap();
         });
 
-        alice_handle.join().unwrap();
-        bob_handle.join().unwrap();
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let alice_session = alice_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let bob_session = bob_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
@@ -2777,7 +2826,7 @@ btc_network: "regtest".to_string(),
 
         // Let the proxy threads drain. Don't strictly need to join
         // them, but joining proves they exited cleanly.
-        let _ = proxy_handle.join();
+        join_with_timeout(proxy_handle, Duration::from_secs(30), "socks5_proxy");
     }
 
     /// Same as above but with Noise XX wrapping inside the SOCKS5
@@ -2880,8 +2929,8 @@ btc_network: "regtest".to_string(),
             bob_tx.send((coord.session().clone(), remote)).unwrap();
         });
 
-        alice_handle.join().unwrap();
-        bob_handle.join().unwrap();
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let (alice_session, alice_sees_bob) =
             alice_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let (bob_session, bob_sees_alice) =
@@ -2893,7 +2942,7 @@ btc_network: "regtest".to_string(),
         assert_eq!(alice_sees_bob, Some(curve25519_static_pub(&bob_static)));
         assert_eq!(bob_sees_alice, Some(curve25519_static_pub(&alice_static)));
 
-        let _ = proxy_handle.join();
+        join_with_timeout(proxy_handle, Duration::from_secs(30), "socks5_proxy");
     }
 
     /// `socks5_connect_domain` rejects target hostnames longer than
@@ -3036,9 +3085,9 @@ btc_network: "regtest".to_string(),
             bob_tx.send(coord.session().clone()).unwrap();
         });
 
-        silent_handle.join().expect("silent");
-        alice_handle.join().expect("alice");
-        bob_handle.join().expect("bob");
+        join_with_timeout(silent_handle, Duration::from_secs(30), "silent");
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let alice_session = alice_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let bob_session = bob_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -3162,9 +3211,9 @@ btc_network: "regtest".to_string(),
             bob_tx.send(coord.session().clone()).unwrap();
         });
 
-        bad_handle.join().expect("bad");
-        alice_handle.join().expect("alice");
-        bob_handle.join().expect("bob");
+        join_with_timeout(bad_handle, Duration::from_secs(30), "bad");
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let alice_session = alice_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let bob_session = bob_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -3206,8 +3255,8 @@ btc_network: "regtest".to_string(),
             thread::sleep(Duration::from_millis(800));
         });
 
-        let result = alice_handle.join().expect("alice");
-        let _ = silent_handle.join();
+        let result = join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(silent_handle, Duration::from_secs(30), "silent");
 
         match result {
             Err(Error::Rpc(msg)) => {
@@ -3337,9 +3386,9 @@ btc_network: "regtest".to_string(),
             bob_tx.send(coord.session().clone()).unwrap();
         });
 
-        garbage_handle.join().expect("garbage");
-        alice_handle.join().expect("alice");
-        bob_handle.join().expect("bob");
+        join_with_timeout(garbage_handle, Duration::from_secs(30), "garbage");
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let alice_session = alice_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let bob_session = bob_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -3427,8 +3476,8 @@ btc_network: "regtest".to_string(),
             );
         });
 
-        alice_handle.join().expect("alice thread");
-        bob_handle.join().expect("bob thread");
+        join_with_timeout(alice_handle, Duration::from_secs(30), "alice");
+        join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
 
         let alice_result = alice_rx
             .recv_timeout(Duration::from_secs(2))
