@@ -56,6 +56,9 @@ pub mod mining;
 pub mod rpc;
 pub mod cli;
 
+// ── Runtime observability ───────────────────────────────────
+pub mod runtime_watchdog;
+
 // ── Network genesis definitions ─────────────────────────────
 pub mod testnet;
 pub mod mainnet;

@@ -492,6 +492,18 @@ async fn start_node(
     // Ensure data dir exists
     std::fs::create_dir_all(&data_dir).ok();
 
+    // Runtime deadlock watchdog. Arm BEFORE any tokio work so the
+    // startup phase (RandomX dataset build, DB open, etc.) is
+    // observable too — the watchdog's own 90s grace window covers
+    // the legitimate startup lock-park pattern. Diagnostic snapshots
+    // land under `data_dir` on confirmed hang; systemd's Restart=
+    // then brings us back. See src/runtime_watchdog.rs for the
+    // full design (motivated by the 2026-07-02 api.coincync.network
+    // 41-hour futex-park deadlock — every tokio worker on
+    // futex_wait_queue for hours with no observable output).
+    let watchdog_heartbeat = coincync::runtime_watchdog::arm(&data_dir);
+    coincync::runtime_watchdog::spawn_heartbeat_task(watchdog_heartbeat);
+
     // Build P2P node config from CLI overrides
     let mut p2p_config = P2PNodeConfig::default();
     p2p_config.magic = network.magic_bytes();
