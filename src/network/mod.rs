@@ -3,6 +3,12 @@ pub mod bootstrap;
 pub mod dns_seeds;
 pub mod socks_dns;
 pub mod peer_snapshot;
+// Generic maintainer-signed registry — infrastructure for Fort-Knox
+// items 2 (faucet decentralization), 3 (FROST-coord decentralization),
+// and future decentralized-service consumers. Follows the same trust
+// model as `peer_snapshot` (signature-over-namespaced-payload) but is
+// generic over the payload type so multiple services share one path.
+pub mod signed_registry;
 
 // Ported from CoinCync (copy as-is):
 pub mod dandelion;
