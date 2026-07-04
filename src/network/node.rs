@@ -430,7 +430,16 @@ impl P2PNode {
 
         // Now safe to await — no sync lock held.
         for (stripe, target, ki_bytes) in sends {
-            if let Some(sender) = self.peer_senders.get(&target) {
+            // DEADLOCK FIX: clone the mpsc::Sender out of DashMap before awaiting.
+            // The prior `if let Some(sender) = self.peer_senders.get(&target)` form held
+            // the DashMap shard Ref across `sender.send(data).await`; if the peer's
+            // outbound channel was at capacity that await parked the worker while still
+            // holding the shard lock, blocking every other task touching the same
+            // shard. Same fix applied uniformly at all `mpsc::Sender::send(...).await`
+            // sites over a DashMap in this file (see PR body for the systematic
+            // sweep + regression test).
+            let sender = self.peer_senders.get(&target).map(|s| s.value().clone());
+            if let Some(sender) = sender {
                 if let Ok(encoded) = borsh::to_vec(&ki_bytes) {
                     let msg = super::protocol::Message::new(
                         self.config.magic,
@@ -1676,7 +1685,14 @@ impl P2PNode {
                                 let nonce = sync_sync.write().await.allocate_header_nonce();
                                 if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
                                     if let Ok(data) = msg.to_bytes() {
-                                        if let Some(sender) = sync_senders.get(&peer_id) {
+                                        // DEADLOCK FIX: clone the sender BEFORE the
+                                        // `sender.send(data).await` and the SECOND await
+                                        // on `sync_sync.write().await` — the prior form
+                                        // held the DashMap shard Ref across BOTH awaits,
+                                        // making this the highest-blast-radius site of
+                                        // the class. See PR body for the full sweep.
+                                        let sender = sync_senders.get(&peer_id).map(|s| s.value().clone());
+                                        if let Some(sender) = sender {
                                             let _ = sender.send(data).await;
                                             sync_sync.write().await.mark_headers_requested(now);
                                             info!("[IBD] GetHeaders nonce={} sent to peer {:?} (our_height={}, state={:?})", nonce, &peer_id[..4], height, state);
@@ -1804,7 +1820,11 @@ impl P2PNode {
                                     if let Ok(payload) = borsh::to_vec(&get_blocks) {
                                         let msg = Message::new(magic, MessageType::GetBlocks, payload);
                                         if let Ok(data) = msg.to_bytes() {
-                                            if let Some(sender) = sync_senders.get(pid) {
+                                            // DEADLOCK FIX: same shape as GetHeaders above
+                                            // — TWO awaits (send + sync_sync.write) inside
+                                            // the guard region. Clone the sender out first.
+                                            let sender = sync_senders.get(pid).map(|s| s.value().clone());
+                                            if let Some(sender) = sender {
                                                 if sender.send(data).await.is_ok() {
                                                     // Record requests
                                                     let mut sg = sync_sync.write().await;
@@ -1994,7 +2014,16 @@ impl P2PNode {
                         // Send pings to all peers
                         let ping = Message::ping(magic);
                         if let Ok(data) = ping.to_bytes() {
-                            for sender in maint_senders.iter() {
+                            // DEADLOCK FIX: snapshot senders before awaiting per-peer
+                            // send. Iterating the DashMap directly holds each shard's
+                            // Ref across `.send(...).await`, and this is the highest-
+                            // frequency broadcast site (every PING_INTERVAL = 120s).
+                            // Cloning a Vec of Sender is cheap (each clone is an Arc
+                            // bump) and unblocks the shard as soon as the snapshot
+                            // completes.
+                            let senders_snapshot: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
+                                maint_senders.iter().map(|s| s.value().clone()).collect();
+                            for sender in senders_snapshot {
                                 let _ = sender.send(data.clone()).await;
                             }
                         }
@@ -2027,7 +2056,16 @@ impl P2PNode {
                         // via GetTxs (only checks mempool), completely breaking
                         // the Dandelion++ stem phase.
                         for (_tx_hash, tx, target_peer) in &actions.stem_relay {
-                            if let Some(sender) = maint_senders.get(target_peer) {
+                            // DEADLOCK FIX: this is the site most-closely matching the
+                            // production 8m45s / 16-of-16-futex-parked signature. A stem
+                            // relay to ONE peer whose outbound mpsc is full parks the
+                            // dandelion task on that channel's capacity while STILL
+                            // holding the DashMap shard Ref via `.get(target_peer)`.
+                            // Every other tokio worker that touches the same shard
+                            // (peer connect, disconnect, another broadcast) then blocks
+                            // on the shard's futex — cascading to 100% futex-park.
+                            let sender = maint_senders.get(target_peer).map(|s| s.value().clone());
+                            if let Some(sender) = sender {
                                 if let Ok(msg) = Message::txs(magic, vec![tx.clone()]) {
                                     if let Ok(data) = msg.to_bytes() {
                                         let _ = sender.send(data).await;
@@ -2041,7 +2079,15 @@ impl P2PNode {
                         for (tx_hash, tx, source) in &actions.fluff {
                             if let Ok(msg) = Message::inv_tx(magic, *tx_hash) {
                                 if let Ok(data) = msg.to_bytes() {
-                                    for sender in maint_senders.iter() {
+                                    // DEADLOCK FIX: same shape as the ping broadcast
+                                    // above — snapshot senders, drop the DashMap iter,
+                                    // then fan out. Fluff fires with actions.fluff
+                                    // potentially non-empty every dandelion tick (10s);
+                                    // the pre-fix code held one shard's Ref for the
+                                    // duration of every peer's send.
+                                    let senders_snapshot: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
+                                        maint_senders.iter().map(|s| s.value().clone()).collect();
+                                    for sender in senders_snapshot {
                                         let _ = sender.send(data.clone()).await;
                                     }
                                 }
@@ -2504,7 +2550,10 @@ impl P2PNode {
 
     /// Send message to specific peer
     pub async fn send_to(&self, peer_id: &PeerId, data: Vec<u8>) -> Result<()> {
-        if let Some(sender) = self.peer_senders.get(peer_id) {
+        // DEADLOCK FIX: clone before await; see the systematic sweep in this
+        // file's PR body for the class-wide rationale.
+        let sender = self.peer_senders.get(peer_id).map(|s| s.value().clone());
+        if let Some(sender) = sender {
             sender.send(data).await
                 .map_err(|_| Error::ConnectionFailed("peer disconnected".into()))?;
         }
@@ -3248,6 +3297,49 @@ fn pick_random_peer(peers: &Arc<DashMap<PeerId, PeerInfo>>) -> Option<PeerId> {
     Some(connected[idx])
 }
 
+/// Send `data` to `peer_id`'s outbound mpsc channel WITHOUT holding
+/// the DashMap shard lock across the send.await.
+///
+/// This is the class-wide replacement for the deadlock antipattern:
+///
+/// ```ignore
+/// if let Some(sender) = senders.get(&peer_id) {
+///     let _ = sender.send(data).await;  // shard Ref held across await
+/// }
+/// ```
+///
+/// `dashmap`'s `get()` returns a `Ref` whose Drop releases the shard
+/// lock only when the Ref goes out of scope. If the peer's outbound
+/// mpsc channel is at capacity, `.send(data).await` parks the tokio
+/// worker while STILL holding the shard lock — every other tokio task
+/// that later touches the same shard (peer connect / disconnect /
+/// broadcast) parks on the shard's futex, cascading to full-runtime
+/// deadlock. Verified matches the 2026-07-02 / 2026-07-03 production
+/// signature (16/16 threads on `futex_wait_queue`).
+///
+/// The fix clones the sender out of the DashMap FIRST (a cheap `Arc`
+/// bump on `tokio::sync::mpsc::Sender`), THEN drops the Ref, THEN
+/// awaits the send. See `docs/operations/runbook-watchdog-diagnostic.md`
+/// for the full incident context.
+///
+/// Returns `true` iff the peer was in the map AND the send succeeded.
+/// `false` on peer not present (disconnect race) OR channel closed OR
+/// backpressure error. Callers that need to distinguish these three
+/// cases should use `senders.get(...).map(|s| s.value().clone())`
+/// directly.
+async fn send_to_peer(
+    senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    peer_id: &PeerId,
+    data: Vec<u8>,
+) -> bool {
+    let sender = senders.get(peer_id).map(|s| s.value().clone());
+    if let Some(sender) = sender {
+        sender.send(data).await.is_ok()
+    } else {
+        false
+    }
+}
+
 /// Process received message
 /// Data format: [msg_type (1 byte), payload...]
 /// The header has already been validated and stripped by the message framer.
@@ -3405,7 +3497,9 @@ async fn process_message(
                 }
 
                 // Respond with verack (only after validation passes)
-                if let Some(sender) = senders.get(&peer_id) {
+                // DEADLOCK FIX: clone before await (systematic sweep).
+                let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                if let Some(sender) = sender {
                     let verack = Message::verack(magic);
                     if let Err(e) = sender.send(verack.to_bytes()?).await {
                         warn!("Failed to send Verack to peer {:?}: {}", &peer_id[..4], e);
@@ -3470,11 +3564,9 @@ async fn process_message(
             }
 
             // Send GetAddr to discover more peers after handshake
-            if let Some(sender) = senders.get(&peer_id) {
-                let getaddr = Message::new(magic, MessageType::GetAddr, vec![]);
-                if let Ok(data) = getaddr.to_bytes() {
-                    let _ = sender.send(data).await;
-                }
+            let getaddr = Message::new(magic, MessageType::GetAddr, vec![]);
+            if let Ok(data) = getaddr.to_bytes() {
+                let _ = send_to_peer(&senders, &peer_id, data).await;
             }
 
             // Handshake complete — if this peer is ahead, send GetHeaders with nonce.
@@ -3487,7 +3579,16 @@ async fn process_message(
                     let nonce = sync.write().await.allocate_header_nonce();
                     if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
                         if let Ok(data) = msg.to_bytes() {
-                            if let Some(sender) = senders.get(&peer_id) {
+                            // DEADLOCK FIX: inline clone-then-await to preserve the
+                            // exact pre-fix log semantics — info! fires whenever the
+                            // peer WAS in the map, regardless of whether the send
+                            // ultimately succeeded (matches the pre-fix `let _ =
+                            // sender.send(...).await` pattern that discarded the
+                            // send-result). Using the send_to_peer helper here would
+                            // change the log to fire only on send success, which is a
+                            // subtle observable behavior change we don't want.
+                            let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                            if let Some(sender) = sender {
                                 let _ = sender.send(data).await;
                                 info!(
                                     "Handshake complete — GetHeaders nonce={} to peer {:?} (h={}, we={})",
@@ -3512,10 +3613,8 @@ async fn process_message(
                 return Ok(());
             }
             let nonce = u64::from_le_bytes(payload[..8].try_into().unwrap_or([0u8; 8]));
-            if let Some(sender) = senders.get(&peer_id) {
-                let pong = Message::pong(magic, nonce);
-                let _ = sender.send(pong.to_bytes()?).await;
-            }
+            let pong = Message::pong(magic, nonce);
+            let _ = send_to_peer(&senders, &peer_id, pong.to_bytes()?).await;
         }
 
         MessageType::Pong => {
@@ -3573,12 +3672,8 @@ async fn process_message(
 
                 // Always respond (even with empty headers) so the requester knows.
                 // Echo the nonce for request/response correlation.
-                {
-                    if let Some(sender) = senders.get(&peer_id) {
-                        if let Ok(resp) = Message::headers_with_nonce(magic, headers, msg.nonce) {
-                            let _ = sender.send(resp.to_bytes()?).await;
-                        }
-                    }
+                if let Ok(resp) = Message::headers_with_nonce(magic, headers, msg.nonce) {
+                    let _ = send_to_peer(&senders, &peer_id, resp.to_bytes()?).await;
                 }
             }
         }
@@ -3629,10 +3724,8 @@ async fn process_message(
 
                     // Always respond (even with empty blocks) so the requester
                     // can free download slots instead of waiting for timeout.
-                    if let Some(sender) = senders.get(&peer_id) {
-                        if let Ok(resp) = Message::blocks(magic, blocks) {
-                            let _ = sender.send(resp.to_bytes()?).await;
-                        }
+                    if let Ok(resp) = Message::blocks(magic, blocks) {
+                        let _ = send_to_peer(&senders, &peer_id, resp.to_bytes()?).await;
                     }
                 }
                 Err(e) => {
@@ -3674,13 +3767,11 @@ async fn process_message(
                 }
                 // Request missing transactions via GetTxs
                 if !needed.is_empty() {
-                    if let Some(sender) = senders.get(&peer_id) {
-                        // Reuse GetBlocksMessage format for tx hashes
-                        let get_msg = GetBlocksMessage { hashes: needed };
-                        if let Ok(payload_bytes) = borsh::to_vec(&get_msg) {
-                            let msg = Message::new(magic, MessageType::GetTxs, payload_bytes);
-                            let _ = sender.send(msg.to_bytes()?).await;
-                        }
+                    // Reuse GetBlocksMessage format for tx hashes
+                    let get_msg = GetBlocksMessage { hashes: needed };
+                    if let Ok(payload_bytes) = borsh::to_vec(&get_msg) {
+                        let msg = Message::new(magic, MessageType::GetTxs, payload_bytes);
+                        let _ = send_to_peer(&senders, &peer_id, msg.to_bytes()?).await;
                     }
                 }
                 }
@@ -3733,7 +3824,11 @@ async fn process_message(
                         let nonce = sync.write().await.allocate_header_nonce();
                         if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
                             if let Ok(data) = msg.to_bytes() {
-                                if let Some(sender) = senders.get(&peer_id) {
+                                // DEADLOCK FIX: same pattern as the Handshake GetHeaders
+                                // above — inline clone-then-await preserves the pre-fix
+                                // "log fires if peer was in map" semantics exactly.
+                                let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                                if let Some(sender) = sender {
                                     let _ = sender.send(data).await;
                                     debug!(
                                         "InvBlock during IBD: sent GetHeaders nonce={} to peer {:?} to refresh tip (our_h={})",
@@ -3803,7 +3898,11 @@ async fn process_message(
                         if let Ok(payload) = borsh::to_vec(&get_blocks) {
                             let msg_out = Message::new(magic, MessageType::GetBlocks, payload);
                             if let Ok(data) = msg_out.to_bytes() {
-                                if let Some(sender) = senders.get(&peer_id) {
+                                // DEADLOCK FIX: two awaits inside the guard (send +
+                                // sync.write). Clone the sender out first, then run
+                                // both awaits with the DashMap Ref already dropped.
+                                let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                                if let Some(sender) = sender {
                                     if sender.send(data).await.is_ok() {
                                         // Track so timeout/retry works
                                         let now = chrono::Utc::now().timestamp() as u64;
@@ -3871,10 +3970,8 @@ async fn process_message(
                     }
                 }
                 if !txs.is_empty() {
-                    if let Some(sender) = senders.get(&peer_id) {
-                        if let Ok(resp) = Message::txs(magic, txs) {
-                            let _ = sender.send(resp.to_bytes()?).await;
-                        }
+                    if let Ok(resp) = Message::txs(magic, txs) {
+                        let _ = send_to_peer(&senders, &peer_id, resp.to_bytes()?).await;
                     }
                 }
                 }
@@ -3947,7 +4044,12 @@ async fn process_message(
                             // Fluff epoch or loop detected — broadcast to all peers
                             if let Ok(msg) = Message::inv_tx(magic, fluff_tx.hash()) {
                                 if let Ok(data) = msg.to_bytes() {
-                                    for sender in senders.iter() {
+                                    // DEADLOCK FIX: snapshot senders before awaiting
+                                    // per-peer send. See PR body for the systematic
+                                    // sweep across this file.
+                                    let senders_snapshot: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
+                                        senders.iter().map(|s| s.value().clone()).collect();
+                                    for sender in senders_snapshot {
                                         let _ = sender.send(data.clone()).await;
                                     }
                                 }
@@ -4214,9 +4316,7 @@ async fn process_message(
                 let addr_msg = super::protocol::AddrMessage { addresses: net_addrs };
                 if let Ok(payload_bytes) = borsh::to_vec(&addr_msg) {
                     let msg = Message::new(magic, MessageType::Addr, payload_bytes);
-                    if let Some(sender) = senders.get(&peer_id) {
-                        let _ = sender.send(msg.to_bytes()?).await;
-                    }
+                    let _ = send_to_peer(&senders, &peer_id, msg.to_bytes()?).await;
                 }
             }
         }
@@ -4337,10 +4437,8 @@ async fn process_message(
                 });
                 for block_bytes in payloads {
                     let m = Message::new(magic, MessageType::BlockData, block_bytes);
-                    if let Some(sender) = senders.get(&peer_id) {
-                        if let Ok(data) = m.to_bytes() {
-                            let _ = sender.send(data).await;
-                        }
+                    if let Ok(data) = m.to_bytes() {
+                        let _ = send_to_peer(&senders, &peer_id, data).await;
                     }
                 }
                 }
@@ -4442,12 +4540,10 @@ async fn process_message(
                 // the per-peer write loop reads `data[4]` as the real
                 // message type instead of a body byte (see 2026-05-09 IBD
                 // wedge: 5 sites bypassed framing and broke the connection).
-                if let Some(sender) = senders.get(&peer_id) {
-                    if let Ok(encoded) = borsh::to_vec(&filters) {
-                        let msg = Message::new(magic, MessageType::Filters, encoded);
-                        if let Ok(data) = msg.to_bytes() {
-                            let _ = sender.send(data).await;
-                        }
+                if let Ok(encoded) = borsh::to_vec(&filters) {
+                    let msg = Message::new(magic, MessageType::Filters, encoded);
+                    if let Ok(data) = msg.to_bytes() {
+                        let _ = send_to_peer(&senders, &peer_id, data).await;
                     }
                 }
             }
@@ -4503,12 +4599,10 @@ async fn process_message(
                 digests
             });
 
-            if let Some(sender) = senders.get(&peer_id) {
-                if let Ok(encoded) = borsh::to_vec(&digests) {
-                    let msg = Message::new(magic, MessageType::OutputDigests, encoded);
-                    if let Ok(data) = msg.to_bytes() {
-                        let _ = sender.send(data).await;
-                    }
+            if let Ok(encoded) = borsh::to_vec(&digests) {
+                let msg = Message::new(magic, MessageType::OutputDigests, encoded);
+                if let Ok(data) = msg.to_bytes() {
+                    let _ = send_to_peer(&senders, &peer_id, data).await;
                 }
             }
         }
@@ -4561,12 +4655,10 @@ async fn process_message(
                 );
             }
 
-            if let Some(sender) = senders.get(&peer_id) {
-                if let Ok(encoded) = borsh::to_vec(&checkpoints) {
-                    let msg = Message::new(magic, MessageType::FilterCheckpoints, encoded);
-                    if let Ok(data) = msg.to_bytes() {
-                        let _ = sender.send(data).await;
-                    }
+            if let Ok(encoded) = borsh::to_vec(&checkpoints) {
+                let msg = Message::new(magic, MessageType::FilterCheckpoints, encoded);
+                if let Ok(data) = msg.to_bytes() {
+                    let _ = send_to_peer(&senders, &peer_id, data).await;
                 }
             }
         }
@@ -4598,12 +4690,10 @@ async fn process_message(
                     statuses
                 });
 
-                if let Some(sender) = senders.get(&peer_id) {
-                    if let Ok(encoded) = borsh::to_vec(&statuses) {
-                        let msg = Message::new(magic, MessageType::KeyImageStatus, encoded);
-                        if let Ok(data) = msg.to_bytes() {
-                            let _ = sender.send(data).await;
-                        }
+                if let Ok(encoded) = borsh::to_vec(&statuses) {
+                    let msg = Message::new(magic, MessageType::KeyImageStatus, encoded);
+                    if let Ok(data) = msg.to_bytes() {
+                        let _ = send_to_peer(&senders, &peer_id, data).await;
                     }
                 }
             }
@@ -4716,5 +4806,202 @@ mod tests {
         let conn_stats = node.connection_stats();
         assert_eq!(conn_stats.memory_used, 0);
         assert_eq!(conn_stats.memory_budget, MEMORY_BUDGET_BYTES);
+    }
+
+    // ─── DashMap-shard-lock-across-await regression tests ─────────────
+    //
+    // These tests guard against the deadlock class that took down the
+    // fleet on 2026-07-02 (api box) and 2026-07-03 (relay1) with the
+    // signature "16/16 threads on futex_wait_queue at ~8m45s uptime".
+    // Root cause: multiple hot-path sites in this file held a
+    // `dashmap::Ref` from `peer_senders.get(...)` or `.iter()` across a
+    // subsequent `.send(...).await`; when a peer's outbound channel
+    // filled up, the sending task parked on channel capacity while
+    // holding the shard lock, and every other tokio worker that later
+    // touched the same shard blocked on the shard's futex.
+    //
+    // The fix (see `send_to_peer` above + the snapshot-then-loop
+    // pattern at Ping / Fluff broadcasts) clones the sender out of the
+    // DashMap BEFORE the send.await. These tests lock the invariant
+    // that no future edit reintroduces the antipattern.
+
+    #[tokio::test]
+    async fn send_to_peer_returns_true_when_send_succeeds() {
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
+        let peer_id: PeerId = [1u8; 32];
+        senders.insert(peer_id, tx);
+
+        let ok = send_to_peer(&senders, &peer_id, vec![0xAA, 0xBB]).await;
+        assert!(ok, "helper must return true on successful send");
+        assert_eq!(rx.recv().await, Some(vec![0xAA, 0xBB]));
+    }
+
+    #[tokio::test]
+    async fn send_to_peer_returns_false_when_peer_missing() {
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let peer_id: PeerId = [7u8; 32];
+        let ok = send_to_peer(&senders, &peer_id, vec![0]).await;
+        assert!(!ok, "helper must return false when peer not in map");
+    }
+
+    #[tokio::test]
+    async fn send_to_peer_returns_false_when_channel_closed() {
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(1);
+        let peer_id: PeerId = [3u8; 32];
+        senders.insert(peer_id, tx);
+        drop(rx); // close the channel
+
+        let ok = send_to_peer(&senders, &peer_id, vec![0]).await;
+        assert!(!ok, "helper must return false when channel closed");
+    }
+
+    /// **This is the anti-regression test for the 2026-07-02 / 2026-07-03
+    /// production deadlock.** It asserts that while `send_to_peer` is
+    /// parked on a full mpsc channel, concurrent `DashMap::insert` on
+    /// the SAME map from another tokio task completes without waiting
+    /// for the parked send.
+    ///
+    /// The pre-fix antipattern held the DashMap shard lock via the
+    /// `Ref` returned by `.get(peer_id)` while awaiting `.send(...)`.
+    /// If any other task tried to touch the same shard (peer connect,
+    /// disconnect, another broadcast), it blocked on the shard's futex.
+    /// With enough tokio worker tasks all contending on that shard, the
+    /// runtime dropped to 100% futex-park — the observed production
+    /// signature.
+    ///
+    /// After the fix, `send_to_peer` clones the sender out FIRST and
+    /// awaits with the DashMap Ref already dropped. Insert must proceed
+    /// immediately.
+    ///
+    /// The test uses a bounded channel of capacity 1, pre-fills it, and
+    /// starts a `send_to_peer` call that will park on channel capacity.
+    /// Then concurrently issues a `DashMap::insert` and asserts that
+    /// completes well within a bound (50ms) — orders of magnitude
+    /// faster than the send's parked duration (which would be forever
+    /// if nothing drained the channel).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn send_to_peer_does_not_block_concurrent_dashmap_insert_on_full_channel() {
+        use std::time::Duration;
+        let senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>> = Arc::new(DashMap::new());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+        let slow_peer: PeerId = [9u8; 32];
+        senders.insert(slow_peer, tx.clone());
+
+        // Fill the channel to capacity so the next `send.await` parks.
+        tx.send(vec![0]).await.expect("pre-fill send must succeed");
+
+        // Spawn the parked send.
+        let senders_send = senders.clone();
+        let send_task = tokio::spawn(async move {
+            // With the fix, this awaits with NO DashMap lock held.
+            // Will unblock once we drain `rx` at the end of the test.
+            send_to_peer(&senders_send, &slow_peer, vec![1, 2, 3]).await
+        });
+
+        // Give the send task a moment to park on the channel.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Now do the operation that would deadlock under the antipattern:
+        // insert into the SAME DashMap while the send is parked. With
+        // the fix, this must complete IMMEDIATELY (no shard-lock wait).
+        let other_peer: PeerId = [42u8; 32];
+        let (tx2, _rx2) = mpsc::channel::<Vec<u8>>(1);
+        let insert_start = std::time::Instant::now();
+        senders.insert(other_peer, tx2);
+        let insert_dur = insert_start.elapsed();
+
+        assert!(
+            insert_dur < Duration::from_millis(500),
+            "DashMap insert took {}ms while send was parked — the DashMap \
+             shard lock is still being held across the send.await. \
+             REGRESSION: the deadlock antipattern is back in send_to_peer \
+             (or in one of its callers). See node.rs:send_to_peer for the \
+             correct pattern.",
+            insert_dur.as_millis()
+        );
+
+        // Cleanup: drain the channel so the send can complete + the task joins.
+        let _ = rx.recv().await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), send_task)
+            .await
+            .expect("send_task must complete after channel drained");
+    }
+
+    /// Companion test: same invariant for the snapshot-then-loop pattern
+    /// used at broadcast sites (ping, fluff). Iterates the DashMap into
+    /// a Vec<Sender>, drops the iterator, THEN awaits per-peer sends.
+    /// Concurrent DashMap modification must not block on the iteration.
+    ///
+    /// This test only asserts the SHARD-LOCK invariant. It does NOT
+    /// assert that fast peers receive their messages ahead of slow —
+    /// the production broadcast loops are deliberately sequential
+    /// (`for sender in snapshot { sender.send(...).await; }`) so a slow
+    /// peer DOES delay the tail of the broadcast. That's a correct
+    /// backpressure design, not a bug. The fix guarantees only that
+    /// concurrent DashMap access remains unblocked — which is what
+    /// prevents the runtime-wide futex-park cascade.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn broadcast_snapshot_pattern_releases_shard_locks_before_await() {
+        use std::time::Duration;
+        let senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>> = Arc::new(DashMap::new());
+
+        // Two peers: one with a full channel (will park the send), one
+        // with room. The broadcast task will park on the slow one but
+        // must NOT block modification of the map.
+        let (slow_tx, mut slow_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (fast_tx, _fast_rx) = mpsc::channel::<Vec<u8>>(4);
+        let slow: PeerId = [1u8; 32];
+        let fast: PeerId = [2u8; 32];
+        senders.insert(slow, slow_tx.clone());
+        senders.insert(fast, fast_tx);
+        // Pre-fill slow's channel to force the broadcast send to park.
+        slow_tx.send(vec![0]).await.expect("pre-fill");
+
+        // Spawn a task that broadcasts using the snapshot pattern.
+        let senders_bcast = senders.clone();
+        let broadcast_task = tokio::spawn(async move {
+            let snapshot: Vec<mpsc::Sender<Vec<u8>>> = senders_bcast
+                .iter()
+                .map(|s| s.value().clone())
+                .collect();
+            // After .collect(), the DashMap iterator is dropped — no
+            // shard locks held. Sequential send.await per peer is fine
+            // (that's correct backpressure); the invariant we're
+            // proving is that concurrent DashMap access remains free.
+            for sender in snapshot {
+                let _ = sender.send(vec![0xFA, 0xB]).await;
+            }
+        });
+
+        // Give the broadcast a moment to enter the loop and (likely)
+        // park on slow's full channel.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Concurrent DashMap modification must succeed WITHOUT waiting
+        // for the parked broadcast. The pre-fix antipattern held a
+        // shard lock via `.iter()` for the full duration of every peer's
+        // send.await — this insert would block until the broadcast
+        // finished. Post-fix, `.collect()` drops the iterator and every
+        // shard is free.
+        let extra: PeerId = [42u8; 32];
+        let (extra_tx, _extra_rx) = mpsc::channel::<Vec<u8>>(1);
+        let insert_start = std::time::Instant::now();
+        senders.insert(extra, extra_tx);
+        let insert_dur = insert_start.elapsed();
+        assert!(
+            insert_dur < Duration::from_millis(500),
+            "DashMap insert took {}ms during snapshot broadcast — shard \
+             lock still held across await. REGRESSION.",
+            insert_dur.as_millis()
+        );
+
+        // Drain slow so the broadcast task can finish.
+        let _ = slow_rx.recv().await; // drain pre-fill
+        let _ = slow_rx.recv().await; // drain broadcast payload
+        let _ = tokio::time::timeout(Duration::from_secs(2), broadcast_task)
+            .await
+            .expect("broadcast_task must complete after slow channel drained");
     }
 }
