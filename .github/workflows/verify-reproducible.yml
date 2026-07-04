@@ -1,0 +1,164 @@
+name: Verify Reproducible Build
+
+# Continuous reproducibility gate. Builds the workspace TWICE via the
+# canonical `scripts/build-in-docker.sh` path and asserts the two runs
+# produce byte-identical binaries (matched by SHA256SUMS).
+#
+# ── When it runs ──────────────────────────────────────────────────────
+#
+# - **Push to main / master**: mandatory. Every merged change is
+#   proven repro-buildable before it can go into a release.
+# - **Tag push `v*`**: mandatory. Tag-cut day cannot ship binaries that
+#   aren't reproducible.
+# - **Pull request** (opt-in): only when the PR carries the label
+#   `reproducibility-check`. The 30-45 minute Docker build is too
+#   expensive for every PR by default; opt-in signals "this PR touched
+#   build config / deps / codegen — verify repro before merge."
+# - **Daily canary** (04:00 UTC): catches drift a maintainer might
+#   introduce without the opt-in label — new dep pulling in a
+#   non-deterministic build script, `codegen-units` regression, etc.
+# - **Manual dispatch**: for on-demand verification (audit-firm ask,
+#   pre-mainnet release rehearsal, etc.).
+#
+# ── What it does NOT do ───────────────────────────────────────────────
+#
+# - Does NOT publish binaries anywhere. Repro-verified SHA256SUMS is
+#   uploaded as a workflow artifact for post-hoc inspection, but the
+#   real release binaries continue to come out of `release.yml`. Until
+#   `release.yml` itself switches to the Docker path (a separate
+#   follow-up gap tracked in `docker/builder.Dockerfile` header,
+#   lines 26-29), the released Linux binary is NOT byte-identical to
+#   what this workflow produces. This workflow's role is only to
+#   PROVE the source tree remains repro-buildable, not to be the
+#   publish source.
+# - Does NOT run cross-architecture. Same-arch (x86_64) repro only,
+#   per `REPRODUCIBLE_BUILDS.md` scope.
+# - Does NOT sign or attest anything additional. Sigstore attestation
+#   still lives in `release.yml`.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    types: [opened, synchronize, labeled]
+  schedule:
+    # Daily canary. UTC = US-morning / EU-early-afternoon so a break
+    # is visible during operator waking hours.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize per-ref so a rapid main-push burst doesn't queue N
+  # copies. Latest run wins on same-ref cancel.
+  group: verify-reproducible-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-reproducible:
+    # PR opt-in: skip unless the PR carries the `reproducibility-check`
+    # label. Push / schedule / tag / dispatch always run.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'reproducibility-check')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # SOURCE_DATE_EPOCH is derived from `git log -1 --format=%ct`
+          # inside the Dockerfile; without the full history, HEAD's
+          # committer-date is missing and the pin falls to the
+          # hard-coded 1714838400 fallback — which would silently
+          # yield the SAME timestamp across two runs (repro OK) but
+          # NOT the timestamp a fresh operator clone would use (repro
+          # broken vs. the outside world). Fetch full depth.
+          fetch-depth: 0
+
+      - name: Docker version banner
+        run: docker version
+
+      - name: Git HEAD banner
+        run: |
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Committer date: $(git log -1 --format=%ct) ($(git log -1 --format=%ci))"
+
+      - name: Build (run 1) via canonical Docker path
+        run: ./scripts/build-in-docker.sh --out "$PWD/out-run1"
+
+      - name: Snapshot run-1 SHA256SUMS
+        run: |
+          if [ ! -f "out-run1/SHA256SUMS" ]; then
+            echo "::error::run-1 did not produce out-run1/SHA256SUMS"
+            exit 1
+          fi
+          cp out-run1/SHA256SUMS run-1-SHA256SUMS
+          echo "=== Run 1 hashes ==="
+          cat run-1-SHA256SUMS
+
+      - name: Purge Docker layer cache before run 2
+        # Force a genuinely-fresh build — a repro guarantee that only
+        # holds under warm-cache conditions isn't a real guarantee.
+        # `docker builder prune` with the specific label leaves other
+        # non-coincync caches on the runner intact (there aren't any
+        # in the default ubuntu-22.04 image, but this is future-proof
+        # for self-hosted runners).
+        run: docker builder prune --filter "label=coincync-build" --force || true
+
+      - name: Build (run 2) via canonical Docker path
+        run: ./scripts/build-in-docker.sh --out "$PWD/out-run2"
+
+      - name: Compare run-1 vs run-2 SHA256SUMS
+        run: |
+          if [ ! -f "out-run2/SHA256SUMS" ]; then
+            echo "::error::run-2 did not produce out-run2/SHA256SUMS"
+            exit 1
+          fi
+          echo "=== Run 2 hashes ==="
+          cat out-run2/SHA256SUMS
+          echo
+          if ! diff -q run-1-SHA256SUMS out-run2/SHA256SUMS >/dev/null; then
+            echo "::error::REPRODUCIBILITY REGRESSION — run-1 and run-2 hashes diverge"
+            echo "==== Diff ===="
+            diff run-1-SHA256SUMS out-run2/SHA256SUMS || true
+            echo
+            echo "Common causes to investigate:"
+            echo "  * Embedded build timestamp in a binary (audit Cargo.toml + build.rs)"
+            echo "  * Non-deterministic dep bump in Cargo.lock (git blame lockfile)"
+            echo "  * Host path or env leaking into the binary"
+            echo "  * Docker base image floated (verify RUST_VERSION pin)"
+            echo "  * A new dep added a build.rs that emits a wall-clock timestamp"
+            exit 1
+          fi
+          echo "✅ Byte-identical across two independent Docker builds."
+
+      - name: Upload verified SHA256SUMS as artifact
+        # 90-day retention. Anyone can download this artifact + rebuild
+        # from source at the same commit + confirm the hashes match
+        # what CI proved was reproducible. Independent of GitHub
+        # Releases — even a delete-and-recreate of a release preserves
+        # the audit trail here.
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums-${{ github.sha }}
+          path: out-run2/SHA256SUMS
+          retention-days: 90
+
+      - name: Success banner
+        run: |
+          echo "===================================================="
+          echo "  REPRODUCIBILITY VERIFIED for ${{ github.sha }}"
+          echo "===================================================="
+          echo
+          echo "Community can independently confirm with:"
+          echo "  git clone https://github.com/ghostrider1092/Coincync-Testnet-"
+          echo "  cd Coincync-Testnet- && git checkout ${{ github.sha }}"
+          echo "  ./scripts/build-in-docker.sh"
+          echo "  sha256sum -c out/SHA256SUMS"
+          echo
+          echo "Or download the workflow artifact 'sha256sums-${{ github.sha }}'"
+          echo "and diff against a local build's SHA256SUMS."

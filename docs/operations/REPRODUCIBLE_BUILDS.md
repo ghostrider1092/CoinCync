@@ -214,9 +214,12 @@ deeper layers, see the security audit policy and the
 | Published manifest format | ✅ shipped (this doc) |
 | End-to-end Docker build verified working | ✅ verified 2026-05-24 — fresh build on `a7f0a6d` produced all 5 binaries (`coincync-node`, `coincync-wallet`, `coincync-rig`, `coord`, `coord-cli`); `sha256sum -c SHA256SUMS` passed for all 5 inside the container. |
 | Host-side artifact extraction on Windows | ✅ fixed 2026-05-24 — wrapper script now sets `MSYS_NO_PATHCONV=1` to prevent Git Bash from translating the container-side `/out` mount path |
-| Two-builder byte-identical comparison | ⏳ requires a second machine — single-machine reproducibility verified, cross-machine pending |
-| First repro-verified release | ⏳ blocks on release process — pre-mainnet |
-| OSS-Fuzz / cosign / sigstore integration | ⏳ post-launch |
+| Sigstore build-provenance attestation on releases | ✅ shipped — `actions/attest-build-provenance@v4` on all 4 platforms in `.github/workflows/release.yml` (SLSA level 2 by construction; Sigstore transparency log + workflow-scoped OIDC token as signing identity). |
+| Automated two-run byte-identical CI gate | ✅ shipped — `.github/workflows/verify-reproducible.yml` runs the Docker build twice on every push to main + tag push + daily 04:00 UTC canary, purging Docker layer cache between runs, and diffs the SHA256SUMS. Failure blocks main. Opt-in for PRs via label `reproducibility-check`. Removes the "trust the operator" gap that single-machine repro left open. |
+| Two-builder cross-machine byte-identical comparison | ⏳ requires a second physical machine — CI covers "two independent runs" (which was the harder half of the gap), but cross-host cross-arch verification is still an operator-driven check via `scripts/verify-reproducible-build.ps1 -CompareToRelease v...` |
+| First repro-verified release | ⏳ blocks on `release.yml` switching its Linux build to `scripts/build-in-docker.sh` — separate scope, tracked in the `docker/builder.Dockerfile` header comment (lines 26-29) as the "not yet" callout |
+| OSS-Fuzz integration | ⏳ post-launch |
+| SLSA level 3 (isolated, non-falsifiable, source-verified) | ⏳ post-launch — current attestation is SLSA level 2; level 3 needs `slsa-github-generator`'s hosted-runner-signed builder |
 
 What this means today:
 
