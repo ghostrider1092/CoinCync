@@ -21,13 +21,26 @@
 # What this DOES guarantee:
 #   - Anyone running this Dockerfile against the same git commit
 #     produces byte-identical binaries.
+#   - Every published Linux release binary from tag v1.0.10-testnet
+#     onward comes out of THIS Dockerfile, so
+#     `bash scripts/build-in-docker.sh` at the release commit
+#     produces the same SHA256 as the published tarball. See
+#     `.github/workflows/release.yml` (build-linux job) for the
+#     wiring, and `docs/operations/REPRODUCIBLE_BUILDS.md` for the
+#     end-to-end verification recipe a community member follows.
 #
 # What this does NOT (yet) guarantee:
-#   - That the published v1.0.2-testnet binaries were built from this
-#     Dockerfile. Pre-mainnet, they were not. Post-mainnet, the release
-#     process will use this Dockerfile and we'll publish a signed
-#     manifest of (commit, dockerfile-digest, binary-sha256). See
-#     docs/operations/REPRODUCIBLE_BUILDS.md.
+#   - macOS / Windows releases. Those still build via `cargo build`
+#     on their native runners in `release.yml` because neither of
+#     those platforms has a Debian-Bookworm-equivalent
+#     reproducible-container ecosystem in GitHub Actions today.
+#     Cross-arch (x86_64 vs arm64) builds are also not guaranteed
+#     identical.
+#   - A signed manifest of (commit, dockerfile-digest, binary-sha256).
+#     Sigstore attestation via `actions/attest-build-provenance@v4`
+#     is done in `release.yml` today; the explicit signed-manifest
+#     format from `REPRODUCIBLE_BUILDS.md` §"Published manifest" is
+#     a separate follow-up.
 
 # Pin the Rust base image to a specific minor.
 # Use --build-arg RUST_VERSION=<x.y.z> to override.
@@ -117,6 +130,7 @@ COPY --from=builder /src/target/release/coincync-node \
                     /src/target/release/coincync-rig \
                     /src/target/release/coord \
                     /src/target/release/coord-cli \
+                    /src/target/release/cyncswap \
                     /artifacts/
 
 # Compute checksums of the binaries inside the image so they're

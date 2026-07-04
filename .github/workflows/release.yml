@@ -29,28 +29,66 @@ permissions:
   attestations: write   # same
 
 jobs:
+  # Linux release binaries build via the CANONICAL reproducible
+  # Docker path (`scripts/build-in-docker.sh` → `docker/builder.Dockerfile`).
+  # This closes the gap the Dockerfile header (lines 26-35 as of this
+  # commit) previously flagged: "the published binaries were not built
+  # from this Dockerfile." Post-this-PR, every Linux release binary is
+  # byte-identical to what any community member's
+  # `bash scripts/build-in-docker.sh` produces at the same commit.
+  #
+  # macOS + Windows still use `cargo build` directly on their native
+  # runners below — no Debian-Bookworm-equivalent reproducible-container
+  # story on GitHub Actions for those platforms today.
   build-linux:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y cmake clang libssl-dev pkg-config
-      - name: Build coincync (node + wallet)
-        run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
-      - name: Build coincync-rig (canonical retail miner)
-        run: cargo build --release -p coincync-rig
-      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
-        run: cargo build --release -p coincync-swap --bin cyncswap
-      - name: Package
+        with:
+          # SOURCE_DATE_EPOCH is derived inside the Dockerfile from
+          # `git log -1 --format=%ct`. Without full history HEAD's
+          # committer-date falls back to the hard-coded 1714838400
+          # constant — reproducible across two runs of THIS workflow
+          # but NOT against a community member's fresh clone. Fetch
+          # full depth so the timestamp matches the outside world.
+          fetch-depth: 0
+
+      - name: Reproducible Docker build (produces out/{binaries,SHA256SUMS})
+        run: bash ./scripts/build-in-docker.sh --out "$PWD/out"
+
+      - name: Package release tarball
         run: |
           mkdir pkg
-          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet target/release/cyncswap pkg/
+          # The Docker artifacts stage produces:
+          #   coincync-node, coincync-wallet, coincync-rig,
+          #   coord, coord-cli, cyncswap
+          # (see docker/builder.Dockerfile, artifacts stage COPY).
+          # Copy the ones we ship in the Linux release tarball.
+          cp out/coincync-node out/coincync-rig out/coincync-wallet out/cyncswap pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
+          # Re-generate SHA256SUMS.txt over the FULL tarball contents
+          # (Docker's out/SHA256SUMS only covers the binaries; the
+          # tarball has extra service files + install scripts too).
           cd pkg && sha256sum * > SHA256SUMS.txt && cd ..
           tar czf coincync-linux-x86_64.tar.gz -C pkg .
+
+      - name: Verify tarball SHA256SUMS.txt matches what Docker produced
+        run: |
+          # Belt-and-suspenders: confirm the binary SHAs inside the
+          # tarball match Docker's out/SHA256SUMS byte-for-byte. If a
+          # future refactor accidentally copies from `target/release/`
+          # (the non-Docker path) instead of `out/`, this catches it.
+          for bin in coincync-node coincync-rig coincync-wallet cyncswap; do
+            docker_sha="$(awk -v b=$bin '$2 == b {print $1}' out/SHA256SUMS)"
+            pkg_sha="$(awk -v b=$bin '$2 == b {print $1}' pkg/SHA256SUMS.txt)"
+            if [ "$docker_sha" != "$pkg_sha" ]; then
+              echo "::error::$bin: docker=$docker_sha pkg=$pkg_sha (should match)"
+              exit 1
+            fi
+            echo "OK $bin: $pkg_sha"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: coincync-linux-x86_64
