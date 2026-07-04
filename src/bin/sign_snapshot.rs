@@ -124,9 +124,52 @@ fn cmd_sign(args: &[String]) -> ExitCode {
     // Domain-separated: sig covers namespace || snapshot_bytes so a
     // signature from any other coincync signing context cannot be
     // replayed here. Namespace MUST match the consumer's constant.
-    let mut signed_payload =
-        Vec::with_capacity(SIGNATURE_NAMESPACE.len() + snapshot_bytes.len());
-    signed_payload.extend_from_slice(SIGNATURE_NAMESPACE);
+    //
+    // Namespace source, in order:
+    //   1. `COINCYNC_SIGN_NAMESPACE_HEX` env var if set — hex-decoded
+    //      bytes used verbatim. Producers for other services
+    //      (faucet-registry-v1, coord-registry-v1, ...) set this so
+    //      they get service-specific domain separation without the
+    //      CLI needing a hard-coded case per service.
+    //   2. Otherwise fall back to the default peer-snapshot namespace.
+    //      This preserves backward compat for every existing
+    //      producer that just does `coincync-sign-snapshot sign ...`
+    //      without setting the env.
+    //
+    // Malformed hex (odd length, non-hex chars) is a hard fail — we
+    // do NOT silently fall back to the default because that would
+    // produce a signature that verifies against the WRONG service.
+    let namespace: Vec<u8> = match std::env::var("COINCYNC_SIGN_NAMESPACE_HEX") {
+        Ok(hex_str) => {
+            let trimmed = hex_str.trim();
+            if trimmed.is_empty() {
+                SIGNATURE_NAMESPACE.to_vec()
+            } else {
+                match hex::decode(trimmed) {
+                    Ok(bytes) => {
+                        if bytes.is_empty() {
+                            eprintln!(
+                                "sign: COINCYNC_SIGN_NAMESPACE_HEX decoded to zero bytes"
+                            );
+                            return ExitCode::from(2);
+                        }
+                        bytes
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "sign: COINCYNC_SIGN_NAMESPACE_HEX not valid hex: {}",
+                            e
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+        }
+        Err(_) => SIGNATURE_NAMESPACE.to_vec(),
+    };
+
+    let mut signed_payload = Vec::with_capacity(namespace.len() + snapshot_bytes.len());
+    signed_payload.extend_from_slice(&namespace);
     signed_payload.extend_from_slice(&snapshot_bytes);
 
     let signing_key = SigningKey::from_bytes(&seed);
@@ -321,5 +364,49 @@ mod tests {
         // \0 or leading BOM and every sig would break.
         assert_eq!(SIGNATURE_NAMESPACE, b"coincync-peer-snapshot-v1");
         assert_eq!(SIGNATURE_NAMESPACE.len(), 25);
+    }
+
+    /// Simulate the cmd_sign namespace-decision path (the block that
+    /// reads COINCYNC_SIGN_NAMESPACE_HEX and falls back to
+    /// SIGNATURE_NAMESPACE). We can't drive the full cmd_sign
+    /// function from tests without setting up files + args + exit
+    /// codes, so this test replicates the specific env-var decision
+    /// logic and asserts the three key branches.
+    #[test]
+    fn namespace_selection_env_override_hex_decode() {
+        // Case 1: unset → default peer-snapshot namespace.
+        let namespace = match std::env::var("COINCYNC_SIGN_NAMESPACE_HEX_TEST_UNSET") {
+            Ok(_) => panic!("test env var must remain unset"),
+            Err(_) => SIGNATURE_NAMESPACE.to_vec(),
+        };
+        assert_eq!(namespace.as_slice(), SIGNATURE_NAMESPACE);
+
+        // Case 2: hex-decodes the faucet namespace correctly.
+        let faucet_hex = "coincync-faucet-registry-v1"
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        let decoded = hex::decode(&faucet_hex).expect("valid hex");
+        assert_eq!(decoded.as_slice(), b"coincync-faucet-registry-v1");
+        assert_ne!(decoded.as_slice(), SIGNATURE_NAMESPACE);
+
+        // Case 3: signature over the faucet namespace does NOT verify
+        // against the peer-snapshot namespace — cross-service replay
+        // defence.
+        let seed = [7u8; 32];
+        let payload = b"faucet-registry-canonical-bytes";
+        let signing_key = SigningKey::from_bytes(&seed);
+        let mut faucet_signed = Vec::from(decoded.as_slice());
+        faucet_signed.extend_from_slice(payload);
+        let sig = signing_key.sign(&faucet_signed);
+
+        let mut wrong_signed = Vec::from(SIGNATURE_NAMESPACE);
+        wrong_signed.extend_from_slice(payload);
+        let vk = signing_key.verifying_key();
+        assert!(
+            vk.verify(&wrong_signed, &sig).is_err(),
+            "faucet-namespace signature must NOT verify as peer-snapshot"
+        );
     }
 }

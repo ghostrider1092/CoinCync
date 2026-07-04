@@ -9,6 +9,9 @@ pub mod peer_snapshot;
 // model as `peer_snapshot` (signature-over-namespaced-payload) but is
 // generic over the payload type so multiple services share one path.
 pub mod signed_registry;
+// Fort-Knox item 2 consumer wiring — payload types + wallet-facing
+// entry point that reuses `signed_registry` above.
+pub mod faucet_registry;
 
 // Ported from CoinCync (copy as-is):
 pub mod dandelion;

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "network": "testnet",
+  "_comment": "Curated live-faucet directory for testnet. Edit + commit; scripts/publish-faucet-registry.sh reads this, stamps unix_ts=now, signs, publishes to IPFS. See docs/operations/runbook-faucet-registry.md for the full ceremony.",
+  "_last_seen_note": "'last_seen' is a producer-side timestamp: when the maintainer last verified this entry responds. Update per-entry as you re-verify; leave stale entries with old last_seen until you're ready to remove them (wallet UI badges old entries).",
+  "faucets": [
+    {
+      "name": "fleet-testnet-primary",
+      "url": "https://faucet.coincync.network",
+      "operator": "fleet",
+      "description": "Canonical fleet-run testnet faucet.",
+      "drip_amount_atomic": 10000000000000,
+      "network": "testnet",
+      "last_seen": 0
+    }
+  ]
+}
