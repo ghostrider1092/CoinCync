@@ -5,6 +5,12 @@
 
 use std::path::Path;
 use std::io::{Read, Write};
+// `File` is only used in the non-Unix fallback branches for
+// atomically creating temp wallet files (see cfg(not(unix)) blocks
+// further down). On Unix builds the create-with-mode(0o600) path is
+// used instead, so this import would fire an `unused_imports`
+// warning without the matching cfg gate here.
+#[cfg(not(unix))]
 use std::fs::File;
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
