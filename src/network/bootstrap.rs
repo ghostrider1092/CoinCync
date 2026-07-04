@@ -1072,6 +1072,59 @@ pub async fn initial_peers(config: &NodeConfig) -> Vec<SocketAddr> {
         tracing::info!("Bootstrap manifest-only mode enabled; skipping DNS/hardcoded fallback");
     }
 
+    // Signed peer-snapshot fallback (Fort-Knox Item 6 consumer).
+    // Only runs if:
+    //   - DNS + local-manifest didn't yield enough peers already
+    //   - The maintainer pubkey env var is set (opt-in — a binary
+    //     shipped without an operator-configured key does NOT fetch
+    //     anything from IPFS)
+    //   - The well-known pointer URL is set via env
+    //   - We're not in manifest-only mode
+    //
+    // Placed BEFORE hardcoded fallback because a fresh signed snapshot
+    // reflects current fleet state, whereas hardcoded seeds may be
+    // stale after months of IP churn.
+    if peers.is_empty() && !manifest_only && !force_disable_dns {
+        if let (Some(pubkey), Ok(pointer_url)) = (
+            crate::network::peer_snapshot::maintainer_pubkey_from_env(),
+            std::env::var("COINCYNC_PEER_SNAPSHOT_POINTER_URL"),
+        ) {
+            let network_name = match config.network {
+                Network::Mainnet => "mainnet",
+                Network::Testnet => "testnet",
+                Network::Regtest => "regtest",
+            };
+            // Replay defence stored in a small state file under data_dir;
+            // fresh installs pass 0 to accept any snapshot.
+            let last_seen_ts: u64 = std::env::var("COINCYNC_PEER_SNAPSHOT_LAST_TS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            match crate::network::peer_snapshot::fetch_verified_peers(
+                &pointer_url,
+                network_name,
+                last_seen_ts,
+                &pubkey,
+            )
+            .await
+            {
+                Ok(mut snapshot_peers) => {
+                    tracing::info!(
+                        "Bootstrap: signed peer snapshot delivered {} peers via IPFS",
+                        snapshot_peers.len()
+                    );
+                    peers.append(&mut snapshot_peers);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Signed peer snapshot fallback failed ({}), falling through to hardcoded seeds",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     if peers.is_empty() && !manifest_only {
         let hardcoded = match config.network {
             Network::Mainnet => MAINNET_NODES,

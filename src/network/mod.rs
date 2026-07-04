@@ -2,6 +2,7 @@
 pub mod bootstrap;
 pub mod dns_seeds;
 pub mod socks_dns;
+pub mod peer_snapshot;
 
 // Ported from CoinCync (copy as-is):
 pub mod dandelion;
