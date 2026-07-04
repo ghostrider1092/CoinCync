@@ -2158,9 +2158,50 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
 // Mainnet pre-launch: rpc() short-circuits and returns null with a
 // flag so callers stay quiet, while the launch-countdown banner
 // (rendered above the page) keeps ticking.
+
+// Fort-Knox item 4: IPFS-mirror portability.
+//
+// The explorer is intended to be pinnable to IPFS as a fallback if
+// `explorer.coincync.network` becomes unreachable. On the canonical
+// deploy, `/api/*` is nginx-proxied to the local coincync-node — so
+// origin-relative URLs work. On an IPFS gateway (e.g.
+// `https://cloudflare-ipfs.com/ipfs/<cid>/`) there is no such proxy
+// and origin-relative URLs would 404. `_computeApiBase()` picks the
+// right base URL for the current context:
+//
+//   1. `?api=<url>` query param — highest priority; power-user
+//      escape hatch, useful for pointing the mirror at a personal
+//      coincync-node.
+//   2. `localStorage['cync-api-base']` — persisted user preference.
+//   3. Origin-relative (empty string) — the canonical deploys
+//      (`explorer.coincync.network`, `localhost`, `127.0.0.1`).
+//   4. Canonical API host — everything else, i.e. any IPFS gateway,
+//      any mirror. Assumes CORS is enabled on api.coincync.network
+//      (verified by the Fort-Knox item 4 rollout runbook before
+//      publishing an IPFS pin).
+//
+// Trailing slashes are trimmed so we never emit `.../api/testnet`
+// twice.
+function _computeApiBase() {
+  try {
+    const q = new URLSearchParams(window.location.search).get('api');
+    if (q) return q.replace(/\/+$/, '');
+  } catch (_) { /* older browsers or file:// — fall through */ }
+  try {
+    const ls = localStorage.getItem('cync-api-base');
+    if (ls) return ls.replace(/\/+$/, '');
+  } catch (_) { /* private-mode / storage-blocked — fall through */ }
+  const h = (typeof window !== 'undefined' && window.location) ? window.location.hostname : '';
+  if (h === 'explorer.coincync.network' || h === 'localhost' || h === '127.0.0.1' || h === '') {
+    return '';
+  }
+  return 'https://api.coincync.network';
+}
+const _API_BASE = _computeApiBase();
+
 let _activeNetwork = (localStorage.getItem('cync-net') === 'mainnet') ? 'mainnet' : 'testnet';
-let RPC  = '/api/' + _activeNetwork;
-let REST = '/api/v1/' + _activeNetwork;
+let RPC  = _API_BASE + '/api/' + _activeNetwork;
+let REST = _API_BASE + '/api/v1/' + _activeNetwork;
 
 // Mainnet launch is hardcoded in src/mainnet.rs as Unix timestamp
 // 1790812800 (October 1, 2026 00:00:00 UTC). Until then the explorer
@@ -2181,8 +2222,12 @@ function setNetwork(net) {
   _activeNetwork = net;
   localStorage.setItem('cync-net', net);
   _blocksGenesisBackfillGen++;
-  RPC  = '/api/' + net;
-  REST = '/api/v1/' + net;
+  // Same base-URL rule as page-load. `_API_BASE` is picked once at
+  // load and doesn't change with the network toggle — it's a
+  // deploy-topology property (same-origin vs. IPFS mirror), not a
+  // network property.
+  RPC  = _API_BASE + '/api/' + net;
+  REST = _API_BASE + '/api/v1/' + net;
 
   // Repaint the toggle: the active button gets the colored pill,
   // and mainnet gets a different shade post-launch vs pre-launch
@@ -3231,7 +3276,10 @@ async function loadHealth(){
     let info=null;
     let probeError=null;
     try{
-      info = await fetchJsonRpc(node.proxy);
+      // Fort-Knox item 4: prepend _API_BASE so the origin-relative
+      // `/health/*` proxy path resolves to api.coincync.network when
+      // the mirror is served from an IPFS gateway.
+      info = await fetchJsonRpc(_API_BASE + node.proxy);
     }catch(e){probeError=e;}
     // In production we intentionally avoid direct browser->node calls.
     // Many nodes keep RPC private or firewalled and would look falsely "offline".
@@ -4287,8 +4335,14 @@ async function _pollNodeHealth() {
     let height = node.height;
     const rpcBody = JSON.stringify({jsonrpc:'2.0', id:1, method:'get_info', params:[]});
     const rpcOpts = {method:'POST', headers:{'Content-Type':'application/json'}, body:rpcBody};
-    // Try proxy first, then direct RPC fallback
-    const urls = [node.proxy || `/health/${node.label.toLowerCase()}`];
+    // Try proxy first, then direct RPC fallback.
+    // Fort-Knox item 4: route the origin-relative `/health/*` proxy
+    // path through _API_BASE so an IPFS-served mirror hits
+    // api.coincync.network's health-proxy instead of 404-ing on the
+    // gateway. Direct-RPC fallback (`node._rpc`) is already an
+    // absolute URL, no change needed there.
+    const proxyPath = node.proxy || `/health/${node.label.toLowerCase()}`;
+    const urls = [_API_BASE + proxyPath];
     if (node._rpc) urls.push(node._rpc);
     for (const url of urls) {
       if (reachable) break;
@@ -5136,7 +5190,13 @@ async function initGlobe(){
         globe.pointOfView({lat:d.lat,lng:d.lng,altitude:1.4},1200);
         // Fetch live data
         try{
-          const r=await fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},
+          // Route through the RPC variable so the network segment is
+          // included AND the base URL respects the IPFS-mirror
+          // `_API_BASE` picked at page load. Previously this was
+          // `fetch('/api', ...)` — missing the /testnet or /mainnet
+          // segment, relying on an nginx catch-all that not every
+          // deploy has, AND not portable to an IPFS gateway.
+          const r=await fetch(RPC,{method:'POST',headers:{'Content-Type':'application/json'},
             body:JSON.stringify({jsonrpc:'2.0',id:1,method:'get_info'})});
           const j=await r.json();
           const info=j.result;
@@ -5179,7 +5239,10 @@ async function initGlobe(){
     let _lastGlobeHeight = 0;
     setInterval(async () => {
       try {
-        const r = await fetch('/api', {
+        // Same fix as the globe tooltip above — route through the
+        // resolved RPC variable so the network segment + `_API_BASE`
+        // are both applied.
+        const r = await fetch(RPC, {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({jsonrpc:'2.0', id:1, method:'get_info'}),
