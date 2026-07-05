@@ -89,7 +89,7 @@ jobs:
             fi
             echo "OK $bin: $pkg_sha"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coincync-linux-x86_64
           path: coincync-linux-x86_64.tar.gz
@@ -116,7 +116,7 @@ jobs:
           cp target/release/coincync-node.exe target/release/coincync-rig.exe target/release/coincync-wallet.exe target/release/cyncswap.exe pkg/
           cd pkg && sha256sum * > SHA256SUMS.txt && cd ..
           tar czf coincync-windows-x64.tar.gz -C pkg .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coincync-windows-x64
           path: coincync-windows-x64.tar.gz
@@ -147,7 +147,7 @@ jobs:
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
           cd pkg && shasum -a 256 * > SHA256SUMS.txt && cd ..
           tar czf coincync-macos-x64.tar.gz -C pkg .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coincync-macos-x64
           path: coincync-macos-x64.tar.gz
@@ -178,7 +178,7 @@ jobs:
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
           cd pkg && shasum -a 256 * > SHA256SUMS.txt && cd ..
           tar czf coincync-macos-arm64.tar.gz -C pkg .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coincync-macos-arm64
           path: coincync-macos-arm64.tar.gz
