@@ -125,6 +125,25 @@ pub struct ChainSync {
     orphan_blocks: HashMap<Hash, OrphanBlock>,
     orphan_by_parent: HashMap<Hash, Vec<Hash>>,
     pending_headers: VecDeque<Hash>,
+    /// v1.0.13 #4 — per-peer attribution for queued headers.
+    ///
+    /// Tracks which peer queued each pending-header hash so we can
+    /// (a) decrement the per-peer counter on pop, and (b) cap each
+    /// peer's share of the 50K-slot pool. Without this, ONE attacker
+    /// peer that wins the GetHeaders nonce race can fill the entire
+    /// pool with bogus header hashes, blocking legitimate peers'
+    /// headers until the pool drains via downloading timeouts.
+    ///
+    /// Self-attributed re-queue paths (orphan recovery,
+    /// recover_timed_out, block-received re-queue) do NOT insert
+    /// into this map — they re-queue hashes ALREADY counted, or
+    /// queue internally-generated hashes that aren't a peer-flood
+    /// vector.
+    pending_header_peer: HashMap<Hash, PeerId>,
+    /// v1.0.13 #4 — per-peer pending-header count, capped at
+    /// MAX_HEADERS_PER_PEER. Kept in sync with `pending_header_peer`
+    /// — invariant: count == pending_header_peer values matching this peer.
+    headers_per_peer: HashMap<PeerId, usize>,
     downloading: HashSet<Hash>,
     download_timestamps: HashMap<Hash, DownloadEntry>,
     max_concurrent: usize,
@@ -158,6 +177,15 @@ pub struct ChainSync {
     best_known_difficulty: u128,
 }
 
+/// v1.0.13 #4 — per-peer cap on pending-headers entries. 10% of the
+/// 50K-slot pool means a flood from any one peer can't displace more
+/// than 5000 legitimate headers from other peers. Picked to be:
+/// - low enough that one peer can't dominate the pool
+/// - high enough that a legitimate IBD GetHeaders response
+///   (MAX_HEADERS_RESPONSE = 2000) fits with headroom for in-flight
+///   pending entries from that same peer
+pub const MAX_HEADERS_PER_PEER: usize = 5_000;
+
 impl ChainSync {
     pub fn new(local_height: u64, local_tip: Hash) -> Self {
         ChainSync {
@@ -168,6 +196,8 @@ impl ChainSync {
             orphan_blocks: HashMap::new(),
             orphan_by_parent: HashMap::new(),
             pending_headers: VecDeque::new(),
+            pending_header_peer: HashMap::new(),
+            headers_per_peer: HashMap::new(),
             downloading: HashSet::new(),
             download_timestamps: HashMap::new(),
             max_concurrent: 100,
@@ -432,7 +462,24 @@ impl ChainSync {
         if self.best_known_height == 0 { 1.0 } else { self.local_height as f64 / self.best_known_height as f64 }
     }
 
+    /// Legacy entry point for self-attributed header queueing (no
+    /// peer flood vector — used by internal recovery paths). External
+    /// peer responses go through `queue_headers_from_peer` for v1.0.13
+    /// per-peer accounting.
     pub fn queue_headers(&mut self, headers: Vec<Hash>) {
+        self.queue_headers_inner(headers, None);
+    }
+
+    /// v1.0.13 #4 — attributed header queueing.
+    ///
+    /// Use this for headers received via a peer's Headers response.
+    /// Enforces a per-peer cap (MAX_HEADERS_PER_PEER) so a single
+    /// peer can't fill the 50K-slot pool and starve other peers.
+    pub fn queue_headers_from_peer(&mut self, peer: PeerId, headers: Vec<Hash>) {
+        self.queue_headers_inner(headers, Some(peer));
+    }
+
+    fn queue_headers_inner(&mut self, headers: Vec<Hash>, peer: Option<PeerId>) {
         const MAX_PH: usize = 50_000;
         if headers.is_empty() {
             if self.state == SyncState::ConfirmingSynced && self.local_height > 0 {
@@ -447,15 +494,51 @@ impl ChainSync {
             return;
         }
         self.headers_received_this_cycle = true;
+        // v1.0.13 #4 — per-peer cap. Self-attributed (peer == None)
+        // bypasses the cap because those paths re-queue hashes
+        // already counted or queue internally-generated hashes.
+        let peer_cap_room: Option<usize> = peer.map(|p| {
+            let used = self.headers_per_peer.get(&p).copied().unwrap_or(0);
+            MAX_HEADERS_PER_PEER.saturating_sub(used)
+        });
+        let mut added_for_peer = 0usize;
         for hash in headers {
             if self.pending_headers.len() >= MAX_PH { break; }
-            if !self.downloading.contains(&hash) && !self.orphan_blocks.contains_key(&hash) {
+            if let Some(cap) = peer_cap_room {
+                if added_for_peer >= cap { break; }
+            }
+            if !self.downloading.contains(&hash)
+                && !self.orphan_blocks.contains_key(&hash)
+                && !self.pending_header_peer.contains_key(&hash)
+            {
                 self.pending_headers.push_back(hash);
+                if let Some(p) = peer {
+                    self.pending_header_peer.insert(hash, p);
+                    added_for_peer += 1;
+                }
+            }
+        }
+        if let Some(p) = peer {
+            if added_for_peer > 0 {
+                *self.headers_per_peer.entry(p).or_insert(0) += added_for_peer;
             }
         }
         if !self.pending_headers.is_empty() {
             self.state = SyncState::Blocks;
             if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+        }
+    }
+
+    /// v1.0.13 #4 — internal helper. Called when a pending-header
+    /// hash is consumed (popped by get_blocks_to_request or removed
+    /// by reset/clear). Decrements the attributed peer's counter.
+    fn untrack_pending_header(&mut self, hash: &Hash) {
+        if let Some(peer) = self.pending_header_peer.remove(hash) {
+            match self.headers_per_peer.get_mut(&peer) {
+                Some(count) if *count > 1 => *count -= 1,
+                Some(_) => { self.headers_per_peer.remove(&peer); }
+                None => {} // shouldn't happen given the insert invariant
+            }
         }
     }
 
@@ -465,6 +548,10 @@ impl ChainSync {
         let now = unix_now();
         while out.len() < max.min(slots) && !self.pending_headers.is_empty() {
             if let Some(h) = self.pending_headers.pop_front() {
+                // v1.0.13 #4 — decrement per-peer counter on pop.
+                // Re-queue paths (push_front) leave attribution
+                // intact so the counter stays accurate across them.
+                self.untrack_pending_header(&h);
                 if !self.downloading.contains(&h) {
                     out.push(h);
                     self.downloading.insert(h);
@@ -857,6 +944,9 @@ impl ChainSync {
         self.orphan_by_parent.clear();
         self.orphans_per_peer.clear();
         self.pending_headers.clear();
+        // v1.0.13 #4 — keep peer attribution maps in sync.
+        self.pending_header_peer.clear();
+        self.headers_per_peer.clear();
         self.downloading.clear();
         self.download_timestamps.clear();
         // Phase 2a: also clear difficulty model on hard reset.
@@ -915,6 +1005,9 @@ impl ChainSync {
                 self.headers_request_time = None;
                 self.blocks_entered_at = None;
                 self.pending_headers.clear();
+                // v1.0.13 #4 — keep peer attribution maps in sync
+                self.pending_header_peer.clear();
+                self.headers_per_peer.clear();
             }
         }
         let mut all = to; all.extend(stuck); all
@@ -1722,5 +1815,85 @@ mod tests {
              Without on_block_processed → refresh_best_known, best_known \
              would lag at 7_295 even though we've passed it locally.");
         assert!(sync.is_synced());
+    }
+
+    /// v1.0.13 #4 — one peer cannot fill more than MAX_HEADERS_PER_PEER
+    /// slots in the pending_headers pool. Without this cap, the attacker
+    /// who wins the GetHeaders nonce race in IBD can stuff 50K bogus
+    /// hashes into the queue, blocking legitimate peers' headers until
+    /// the pool drains via download timeouts.
+    #[test]
+    fn per_peer_pending_headers_cap_enforced() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let attacker = super::super::peer::generate_peer_id();
+
+        // Try to queue 2x the per-peer cap from a single peer.
+        let big: Vec<Hash> = (0..(MAX_HEADERS_PER_PEER as u64 * 2))
+            .map(|i: u64| {
+                let mut h = [0u8; 32];
+                h[..8].copy_from_slice(&i.to_be_bytes());
+                Hash::from_bytes(h)
+            })
+            .collect();
+        sync.queue_headers_from_peer(attacker, big);
+
+        // Only MAX_HEADERS_PER_PEER got in.
+        assert_eq!(
+            sync.pending_headers.len(),
+            MAX_HEADERS_PER_PEER,
+            "attacker capped at MAX_HEADERS_PER_PEER ({})",
+            MAX_HEADERS_PER_PEER,
+        );
+        assert_eq!(
+            sync.headers_per_peer.get(&attacker).copied().unwrap_or(0),
+            MAX_HEADERS_PER_PEER,
+        );
+        assert_eq!(sync.pending_header_peer.len(), MAX_HEADERS_PER_PEER);
+
+        // Legitimate peer can still queue its own MAX_HEADERS_PER_PEER
+        // (different hashes — distinct because per-peer cap is per-peer,
+        // not a shared budget).
+        let honest = super::super::peer::generate_peer_id();
+        let honest_hdrs: Vec<Hash> = ((MAX_HEADERS_PER_PEER as u64 * 10)
+            ..(MAX_HEADERS_PER_PEER as u64 * 10 + 100))
+            .map(|i: u64| {
+                let mut h = [0u8; 32];
+                h[..8].copy_from_slice(&i.to_be_bytes());
+                Hash::from_bytes(h)
+            })
+            .collect();
+        sync.queue_headers_from_peer(honest, honest_hdrs);
+        assert_eq!(
+            sync.headers_per_peer.get(&honest).copied().unwrap_or(0),
+            100,
+            "honest peer got its 100 hashes in despite attacker's cap-hit",
+        );
+    }
+
+    /// v1.0.13 #4 — popping pending_headers (via get_blocks_to_request)
+    /// decrements the per-peer counter, freeing room for that peer to
+    /// queue more legitimately.
+    #[test]
+    fn per_peer_counter_decrements_on_pop() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+        let hashes: Vec<Hash> = (0..50)
+            .map(|i: u64| {
+                let mut h = [0u8; 32];
+                h[..8].copy_from_slice(&i.to_be_bytes());
+                Hash::from_bytes(h)
+            })
+            .collect();
+        sync.queue_headers_from_peer(peer, hashes);
+        assert_eq!(sync.headers_per_peer.get(&peer).copied().unwrap(), 50);
+
+        // Pop 20 via get_blocks_to_request.
+        sync.max_concurrent = 100; // allow popping 20 at once
+        let popped = sync.get_blocks_to_request(20);
+        assert_eq!(popped.len(), 20);
+
+        // Counter went from 50 → 30 (50 queued - 20 popped).
+        assert_eq!(sync.headers_per_peer.get(&peer).copied().unwrap(), 30);
+        assert_eq!(sync.pending_header_peer.len(), 30);
     }
 }

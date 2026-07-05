@@ -4433,7 +4433,10 @@ async fn process_message(
                     "Accepted Headers nonce={} count={} max_height={} from peer {:?}",
                     headers_msg.nonce, hashes.len(), max_header_height, &peer_id[..4]
                 );
-                sync_guard.queue_headers(hashes);
+                // v1.0.13 #4 — attributed queue so one peer can't
+                // fill the 50K-slot pending_headers pool. Cap is
+                // MAX_HEADERS_PER_PEER (5000) per peer.
+                sync_guard.queue_headers_from_peer(peer_id, hashes);
                 }
                 Err(e) => {
                     warn!("Failed to deserialize HeadersMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
