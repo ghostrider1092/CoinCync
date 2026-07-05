@@ -212,7 +212,7 @@ ordered-float = "4"
 colored   = "2"
 indicatif = { version = "0.18", features = ["tokio"] }
 dialoguer = { version = "0.12", features = ["password"] }
-console   = "0.15"
+console   = "0.16"
 rustyline = "13"
 strsim    = "0.11"
 
