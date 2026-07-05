@@ -18,6 +18,14 @@ This is the most common 3am page. 80% of the time the miner stopped producing an
 If `check-fleet-partition.sh` returns **0** but tip_age is rising on every host → continue here.
 If it returns **1** → this is not a stall, it's a partition → [runbook-peer-partition](runbook-peer-partition.md).
 
+**Also check for the 2026-07-04 pattern**: `check-fleet-partition.sh` may exit 0 because the fleet agrees with itself, but a **separate mining host** has a heavier chain the fleet is refusing to accept via reorg. Grep for `hard finality` in fleet node logs:
+
+```bash
+ssh seed1 'journalctl -u coincync-node -n 500 --no-pager | grep -i "hard finality"'
+```
+
+If you see `Rejecting reorg at depth <N>: exceeds absolute maximum 100 (hard finality)` → this is not a stall in the usual sense, it's [runbook-hard-finality-stuck](runbook-hard-finality-stuck.md). Fleet is stuck on a losing minor fork; miner has the winner but can't push it in.
+
 ---
 
 ## Decision tree

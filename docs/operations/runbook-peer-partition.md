@@ -54,6 +54,11 @@ If exit 1 → continue here.
 5. **Wrong chain entirely** (real fork, not partition)
    - Same height but DIFFERENT tip_hash → not a partition, it's a fork → [runbook-fork-rollback](runbook-fork-rollback.md).
 
+6. **Fleet agrees internally but is stuck; a separate host has a heavier chain and reorgs are being rejected as `hard finality`**
+   - Log line to look for on fleet nodes: `Rejecting reorg at depth <N>: exceeds absolute maximum 100 (hard finality)`.
+   - This is NOT a peer partition — it's the 2026-07-04 hard-finality-stuck pattern. Fleet hosts agree with each other but disagree with the mining host, and the divergence is > 100 blocks so p2p can't recover it.
+   - → [runbook-hard-finality-stuck](runbook-hard-finality-stuck.md).
+
 ---
 
 ## Fix
