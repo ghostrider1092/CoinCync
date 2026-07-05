@@ -661,7 +661,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbfcb6c5a091e80cb3d3b0c1a7f126af4631cd5065b1f9929b139f1be8f3fb62"
 dependencies = [
- "incrementalmerkletree 0.5.1",
+ "incrementalmerkletree",
 ]
 
 [[package]]
@@ -989,7 +989,7 @@ dependencies = [
  "hyper 1.9.0",
  "igd",
  "image",
- "incrementalmerkletree 0.8.2",
+ "incrementalmerkletree",
  "indicatif",
  "jsonrpsee",
  "merlin",
@@ -1006,7 +1006,7 @@ dependencies = [
  "qrcode",
  "quickcheck",
  "quickcheck_macros",
- "rand 0.10.1",
+ "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "rand_distr",
@@ -1098,7 +1098,7 @@ dependencies = [
  "coincync",
  "crossterm 0.27.0",
  "hex",
- "rand 0.10.1",
+ "rand 0.8.6",
  "ratatui",
  "reqwest",
  "serde",
@@ -1116,7 +1116,7 @@ dependencies = [
  "borsh",
  "ed25519-dalek",
  "proptest",
- "rand 0.10.1",
+ "rand 0.8.6",
  "serde",
  "thiserror 1.0.69",
 ]
@@ -1134,7 +1134,7 @@ dependencies = [
  "hmac",
  "libc",
  "proptest",
- "rand 0.10.1",
+ "rand 0.8.6",
  "reqwest",
  "secp256k1",
  "serde",
@@ -3002,15 +3002,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "incrementalmerkletree"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30821f91f0fa8660edca547918dc59812893b497d07c1144f326f07fdd94aba9"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3974,7 +3965,7 @@ dependencies = [
  "halo2_proofs",
  "hex",
  "pasta_curves",
- "rand 0.10.1",
+ "rand 0.8.6",
  "rand_chacha 0.3.1",
  "subtle",
  "thiserror 1.0.69",

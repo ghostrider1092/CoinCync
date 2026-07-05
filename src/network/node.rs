@@ -559,6 +559,26 @@ impl P2PNode {
     /// 2-strike).
     pub async fn notify_block_invalid(&self, peer_id: &PeerId, reason: &str) {
         let offense = super::scoring::classify_invalid_block_reason(reason);
+
+        // MissingParent is not misbehavior — it's an out-of-order sync race
+        // during a deep reorg (peer's fork tip arrived before we backfilled
+        // parents). Do NOT score, do NOT ban. The header/block sync path
+        // should already be requesting the missing parents on its own; if
+        // it isn't, that's a bug in sync, not the peer's fault.
+        //
+        // Before this short-circuit existed, this exact case banned our own
+        // randomx-2 miner during a legitimate 628-block reorg on 2026-07-04
+        // and locked the fleet out of the canonical chain for ~20 hours.
+        // See `project_hard_finality_partition_2026_07_04.md`.
+        if offense == super::scoring::MisbehaviorType::MissingParent {
+            tracing::debug!(
+                peer = ?&peer_id[..4],
+                reason = %reason,
+                "notify_block_invalid: MissingParent — not scoring peer, upstream sync should request parents"
+            );
+            return;
+        }
+
         let addr = match self.peers.get(peer_id).map(|p| p.addr) {
             Some(a) => a,
             None => {

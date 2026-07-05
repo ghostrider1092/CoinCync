@@ -60,7 +60,7 @@ proptest    = "1"
 # Test-only access to ed25519 signing for round-trip tests of the
 # verifier. We use rand_core 0.6 so we match `ed25519-dalek`'s
 # constraint (it doesn't yet depend on rand 0.8's traits).
-rand        = "0.10"
+rand        = "0.8"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 borsh       = { version = "1", features = ["derive"] }
 

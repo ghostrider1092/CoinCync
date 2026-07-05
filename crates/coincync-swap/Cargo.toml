@@ -96,7 +96,7 @@ snow       = { version = "0.9", default-features = false, features = ["default-r
 # adaptor-roundtrip tests) to regular dependencies so the binary
 # can pull it in. The library code uses `OsRng` directly via this
 # same crate; same version pin keeps the resolver tree clean.
-rand       = "0.10"
+rand       = "0.8"
 
 # SOCKS5 client for dialing through Tor (or any RFC 1928 proxy).
 # Sync crate — matches the std::net::TcpStream architecture used

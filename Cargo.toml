@@ -95,7 +95,7 @@ hmac   = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 
 # â”€â”€ RNG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-rand        = "0.10"
+rand        = "0.8"
 rand_chacha = "0.3"
 rand_core   = "0.6"
 rand_distr  = "0.4"
@@ -250,7 +250,7 @@ prometheus  = "0.14"
 # memory/project_cync1_orchard_tari_conflict.md for the background.
 halo2_proofs          = "0.3"
 halo2_gadgets         = "0.3"
-incrementalmerkletree = "0.8"
+incrementalmerkletree = "0.5"
 bridgetree            = "0.4"
 pasta_curves          = "0.5"
 blake2b_simd          = "1.0"

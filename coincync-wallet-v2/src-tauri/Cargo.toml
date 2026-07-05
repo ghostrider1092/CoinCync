@@ -5,7 +5,7 @@ name = "coincync-wallet-v2"
 version = "1.0.10"
 edition = "2021"
 [build-dependencies]
-tauri-build = { version = "2.6", features = [] }
+tauri-build = { version = "1.5", features = [] }
 [dependencies]
 tauri     = { version = "1.6", features = [ "process-relaunch", "notification-all", "shell-open"] }
 serde     = { version = "1.0", features = ["derive"] }
