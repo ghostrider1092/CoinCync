@@ -22,7 +22,44 @@ pub enum MisbehaviorType {
     InvalidTransaction,
     /// Sent oversized message exceeding per-type limit
     OversizedMessage,
-    /// Sent too many orphan blocks (flooding)
+    /// Sent too many orphan blocks (flooding).
+    ///
+    /// SECURITY (2026-07-05 audit — same class as `MissingParent`):
+    /// **This variant is retained as a zero-penalty no-op** because the
+    /// original semantics banned legitimate miners during deep reorgs.
+    /// Any peer whose fork tip we haven't backfilled parents for
+    /// naturally sends "orphans" from our perspective — that's not
+    /// misbehavior, it's exactly the pattern of a valid heavier-chain
+    /// takeover.
+    ///
+    /// **Historical incident** (2026-06-22, memory
+    /// `project_chain_partition_2026_06_22`): the orphan-flood ban on
+    /// our own miner caused an 18-hour testnet stall. Recovered via
+    /// manual chaindata tarball transfer. The 2026-07-04 20-hour stall
+    /// (`project_hard_finality_partition_2026_07_04`) was a SIBLING
+    /// bug in a different code path (peer-punishment classifier), fixed
+    /// in PR #154. This variant is the same class.
+    ///
+    /// **Prior art** — every major implementation handles this without
+    /// banning:
+    ///   * Bitcoin Core `net_processing.cpp`: rejects orphan with
+    ///     `MSG_BLOCK_UNKNOWN_PARENT`, requests parent via GETDATA.
+    ///     No ban. Only bans if peer refuses to deliver requested
+    ///     parents (that maps to our `DownloadStall` category).
+    ///   * Zebra (Zcash Rust): size-limited orphan pool + LRU
+    ///     eviction. No peer punishment.
+    ///   * Monero: orphan queued, parent requested via response
+    ///     protocol. No punishment for legitimate orphans.
+    ///
+    /// **Where DoS protection should live instead**: orphan-pool layer
+    /// (size-limit + LRU eviction) — never the peer scorer. If a
+    /// future PR wires GETDATA-response tracking, revive this variant
+    /// with `Option B` semantics: score only when the peer sent an
+    /// orphan AND then refused to deliver its parents.
+    ///
+    /// The variant is not removed outright so existing call sites
+    /// keep compiling; any call that reaches the scorer is a no-op
+    /// (penalty=0, short-circuit in `notify_block_orphan`).
     OrphanFlood,
     /// Protocol version mismatch or invalid handshake
     ProtocolViolation,
@@ -89,7 +126,12 @@ impl MisbehaviorType {
 
             // Severe (2-3 offenses → ban)
             MisbehaviorType::InvalidTransaction => 25,
-            MisbehaviorType::OrphanFlood => 20,
+            // OrphanFlood: 0-penalty no-op (see enum doc). Was 20 before
+            // the 2026-07-05 audit; changed after the 2026-06-22 partition
+            // incident recurred structurally in 2026-07-04 (both stalls
+            // caused by the same "peer sending legit blocks looks like
+            // an attacker" misclassification).
+            MisbehaviorType::OrphanFlood => 0,
             MisbehaviorType::ProtocolViolation => 20,
 
             // Moderate (5-10 offenses → ban)
@@ -1319,6 +1361,108 @@ mod tests {
             let s = scorer.get_or_create(addr);
             s.record_misbehavior(offense);
             assert!(s.should_ban(), "1 offense should be enough for ban");
+        }
+    }
+
+    // ===================================================================
+    // OrphanFlood zero-penalty regression tests — 2026-07-05 class fix
+    // ===================================================================
+    //
+    // These tests lock the fix for the 2026-06-22 partition (18hr stall,
+    // caused when our own miner was banned as an "orphan flooder" while
+    // sending legitimate blocks from a heavier chain). Same class as the
+    // MissingParent fix in PR #154.
+    //
+    // The variant name and enum entry are kept so any legacy code that
+    // still calls `record_misbehavior(OrphanFlood)` compiles, but the
+    // penalty is now 0 — the peer cannot be banned via this path.
+
+    #[test]
+    fn orphan_flood_penalty_is_zero() {
+        // Guard the fix. If someone tunes penalty tables in the future and
+        // this variant creeps back to any nonzero value, this test fires.
+        let m = MisbehaviorType::OrphanFlood;
+        assert_eq!(
+            m.penalty(),
+            0,
+            "OrphanFlood penalty MUST stay zero — legitimate miners \
+             during deep reorgs look like flooders. See enum doc-comment \
+             for the 2026-06-22 partition incident this closes.",
+        );
+    }
+
+    #[test]
+    fn orphan_flood_thousand_strikes_cannot_ban() {
+        // The strict version: even if a call site forgets that OrphanFlood
+        // is no-op and pipes 1000 of them into `record_misbehavior`, the
+        // peer's reputation must NOT reach the ban threshold. This is what
+        // would have prevented the 2026-06-22 partition even if the
+        // notify_block_orphan short-circuit gets accidentally removed.
+        let mut score = PeerScore::default();
+        assert_eq!(score.reputation, 50, "test invariant: default rep = 50");
+
+        for _ in 0..1000 {
+            score.record_misbehavior(MisbehaviorType::OrphanFlood);
+        }
+
+        assert_eq!(
+            score.reputation, 50,
+            "reputation must not drift for zero-penalty offenses",
+        );
+        assert!(
+            !score.should_ban(),
+            "1000 OrphanFlood strikes must not ban — this is the belt-and-\
+             suspenders that protects against a future notify_block_orphan \
+             refactor accidentally re-introducing the ban path",
+        );
+    }
+
+    #[test]
+    fn orphan_flood_tracker_still_returns_true_at_threshold() {
+        // Rate-tracking is preserved for observability logging even though
+        // scoring is a no-op. This test just verifies the tracker itself
+        // still fires so `notify_block_orphan` can emit the debug log.
+        let mut t = OrphanFloodTracker::new();
+        let pid = [77u8; 32];
+        for _ in 0..ORPHAN_FLOOD_THRESHOLD {
+            assert!(!t.record(pid), "below-threshold record returns false");
+        }
+        assert!(t.record(pid), "at-threshold record returns true (for logging)");
+    }
+
+    #[test]
+    fn orphan_flood_variant_penalty_calibration_matrix() {
+        // Sanity check: OrphanFlood is the ONLY block-related variant with
+        // penalty=0 (besides MissingParent, which is also a "not the peer's
+        // fault" category). If a new variant is added and this list needs
+        // updating, the test fails so we consciously re-evaluate.
+        let zero_penalty_variants: &[MisbehaviorType] = &[
+            MisbehaviorType::OrphanFlood,
+            MisbehaviorType::MissingParent,
+        ];
+        for v in zero_penalty_variants {
+            assert_eq!(v.penalty(), 0, "expected zero penalty for {:?}", v);
+        }
+
+        // Cross-check: every variant NOT in the zero list has a penalty > 0.
+        let all_nonzero: &[MisbehaviorType] = &[
+            MisbehaviorType::InvalidBlockPoW,
+            MisbehaviorType::InvalidBlockProofs,
+            MisbehaviorType::InvalidTransaction,
+            MisbehaviorType::ProtocolViolation,
+            MisbehaviorType::OversizedMessage,
+            MisbehaviorType::UnrequestedData,
+            MisbehaviorType::DuplicateRequests,
+            MisbehaviorType::DownloadStall,
+            MisbehaviorType::InvalidAddress,
+            MisbehaviorType::WrongNetwork,
+            MisbehaviorType::InvalidAnchorStamp,
+            MisbehaviorType::MessageFlood,
+            MisbehaviorType::ChronicSendQueueFull,
+            MisbehaviorType::LowFeeFlood,
+        ];
+        for v in all_nonzero {
+            assert!(v.penalty() > 0, "expected NON-zero penalty for {:?}", v);
         }
     }
 }

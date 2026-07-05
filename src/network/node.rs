@@ -644,45 +644,40 @@ impl P2PNode {
     /// re-requesting the orphan itself in a loop. See sync::mark_block_orphan
     /// for the full rationale.
     ///
-    /// Also runs orphan-flood detection on the originating peer. A handful
-    /// of orphans during IBD is normal (we're catching up), but more than
-    /// `ORPHAN_FLOOD_THRESHOLD` orphans in `ORPHAN_FLOOD_WINDOW_SECS` from
-    /// one peer indicates abuse (e.g. malicious chain-tip spoofing or
-    /// PoW-recheck CPU exhaustion). Flooders accumulate
-    /// `MisbehaviorType::OrphanFlood` strikes (20 points each); five
-    /// distinct flooding windows ban the peer.
+    /// SECURITY (2026-07-05 audit — same class as PR #154 MissingParent):
+    /// Orphan-flood scoring has been **removed** from this path. It was the
+    /// direct cause of the 2026-06-22 partition (18hr stall — our own miner
+    /// got banned as an "orphan flooder" while sending legitimate blocks
+    /// from a heavier chain). The pattern is the same as the 2026-07-04
+    /// stall: peer sending blocks we haven't backfilled parents for looks
+    /// like an attacker from our current-tip vantage point, but is actually
+    /// exactly what a legitimate heavier-chain takeover looks like.
+    ///
+    /// **Rate-tracking is kept** (see `self.orphan_flood.write().await.record`
+    /// below) purely as an observability signal — the return value is
+    /// logged but never fed to the scorer. If a future PR wires proper
+    /// GETDATA-response tracking, THAT is where "peer refused to deliver
+    /// its parents" DoS-detection belongs, not here.
+    ///
+    /// Prior art: Bitcoin Core `net_processing.cpp` rejects orphans with
+    /// `MSG_BLOCK_UNKNOWN_PARENT` + requests parent via GETDATA and only
+    /// bans on parent-request stall. Zebra size-limits the orphan pool
+    /// with LRU eviction; no peer punishment. Monero same shape.
     pub async fn notify_block_orphan(&self, peer_id: &PeerId, orphan_hash: &Hash, parent_hash: &Hash) {
         self.sync.write().await.mark_block_orphan(orphan_hash, parent_hash);
 
+        // Track rate for observability only. Do NOT feed into the peer scorer.
+        // See method doc-comment for the 2026-06-22 partition context.
         let flooded = self.orphan_flood.write().await.record(*peer_id);
-        if !flooded {
-            return;
-        }
-        // Threshold crossed. Score the peer.
-        let addr = match self.peers.get(peer_id).map(|p| p.addr) {
-            Some(a) => a,
-            None => return,
-        };
-        let banned = {
-            let mut scorer = self.peer_scorer.write().await;
-            let score = scorer.get_or_create(addr);
-            score.record_misbehavior(super::scoring::MisbehaviorType::OrphanFlood);
-            score.should_ban()
-        };
-        if banned {
-            tracing::warn!(
-                "Banning peer {:?} ({}): OrphanFlood (>{} orphans in {}s)",
-                &peer_id[..4],
-                addr,
-                super::scoring::ORPHAN_FLOOD_THRESHOLD,
-                super::scoring::ORPHAN_FLOOD_WINDOW_SECS,
-            );
-            self.ban_peer(peer_id).await;
-        } else {
-            tracing::warn!(
-                "Orphan flood detected from peer {:?} ({}): scored OrphanFlood",
-                &peer_id[..4],
-                addr,
+        if flooded {
+            tracing::debug!(
+                peer = ?&peer_id[..4],
+                threshold = super::scoring::ORPHAN_FLOOD_THRESHOLD,
+                window_secs = super::scoring::ORPHAN_FLOOD_WINDOW_SECS,
+                orphan = ?orphan_hash,
+                parent = ?parent_hash,
+                "notify_block_orphan: rate above threshold — logging as observability only, \
+                 NOT scoring peer (see method doc-comment for the 2026-06-22 partition rationale)"
             );
         }
     }
