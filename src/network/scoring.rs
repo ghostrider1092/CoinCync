@@ -57,6 +57,24 @@ pub enum MisbehaviorType {
     /// we score it because the dynamic-fee escalation interacts with
     /// sybil-displacement (see audit finding HIGH #13).
     LowFeeFlood,
+    /// Peer sent us a block whose parent we don't have yet. This is NOT
+    /// misbehavior — it's an out-of-order sync race that happens
+    /// naturally during deep reorgs (peer's fork tip arrives before we've
+    /// requested the parent chain). Correct handling: request the parents
+    /// via header sync. Ban score: zero. Kept in the enum only so the
+    /// classifier can distinguish this reason from truly-invalid blocks
+    /// and the caller can short-circuit the score/ban path.
+    ///
+    /// SECURITY (2026-07-04 fix): Before this variant existed, the
+    /// classifier's default was `InvalidBlockProofs` (penalty 50,
+    /// instant ban on first strike). On 2026-07-04 that misclassification
+    /// banned our own randomx-2 miner during a legitimate 628-block
+    /// reorg attempt — the reorg engine tried to apply the fork tip at
+    /// h=9371 before backfilling parents, got "Non-genesis block without
+    /// parent" from the validator, and the ban locked the fleet out of
+    /// the canonical chain for ~20 hours. See
+    /// `project_hard_finality_partition_2026_07_04.md`.
+    MissingParent,
 }
 
 impl MisbehaviorType {
@@ -96,6 +114,11 @@ impl MisbehaviorType {
             // Low fee — tiny per-tx penalty (~50 strikes -> ban). Honest
             // fee-estimator drift survives; sustained sybil floods don't.
             MisbehaviorType::LowFeeFlood => 1,
+            // Missing parent — not misbehavior. Zero penalty. Callers
+            // MUST short-circuit before recording so we never even touch
+            // the scorer for this reason. Zero here is belt-and-suspenders
+            // in case a caller forgets the short-circuit.
+            MisbehaviorType::MissingParent => 0,
         }
     }
 }
@@ -139,6 +162,23 @@ pub fn classify_invalid_block_reason(reason: &str) -> MisbehaviorType {
     // Wrong height in a block message: protocol-level violation.
     if r.contains("invalid height") {
         return MisbehaviorType::ProtocolViolation;
+    }
+
+    // Missing-parent race: not the peer's fault, it's an out-of-order sync
+    // race during a deep reorg. Correct handling upstream is to request
+    // the parents; the ban path should be short-circuited.
+    //
+    // Exact strings from src/consensus/validation.rs:
+    //   * `"Non-genesis block without parent"`         (line 925)
+    //   * `"Cannot verify PoW without previous block"` (line 228)
+    //
+    // Also matches the wrapped forms that appear in reorg logs:
+    //   * `"Invalid fork block: Non-genesis block without parent; ..."` (chain.rs reorg path)
+    if r.contains("without parent")
+        || r.contains("without previous block")
+        || r.contains("no parent")
+    {
+        return MisbehaviorType::MissingParent;
     }
 
     // Body-level cryptographic failures (signatures, range proofs, ring sigs,
@@ -1129,6 +1169,74 @@ mod tests {
                 MisbehaviorType::InvalidBlockProofs,
                 "reason: {}", r,
             );
+        }
+    }
+
+    #[test]
+    fn classify_missing_parent_is_not_misbehavior() {
+        // REGRESSION LOCK for the 2026-07-04 partition. These EXACT strings
+        // are what src/consensus/validation.rs emits (lines 228, 925) plus
+        // their reorg-wrapper forms from chain.rs. Before the fix, all four
+        // fell through to InvalidBlockProofs (penalty 50, instant ban on
+        // first strike), which banned our own randomx-2 miner and locked
+        // the fleet out of the canonical chain for ~20 hours.
+        for r in [
+            // Direct validation-layer strings
+            "Non-genesis block without parent",
+            "Cannot verify PoW without previous block",
+            // Reorg-wrapper forms observed in seed3's July 4 logs
+            "Invalid fork block: Non-genesis block without parent; Cannot verify PoW without previous block",
+            "Fork block rejected during reorg: Non-genesis block without parent",
+            // Case-insensitive coverage
+            "NON-GENESIS BLOCK WITHOUT PARENT",
+            "block has no parent",
+        ] {
+            let m = classify_invalid_block_reason(r);
+            assert_eq!(
+                m,
+                MisbehaviorType::MissingParent,
+                "reason should be MissingParent: {}",
+                r,
+            );
+            assert_eq!(
+                m.penalty(),
+                0,
+                "MissingParent must have zero ban weight (reason: {})",
+                r,
+            );
+        }
+    }
+
+    #[test]
+    fn missing_parent_penalty_cannot_ban_even_if_accumulated() {
+        // Belt-and-suspenders: even if a caller forgets to short-circuit and
+        // pipes 1000 MissingParent events into the scorer, the total penalty
+        // (0 × 1000 = 0) must never cross the -50 ban threshold. This
+        // guards against a regression where someone changes the penalty
+        // constant without realising this variant is load-bearing.
+        let m = MisbehaviorType::MissingParent;
+        assert_eq!(m.penalty(), 0, "MissingParent penalty MUST stay zero");
+        assert_eq!(
+            m.penalty().saturating_mul(1000),
+            0,
+            "1000× MissingParent must not overflow into a bannable score",
+        );
+    }
+
+    #[test]
+    fn other_reasons_still_ban_after_fix() {
+        // Make sure adding MissingParent didn't accidentally weaken any of
+        // the ACTUAL-invalid-block categories. All these must remain
+        // instant-ban or 2-strike as before.
+        let must_instant_ban = [
+            ("Difficulty target mismatch: expected X, got Y", MisbehaviorType::InvalidBlockPoW),
+            ("Hardcoded checkpoint mismatch at height 42",   MisbehaviorType::InvalidBlockPoW),
+            ("Invalid proof of work",                        MisbehaviorType::InvalidBlockPoW),
+            ("Block hash above target",                      MisbehaviorType::InvalidBlockPoW),
+        ];
+        for (r, expected) in must_instant_ban {
+            assert_eq!(classify_invalid_block_reason(r), expected, "reason: {}", r);
+            assert!(expected.penalty() >= 50, "must still instant-ban: {}", r);
         }
     }
 
