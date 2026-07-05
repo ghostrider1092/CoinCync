@@ -641,9 +641,11 @@ impl P2PNode {
     }
 
     /// IBD orphan recovery: when a block came back as Orphan, ask the
-    /// sync manager to fetch the parent so the gap fills, instead of
-    /// re-requesting the orphan itself in a loop. See sync::mark_block_orphan
-    /// for the full rationale.
+    /// sync manager to fetch the parent so the gap fills, AND store the
+    /// orphan body so the drain in `on_block_received_from` can replay
+    /// it once the parent connects. See `sync::mark_block_orphan` for
+    /// the full rationale + the 2026-06-17 root-cause notes on why the
+    /// hashes-only version of this function stuck the chain.
     ///
     /// SECURITY (2026-07-05 audit — same class as PR #154 MissingParent):
     /// Orphan-flood scoring has been **removed** from this path. It was the
@@ -670,8 +672,19 @@ impl P2PNode {
     /// upstream this session, so the identifier-level citations have
     /// been removed. Consistent with the parallel scoring.rs / sync.rs
     /// scrubs in this PR.
-    pub async fn notify_block_orphan(&self, peer_id: &PeerId, orphan_hash: &Hash, parent_hash: &Hash) {
-        self.sync.write().await.mark_block_orphan(orphan_hash, parent_hash);
+    ///
+    /// v1.0.13 orphan-body-in-pool fix (2026-06-17): takes the full
+    /// `Block` (not just its hash) so `sync::mark_block_orphan` can
+    /// stash the body in the orphan pool for instant replay when the
+    /// parent chain connects. Pre-fix, hashes-only propagation forced
+    /// gossip to re-deliver every intermediate block body 200-deep,
+    /// which peers don't do unprompted — the chain stuck.
+    pub async fn notify_block_orphan(&self, peer_id: &PeerId, block: Block, parent_hash: &Hash) {
+        // Capture the orphan's hash BEFORE moving `block` into
+        // `mark_block_orphan`. Used only in the debug-log below for
+        // observability; the orphan pool stores the block itself.
+        let orphan_hash = block.hash();
+        self.sync.write().await.mark_block_orphan(block, Some(*peer_id), parent_hash);
 
         // Track rate for observability only. Do NOT feed into the peer scorer.
         // See method doc-comment for the 2026-06-22 partition context.

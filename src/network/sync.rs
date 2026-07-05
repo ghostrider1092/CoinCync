@@ -715,26 +715,97 @@ impl ChainSync {
         tracing::debug!("Block {} failed — re-queued for retry", &hash.to_hex()[..16]);
     }
 
-    /// IBD orphan-recovery (fixes the "wedge at one height" bug 2026-05-02):
+    /// IBD orphan-recovery (fixes the "wedge at one height" bug 2026-05-02
+    /// + the "200-block-deep gossip-orphan loop" bug 2026-06-17):
     ///
     /// When a block comes back from chain validation as `Orphan` it means
     /// we don't have its parent. Re-requesting the orphan itself causes
     /// the same peer to keep handing it back — chain never advances.
     /// Instead, drop the orphan from active tracking and queue its PARENT
     /// hash for fetch. When the parent arrives and processes successfully,
-    /// gossip will re-deliver the original orphan and the second pass will
-    /// connect it to the chain.
+    /// the orphan pool is drained forward via `on_block_received_from`'s
+    /// queue walk (lines ~386-407), replaying the orphan immediately.
     ///
-    /// This is the minimal fix; we don't store the orphan body here
-    /// because the gossip relay path doesn't pass us the block. A more
-    /// thorough fix would also keep the orphan in `orphan_blocks` for
-    /// instant replay when the parent lands. Acceptable trade-off for
-    /// testnet — see the IBD orphan-loop bug memo for full context.
-    pub fn mark_block_orphan(&mut self, orphan_hash: &Hash, parent_hash: &Hash) {
+    /// **Body required, not just hashes.** The 2026-05-02 minimal-fix
+    /// version of this function took only hashes and trusted gossip to
+    /// re-deliver the orphan body after the parent connected. That was
+    /// wrong for the 200-block-deep case observed 2026-06-17:
+    ///
+    /// 1. Miner extends chain from height H by ~200 blocks alone (peer
+    ///    gossip in-flight but never queueing into the orphan pool with
+    ///    bodies — the hashes-only fix path is taken)
+    /// 2. Fleet node receives N+1 via gossip → Orphan (we lack N)
+    /// 3. Fleet node drops the body, queues N for fetch
+    /// 4. Fleet node receives N via gossip → Orphan (we lack N-1)
+    /// 5. Goto 3 with N-1
+    /// 6. Eventually we fetch all the way down to H — but by then we
+    ///    no longer have any of the bodies for H+1..N. Gossip doesn't
+    ///    re-deliver them (peer thinks we have them; we requested them
+    ///    once and ack'd receipt). Chain stuck at H forever.
+    ///
+    /// The fix: store the orphan body in `orphan_blocks` at receive time,
+    /// keyed by hash + indexed by parent. When the parent walks the
+    /// chain forward via on_block_received_from's drain loop, each
+    /// pooled orphan is replayed in order. No second gossip required.
+    ///
+    /// Eviction is LRU by `received_at`, capped at `MAX_ORPHAN_BLOCKS` —
+    /// same policy as the IBD-path orphan storage. Per-peer caps via
+    /// `MAX_ORPHANS_PER_PEER` prevent a single misbehaving peer from
+    /// filling the pool with garbage.
+    pub fn mark_block_orphan(&mut self, block: Block, from: Option<PeerId>, parent_hash: &Hash) {
+        let orphan_hash = block.hash();
+
         // Stop tracking the orphan itself; we're not going to retry it.
-        self.pending_requests.remove(orphan_hash);
-        self.downloading.remove(orphan_hash);
-        self.download_timestamps.remove(orphan_hash);
+        self.pending_requests.remove(&orphan_hash);
+        self.downloading.remove(&orphan_hash);
+        self.download_timestamps.remove(&orphan_hash);
+
+        // Store the orphan body so the on_block_received_from drain
+        // loop can replay it once the parent connects. Same storage
+        // policy as the IBD-path orphan code (eviction by oldest
+        // received_at, per-peer cap, parent index).
+        let now = unix_now();
+        if !self.orphan_blocks.contains_key(&orphan_hash) {
+            // Evict oldest if pool is full.
+            while self.orphan_blocks.len() >= MAX_ORPHAN_BLOCKS {
+                if let Some(k) = self
+                    .orphan_blocks
+                    .iter()
+                    .min_by_key(|(_, e)| e.received_at)
+                    .map(|(k, _)| *k)
+                {
+                    if let Some(o) = self.orphan_blocks.remove(&k) {
+                        let p = o.block.header.prev_hash;
+                        if let Some(c) = self.orphan_by_parent.get_mut(&p) {
+                            c.retain(|h| h != &k);
+                            if c.is_empty() {
+                                self.orphan_by_parent.remove(&p);
+                            }
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            // Per-peer cap to bound flood damage.
+            let admit = if let Some(pid) = from {
+                let c = self.orphans_per_peer.entry(pid).or_insert(0);
+                if *c >= MAX_ORPHANS_PER_PEER {
+                    false
+                } else {
+                    *c += 1;
+                    true
+                }
+            } else {
+                true
+            };
+            if admit {
+                let ph = block.header.prev_hash;
+                self.orphan_by_parent.entry(ph).or_default().push(orphan_hash);
+                self.orphan_blocks
+                    .insert(orphan_hash, OrphanBlock { block, received_at: now, from });
+            }
+        }
 
         // Don't queue the parent if we already have it or are about to.
         if *parent_hash == self.local_tip {
@@ -756,9 +827,10 @@ impl ChainSync {
             }
         }
         tracing::debug!(
-            "Orphan {} → fetching parent {}",
+            "Orphan {} → fetching parent {} (pool: {} blocks)",
             &orphan_hash.to_hex()[..16],
-            &parent_hash.to_hex()[..16]
+            &parent_hash.to_hex()[..16],
+            self.orphan_blocks.len(),
         );
     }
 
