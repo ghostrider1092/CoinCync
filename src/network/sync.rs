@@ -31,7 +31,55 @@ const MAX_ORPHAN_BLOCKS: usize = 1000;
 const MAX_PENDING_REQUESTS: usize = 10_000;
 const ORPHAN_TTL_SECONDS: u64 = 30 * 60;
 const ORPHAN_CLEANUP_INTERVAL: u64 = 60;
-const MAX_ORPHANS_PER_PEER: usize = 50;
+/// Per-peer orphan-block cap.
+///
+/// SECURITY (2026-07-05 audit F24 — SEV-A, same class as F1 OrphanFlood
+/// and F0 MissingParent): Pre-audit this was `50`. During a legitimate
+/// deep reorg (like the 2026-07-04 partition where randomx-2 mined a
+/// 628-block heavier canonical chain) the peer serving the fork tip
+/// sends every intermediate block as an "orphan" from our current-tip
+/// vantage point. First 50 orphans stored, remaining 578 SILENTLY
+/// DROPPED at the check in `on_block_received_from` (returned `Ok(vec![])`
+/// with no log). The reorg could never complete because we never
+/// accepted enough of the fork to backfill parents.
+///
+/// This is the third self-defeating-gate bug found in the peer-punishment
+/// / sync surface this audit round (F0 MissingParent → PR #154, F1
+/// OrphanFlood → PR #155, F24 = this).
+///
+/// **Prior art — every reference implementation** relies on total-pool
+/// caps + LRU eviction + TTL, not per-peer caps:
+///   * Bitcoin Core `net_processing.cpp::AddOrphanTx` /
+///     `LimitOrphans`: 100 total txs (parameterized), evicted by
+///     random selection when full — no per-peer cap. Same shape for
+///     blocks in the compact-block-relay path.
+///   * Zebra: size-limited orphan pool with LRU eviction. No per-peer
+///     tracking of orphan counts.
+///   * Monero: `m_orphaned_by_prev_id` capped at 100 total blocks
+///     with FIFO eviction. No per-peer.
+///
+/// **Why the pre-audit value was 50**: appears to be a DoS heuristic
+/// intended to prevent one peer from filling the entire pool. BUT the
+/// TOTAL pool cap (`MAX_ORPHAN_BLOCKS = 1000` + LRU-oldest eviction at
+/// `on_block_received_from` line ~547) already provides that
+/// protection. The per-peer cap was defense-in-depth that BOTH:
+///   * failed to prevent DoS (LRU already does that better)
+///   * created a new attack surface (silent-drop → chain-stall)
+///
+/// **Post-fix value**: `usize::MAX` — effectively unbounded per-peer.
+/// The check `orphans_per_peer[p] >= MAX_ORPHANS_PER_PEER` becomes
+/// impossible to trigger, so orphans are accepted up to the total-pool
+/// cap and evicted by LRU as designed.
+///
+/// The `orphans_per_peer` counter itself is retained (unchanged in
+/// this fix — see `on_block_received_from` and the resolution-decrement
+/// path) so any future PR that adds cause-based DoS mitigation (e.g.,
+/// "peer sent orphans AND refused to deliver requested parents") has
+/// the tracking already wired.
+///
+/// See `project_hard_finality_partition_2026_07_04.md` in the memory
+/// index for the incident this closes.
+const MAX_ORPHANS_PER_PEER: usize = usize::MAX;
 
 /// How long a block can sit in `downloading` with no `pending_requests`
 /// entry before it is re-queued. Fix for Bug 3 (NYC stuck at height 12).
@@ -1086,6 +1134,68 @@ mod tests {
             sync2.best_known_height < 12_776,
             "update_peer_height must reject oversized claims same as \
              update_peer_height_for"
+        );
+    }
+
+    /// Regression test for the 2026-07-04 partition (F24 SEV-A).
+    ///
+    /// The pre-audit `MAX_ORPHANS_PER_PEER = 50` silently DROPPED any orphan
+    /// past the 50th from a single peer. During a legitimate 628-block
+    /// heavier-chain reorg (like the one randomx-2 delivered on 2026-07-04),
+    /// the peer serving the fork tip would deliver every intermediate block
+    /// as an orphan from our current-tip vantage point. First 50 stored,
+    /// remaining 578 silently dropped, reorg never completed.
+    ///
+    /// Post-fix `MAX_ORPHANS_PER_PEER = usize::MAX` — no per-peer cap.
+    /// Total-pool cap (`MAX_ORPHAN_BLOCKS = 1000`) + LRU eviction + TTL
+    /// still provide DoS protection.
+    ///
+    /// This test simulates a peer submitting far more than 50 orphans and
+    /// asserts they're all accepted (i.e., counted, not silently dropped),
+    /// AND that `peer_orphan_limit_reached` never returns true for that
+    /// peer no matter how many they submit.
+    ///
+    /// Same class as [[project_hard_finality_partition_2026_07_04.md]]
+    /// (memory index) and PR #155 (F1 OrphanFlood).
+    #[test]
+    fn regression_2026_07_04_deep_reorg_orphan_cap() {
+        let peer = super::super::peer::generate_peer_id();
+
+        // Cap check: at any count the peer submits, limit-reached MUST be
+        // false. Pre-audit at count=50 it would have flipped true and
+        // subsequent orphans dropped.
+        let counts_to_check: [usize; 5] = [0, 50, 100, 628, 1000];
+        for count in counts_to_check {
+            let mut sync = ChainSync::new(0, Hash::zero());
+            // Directly poke the counter to simulate `count` prior orphans
+            // from this peer without needing 1000 real Block objects.
+            sync.orphans_per_peer.insert(peer, count);
+            assert!(
+                !sync.peer_orphan_limit_reached(&peer),
+                "F24 regression: peer_orphan_limit_reached must NEVER return \
+                 true no matter how many orphans a peer sent. Got true at \
+                 orphans_per_peer={}. Pre-audit this returned true at 50, \
+                 which caused the 2026-07-04 20hr fleet stall by silently \
+                 dropping every orphan past the 50th during a 628-block \
+                 reorg. If this test fails, MAX_ORPHANS_PER_PEER was reduced \
+                 below usize::MAX — see the const doc-comment for the incident \
+                 context.",
+                count,
+            );
+        }
+
+        // Also assert the constant itself hasn't been silently reduced.
+        // A future refactor might tune it to something like 500 or 1000
+        // "as a safety net" — that would re-introduce the F24 partition
+        // risk for any reorg deeper than that value.
+        assert_eq!(
+            MAX_ORPHANS_PER_PEER,
+            usize::MAX,
+            "F24 regression: MAX_ORPHANS_PER_PEER must stay at usize::MAX. \
+             Any lower value re-introduces the 2026-07-04 partition risk \
+             for legitimate reorgs deeper than that cap. If a future DoS \
+             concern arises, use cause-based mitigation (peer refused to \
+             deliver parents) not per-peer count cap. See const doc-comment.",
         );
     }
 

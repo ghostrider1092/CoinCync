@@ -4519,7 +4519,61 @@ async fn process_message(
                     }
                     return Ok(());
                 }
-                // Record successful block delivery
+                // SECURITY (2026-07-05 audit F30 — SEV-A): Cheap PoW check
+                // BEFORE recording success. Pre-fix this handler called
+                // `record_block_success` (+2 reputation) as soon as the
+                // block deserialized + matched network_magic, WITHOUT
+                // verifying that the block's PoW hash met its claimed
+                // target. An attacker sending sub-target `BlockData`
+                // messages gained +2 rep per attempt while the eventual
+                // rejection happened much further downstream at
+                // `chain.add_block` / `sync.on_block_received_from` and
+                // only incremented `sync.peer_failures` (3-strike, 5-min
+                // sync-only ban). Net effect: attacker's PeerScorer
+                // reputation went UP while burning our CPU on garbage
+                // block validation.
+                //
+                // Same fix pattern as F11 (the parallel bug in the Blocks
+                // handler, line ~4183): provably-invalid PoW is
+                // cryptographic invalidity and triggers instant ban via
+                // `MisbehaviorType::InvalidBlockPoW` (penalty 100).
+                //
+                // Prior art: Bitcoin Core `net_processing.cpp::ProcessBlock`
+                // calls `Misbehaving(100)` on `MSG_BLOCK_HEADER_LOW_WORK`.
+                // Zebra rejects at `PeerError::WrongDifficulty` + immediate
+                // PeerSet.remove(). Monero uses `peer_add_hash_ban`.
+                let pow_hash = match crate::consensus::compute_pow_hash(
+                    crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
+                    &block.header.anchor,
+                    block.header.nonce,
+                    &block.header.tx_root,
+                    block.header.height,
+                ) {
+                    Ok(h) => h,
+                    Err(_) => {
+                        // Local recompute failure (out-of-range algorithm
+                        // id, dataset error) — ambiguous, keep low-weight
+                        // `record_block_failure` as with the Blocks
+                        // handler. See F11 doc-comment there for the
+                        // full split rationale.
+                        warn!("BlockData: PoW hash recompute failed for block from peer {:?}",
+                            &peer_id[..4]);
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_block_failure();
+                        }
+                        return Ok(());
+                    }
+                };
+                if !pow_hash.meets_difficulty(&block.header.target) {
+                    warn!("Instant-banning peer {:?} — BlockData block with provably-invalid PoW",
+                        &peer_id[..4]);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::InvalidBlockPoW);
+                    }
+                    return Ok(());
+                }
+                // Now record success and hand off to the event pipeline.
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr).record_block_success(Duration::from_millis(100));
                 }

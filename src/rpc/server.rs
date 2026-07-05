@@ -1349,7 +1349,12 @@ pub async fn start_rpc_server(
             "seconds_until_checkpoint": seconds_until_next,
             "checkpoint_interval": 5,
             "finality_type": "PoW + Checkpoint",
-            "max_reorg_depth": crate::chain::max_reorg_depth(),
+            // F31 SEV-A fix (2026-07-05): use the runtime-network variant
+            // rather than the deprecated compile-time `max_reorg_depth()`.
+            // A binary built without --features testnet was previously
+            // returning 100 here even when configured to run on testnet at
+            // runtime, misleading the explorer about hard-finality behavior.
+            "max_reorg_depth": state.chain.max_reorg_depth(),
             "checkpoint_finality": "absolute",
             "description": "Blocks below the last checkpoint cannot be reverted by any amount of hashpower",
         }))

@@ -37,11 +37,40 @@ pub fn max_reorg_depth_for(network: NetworkType) -> u64 {
 }
 
 /// Returns the absolute maximum reorg depth for the current network.
+///
+/// SECURITY (2026-07-05 audit F31 — SEV-A): The previous implementation
+/// used `#[cfg(feature = "testnet")]` (compile-time) to select 1000 vs
+/// 100. But **network selection is a runtime decision** — the `network:
+/// NetworkType` field on `Blockchain` is set from the `--network` CLI
+/// flag / config, not from the build's feature flags. Result: a binary
+/// built without `--features testnet` would use the 100-block mainnet
+/// hard-finality cap EVEN WHEN CONFIGURED TO RUN ON TESTNET. That
+/// misconfiguration contributed to the 2026-07-04 partition where the
+/// fleet was running on testnet but hitting the 100-block cap that
+/// belongs to mainnet — the ideal testnet cap is 1000, deliberately
+/// higher so testnet can survive stress-test deep reorgs like the
+/// 628-block one randomx-2 delivered.
+///
+/// Post-fix: the free-function version is deprecated in favor of
+/// `max_reorg_depth_for(NetworkType)` which is unambiguous. This
+/// wrapper still exists (and defaults to the safer Testnet=1000
+/// interpretation) so any pre-audit caller compiles, but new code
+/// should ALWAYS pass the actual network explicitly.
+///
+/// See `project_hard_finality_partition_2026_07_04.md` in the memory
+/// index for the incident this closes.
+#[deprecated(
+    since = "1.0.11",
+    note = "Uses compile-time feature flags for what should be a runtime \
+            decision. Callers with access to a `Blockchain` should use \
+            `blockchain.max_reorg_depth()` (method); free-function callers \
+            should use `max_reorg_depth_for(network)` explicitly."
+)]
 pub fn max_reorg_depth() -> u64 {
-    #[cfg(feature = "testnet")]
-    { 1000 }
-    #[cfg(not(feature = "testnet"))]
-    { 100 }
+    // Fall back to the safer testnet interpretation (1000) rather than
+    // the pre-fix cfg-based mix. Callers who need the actual value MUST
+    // migrate to the network-taking variant.
+    max_reorg_depth_for(NetworkType::Testnet)
 }
 
 // ═══ HYBRID REORG DEFENSE (H-16 FIX) ═══════════════════════════════════════
@@ -95,19 +124,32 @@ pub const BOOTSTRAP_MESS_HEIGHT: u64 = 1000;
 /// be accepted given `honest_work` on the current chain. `current_height` is the
 /// caller's current tip; below `BOOTSTRAP_MESS_HEIGHT` we skip Tier-2 MESS.
 ///
+/// `max_depth` is the network-specific hard-finality cap. Callers who have a
+/// `Blockchain` should use `blockchain.max_reorg_depth()`; callers without
+/// should compute `max_reorg_depth_for(network)` from the runtime network.
+///
+/// SECURITY (2026-07-05 audit F31 — SEV-A): The pre-fix signature omitted
+/// `max_depth` and internally called `max_reorg_depth()` which used
+/// compile-time cfg feature flags. Runtime network vs compile-time features
+/// could diverge (see doc-comment on `max_reorg_depth`). The 2026-07-04
+/// partition trap was exacerbated by this: fleet binary compiled without
+/// `--features testnet` used max=100 (mainnet) even though runtime network
+/// was testnet — testnet is supposed to allow 1000-deep reorgs so it can
+/// survive the exact 628-block reorg that got trapped.
+///
 /// Returns `Ok(())` if the reorg is acceptable, `Err(reason)` if rejected.
 pub fn evaluate_reorg_acceptability(
     depth: u64,
     fork_work: u128,
     honest_work: u128,
     current_height: u64,
+    max_depth: u64,
 ) -> std::result::Result<(), String> {
     // Tier 3: Hard reject beyond absolute max depth
-    let max = max_reorg_depth();
-    if depth > max {
+    if depth > max_depth {
         return Err(format!(
             "Reorg depth {} exceeds absolute maximum {} (hard finality)",
-            depth, max
+            depth, max_depth
         ));
     }
 
@@ -424,6 +466,20 @@ impl Blockchain {
     /// Returns the network type this blockchain is configured for
     pub fn network(&self) -> NetworkType {
         self.network
+    }
+
+    /// Returns the network-specific max reorg depth (hard-finality cap).
+    ///
+    /// SECURITY (2026-07-05 audit F31 — SEV-A): This method reads the
+    /// RUNTIME network from `self.network`, avoiding the compile-time
+    /// feature-flag pitfall of the deprecated free-function
+    /// `chain::max_reorg_depth()`. All in-file reorg-check paths and
+    /// the RPC exposure should route through this method rather than
+    /// the free function so a build without `--features testnet` still
+    /// picks the correct testnet-1000 cap when configured for testnet
+    /// at runtime.
+    pub fn max_reorg_depth(&self) -> u64 {
+        max_reorg_depth_for(self.network)
     }
 
     // ── Phase 2 privacy store accessors ─────────────────────────────
@@ -1974,8 +2030,14 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                 // Tier 1 (≤10): unconditional. Tier 2 (11-100): MESS exponential cost.
                 // Tier 3 (>100): hard reject.
                 let reorg_depth = block.header.height.saturating_sub(fork_point);
+                // F31 SEV-A fix: pass the RUNTIME network's max reorg depth,
+                // not the compile-time-feature-derived value. See
+                // Blockchain::max_reorg_depth doc-comment for the 2026-07-04
+                // partition context that motivated this change.
+                let net_max = self.max_reorg_depth();
                 if let Err(reason) = evaluate_reorg_acceptability(
-                    reorg_depth, fork_cumulative, current_total_difficulty, self.height()
+                    reorg_depth, fork_cumulative, current_total_difficulty, self.height(),
+                    net_max,
                 ) {
                     tracing::error!(
                         "Rejecting reorg at depth {}: {}",
@@ -1983,7 +2045,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                     );
                     return Err(Error::ReorgTooDeep {
                         depth: reorg_depth,
-                        max: max_reorg_depth(),
+                        max: net_max,
                     });
                 }
 
@@ -3229,24 +3291,42 @@ mod tests {
     fn test_reorg_acceptability_shallow_requires_more_work() {
         // Shallow reorgs still require strict cumulative-work superiority.
         let h = BOOTSTRAP_MESS_HEIGHT + 1; // post-bootstrap, full rules apply
-        assert!(evaluate_reorg_acceptability(3, 101, 100, h).is_ok());
-        assert!(evaluate_reorg_acceptability(3, 100, 100, h).is_err());
+        let max = max_reorg_depth_for(NetworkType::Testnet);
+        assert!(evaluate_reorg_acceptability(3, 101, 100, h, max).is_ok());
+        assert!(evaluate_reorg_acceptability(3, 100, 100, h, max).is_err());
     }
 
     #[test]
     fn test_reorg_acceptability_mess_multiplier() {
         // At depth 50, exponent = (50-10)/20 = 2 => required multiplier 4x.
         let h = BOOTSTRAP_MESS_HEIGHT + 1; // post-bootstrap
-        let err = evaluate_reorg_acceptability(50, 399, 100, h).unwrap_err();
+        let max = max_reorg_depth_for(NetworkType::Testnet);
+        let err = evaluate_reorg_acceptability(50, 399, 100, h, max).unwrap_err();
         assert!(err.contains("requires 4x work"));
-        assert!(evaluate_reorg_acceptability(50, 401, 100, h).is_ok());
+        assert!(evaluate_reorg_acceptability(50, 401, 100, h, max).is_ok());
     }
 
     #[test]
     fn test_reorg_acceptability_hard_depth_cap() {
-        let max = max_reorg_depth();
-        let err = evaluate_reorg_acceptability(max + 1, u128::MAX, 1, BOOTSTRAP_MESS_HEIGHT + 1).unwrap_err();
-        assert!(err.contains("exceeds absolute maximum"));
+        // F31: use the network-taking form so this test doesn't rely on the
+        // deprecated compile-time free function. Verify both networks so the
+        // caps are pinned by tests to their intended values.
+        let testnet_max = max_reorg_depth_for(NetworkType::Testnet);
+        let mainnet_max = max_reorg_depth_for(NetworkType::Mainnet);
+        assert_eq!(testnet_max, 1000, "testnet hard-finality cap must be 1000");
+        assert_eq!(mainnet_max, 100, "mainnet hard-finality cap must be 100");
+
+        let err_testnet = evaluate_reorg_acceptability(
+            testnet_max + 1, u128::MAX, 1, BOOTSTRAP_MESS_HEIGHT + 1, testnet_max,
+        ).unwrap_err();
+        assert!(err_testnet.contains("exceeds absolute maximum"));
+        assert!(err_testnet.contains("1000"), "testnet error must cite testnet cap");
+
+        let err_mainnet = evaluate_reorg_acceptability(
+            mainnet_max + 1, u128::MAX, 1, BOOTSTRAP_MESS_HEIGHT + 1, mainnet_max,
+        ).unwrap_err();
+        assert!(err_mainnet.contains("exceeds absolute maximum"));
+        assert!(err_mainnet.contains("100"), "mainnet error must cite mainnet cap");
     }
 
     #[test]
@@ -3256,15 +3336,50 @@ mod tests {
         // launch convergence fix: a young fleet whose nodes diverge at low
         // heights must be able to converge once one chain pulls ahead.
         let bootstrap_h = BOOTSTRAP_MESS_HEIGHT / 2;
+        let max = max_reorg_depth_for(NetworkType::Testnet);
         // Depth 50 with only slightly-more work: rejected post-bootstrap,
         // accepted during bootstrap.
-        assert!(evaluate_reorg_acceptability(50, 101, 100, bootstrap_h).is_ok());
+        assert!(evaluate_reorg_acceptability(50, 101, 100, bootstrap_h, max).is_ok());
         // Equal work still loses (longest chain must strictly exceed).
-        let err = evaluate_reorg_acceptability(50, 100, 100, bootstrap_h).unwrap_err();
+        let err = evaluate_reorg_acceptability(50, 100, 100, bootstrap_h, max).unwrap_err();
         assert!(err.contains("bootstrap phase"));
         // Tier-3 hard cap still enforced during bootstrap.
-        let max = max_reorg_depth();
-        assert!(evaluate_reorg_acceptability(max + 1, u128::MAX, 1, bootstrap_h).is_err());
+        assert!(evaluate_reorg_acceptability(max + 1, u128::MAX, 1, bootstrap_h, max).is_err());
+    }
+
+    #[test]
+    fn f31_blockchain_max_reorg_depth_uses_runtime_network() {
+        // REGRESSION LOCK for F31 SEV-A. Pre-audit `max_reorg_depth()` was
+        // a free function using `#[cfg(feature = "testnet")]` — compile-time.
+        // A binary built without `--features testnet` would use max=100
+        // (mainnet) EVEN WHEN CONFIGURED TO RUN ON TESTNET at runtime via
+        // `--network testnet`. That misconfiguration exacerbated the
+        // 2026-07-04 partition trap (628-block reorg needed the testnet
+        // 1000-cap, hit the compile-time-mainnet 100-cap instead).
+        //
+        // Post-fix, `Blockchain::max_reorg_depth()` reads from the runtime
+        // `self.network` field. Verify both network selections yield the
+        // correct cap regardless of which feature flags were passed to the
+        // build.
+        let testnet_chain = Blockchain::new_with_network(NetworkType::Testnet);
+        assert_eq!(
+            testnet_chain.max_reorg_depth(),
+            1000,
+            "Blockchain configured for testnet at runtime MUST use the \
+             1000-block hard-finality cap. Pre-F31 fix, a binary built \
+             without --features testnet would return 100 here despite \
+             the runtime network selection — that was the 2026-07-04 \
+             partition-trap surface.",
+        );
+        let mainnet_chain = Blockchain::new_with_network(NetworkType::Mainnet);
+        assert_eq!(
+            mainnet_chain.max_reorg_depth(),
+            100,
+            "Blockchain configured for mainnet at runtime MUST use the \
+             100-block hard-finality cap. Pre-F31, a binary built WITH \
+             --features testnet would return 1000 here even when the \
+             operator configured mainnet at runtime — the inverse bug.",
+        );
     }
 
     /// Reorg-with-stores integration test for the Phase-2 privacy
