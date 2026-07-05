@@ -4376,6 +4376,49 @@ async fn process_message(
                     return Ok(());
                 }
 
+                // v1.0.13 #3 — pre-PoW verification on each header.
+                //
+                // Pre-fix, Headers responses were queued unconditionally
+                // into pending_headers; PoW was only re-validated at
+                // block-receive time. A peer that wins the GetHeaders
+                // nonce race could send 2000 random-bytes headers,
+                // filling the pool with hashes whose corresponding
+                // blocks no one (including the sender) can serve.
+                //
+                // The cheap defense: every header carries a
+                // `claimed_anchor` that's a hash of (prev_hash, height,
+                // timestamp). We recompute the real anchor and reject
+                // the batch on first mismatch. This forces a flooder
+                // to actually BLAKE2b-precompute every fake header
+                // chaining off our tip — meaningful work, no longer
+                // free.
+                //
+                // Full RandomX-hash verification (the ~10-20ms-per-
+                // header expensive check) still happens at block-
+                // receive time, where it belongs (one check per
+                // actually-served block, not per advertised tip).
+                let bad_anchor_at = headers_msg.headers.iter().enumerate().find_map(|(i, hdr)| {
+                    match crate::consensus::pow::compute_full_anchor(
+                        &hdr.prev_hash, hdr.height, hdr.timestamp,
+                    ) {
+                        Ok(anchor) if anchor.mixed_hash == hdr.anchor => None,
+                        _ => Some(i),
+                    }
+                });
+                if let Some(idx) = bad_anchor_at {
+                    warn!(
+                        "Headers pre-PoW reject: header[{}] anchor mismatch from peer {:?} \
+                         (h={}). Dropping batch + scoring peer.",
+                        idx, &peer_id[..4], headers_msg.headers[idx].height,
+                    );
+                    drop(sync_guard);
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    }
+                    return Ok(());
+                }
+
                 let hashes: Vec<Hash> = headers_msg.headers.iter()
                     .map(|h| h.hash())
                     .collect();
