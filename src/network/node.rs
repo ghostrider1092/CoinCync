@@ -4001,11 +4001,15 @@ async fn process_message(
         }
 
         MessageType::Txs => {
-            // SECURITY: Limit payload size before deserialization to prevent CPU exhaustion
+            // SECURITY: Limit payload size before deserialization to prevent CPU exhaustion.
+            // F12 fix (2026-07-05 audit): "message too large" is OversizedMessage
+            // (10pt / 5-strike) not ProtocolViolation (20pt / 3-strike). Pre-fix used
+            // the legacy `record_protocol_violation` which applied the wrong penalty.
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("Txs message too large from peer {}", hex::encode(&peer_id[..8]));
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
             }
@@ -4089,29 +4093,39 @@ async fn process_message(
                 Err(e) => {
                     warn!("Failed to deserialize TxsMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_protocol_violation();
+                        // F2 fix: migrate to unified record_misbehavior for
+                        // consistent observability. Borsh decode failure is
+                        // a genuine ProtocolViolation.
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
             }
         }
 
         MessageType::Blocks => {
-            // SECURITY: Limit payload size before deserialization to prevent CPU exhaustion
+            // SECURITY: Limit payload size before deserialization to prevent CPU exhaustion.
+            // F12 fix: OversizedMessage (10pt), not ProtocolViolation (20pt).
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("Blocks message too large from peer {}", hex::encode(&peer_id[..8]));
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
             }
             // Parse blocks. P5-N7 fix: match with Err scoring.
             match borsh::from_slice::<super::protocol::BlocksMessage>(payload) {
                 Ok(blocks_msg) => {
-                // SECURITY: Limit number of blocks per message
+                // SECURITY: Limit number of blocks per message.
+                // F12 fix: "too many items in one message" is OversizedMessage
+                // semantically — the peer is sending too much data in one frame,
+                // not sending malformed data.
                 if blocks_msg.blocks.len() > super::protocol::MAX_BLOCK_HASHES {
                     warn!("Too many blocks in message from peer {}", hex::encode(&peer_id[..8]));
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_protocol_violation();
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                     }
                     return Ok(());
                 }
@@ -4246,29 +4260,40 @@ async fn process_message(
                 Err(e) => {
                     warn!("Failed to deserialize BlocksMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_protocol_violation();
+                        // F2 fix: unified record_misbehavior for observability.
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
             }
         }
 
         MessageType::Headers => {
-            // SECURITY: Limit payload size before deserialization
+            // SECURITY: Limit payload size before deserialization.
+            // F12 fix: OversizedMessage, not ProtocolViolation.
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("Headers message too large from peer {}", hex::encode(&peer_id[..8]));
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
             }
             // Parse headers and queue for download. P5-N7 fix: match with Err scoring.
             match borsh::from_slice::<super::protocol::HeadersMessage>(payload) {
                 Ok(headers_msg) => {
-                // SECURITY: Validate message before processing
+                // SECURITY: Validate message before processing.
+                // F15 fix (2026-07-05 audit): HeadersMessage struct-level validate()
+                // failure is protocol-frame-level (peer sent malformed HEADERS message),
+                // not block-content-level. Pre-fix used `record_block_failure` (-10 rep)
+                // which is the wrong category — the peer's Headers frame itself is
+                // malformed. Now uses `ProtocolViolation` (20pt / 3-strike ban) via
+                // the unified record_misbehavior.
                 if let Err(e) = headers_msg.validate() {
                     warn!("Invalid HeadersMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_block_failure();
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                     return Ok(());
                 }
@@ -4310,7 +4335,9 @@ async fn process_message(
                 Err(e) => {
                     warn!("Failed to deserialize HeadersMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_protocol_violation();
+                        // F2 fix: unified record_misbehavior for observability.
+                        scorer.write().await.get_or_create(addr)
+                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
             }
@@ -4453,10 +4480,12 @@ async fn process_message(
         MessageType::GetData => {
             // Peer requests specific blocks by hash (individual block responses).
             // P5-N-CLASS-A fix: tight per-type cap.
+            // F12 fix: OversizedMessage, not ProtocolViolation.
             if payload.len() > super::protocol::MAX_GETDATA_PAYLOAD {
                 warn!("GetData message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
             }
@@ -4500,11 +4529,13 @@ async fn process_message(
         }
 
         MessageType::BlockData => {
-            // Peer sends us a single block
+            // Peer sends us a single block.
+            // F12 fix: OversizedMessage, not ProtocolViolation.
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("BlockData message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr).record_protocol_violation();
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
             }
@@ -4581,19 +4612,57 @@ async fn process_message(
             } else {
                 warn!("Failed to deserialize BlockData from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr).record_block_failure();
+                    // F14 fix (2026-07-05 audit): BlockData Borsh deserialize failure
+                    // is a MALFORMED PROTOCOL FRAME (peer sent us bytes we can't parse
+                    // as a Block), not a block-content-level failure. Pre-fix used
+                    // `record_block_failure` (-10 rep) which is the wrong category —
+                    // the block content never existed in a form we could inspect.
+                    // Now uses `ProtocolViolation` (20pt / 3-strike) via unified
+                    // `record_misbehavior`.
+                    scorer.write().await.get_or_create(addr)
+                        .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                 }
             }
         }
 
         MessageType::Reject => {
-            // Peer rejected something - adjust reputation
+            // Peer rejected something (they didn't like a tx/block we sent).
+            //
+            // F16 fix (2026-07-05 audit — SEV-B): Pre-fix this handler
+            // double-punished — both `Peer.adjust_reputation(-10)` (peer
+            // struct's own reputation field) AND
+            // `PeerScorer.record_block_failure()` (also -10 rep). Net effect
+            // was -20 reputation for a single Reject message, which is
+            // actually normal p2p behavior — a peer may reject a tx we
+            // relayed because they already have it, or reject a block for
+            // legitimate consensus disagreement. Even a single -10 is
+            // arguably too harsh for the "peer expressed disagreement" case.
+            //
+            // Prior art: **Bitcoin Core DEPRECATED the Reject message
+            // entirely in v0.20** (BIP-61 removal), citing exactly this
+            // over-interpretation problem. Zebra doesn't send or process
+            // Reject messages. Monero silently drops received Rejects
+            // without scoring.
+            //
+            // Post-fix: only the peer struct's own reputation is nudged
+            // down by a small amount (-5 rather than -10, better reflecting
+            // the "they didn't like it" signal without punishing legitimate
+            // disagreement). The unified `PeerScorer` is NOT touched here —
+            // Reject-based scoring is off. If we ever want to re-enable it,
+            // add a dedicated `MisbehaviorType::PeerRejected` with a real
+            // rationale and a low penalty like LowFeeFlood.
+            //
+            // We keep the peer.adjust_reputation call rather than removing
+            // both because the Peer struct's reputation field is separate
+            // from PeerScorer's tracking (dual reputation system, tracked
+            // in F17 — architectural cleanup deferred). Removing it here
+            // would silently zero one signal; leaving it at -5 is the
+            // minimal-diff correct behavior until F17 lands.
             if let Some(mut peer) = peers.get_mut(&peer_id) {
-                peer.adjust_reputation(-10);
+                peer.adjust_reputation(-5);
             }
-            if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                scorer.write().await.get_or_create(addr).record_block_failure();
-            }
+            // Deliberately NOT calling scorer.record_block_failure or any
+            // record_misbehavior variant — see F16 comment above.
         }
 
         // ─── Personal Node (Tier 1) Protocol ─────────────────────────────

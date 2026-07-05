@@ -188,10 +188,25 @@ pub fn classify_invalid_block_reason(reason: &str) -> MisbehaviorType {
 
     // Header-rule violations: PoW or timestamp consensus rules the peer is
     // expected to enforce locally before relay. Instant-ban category.
+    //
+    // F32 fix (2026-07-05 audit — SEV-B): pre-fix used `.contains("timestamp")`
+    // which was too broad. `check_header_future_timestamp` in
+    // `src/consensus/validation.rs` emits `"System clock error: ...
+    // Cannot validate block timestamps."` when OUR system clock fails —
+    // that string contains "timestamp" and used to instant-ban the peer
+    // for OUR clock failure. One node's clock issue would then ban every
+    // peer sending it blocks (correlated failure).
+    //
+    // Post-fix: match only the specific timestamp-related error phrases
+    // that indicate peer-fault. Kept as substring matches (not exact) so
+    // wrapped forms ("Invalid header: Block timestamp too far in future")
+    // still classify correctly.
     if r.contains("proof of work")
         || r.contains("hash above target")
         || r.contains("median-time-past")
-        || r.contains("timestamp")
+        || r.contains("timestamp not greater than previous")
+        || r.contains("timestamp too far in future")
+        || r.contains("timestamp drift")
     {
         return MisbehaviorType::InvalidBlockPoW;
     }
@@ -650,11 +665,19 @@ impl PeerScore {
         self.adjust_reputation(-5);
     }
 
-    /// Record protocol violation (spam, malformed messages, etc.)
-    pub fn record_protocol_violation(&mut self) {
-        self.adjust_reputation(-20);
-        self.last_failure = Some(Instant::now());
-    }
+    // `record_protocol_violation` — DELETED in the 2026-07-05 audit F2
+    // cleanup. It duplicated `record_misbehavior(ProtocolViolation)` with
+    // the same -20 penalty but bypassed the unified debug-log emission,
+    // creating a silent observability gap: 9 call sites in node.rs used
+    // it, 15 other sites used the enum-based path, and the two produced
+    // different traces despite identical effect. All callers migrated
+    // to `record_misbehavior(MisbehaviorType::ProtocolViolation)` in the
+    // same PR (or to `OversizedMessage` for the 4 sites that were
+    // actually oversized-message hits mislabeled as protocol violations —
+    // finding F12). Adding the method back at any point re-opens the
+    // silent observability gap; the batched-cleanup regression test
+    // `record_misbehavior_is_only_reputation_write_path` locks the
+    // invariant.
 
     /// SECURITY (H17-FIX): Per-behavior misbehavior scoring (Bitcoin Misbehaving() pattern).
     /// Each offense type has a specific penalty. Accumulates toward the ban threshold.
@@ -1562,6 +1585,78 @@ mod tests {
         ];
         for v in all_nonzero {
             assert!(v.penalty() > 0, "expected NON-zero penalty for {:?}", v);
+        }
+    }
+
+    #[test]
+    fn f32_system_clock_error_does_not_instant_ban_peers() {
+        // REGRESSION LOCK for F32 (SEV-B). Pre-audit the classifier used
+        // `.contains("timestamp")` which was too broad. When OUR system
+        // clock failed, `check_header_future_timestamp` in
+        // src/consensus/validation.rs emitted `"System clock error: {}.
+        // Cannot validate block timestamps."`. That string contains
+        // "timestamp" and was classified as InvalidBlockPoW (100pt,
+        // instant ban) — meaning one node's clock failure would ban every
+        // peer sending it blocks (correlated failure).
+        //
+        // Post-fix, the classifier matches only specific peer-fault
+        // phrases. System clock errors fall through to the
+        // InvalidBlockProofs default (50pt, 2-strike), which is still
+        // wrong — but at least not instant-ban. The underlying
+        // architectural problem (system clock errors shouldn't be
+        // classified as peer errors AT ALL) needs the validation-layer
+        // fix in the F32 note in classify_invalid_block_reason.
+        for r in [
+            "System clock error: SystemTimeError(...). Cannot validate block timestamps.",
+            "system clock error cannot validate block timestamps",
+        ] {
+            let m = classify_invalid_block_reason(r);
+            assert_ne!(
+                m,
+                MisbehaviorType::InvalidBlockPoW,
+                "reason '{}' MUST NOT classify as InvalidBlockPoW — that would \
+                 instant-ban peers for OUR system-clock failure. See F32 audit note.",
+                r,
+            );
+            // Belt-and-suspenders: penalty must not reach ban threshold
+            // on a single hit from default reputation (which is +50, ban
+            // at -50 = 100pt).
+            assert!(
+                m.penalty() < 100,
+                "reason '{}' classified as {:?} with penalty {} — that instant-bans \
+                 from default reputation. F32 explicitly guards against this.",
+                r, m, m.penalty(),
+            );
+        }
+    }
+
+    #[test]
+    fn f32_legitimate_timestamp_violations_still_instant_ban() {
+        // Belt-and-suspenders for F32: after tightening the substring match,
+        // the ACTUAL peer-fault timestamp errors from
+        // src/consensus/validation.rs MUST still classify as InvalidBlockPoW.
+        // If a future refactor of the validation error strings breaks this,
+        // the test fires immediately.
+        for r in [
+            // From validation.rs check_header_vs_prev L946
+            "Timestamp not greater than previous block",
+            // From validation.rs check_header_future_timestamp L998
+            "Block timestamp too far in future",
+            // Wrapped in a header-validation error prefix (worst-case)
+            "Invalid header: Block timestamp too far in future",
+            // Median-time-past variants (existing test coverage retained)
+            "Block timestamp 12345 is not greater than median-time-past 12346",
+            "timestamp drift exceeded",
+        ] {
+            assert_eq!(
+                classify_invalid_block_reason(r),
+                MisbehaviorType::InvalidBlockPoW,
+                "reason '{}' MUST still classify as InvalidBlockPoW after F32 \
+                 substring tightening. If this fires, the validation.rs error \
+                 strings drifted from the classifier patterns and peers who \
+                 send genuinely-invalid timestamped blocks won't be banned.",
+                r,
+            );
         }
     }
 

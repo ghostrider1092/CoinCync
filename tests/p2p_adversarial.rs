@@ -151,13 +151,20 @@ fn block_deserialize_truncated_at_every_position() {
 
 #[test]
 fn peer_score_degrades_on_protocol_violations() {
+    // F2 fix (2026-07-05 audit): migrated from the deleted
+    // `record_protocol_violation()` (silent -20 rep, no debug log)
+    // to the unified `record_misbehavior(ProtocolViolation)` path.
+    // Same -20 rep per event, ban still fires after 3 events from
+    // default reputation, PLUS emits the tracing::debug line so
+    // future observability tooling sees the event.
+    use coincync::network::scoring::MisbehaviorType;
     let mut scorer = PeerScorer::new();
     let bad_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 28080);
 
     // Record many protocol violations
     for _ in 0..20 {
         let s = scorer.get_or_create(bad_peer);
-        s.record_protocol_violation();
+        s.record_misbehavior(MisbehaviorType::ProtocolViolation);
     }
 
     let score = scorer.get(&bad_peer).unwrap();
