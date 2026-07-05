@@ -131,7 +131,7 @@ signal-hook = "0.3"
 jsonrpsee  = { version = "0.24", features = ["server", "client", "macros"] }
 http       = "1"
 tower      = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace", "validate-request"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "validate-request"] }
 http-body-util = "0.1"
 bytes      = "1"
 hyper      = { version = "1", features = ["full"] }
