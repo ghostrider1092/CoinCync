@@ -2620,17 +2620,84 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                         inner.stats.tip_hash = hash;
                         inner.stats.total_difficulty = fork_cumulative;
 
-                        // Fix stats drift: account for disconnected vs reconnected blocks
+                        // Fix stats drift: account for disconnected vs reconnected blocks.
+                        //
+                        // T1F1 (2026-07-05 audit, TIER 1 chain.rs pass):
+                        // Pre-audit these two accounting math lines used
+                        // `saturating_sub` + `saturating_add`. Same silent-clamp
+                        // anti-pattern the sibling H-11 audit note above
+                        // (~L2400 / L2183 for `total_supply`) explicitly PANICS on
+                        // when it fires — because a supply-underflow proves the
+                        // state was already corrupt, so clamping to 0 and
+                        // continuing gives every downstream query a fabricated
+                        // answer.
+                        //
+                        // For `total_blocks` / `total_transactions` the same
+                        // invariant argument holds (`disconnected_blocks` can only
+                        // exceed `stats.total_blocks` if the state was already
+                        // corrupt from a prior reorg pass), but these fields are
+                        // stats-only (surfaced via `chain.stats()` for the RPC
+                        // `get_info` "total_blocks" / "total_transactions"
+                        // fields), not consensus-load-bearing. So we don't PANIC
+                        // — a corrupted counter should not halt block processing
+                        // — but we surface the corruption via a CRITICAL log
+                        // line so the operator sees it, and we saturate as the
+                        // fallback (the RPC field being wrong is better than the
+                        // node crashing).
+                        //
+                        // Prior art:
+                        //   * Bitcoin Core `main.cpp::DisconnectBlock`: bails
+                        //     the entire block-processing loop with an assert
+                        //     on comparable inconsistencies (nBlockTx counter).
+                        //   * Monero `blockchain.cpp::rollback`: logs at ERROR
+                        //     when the block-count invariant is violated,
+                        //     continues.
+                        //   * zebrad `state::write::block::finalize`: `expect()`
+                        //     on chain-height math, but for statistics-only
+                        //     counters it uses `checked_sub().unwrap_or_log()`.
+                        //
+                        // We take zebrad's stats-only pattern.
                         let reconnected_blocks = fork_blocks.len() as u64 + 1; // +1 for triggering block
                         let reconnected_txs: u64 = fork_blocks.iter()
                             .map(|b| b.transactions.len() as u64)
                             .sum::<u64>() + block.transactions.len() as u64;
-                        inner.stats.total_blocks = inner.stats.total_blocks
-                            .saturating_sub(disconnected_blocks)
-                            .saturating_add(reconnected_blocks);
-                        inner.stats.total_transactions = inner.stats.total_transactions
-                            .saturating_sub(disconnected_txs)
-                            .saturating_add(reconnected_txs);
+                        inner.stats.total_blocks = match inner.stats.total_blocks
+                            .checked_sub(disconnected_blocks)
+                        {
+                            Some(v) => v.saturating_add(reconnected_blocks),
+                            None => {
+                                tracing::error!(
+                                    target: "chain::stats_invariant",
+                                    "STATS INVARIANT VIOLATION: disconnected_blocks={} > \
+                                     stats.total_blocks={} on reorg accounting. This means \
+                                     the counter was already corrupt (a prior reorg silently \
+                                     saturated). Recomputing floor as reconnected_blocks={} \
+                                     so this reorg's addition is preserved. RPC \
+                                     `get_info` `total_blocks` will be wrong until a full \
+                                     rebuild. See T1F1 audit note in chain.rs for detail.",
+                                    disconnected_blocks,
+                                    inner.stats.total_blocks,
+                                    reconnected_blocks,
+                                );
+                                reconnected_blocks
+                            }
+                        };
+                        inner.stats.total_transactions = match inner.stats.total_transactions
+                            .checked_sub(disconnected_txs)
+                        {
+                            Some(v) => v.saturating_add(reconnected_txs),
+                            None => {
+                                tracing::error!(
+                                    target: "chain::stats_invariant",
+                                    "STATS INVARIANT VIOLATION: disconnected_txs={} > \
+                                     stats.total_transactions={} on reorg accounting. Same \
+                                     pattern as T1F1. Recomputing floor.",
+                                    disconnected_txs,
+                                    inner.stats.total_transactions,
+                                );
+                                reconnected_txs
+                            }
+                        };
 
                         inner.height_to_hash.insert(block.header.height, hash);
 
