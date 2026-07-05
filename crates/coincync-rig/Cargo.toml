@@ -60,4 +60,4 @@ crossterm = "0.27"
 [dev-dependencies]
 # rand for the correctness test — generate random header inputs to
 # fuzz the hasher against the validator.
-rand = "0.8"
+rand = "0.10"

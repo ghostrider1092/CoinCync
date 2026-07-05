@@ -59,7 +59,7 @@ blake2b_simd  = "1"
 # RNG for halo2 proof creation. `OsRng` is the canonical CSPRNG
 # the reference orchard crate uses; promoted from dev-deps to
 # regular deps when `prove_action` started consuming it directly.
-rand          = "0.8"
+rand          = "0.10"
 
 # `zeroize` for secret-byte hygiene on every key struct in
 # `spend_key.rs` (SpendingKey, FullViewingKey, IncomingViewingKey).
