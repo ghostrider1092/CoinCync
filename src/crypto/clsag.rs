@@ -415,16 +415,11 @@ pub fn clsag_verify(
         })
         .collect();
 
-    // T2-1F3 fix (2026-07-04 audit): hoist the aggregate key image out
-    // of the challenge loop. J = mu_p * I + mu_c * D is loop-invariant
-    // (mu_p, mu_c, I, D are all fixed before the loop starts), so
-    // recomputing it n times was two scalar-multiplications and a point-
-    // addition of wasted work per iteration. For a ring size of 16 that
-    // is ~30 curve operations per signature; over a full block that
-    // compounds. No soundness impact — the value produced is identical.
-    // Prior art: Monero's rctSigs.cpp `verRctCLSAGSimple` computes the
-    // aggregate key-image (`D_INV_EIGHT_scaled`) once, outside the ring
-    // loop, for the same reason.
+    // T2-1F3 fix (2026-07-05): hoist `mu_p * I + mu_c * D` out of the
+    // challenge loop below. All four operands (`mu_p`, `mu_c`,
+    // `signature.key_image`, `signature.commitment_image`) are fixed
+    // before the loop starts and are not indexed by the loop variable,
+    // so the value is loop-invariant. Bit-identical output.
     let aggregate_key_image = mu_p * signature.key_image.as_point().as_point() +
                     mu_c * signature.commitment_image.as_point();
 

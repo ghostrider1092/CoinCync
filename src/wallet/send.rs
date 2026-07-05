@@ -506,14 +506,12 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
             height: utxo.height,
         };
 
-        // T3F5 fix (2026-07-04 audit): comment previously said "gamma
-        // distribution" — stale from the Wave 1 gamma → uniform
-        // migration. Select_ring_decoys delegates to RingSelector which
-        // performs UNIFORM Fisher-Yates over the eligible pool (module
-        // header at src/crypto/ring_selection.rs:3-22). Gamma is the
-        // distribution Möser 2018 weaponized; uniform is the Möser-2018
-        // defense. The C40 fix (2026-07-02) updated select_ring_decoys's
-        // own docstring but missed this caller-side comment.
+        // T3F5 fix (2026-07-05): the pre-fix comment said "gamma
+        // distribution" but the callee `select_ring_decoys` (see its
+        // docstring at src/wallet/send.rs:1067-1090) delegates to
+        // `RingSelector` which performs a Fisher-Yates partial shuffle,
+        // not a gamma draw. This comment is corrected rather than the
+        // behavior being changed.
         let (decoys, real_position) = select_ring_decoys(
             &real_pubkey, utxo.height, &deduped_pool, ring_size, current_height, rng,
         )?;
@@ -1129,17 +1127,18 @@ fn select_ring_decoys<R: RngCore + CryptoRng>(
         }
     }).collect();
 
-    // T3F7 fix (2026-07-05 audit): configure selector for young chains
-    // by overriding min_decoy_age=0 only. strict_privacy_mode stays at
-    // the default (`true`) — the R-24 fallback path is refused, and any
-    // eligible-pool shortfall surfaces as `InvalidRingSize` at the outer
-    // caller. Prior comment said "non-strict mode" but the code never
-    // overrode strict_privacy_mode; docstring and behavior disagreed. In
-    // practice we WANT strict here: the outer enforce_wallet_privacy_policy
-    // already guards, and having a second layer refuse rather than silently
-    // degrade to with-replacement fallback catches any future path that
-    // bypasses the outer check. Prior art: Monero's `wallet2::pick_random_outputs`
-    // returns an error rather than falling back on pool exhaustion.
+    // T3F7 fix (2026-07-05): the pre-fix comment said "non-strict mode"
+    // but the `..RingSelectionConfig::default()` spread on the config
+    // literal below does not override `strict_privacy_mode`, and the
+    // default is `strict_privacy_mode: true` at
+    // src/crypto/ring_selection.rs:106. So the selector actually runs
+    // in strict mode. With strict mode on, pool-shortfall returns an
+    // Err at src/crypto/ring_selection.rs:340 before the fallback
+    // loop at ~L380 is reached. The pre-fix comment misdescribed
+    // this. The strict behavior is what the outer flow expects
+    // (enforce_wallet_privacy_policy already guards short pools);
+    // this comment is corrected rather than the behavior being
+    // changed.
     let config = RingSelectionConfig {
         target_ring_size: ring_size,
         min_ring_size: ring_size,
