@@ -256,19 +256,18 @@ impl PaymentAddress {
         let mut raw = [0u8; 43];
         raw[..11].copy_from_slice(&self.diversifier);
         raw[11..].copy_from_slice(self.pk_d.compress().as_bytes());
-        bech32::encode(hrp, bech32::ToBase32::to_base32(&raw), bech32::Variant::Bech32m)
+        let hrp = bech32::Hrp::parse(hrp)
+            .map_err(|e| Error::Other(format!("PaymentAddress bech32 HRP: {}", e)))?;
+        bech32::encode::<bech32::Bech32m>(hrp, &raw)
             .map_err(|e| Error::Other(format!("PaymentAddress bech32 encode: {}", e)))
     }
 
     pub fn from_bech32(s: &str) -> Result<Self> {
-        let (_, data, _) = bech32::decode(s)
+        let (_hrp, raw) = bech32::decode(s)
             .map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
-        let raw: Vec<u8> = bech32::FromBase32::from_base32(&data)
-            .map_err(|e| Error::Other(format!("base32 decode: {}", e)))?;
         if raw.len() != 43 {
             return Err(Error::Other("bad address length".into()));
         }
-        // SAFETY: length checked to be exactly 43 on line 176
         let diversifier: [u8; 11] = raw[..11].try_into().expect("len==43");
         let pk_bytes: [u8; 32]   = raw[11..43].try_into().expect("len==43");
         let pk_d = CompressedRistretto(pk_bytes)
@@ -500,19 +499,18 @@ impl SparkAddress {
         let mut raw = [0u8; 43];
         raw[..11].copy_from_slice(&self.diversifier);
         raw[11..].copy_from_slice(self.pk.compress().as_bytes());
-        bech32::encode(hrp, bech32::ToBase32::to_base32(&raw), bech32::Variant::Bech32m)
+        let hrp = bech32::Hrp::parse(hrp)
+            .map_err(|e| Error::Other(format!("SparkAddress bech32 HRP: {}", e)))?;
+        bech32::encode::<bech32::Bech32m>(hrp, &raw)
             .map_err(|e| Error::Other(format!("SparkAddress bech32 encode: {}", e)))
     }
 
     pub fn from_bech32(s: &str) -> Result<Self> {
-        let (_, data, _) = bech32::decode(s)
+        let (_hrp, raw) = bech32::decode(s)
             .map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
-        let raw: Vec<u8> = bech32::FromBase32::from_base32(&data)
-            .map_err(|e| Error::Other(format!("base32 decode: {}", e)))?;
         if raw.len() != 43 {
             return Err(Error::Other("bad Spark address length".into()));
         }
-        // SAFETY: length validated to be exactly 43 on line 388
         let diversifier: [u8; 11] = raw[..11].try_into().unwrap();
         let pk_bytes: [u8; 32] = raw[11..43].try_into().unwrap();
         let pk = CompressedRistretto(pk_bytes)

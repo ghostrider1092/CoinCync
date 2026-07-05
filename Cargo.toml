@@ -155,7 +155,7 @@ rcgen                = "0.13"
 # â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Migrated to RocksDB via the db::shim layer â€” see src/db/shim.rs.
 rocksdb  = { version = "0.22", features = ["multi-threaded-cf", "lz4"] }
-bech32   = "0.9"
+bech32   = "0.11"
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 redb     = "2"
 
