@@ -661,7 +661,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbfcb6c5a091e80cb3d3b0c1a7f126af4631cd5065b1f9929b139f1be8f3fb62"
 dependencies = [
- "incrementalmerkletree",
+ "incrementalmerkletree 0.5.1",
 ]
 
 [[package]]
@@ -989,7 +989,7 @@ dependencies = [
  "hyper 1.9.0",
  "igd",
  "image",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "indicatif",
  "jsonrpsee",
  "merlin",
@@ -2997,6 +2997,15 @@ name = "incrementalmerkletree"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb1872810fb725b06b8c153dde9e86f3ec26747b9b60096da7a869883b549cbe"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "incrementalmerkletree"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30821f91f0fa8660edca547918dc59812893b497d07c1144f326f07fdd94aba9"
 dependencies = [
  "either",
 ]
