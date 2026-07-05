@@ -34,7 +34,23 @@ if [ -z "$WEBHOOK" ]; then
   exit 1
 fi
 
-FLEET_IPS=(66.135.23.193 140.82.57.168 207.148.111.76 207.148.6.50 95.179.165.225)
+# Fleet IPs: sourced from fleet-config.json if reachable (deployed at
+# /etc/coincync/fleet-config.json by sync-fleet-config.sh), else falls
+# back to the historical hardcoded list with a warning. Pre-fix
+# versions hardcoded 66.135.23.193 (destroyed 2026-06-25) and
+# 207.148.111.76 (destroyed 2026-06-18); the "in_fleet" peer counter
+# would then undercount by matching only live IPs among a stale list.
+FLEET_CONFIG="${FLEET_CONFIG:-/etc/coincync/fleet-config.json}"
+if [ -f "$FLEET_CONFIG" ] && command -v jq >/dev/null 2>&1; then
+  # Active nodes only; exclude role=api nginx-only host
+  # (weekly-review is expected to run on coincync-node hosts;
+  # the api host runs nginx, and it's the only role legitimately
+  # excluded from fleet-peer counting).
+  mapfile -t FLEET_IPS < <(jq -r '.nodes | to_entries | map(select(.value.role != "api")) | map(.value.ip) | .[]' "$FLEET_CONFIG")
+else
+  logger -t coincync-weekly-review "warning: fleet-config.json not found at $FLEET_CONFIG; using empty FLEET_IPS (in_fleet=0)"
+  FLEET_IPS=()
+fi
 
 # ─── disk ────────────────────────────────────────────────────────────────
 disk_root_pct=$(df / | awk 'NR==2 {print $5}' | tr -d %)
@@ -73,9 +89,16 @@ peer_slash16=$(echo "$peer_ips" \
                 | sort -u \
                 | grep -c .)
 
-# How many of those are members of our own fleet
-fleet_pattern=$(IFS='|'; echo "${FLEET_IPS[*]}")
-in_fleet=$(echo "$peer_ips" | grep -cE "^(${fleet_pattern//./\\.})$" || echo 0)
+# How many of those are members of our own fleet. Guard against empty
+# FLEET_IPS (fleet-config.json was unreadable): grep with an empty
+# alternation pattern would match every line, producing a false-high
+# in_fleet count.
+if [ ${#FLEET_IPS[@]} -eq 0 ]; then
+  in_fleet=0
+else
+  fleet_pattern=$(IFS='|'; echo "${FLEET_IPS[*]}")
+  in_fleet=$(echo "$peer_ips" | grep -cE "^(${fleet_pattern//./\\.})$" || echo 0)
+fi
 
 # ─── TLS cert expiry (explorer + api only — they have nginx + LE) ────────
 cert_status="n/a (no cert on this box)"
