@@ -379,15 +379,50 @@ pub struct PeerMessageRateTracker {
 /// Per-message-type limits (messages per 10-second window).
 /// Heavy request types have lower limits. Data responses are unlimited
 /// (we asked for them).
+///
+/// SECURITY (2026-07-05 audit F21 — SEV-A): The hex values here MUST match
+/// `crate::network::protocol::MessageType`'s `#[repr(u8)]` discriminants,
+/// not arbitrary sequence numbers. Before the audit the table had
+/// hand-picked hex (`0x01, 0x03, 0x05, ...`) that did NOT match the
+/// enum's `Version=0, Verack=1, Ping=2, Pong=3, GetHeaders=10, ...`
+/// discriminants, so:
+///   * intended-to-limit types (Version, Ping, GetBlocks, GetData, InvTx,
+///     InvBlock, GetAddr) had NO rate limit
+///   * unintended types (Verack, Pong, GetHeaders, Headers) were
+///     falsely rate-limited
+///   * four hex values (0x05, 0x07, 0x09, 0x10) matched no message type
+///     at all and silently did nothing
+///
+/// The bug produced an unbounded CPU-burn attack surface: an attacker
+/// could spam GetBlocks or GetData to force disk lookups + PoW
+/// recomputation without triggering `MisbehaviorType::MessageFlood`.
+///
+/// Prior art: Bitcoin Core `net_processing.cpp` uses the actual
+/// `NetMsgType::*` string constants + per-type `LimitTx`/`LimitBlock`
+/// counters keyed by string name, so the same misconfiguration can't
+/// happen. Zebra encodes the enum variant → limit map with the enum
+/// itself, catching this at compile time.
+///
+/// **Correctness invariant** (locked by
+/// `msg_rate_limits_use_real_msg_type_discriminants` test): every entry
+/// in this table MUST correspond to a `MessageType::try_from(hex).is_ok()`
+/// value. If you add a new limit, use `MessageType::X as u8` not a
+/// hand-written hex.
 const MSG_RATE_LIMITS: &[(u8, u32)] = &[
-    (0x01, 50),   // Version — 5/sec
-    (0x03, 100),  // GetHeaders — 10/sec
-    (0x05, 100),  // GetBlocks — 10/sec
-    (0x07, 200),  // GetData — 20/sec
-    (0x09, 500),  // InvTx — 50/sec (relaying txs to many peers is normal)
-    (0x0A, 100),  // InvBlock — 10/sec
-    (0x0B, 50),   // GetAddr — 5/sec
-    (0x10, 30),   // Ping — 3/sec
+    // Heavy request types — attacker's natural amplification vectors.
+    // These are the ones the pre-audit table MEANT to limit but got wrong.
+    (0,  50),   // MessageType::Version    — 5/sec  (handshake burst detector)
+    (10, 100),  // MessageType::GetHeaders — 10/sec (IBD-request flood)
+    (12, 100),  // MessageType::GetBlocks  — 10/sec (block-fetch flood)
+    (14, 200),  // MessageType::GetData    — 20/sec (bulk fetch flood)
+    (22, 500),  // MessageType::InvTx      — 50/sec (tx-relay flood; higher because relaying txs across a mesh is normal)
+    (23, 100),  // MessageType::InvBlock   — 10/sec (block-announce flood)
+    (30, 50),   // MessageType::GetAddr    — 5/sec  (peer-list scraping)
+    (2,  30),   // MessageType::Ping       — 3/sec  (keepalive spam)
+    // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
+    // are intentionally NOT rate-limited here — we asked for them.
+    // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
+    // + per-shard framer caps.
 ];
 
 impl PeerMessageRateTracker {
@@ -1055,12 +1090,76 @@ mod tests {
 
     #[test]
     fn test_message_rate_tracker_flags_flood() {
+        // Uses `MessageType::GetBlocks as u8 = 12` — the ACTUAL protocol.rs
+        // discriminant, not a hand-picked hex. Pre-audit this test called
+        // `tracker.record(0x05)` claiming that was GetBlocks; it was not
+        // (0x05 mapped to no MessageType at all). The tracker mechanics
+        // still passed the test because record() falls through the loop
+        // and matches on the first entry with the correct u8, but the
+        // test proved nothing about real per-type limits — see F21.
         let mut tracker = PeerMessageRateTracker::new();
+        let msg_type_id = crate::network::protocol::MessageType::GetBlocks as u8;
+        assert_eq!(msg_type_id, 12, "protocol.rs discriminant must be 12");
         let mut exceeded = false;
         for _ in 0..101 {
-            exceeded = tracker.record(0x05); // GetBlocks, limit 100/10s
+            exceeded = tracker.record(msg_type_id);
         }
-        assert!(exceeded, "expected message flood threshold to trigger");
+        assert!(exceeded, "expected message flood threshold to trigger for GetBlocks");
+    }
+
+    #[test]
+    fn msg_rate_limits_use_real_msg_type_discriminants() {
+        // REGRESSION LOCK for F21. Every entry in MSG_RATE_LIMITS MUST map
+        // to a real MessageType enum variant, otherwise the rate limiter
+        // is either falsely limiting nothing OR silently no-op on the
+        // types it claims to limit.
+        //
+        // Before the audit this table had 8 entries: 4 of them corresponded
+        // to no MessageType at all (0x05, 0x07, 0x09, 0x10) and were silent
+        // no-ops. The other 4 mapped to unintended types (Verack, Pong,
+        // GetHeaders, Headers) instead of the types documented in the
+        // comments (Version, GetHeaders, InvBlock, GetAddr).
+        for (msg_type_id, limit) in MSG_RATE_LIMITS {
+            let recovered = crate::network::protocol::MessageType::try_from(*msg_type_id);
+            assert!(
+                recovered.is_ok(),
+                "MSG_RATE_LIMITS entry ({}, {}) does not map to any \
+                 MessageType. Either the table is out of sync with \
+                 protocol.rs or someone wrote a hex value instead of \
+                 `MessageType::X as u8`.",
+                msg_type_id, limit,
+            );
+        }
+    }
+
+    #[test]
+    fn msg_rate_limits_cover_the_attacker_amplification_types() {
+        // Assert the specific attacker-amplification message types are
+        // in the limits table. If any of these drops out (say, a refactor
+        // renames one), the CPU-burn attack surface F21 patched re-opens.
+        let must_be_limited: &[crate::network::protocol::MessageType] = &[
+            crate::network::protocol::MessageType::Version,
+            crate::network::protocol::MessageType::GetHeaders,
+            crate::network::protocol::MessageType::GetBlocks,
+            crate::network::protocol::MessageType::GetData,
+            crate::network::protocol::MessageType::InvTx,
+            crate::network::protocol::MessageType::InvBlock,
+            crate::network::protocol::MessageType::GetAddr,
+            crate::network::protocol::MessageType::Ping,
+        ];
+
+        for required in must_be_limited {
+            let required_id = *required as u8;
+            let found = MSG_RATE_LIMITS.iter().any(|(id, _)| *id == required_id);
+            assert!(
+                found,
+                "MSG_RATE_LIMITS is missing an entry for \
+                 MessageType::{:?} (discriminant {}). This re-opens the \
+                 F21 attacker amplification vector. Add it or explicitly \
+                 remove it from this test's list with a justification.",
+                required, required_id,
+            );
+        }
     }
 
     #[test]
@@ -1464,5 +1563,31 @@ mod tests {
         for v in all_nonzero {
             assert!(v.penalty() > 0, "expected NON-zero penalty for {:?}", v);
         }
+    }
+
+    #[test]
+    fn invalid_block_pow_is_single_strike_ban_from_default_reputation() {
+        // REGRESSION LOCK for the 2026-07-05 F11 fix. Sub-target-PoW blocks
+        // in `network::node.rs` (Blocks handler + BlockData handler) previously
+        // called `record_block_failure()` (-10 rep, 10-strike ban) which let a
+        // malicious peer burn ~10 free CPU-heavy validations before we ban.
+        //
+        // Post-fix, that path now calls `record_misbehavior(InvalidBlockPoW)`
+        // which MUST instant-ban from the default starting reputation.
+        //
+        // If this test ever fails, the ban_threshold or InvalidBlockPoW
+        // penalty was tuned wrong.
+        let mut score = PeerScore::default();
+        assert_eq!(score.reputation, 50, "test invariant: default rep = 50");
+
+        score.record_misbehavior(MisbehaviorType::InvalidBlockPoW);
+        assert!(
+            score.should_ban(),
+            "single InvalidBlockPoW offense from default reputation MUST ban. \
+             reputation={}, should_ban_threshold=-50. If this fails, either \
+             penalty was reduced or should_ban logic changed — either way it \
+             re-opens the F11 CPU-burn vector.",
+            score.reputation,
+        );
     }
 }

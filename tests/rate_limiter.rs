@@ -7,11 +7,23 @@
 //! - Handles multiple message types independently
 
 use coincync::network::PeerMessageRateTracker;
+use coincync::network::protocol::MessageType;
 
-// Message type IDs (from scoring.rs MSG_RATE_LIMITS)
-const MSG_VERSION: u8 = 0x01;     // Limit: 50 per 10s window
-const MSG_GET_HEADERS: u8 = 0x03; // Limit: 100 per 10s
-const MSG_INV_TX: u8 = 0x09;      // Limit: 500 per 10s
+// F21 fix (2026-07-05 audit): use ACTUAL `#[repr(u8)]` discriminants
+// from `network::protocol::MessageType`, not hand-picked hex values.
+// Pre-audit these consts were `0x01` (Verack, not Version!), `0x03`
+// (Pong, not GetHeaders!), `0x09` (undefined, not InvTx!). The tests
+// still passed because the tracker mechanics fired on ANY consistent
+// u8 within its limits table — but the tests proved nothing about
+// real per-message-type rate limiting. Post-fix these tie back to the
+// enum so a future refactor of `MessageType` variants forces the
+// tests to update in lockstep. Same pattern locked by the unit tests
+// `msg_rate_limits_use_real_msg_type_discriminants` and
+// `msg_rate_limits_cover_the_attacker_amplification_types` inside
+// scoring.rs.
+const MSG_VERSION: u8 = MessageType::Version as u8;         // 0  — Limit: 50 per 10s window
+const MSG_GET_HEADERS: u8 = MessageType::GetHeaders as u8;  // 10 — Limit: 100 per 10s
+const MSG_INV_TX: u8 = MessageType::InvTx as u8;            // 22 — Limit: 500 per 10s
 
 #[test]
 fn test_under_limit_not_flagged() {

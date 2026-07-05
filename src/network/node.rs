@@ -4183,6 +4183,34 @@ async fn process_message(
                     // Verify PoW hash meets the claimed target (cheap check — no
                     // chain lookup needed). A full PoW check (anchor recomputation,
                     // difficulty validation) happens later in add_block().
+                    //
+                    // SECURITY (2026-07-05 audit F11 — SEV-A): The two failure
+                    // paths below map to DIFFERENT peer misbehavior categories:
+                    //
+                    //   * `compute_pow_hash(...) → Err(_)`: We failed to
+                    //     RECOMPUTE the hash locally (out-of-range algorithm
+                    //     id, dataset error, etc.). This is ambiguous — the
+                    //     peer sent a well-formed block whose hash we can't
+                    //     verify because OUR side has a state issue. Not
+                    //     clearly the peer's fault. Keep low-weight
+                    //     `record_block_failure` (-10 rep, 10-strike ban)
+                    //     which acts as a soft demotion.
+                    //
+                    //   * `!pow_hash.meets_difficulty(target)`: We recomputed
+                    //     the hash and it DOES NOT satisfy the claimed
+                    //     target. This is provable cryptographic invalidity —
+                    //     the peer is trying to waste our CPU on validation
+                    //     of a block that mathematically cannot be valid.
+                    //     Instant ban (`InvalidBlockPoW`, penalty 100).
+                    //
+                    //   Pre-audit: both paths used `record_block_failure`
+                    //   (-10), meaning a malicious peer needed 10 strikes to
+                    //   accumulate the ban threshold. That's ~10 free CPU-
+                    //   burning attempts before we cut them off. Bitcoin
+                    //   Core's `MSG_BLOCK_HEADER_LOW_WORK` maps directly to
+                    //   discouragement (their equivalent of instant ban) for
+                    //   the same reason — sub-target PoW is proof of
+                    //   attack intent, not accidental protocol drift.
                     let pow_hash = match crate::consensus::compute_pow_hash(
                         crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
                         &block.header.anchor,
@@ -4201,10 +4229,14 @@ async fn process_message(
                         }
                     };
                     if !pow_hash.meets_difficulty(&block.header.target) {
-                        warn!("Rejecting block with invalid PoW from peer {}",
-                            hex::encode(&peer_id[..8]));
+                        warn!("Instant-banning peer {} — provably-invalid PoW: \
+                               block hash {:?} does not meet claimed target {:?}",
+                            hex::encode(&peer_id[..8]),
+                            pow_hash,
+                            block.header.target);
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr).record_block_failure();
+                            scorer.write().await.get_or_create(addr)
+                                .record_misbehavior(super::scoring::MisbehaviorType::InvalidBlockPoW);
                         }
                         continue;
                     }
