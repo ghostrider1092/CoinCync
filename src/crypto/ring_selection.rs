@@ -200,6 +200,25 @@ impl RingSelector {
         rng: &mut R,
     ) -> Result<(Vec<OutputRef>, usize, RingSelectionStats)> {
         let ring_size = self.config.target_ring_size;
+
+        // T3F1 fix (2026-07-04 audit): reject ring_size < 2 explicitly.
+        // A ring of size 1 is not a ring (no anonymity set) and size 0
+        // is meaningless. Without this check, `decoy_count = ring_size - 1`
+        // would underflow to `usize::MAX` in release mode and return a
+        // nonsensical `InvalidRingSize { expected: usize::MAX, got: <pool> }`
+        // error that misleads engineers about the real cause. Only
+        // reachable via the test-helper constructors (`with_ring_size(0)`
+        // or a maliciously-constructed `RingSelectionConfig`), but a
+        // clear error at the entry point is defense-in-depth for both.
+        // Prior art: Monero's `crypto/ringct/rctSigs.cpp::verRctCLSAG`
+        // rejects `ring.size() < 2` at the CLSAG verifier entry — same
+        // invariant, one layer above the sub.
+        if ring_size < 2 {
+            return Err(Error::InvalidRingSize {
+                expected: 2,
+                got: ring_size,
+            });
+        }
         let decoy_count = ring_size - 1;
 
         if output_pool.len() < decoy_count {
