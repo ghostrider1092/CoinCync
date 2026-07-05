@@ -555,30 +555,43 @@ pub fn is_protocol_version_supported(version: u32) -> bool {
 // =============================================================================
 
 /// Number of outbound relay peers per epoch (quasi-4-regular graph).
-/// Monero: CRYPTONOTE_DANDELIONPP_STEMS = 2
+/// Monero: `CRYPTONOTE_DANDELIONPP_STEMS = 2` — VERIFIED at
+/// src/cryptonote_config.h:109 in the Monero master read this session.
 pub const DANDELION_STEMS: usize = 2;
 
 /// Fluff probability per epoch (0–100).  At epoch start, the node has this
 /// percent chance of being a "fluff node" that immediately broadcasts all
 /// received stem transactions.
-/// Monero: CRYPTONOTE_DANDELIONPP_FLUFF_PROBABILITY = 20
-/// (Paper recommends 10–20%; Monero tuned to 20% for privacy vs latency.)
+/// Monero: `CRYPTONOTE_DANDELIONPP_FLUFF_PROBABILITY = 20` — VERIFIED at
+/// cryptonote_config.h:110. Dandelion++ paper recommends 10–20%.
 pub const DANDELION_FLUFF_PROBABILITY: u32 = 20;
 
 /// Base epoch duration in seconds (10 minutes).
-/// Monero: CRYPTONOTE_DANDELIONPP_MIN_EPOCH = 10 (minutes)
+/// Monero: `CRYPTONOTE_DANDELIONPP_MIN_EPOCH = 10` (minutes) — VERIFIED at
+/// cryptonote_config.h:111.
 pub const DANDELION_EPOCH_BASE_SECS: u64 = 600;
 
 /// Random jitter added to epoch duration (seconds).  Prevents network-wide
 /// synchronized epoch rotations.
-/// Monero: CRYPTONOTE_DANDELIONPP_EPOCH_RANGE = 30 (seconds)
+/// Monero: `CRYPTONOTE_DANDELIONPP_EPOCH_RANGE = 30` (seconds) — VERIFIED at
+/// cryptonote_config.h:112.
 pub const DANDELION_EPOCH_JITTER_SECS: u64 = 30;
 
 /// Mean embargo timeout in seconds (exponential distribution).
 /// If a stem-forwarded tx hasn't appeared back via diffusion by this deadline,
 /// the node fluffs it as a fail-safe.  Uses exponential distribution for the
-/// memoryless property (Monero PR #9295 corrected from Poisson to exponential).
-/// Monero: CRYPTONOTE_DANDELIONPP_EMBARGO_AVERAGE = 39
+/// memoryless property.
+/// Monero: `CRYPTONOTE_DANDELIONPP_EMBARGO_AVERAGE = 39` — VERIFIED at
+/// cryptonote_config.h:114. Note: Monero PR #9295 ("Fix embargo timeout
+/// in dandelion++", by vtnerd) proposes switching Monero's distribution
+/// from Poisson to exponential (aligning with the Dandelion++ paper),
+/// which would also change the 39s parameter's effective average
+/// substantially. That PR was verified as OPEN (not merged) via the
+/// GitHub REST API this session; the prior comment implying it had
+/// "corrected" the value has been updated to reflect its actual
+/// unmerged status. CoinCync's local choice of exponential distribution
+/// with a 39s mean is intentional; the Monero constant is retained here
+/// as a design-parity reference, not because the PR shipped.
 pub const DANDELION_EMBARGO_MEAN_SECS: u64 = 39;
 
 /// Maximum embargo timeout in seconds.  Cap to prevent black-hole attacks

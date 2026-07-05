@@ -177,10 +177,12 @@ impl UtxoDb {
                 //
                 // Wrap the cleanup in a multi-tree transaction so either all
                 // three trees are updated or none are. Prior art: Monero's
-                // BlockchainLMDB `remove_output` runs inside the parent
-                // mdb_txn that wraps the whole block apply; Bitcoin Core's
-                // CCoinsView writes the spend (DeleteCoin) + UTXO update in a
-                // single WriteBatch via CDBBatch::Write(sync=true).
+                // `BlockchainLMDB::remove_output` is declared at
+                // src/blockchain_db/lmdb/db_lmdb.cpp:1167 (VERIFIED via
+                // direct fetch this session) and is invoked from within
+                // the LMDB transaction that wraps the caller's block-apply
+                // path — the transaction wrapping itself is caller-side and
+                // I did not read those call sites this session.
                 //
                 // Audit-fix cross-ref: R-43 storage #1+#7 atomicity work on
                 // refactor/sync-state-model; this merge takes main's

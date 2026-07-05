@@ -86,14 +86,20 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     //
     // ## Prior art for the fallback-on-DNS-fail pattern
     //
-    // - **Bitcoin Core** `vFixedSeeds` (chainparamsseeds.h, auto-generated
-    //   from `contrib/seeds/nodes_main.txt`). Larger list (~200 IPs)
-    //   because Bitcoin's seed-DNS reliability is higher and the fallback
-    //   only fires on edge-case DNS outages.
-    // - **Monero** `cryptonote_basic.cpp` `seed_nodes`. Smaller list
-    //   (~10-15 IPs) closer to CoinCync's scale.
-    // - **zebrad** uses both DNS seeds + hardcoded mainnet/testnet
-    //   nodes baked into `zebra-network` crate. Same shape.
+    // - **Bitcoin Core** `vFixedSeeds`: VERIFIED as populated at
+    //   src/kernel/chainparams.cpp:185 (mainnet), :300 (testnet), and
+    //   cleared at :283 (regtest) in the master read this session.
+    //   Larger seed list is generated from contrib/seeds; the specific
+    //   generation-input filename was not re-read this session and the
+    //   "~200 IPs" size claim is dropped as unverified.
+    // - **Monero** `seed_nodes`: VERIFIED as a named vector used
+    //   extensively in src/p2p/net_node.inl (declared at :83, member
+    //   at :488, first parse at :486 in the master read this session).
+    //   The prior comment placed it in `cryptonote_basic.cpp` — that
+    //   file was not the location this session. Corrected. The "~10-15
+    //   IPs" size claim was not re-measured this session and is dropped.
+    // - **zebrad** DNS + hardcoded seeds pattern: not re-verified
+    //   against Zebra source this session. Dropped.
     "66.135.23.193:28080",    // seed1 — Vultr
     "140.82.57.168:28080",    // seed2 — Vultr
     "45.32.251.6:28080",      // seed3 — Vultr (replaces dead 207.148.111.76)
@@ -248,7 +254,9 @@ mod tests {
     /// Sanity check: TESTNET_FALLBACK must contain SOMETHING — an empty
     /// list means new operators have NO bootstrap path when DNS fails,
     /// which is exactly the failure mode this whole subsystem prevents.
-    /// Bitcoin Core's `vFixedSeeds` is never empty for the same reason.
+    /// Bitcoin Core's `vFixedSeeds` follows the same non-empty
+    /// invariant (populated at src/kernel/chainparams.cpp:185 for
+    /// mainnet and :300 for testnet in the master read this session).
     #[test]
     fn testnet_fallback_is_non_empty() {
         assert!(

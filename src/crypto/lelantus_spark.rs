@@ -262,19 +262,20 @@ impl SparkAccumulator {
         // AUDIT (2026-07-02): use OsRng for the anonymity-set shuffle,
         // matching what the rest of this file already does (see all
         // OsRng usages below and in tests). thread_rng() is a CSPRNG
-        // (ChaCha12 reseeded from OsRng), so this is a hardening not a
-        // bug — but the anonymity-set shuffle is the ONE privacy-critical
-        // randomness surface in Lelantus Spark (the decoy indices leak
-        // if their draws are correlated across spends), so using the
-        // OS RNG directly removes the thread-local-state observation
-        // surface entirely. OsRng is what Monero's crypto_ops::
-        // random_scalar() uses for every privacy-critical draw, and
-        // what dandelion.rs uses for stem-peer selection in this
-        // codebase (see network/dandelion.rs L193, L467, L481).
+        // (ChaCha12 reseeded from OsRng), so this is a hardening not
+        // a bug — but the anonymity-set shuffle is the ONE privacy-
+        // critical randomness surface in Lelantus Spark (the decoy
+        // indices leak if their draws are correlated across spends),
+        // so using the OS RNG directly removes the thread-local-state
+        // observation surface entirely. Same discipline as
+        // `network/dandelion.rs` L193, L467, L481 which also read
+        // `rand::rngs::OsRng` directly for stem-peer selection and
+        // embargo/forward timing (VERIFIED cross-reference in this
+        // codebase).
         //
-        // Feature-gated behind `sketch-lelantus-spark` (off by default),
-        // so this has no v1.0 activation impact — landing now closes
-        // the gap before any future v1.1 turn-on.
+        // Feature-gated behind `sketch-lelantus-spark` (off by
+        // default), so this has no v1.0 activation impact — landing
+        // now closes the gap before any future v1.1 turn-on.
         let mut rng = rand::rngs::OsRng;
         let mut indices: Vec<usize> = (0..self.coins.len())
             .filter(|&i| i != real_idx)
@@ -528,7 +529,10 @@ pub fn verify_spark_spend(
 
     // Decode challenges + responses via PeerScalar — canonical-decode
     // enforced at the type boundary. See src/crypto/peer_scalars.rs for
-    // the class-of-bug rationale (Monero CVE-2017-14428 shape).
+    // the class-of-bug rationale (documented Monero non-canonical
+    // scalar handling class; specific CVE identifier UNVERIFIED —
+    // the previously-cited CVE-2017-14428 turned out to be a D-Link
+    // firmware issue, not the Monero scalar bug).
     //
     // 2026-07-02: consolidated from the site-specific `from_canonical_bytes`
     // check landed earlier the same day. PeerScalar makes the fix

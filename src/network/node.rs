@@ -68,15 +68,14 @@ pub const MAX_PEERS: usize = 72;
 pub const MAX_OUTBOUND: usize = 16;
 /// Maximum inbound connections (reduced from 117 to prevent resource exhaustion)
 pub const MAX_INBOUND: usize = 64;
-/// Maximum connections per IP (prevent Sybil attacks)
-/// SECURITY: Reduced from 3 to 1 to prevent Sybil attacks where a single
-/// entity controls multiple connections. Bitcoin Core uses 1 connection per IP.
-/// Maximum connections per IP. Set to 8 to allow multi-node local testing.
-/// In production with real IPs, 2-3 is sufficient; 1 is too restrictive for
-/// localhost deployments where all nodes share 127.0.0.1.
-/// Maximum connections from a single IP address.
-/// Bitcoin Core uses 1. We use 2 to allow one inbound + one outbound.
-/// Higher values enable trivial Sybil attacks.
+/// Maximum connections per IP (prevent Sybil attacks).
+/// SECURITY: Reduced from 3 to 2 to prevent Sybil attacks where a
+/// single entity controls multiple connections. We use 2 to allow one
+/// inbound + one outbound; higher values enable trivial Sybil attacks;
+/// 1 is too restrictive for localhost multi-node testing where all
+/// nodes share 127.0.0.1. (The prior comment claimed "Bitcoin Core
+/// uses 1 connection per IP" — that specific per-IP default was not
+/// re-verified against upstream this session and is dropped.)
 pub const MAX_CONNECTIONS_PER_IP: usize = 2;
 /// Connection timeout
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -98,12 +97,14 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(120);
 /// h=7275 for 13+ minutes. seed1's own EMERGENCY-TIER-3 detector
 /// flagged the stall but had no recovery path.
 ///
-/// Periodic tip re-announce (Bitcoin Core's "trickle" pattern, but
-/// per-peer-channel rather than per-peer-task) closes the gap: even
-/// if a per-peer channel was full when the original Inv was sent,
-/// the channel drains within seconds and the next interval picks
-/// up. 60s matches Bitcoin Core's send-loop cadence; for a 120s
-/// target block time it bounds peer staleness at one block.
+/// Periodic tip re-announce closes the gap: even if a per-peer
+/// channel was full when the original Inv was sent, the channel
+/// drains within seconds and the next interval picks up. (Bitcoin
+/// Core has a well-known "trickle" gossip idea; the specific
+/// send-loop cadence and per-peer-task shape were not re-read this
+/// session, so the identifier-level analogy is stated qualitatively
+/// only.) The 60s pick matches our 120s target block time — bounds
+/// peer staleness at roughly one block.
 ///
 /// Tuning rationale (rejected alternatives):
 ///   - Bigger channel capacity alone (100 → 1000): just delays the
@@ -659,10 +660,16 @@ impl P2PNode {
     /// GETDATA-response tracking, THAT is where "peer refused to deliver
     /// its parents" DoS-detection belongs, not here.
     ///
-    /// Prior art: Bitcoin Core `net_processing.cpp` rejects orphans with
-    /// `MSG_BLOCK_UNKNOWN_PARENT` + requests parent via GETDATA and only
-    /// bans on parent-request stall. Zebra size-limits the orphan pool
-    /// with LRU eviction; no peer punishment. Monero same shape.
+    /// Prior art (specific per-project identifiers UNVERIFIED this
+    /// session): the widely-followed pattern in reference impls is to
+    /// hold the orphan, request the missing parent(s), and only
+    /// score/ban if the peer then refuses to deliver those parents.
+    /// The prior comment cited specific per-project identifiers
+    /// (`MSG_BLOCK_UNKNOWN_PARENT`, Zebra orphan-pool internals,
+    /// "Monero same shape") that were not re-confirmed against
+    /// upstream this session, so the identifier-level citations have
+    /// been removed. Consistent with the parallel scoring.rs / sync.rs
+    /// scrubs in this PR.
     pub async fn notify_block_orphan(&self, peer_id: &PeerId, orphan_hash: &Hash, parent_hash: &Hash) {
         self.sync.write().await.mark_block_orphan(orphan_hash, parent_hash);
 
@@ -894,7 +901,11 @@ impl P2PNode {
                         if inbound_count >= MAX_INBOUND {
                             // Saturation. Before rejecting, try to evict
                             // a more-evictable peer per the Bitcoin Core
-                            // `AttemptToEvictConnection` algorithm. This
+                            // `CConnman::AttemptToEvictConnection`
+                            // algorithm (VERIFIED at net.cpp:1694 in
+                            // the master read this session; candidate
+                            // selection delegated to node/eviction.cpp,
+                            // see network/eviction.rs for details). This
                             // closes the eclipse vector where an attacker
                             // fills all 64 slots from one /16 and pins us.
                             //
@@ -920,9 +931,14 @@ impl P2PNode {
                                     );
                                     // Drop the sender first so the peer's
                                     // write task unwinds; then remove
-                                    // from peers + untrack the IP. Order
-                                    // matches Bitcoin Core's eviction
-                                    // sequence in CConnman.
+                                    // from peers + untrack the IP.
+                                    // (The prior comment claimed this
+                                    // order matches Bitcoin Core's
+                                    // CConnman eviction sequence; the
+                                    // specific upstream ordering was
+                                    // not re-verified this session, so
+                                    // the parity claim is downgraded to
+                                    // qualitative.)
                                     acceptor_senders.remove(&victim_id);
                                     if let Some((_, victim)) = acceptor_peers.remove(&victim_id) {
                                         acceptor_tracker.untrack_connection(&victim.addr);
@@ -1721,7 +1737,11 @@ impl P2PNode {
                         // ============================================================
                         // AGGRESSIVE IBD FIX (Mar 2026)
                         //
-                        // Bitcoin Core approach: simple, deterministic block download.
+                        // Approach: simple, deterministic block download.
+                        // (Prior comment characterised this as "Bitcoin Core
+                        // approach"; the specific upstream algorithm was
+                        // not re-read this session, so the attribution is
+                        // downgraded to design-neutral wording.)
                         // 1. Recover timed-out/stuck requests
                         // 2. Find BEST LIVE peer from the ACTUAL peer DashMap
                         //    (completely bypass sync engine's stale peer_heights)
@@ -1752,9 +1772,12 @@ impl P2PNode {
                             no_progress_ticks += 1;
                         }
 
-                        // Step 2: Get block hashes to download from sync engine
-                        // Monero uses spans of 20-100. We use 500 (protocol max)
-                        // for aggressive IBD — split across all live peers.
+                        // Step 2: Get block hashes to download from sync engine.
+                        // (Prior comment cited "Monero uses spans of 20-100";
+                        // that specific numeric range was not re-confirmed
+                        // against Monero source this session and is dropped.)
+                        // We use 500 (protocol max) for aggressive IBD —
+                        // split across all live peers.
                         let to_request = sync_sync.write().await.get_blocks_to_request(500);
 
                         if to_request.is_empty() {
@@ -1775,10 +1798,14 @@ impl P2PNode {
                                 sg.reset_headers_timeout();
                             }
                         } else {
-                            // Step 3: MONERO-STYLE MULTI-PEER SPAN DOWNLOAD
-                            // Split block hashes across ALL connected peers simultaneously.
-                            // Each peer gets a different span (chunk) of hashes.
-                            // This is how Monero achieves 720+ blocks/sec during IBD.
+                            // Step 3: MULTI-PEER SPAN DOWNLOAD
+                            // Split block hashes across ALL connected peers
+                            // simultaneously. Each peer gets a different
+                            // span (chunk) of hashes. (Prior comment cited
+                            // Monero achieving "720+ blocks/sec during IBD"
+                            // via this pattern; that specific benchmark
+                            // figure was not re-verified this session and is
+                            // dropped.)
                             //
                             // Filter peers temporarily banned from GetBlocks selection
                             // (consecutive empty-Blocks replies above threshold). This
@@ -1944,8 +1971,13 @@ impl P2PNode {
         // without a graceful error path. Replaced with a typed error
         // return so the caller can detect double-start (e.g. supervisor
         // restart after a crash without dropping the prior P2PNode) and
-        // recover. Reference: Bitcoin Core's `CConnman::Start()` returns
-        // bool and refuses re-start if `interruptNet` was never armed.
+        // recover. Reference: Bitcoin Core's `CConnman::Start()` is
+        // VERIFIED at net.h:1166 in the master read this session as a
+        // `bool`-returning method on `CConnman`. The prior comment
+        // additionally asserted a specific "refuses re-start if
+        // `interruptNet` was never armed" behavioural detail; that
+        // internal precondition was not re-read this session and is
+        // dropped.
         let mut broadcast_rx = match self.tx_broadcast_rx.lock().take() {
             Some(rx) => rx,
             None => {
@@ -1970,29 +2002,36 @@ impl P2PNode {
         // also auto-restart the loop, but auto-restart of a task that
         // holds shared mutable state (peers, scorer, dandelion) is
         // risky if those structures are mid-mutation; safer to log
-        // loudly and let the operator restart the process. Reference:
-        // zebrad's actor model wraps every actor in a top-level
-        // supervisor that escalates panics. Bitcoin Core's `scheduler`
-        // thread is the equivalent supervised-task pattern.
+        // loudly and let the operator restart the process. (Prior
+        // comment invoked zebrad's actor-model supervisor pattern and
+        // Bitcoin Core's `scheduler` thread as prior art; those
+        // specific characterisations were not re-verified this session
+        // and are dropped. The log-loudly / no-auto-restart choice
+        // stands on its own reasoning above.)
         let maint_handle = tokio::spawn(async move {
             let mut ping_interval = interval(PING_INTERVAL);
             let mut cleanup_interval = interval(Duration::from_secs(60));
             // Dandelion++ monitor runs every DANDELION_MONITOR_INTERVAL_SECS
             let mut dandelion_interval = interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
-            // Periodic ban-list flush. Same cadence as Bitcoin Core's
-            // `DumpBanlist()` (every 15 min via CScheduler). Cheap to
-            // call: writes a small JSON file even when the ban list is
-            // empty. Cost-benefit favors always flushing over tracking
-            // a dirty flag.
+            // Periodic ban-list flush. (Prior comment claimed "same
+            // cadence as Bitcoin Core's `DumpBanlist()` — every 15 min
+            // via CScheduler". That specific identifier + cadence
+            // pairing was not re-verified against upstream this
+            // session and is dropped.) 900s (15 min) picked locally.
+            // Cheap to call: writes a small JSON file even when the
+            // ban list is empty. Cost-benefit favors always flushing
+            // over tracking a dirty flag.
             let mut ban_flush_interval = interval(Duration::from_secs(900));
-            // Outbound peer rotation. Bitcoin Core picks a "block-relay-only"
-            // outbound peer every ~22.5 minutes and forces an eviction +
-            // reconnection to disrupt eclipse setups (see net_processing.cpp
-            // `MaybePickEvictionCandidate` and the EXTRA_PEER_CHECK_INTERVAL
-            // constant, defaulting to 45 min). We pick a similar cadence
-            // (45 min) to balance churn against eclipse-defense — too
-            // aggressive and we waste bandwidth on Noise handshakes; too
-            // slow and a patient eclipse holds. Closes audit MEDIUM #28.
+            // Outbound peer rotation. (Prior comment cited Bitcoin
+            // Core's "block-relay-only" outbound peer rotation with a
+            // ~22.5 min cadence, a `MaybePickEvictionCandidate` helper
+            // in net_processing.cpp, and an `EXTRA_PEER_CHECK_INTERVAL`
+            // constant defaulting to 45 min. Those specific identifiers
+            // and cadence numbers were not re-verified against upstream
+            // this session and are dropped.) 45 min picked locally to
+            // balance churn against eclipse-defense — too aggressive
+            // and we waste bandwidth on Noise handshakes; too slow and
+            // a patient eclipse holds. Closes audit MEDIUM #28.
             let mut outbound_rotate_interval = interval(Duration::from_secs(45 * 60));
             // Heartbeat / liveness signal. Emits a single INFO line every
             // 30 seconds with a monotonically-increasing tick counter +
@@ -2211,8 +2250,10 @@ impl P2PNode {
                     _ = ban_flush_interval.tick() => {
                         // Persist current ban list to disk so an unclean
                         // shutdown (OOM, SIGKILL, host crash) doesn't lose
-                        // bans accumulated since startup. Bitcoin Core
-                        // `BanMan::DumpBanlist` is the equivalent path.
+                        // bans accumulated since startup. Bitcoin Core's
+                        // `BanMan::DumpBanlist` (VERIFIED at banman.h:85
+                        // in the master read this session) is the
+                        // equivalent path.
                         let scorer = maint_scorer.read().await;
                         if let Err(e) = scorer.save_bans_to_file(&maint_ban_list_path) {
                             warn!("Periodic ban-list save failed: {}", e);
@@ -2661,9 +2702,12 @@ impl P2PNode {
         // checks at node.rs:763 / 1022) was NOT informed. The peer could
         // reconnect immediately because is_banned(addr) returned false
         // until the scorer's own auto_ban_bad_peers tick (~60s later)
-        // observed the dropped score and persisted a ban. Reference:
-        // Bitcoin Core's CConnman::Ban calls CBanDB::Write atomically
-        // before disconnecting; we mirror that ordering here.
+        // observed the dropped score and persisted a ban. (The prior
+        // comment described a specific "CConnman::Ban calls CBanDB::Write
+        // atomically before disconnecting" ordering as prior art; that
+        // specific pair + ordering was not re-verified against upstream
+        // this session and is dropped. The scorer-first-then-disconnect
+        // ordering below stands on the local reasoning above.)
         let peer_addr = self.peers.get(peer_id).map(|p| p.addr);
         if let Some(addr) = peer_addr {
             self.conn_tracker.untrack_connection(&addr);
@@ -3003,7 +3047,11 @@ async fn handle_connection(
                         // 2. Per-peer misbehavior scoring in process_message()
                         // 3. Connection limits (MAX_CONNECTIONS_PER_IP)
                         // Never drop solicited data — that breaks IBD.
-                        // (Bitcoin/Monero/Ethereum all process every received message.)
+                        // (Prior comment claimed "Bitcoin/Monero/Ethereum
+                        // all process every received message" as a broad
+                        // cross-project rationale; that generalization
+                        // was not verified this session and is dropped.
+                        // The DoS-vs-liveness reasoning above stands.)
 
                         let mut data = Vec::with_capacity(1 + payload.len());
                         data.push(msg_type);
@@ -3110,8 +3158,16 @@ fn net_addr_to_socket_addr(net_addr: &super::protocol::NetAddr) -> Option<Socket
 /// || is_unspecified()`. An attacker poisoning our address book with
 /// multicast / link-local / CGNAT / docs / broadcast IPs would get us
 /// to dial those (burning connection slots) and gossip them onward,
-/// fanning out the pollution to peers. Bitcoin CVE-2015-3641 class.
-/// Mirrors Bitcoin Core's `CNetAddr::IsRoutable()` shape.
+/// fanning out the pollution to peers. (Prior comment tagged this as
+/// "Bitcoin CVE-2015-3641 class". That CVE is real — VERIFIED via NVD
+/// this session as a bitcoind/Bitcoin-Qt pre-0.10.2 DoS, description
+/// text "an 'Easy' attack" — but the CVE's public description is too
+/// vague to specifically pin it to address-book poisoning. The class-
+/// of-bug tag is dropped; the reachable-address filter here stands on
+/// its own reasoning above.)
+/// Mirrors the shape of Bitcoin Core's `CNetAddr::IsRoutable()`
+/// (VERIFIED as a declared method at netaddress.h:180 in the master
+/// read this session).
 ///
 /// Rejections (all variants):
 ///   - Loopback (127.0.0.0/8, ::1)
@@ -3478,9 +3534,12 @@ async fn process_message(
                 //
                 // The proper fix (per-outbound nonce tracking that binds
                 // nonce ↔ dialed_addr) is a larger refactor, queued
-                // separately. See Bitcoin Core's
-                // `net_processing.cpp::ProcessMessage` Version handler —
-                // identical pattern: disconnect, log, don't ban.
+                // separately. (Prior comment claimed Bitcoin Core's
+                // `net_processing.cpp::ProcessMessage` Version handler
+                // uses the identical disconnect-log-don't-ban pattern;
+                // that specific internal handler shape was not re-read
+                // this session and is dropped. The local disconnect-
+                // without-marking design stands on its own reasoning.)
                 if version.nonce == our_nonce {
                     warn!(
                         "Self-connection nonce match from peer {:?} \
@@ -3892,10 +3951,11 @@ async fn process_message(
                 // best_known from current peer_heights + local. No
                 // speculation needed.
                 //
-                // Bitcoin Core / Monero / zebrad all follow the same
-                // posture: speculative peer-height bumps on Inv are
-                // not done; height tracking is event-driven from
-                // confirmed messages only.
+                // (Prior comment asserted Bitcoin Core / Monero / zebrad
+                // all share this "no speculative peer-height bump on Inv"
+                // posture; that cross-project generalization was not
+                // verified this session and is dropped. The confirmed-
+                // message-only design stands on its own reasoning.)
 
                 let mut needed = Vec::new();
                 for inv in &inv_msg.inventory {
@@ -4423,8 +4483,11 @@ async fn process_message(
                 // FIX: Relax age check. 3 hours was too aggressive — after a
                 // chain wipe or long downtime, ALL addresses in peers' books
                 // have old timestamps and get rejected, preventing peer discovery.
-                // 7 days allows nodes to bootstrap from peers that haven't been
-                // seen recently. Bitcoin Core uses 10 days.
+                // 7 days allows nodes to bootstrap from peers that
+                // haven't been seen recently. (Prior comment cited a
+                // "Bitcoin Core uses 10 days" comparison; that specific
+                // upstream threshold was not re-verified this session
+                // and is dropped.)
                 let max_age = 7 * 24 * 3600; // Reject addresses older than 7 days
 
                 // 1.0: Firework "Veil" propagation removed — addresses are
@@ -4441,8 +4504,13 @@ async fn process_message(
                         continue; // Stale address — too old
                     }
                     if let Some(socket_addr) = net_addr_to_socket_addr(net_addr) {
-                        // Expanded unroutable filter (Bitcoin CVE-2015-3641
-                        // class + P5-N10 audit). Pre-fix this only
+                        // Expanded unroutable filter (P5-N10 audit).
+                        // (Prior comment additionally tagged this as
+                        // "Bitcoin CVE-2015-3641 class"; that CVE is
+                        // real per NVD but its "'Easy' attack" text is
+                        // too vague to specifically pin to address-book
+                        // poisoning, so the tag is dropped.) Pre-fix
+                        // this only
                         // rejected loopback + unspecified, so an attacker
                         // poisoning our address book with multicast /
                         // link-local / CGNAT / IPv6-multicast / broadcast /
@@ -4569,10 +4637,16 @@ async fn process_message(
                 // cryptographic invalidity and triggers instant ban via
                 // `MisbehaviorType::InvalidBlockPoW` (penalty 100).
                 //
-                // Prior art: Bitcoin Core `net_processing.cpp::ProcessBlock`
-                // calls `Misbehaving(100)` on `MSG_BLOCK_HEADER_LOW_WORK`.
-                // Zebra rejects at `PeerError::WrongDifficulty` + immediate
-                // PeerSet.remove(). Monero uses `peer_add_hash_ban`.
+                // Prior art (specific per-project identifiers UNVERIFIED
+                // this session): reference implementations treat sub-
+                // target PoW as immediate-ban material at the network
+                // layer. The prior comment cited specific per-project
+                // identifiers (`ProcessBlock` + `Misbehaving(100)` +
+                // `MSG_BLOCK_HEADER_LOW_WORK` for Bitcoin Core, a
+                // `PeerError::WrongDifficulty` + `PeerSet.remove()`
+                // pair for Zebra, and Monero `peer_add_hash_ban`);
+                // none were re-confirmed against upstream this session
+                // and are dropped.
                 let pow_hash = match crate::consensus::compute_pow_hash(
                     crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
                     &block.header.anchor,
@@ -4638,11 +4712,17 @@ async fn process_message(
             // legitimate consensus disagreement. Even a single -10 is
             // arguably too harsh for the "peer expressed disagreement" case.
             //
-            // Prior art: **Bitcoin Core DEPRECATED the Reject message
-            // entirely in v0.20** (BIP-61 removal), citing exactly this
-            // over-interpretation problem. Zebra doesn't send or process
-            // Reject messages. Monero silently drops received Rejects
-            // without scoring.
+            // Prior art (partially UNVERIFIED this session): Bitcoin
+            // Core deprecated / removed BIP-61 Reject-message support
+            // in the v0.19-v0.20 era as a matter of public record; the
+            // specific release-note attribution ("v0.20") and citing
+            // reason ("over-interpretation problem") were not re-fetched
+            // this session, so those exact details are stated as
+            // historical rather than authoritatively verified. The
+            // prior comment additionally asserted that Zebra doesn't
+            // send/process Reject and that Monero silently drops
+            // received Rejects without scoring — those cross-project
+            // claims were not verified this session and are dropped.
             //
             // Post-fix: only the peer struct's own reputation is nudged
             // down by a small amount (-5 rather than -10, better reflecting

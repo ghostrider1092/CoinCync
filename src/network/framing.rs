@@ -458,10 +458,13 @@ impl RateLimiter {
     }
 }
 
-// NOTE: Per-peer PeerRateLimiter was removed. It was dropping solicited block
-// data during IBD (Initial Block Download), matching Bitcoin/Monero's pattern
-// of no per-message rate limiting on the P2P layer. RPC rate limiting is
-// handled separately in src/rpc/ratelimit.rs.
+// NOTE: Per-peer PeerRateLimiter was removed because it was dropping
+// solicited block data during IBD (Initial Block Download). (Prior
+// comment characterized this as "matching Bitcoin/Monero's pattern of
+// no per-message rate limiting on the P2P layer"; that specific
+// cross-project generalization was not verified this session and is
+// dropped.) RPC rate limiting is handled separately in
+// src/rpc/ratelimit.rs.
 
 /// Backoff strategy for reconnection
 pub struct ExponentialBackoff {

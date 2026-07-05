@@ -31,7 +31,13 @@ use crate::constants::{
 /// and at the natural floor `target = u128::MAX` block production runs faster
 /// than P2P validation+gossip — the chain physically can't stay synchronized.
 /// The standard production fix for this class of issue is a minimum-difficulty
-/// floor (Monero LWMA, Bitcoin testnet 20-min rule, Zcash NU5 floor).
+/// floor. (Prior comment cited "Monero LWMA, Bitcoin testnet 20-min
+/// rule, Zcash NU5 floor" as three concrete prior-art examples of
+/// this class of fix. None of those specific per-project mechanisms
+/// were re-verified against upstream source this session, so the
+/// concrete attributions are dropped — the "minimum-difficulty floor
+/// as the standard production fix" characterisation stands on its
+/// own reasoning above.)
 ///
 /// 500 was picked so that even at the floor on a slow home CPU (~45 H/s
 /// total RandomX), blocks come no faster than ~11s each. That's comfortably

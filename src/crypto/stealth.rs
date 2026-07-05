@@ -866,8 +866,6 @@ pub fn coinbase_stealth_address(
     // (Vec drop does NOT zeroize) where a memory dump / crash core /
     // long-lived adjacent allocation could surface it. Matches the
     // zeroize call on `scalar_input` below (same pattern, same risk).
-    // Reference: Monero's `crypto::secret_key` enforces zeroize on
-    // every intermediate buffer touching `m_secret_key` material.
     secret_input.zeroize();
     let tx_secret_scalar = SecretScalar::from_bytes(*tx_secret_hash.as_bytes());
     let tx_public = tx_secret_scalar.to_public();

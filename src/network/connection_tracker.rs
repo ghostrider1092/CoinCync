@@ -114,9 +114,11 @@ impl ConnectionTracker {
                 // (which is smaller than the typical modern /48 residential
                 // block) can spread outbound connections across many /64s
                 // that all collapse to the same /16 bucket, defeating the
-                // per-bucket cap. `/32` matches Bitcoin Core's `CNetAddr::
-                // GetGroup()` for IPv6 (`GetByte(0), GetByte(1)`), which
-                // was chosen precisely to avoid this coarseness problem.
+                // per-bucket cap. `/32` was chosen to avoid this coarseness
+                // problem. Bitcoin Core has an equivalent concept via its
+                // `NetGroupManager` (class declared at src/addrman.h:24 in
+                // the current master read this session), which drives peer-
+                // bucket selection with a similar prefix-based grouping.
                 //
                 // Return type is now `u32` (was `u16`) since /32 needs 32
                 // bits; IPv4 /16 still fits and is zero-extended into the

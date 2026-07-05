@@ -1147,8 +1147,12 @@ fn scan_output_with_keys(
             // See the long-form rationale at `scan_output`:692-706.
             // Same drop-and-continue behavior so the two paths return
             // identical results given the same inputs. Reference:
-            // Monero wallet2's `check_acc_out_precomp` always recomputes
-            // the commitment before accepting an output as owned.
+            // Monero wallet2's `check_acc_out_precomp` (VERIFIED at
+            // src/wallet/wallet2.cpp:2130 and :2154 in the master read
+            // this session) is the analogous owned-output verification
+            // entry. The specific "always recomputes the commitment"
+            // internal step was not re-traced this session and is
+            // stated qualitatively rather than as a receipt.
             let expected_commitment = PedersenCommitment::commit(
                 amount,
                 &blinding_factor,

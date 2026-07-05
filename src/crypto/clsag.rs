@@ -63,10 +63,6 @@ impl ClsagSignature {
     /// downstream hashing / cache keying, opening a class of "empty
     /// signature accidentally cached" bugs. Consolidated into one method
     /// that forces the caller to handle serialization failure via `Result`.
-    ///
-    /// Prior art: Bitcoin Core aborts on serialization failure (impossible-
-    /// in-practice case, but abort > silent-empty). Monero uses exceptions.
-    /// Zebrad returns `Result` from all serialization paths.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         borsh::to_vec(self).map_err(|e| Error::SerializationError(e.to_string()))
     }
@@ -342,12 +338,9 @@ pub fn clsag_verify(
     // the ring construction skip the P-contribution and construct a
     // valid-looking signature without knowing a discrete log. Identity
     // ring members are the ring-signature analogue of the classic small-
-    // subgroup / identity-input attacks against Schnorr / EdDSA (see
-    // Monero's Möser/Soukhov 2018 discussion of subgroup checks on
-    // aggregated points, and Bitcoin Core's `Consensus::verify_taproot`
-    // identity check on the internal key). Reject the whole signature
-    // here so the invariant is enforced structurally, not by luck of the
-    // downstream challenge closure.
+    // subgroup / identity-input attack class against Schnorr / EdDSA.
+    // Reject the whole signature here so the invariant is enforced
+    // structurally, not by luck of the downstream challenge closure.
     for member in ring {
         if member.public_key.as_point() == &RistrettoPoint::identity() {
             return false;

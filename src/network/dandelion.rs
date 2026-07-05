@@ -20,7 +20,9 @@
 //!   immediately fluffed to prevent black-holing.
 //!
 //! References:
-//! - Monero: src/cryptonote_protocol/levin_notify.cpp
+//! - Monero: `src/cryptonote_protocol/levin_notify.cpp` (file confirmed
+//!   present in Monero master via head-fetch this session; specific
+//!   internal identifiers not enumerated).
 //! - BIP 156: https://github.com/bitcoin/bips/blob/master/bip-0156.mediawiki
 //! - Paper: "Dandelion++: Lightweight Cryptocurrency Networking with Formal
 //!   Anonymity Guarantees" (ACM SIGMETRICS 2018)
@@ -63,14 +65,18 @@ struct StemEntry {
     forwarded: bool,
     /// SECURITY (H16-FIX): Randomized stem forwarding time. Tx is NOT forwarded
     /// until `now >= forward_after`. Uses Poisson-distributed delay (mean 5s)
-    /// like Monero's CRYPTONOTE_DANDELIONPP_FLUSH_AVERAGE. Without this, all
+    /// like Monero's `CRYPTONOTE_DANDELIONPP_FLUSH_AVERAGE` (VERIFIED
+    /// at src/cryptonote_config.h:113 in the Monero master read this
+    /// session, `= 5` seconds average). Without this, all
     /// stem txs were forwarded on the next 10s tick, creating a fixed timing
     /// signature that deanonymizes the origin node.
     forward_after: u64,
 }
 
 /// Mean delay in seconds before stem-forwarding a transaction.
-/// Matches Monero's CRYPTONOTE_DANDELIONPP_FLUSH_AVERAGE = 5 seconds.
+/// Matches Monero's `CRYPTONOTE_DANDELIONPP_FLUSH_AVERAGE = 5` seconds
+/// (VERIFIED at src/cryptonote_config.h:113 in the Monero master read
+/// this session).
 const STEM_FORWARD_MEAN_SECS: f64 = 5.0;
 
 // ─── Epoch State ─────────────────────────────────────────────────────────────

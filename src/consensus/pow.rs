@@ -986,8 +986,10 @@ pub fn meets_difficulty(hash: &Hash, target: &Hash) -> bool {
 /// anyway, so no two consecutive real targets can differ only in the
 /// bottom half. If a future change makes the DAA finer-grained past
 /// 128 bits of resolution, this function must switch to u256 or
-/// arith_uint256 arithmetic (see Bitcoin Core's `arith_uint256::GetLow64`
-/// pattern and the `#include <arith_uint256.h>` uses in `pow.cpp`).
+/// arith_uint256 arithmetic (see Bitcoin Core's `GetLow64()` on the
+/// `base_uint<256>` base that `arith_uint256` inherits — VERIFIED at
+/// src/arith_uint256.h:222 with the derived `arith_uint256` class at
+/// :230 in the master read this session).
 ///
 /// This function is used ONLY for fork-choice work comparison; it is
 /// NOT used to compute or verify the target bytes themselves. Target

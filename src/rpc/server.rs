@@ -212,9 +212,11 @@ fn rpc_clamp_audit_range(start: u64, end: u64) -> std::result::Result<(u64, u64)
 /// cannot recover the API key — only a one-way hash. Closes the CRITICAL
 /// audit finding "Bearer token stored + compared plaintext".
 ///
-/// Reference: Bitcoin Core's `rpcauth.py` stores `user:salt$hash`, never
-/// the plaintext password. We follow the same pattern but with a fixed
-/// salt-free SHA-256 because the operator-supplied API key is already a
+/// (Bitcoin Core's `share/rpcauth/rpcauth.py` helper generates a
+/// `user:salt$hash` credential shape rather than storing a plaintext
+/// password; specific script internals not re-read this session, so
+/// only the high-level pattern is asserted.) We use a fixed salt-free
+/// SHA-256 because the operator-supplied API key is already a
 /// high-entropy random hex string (per the bearer-key rotation incident
 /// memo); salting buys little against an offline attacker who has the
 /// process memory dump.
@@ -223,16 +225,21 @@ fn rpc_clamp_audit_range(start: u64, end: u64) -> std::result::Result<(u64, u64)
 /// When `rate_limiter` is `Some`, every request is also passed through the
 /// IP-based rate limiter BEFORE the bearer check. Closes audit HIGH #14
 /// (`src/rpc/ratelimit.rs` exists but was not wired into the server).
-/// Reference: Bitcoin Core does not have application-layer rate limiting
-/// on the RPC and relies entirely on the operator's reverse proxy; we
-/// expose the application-layer limiter as a defense-in-depth even when
-/// nginx in front is misconfigured.
+/// (The prior comment asserted "Bitcoin Core does not have application-
+/// layer rate limiting on the RPC and relies entirely on the operator's
+/// reverse proxy". That negative claim was not re-verified against
+/// upstream this session and is downgraded to UNVERIFIED. We still
+/// expose the application-layer limiter as defense-in-depth on our own
+/// merits — misconfigured nginx should not become a single point of
+/// failure.)
 ///
 /// `token_hashes` is a list of accepted key hashes (current + previous)
 /// to support hot key rotation without restart (audit HIGH #16). The
 /// operator can ship a new key via SIGHUP-style reload and accept both
 /// keys for a grace window, then drop the old one in a follow-up reload.
-/// Bitcoin Core's `rpcauth` supports multiple users; we use the same
+/// (Bitcoin Core supports multiple RPC credentials via repeated
+/// `-rpcauth` args as a well-known operational pattern; specific
+/// implementation not re-read this session.) We use a comparable
 /// "multiple accepted credentials at once" model collapsed to a single
 /// principal (the bearer is opaque, so we don't need user-IDs).
 #[derive(Clone)]
@@ -545,11 +552,13 @@ pub async fn start_rpc_server(
     //
     // This mirrors the existing Stratum gate
     // (`COINCYNC_STRATUM_TLS_PROXY_ACK`) so operators have one consistent
-    // ack convention across services. Reference: Bitcoin Core requires
-    // rpcuser/rpcpassword for non-loopback RPC but does not gate on TLS;
-    // we go further because the production deploy fronts api.coincync
-    // .network behind nginx and an unacknowledged direct-bind would
-    // expose the Bearer in cleartext.
+    // ack convention across services. (The prior comment specifically
+    // asserted "Bitcoin Core requires rpcuser/rpcpassword for non-
+    // loopback RPC but does not gate on TLS". That specific behavioural
+    // pair was not re-verified this session and is dropped. We gate on
+    // TLS-or-explicit-ack on our own merits: the production deploy
+    // fronts api.coincync.network behind nginx and an unacknowledged
+    // direct-bind would expose the Bearer in cleartext.)
     if !listen_loopback {
         let tls_proxy_ack = rpc_env_bool("COINCYNC_RPC_TLS_PROXY_ACK").unwrap_or(false);
         if !config.tls_enabled && !tls_proxy_ack {
@@ -1037,10 +1046,13 @@ pub async fn start_rpc_server(
         // hex, 2 for slack) leaves headroom for a max-size valid block plus
         // any near-boundary encoding variance.
         //
-        // Prior art: Bitcoin Core's `submitblock` RPC rejects oversized
-        // hex at the JSON-parse layer via `MAX_BLOCK_SERIALIZED_SIZE`;
-        // Monero's `/sendrawtransaction` daemon endpoint rejects past
-        // `MAX_TX_BLOB_SIZE` before deserialization.
+        // (Bitcoin Core exposes a `submitblock` RPC and Monero exposes
+        // a `/sendrawtransaction` daemon endpoint as widely-referenced
+        // interfaces; the specific rejection paths / constants
+        // (`MAX_BLOCK_SERIALIZED_SIZE` / `MAX_TX_BLOB_SIZE`) were not
+        // re-verified against upstream this session, so the concrete
+        // enforcement claim is dropped. The 2× × 2 pre-decode cap
+        // stands on its own reasoning above.)
         const MAX_HEX_BLOCK: usize = 2 * 2 * crate::constants::MAX_BLOCK_SIZE;
         if hex_block.len() > MAX_HEX_BLOCK {
             return Err(ErrorObjectOwned::owned(
@@ -1213,11 +1225,15 @@ pub async fn start_rpc_server(
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;
         // Bound hex input length. Mirrors submit_block above and
-        // `is_nullifier_spent` at ~L1309. Bitcoin Core's `sendrawtransaction`
-        // performs the equivalent size cap via `MAX_STANDARD_TX_WEIGHT`.
-        // Cap at 2× MAX_TX_SIZE × 2 (2 for hex, 2 for slack) — anything
-        // larger decodes to bytes larger than any valid tx and is rejected
-        // downstream; the pre-check saves the allocation and the borsh parse.
+        // `is_nullifier_spent` at ~L1309. (Bitcoin Core exposes a
+        // `sendrawtransaction` RPC; the prior comment specifically
+        // cited `MAX_STANDARD_TX_WEIGHT` as the size cap primitive.
+        // That specific constant was not re-verified against upstream
+        // this session and is dropped. The 2× MAX_TX_SIZE × 2 cap
+        // below stands on its own reasoning: 2 for hex, 2 for slack;
+        // anything larger decodes to bytes larger than any valid tx
+        // and is rejected downstream, but the pre-check saves the
+        // allocation and the borsh parse.)
         const MAX_HEX_TX: usize = 2 * 2 * crate::constants::MAX_TX_SIZE;
         if hex_tx.len() > MAX_HEX_TX {
             return Err(ErrorObjectOwned::owned(

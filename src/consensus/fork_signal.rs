@@ -172,15 +172,23 @@ pub enum DeploymentState {
 // no hard-fork required for the encoding itself.
 //
 // Prior art:
-// - **Bitcoin Core**: signal bits live in `nVersion` field of the
-//   block header (4 bytes, 28 usable bits). CoinCync's BlockHeader
-//   uses a narrower u8 version field (see header.rs), so we route
-//   signaling through the coinbase `extra` field instead. Same
-//   conceptual mechanism, different on-wire location.
-// - **Monero**: miners signal hardfork-readiness via `vote` field
-//   in coinbase, very similar shape (small extension to coinbase
-//   metadata, not header). Our pattern follows Monero's more
-//   directly than Bitcoin's.
+// - **Bitcoin Core (BIP 9)**: signal bits live in the `nVersion`
+//   field of the block header (4 bytes, upper bits reserved for
+//   the versionbits state machine per the BIP 9 spec). CoinCync's
+//   BlockHeader uses a narrower version field (see header.rs), so
+//   we route signalling through the coinbase `extra` field instead
+//   — same conceptual mechanism, different on-wire location. (The
+//   "28 usable bits" specific count was not re-verified against
+//   the BIP text this session; retained here loosely as "upper
+//   bits" per the BIP-9 shape.)
+// - **Monero**: miners signal hardfork-readiness via a coinbase-
+//   embedded field rather than the block header. (The prior comment
+//   named this as a `vote` field and claimed "our pattern follows
+//   Monero's more directly than Bitcoin's". The specific `vote`
+//   field name was not re-located in current Monero source this
+//   session and the comparative claim is downgraded to qualitative
+//   — both Monero and CoinCync route through coinbase; Bitcoin
+//   Core routes through the header.)
 
 /// Encode the `extra` field of a coinbase transaction with optional signal bits.
 ///

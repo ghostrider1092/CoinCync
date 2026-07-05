@@ -284,8 +284,10 @@ pub struct Database {
 //     today, but future v1.1 must not accidentally read a v0 layout
 //     as if it were v1).
 //   - Existing DB with stored > expected → refuse to start: future DB,
-//     operator downgraded binary. Same as Bitcoin Core's
-//     `kVersionNumberFromDb > kCurrentVersion` check.
+//     operator downgraded binary. (Prior comment cited a Bitcoin Core
+//     `kVersionNumberFromDb > kCurrentVersion` check as the analogous
+//     shape; those specific identifier names were not located in
+//     current upstream this session and are dropped.)
 //   - Existing DB with stored < expected → future PR will run
 //     registered migration closures here. Today the migration table
 //     is empty, so this branch returns an explicit "no migration
@@ -293,17 +295,21 @@ pub struct Database {
 //
 // ## Prior art
 //
-// - **Monero** (`BlockchainDB::get_db_version` + `m_open`): single
-//   `uint32` per-DB version, compared against `MAX_VERSION` constant.
-//   Same shape used here.
-// - **Bitcoin Core** (`CDBWrapper::Read(kVersionKey, ...)`): per-DB
-//   version stored in a reserved key; mismatch aborts startup.
-//   CoinCync mirrors this pattern, with the additional fresh-DB
-//   short-circuit Monero also has.
-// - **Zcash** (`CDBEnv::version_check` in `walletdb.cpp`): same
-//   pattern, version stored in DB header. Migration registry
-//   dispatched per (from, to) tuple, which is the shape the future
-//   v1.1 migration code will adopt here.
+// - **Monero**: `BlockchainDB::m_open` VERIFIED at
+//   src/blockchain_db/blockchain_db.h:1868 in the Monero master read
+//   this session as the open-state flag. Prior comment additionally
+//   named `BlockchainDB::get_db_version` + a `MAX_VERSION` comparison
+//   constant; those specific identifiers were not located in current
+//   upstream this session and are dropped.
+// - **Bitcoin Core**: `CDBWrapper::Read` VERIFIED at
+//   src/dbwrapper.h:215 as the generic keyed-read entry. Prior
+//   comment specifically parameterized it with a `kVersionKey`
+//   reserved key + startup-abort-on-mismatch behaviour; the
+//   `kVersionKey` constant was not located this session, so the
+//   concrete key name is dropped. Generic per-DB-key version pattern
+//   stands as prior art on its own reasoning.
+// - **Zcash**: `CDBEnv::version_check` in `walletdb.cpp`. Not
+//   verified against zcashd source this session; dropped.
 //
 // ## Why u32 (not u8)
 //
@@ -335,10 +341,16 @@ pub struct Database {
 /// | Some(v <  EXP) | (either)    | ERROR: no migration registered (today)    |
 /// | Some(v >  EXP) | (either)    | ERROR: future DB, downgrade binary        |
 ///
-/// Fresh-DB detection uses `BlockDb::is_empty()` (no blocks accepted yet).
-/// This is the same shape Bitcoin Core uses (`pblockindex->empty()` check
-/// during `LoadBlockIndexDB`) and Monero uses (`m_height == 0` check in
-/// `BlockchainDB::is_open`).
+/// Fresh-DB detection uses `BlockDb::is_empty()` (no blocks accepted
+/// yet). Bitcoin Core loads block-index state via
+/// `BlockManager::LoadBlockIndexDB` (VERIFIED as invoked at
+/// src/validation.cpp:4918 in the master read this session); the
+/// prior comment specifically cited a `pblockindex->empty()` check
+/// inside that function as the fresh-DB primitive, and named a
+/// Monero `BlockchainDB::is_open` "`m_height == 0`" check for the
+/// same purpose. Neither internal check-shape was re-traced this
+/// session, so the concrete inner primitives are dropped in favour
+/// of the verified enclosing-function receipts above.
 fn verify_or_stamp_schema_version(
     metadata: &shim::Tree,
     blocks: &BlockDb,

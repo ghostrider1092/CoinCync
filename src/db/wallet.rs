@@ -182,8 +182,7 @@ impl WalletDb {
     /// row, so the user could see the balance but not spend it. A rescan
     /// recovered it, but that's a manual step. Same shape as the
     /// utxos.rs "storage #1 + #7" atomicity fix; this brings the wallet
-    /// db in line. Reference: Bitcoin Core's CCoinsMap writes are
-    /// single-batch (CDBBatch::Write, sync=true).
+    /// db in line.
     pub fn add_output(&self, output: &OwnedOutput) -> Result<()> {
         let key = Self::make_output_key(&output.tx_hash, output.output_index);
         let data = serialize(output)?;
@@ -393,7 +392,6 @@ impl WalletDb {
     /// misses it — the recent-transactions view, wallet UI history,
     /// and any downstream analytics all silently drop the row. On
     /// reorg-rewind or clear+rescan the drift widens.
-    /// Prior art: Bitcoin Core CCoinsMap single-batch CDBBatch::Write.
     pub fn add_transaction(&self, tx: &WalletTx) -> Result<()> {
         let data = serialize(tx)?;
 

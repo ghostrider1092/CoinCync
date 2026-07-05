@@ -582,9 +582,9 @@ impl RejectMessage {
     /// leaving `message` unbounded. A malicious peer could send a Reject
     /// with a 16 MB `message` field; borsh would happily allocate the
     /// full Vec for the String length prefix before `validate()` ever
-    /// ran, OOM-bombing the node. Reference: Bitcoin Core caps every
-    /// String field on the wire (user-agent 256 B, reject reason 111 B
-    /// per BIP61); Monero's epee serialization bounds all wire Strings.
+    /// ran, OOM-bombing the node. The fix caps `message.len()` at
+    /// `MAX_REJECT_REASON_LENGTH` before any borsh allocation can
+    /// occur.
     pub fn validate(&self) -> Result<()> {
         if self.message.len() > MAX_REJECT_REASON_LENGTH {
             return Err(Error::ProtocolError(format!(

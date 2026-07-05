@@ -50,12 +50,16 @@
 //!
 //! ## Design references
 //!
-//! - Bitcoin Core's `WaitableCriticalSection` deadlock check
+//! - Bitcoin Core's lock-order deadlock detection: `EnterCritical` /
+//!   `LeaveCritical` in `src/sync.h` (lines 49-50 in current master),
+//!   called from every `LOCK`/`UNLOCK` macro, with `abort()` on
+//!   detected deadlock gated by `g_debug_lockorder_abort` (line 64).
 //! - Kubernetes' liveness / readiness split (we're implementing the
-//!   liveness half in-process rather than delegating to k8s)
-//! - Amazon's "process suicide is better than half-alive" principle:
-//!   under a deadlock, restarting is strictly better than staying up
-//!   and silently serving stale data.
+//!   liveness half in-process rather than delegating to k8s).
+//! - The general "process suicide is safer than half-alive"
+//!   fail-fast principle: under a suspected deadlock, restarting
+//!   returns the system to a known state; staying up risks silently
+//!   serving stale data.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

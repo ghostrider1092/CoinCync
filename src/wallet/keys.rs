@@ -108,11 +108,11 @@ impl FullViewingKey {
     /// leaking the audit key.
     ///
     /// Structural fix would be to require encryption at share
-    /// time (encode-with-passphrase), matching Zcash's ZIP-317
-    /// unified-address encoding pattern. Deferred pending API
-    /// design decision. Meanwhile: `raw` on the stack contains
-    /// the same secret; zeroize it before return so we don't
-    /// double-expose via memory dump.
+    /// time (encode-with-passphrase) so the encoded string alone
+    /// is not sufficient to reveal the viewing capability.
+    /// Deferred pending API design decision. Meanwhile: `raw` on
+    /// the stack contains the same secret; zeroize it before
+    /// return so we don't double-expose via memory dump.
     pub fn encode(&self) -> String {
         let ak = self.ak.compress().to_bytes();
         let nk = self.nk.compress().to_bytes();

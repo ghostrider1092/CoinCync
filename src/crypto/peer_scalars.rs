@@ -5,7 +5,12 @@
 //! canonical byte validation before it enters the crypto math. Two classes
 //! of bug become possible when it doesn't:
 //!
-//!   1. **Non-canonical scalar acceptance** (Monero CVE-2017-14428 class).
+//!   1. **Non-canonical scalar acceptance** (a documented class of
+//!      Monero/CryptoNote-era non-canonical-Ed25519 handling bugs;
+//!      specific CVE identifier UNVERIFIED — the previously-cited
+//!      `CVE-2017-14428` was checked against the NVD this session
+//!      and is a D-Link DIR-850L router-firmware issue, not the
+//!      Monero scalar bug, so the CVE number has been removed).
 //!      `Scalar::from_bytes_mod_order` silently reduces any 32 bytes modulo
 //!      the group order, so a bit-distinct byte sequence maps to the same
 //!      underlying scalar. On a chain where the txid or a cache key is a
@@ -123,10 +128,6 @@ impl PeerScalar {
     /// This is what every peer-facing verifier should call, and what
     /// `Scalar::from_bytes_mod_order` is emphatically NOT — the mod-order
     /// variant silently accepts non-canonical input.
-    ///
-    /// Prior art:
-    ///   • Monero CVE-2017-14428 (RCT nullification via non-canonical scalar)
-    ///   • Zcash NU5 canonical-encoding discriminants on Halo2 proofs
     ///   • BIP-62 low-S / canonical-encoding enforcement
     ///   • `dalek`'s own `from_canonical_bytes` — this is a thin wrapper
     ///     that surfaces the failure as a typed `Error` instead of

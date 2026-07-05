@@ -247,11 +247,13 @@ impl Mempool {
     /// Create a new mempool with default max size.
     ///
     /// Default sourced from `constants::MAX_MEMPOOL_BYTES` (300 MB) for
-    /// Bitcoin Core parity (DEFAULT_MAX_MEMPOOL_SIZE = 300 MB). Prior to
-    /// this fix, `Mempool::new` hardcoded 100 MB which silently diverged
-    /// from `constants::MAX_MEMPOOL_BYTES` — the constant was authoritative
-    /// in name only. Reference: Bitcoin Core src/policy/policy.h
-    /// `DEFAULT_MAX_MEMPOOL_SIZE_MB`.
+    /// Bitcoin Core parity (`DEFAULT_MAX_MEMPOOL_SIZE_MB = 300` at
+    /// src/kernel/mempool_options.h:19 in the master read this session;
+    /// the prior comment placed the constant in `src/policy/policy.h`,
+    /// which is the wrong header). Prior to this fix, `Mempool::new`
+    /// hardcoded 100 MB which silently diverged from
+    /// `constants::MAX_MEMPOOL_BYTES` — the constant was authoritative
+    /// in name only.
     pub fn new() -> Self {
         Self::with_max_size(crate::constants::MAX_MEMPOOL_BYTES)
     }
@@ -594,9 +596,13 @@ impl Mempool {
             // rejection masked the cause in prior incidents. Throttled
             // to once per 5 seconds to avoid disk-fill during sustained
             // low-fee floods (audit-fix: previously could emit 10k+
-            // WARN/s). Reference: Bitcoin Core CTxMemPool::TrimToSize
-            // logs at LogPrintf level WITHOUT per-attempt throttling
-            // because their log facility has built-in deduplication.
+            // WARN/s). Reference: Bitcoin Core `CTxMemPool::TrimToSize`
+            // is at src/txmempool.cpp:861 in the master read this
+            // session. The prior comment additionally asserted that
+            // Bitcoin Core's `LogPrintf` facility does per-attempt
+            // deduplication so throttling is unnecessary there — that
+            // specific claim about LogPrintf's dedup behaviour was not
+            // re-verified this session and is dropped.
             if self.current_size >= prev_size || eviction_attempts >= MAX_EVICTION_ATTEMPTS {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static LAST_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
@@ -689,9 +695,13 @@ impl Mempool {
     /// Without this eviction, a single shadow-conflict tx would stall the
     /// chain indefinitely (until the 288-block expiry timer fires, ~9.6
     /// hours). This caused two chain stalls during 2026-05-07 testing.
-    /// Bitcoin Core (`CTxMemPool::removeForBlock`) and Monero (`tx_pool::
-    /// on_blockchain_inc`) both do the same shadow-eviction; CoinCync
-    /// missed it on the initial port.
+    /// Bitcoin Core does the same shadow-eviction from
+    /// `CTxMemPool::removeForBlock` (VERIFIED at src/txmempool.cpp:405
+    /// in the master read this session). The prior comment additionally
+    /// cited Monero `tx_pool::on_blockchain_inc`; that specific Monero
+    /// identifier was not re-confirmed against Monero source this
+    /// session and is dropped. CoinCync missed the shadow-eviction step
+    /// on the initial port.
     pub fn remove_confirmed(&mut self, txs: &[Transaction]) {
         let now = unix_now();
 
@@ -1051,8 +1061,13 @@ impl Mempool {
         // path. A crash mid-write would leave a partial .tmp file (which
         // we ignore on next startup because we only read .dat), preserving
         // the previous good mempool.dat. Reference: Bitcoin Core's
-        // `DumpMempool` uses the same temp-file + rename pattern via
-        // `RenameOver`. Direct `fs::write` (the pre-fix behavior) would
+        // `DumpMempool` (VERIFIED at src/node/mempool_persist.cpp:153
+        // in the master read this session) uses a similar temp-file +
+        // rename dump pattern. The prior comment named a `RenameOver`
+        // helper as the rename primitive; that specific helper name
+        // was not re-confirmed against upstream this session, so the
+        // specific helper reference is dropped. Direct `fs::write`
+        // (the pre-fix behavior here) would
         // corrupt mempool.dat on power loss, then line 1042 (silent file
         // removal on parse failure) would drop ALL pending txs on
         // restart — confirmed transaction loss for users.
@@ -1098,10 +1113,16 @@ impl Mempool {
         // before failing. Even bounded allocation strategies in borsh 1.x
         // can still amortize tens of GB of work before erroring.
         //
-        // Prior art: Bitcoin Core's `LoadMempool` enforces
-        // MAX_BLOCK_SERIALIZED_SIZE (4 MB) at the file-size layer plus a
-        // tx-count sanity check before processing. Monero's
-        // `Blockchain::load_pool` does the same with a 100k-tx cap.
+        // Prior art: Bitcoin Core's `LoadMempool` is VERIFIED at
+        // src/node/mempool_persist.cpp:43 in the master read this
+        // session. The prior comment additionally asserted specific
+        // per-project limits (`MAX_BLOCK_SERIALIZED_SIZE = 4 MB`
+        // file-size cap + tx-count sanity check for Bitcoin Core,
+        // Monero `Blockchain::load_pool` with a 100k-tx cap); those
+        // specific numeric values and the Monero identifier were not
+        // re-verified against upstream this session and are dropped.
+        // The bound-first pattern below stands on its own reasoning
+        // above.
         let metadata = std::fs::metadata(&path)
             .map_err(|e| Error::DatabaseError(format!("stat mempool.dat: {}", e)))?;
         if metadata.len() > crate::constants::MAX_MEMPOOL_BYTES as u64 {
@@ -1218,8 +1239,14 @@ impl SharedMempool {
         // garbage. The precheck is the same structural+privacy gate
         // that runs in Mempool::preflight_check but inlined here so we
         // don't need to acquire the mempool write lock first. Reference:
-        // Bitcoin Core's `AcceptToMemoryPool` orders `CheckTransaction`
-        // (structural) before `Consensus::CheckTxInputs` (UTXO walk).
+        // Bitcoin Core's `AcceptToMemoryPool` (VERIFIED at
+        // src/validation.cpp:1781 in the master read this session) runs
+        // an analogous cheap-first, expensive-second sequence. The prior
+        // comment specifically ordered `CheckTransaction` (structural)
+        // before `Consensus::CheckTxInputs` (UTXO walk) inside that
+        // function; the exact internal call sequence was not re-read
+        // this session and is not asserted. The qualitative cheap-
+        // before-expensive principle stands.
         if tx.is_coinbase() {
             return Err(Error::InvalidMessage(
                 "coinbase transactions cannot enter mempool".into(),

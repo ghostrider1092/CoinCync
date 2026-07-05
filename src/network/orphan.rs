@@ -3,11 +3,15 @@
 //! Stores blocks whose parent is not yet known. Prevents unnecessary
 //! rollbacks during IBD when blocks arrive out of order.
 //!
-//! Eviction and lookup are O(log n) via a BTreeMap secondary index keyed by
-//! insertion sequence number, matching Bitcoin Core's ordered-index pattern
-//! for `mapOrphanTransactionsByPrev`. The reverse `parent_by_hash` map turns
-//! "find and remove an arbitrary orphan" into an O(log n) operation instead
-//! of the previous O(n) scan across every parent bucket.
+//! Eviction and lookup are O(log n) via a BTreeMap secondary index
+//! keyed by insertion sequence number. (Prior comment referenced
+//! Bitcoin Core's `mapOrphanTransactionsByPrev` as prior art for the
+//! ordered-index shape; that specific identifier was not re-located
+//! in current upstream this session, so the concrete symbol
+//! attribution is dropped. The BTreeMap design here stands on its own
+//! reasoning.) The reverse `parent_by_hash` map turns "find and remove
+//! an arbitrary orphan" into an O(log n) operation instead of the
+//! previous O(n) scan across every parent bucket.
 
 use std::collections::{BTreeMap, HashMap};
 use crate::consensus::Block;

@@ -33,9 +33,6 @@ impl OutputIndexEntry {
     /// If callers see Err here, the entry is corrupt and the ring-
     /// member lookup must fail closed (reject the spend) rather than
     /// optimistically accept a bogus output.
-    ///
-    /// Reference: Bitcoin Core's CCoinsViewCache validates each
-    /// deserialized Coin's nHeight + fCoinBase consistency on read.
     pub fn validate(&self) -> std::result::Result<(), &'static str> {
         if let Some(lh) = self.lock_height {
             if lh < self.height {

@@ -890,8 +890,10 @@ impl Blockchain {
                             // We can't abort here (we're mid-truncation, the
                             // in-memory state is correct), but at least the
                             // operator gets a CRITICAL log line. Reference:
-                            // Bitcoin Core's `AbortNode()` after `CCoinsView::
-                            // Flush()` failure on tip commit.
+                            // Bitcoin Core reports comparable post-flush
+                            // failures through `FatalError()` (validation.h:104
+                            // in the master read this session; the previous
+                            // `AbortNode()` identifier was renamed).
                             tracing::error!(
                                 target: "chain::persistence",
                                 "CRITICAL: save_state failed after truncation to height {} ({}). \
@@ -1206,11 +1208,15 @@ impl Blockchain {
     ///
     /// ## Prior art
     ///
-    /// - **Bitcoin Core `ThresholdConditionCache::GetStateStatisticsFor`** in
-    ///   `versionbits.cpp` does the equivalent count by walking `CBlockIndex`
-    ///   pointers. Same shape, different chain-index representation.
-    /// - **Bitcoin Cash, Litecoin, Dogecoin** all inherited the BIP 9 pattern
-    ///   and walk-block-index-counting their coinbase / header signal bit.
+    /// - **Bitcoin Core `AbstractThresholdConditionChecker::GetStateStatisticsFor`**
+    ///   at versionbits.cpp:119 in the master read this session does the
+    ///   equivalent count by walking `CBlockIndex` pointers. The prior
+    ///   comment misattributed the method to `ThresholdConditionCache`
+    ///   (which is a `std::map` typedef at versionbits.h:33, not the
+    ///   owner of the method).
+    /// - Other BIP-9-derived chains (Bitcoin Cash / Litecoin / Dogecoin)
+    ///   inherit the walk-block-index-counting shape; specific per-fork
+    ///   identifiers UNVERIFIED this session.
     pub fn count_signaling_blocks_in_window(
         &self,
         window_start: u64,
@@ -1332,8 +1338,8 @@ impl Blockchain {
                         // silent clamp defeats the point of `checked_sub` and
                         // corrupts every downstream supply read. See fixed sites'
                         // audit block for the full rationale + prior art citations
-                        // (Bitcoin Core assert, Monero verification_context.h
-                        // defensive panic, zebrad expect on chain invariants).
+                        // (specific upstream identifiers UNVERIFIED this session
+                        // — see the updated block above).
 inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
     .unwrap_or_else(|_| panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
@@ -1442,8 +1448,9 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                 // Surface previously-silent error after rollback. The
                 // in-memory tip is correct; the on-disk tip is now stale.
                 // Restart would reload stale state. See sibling error
-                // path above for the same pattern + Bitcoin Core
-                // AbortNode reference.
+                // path above for the same pattern + the corrected
+                // Bitcoin Core `FatalError` reference (formerly
+                // `AbortNode`).
                 tracing::error!(
                     target: "chain::persistence",
                     "CRITICAL: save_state failed after rollback to height {} ({}). \
@@ -1839,8 +1846,14 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                 // RocksDB WriteBatch) is deferred — it requires
                 // refactoring `commit_block_to_db` to take the entire
                 // tx_index update set as a batch parameter. Reference:
-                // Bitcoin Core indexes `tx→block` via `LookupBlockIndex`
-                // inside `ConnectBlock`'s atomic batch (txindex/coinstats).
+                // Bitcoin Core keeps tx→block indexing inside the block-
+                // apply atomic batch (see `ConnectBlock` flow in
+                // src/validation.cpp). The prior comment cited
+                // `LookupBlockIndex` for this purpose; `LookupBlockIndex`
+                // exists (validation.cpp:135 in the master read this
+                // session) but it's the block-hash→pindex lookup, not
+                // the tx→block writer. Reference kept qualitative rather
+                // than perpetuate a mis-named identifier.
                 if let Some(ref db) = self.db {
                     for (idx, tx) in block.transactions.iter().enumerate() {
                         if let Err(e) = db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32) {
@@ -1993,12 +2006,20 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
             // converge to the same tie-winning chain regardless of which
             // half of the partition they're in. It also resists
             // "fresher-timestamp" tiebreaks that incentivize timestamp
-            // manipulation. Reference: Bitcoin Core ChainstateManager::
-            // FindMostWorkChain uses `nSequenceId` (per-node arrival order)
-            // for ties, which is non-deterministic across the network and
-            // a known consensus-irrelevant choice; we improve on it with a
-            // network-deterministic rule. zebrad similarly uses hash-as-
-            // tiebreak in its non-finalized state.
+            // manipulation. Reference (VERIFIED against upstream master
+            // this session): Bitcoin Core's `Chainstate::FindMostWorkChain`
+            // (validation.cpp:3128 — note the class is `Chainstate`, not
+            // `ChainstateManager` as the prior comment said) uses
+            // `nSequenceId` (arrival-order tie-breaker; assigned at
+            // validation.cpp:3819 via `nBlockSequenceId++`, and referenced
+            // by fork-choice ordering at validation.cpp:3167 / :3516),
+            // which is a per-node value and non-deterministic across the
+            // network. Our hash-lex tiebreak is network-deterministic —
+            // any honest node sees the same winner regardless of arrival
+            // order. (The prior comment also claimed zebrad uses
+            // hash-as-tiebreak in its non-finalized state; that specific
+            // Zebra behaviour was not re-confirmed against source this
+            // session, so it's not asserted.)
             let take_fork = if fork_cumulative > current_total_difficulty {
                 true
             } else if fork_cumulative == current_total_difficulty {
@@ -2161,11 +2182,16 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                                 // cap becomes wrong, and any RPC reader gets a fabricated answer.
                                 //
                                 // Prior art:
-                                //   • Bitcoin Core: `assert(nBitsCurrent > 0)` / `assert(nMoneySupply >= 0)`
-                                //     — silent corruption is a stop condition, not a warning.
-                                //   • Monero: defensive panics in coinbase-emission accounting
-                                //     (`src/cryptonote_basic/verification_context.h`).
-                                //   • zebrad: `expect("chain state invariant")` on supply math.
+                                //   (Specific upstream identifiers UNVERIFIED this session.)
+                                //   The prior comment cited Bitcoin Core asserts
+                                //   `nBitsCurrent > 0` / `nMoneySupply >= 0`, a Monero
+                                //   `verification_context.h` defensive panic, and
+                                //   zebrad `expect("chain state invariant")`. None of
+                                //   those exact identifiers were re-confirmed against
+                                //   current upstream this session, so the specific
+                                //   citations are removed. The "silent corruption is a
+                                //   stop condition, not a warning" principle stands on
+                                //   its own reasoning above.
                                 //
                                 // Halting via panic is safe here because the SIGTERM/SIGINT
                                 // handlers on this node flush RocksDB cleanly on shutdown
@@ -2387,11 +2413,16 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                                 // cap becomes wrong, and any RPC reader gets a fabricated answer.
                                 //
                                 // Prior art:
-                                //   • Bitcoin Core: `assert(nBitsCurrent > 0)` / `assert(nMoneySupply >= 0)`
-                                //     — silent corruption is a stop condition, not a warning.
-                                //   • Monero: defensive panics in coinbase-emission accounting
-                                //     (`src/cryptonote_basic/verification_context.h`).
-                                //   • zebrad: `expect("chain state invariant")` on supply math.
+                                //   (Specific upstream identifiers UNVERIFIED this session.)
+                                //   The prior comment cited Bitcoin Core asserts
+                                //   `nBitsCurrent > 0` / `nMoneySupply >= 0`, a Monero
+                                //   `verification_context.h` defensive panic, and
+                                //   zebrad `expect("chain state invariant")`. None of
+                                //   those exact identifiers were re-confirmed against
+                                //   current upstream this session, so the specific
+                                //   citations are removed. The "silent corruption is a
+                                //   stop condition, not a warning" principle stands on
+                                //   its own reasoning above.
                                 //
                                 // Halting via panic is safe here because the SIGTERM/SIGINT
                                 // handlers on this node flush RocksDB cleanly on shutdown
@@ -2645,18 +2676,23 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                         // fallback (the RPC field being wrong is better than the
                         // node crashing).
                         //
-                        // Prior art:
-                        //   * Bitcoin Core `main.cpp::DisconnectBlock`: bails
-                        //     the entire block-processing loop with an assert
-                        //     on comparable inconsistencies (nBlockTx counter).
-                        //   * Monero `blockchain.cpp::rollback`: logs at ERROR
-                        //     when the block-count invariant is violated,
-                        //     continues.
-                        //   * zebrad `state::write::block::finalize`: `expect()`
-                        //     on chain-height math, but for statistics-only
-                        //     counters it uses `checked_sub().unwrap_or_log()`.
-                        //
-                        // We take zebrad's stats-only pattern.
+                        // Prior art (specific per-project identifiers
+                        // partially UNVERIFIED this session):
+                        //   * Bitcoin Core: DisconnectBlock lives at
+                        //     validation.cpp:2185 in the master read this
+                        //     session as `Chainstate::DisconnectBlock`
+                        //     (NOT `main.cpp::DisconnectBlock` — main.cpp
+                        //     was refactored out long ago). The prior
+                        //     comment additionally invoked an
+                        //     `assert(nBlockTx > 0)` claim which is not
+                        //     asserted here without a specific line
+                        //     receipt.
+                        //   * Monero `blockchain.cpp::rollback` behaviour
+                        //     and zebrad `state::write::block::finalize`
+                        //     specifics were not re-fetched this session;
+                        //     the "stats-only counters saturate rather
+                        //     than halt" pattern below is retained on its
+                        //     own reasoning.
                         let reconnected_blocks = fork_blocks.len() as u64 + 1; // +1 for triggering block
                         let reconnected_txs: u64 = fork_blocks.iter()
                             .map(|b| b.transactions.len() as u64)

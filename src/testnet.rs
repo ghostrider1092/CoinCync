@@ -23,7 +23,11 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
     "seed3.coincync.network",
 ];
 
-/// Hard-coded testnet seed peers — Monero-style minimal bootstrap set.
+/// Hard-coded testnet seed peers — small, purpose-scoped bootstrap
+/// set. (Prior comment characterised this as "Monero-style"; whether
+/// Monero's testnet or mainnet seed sets follow a specifically
+/// smaller-than-Bitcoin shape was not re-verified against Monero
+/// source this session, so the qualifier is dropped.)
 ///
 /// These are PURE SEED hosts: their only job is to accept inbound P2P,
 /// hand out a peer list, and serve the chain to bootstrapping nodes.

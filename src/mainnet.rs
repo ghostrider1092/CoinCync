@@ -50,8 +50,14 @@ pub const MAINNET_SEED_NODES: &[&str] = &[
 pub const MAINNET_MIN_RING_SIZE: usize = 11;
 
 /// Mainnet block time target: 60 seconds.
-/// Slower than testnet (30s) for safety — proven safe by Dogecoin (60s, 10+ years).
-/// 2x faster than Monero (120s). 10 confirmations = 10 minutes.
+/// Slower than testnet (30s) for safety. Dogecoin uses a 60s target;
+/// the "proven safe by Dogecoin (10+ years)" durability characterisation
+/// is retained as a general reference — Dogecoin's specific parameter
+/// history was not re-verified against upstream Dogecoin source this
+/// session. Monero's block time is 120s (VERIFIED as
+/// `DIFFICULTY_TARGET_V2 = 120` at cryptonote_config.h:80 in the
+/// Monero master read this session), so 60s here is 2x faster.
+/// 10 confirmations = 10 minutes.
 pub const MAINNET_BLOCK_TIME: u64 = 60;
 
 /// Mainnet initial difficulty.

@@ -15,7 +15,11 @@
 //! - The server sees the VIEW key (not the SPEND key) — it can detect incoming
 //!   payments but CANNOT spend coins
 //! - The server learns WHICH outputs belong to the user — this is a privacy
-//!   tradeoff vs running a full node. Same model as MyMonero.
+//!   tradeoff vs running a full node. (MyMonero is a well-known light-
+//!   wallet service that has historically followed a similar view-key-
+//!   with-server model; the specific implementation was not verified
+//!   this session and is stated as a general reference rather than as
+//!   a specific parity claim.)
 //! - Transaction SIGNING happens client-side — the server never touches
 //!   the spend key
 //! - Communication should use HTTPS (TLS) to protect the view key in transit

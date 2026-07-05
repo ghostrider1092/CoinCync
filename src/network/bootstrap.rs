@@ -938,9 +938,11 @@ fn load_signed_manifest_peers(network: Network) -> Vec<SocketAddr> {
     // call, defeating the cap and OOMing the node. `Read::take(cap)`
     // caps at the OS-level read boundary regardless of runtime file
     // growth: no matter how big the file is when read is called, at
-    // most `cap+1` bytes leave the kernel. Prior art: Bitcoin Core and
-    // Monero use file-descriptor-based bounded reads (Monero: LMDB
-    // wrapper `check_open`; Bitcoin Core: `AutoFile::read` bounded).
+    // most `cap+1` bytes leave the kernel. Prior art: Bitcoin Core's
+    // `AutoFile::read(std::span<std::byte> dst)` at src/streams.h:478
+    // (VERIFIED via direct fetch this session) — the span carries its
+    // own bound, so the read is capped at the span size regardless of
+    // underlying file size.
     //
     // Threat model note: this file is a local operator-configured path;
     // an attacker with write access to it typically already has more

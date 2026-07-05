@@ -211,10 +211,6 @@ impl StateDb {
     /// ChainStateData / genesis, making the DB unloadable on next
     /// open. Reject those two reserved keys structurally so no
     /// mis-typed caller can wedge the DB.
-    ///
-    /// Prior art: Bitcoin Core's `CBlockTreeDB::Write*` refuses
-    /// reserved subkeys (`FLAGS`, `LAST_BLOCK`, etc.) with a
-    /// distinct error. Same discipline here.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         if key == Self::KEY_CHAIN_STATE || key == Self::KEY_GENESIS_HASH {
             return Err(Error::DatabaseError(format!(

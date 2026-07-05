@@ -12,9 +12,14 @@
 //! Allow / Warn / Throttle / Ban actions) into [`crate::network::framing`].
 //! It was removed because under Initial Block Download a peer legitimately
 //! bursts hundreds of solicited blocks per second, and the limiter was
-//! dropping that traffic and stalling sync. Bitcoin Core and Monero use the
-//! same posture: no count-based per-message limit on the P2P layer; rely on
-//! bandwidth caps + protocol-violation banscore instead. The breadcrumb in
+//! dropping that traffic and stalling sync. (Prior comment claimed
+//! "Bitcoin Core and Monero use the same posture: no count-based
+//! per-message limit on the P2P layer; rely on bandwidth caps +
+//! protocol-violation banscore instead". That cross-project
+//! generalization was not verified this session and is dropped.) The
+//! design here relies on bandwidth caps + protocol-violation banscore
+//! rather than per-message counting, on its own reasoning above. The
+//! breadcrumb in
 //! [`crate::network::framing`] (search for "PeerRateLimiter was removed")
 //! preserves the rationale.
 //!

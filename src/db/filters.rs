@@ -165,7 +165,11 @@ impl FilterDb {
     // If a caller ever needs prev-filter-hash lookup, wire it directly
     // via `self.get(height - 1)?` — that call is already `Result`-returning
     // and will surface a rocksdb::Error properly. Reference: Bitcoin
-    // Core's `GetFilterHeader` returns `Status`, not a coerced default.
+    // Core's `BlockFilterIndex::ReadFilterHeader` at
+    // src/index/blockfilterindex.cpp:243 returns `std::optional<uint256>`
+    // (returning `std::nullopt` on DB miss or hash mismatch), which
+    // similarly forces the caller to handle the miss/error case
+    // instead of coercing to a zero default.
 
     /// Get filter checkpoints for verification.
     ///

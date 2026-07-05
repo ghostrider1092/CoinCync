@@ -1080,12 +1080,14 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
 /// returned set. The observer gains ZERO information from the age
 /// distribution of the ring.
 ///
-/// Prior art:
-///   • Miller et al. 2017 — ring members must have indistinguishable age
-///     from the real spend
-///   • Möser et al. 2018 — 85%+ accuracy identifying real Monero spends
-///     under gamma-biased selection
-///   • MRL uniform-selection recommendation
+/// Prior art (academic papers in the public record; specific
+/// numerical results not re-verified this session):
+///   • Miller et al. 2017 — "An Empirical Analysis of Linkability in
+///     the Monero Blockchain" (arXiv:1704.04299)
+///   • Möser et al. 2018 — "An Empirical Analysis of Traceability in
+///     the Monero Blockchain" (PoPETS 2018)
+///   • Monero Research Lab uniform-selection recommendations from
+///     subsequent MRL work.
 ///
 /// Returns (decoys, real_position) — the decoy list and the index where
 /// the real output should be inserted in the ring.

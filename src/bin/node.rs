@@ -800,9 +800,15 @@ async fn start_node(
                             // hold the chain RwLock for the duration of
                             // the mempool walk, blocking other tokio
                             // tasks (RPC, network reads) on the same
-                            // worker. Bitcoin Core's `MaybeUpdateMempool
-                            // ForReorg` runs on a separate background
-                            // thread for the same reason.
+                            // worker. Bitcoin Core's
+                            // `MaybeUpdateMempoolForReorg` (VERIFIED as
+                            // declared at validation.h:883 in the
+                            // master read this session) fills an
+                            // analogous role at the equivalent hook;
+                            // the prior comment's specific "runs on a
+                            // separate background thread" claim about
+                            // upstream's execution model was not
+                            // verified this session and is dropped.
                             //
                             // We .await the join so the post-block
                             // notifications below see the updated
@@ -1055,9 +1061,18 @@ async fn start_node(
     // 2026-06-30 zombie state: WAL entries never made it to SST, next
     // startup hung on WAL replay.
     //
-    // Prior art: Bitcoin Core's daemon installs handlers for SIGINT,
-    // SIGTERM, and SIGHUP in `init.cpp::AppInit()`. All three route
-    // to the same `StartShutdown()` path.
+    // Prior art (VERIFIED against upstream master this session):
+    // Bitcoin Core installs `SIGTERM` and `SIGINT` handlers in
+    // `AppInitBasicSetup` (init.cpp:908; registration at :928-:929),
+    // both routed to `HandleSIGTERM` (init.cpp:451), plus a `SIGHUP`
+    // handler `HandleSIGHUP` (init.cpp:458, registered :932). The
+    // prior comment placed the registration in `AppInit()` and
+    // claimed all three "route to the same `StartShutdown()` path";
+    // the enclosing function name has changed and the internal
+    // path from HandleSIGTERM to StartShutdown was not traced this
+    // session, so the specific `StartShutdown()` chain claim is
+    // dropped in favour of the verified handler-registration
+    // receipts.
     #[cfg(unix)]
     {
         let mut sigterm = tokio::signal::unix::signal(
@@ -1131,10 +1146,14 @@ async fn start_node(
     // broken" property. But under normal conditions this eliminates the
     // WAL-replay-hang failure mode entirely.
     //
-    // Prior art: Bitcoin Core's `Shutdown()` explicitly calls
-    // `pcoinsdbview->Flush()` and `pblocktree->Sync()` before returning
-    // to main. Zebrad's `RpcServer::stop_service` explicitly awaits DB
-    // drain. Same pattern here.
+    // Prior art (UNVERIFIED this session): the prior comment cited
+    // Bitcoin Core `Shutdown()` explicitly calling `pcoinsdbview->Flush()`
+    // and `pblocktree->Sync()` before returning to main, and Zebrad's
+    // `RpcServer::stop_service` explicitly awaiting DB drain. Neither
+    // specific identifier chain was re-verified against upstream this
+    // session, so both citations are dropped. The flush-before-exit
+    // design here stands on its own reasoning above (the 2026-06-30
+    // WAL-replay-hang incident).
     info!("Draining RocksDB before exit...");
     let flush_deadline = std::time::Duration::from_secs(10);
     let flush_start = std::time::Instant::now();

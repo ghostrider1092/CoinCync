@@ -47,16 +47,14 @@ const ORPHAN_CLEANUP_INTERVAL: u64 = 60;
 /// / sync surface this audit round (F0 MissingParent → PR #154, F1
 /// OrphanFlood → PR #155, F24 = this).
 ///
-/// **Prior art — every reference implementation** relies on total-pool
-/// caps + LRU eviction + TTL, not per-peer caps:
-///   * Bitcoin Core `net_processing.cpp::AddOrphanTx` /
-///     `LimitOrphans`: 100 total txs (parameterized), evicted by
-///     random selection when full — no per-peer cap. Same shape for
-///     blocks in the compact-block-relay path.
-///   * Zebra: size-limited orphan pool with LRU eviction. No per-peer
-///     tracking of orphan counts.
-///   * Monero: `m_orphaned_by_prev_id` capped at 100 total blocks
-///     with FIFO eviction. No per-peer.
+/// **Reference-implementation shape (specific identifiers UNVERIFIED
+/// this session):** reference orphan-pool designs typically use total-
+/// pool caps + eviction (LRU/FIFO/random) rather than per-peer caps.
+/// The specific per-project method / class names I cited pre-fix
+/// (`AddOrphanTx`, `LimitOrphans`, `m_orphaned_by_prev_id`) were not
+/// re-confirmed against current upstream sources this session, so the
+/// specific identifier citations have been removed rather than
+/// perpetuated without receipts.
 ///
 /// **Why the pre-audit value was 50**: appears to be a DoS heuristic
 /// intended to prevent one peer from filling the entire pool. BUT the
@@ -219,16 +217,17 @@ impl ChainSync {
         // When local advances, any peer whose claimed height is now <= local
         // is announcing a stale view. Prune those entries so they cannot
         // pin best_known above local indefinitely (the chronic stall bug).
-        // This mirrors Monero's behaviour where per-peer "remaining work"
-        // collapses to zero once local catches up — but we make it explicit
-        // by removing the entry, not merely ignoring it.
+        // Make the pruning explicit by removing the entry, not merely
+        // ignoring it.
         self.prune_stale_peer_heights();
         // I2/I3 enforcement: best_known_height must equal
         // max(local_height, max(peer_heights.values())). Re-derive from
         // scratch rather than only-grow, so the field can SHRINK when peers
-        // disconnect or local overtakes them. Bitcoin Core derives
-        // `pindexBestHeader` from the headers tree on every update; we
-        // mirror that by recomputing on every state mutation.
+        // disconnect or local overtakes them. Bitcoin Core takes a similar
+        // approach with `m_best_header` (validation.h:1078 in the master
+        // read this session) — the value is refreshed via
+        // `RecalculateBestHeader()` (validation.h:1366) rather than
+        // treated as a monotonic latch.
         self.refresh_best_known();
         if self.local_height >= self.best_known_height
             && self.pending_headers.is_empty() && self.downloading.is_empty() {
@@ -480,9 +479,13 @@ impl ChainSync {
     ///
     /// Closes V4 (downloading drift): this is the canonical mark-in-flight
     /// entry point and enforces that `downloading`, `download_timestamps`,
-    /// and `pending_requests` all contain `hash` after the call. Inspired by
-    /// Bitcoin Core's `mapBlocksInFlight` unified map and Monero's
-    /// `block_queue::insert_span`, but adapted to our three-collection API.
+    /// and `pending_requests` all contain `hash` after the call. Bitcoin
+    /// Core's `mapBlocksInFlight` (net_processing.cpp:960 in the master
+    /// read this session) is a comparable unified map. The prior comment
+    /// also cited `Monero block_queue::insert_span`, but this session's
+    /// read of Monero `block_queue` shows methods `add_blocks`,
+    /// `remove_span`, `remove_spans` — no `insert_span` — so that
+    /// reference has been dropped rather than perpetuated.
     ///
     /// Idempotent: safe to call repeatedly; updates the peer/timestamp on
     /// re-call (the most recent request wins for timeout accounting).

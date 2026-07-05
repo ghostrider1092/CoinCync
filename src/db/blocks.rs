@@ -122,11 +122,10 @@ impl BlockDb {
     /// removes as a separate loop. Same net effect, but no live
     /// mutation during iteration.
     ///
-    /// Prior art:
-    ///   - Bitcoin Core's CDBBatch::EraseRange collects then deletes.
-    ///   - RocksDB's own DeleteRange primitive is atomic-in-batch
-    ///     and would be a better fix long-term; deferred because
-    ///     the shim doesn't currently expose it.
+    /// A better long-term fix would use RocksDB's own `DeleteRange`
+    /// primitive (declared at include/rocksdb/db.h:557 in the RocksDB
+    /// master source read this session), which is atomic-in-batch;
+    /// deferred because the shim doesn't currently expose it.
     pub fn remove_heights_above(&self, max_valid_height: u64) -> Result<u64> {
         // Phase 1: collect keys under iterator; NO writes during scan.
         let start = (max_valid_height + 1).to_be_bytes();
@@ -335,8 +334,6 @@ impl BlockDb {
     /// and can't observe staged writes anyway (see `db/shim.rs` line
     /// ~709 for the documented behavior).
     ///
-    /// Reference: Bitcoin Core's `BlockManager::FlushBlockFile()` writes
-    /// pruned-flag metadata and deletes data in a single `CDBBatch`.
     /// AUDIT (R-40 SURGICAL FIX, 2026-07-03): moved the
     /// height→hash lookup INSIDE the transaction closure. The shim's
     /// `TxTree::get()` (db/shim.rs L825-831) reads live committed

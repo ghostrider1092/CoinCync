@@ -316,10 +316,15 @@ impl UtxoSet {
     /// ## Privacy model — uniform, NOT gamma
     ///
     /// AUDIT (2026-07-02): SEV-A fix. The prior implementation used a gamma
-    /// distribution (shape=19.28, scale=1/1.61 — Monero's parameters), the
-    /// exact shape the Möser et al. 2018 paper "An Empirical Analysis of
-    /// Traceability in the Monero Blockchain" showed enables ring-signature
-    /// deanonymization via output-age regression. That prior version's own
+    /// distribution with shape=19.28, scale=1/1.61 — the same parameter
+    /// values Monero defines as `GAMMA_SHAPE` and `GAMMA_SCALE` at
+    /// src/wallet/wallet2.cpp:146-147 in its current master source
+    /// (VERIFIED via direct fetch this session). A gamma-shaped decoy
+    /// distribution is the exact shape shown to enable ring-signature
+    /// deanonymization via output-age regression (Möser et al. 2018;
+    /// paper title UNVERIFIED this session — reader is directed to
+    /// the widely-cited Möser 2018 Monero traceability work).
+    /// That prior version's own
     /// docstring even said the quiet part out loud:
     ///
     ///     Real spends are heavily biased toward recent outputs. If decoys
@@ -873,10 +878,6 @@ mod tests {
     /// (buckets 0..7 would get ~0%; buckets 8-9 would get ~50%+ each).
     /// The 7-13% band is wide enough that legitimate uniform noise
     /// passes and gamma fails deterministically.
-    ///
-    /// Prior art: Monero's ring_ct_batch_tests / Zcash Sapling test
-    /// suites both include distribution-uniformity assertions on their
-    /// decoy analogues.
     #[test]
     fn test_decoy_selection_is_uniform_not_gamma() {
         let mut utxos = UtxoSet::new();

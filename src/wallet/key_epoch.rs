@@ -50,9 +50,14 @@ impl Drop for ViewOnlyEpoch {
 }
 
 /// Time-scoped view key — can only decrypt outputs within a specific
-/// block height range. This is CoinCync's innovation over Monero:
-/// you can prove your transaction history for a specific period
-/// (e.g., tax year) without surrendering all past and future privacy.
+/// block height range. This lets a holder prove transaction history
+/// for a specific period (e.g. a tax year) without surrendering all
+/// past and future privacy. (Prior comment characterised this as
+/// "CoinCync's innovation over Monero"; whether upstream Monero has
+/// or lacks an equivalent time-scoped view-key primitive was not
+/// re-verified against Monero source this session, so the
+/// comparative-novelty claim is dropped in favour of the design
+/// description above.)
 ///
 /// The 4th Amendment protects against unreasonable searches.
 /// Time-scoped view keys implement "particular description" —

@@ -703,10 +703,12 @@ async fn get_supply_circulating(
 ///
 /// CoinMarketCap "max supply" field. CoinCync has a 100M asymptotic
 /// target (Constitution Article I) approached but never reached, plus
-/// a 0.6 CYNC/block tail emission. By the convention CMC and CoinGecko
-/// use for similar asymptotic chains (Monero etc.), the target is
-/// reported as the max-supply figure and the tail is documented in
-/// the long-form description.
+/// a 0.6 CYNC/block tail emission. (Prior comment characterized the
+/// max-supply-with-tail reporting shape as "the convention CMC and
+/// CoinGecko use for similar asymptotic chains (Monero etc.)"; the
+/// specific listing-site conventions were not verified against
+/// CMC/CoinGecko this session and are stated as a design intent
+/// rather than an asserted parity claim.)
 async fn get_supply_max() -> String {
     crate::constants::TOTAL_SUPPLY_TARGET.to_string()
 }

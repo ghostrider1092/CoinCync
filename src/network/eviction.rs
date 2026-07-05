@@ -1,7 +1,8 @@
 //! Netgroup-aware inbound peer eviction.
 //!
-//! Port of Bitcoin Core's `AttemptToEvictConnection` (src/net.cpp, around
-//! line 1100 in modern Bitcoin Core). When the inbound slot table is
+//! Port of Bitcoin Core's `AttemptToEvictConnection` (net.cpp:1694 in
+//! the master read this session; the candidate-selection helpers live
+//! in src/node/eviction.cpp). When the inbound slot table is
 //! saturated, this module selects the best candidate to disconnect so a
 //! new connection can be accepted.
 //!
@@ -33,26 +34,38 @@
 //!     eviction toward plaintext peers, which an attacker is more
 //!     likely to be running (eviction-cost asymmetry).
 //!
-//! References:
-//!   - Bitcoin Core `AttemptToEvictConnection` (src/net.cpp)
-//!   - Bitcoin Core `CompareNetGroupKeyed` (subnet-group comparator)
+//! References (verified against upstream master this session):
+//!   - Bitcoin Core `CConnman::AttemptToEvictConnection`
+//!     (src/net.cpp:1694), which delegates candidate selection to
+//!     `SelectNodeToEvict` (src/node/eviction.cpp:178).
+//!   - Bitcoin Core `CompareNetGroupKeyed` subnet-group comparator
+//!     (src/node/eviction.cpp:26, used at :188).
 //!   - Heilman et al. 2015, "Eclipse Attacks on Bitcoin's Peer-to-Peer
-//!     Network" — the paper that motivated AttemptToEvictConnection.
+//!     Network" — motivational paper for the eviction defense.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use super::peer::{PeerId, PeerInfo};
 
-/// How many peers to protect by each criterion. Matches Bitcoin Core's
-/// `NumProtectedPeers = 4` per axis (longest, most-recently-active,
-/// highest-reputation). With three axes and 4 each, up to 12 peers are
-/// candidate-protected; the remainder is eligible for eviction.
+/// How many peers to protect by each criterion. Bitcoin Core's
+/// `SelectNodeToEvict` (src/node/eviction.cpp:178 in the master read
+/// this session) uses a MIX of 4 and 8 per axis — 4 by netgroup (:188),
+/// 8 by ping (:191), 4 by tx-time (:194), 8 by block-relay-only-time
+/// (:196). The single `NumProtectedPeers = 4` constant this file
+/// previously cited was not located as a named upstream constant, so
+/// the specific identifier claim is dropped; we retain 4-per-axis here
+/// as a CoinCync design choice justified on its own merits (three
+/// axes × 4 = up to 12 candidate-protected).
 const PROTECT_PER_AXIS: usize = 4;
 
 /// Minimum age before a peer is even considered for eviction. Below this,
 /// we assume the peer is still in handshake / sync warmup and disconnecting
-/// would waste both sides' work. Bitcoin Core uses 30s; we use the same.
+/// would waste both sides' work. (The prior comment asserted Bitcoin
+/// Core uses 30s for a comparable "min age before evict" constant;
+/// that specific constant was not located this session, so the
+/// upstream comparison is dropped. The 30s value is retained as a
+/// local design pick with the rationale above.)
 const MIN_AGE_BEFORE_EVICT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Reputation threshold above which a peer is exempted from eviction
@@ -60,10 +73,15 @@ const MIN_AGE_BEFORE_EVICT: std::time::Duration = std::time::Duration::from_secs
 /// Anything ≥ this is considered well-behaved and never evicted.
 const REPUTATION_PROTECT_FLOOR: i32 = 80;
 
-/// /16 (IPv4) or /32 (IPv6) netgroup key. Matches Bitcoin Core's
-/// `CNetAddr::GetGroup()` for the common IPv4/IPv6 cases (CoinCync doesn't
-/// route Tor/I2P-aware grouping yet, so we treat them as their underlying
-/// transport's netgroup).
+/// /16 (IPv4) or /32 (IPv6) netgroup key. Similar in spirit to Bitcoin
+/// Core's netgroup keying — in current upstream that logic lives in
+/// `NetGroupManager::GetGroup()` (declared in src/netgroup.h in the
+/// master read this session; used via `m_netgroupman.GetGroup(...)` at
+/// e.g. src/net.cpp:4222). The prior comment cited the older
+/// `CNetAddr::GetGroup()` name; that method-on-address form is not the
+/// current shape in upstream. (CoinCync doesn't route Tor/I2P-aware
+/// grouping yet, so we treat them as their underlying transport's
+/// netgroup.)
 fn netgroup(addr: SocketAddr) -> u64 {
     match addr.ip() {
         IpAddr::V4(v4) => {
@@ -91,9 +109,10 @@ fn netgroup(addr: SocketAddr) -> u64 {
 ///   1. Drop the peer's sender so its tasks unwind cleanly.
 ///   2. Remove the peer from the peers table.
 ///   3. Untrack the connection from the per-IP `ConnectionTracker`.
-/// Bitcoin Core does all three from inside `CConnman::AttemptToEvict
-/// Connection`; we keep the policy/mechanism split because the peers
-/// table here is a DashMap and locking is the caller's responsibility.
+/// Bitcoin Core's `CConnman::AttemptToEvictConnection` (net.cpp:1694 in
+/// the master read this session) drives the equivalent flow inline; we
+/// keep the policy/mechanism split because the peers table here is a
+/// DashMap and locking is the caller's responsibility.
 pub fn select_inbound_to_evict<'a, I>(peers: I, now: Instant) -> Option<PeerId>
 where
     I: IntoIterator<Item = &'a PeerInfo>,

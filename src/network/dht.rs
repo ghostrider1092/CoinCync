@@ -21,8 +21,11 @@
 //! 3. Receives the spend status response
 //!
 //! ## References
-//! - Monero stripe-based pruning: `common/pruning.{h,cpp}`
-//! - CKB discovery protocol: `network/src/protocols/discovery/`
+//! - Monero stripe-based pruning: `src/common/pruning.h` / `.cpp`
+//!   (files confirmed present in Monero master via head-fetch this
+//!   session; specific stripe-computation identifiers not re-read).
+//! - CKB discovery protocol: `network/src/protocols/discovery/` in the
+//!   CKB source tree (not verified against upstream this session).
 
 use crate::primitives::{KeyImage, hash_domain};
 use crate::config::NetworkTierConfig;

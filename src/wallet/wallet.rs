@@ -491,14 +491,17 @@ impl Wallet {
         // from an already-unlocked wallet without password re-confirm is
         // an unattended-session footgun (an attacker who walks up to an
         // unlocked desktop wallet can dump the view key in one RPC call).
-        // Use `export_view_key_confirmed(password, epoch)` instead.
+        // Use `export_view_key_confirmed(password, epoch)` instead. The
+        // bool-toggle variant proposed by the audit was rejected as too
+        // easy to call with the wrong default; making the safe API the
+        // only API forces every caller to be explicit.
         //
-        // Reference: Monero's wallet2 `get_seed`/`get_multisig_seed` REQUIRE
-        // re-entry of the wallet password; zcashd's `z_exportviewingkey`
-        // similarly gates on unlock + confirmation. The bool-toggle
-        // variant proposed by the audit was rejected as too easy to
-        // call with the wrong default; making the safe API the only API
-        // forces every caller to be explicit.
+        // The unlock-gated pattern this fix mirrors is present in
+        // zcashd's `z_exportviewingkey` at src/wallet/rpcdump.cpp:976,
+        // which calls `EnsureWalletIsUnlocked()` at line 1002 before
+        // returning any viewing key. CoinCync's design goes one step
+        // further by also requiring an explicit password re-confirm
+        // parameter on the successor API, not just an unlock check.
         let _ = epoch;
         Err(Error::InvalidState(
             "export_view_key requires password re-confirmation; \

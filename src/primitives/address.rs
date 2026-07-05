@@ -238,8 +238,7 @@ impl<'de> Deserialize<'de> for Address {
             // The human-readable branch above already routes through
             // `from_string` → `from_bytes_checked`, so this closes the
             // documentation-vs-code drift and makes both Serde paths
-            // consistent. Prior art: Monero addresses validate keypair
-            // membership on deserialization; Zcash Sapling likewise.
+            // consistent.
             //
             // Not touching the derived BorshDeserialize impl at L42 in this
             // pass — the persisted-Address surface is currently wallet-

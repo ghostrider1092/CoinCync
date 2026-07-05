@@ -33,9 +33,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// validation. Replaced with a compile-time feature (`insecure-fast-sync`) so
 /// production builds physically cannot enable the skip.
 ///
-/// Prior art: Bitcoin Core's `-assumevalid` is a config-file flag (not env)
-/// AND only skips signature verification, not all crypto. Zcash's zebrad uses
-/// a compile-time feature. This function follows zebrad's model.
+/// Design comparison (upstream specifics UNVERIFIED this session):
+/// Bitcoin Core exposes an `-assumevalid` mechanism as a command-line /
+/// config-file argument (not an environment variable), which is a
+/// stricter surface than the pre-fix runtime env var here. The precise
+/// scope of what `-assumevalid` skips vs re-verifies was not re-read
+/// this session and is not asserted below. This function's compile-
+/// time-feature gating is the safer design regardless of the specific
+/// upstream shape.
 ///
 /// To build with fast-sync (dev/testnet bootstrap only):
 ///   cargo build --features insecure-fast-sync
@@ -107,7 +112,7 @@ pub fn validate_block(
 
 /// Validate a block with optional checkpoint-based PoW skip.
 ///
-/// **Monero-style fast sync**: When `checkpoint_height` is Some and the block
+/// **Checkpoint fast-sync**: When `checkpoint_height` is Some and the block
 /// height is at or below it, ALL expensive cryptographic verification is
 /// skipped — not just PoW/VDF, but also CLSAG ring signatures, Bulletproofs
 /// range proofs, balance proofs, and asset surjection proofs. Only structural
@@ -115,7 +120,10 @@ pub fn validate_block(
 /// timestamps). This is safe because:
 /// 1. The block hash was already verified against the checkpoint chain
 /// 2. If any transaction were invalid, the block hash would differ
-/// 3. Monero uses this exact pattern for blocks below hardcoded checkpoints
+///
+/// (Monero's hardcoded-checkpoint fast-sync mode uses a similar
+/// approach in spirit; specific upstream identifiers were not re-read
+/// this session, so the reference is left qualitative.)
 #[tracing::instrument(
     skip(block, prev_block, utxos),
     fields(
@@ -160,7 +168,11 @@ pub fn validate_block_with_checkpoint_for_network(
     // is fatal enough that later checks would produce meaningless errors
     // — the same short-circuit behavior the original had, made explicit.
     //
-    // Prior art: Bitcoin Core's ContextualCheckBlock + CheckBlock split.
+    // Prior art: Bitcoin Core splits block validation into `CheckBlock`
+    // (validation.cpp:3928 in the master read this session — context-
+    // free structural checks) and `ContextualCheckBlock` (validation.cpp
+    // :4139 — contextual header/pindex-aware checks). The driver +
+    // named sub-check layout below mirrors that separation.
 
     let mut result = BlockValidation::ok();
 
@@ -347,8 +359,12 @@ pub fn validate_block_with_checkpoint_for_network(
             // Previously only the sum of commitments was checked against commit(max_coinbase, 0).
             // A miner could use non-zero blinding factors that cancel in sum (b1 + b2 = 0),
             // hiding arbitrary per-output amounts while the sum appeared correct.
-            // Like Monero's RCTTypeNull enforcement, coinbase outputs must be transparent:
-            // each commitment must equal commit(declared_amount, zero_blinding).
+            // Coinbase outputs must be transparent: each commitment must
+            // equal commit(declared_amount, zero_blinding). (Monero's
+            // RCT type distinguishes non-RCT coinbase outputs from RCT
+            // spends in an analogous spirit; the specific enum
+            // identifier was not re-read this session, so no upstream
+            // identifier is asserted here.)
             let mut total_declared: u64 = 0;
             let mut all_valid = true;
 
@@ -966,10 +982,15 @@ fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidati
 ///
 /// SPEC: the bound is INCLUSIVE — `timestamp == current_time +
 /// MAX_TIMESTAMP_DRIFT` is accepted, only strictly-greater is rejected.
-/// Matches Bitcoin Core's `nMaxFutureBlockTime` semantics (pow.cpp) and
-/// the NTP/RFC 5905 convention where the drift bound IS the tolerable
-/// window, not one tick less. Switching to `>=` would reject legitimate
-/// blocks whose timestamp exactly hits the boundary with no security gain.
+/// Matches the semantics of Bitcoin Core's `MAX_FUTURE_BLOCK_TIME`
+/// constant (chain.h:29 in the master read this session — 2 * 60 * 60
+/// seconds; also aliased at chain.h:37 as `TIMESTAMP_WINDOW`). The prior
+/// comment misattributed the constant to `pow.cpp` and used the older
+/// Hungarian-notation name `nMaxFutureBlockTime`, which is not present
+/// in current upstream. The bound is inclusive, matching the NTP/
+/// RFC 5905 convention where the drift bound IS the tolerable window,
+/// not one tick less. Switching to `>=` would reject legitimate blocks
+/// whose timestamp exactly hits the boundary with no security gain.
 ///
 /// SECURITY: genesis (height 0) is exempt. The genesis timestamp is a
 /// protocol constant hardcoded in the binary (`{testnet,mainnet}_genesis`)
@@ -1156,8 +1177,13 @@ pub fn validate_transaction(
     // order and error types are BIT-IDENTICAL to the previous flow — this
     // is a mechanical extraction, not a semantic change. Each sub-check
     // is a private helper in this file with a docstring explaining what
-    // it enforces. Prior art: Bitcoin Core's `CheckTransaction()` is
-    // under 100 lines with sub-checks in separate functions.
+    // it enforces. Prior art: Bitcoin Core factors transaction validity
+    // into `CheckTransaction()` and adjacent helpers (referenced from
+    // validation.cpp:802 and :3971 in the master read this session);
+    // the same driver + named-sub-check pattern is applied here. The
+    // prior comment asserted a specific line-count for the upstream
+    // helper; that count was not re-measured this session and is not
+    // repeated.
 
     // Version range: reject version==0 or version > MAX_TX_VERSION. Runs
     // BEFORE the coinbase early return so a version-99 coinbase is still
@@ -1335,8 +1361,12 @@ fn check_tx_input_output_counts(tx: &Transaction, current_height: u64) -> Result
 ///
 /// Left in place because REMOVING a consensus rule requires a hard fork
 /// and the removal has no observable benefit (uniform-shape dominates).
-/// Prior art: Bitcoin has no I/O ratio rule; Monero has no I/O ratio rule
-/// (uses TX_MAX_SIZE instead).
+/// (The prior comment asserted "Bitcoin has no I/O ratio rule; Monero
+/// has no I/O ratio rule (uses TX_MAX_SIZE instead)". Those broad
+/// negative claims were not re-verified against upstream this session,
+/// so they are removed rather than perpetuated. The rule is retained
+/// here on its own merits: removing a consensus rule requires a hard
+/// fork, and the uniform-shape rule already dominates the dust vector.)
 fn check_tx_io_ratio_legacy(tx: &Transaction) -> Result<()> {
     let ratio_limit = 32usize;
     if tx.inputs.len() > tx.outputs.len().saturating_mul(ratio_limit) {
@@ -2027,8 +2057,9 @@ pub(crate) fn verify_balance_proof(tx: &Transaction) -> bool {
                 // equation collapses to `output_sum + fee == 0` for that
                 // input, letting an attacker craft a transaction that
                 // passes balance without actually spending anything.
-                // Monero explicitly rejects identity pseudo-outputs for
-                // exactly this reason.
+                // (Reference implementations reject identity pseudo-
+                // outputs for the same reason; specific upstream
+                // identifier UNVERIFIED this session.)
                 tracing::warn!("Pseudo-output is identity point — rejecting");
                 return false;
             }
@@ -2284,7 +2315,10 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         // An invalid Ristretto point (e.g., all-0xFF, random non-curve bytes) creates
         // an unspendable output — enabling burning attacks where an attacker destroys
         // another user's funds by sending to addresses nobody can spend from.
-        // Historical precedent: Monero burning bug (September 2018).
+        // Historical incident referenced from public record: Monero
+        // burning bug (September 2018). Details not re-fetched this
+        // session; the check below stands on its own security
+        // reasoning above.
         if output.stealth_address.as_bytes() == &[0u8; 32] {
             return Err(Error::InvalidTransaction(
                 "output stealth address is zero (unspendable — potential burning attack)".into()
@@ -2312,7 +2346,10 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
 
     // SECURITY (C-9 / H-18): Reject inputs with invalid key images.
     // A zero key image or non-curve-point key image bypasses double-spend detection.
-    // Historical precedent: Monero key image validation bug (April 2017).
+    // Historical incident referenced from public record: Monero key
+    // image validation bug (April 2017). Details not re-fetched this
+    // session; the check below stands on its own security reasoning
+    // above.
     if !tx.is_coinbase() {
         for (idx, input) in tx.inputs.iter().enumerate() {
             let ki_bytes = input.key_image.as_bytes();

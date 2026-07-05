@@ -185,10 +185,15 @@ impl BlockReconstructor {
         // compact block" signal used for tx-count-cap violations
         // above; the caller falls back to GetData for the full block.
         //
-        // Prior art: Bitcoin Core's `BlockTransactions` validation
-        // rejects out-of-range and duplicate indices before
-        // attempting block reconstruction (see net_processing.cpp
-        // ProcessMessage<BlockTxn>).
+        // Prior art: Bitcoin Core's `BlockTransactions` type
+        // (VERIFIED at src/blockencodings.h:57 in the master read this
+        // session; the related request type `BlockTransactionsRequest`
+        // is at :45) is the analogous compact-block-transactions wire
+        // structure. The prior comment specifically claimed the
+        // rejection logic lives at "net_processing.cpp
+        // ProcessMessage<BlockTxn>"; that specific handler location
+        // was not re-traced this session and the internal validation
+        // shape is stated qualitatively rather than as a receipt.
         let mut prefilled_indices = std::collections::HashSet::with_capacity(
             compact.prefilled_txs.len()
         );

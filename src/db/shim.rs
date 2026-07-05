@@ -191,10 +191,6 @@ impl Db {
     /// RocksDB reopen race / WAL replay corner case. Emits structured
     /// tracing events for every open/close boundary + timing, so the next
     /// occurrence yields a full timeline in the journal.
-    ///
-    /// Prior art: Bitcoin Core wraps CDBWrapper::Open with LogPrintf on
-    /// entry/exit. Zebrad uses tracing::instrument on its ShieldedPool
-    /// state open. Same idea here.
     #[tracing::instrument(skip_all, fields(path = %path.display()))]
     pub fn open_path(path: &Path) -> Result<Self> {
         let open_start = std::time::Instant::now();
@@ -824,11 +820,6 @@ pub mod transaction {
     /// practice because `put_cf`/`delete_cf` don't corrupt memory. Migrated
     /// to `&'a RefCell<RocksBatch>` which enforces the "one mutator at a
     /// time" invariant at runtime with a small (~1ns) overhead per call.
-    ///
-    /// Prior art: zebrad's write-batch API uses `&mut WriteBatch` passed
-    /// through `&mut self` methods. redb uses `RefCell` for the same
-    /// interior-mutability pattern. rust-rocksdb's `WriteBatch` itself
-    /// is `Send + Sync` but requires exclusive access for mutation.
     pub struct TxTree<'a> {
         pub(super) tree: &'a Tree,
         pub(super) batch: &'a std::cell::RefCell<RocksBatch>,

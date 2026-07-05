@@ -24,8 +24,11 @@
 //!
 //! Privacy property: the proxy (e.g. a Tor exit) sees "TCP to
 //! 1.1.1.1:53"; the resolver sees a DNS query but not the user's IP.
-//! Equivalent to how torsocks routes DNS today, and matches the
-//! Bitcoin Core "dnsseed via proxy" posture.
+//! Equivalent to how torsocks routes DNS today. (Prior comment
+//! additionally invoked "the Bitcoin Core 'dnsseed via proxy'
+//! posture" as a parity reference; that specific characterization
+//! was not verified against Bitcoin Core this session and is
+//! dropped.)
 //!
 //! A future enhancement could add the Tor-specific SOCKS RESOLVE
 //! extension (CMD 0xF0, see tor-spec/socks-extensions.txt) as a faster

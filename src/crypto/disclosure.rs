@@ -227,7 +227,10 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
     // Canonical scalar decode via PeerScalar (2026-07-02 structural fix
     // consolidating the site-by-site canonical checks introduced earlier
     // the same day). See src/crypto/peer_scalars.rs for the class-of-bug
-    // rationale (Monero CVE-2017-14428 shape). PeerScalar::decode returns
+    // rationale (documented Monero non-canonical scalar handling class;
+    // specific CVE identifier UNVERIFIED — the previously-cited
+    // CVE-2017-14428 turned out to be a D-Link firmware issue, not the
+    // Monero scalar bug). PeerScalar::decode returns
     // Err if the 32-byte input isn't a canonical curve25519 encoding — no
     // silent mod-order reduction.
     let s = crate::crypto::PeerScalar::decode(proof.schnorr_s)?;

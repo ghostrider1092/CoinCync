@@ -9,7 +9,9 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 /// SECURITY (H17-FIX): Per-behavior misbehavior types with specific penalties.
-/// Based on Bitcoin Core's `Misbehaving()` pattern in `net_processing.cpp`.
+/// Based on Bitcoin Core's `Misbehaving()` pattern in `net_processing.cpp`
+/// (declared at line 583, defined at line 1918 in the master read this
+/// session).
 /// Each offense type carries a calibrated penalty that accumulates toward
 /// the ban threshold (-50 reputation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,16 +42,16 @@ pub enum MisbehaviorType {
     /// bug in a different code path (peer-punishment classifier), fixed
     /// in PR #154. This variant is the same class.
     ///
-    /// **Prior art** — every major implementation handles this without
-    /// banning:
-    ///   * Bitcoin Core `net_processing.cpp`: rejects orphan with
-    ///     `MSG_BLOCK_UNKNOWN_PARENT`, requests parent via GETDATA.
-    ///     No ban. Only bans if peer refuses to deliver requested
-    ///     parents (that maps to our `DownloadStall` category).
-    ///   * Zebra (Zcash Rust): size-limited orphan pool + LRU
-    ///     eviction. No peer punishment.
-    ///   * Monero: orphan queued, parent requested via response
-    ///     protocol. No punishment for legitimate orphans.
+    /// **Behavioural pattern (specific upstream identifiers UNVERIFIED
+    /// this session):** the widely-followed pattern is to hold the
+    /// orphan, request the missing parent(s), and only score-then-ban
+    /// the peer if it refuses to deliver those parents (which then maps
+    /// to the `DownloadStall` category here). The prior comment cited
+    /// specific per-project identifiers (`MSG_BLOCK_UNKNOWN_PARENT`,
+    /// Zebra orphan-pool internals, Monero response-protocol details)
+    /// that were not re-confirmed against upstream this session, so
+    /// the identifier-level citations have been removed rather than
+    /// perpetuated without receipts.
     ///
     /// **Where DoS protection should live instead**: orphan-pool layer
     /// (size-limit + LRU eviction) — never the peer scorer. If a
@@ -89,10 +91,12 @@ pub enum MisbehaviorType {
     /// activity, AND because a sybil-spam attacker filling mempool below
     /// the floor is a known DoS pattern. Per-tx weight is small so honest
     /// fee-estimator drift doesn't get a peer banned in two strikes, but
-    /// accumulated low-fee spam (~50 strikes) does. Bitcoin Core's
-    /// equivalent is `BLOCK_RELAY_MIN_FEE` silent-drop with no banscore;
-    /// we score it because the dynamic-fee escalation interacts with
-    /// sybil-displacement (see audit finding HIGH #13).
+    /// accumulated low-fee spam (~50 strikes) does. The prior comment
+    /// cited a Bitcoin Core `BLOCK_RELAY_MIN_FEE` silent-drop equivalent,
+    /// but that specific identifier could not be located in current
+    /// upstream this session, so the concrete cross-project reference is
+    /// removed. CoinCync-specific rationale (dynamic-fee escalation vs
+    /// sybil-displacement) still stands — see audit finding HIGH #13.
     LowFeeFlood,
     /// Peer sent us a block whose parent we don't have yet. This is NOT
     /// misbehavior — it's an out-of-order sync race that happens
@@ -273,9 +277,9 @@ pub fn classify_invalid_tx_reason(reason: &str) -> MisbehaviorType {
     // mempool floor (1x→8x as mempool fills) can legitimately exceed the
     // relaying peer's estimate during congestion bursts, so we don't want
     // to ban honest peers after 2 strikes. Sybil floods still accumulate
-    // and ban around ~50 strikes. Bitcoin Core silently drops below
-    // `BLOCK_RELAY_MIN_FEE` with no banscore; the small penalty here is
-    // the CoinCync-specific coupling for HIGH #13 anti-sybil.
+    // and ban around ~50 strikes. The small penalty here is the
+    // CoinCync-specific coupling for HIGH #13 anti-sybil (dynamic-fee
+    // floor interacting with sybil-displacement).
     if r.contains("fee too low") || r.contains("feetoolow") || r.contains("min_fee") {
         return MisbehaviorType::LowFeeFlood;
     }
@@ -379,9 +383,14 @@ pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
 /// Limits are calibrated so normal IBD (requesting many blocks) is fine,
 /// but 100 GetBlocks/sec from a single peer triggers a penalty. Wired
 /// into the P2P dispatch loop in `node.rs` (see the `rate_trackers`
-/// HashMap in the message-processor task). Reference: Bitcoin Core
-/// net_processing.cpp `PROCESSMSG_RATE_LIMIT_HASHES` and the per-type
-/// rate gates in `ProcessMessage()`.
+/// HashMap in the message-processor task). The prior comment cited
+/// Bitcoin Core `PROCESSMSG_RATE_LIMIT_HASHES` as a specific
+/// upstream constant; that identifier was not located in current
+/// upstream master this session, so the concrete cross-project
+/// reference has been removed. Bitcoin Core does have a
+/// `ProcessMessage()` entry point in net_processing.cpp, but the
+/// specific per-type rate gate this comment previously named
+/// remains UNVERIFIED here.
 pub struct PeerMessageRateTracker {
     /// (message_type_id, count) for the current window
     counts: HashMap<u8, u32>,
@@ -412,11 +421,16 @@ pub struct PeerMessageRateTracker {
 /// could spam GetBlocks or GetData to force disk lookups + PoW
 /// recomputation without triggering `MisbehaviorType::MessageFlood`.
 ///
-/// Prior art: Bitcoin Core `net_processing.cpp` uses the actual
-/// `NetMsgType::*` string constants + per-type `LimitTx`/`LimitBlock`
-/// counters keyed by string name, so the same misconfiguration can't
-/// happen. Zebra encodes the enum variant → limit map with the enum
-/// itself, catching this at compile time.
+/// Prior art (specific identifiers partially UNVERIFIED this session):
+/// Bitcoin Core `net_processing.cpp` uses `NetMsgType::*` constants
+/// throughout (VERIFIED — many call sites, e.g. line 1589 `VERSION`,
+/// line 2014 `GETDATA`, line 2438 `BLOCK` in the master read this
+/// session). The prior comment additionally named `LimitTx`/
+/// `LimitBlock` per-type counters; those specific identifiers were
+/// not located in current upstream this session, so the concrete
+/// counter names are removed. Zebra's compile-time enum-variant
+/// encoding was cited but was not confirmed against Zebra source
+/// this session and is dropped as well.
 ///
 /// **Correctness invariant** (locked by
 /// `msg_rate_limits_use_real_msg_type_discriminants` test): every entry
@@ -796,9 +810,12 @@ impl PeerScorer {
     /// the equilibrium size. Cheap: HashMap::retain is O(n) but n is
     /// bounded by recent unique offender count, not historical total.
     ///
-    /// Prior art: Bitcoin Core's `BanMan::BannedSetClean()` runs
-    /// inline before every `Discourage()` / `Ban()` call for the same
-    /// "amortize cleanup at write time" reason.
+    /// Prior art: Bitcoin Core's `BanMan::SweepBanned()` (banman.cpp:182
+    /// in the master read this session) is called before ban-set writes
+    /// (banman.cpp:37, :56, :178) for the same "amortize cleanup at
+    /// write time" reason. The prior comment cited `BannedSetClean()`
+    /// — that identifier was not located in current upstream and is
+    /// corrected to `SweepBanned()`.
     pub fn ban(&mut self, addr: SocketAddr) {
         self.cleanup_bans();
         let expiry = Instant::now() + self.ban_duration;
