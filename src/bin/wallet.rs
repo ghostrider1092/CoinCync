@@ -541,14 +541,26 @@ fn resolve_home(p: &PathBuf) -> PathBuf {
     p.clone()
 }
 
-fn prompt_password(confirm: bool) -> Result<String, String> {
-    // P8-Bw1 (2026-07-03): use dialoguer's hidden-input Password prompt.
-    // The previous read_line implementation echoed the password to the
-    // terminal — visible in scrollback, terminal recordings, and any
-    // shell that logs the tty (screen/tmux, mosh, `script`, some CI
-    // wrappers). dialoguer::Password disables terminal echo via the
-    // console crate's cross-platform tty control (termios ECHO off on
-    // Unix, SetConsoleMode on Windows), which is the standard fix.
+/// Maximum password length accepted from any input path (interactive
+/// prompt or stdin pipe). Prevents OOM via malicious piped input
+/// (`cat big-file | wallet --password -`) and limits the heap-resident
+/// window of password bytes regardless of source. 4 KiB comfortably
+/// exceeds any reasonable human-typed password. Added in v1.0.13 #5.
+const MAX_PASSWORD_LEN: usize = 4 * 1024;
+
+fn prompt_password(confirm: bool) -> Result<zeroize::Zeroizing<String>, String> {
+    // P8-Bw1 (2026-07-03) + v1.0.13 #5: use dialoguer's hidden-input
+    // Password prompt AND wrap the returned String in `Zeroizing<String>`
+    // at the boundary. The previous read_line implementation echoed the
+    // password to the terminal — visible in scrollback, terminal
+    // recordings, and any shell that logs the tty (screen/tmux, mosh,
+    // `script`, some CI wrappers). dialoguer::Password disables
+    // terminal echo via the console crate's cross-platform tty control
+    // (termios ECHO off on Unix, SetConsoleMode on Windows), which is
+    // the standard fix. The Zeroizing wrapper ensures the backing heap
+    // allocation is wiped on drop even if the subsequent length /
+    // emptiness validation errors.
+    //
     // Falls through to Err(String) on non-tty stdin so callers see the
     // same interface as before (piped automation must use `--password -`
     // to opt into the stdin-mode branch of resolve_password).
@@ -558,9 +570,11 @@ fn prompt_password(confirm: bool) -> Result<String, String> {
         prompt = prompt
             .with_confirmation("Confirm password", "passwords do not match");
     }
-    let pw = prompt
-        .interact()
-        .map_err(|e| format!("password prompt failed: {}", e))?;
+    let pw = zeroize::Zeroizing::new(
+        prompt
+            .interact()
+            .map_err(|e| format!("password prompt failed: {}", e))?,
+    );
     if pw.is_empty() {
         return Err("password must not be empty".into());
     }
@@ -580,20 +594,53 @@ fn prompt_password(confirm: bool) -> Result<String, String> {
 ///
 /// `confirm` only applies to the interactive path — piping is assumed to
 /// be deliberate, and re-typing for confirmation is hostile to automation.
-fn resolve_password(opt: Option<String>, confirm: bool) -> Result<String, String> {
+fn resolve_password(opt: Option<String>, confirm: bool) -> Result<zeroize::Zeroizing<String>, String> {
+    use std::io::Read;
+    use zeroize::Zeroize;
     match opt {
         Some(s) if s == "-" => {
-            use std::io::BufRead;
             let stdin = std::io::stdin();
-            let mut pw = String::new();
-            stdin.lock().read_line(&mut pw).map_err(|e| e.to_string())?;
-            let pw = pw.trim_end_matches(['\r', '\n']).to_string();
-            if pw.is_empty() {
+            let mut handle = stdin.lock().take((MAX_PASSWORD_LEN + 1) as u64);
+            // v1.0.13 #5: stdin buffer is Zeroizing so the intermediate
+            // copy is wiped on drop, including the error paths below.
+            let mut buf = zeroize::Zeroizing::new(String::new());
+            handle.read_to_string(&mut *buf).map_err(|e| e.to_string())?;
+            if buf.len() > MAX_PASSWORD_LEN {
+                return Err(format!(
+                    "stdin password too long (max {} bytes); refusing to read \
+                     more — did you accidentally pipe a large file?",
+                    MAX_PASSWORD_LEN,
+                ));
+            }
+            // Strip ONE trailing newline (typical interactive paste
+            // pattern). Don't trim() — leading/trailing whitespace
+            // might be intentional in the password.
+            let pw_str = zeroize::Zeroizing::new(buf
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string());
+            if pw_str.is_empty() {
                 return Err("password must not be empty when reading from stdin".into());
             }
+            Ok(pw_str)
+        }
+        Some(mut s) => {
+            // ARGV exposure warning — see function doc.
+            tracing::warn!(
+                "Password passed via `--password <literal>` is visible to \
+                 any local user via /proc/<pid>/cmdline on Linux or \
+                 `wmic process get commandline` on Windows. Prefer `--password -` \
+                 (piping the secret on stdin) for non-interactive use."
+            );
+            // v1.0.13 #5: copy the bytes into a Zeroizing wrapper and
+            // explicitly zeroize the original clap-owned String so the
+            // heap allocation that held the password through clap's
+            // parse + dispatch is wiped immediately, instead of
+            // leaking until the caller's drop.
+            let pw = zeroize::Zeroizing::new(s.clone());
+            s.zeroize();
             Ok(pw)
         }
-        Some(s) => Ok(s),
         None => prompt_password(confirm),
     }
 }
@@ -653,7 +700,10 @@ async fn cmd_create(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    save_wallet(path, &data, password.as_deref())
+    // v1.0.13 #5: password is now Option<Zeroizing<String>>.
+    // as_deref doesn't give us &str directly (intermediate &String);
+    // chain through as_str to land on &str for the library API.
+    save_wallet(path, &data, password.as_ref().map(|p| p.as_str()))
         .map_err(|e| format!("save failed: {}", e))?;
 
     println!("Wallet created at {:?}", path);

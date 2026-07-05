@@ -122,14 +122,24 @@ pub struct ChurnEngine {
     wallet_path: std::path::PathBuf,
     /// Wallet password (held in memory while churn is active).
     ///
-    /// SECURITY (R-87 fix, 2026-07-02): wrapped in `Zeroizing<String>`
-    /// so the password bytes are wiped from the heap allocation when
-    /// the `ChurnEngine` is dropped. Prior code held a plain `String`,
+    /// SECURITY (R-87 fix, 2026-07-02 + v1.0.13 #5 propagation
+    /// 2026-06-14): wrapped in `Zeroizing<String>` so the password
+    /// bytes are wiped from the heap allocation when the
+    /// `ChurnEngine` is dropped. Prior code held a plain `String`,
     /// meaning shutdown left the plaintext password sitting in the
     /// allocator's freed pool where a subsequent memory dump (core
     /// file, hibernation image, swap) could recover it. `Zeroizing`
     /// runs a `Zeroize` on Drop before the allocation is freed, so
     /// the freed memory contains all-zeros instead of the password.
+    ///
+    /// The `new()` constructor also takes `Zeroizing<String>` (not
+    /// `String`) so the wrapper travels the whole call chain from
+    /// the CLI prompt in `bin/wallet.rs` — this closes the pre-v1.0.13
+    /// window where the caller's owned `String` sat un-zeroized on
+    /// the heap until it was dropped independently of the engine.
+    /// ChurnEngine instances live the duration of the auto-churn
+    /// session (hours/days) — the largest in-process exposure window
+    /// outside WalletData itself.
     wallet_password: Zeroizing<String>,
     /// Shutdown signal.
     shutdown: Arc<AtomicBool>,
@@ -140,20 +150,22 @@ pub struct ChurnEngine {
 impl ChurnEngine {
     /// Create a new churn engine.
     ///
-    /// The caller passes an owned `String` for `wallet_password`; the
-    /// engine takes ownership and wraps it in `Zeroizing<String>` so
-    /// the memory is wiped on Drop (see R-87 note on the struct).
+    /// The caller passes an already-`Zeroizing<String>` wrapper for
+    /// `wallet_password` (see the struct field docstring for why the
+    /// wrapper travels the whole call chain rather than being applied
+    /// at the boundary). Engine takes ownership; the memory is wiped
+    /// when the engine drops.
     pub fn new(
         config: ChurnConfig,
         wallet_path: std::path::PathBuf,
-        wallet_password: String,
+        wallet_password: Zeroizing<String>,
         shutdown: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         config.validate()?;
         Ok(Self {
             config,
             wallet_path,
-            wallet_password: Zeroizing::new(wallet_password),
+            wallet_password,
             shutdown,
             stats: Arc::new(parking_lot::Mutex::new(ChurnStats::default())),
         })
@@ -546,7 +558,7 @@ mod tests {
                 ..Default::default()
             },
             std::path::PathBuf::from("/tmp/test.wallet"),
-            "test".to_string(),
+            zeroize::Zeroizing::new("test".to_string()),
             shutdown,
         )
         .unwrap();
@@ -576,7 +588,7 @@ mod tests {
         let engine = ChurnEngine::new(
             ChurnConfig::default(),
             std::path::PathBuf::from("/tmp/test.wallet"),
-            "test".to_string(),
+            zeroize::Zeroizing::new("test".to_string()),
             shutdown,
         )
         .unwrap();
@@ -600,7 +612,7 @@ mod tests {
                 ..Default::default()
             },
             std::path::PathBuf::from("/tmp/test.wallet"),
-            "test".to_string(),
+            zeroize::Zeroizing::new("test".to_string()),
             shutdown,
         )
         .unwrap();
@@ -626,7 +638,7 @@ mod tests {
                 ..Default::default()
             },
             std::path::PathBuf::from("/tmp/test.wallet"),
-            "test".to_string(),
+            zeroize::Zeroizing::new("test".to_string()),
             shutdown,
         )
         .unwrap();
