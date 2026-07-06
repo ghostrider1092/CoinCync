@@ -134,6 +134,14 @@ pub enum MessageType {
     Txs = 21,
     InvTx = 22,
     InvBlock = 23,
+    /// v1.0.13 #2 — `NotFound` response to GetTxs/GetData for items
+    /// we don't have. Without this, peers re-ask indefinitely (no
+    /// signal that the item is genuinely absent vs in-flight), and
+    /// we re-do disk/mempool lookups for every re-ask. Payload is
+    /// the same shape as the request: a list of hashes the receiver
+    /// can cache as "this peer doesn't have these — don't re-ask
+    /// for a while".
+    NotFound = 24,
     GetAddr = 30,
     Addr = 31,
     Reject = 40,
@@ -207,6 +215,7 @@ impl TryFrom<u8> for MessageType {
             21 => Ok(MessageType::Txs),
             22 => Ok(MessageType::InvTx),
             23 => Ok(MessageType::InvBlock),
+            24 => Ok(MessageType::NotFound),
             30 => Ok(MessageType::GetAddr),
             31 => Ok(MessageType::Addr),
             40 => Ok(MessageType::Reject),
@@ -267,6 +276,11 @@ impl MessageType {
             // Inventory: moderate
             MessageType::InvTx => 64 * 1024,         // 64 KB
             MessageType::InvBlock => 64 * 1024,      // 64 KB
+
+            // v1.0.13 #2 — NotFound mirrors a GetTxs/GetData request
+            // shape (list of hashes). Cap matches GetTxs (16 KB =
+            // ~500 hashes @ 32 bytes each + framing overhead).
+            MessageType::NotFound => 16 * 1024,      // 16 KB
 
             // Peer addresses: moderate
             MessageType::Addr => 256 * 1024,         // 256 KB
@@ -441,6 +455,28 @@ impl GetBlocksMessage {
                 "too many block hashes: {} > {}",
                 self.hashes.len(),
                 MAX_BLOCK_HASHES
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// v1.0.13 #2 — `NotFound` reply to GetTxs/GetData for items the
+/// receiver doesn't have. Mirrors the request shape exactly so the
+/// requester can mark each absent hash in its absence cache.
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct NotFoundMessage {
+    pub hashes: Vec<Hash>,
+}
+
+impl NotFoundMessage {
+    pub fn validate(&self) -> Result<()> {
+        // Bounded at MAX_BLOCK_HASHES (500) — same cap as the GetData/
+        // GetTxs requests it answers.
+        if self.hashes.len() > MAX_BLOCK_HASHES {
+            return Err(Error::ProtocolError(format!(
+                "NotFound has too many hashes: {} > {}",
+                self.hashes.len(), MAX_BLOCK_HASHES,
             )));
         }
         Ok(())
@@ -722,6 +758,14 @@ impl Message {
         let payload = borsh::to_vec(&msg)
             .map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::InvTx, payload))
+    }
+
+    /// v1.0.13 #2 — build a NotFound reply for a list of absent hashes.
+    pub fn not_found(magic: [u8; 4], hashes: Vec<Hash>) -> Result<Self> {
+        let msg = NotFoundMessage { hashes };
+        let payload = borsh::to_vec(&msg)
+            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        Ok(Self::new(magic, MessageType::NotFound, payload))
     }
 
     pub fn blocks(magic: [u8; 4], blocks: Vec<Block>) -> Result<Self> {
