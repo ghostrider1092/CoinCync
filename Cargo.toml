@@ -84,7 +84,7 @@ ed25519-dalek       = { version = "2", features = ["serde", "rand_core"] }
 x25519-dalek        = { version = "2", features = ["serde", "static_secrets"] }
 
 # â”€â”€ Range proofs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-tari_bulletproofs_plus = "0.5"
+tari_bulletproofs_plus = "0.4"
 merlin                 = "3"
 
 # â”€â”€ Hashing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -240,7 +240,7 @@ tokio-tungstenite  = "0.29"
 qrcode     = "0.14"
 image      = { version = "0.25", default-features = false, features = ["png"] }
 hashlink   = "0.9"
-bloomfilter = "3"
+bloomfilter = "1"
 prometheus  = "0.14"
 
 # â”€â”€ ZK / Halo2 (Phase 2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -250,7 +250,7 @@ prometheus  = "0.14"
 # memory/project_cync1_orchard_tari_conflict.md for the background.
 halo2_proofs          = "0.3"
 halo2_gadgets         = "0.3"
-incrementalmerkletree = "0.8"
+incrementalmerkletree = "0.5"
 bridgetree            = "0.4"
 pasta_curves          = "0.5"
 blake2b_simd          = "1.0"
