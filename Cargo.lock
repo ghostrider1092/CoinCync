@@ -5980,6 +5980,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tick"
+version = "0.1.0"
+dependencies = [
+ "tick",
+]
+
+[[package]]
 name = "time"
 version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"

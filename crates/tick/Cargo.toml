@@ -1,0 +1,34 @@
+[package]
+name         = "tick"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+description  = "Passive network agents that quest for signals, latch onto targets, and feed payloads. Designed for privacy blockchains — no wallet access, aggregate metrics only, Dandelion++ preservation. See docs/architecture/tick.md in the coincync repo for the full design."
+license      = "MIT"
+
+# Phase 1a: crate skeleton. Two traits (ChainAdapter, TickBehavior),
+# a set of aggregate-only types, and a MockAdapter for testing.
+# NO impls of RescueTick / HealthTick / PropagationTick in this
+# phase — they land in 1b, 2, 3 respectively.
+[lib]
+name = "tick"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+# `mock` gates the MockAdapter used by unit + integration tests.
+# Downstream crates depend on `tick = { version = "0.1", features = ["mock"] }`
+# only in their [dev-dependencies], never in the main dep tree —
+# MockAdapter has zero business in a production binary.
+mock = []
+
+[dependencies]
+# Nothing yet — Phase 1a is pure Rust, no external deps.
+# Phase 1b will pull in tokio for async ticks and rand for
+# Poisson-distributed intervals.
+
+[dev-dependencies]
+# Testing needs the mock feature to exercise adapters without
+# a real chain.
+tick = { path = ".", features = ["mock"] }
