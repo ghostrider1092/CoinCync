@@ -44,7 +44,6 @@ use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT as G,
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
-    traits::Identity,
 };
 use rand::{rngs::OsRng, RngCore};
 

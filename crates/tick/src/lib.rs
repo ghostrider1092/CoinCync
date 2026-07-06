@@ -57,6 +57,7 @@
 #![deny(unsafe_code)]
 
 pub mod adapter;
+pub mod rescue;
 pub mod tick;
 pub mod types;
 
@@ -64,6 +65,7 @@ pub mod types;
 pub mod mock;
 
 pub use adapter::ChainAdapter;
+pub use rescue::{recovery_priority, RescueConfig, RescueTick};
 pub use tick::{TickBehavior, TickPhase};
 pub use types::{
     AggregateFleetHealth, ChainTipState, DeploymentMode, FleetPeer,

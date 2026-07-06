@@ -71,20 +71,63 @@ pub trait ChainAdapter: Send + Sync + 'static {
     /// spoofed peer would auto-recover to a wrong chain.
     fn probe_peer(&self, peer: &FleetPeer) -> TickResult<ChainTipState<Self::BlockId>>;
 
+    /// Fetch a header from `peer` at the given height and locally
+    /// re-verify its PoW.
+    ///
+    /// RescueTick calls this AFTER detecting a divergence and BEFORE
+    /// accepting the peer's chain as canonical. If the peer serves a
+    /// header whose PoW doesn't check out, they're either lying (a
+    /// hostile RescueTick pointing at a spoofed chain) or broken
+    /// (adapter bug on the peer side). Either way, RescueTick refuses
+    /// to feed anything and emits a `PrivacyViolation`-shaped alert.
+    ///
+    /// Returns:
+    /// - `Ok(true)` on successful fetch + PoW valid
+    /// - `Ok(false)` on successful fetch + PoW INVALID (peer is lying)
+    /// - `Err(_)` on adapter/network failure (peer unreachable, RPC
+    ///   auth failed, chain code panicked, etc.)
+    ///
+    /// The distinction between `Ok(false)` and `Err` is
+    /// safety-critical. `Ok(false)` MUST NOT be conflated with
+    /// "couldn't check" — it's an active statement that the peer's
+    /// chain is wrong.
+    ///
+    /// Adapters for chains without cheap header-level PoW check
+    /// (e.g., PoS chains) SHOULD implement this via a batch header-
+    /// chain download + finality check equivalent, or return
+    /// `TickResult::Err(TickError::Other("chain has no cheap PoW
+    /// header check".into()))` — RescueTick will treat that as
+    /// "unable to verify, refuse to feed."
+    fn verify_peer_header_pow(
+        &self,
+        peer: &FleetPeer,
+        height: u64,
+    ) -> TickResult<bool>;
+
     // ─── Chaindata snapshot / restore (RescueTick) ─────────────────
 
-    /// Snapshot the local chaindata to a tarball at `dest`.
+    /// Snapshot chaindata to a tarball at `dest`.
+    ///
+    /// When `source == None`, snapshots the local node's chaindata.
+    /// When `source == Some(peer)`, asks that peer to snapshot ITS
+    /// chaindata (typically over a Noise-encrypted tick-to-tick
+    /// channel) and receives the tarball into `dest`.
+    ///
+    /// RescueTick calls this with `Some(canonical_peer)` during Latch
+    /// — the point is to get the CANONICAL chain's data, which lives
+    /// on a different host than the tick doing the orchestration.
     ///
     /// Blocking; async callers wrap in `spawn_blocking` themselves. The
     /// tick crate stays sync-agnostic so it can be used from either
     /// tokio or an executor-less binary.
     ///
-    /// The snapshot must be taken with the node running (live-tar).
-    /// Callers wait for `tip_age > 60s` before invoking to reduce WAL
-    /// inconsistency (see `feedback_snapshot_procedure` memo in the
-    /// coincync repo).
+    /// The snapshot must be taken with the source node running (live-
+    /// tar). Callers wait for `tip_age > 60s` before invoking to
+    /// reduce WAL inconsistency (see `feedback_snapshot_procedure`
+    /// memo in the coincync repo).
     fn snapshot_chaindata(
         &self,
+        source: Option<&FleetPeer>,
         dest: &std::path::Path,
     ) -> TickResult<Snapshot>;
 

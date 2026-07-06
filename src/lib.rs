@@ -59,6 +59,13 @@ pub mod cli;
 // ── Runtime observability ───────────────────────────────────
 pub mod runtime_watchdog;
 
+// ── Tick sidecar adapter ────────────────────────────────────
+// CoincyncAdapter — the `tick::ChainAdapter` bridge that lets the
+// sidecar `coincync-tick` binary drive RescueTick / HealthTick /
+// PropagationTick against a running coincync-node. Phase 1c ships
+// the shell only; RPC integration lands in Phase 1d.
+pub mod tick_adapter;
+
 // ── Network genesis definitions ─────────────────────────────
 pub mod testnet;
 pub mod mainnet;

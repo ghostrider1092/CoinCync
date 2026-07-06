@@ -136,7 +136,7 @@ http-body-util = "0.1"
 bytes      = "1"
 hyper      = { version = "1", features = ["full"] }
 axum       = { version = "0.7", features = ["ws"] }
-reqwest    = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest    = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 # â”€â”€ Networking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 hickory-resolver = "0.26"
@@ -259,6 +259,12 @@ group                 = "0.13"
 
 # Bridge crate â€” bytes-only cross-stack boundary types.
 bridge                = { path = "crates/bridge" }
+
+# Tick â€” passive network agents (rescue / health / propagation).
+# Depended on for the in-process CoincyncAdapter shim in
+# src/tick_adapter.rs. Zero external transitive deps â€” tick
+# itself has no upstream crates.
+tick                  = { path = "crates/tick" }
 
 # Rolling soft-finality state machine (CIP-009.D). Optional â€” pulled
 # in only by the off-by-default `rolling-finality` feature. The

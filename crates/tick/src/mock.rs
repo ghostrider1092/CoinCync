@@ -67,6 +67,10 @@ struct MockState {
     tip: ChainTipState<MockBlockId>,
     fleet: Vec<FleetPeer>,
     peer_tips: std::collections::HashMap<String, ChainTipState<MockBlockId>>,
+    /// Per-peer PoW-verify verdict. Missing entry ⇒ Err (adapter can't
+    /// verify — treated as "refuse to feed"). Present entry ⇒ that
+    /// bool is returned by `verify_peer_header_pow`.
+    peer_pow_verdicts: std::collections::HashMap<String, bool>,
     stem_txs: std::collections::HashSet<MockTxId>,
     stem_relays: Vec<MockPeerId>,
     health: HealthSnapshot,
@@ -93,6 +97,7 @@ impl Default for MockState {
             },
             fleet: Vec::new(),
             peer_tips: std::collections::HashMap::new(),
+            peer_pow_verdicts: std::collections::HashMap::new(),
             stem_txs: std::collections::HashSet::new(),
             stem_relays: Vec::new(),
             health: HealthSnapshot {
@@ -156,6 +161,19 @@ impl MockAdapter {
         let mut inner = self.inner.lock().unwrap();
         inner.peer_tips.insert(peer.name.clone(), state);
         inner.fleet.push(peer);
+    }
+
+    /// Set the verdict `verify_peer_header_pow` will return for the
+    /// named peer. `Some(true)` → peer's headers verify; `Some(false)`
+    /// → peer is lying; `None` → `verify_peer_header_pow` returns
+    /// `Err` (adapter can't verify, RescueTick treats as
+    /// "refuse to feed").
+    pub fn set_peer_pow_verdict(&self, peer_name: &str, verdict: Option<bool>) {
+        let mut inner = self.inner.lock().unwrap();
+        match verdict {
+            Some(v) => { inner.peer_pow_verdicts.insert(peer_name.into(), v); }
+            None => { inner.peer_pow_verdicts.remove(peer_name); }
+        }
     }
 
     /// Mark a tx as being in stem phase. `is_stem_phase` will return
@@ -231,13 +249,39 @@ impl ChainAdapter for MockAdapter {
             .ok_or_else(|| TickError::Unreachable(format!("no mock tip for peer {}", peer.name)))
     }
 
-    fn snapshot_chaindata(&self, dest: &std::path::Path) -> TickResult<Snapshot> {
+    fn verify_peer_header_pow(
+        &self,
+        peer: &FleetPeer,
+        _height: u64,
+    ) -> TickResult<bool> {
+        let inner = self.inner.lock().unwrap();
+        match inner.peer_pow_verdicts.get(&peer.name) {
+            Some(v) => Ok(*v),
+            None => Err(TickError::Unreachable(format!(
+                "no PoW verdict registered for peer {}", peer.name
+            ))),
+        }
+    }
+
+    fn snapshot_chaindata(
+        &self,
+        source: Option<&FleetPeer>,
+        dest: &std::path::Path,
+    ) -> TickResult<Snapshot> {
         let mut inner = self.inner.lock().unwrap();
         inner.snapshot_calls += 1;
+        let tip = match source {
+            Some(peer) => inner
+                .peer_tips
+                .get(&peer.name)
+                .map(|t| t.tip_id.0.to_vec())
+                .unwrap_or_else(|| inner.tip.tip_id.0.to_vec()),
+            None => inner.tip.tip_id.0.to_vec(),
+        };
         Ok(Snapshot {
             tarball_path: dest.to_path_buf(),
             sha256: [0u8; 32],
-            source_tip: inner.tip.tip_id.0.to_vec(),
+            source_tip: tip,
             compressed_bytes: 0,
         })
     }

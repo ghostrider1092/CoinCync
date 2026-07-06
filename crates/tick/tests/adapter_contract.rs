@@ -234,11 +234,38 @@ fn health_snapshot_reports_local_metrics() {
 fn snapshot_and_apply_are_recorded() {
     let adapter = MockAdapter::new();
     let dest = std::path::PathBuf::from("/tmp/tick-test.tgz");
-    let snap = adapter.snapshot_chaindata(&dest).unwrap();
+    // Local snapshot (source == None).
+    let snap = adapter.snapshot_chaindata(None, &dest).unwrap();
     assert_eq!(snap.tarball_path, dest);
     assert_eq!(adapter.snapshot_calls(), 1);
     adapter.apply_chaindata(&dest).unwrap();
     assert_eq!(adapter.apply_calls(), 1);
+}
+
+#[test]
+fn snapshot_from_specific_peer_records_peer_tip() {
+    let adapter = MockAdapter::new();
+    let peer = FleetPeer {
+        name: "randomx-2".into(),
+        rpc_url: "http://127.0.0.1:28081".into(),
+        role: "miner".into(),
+    };
+    let peer_tip = ChainTipState {
+        height: 9469,
+        difficulty: 720_000_000,
+        tip_id: MockBlockId::from_tag(9469),
+        is_synced: true,
+        peer_count: 5,
+        tip_age_secs: 30,
+    };
+    adapter.add_fleet_peer(peer.clone(), peer_tip.clone());
+
+    let dest = std::path::PathBuf::from("/tmp/canonical.tgz");
+    let snap = adapter.snapshot_chaindata(Some(&peer), &dest).unwrap();
+    // source_tip in the snapshot should reflect the peer's tip, not
+    // the local tick's tip. Confirms `snapshot_chaindata(source=Some)`
+    // is genuinely sourcing from the canonical, not from local.
+    assert_eq!(snap.source_tip, peer_tip.tip_id.0.to_vec());
 }
 
 // ─── Rebroadcast surface ──────────────────────────────────────────────
