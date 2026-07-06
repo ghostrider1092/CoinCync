@@ -37,7 +37,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing::{info, warn};
 
-use coincync::colony::forager::observe_round;
+use coincync::colony::forager::{advise, observe_round};
 use coincync::colony::pheromone::PheromoneMap;
 use coincync::colony::sensor::{classify, NetSignal};
 use coincync::tick_adapter::{CoincyncAdapter, CoincyncAdapterConfig};
@@ -66,7 +66,18 @@ struct Cli {
     /// changes no node behavior, observes no transaction. Off by default.
     #[arg(long)]
     colony_observe: bool,
+
+    /// Run the colony forager in ADVISE mode: additionally log the bounded
+    /// peer-preference recommendation the colony *would* advise the node to
+    /// prefer. Still sends NOTHING to the node — pushing advice to the node's
+    /// peer manager is a separate, reviewed step. Implies --colony-observe.
+    #[arg(long)]
+    colony_advise: bool,
 }
+
+/// Max peers the colony recommends preferring — small (diversity over
+/// volume; also bounds any eventual advisory RPC).
+const COLONY_MAX_PREFER: usize = 3;
 
 fn init_tracing() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -147,7 +158,12 @@ fn report_once(adapter: &CoincyncAdapter, fleet: bool) {
 /// One colony forager observe round: score peers on public block/tip
 /// signals and log the top-ranked block-relay recommendation. Read-only —
 /// sends nothing to the node, observes no transaction.
-fn colony_observe_report(adapter: &CoincyncAdapter, map: &mut PheromoneMap, fleet: bool) {
+fn colony_observe_report(
+    adapter: &CoincyncAdapter,
+    map: &mut PheromoneMap,
+    fleet: bool,
+    advise_mode: bool,
+) {
     // Forager: block-relay peer scoring.
     let ranked = observe_round(adapter, map);
     if ranked.is_empty() {
@@ -159,6 +175,19 @@ fn colony_observe_report(adapter: &CoincyncAdapter, map: &mut PheromoneMap, flee
                 score,
                 "colony/forager (observe): would prefer for block relay"
             );
+        }
+    }
+
+    // Advise mode: log the bounded recommendation the colony WOULD advise.
+    // Still sends nothing — the node-side advisory application is a separate,
+    // reviewed step.
+    if advise_mode {
+        let advice = advise(map, COLONY_MAX_PREFER);
+        if advice.prefer.is_empty() {
+            info!("colony/forager (advise): no peer clears the advice threshold yet");
+        } else {
+            let peers: Vec<&str> = advice.prefer.iter().map(|p| p.0.as_str()).collect();
+            info!(?peers, "colony/forager (advise): WOULD advise node to prefer (not sent)");
         }
     }
 
@@ -200,17 +229,20 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("building adapter: {}", e))?;
     let fleet = matches!(adapter.deployment_mode(), DeploymentMode::Fleet);
 
-    // Local pheromone map for the forager (observe mode). Persists across
-    // rounds so evaporation/reinforcement can track current conditions.
+    // Local pheromone map for the forager. Persists across rounds so
+    // evaporation/reinforcement can track current conditions. --colony-advise
+    // implies observe (advise reads the map the observe round builds).
     let mut pheromone = PheromoneMap::new();
-    if cli.colony_observe {
-        info!("colony forager: OBSERVE mode (read-only; recommendations logged, nothing sent)");
+    let colony_active = cli.colony_observe || cli.colony_advise;
+    if colony_active {
+        let m = if cli.colony_advise { "OBSERVE+ADVISE" } else { "OBSERVE" };
+        info!("colony forager: {m} mode (read-only; recommendations logged, nothing sent)");
     }
 
     if cli.once {
         report_once(&adapter, fleet);
-        if cli.colony_observe {
-            colony_observe_report(&adapter, &mut pheromone, fleet);
+        if colony_active {
+            colony_observe_report(&adapter, &mut pheromone, fleet, cli.colony_advise);
         }
         return Ok(());
     }
@@ -231,8 +263,8 @@ fn main() -> anyhow::Result<()> {
 
     while !shutdown.load(Ordering::Relaxed) {
         report_once(&adapter, fleet);
-        if cli.colony_observe {
-            colony_observe_report(&adapter, &mut pheromone, fleet);
+        if colony_active {
+            colony_observe_report(&adapter, &mut pheromone, fleet, cli.colony_advise);
         }
         // Sleep the interval in small slices so shutdown stays responsive.
         let mut slept = Duration::ZERO;

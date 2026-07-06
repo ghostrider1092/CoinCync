@@ -81,6 +81,41 @@ pub fn observe_round<A: ChainAdapter>(
     map.ranked()
 }
 
+// ─── Advise mode (Phase 2, decision only) ─────────────────────────────────
+
+/// A bounded peer-preference recommendation. In advise mode the colony would
+/// ask the node to **prefer** these peers for block relay / connection
+/// retention. Advisory only: the node validates, caps, keeps its anchors,
+/// and may ignore it. The colony has no direct authority over the peer set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerAdvice {
+    /// Peers to prefer, highest-scored first (already capped).
+    pub prefer: Vec<PeerKey>,
+}
+
+/// Minimum pheromone a peer must have before the colony will recommend it.
+/// A peer has to have relayed well over several rounds (deposits accumulate,
+/// evaporation decays) — one lucky-fast block is not enough. First defense
+/// against pheromone-poisoning: a transient spike can't reach the threshold.
+pub const ADVISE_MIN_SCORE: u32 = 600;
+
+/// Turn the current pheromone ranking into a bounded [`PeerAdvice`]: the top
+/// `max_prefer` peers whose score clears [`ADVISE_MIN_SCORE`].
+///
+/// Pure and non-mutating — computes a recommendation from the map; it does
+/// **not** send anything or touch the node. Wiring this to the node's peer
+/// manager (an eclipse-safe retention hint) is the reviewed next step.
+pub fn advise(map: &PheromoneMap, max_prefer: usize) -> PeerAdvice {
+    let prefer = map
+        .ranked()
+        .into_iter()
+        .filter(|(_, score)| *score >= ADVISE_MIN_SCORE)
+        .take(max_prefer)
+        .map(|(key, _)| key)
+        .collect();
+    PeerAdvice { prefer }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +176,47 @@ mod tests {
         let a = deposit_for_probe(1000, &tip(1200, 30, true));
         let b = deposit_for_probe(1000, &tip(1200, 30, true));
         assert_eq!(a, b);
+    }
+
+    // ── advise ──────────────────────────────────────────────────────────
+
+    fn key(s: &str) -> PeerKey {
+        PeerKey(s.to_string())
+    }
+
+    #[test]
+    fn advise_recommends_top_peers_above_threshold_highest_first() {
+        let mut m = PheromoneMap::new();
+        m.deposit(key("best"), 900);
+        m.deposit(key("good"), 700);
+        let advice = advise(&m, 5);
+        assert_eq!(advice.prefer, vec![key("best"), key("good")]);
+    }
+
+    #[test]
+    fn advise_excludes_peers_below_min_score() {
+        let mut m = PheromoneMap::new();
+        m.deposit(key("proven"), ADVISE_MIN_SCORE);
+        m.deposit(key("unproven"), ADVISE_MIN_SCORE - 1);
+        let advice = advise(&m, 5);
+        // Only the peer clearing the threshold is recommended — a transient
+        // spike below it can't get advised (poison resistance).
+        assert_eq!(advice.prefer, vec![key("proven")]);
+    }
+
+    #[test]
+    fn advise_caps_at_max_prefer() {
+        let mut m = PheromoneMap::new();
+        for name in ["a", "b", "c", "d"] {
+            m.deposit(key(name), 800);
+        }
+        assert_eq!(advise(&m, 2).prefer.len(), 2);
+    }
+
+    #[test]
+    fn advise_is_empty_when_nothing_qualifies() {
+        let mut m = PheromoneMap::new();
+        m.deposit(key("weak"), 100);
+        assert!(advise(&m, 5).prefer.is_empty());
     }
 }
