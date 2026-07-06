@@ -1,0 +1,37 @@
+[Unit]
+Description=CoinCync tick — read-only health-monitoring sidecar (HealthTick)
+Documentation=https://github.com/ghostrider1092/Coincync-Testnet-
+# Start after the node so the local RPC is up. Wants (not Requires): the
+# sidecar tolerates a down node and simply reports the RPC as unreachable,
+# so it must not be torn down when the node restarts.
+After=coincync-node.service
+Wants=coincync-node.service
+
+[Service]
+Type=simple
+# Same user as the node so the shared RPC bearer token
+# (/etc/coincync/rpc-token) is readable. Isolation is at the *process*
+# level — a crash/hang here cannot wedge coincync-node.
+User=coincync
+Group=coincync
+ExecStart=/usr/local/bin/coincync-tick --config /etc/coincync-tick/config.toml --interval 30
+Restart=on-failure
+RestartSec=10s
+
+# Hardening — this is a read-only monitor: it reads /proc, the config, and
+# the RPC token, and writes nothing to disk. Lock it down accordingly.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=coincync-tick
+
+[Install]
+WantedBy=multi-user.target

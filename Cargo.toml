@@ -44,6 +44,13 @@ path = "src/bin/update_critical_hashes.rs"
 name = "coincync-sign-snapshot"
 path = "src/bin/sign_snapshot.rs"
 
+[[bin]]
+# Read-only health-monitoring sidecar (HealthTick). Runs as its own
+# process so a bug here can't wedge the node; watches a local node over
+# RPC + this host's /proc. See src/bin/coincync-tick.rs.
+name = "coincync-tick"
+path = "src/bin/coincync-tick.rs"
+
 [features]
 default = ["randomx"]
 testnet = ["randomx"]

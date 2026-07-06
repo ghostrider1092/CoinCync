@@ -1,0 +1,18 @@
+# coincync-tick sidecar configuration (CoincyncAdapterConfig).
+# Install at /etc/coincync-tick/config.toml.
+
+# Deployment mode:
+#   "personal" — monitor only the local node (host + node health).
+#   "fleet"    — additionally probe fleet peers and report
+#                aggregate_fleet_health (uses fleet_config_path below).
+deployment_mode = "personal"
+
+# Local coincync-node JSON-RPC endpoint (loopback).
+local_rpc_url = "http://127.0.0.1:28081"
+
+# Bearer token file — the SAME token the node's RPC auth uses. The sidecar
+# reads it (never logs it) to authenticate its get_info calls.
+local_rpc_token_path = "/etc/coincync/rpc-token"
+
+# Fleet peer list. Only consulted when deployment_mode = "fleet".
+fleet_config_path = "/etc/coincync-tick/fleet-config.json"

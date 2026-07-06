@@ -66,6 +66,12 @@ pub mod runtime_watchdog;
 // the shell only; RPC integration lands in Phase 1d.
 pub mod tick_adapter;
 
+// ── Colony — biomimetic swarm agents ────────────────────────
+// Advisory-only, non-consensus network-resilience agents hosted by the
+// coincync-tick sidecar. Phase 1: forager in observe mode (scores peers on
+// public block/tip signals; sends nothing). See docs/architecture/colony.md.
+pub mod colony;
+
 // ── Network genesis definitions ─────────────────────────────
 pub mod testnet;
 pub mod mainnet;
