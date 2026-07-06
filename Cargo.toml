@@ -240,7 +240,7 @@ tokio-tungstenite  = "0.29"
 qrcode     = "0.14"
 image      = { version = "0.25", default-features = false, features = ["png"] }
 hashlink   = "0.9"
-bloomfilter = "1"
+bloomfilter = "3"
 prometheus  = "0.14"
 
 # â”€â”€ ZK / Halo2 (Phase 2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
