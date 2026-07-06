@@ -250,7 +250,7 @@ prometheus  = "0.14"
 # memory/project_cync1_orchard_tari_conflict.md for the background.
 halo2_proofs          = "0.3"
 halo2_gadgets         = "0.3"
-incrementalmerkletree = "0.5"
+incrementalmerkletree = "0.8"
 bridgetree            = "0.4"
 pasta_curves          = "0.5"
 blake2b_simd          = "1.0"
