@@ -19,7 +19,7 @@ keyring = "4"
 # Used by generate_rpc_key() to create a fresh 64-hex bearer key on
 # first launch. Pinned to 0.8 to match the workspace-wide version
 # elsewhere (root Cargo.toml + crates/coincync-rig/Cargo.toml).
-rand = "0.8"
+rand = "0.10"
 # QR code rendering for the Receive page. SVG output keeps the bundle
 # small and scales cleanly. Same version as the workspace-wide pin in
 # the root Cargo.toml.
