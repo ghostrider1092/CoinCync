@@ -125,7 +125,7 @@ flume       = "0.12"
 # registry crate. We only ever call `low_level::register` in an
 # async-signal-safe closure that stores an AtomicBool; every other path
 # stays in `signal-hook`'s safe wrapper API.
-signal-hook = "0.3"
+signal-hook = "0.4"
 
 # â”€â”€ JSON-RPC + HTTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 jsonrpsee  = { version = "0.24", features = ["server", "client", "macros"] }
