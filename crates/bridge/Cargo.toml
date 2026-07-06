@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # the isolation guarantee this crate exists to provide.
 [dependencies]
 subtle    = "2.5"
-thiserror = "1"
+thiserror = "2"
 
 [lints.rust]
 unsafe_code  = "forbid"

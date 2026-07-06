@@ -42,7 +42,7 @@ wire-codec = ["dep:borsh"]
 serde       = { version = "1", features = ["derive"] }
 
 # Errors
-thiserror   = "1"
+thiserror   = "2"
 
 # Real ed25519 — feature-gated. Used by `verifier_ed25519` module.
 ed25519-dalek = { version = "2", features = ["rand_core"], optional = true }

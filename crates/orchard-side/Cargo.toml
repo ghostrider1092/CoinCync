@@ -42,7 +42,7 @@ group         = "0.13"
 bridge        = { path = "../bridge" }
 
 # Error machinery + structured error enum.
-thiserror     = "1"
+thiserror     = "2"
 
 # Subtle ConstantTimeEq for nullifier comparisons (mirrors the
 # bridge crate's posture — anything that compares a 32-byte
