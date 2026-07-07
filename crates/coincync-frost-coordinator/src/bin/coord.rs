@@ -524,7 +524,7 @@ async fn run_connection(
                         let response = handle_request(&coord, &text, &mut attached, peer.ip()).await;
                         let payload = serde_json::to_string(&response)
                             .map_err(|e| format!("encode response: {e}"))?;
-                        sink.send(Message::Text(payload))
+                        sink.send(Message::Text(payload.into()))
                             .await
                             .map_err(|e| format!("ws send: {e}"))?;
                     }
@@ -544,7 +544,7 @@ async fn run_connection(
                     Some(Ok(event)) => {
                         let payload = serde_json::to_string(&event)
                             .map_err(|e| format!("encode broadcast: {e}"))?;
-                        sink.send(Message::Text(payload))
+                        sink.send(Message::Text(payload.into()))
                             .await
                             .map_err(|e| format!("ws send: {e}"))?;
                     }
