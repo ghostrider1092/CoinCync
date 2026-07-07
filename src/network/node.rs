@@ -961,6 +961,7 @@ impl P2PNode {
         let acceptor_tracker = self.conn_tracker.clone();
         let acceptor_scorer = self.peer_scorer.clone();
         let acceptor_identity = identity.clone();
+        let acceptor_relay_scores = self.relay_scores.clone();
         let acceptor_encryption = encryption_config.clone();
 
         tokio::spawn(async move {
@@ -1015,8 +1016,9 @@ impl P2PNode {
                             let now = std::time::Instant::now();
                             let victim_ref: Vec<&crate::network::peer::PeerInfo> =
                                 snapshot.iter().collect();
+                            let relay_guard = acceptor_relay_scores.read().await;
                             match crate::network::eviction::select_inbound_to_evict(
-                                victim_ref, now,
+                                victim_ref, now, &relay_guard,
                             ) {
                                 Some(victim_id) => {
                                     debug!(

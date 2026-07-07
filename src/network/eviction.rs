@@ -47,6 +47,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use super::peer::{PeerId, PeerInfo};
+use super::relay_score::RelayScoreMap;
 
 /// How many peers to protect by each criterion. Bitcoin Core's
 /// `SelectNodeToEvict` (src/node/eviction.cpp:178 in the master read
@@ -113,7 +114,11 @@ fn netgroup(addr: SocketAddr) -> u64 {
 /// the master read this session) drives the equivalent flow inline; we
 /// keep the policy/mechanism split because the peers table here is a
 /// DashMap and locking is the caller's responsibility.
-pub fn select_inbound_to_evict<'a, I>(peers: I, now: Instant) -> Option<PeerId>
+pub fn select_inbound_to_evict<'a, I>(
+    peers: I,
+    now: Instant,
+    relay_scores: &RelayScoreMap,
+) -> Option<PeerId>
 where
     I: IntoIterator<Item = &'a PeerInfo>,
 {
@@ -150,10 +155,29 @@ where
     let protect_rep: std::collections::HashSet<PeerId> =
         by_rep.iter().take(PROTECT_PER_AXIS).map(|p| p.id).collect();
 
+    // Step 3.5: protect the N highest inbound block-relay scorers. Mirrors
+    // Bitcoin Core's block-relay-time protection axis. This is EARNED, not
+    // asserted — a peer only appears here by actually delivering blocks
+    // first (score > 0), i.e. by being a genuinely useful relay. It is
+    // bounded (PROTECT_PER_AXIS) exactly like the axes above, and the
+    // netgroup-concentration step below is UNCHANGED — so a flood from one
+    // /16 is still evicted (there are always more than N flooders). See
+    // docs/architecture/inbound-relay-eviction.md and the adversarial
+    // eclipse test below.
+    let mut by_relay = candidates.clone();
+    by_relay.sort_by(|a, b| relay_scores.score(&b.id).cmp(&relay_scores.score(&a.id)));
+    let protect_relay: std::collections::HashSet<PeerId> = by_relay
+        .iter()
+        .filter(|p| relay_scores.score(&p.id) > 0) // only actual relayers
+        .take(PROTECT_PER_AXIS)
+        .map(|p| p.id)
+        .collect();
+
     candidates.retain(|p| {
         !protect_age.contains(&p.id)
             && !protect_active.contains(&p.id)
             && !protect_rep.contains(&p.id)
+            && !protect_relay.contains(&p.id)
     });
 
     if candidates.is_empty() {
@@ -226,7 +250,7 @@ mod tests {
 
     #[test]
     fn no_candidates_returns_none() {
-        assert!(select_inbound_to_evict(std::iter::empty(), Instant::now()).is_none());
+        assert!(select_inbound_to_evict(std::iter::empty(), Instant::now(), &RelayScoreMap::new()).is_none());
     }
 
     #[test]
@@ -236,7 +260,7 @@ mod tests {
             mk(2, "1.2.3.5", 3600, 50, true, true /*outbound*/),
         ];
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now()).is_none(),
+        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
             "outbound peers must never be evicted");
     }
 
@@ -247,7 +271,7 @@ mod tests {
             mk(2, "1.2.3.5", 10, 50, true, false), // 10s old, still too young
         ];
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now()).is_none(),
+        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
             "peers younger than MIN_AGE_BEFORE_EVICT must be protected");
     }
 
@@ -257,7 +281,7 @@ mod tests {
             .map(|i| mk(i, &format!("1.2.3.{}", i + 10), 3600, 100, false, false))
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now()).is_none(),
+        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
             "all-high-reputation peer pool must yield no eviction candidate");
     }
 
@@ -278,7 +302,7 @@ mod tests {
         peers.push(mk(23, "198.51.100.1", 7200, 90, true, false));
 
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        let evictee = select_inbound_to_evict(refs, Instant::now())
+        let evictee = select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new())
             .expect("with 16 candidates, eviction must succeed");
 
         // The evictee MUST come from the 10.0.x.y attacker /16.
@@ -302,7 +326,7 @@ mod tests {
             .map(|i| mk(i, &format!("10.0.0.{}", i + 1), 3600 + (i as u64) * 60, 50, false, false))
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        let evictee = select_inbound_to_evict(refs, Instant::now())
+        let evictee = select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new())
             .expect("eviction must succeed");
 
         // Protection axes (with all-equal rep and last_seen, the
@@ -316,6 +340,67 @@ mod tests {
         assert_eq!(evictee[0], 4,
             "within the saturated /16, the youngest unprotected peer (id=4) should be evicted; got id={}",
             evictee[0]);
+    }
+
+    #[test]
+    fn relay_scored_flood_is_still_evicted_eclipse_safe() {
+        // ADVERSARIAL — load-bearing eclipse-safety test (Phase 2). An
+        // attacker floods ONE /16 with inbound peers AND makes them earn
+        // relay score (i.e. actually relays blocks to us). The relay-
+        // protection axis is bounded (PROTECT_PER_AXIS) and the netgroup step
+        // is unchanged, so the flooded /16 stays the most-concentrated group
+        // and STILL loses a peer. Protecting good relayers must never become
+        // an eclipse assist — this test fails loudly if it ever does.
+        let now = Instant::now();
+        // 20 flood peers, all in 1.2.0.0/16, candidates (old enough, low rep).
+        let flood: Vec<PeerInfo> = (0..20u8)
+            .map(|i| mk(100 + i, &format!("1.2.{}.1", i), 300 + i as u64, 0, false, false))
+            .collect();
+        // 2 honest inbound peers in DIFFERENT /16s.
+        let honest = [
+            mk(1, "9.9.9.9", 300, 0, false, false),
+            mk(2, "8.8.8.8", 300, 0, false, false),
+        ];
+
+        // Every flood peer earns relay score (they truly relay blocks).
+        let mut relay = RelayScoreMap::new();
+        for p in &flood {
+            relay.credit_block(p.id);
+        }
+
+        let all: Vec<&PeerInfo> = flood.iter().chain(honest.iter()).collect();
+        let victim = select_inbound_to_evict(all, now, &relay)
+            .expect("a candidate must be evictable");
+
+        // The eclipse defense holds: eviction falls on the flooded /16, never
+        // on an honest peer in a diverse netgroup — despite the flood's score.
+        assert!(
+            flood.iter().any(|p| p.id == victim),
+            "eviction must fall on the flooded /16 (eclipse-safe)"
+        );
+        assert!(
+            !honest.iter().any(|p| p.id == victim),
+            "an honest peer in a diverse netgroup must not be evicted"
+        );
+    }
+
+    #[test]
+    fn relay_score_protects_a_good_relayer_when_its_group_is_not_flooded() {
+        // Positive case: with no netgroup concentration to exploit, a peer
+        // that has earned relay score is protected over one that hasn't.
+        // Two diverse /16s, both single-peer; the relayer must survive.
+        let now = Instant::now();
+        let relayer = mk(1, "9.9.9.9", 300, 0, false, false);
+        let idle = mk(2, "8.8.8.8", 300, 0, false, false);
+        let mut relay = RelayScoreMap::new();
+        relay.credit_block(relayer.id); // only the relayer has score
+
+        let refs: Vec<&PeerInfo> = vec![&relayer, &idle];
+        // With 2 candidates and 4-per-axis protection, both may be protected
+        // -> None; but if one is chosen, it must NOT be the relayer.
+        if let Some(victim) = select_inbound_to_evict(refs, now, &relay) {
+            assert_eq!(victim, idle.id, "the earned relayer must be protected");
+        }
     }
 
     #[test]
