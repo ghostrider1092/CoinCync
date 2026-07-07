@@ -287,7 +287,7 @@ tokio-test        = "0.4"
 test-log          = "0.2"
 quickcheck        = "1"
 quickcheck_macros = "1"
-mockall           = "0.13"
+mockall           = "0.15"
 test-case         = "3"
 # Self-dep with `test-utilities` feature enabled so integration tests in
 # `tests/*.rs` can use `Mempool::add_skip_crypto` and similar cfg-gated
