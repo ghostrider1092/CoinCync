@@ -135,7 +135,7 @@ wiremock = "0.6"
 # audit-prep doc §8 carried "no published strict-DLEQ benchmark numbers"
 # as a known gap; this dep + the `benches/` directory closes that gap.
 # Only used by `cargo bench`, never by `cargo test`.
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # Benchmark targets.
 [[bench]]

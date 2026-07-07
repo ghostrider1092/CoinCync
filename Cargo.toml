@@ -280,7 +280,7 @@ tick                  = { path = "crates/tick" }
 coincync-rolling-finality = { path = "crates/coincync-rolling-finality", features = ["ed25519", "wire-codec"], optional = true }
 
 [dev-dependencies]
-criterion         = "0.5"
+criterion         = "0.8"
 proptest          = "1"
 tempfile          = "3"
 tokio-test        = "0.4"
