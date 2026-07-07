@@ -1038,7 +1038,7 @@ dependencies = [
  "sha3 0.12.0",
  "signal-hook 0.4.4",
  "snow",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "strsim",
  "subtle",
  "tari_bulletproofs_plus",

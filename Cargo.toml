@@ -147,7 +147,7 @@ reqwest    = { version = "0.12", default-features = false, features = ["json", "
 
 # â”€â”€ Networking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 hickory-resolver = "0.26"
-socket2            = "0.5"
+socket2            = "0.6"
 igd                = { version = "0.12", features = ["aio"] }
 tokio-socks        = "0.5"
 snow               = "0.9"
