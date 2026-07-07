@@ -59,6 +59,7 @@ use super::dandelion::{DandelionRouter, DandelionStats, StemAction, DANDELION_MO
 use super::sync::{ChainSync, SyncState, SyncStats, build_locator};
 use super::bootstrap::{Bootstrapper, BootstrapConfig, AddressManager, PeerAddress};
 use super::scoring::{PeerScorer, ScorerStats};
+use super::relay_score::RelayScoreMap;
 use super::traffic_shaping::TrafficShaper;
 use super::connection_tracker::ConnectionTracker;
 
@@ -319,6 +320,10 @@ pub struct P2PNode {
     conn_tracker: Arc<ConnectionTracker>,
     /// Peer scoring and reputation management
     peer_scorer: Arc<RwLock<PeerScorer>>,
+    /// Node-internal inbound block-relay scores (ACO, un-poisonable).
+    /// Phase 1: measured + exposed; not yet used by eviction.
+    /// See docs/architecture/inbound-relay-eviction.md.
+    relay_scores: Arc<RwLock<RelayScoreMap>>,
     /// Per-peer orphan-block rate tracker for flood detection.
     /// Wired into `notify_block_orphan`; flooders are scored with
     /// `MisbehaviorType::OrphanFlood`.
@@ -439,6 +444,7 @@ impl P2PNode {
             running: Arc::new(RwLock::new(false)),
             conn_tracker: Arc::new(ConnectionTracker::new(MEMORY_BUDGET_BYTES)),
             peer_scorer: Arc::new(RwLock::new(PeerScorer::new())),
+            relay_scores: Arc::new(RwLock::new(RelayScoreMap::new())),
             orphan_flood: Arc::new(RwLock::new(super::scoring::OrphanFloodTracker::new())),
             tx_absence_cache: Arc::new(parking_lot::RwLock::new(TxAbsenceCache::new())),
             version_nonce: rand::random::<u64>(),
@@ -1097,6 +1103,7 @@ impl P2PNode {
         let connector_encryption = encryption_config.clone();
         let connector_listen_port = self.config.listen_addr.port();
         let connector_tracker = self.conn_tracker.clone();
+        let connector_relay_scores = self.relay_scores.clone();
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(10));
@@ -1129,6 +1136,17 @@ impl P2PNode {
 
             while *connector_running.read().await {
                 interval.tick().await;
+
+                // Evaporate inbound block-relay scores each tick so they track
+                // current relay usefulness, and log a one-liner so the measure
+                // phase is observable (Phase 1: measure only).
+                {
+                    let mut rs = connector_relay_scores.write().await;
+                    rs.evaporate();
+                    if !rs.is_empty() {
+                        debug!("inbound relay-score: {} peers currently scored", rs.len());
+                    }
+                }
 
                 let outbound_count = connector_peers.iter()
                     .filter(|p| p.outbound)
@@ -1403,6 +1421,7 @@ impl P2PNode {
         let processor_identity = self.identity.clone();
         // v1.0.13 #2
         let processor_tx_absence_cache = self.tx_absence_cache.clone();
+        let processor_relay_scores = self.relay_scores.clone();
 
         tokio::spawn(async move {
             // Phase D (audit fix): per-peer message rate tracking.
@@ -1470,6 +1489,7 @@ impl P2PNode {
                             processor_scorer.clone(),
                             processor_identity.clone(),
                             processor_tx_absence_cache.clone(),
+                            processor_relay_scores.clone(),
                         ).await {
                             warn!("Message processing error: {}", e);
                         }
@@ -3533,6 +3553,10 @@ async fn process_message(
     // v1.0.13 #2 — tx-absence cache, populated by NotFound-receive,
     // consulted by InvTx-receive.
     tx_absence_cache: Arc<parking_lot::RwLock<TxAbsenceCache>>,
+    // Node-internal inbound block-relay scores. Credited in the BlockData
+    // handler when this peer delivers a valid block. Phase 1: measured
+    // only — not yet consulted by eviction.
+    relay_scores: Arc<RwLock<RelayScoreMap>>,
 ) -> Result<()> {
     // Data format is now [msg_type, ...payload] after framer processing
     if data.is_empty() {
@@ -4885,6 +4909,11 @@ async fn process_message(
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr).record_block_success(Duration::from_millis(100));
                 }
+                // Credit this peer's inbound block-relay score (Phase 1: measure
+                // only — not yet consulted by eviction). Public block delivery is
+                // the sole input; no transaction is observed. Credits valid
+                // delivery; a new-block-only refinement is a follow-up.
+                relay_scores.write().await.credit_block(peer_id);
                 let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));
             } else {
                 warn!("Failed to deserialize BlockData from peer {:?}", &peer_id[..4]);
