@@ -20,10 +20,13 @@
 //!   full blocks)
 //! - **View tag pre-filtering**: reject 255/256 outputs without ECDH
 //! - **Parallel scanning**: process multiple digests concurrently via rayon
-//! - **Sync checkpoints**: periodic trust anchors for fast initial sync
-//!   (note: checkpoint *authentication* — Gap 2 in the audit — is deferred
-//!   to v1.0.1 once miner-signed checkpoints are wired; for now wallets
-//!   should validate against a hardcoded checkpoint set.)
+//! - **Sync checkpoints**: periodic trust anchors for fast initial sync.
+//!   Audit **Gap 2** (checkpoint *authentication*): a consumer must call
+//!   [`SyncCheckpoint::authenticate`] and only fast-skip on
+//!   [`CheckpointAuth::Authenticated`] — this validates a server-provided
+//!   checkpoint against the binary's hardcoded `CONSENSUS_CHECKPOINTS` set.
+//!   Full miner-signed checkpoints remain the v1.0.1 solution; until then an
+//!   unhardcoded height is `Unverifiable` and must fall back to a full scan.
 //!
 //! Bandwidth savings: ~50-100x reduction vs downloading full blocks.
 
@@ -176,7 +179,13 @@ impl SyncCheckpoint {
         }
     }
 
-    /// Verify checkpoint integrity (hash includes all fields)
+    /// Verify checkpoint integrity (hash includes all fields).
+    ///
+    /// NOTE: this only computes a *self*-consistency hash — it proves the
+    /// fields haven't been mangled in transit, NOT that the checkpoint is
+    /// legitimate. A malicious server can craft a perfectly self-consistent
+    /// but forged checkpoint. To establish *authenticity*, call
+    /// [`authenticate`](Self::authenticate).
     pub fn verify_hash(&self) -> Hash {
         hash_domain(
             b"COINCYNC_CHECKPOINT_v1",
@@ -188,6 +197,51 @@ impl SyncCheckpoint {
             ].concat(),
         )
     }
+
+    /// Authenticate this (server-provided) checkpoint against the binary's
+    /// hardcoded `CONSENSUS_CHECKPOINTS` set — the interim mitigation for
+    /// **audit Gap 2** (checkpoint authentication) until miner-signed
+    /// checkpoints are wired (v1.0.1).
+    ///
+    /// SECURITY: a light wallet that "trusts a checkpoint to skip scanning
+    /// blocks before its height" is trusting the server not to lie. A forged
+    /// checkpoint could make the wallet skip real blocks and miss the
+    /// owner's own incoming transactions, or accept a false chain state. A
+    /// consumer MUST call this and **only fast-skip when the result is
+    /// [`CheckpointAuth::Authenticated`]**; [`Unverifiable`](CheckpointAuth::Unverifiable)
+    /// and [`Forged`](CheckpointAuth::Forged) must both fall back to a normal
+    /// scan (and `Forged` should additionally distrust the peer).
+    pub fn authenticate(&self) -> CheckpointAuth {
+        self.authenticate_against(crate::constants::expected_checkpoint_hash(self.height))
+    }
+
+    /// Core of [`authenticate`](Self::authenticate), split out so the
+    /// decision logic is unit-testable without depending on the (currently
+    /// sparse/empty pre-launch) hardcoded checkpoint table.
+    fn authenticate_against(&self, expected: Option<&[u8; 32]>) -> CheckpointAuth {
+        match expected {
+            Some(h) if self.block_hash.as_bytes()[..] == h[..] => CheckpointAuth::Authenticated,
+            Some(_) => CheckpointAuth::Forged,
+            None => CheckpointAuth::Unverifiable,
+        }
+    }
+}
+
+/// Result of authenticating a server-provided [`SyncCheckpoint`] against the
+/// binary's hardcoded consensus-checkpoint set (audit Gap 2 mitigation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointAuth {
+    /// A hardcoded checkpoint exists at this height AND its block hash
+    /// matches. Safe to trust as a fast-sync anchor.
+    Authenticated,
+    /// A hardcoded checkpoint exists at this height but the block hash
+    /// DIFFERS — the checkpoint is forged. Reject it and distrust the peer.
+    Forged,
+    /// No hardcoded checkpoint at this height, so authenticity can't be
+    /// established. Do NOT fast-skip — scan normally. Until miner-signed
+    /// checkpoints land (v1.0.1) and the hardcoded table is populated, this
+    /// is the expected common case.
+    Unverifiable,
 }
 
 // =============================================================================
@@ -942,6 +996,36 @@ mod tests {
         let h1 = cp.verify_hash();
         let h2 = cp.verify_hash();
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn checkpoint_authenticate_accepts_matching_hardcoded() {
+        let cp = SyncCheckpoint::new(1000, Hash::from_bytes([7u8; 32]), 50_000, Hash::from_bytes([2u8; 32]));
+        // A hardcoded checkpoint at this height with the SAME block hash.
+        assert_eq!(cp.authenticate_against(Some(&[7u8; 32])), CheckpointAuth::Authenticated);
+    }
+
+    #[test]
+    fn checkpoint_authenticate_rejects_forged() {
+        let cp = SyncCheckpoint::new(1000, Hash::from_bytes([7u8; 32]), 50_000, Hash::from_bytes([2u8; 32]));
+        // A hardcoded checkpoint exists at this height but the hash DIFFERS.
+        assert_eq!(cp.authenticate_against(Some(&[9u8; 32])), CheckpointAuth::Forged);
+    }
+
+    #[test]
+    fn checkpoint_authenticate_unverifiable_without_hardcoded() {
+        let cp = SyncCheckpoint::new(1000, Hash::from_bytes([7u8; 32]), 50_000, Hash::from_bytes([2u8; 32]));
+        // No hardcoded checkpoint at this height -> cannot authenticate; caller must not fast-skip.
+        assert_eq!(cp.authenticate_against(None), CheckpointAuth::Unverifiable);
+    }
+
+    #[test]
+    fn checkpoint_authenticate_never_false_accepts_against_real_table() {
+        // Safety property that holds whether the hardcoded table is empty
+        // (pre-launch) or populated: a made-up checkpoint at an arbitrary
+        // height must NEVER authenticate.
+        let cp = SyncCheckpoint::new(123_456, Hash::from_bytes([3u8; 32]), 1, Hash::from_bytes([4u8; 32]));
+        assert_ne!(cp.authenticate(), CheckpointAuth::Authenticated);
     }
 
     #[test]
