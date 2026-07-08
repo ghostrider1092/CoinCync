@@ -9,7 +9,43 @@ use coincync::crypto::{
     clsag_sign, clsag_verify, ct_eq,
 };
 use rand::rngs::OsRng;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Number of independent timing runs whose median we take per measurement.
+const TIMING_RUNS: usize = 5;
+
+/// Robustly time `iterations` calls to `op`, returning the MEDIAN of
+/// [`TIMING_RUNS`] independent measurements taken after a discarded warmup.
+///
+/// Why median-of-runs and not a single measurement: on a shared CI runner
+/// one scheduler preemption or a CPU-frequency step can blow a single
+/// wall-clock measurement out by >2x even when the operation is genuinely
+/// constant-time, producing a spurious side-channel "failure" (this is what
+/// intermittently reddened the tier9 job). The median across several runs
+/// — plus a discarded warmup that primes caches / lets frequency settle —
+/// rejects those one-off outliers.
+///
+/// Crucially this does NOT weaken the security assertion: a real
+/// secret-dependent timing difference is *systematic*, so it shifts the
+/// median too and is still caught by the same ratio bound. We remove false
+/// positives from measurement noise, never true positives from real leakage.
+fn median_time<F: FnMut()>(mut op: F, iterations: usize) -> Duration {
+    // Warmup — prime instruction/data caches and let CPU frequency settle;
+    // this run's timing is discarded.
+    for _ in 0..iterations {
+        op();
+    }
+    let mut samples = [Duration::ZERO; TIMING_RUNS];
+    for slot in &mut samples {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            op();
+        }
+        *slot = start.elapsed();
+    }
+    samples.sort_unstable();
+    samples[TIMING_RUNS / 2]
+}
 
 // =============================================================================
 // TEST 1: Constant-time equality comparison
@@ -38,21 +74,9 @@ fn tier9_ct_eq_timing_consistent() {
 
     let iterations = 10_000;
 
-    let t_equal = {
-        let start = Instant::now();
-        for _ in 0..iterations { let _ = ct_eq(&a, &b); }
-        start.elapsed()
-    };
-    let t_diff_first = {
-        let start = Instant::now();
-        for _ in 0..iterations { let _ = ct_eq(&a, &c); }
-        start.elapsed()
-    };
-    let t_diff_last = {
-        let start = Instant::now();
-        for _ in 0..iterations { let _ = ct_eq(&a, &d); }
-        start.elapsed()
-    };
+    let t_equal = median_time(|| { let _ = ct_eq(&a, &b); }, iterations);
+    let t_diff_first = median_time(|| { let _ = ct_eq(&a, &c); }, iterations);
+    let t_diff_last = median_time(|| { let _ = ct_eq(&a, &d); }, iterations);
 
     let max_t = t_equal.max(t_diff_first).max(t_diff_last);
     let min_t = t_equal.min(t_diff_first).min(t_diff_last);
@@ -75,14 +99,10 @@ fn tier9_scalar_mul_timing_consistent() {
         .map(|_| SecretScalar::random(&mut OsRng))
         .collect();
 
-    let mut times = Vec::new();
-    for scalar in &scalars {
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = scalar.to_public();
-        }
-        times.push(start.elapsed());
-    }
+    let times: Vec<Duration> = scalars
+        .iter()
+        .map(|scalar| median_time(|| { let _ = scalar.to_public(); }, iterations))
+        .collect();
 
     let max_t = times.iter().max().unwrap();
     let min_t = times.iter().min().unwrap();
@@ -105,14 +125,10 @@ fn tier9_key_image_timing_consistent() {
         .map(|_| SecretScalar::random(&mut OsRng))
         .collect();
 
-    let mut times = Vec::new();
-    for secret in &secrets {
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = KeyImage::from_secret(secret);
-        }
-        times.push(start.elapsed());
-    }
+    let times: Vec<Duration> = secrets
+        .iter()
+        .map(|secret| median_time(|| { let _ = KeyImage::from_secret(secret); }, iterations))
+        .collect();
 
     let max_t = times.iter().max().unwrap();
     let min_t = times.iter().min().unwrap();
@@ -134,14 +150,10 @@ fn tier9_pedersen_commit_timing_consistent() {
     let bf = BlindingFactor::random(&mut OsRng);
     let amounts = [0u64, 1, u64::MAX / 2, u64::MAX - 1, 1_000_000_000];
 
-    let mut times = Vec::new();
-    for &amount in &amounts {
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = PedersenCommitment::commit(amount, &bf);
-        }
-        times.push(start.elapsed());
-    }
+    let times: Vec<Duration> = amounts
+        .iter()
+        .map(|&amount| median_time(|| { let _ = PedersenCommitment::commit(amount, &bf); }, iterations))
+        .collect();
 
     let max_t = times.iter().max().unwrap();
     let min_t = times.iter().min().unwrap();
@@ -196,11 +208,11 @@ fn tier9_clsag_verify_timing_independent_of_signer() {
         let sig = clsag_sign(message, &ring, real_idx, &real_secret, &blinding_diff, &pseudo_output, &mut OsRng)
             .expect("sign");
 
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = clsag_verify(message, &ring, &pseudo_output, &sig);
-        }
-        verify_times.push((real_idx, start.elapsed()));
+        let elapsed = median_time(
+            || { let _ = clsag_verify(message, &ring, &pseudo_output, &sig); },
+            iterations,
+        );
+        verify_times.push((real_idx, elapsed));
     }
 
     let max_t = verify_times.iter().map(|(_, t)| t).max().unwrap();
@@ -252,16 +264,14 @@ fn tier9_invalid_sig_not_faster_than_valid() {
     let mut invalid_sig = valid_sig.clone();
     invalid_sig.c1[0] ^= 0xFF;
 
-    let t_valid = {
-        let start = Instant::now();
-        for _ in 0..iterations { let _ = clsag_verify(message, &ring, &pseudo_output, &valid_sig); }
-        start.elapsed()
-    };
-    let t_invalid = {
-        let start = Instant::now();
-        for _ in 0..iterations { let _ = clsag_verify(message, &ring, &pseudo_output, &invalid_sig); }
-        start.elapsed()
-    };
+    let t_valid = median_time(
+        || { let _ = clsag_verify(message, &ring, &pseudo_output, &valid_sig); },
+        iterations,
+    );
+    let t_invalid = median_time(
+        || { let _ = clsag_verify(message, &ring, &pseudo_output, &invalid_sig); },
+        iterations,
+    );
 
     // Invalid should not be >4x faster (some early return OK for DoS protection)
     assert!(
