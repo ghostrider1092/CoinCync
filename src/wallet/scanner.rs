@@ -391,6 +391,14 @@ impl WalletScanner {
         self.journal.back()
     }
 
+    /// Export the reorg journal as `(height, block_hash)` pairs, oldest-first.
+    /// This is the input the node's `find_fork_point` RPC needs to locate the
+    /// wallet's fork point after a reorg (the wallet sends this list; the node
+    /// returns the deepest height still on its canonical chain).
+    pub fn journal_pairs(&self) -> Vec<(u64, Hash)> {
+        self.journal.iter().map(|e| (e.height, e.block_hash)).collect()
+    }
+
     /// Push a journal entry and trim oldest entries to maintain the
     /// bounded length invariant. Called by [`scan_block`] after each
     /// successful block scan. Public so integration tests in
@@ -1739,6 +1747,24 @@ mod tests {
         // "TargetAboveCurrent" guard reflects real state.
         scanner.last_height = height;
         scanner.last_hash = Hash::from_bytes([tag; 32]);
+    }
+
+    #[test]
+    fn journal_pairs_exports_height_hash_oldest_first() {
+        let mut scanner = WalletScanner::new();
+        push_diff(&mut scanner, 1, 1);
+        push_diff(&mut scanner, 2, 2);
+        push_diff(&mut scanner, 3, 3);
+        // Exactly the (height, block_hash) input the find_fork_point RPC
+        // consumes, oldest-first.
+        assert_eq!(
+            scanner.journal_pairs(),
+            vec![
+                (1, Hash::from_bytes([1u8; 32])),
+                (2, Hash::from_bytes([2u8; 32])),
+                (3, Hash::from_bytes([3u8; 32])),
+            ]
+        );
     }
 
     /// Reorg-handling Task #3: rewind to a specific height drops newer

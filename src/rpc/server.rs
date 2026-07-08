@@ -964,6 +964,39 @@ pub async fn start_rpc_server(
         }
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── find_fork_point (light-wallet reorg recovery, v1.1) ────
+    //
+    // The wallet sends its recent (height, hex_hash) journal; we return the
+    // deepest height still on the canonical chain (the last common ancestor)
+    // so the wallet rewinds there instead of full-rescanning. See
+    // src/rpc/lightwallet.rs::fork_point_in_journal and
+    // docs/wallet-v2-reorg-handling-design.md §3.5.
+    module.register_method("find_fork_point", |params, state, _ext| {
+        let (journal_hex,): (Vec<(u64, String)>,) = params.parse().map_err(|e: ErrorObjectOwned| {
+            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+        })?;
+        // DoS guard: reject an oversized journal before any hex decode or
+        // chain lookups. A real wallet journal is a few thousand entries at
+        // most (see wallet::scanner::JOURNAL_MAX_DEFAULT).
+        const MAX_JOURNAL: usize = 4096;
+        if journal_hex.len() > MAX_JOURNAL {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("find_fork_point: journal too large ({} > {})", journal_hex.len(), MAX_JOURNAL),
+                None::<()>,
+            ));
+        }
+        let journal = crate::rpc::lightwallet::parse_journal_hex(&journal_hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("find_fork_point: {}", e), None::<()>)
+        })?;
+        // Layer 2: canonical-hash lookups under block_in_place — same
+        // rationale as get_block_by_height above.
+        let fork = tokio::task::block_in_place(|| {
+            crate::rpc::lightwallet::fork_point_in_journal(&journal, |h| state.chain.get_block_hash(h))
+        });
+        Ok::<_, ErrorObjectOwned>(serde_json::json!({ "fork_point": fork }))
+    }).map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_block (by hash) ───────────────────────────────────
     //
     // Hash-based block lookup. The embedded explorer's search

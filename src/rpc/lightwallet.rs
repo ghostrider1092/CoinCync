@@ -449,6 +449,70 @@ impl LightWalletServer {
         let _ = walk_depth; // suppress unused-var warning for v1.0 stub
         None
     }
+
+    /// v1.1 fork-finding (design §3.5): given the wallet's recent
+    /// `(height, hash)` journal — the same tip-history its scanner keeps in
+    /// its `BlockApplyDiff` journal — return the DEEPEST height whose hash
+    /// still matches this node's canonical chain. That height is the last
+    /// common ancestor: the wallet rewinds to it and resumes scanning from
+    /// `height + 1`, instead of the v1.0 full-rescan fallback.
+    ///
+    /// Unlike [`find_fork_point`](Self::find_fork_point) — which can only
+    /// check the wallet's single most-recent pair, so any reorg that moved
+    /// the wallet's tip forced a full rescan — the journal lets the server
+    /// locate a fork point anywhere in the wallet's recent history.
+    ///
+    /// Returns `None` only if NO journal entry is still canonical (the reorg
+    /// is deeper than the wallet's whole journal). With the scanner journal
+    /// sized to the network reorg cap (`wallet::scanner::JOURNAL_MAX_DEFAULT`),
+    /// that is unreachable for a consensus-legal reorg, so this resolves
+    /// every legal reorg without a full rescan.
+    ///
+    /// Cost: O(journal.len()) canonical-hash lookups (each an O(log N) tree
+    /// lookup). The wallet bounds the journal it sends; existing per-IP RPC
+    /// caps bound abuse.
+    pub fn find_fork_point_from_journal(
+        &self,
+        journal: &[(u64, crate::primitives::Hash)],
+    ) -> Option<u64> {
+        fork_point_in_journal(journal, |h| self.chain.get_block_hash(h))
+    }
+}
+
+/// Pure core of [`LightWalletServer::find_fork_point_from_journal`], split
+/// out so the fork-selection logic is unit-testable without a live chain.
+///
+/// `canonical_hash_at(height)` returns this node's canonical block hash at
+/// `height` (or `None` if unknown). The fork point is the DEEPEST — i.e.
+/// numerically highest — journal height whose hash still matches canonical;
+/// everything above it is on the wallet's abandoned branch.
+pub(crate) fn fork_point_in_journal(
+    journal: &[(u64, crate::primitives::Hash)],
+    canonical_hash_at: impl Fn(u64) -> Option<crate::primitives::Hash>,
+) -> Option<u64> {
+    journal
+        .iter()
+        .filter(|(height, hash)| canonical_hash_at(*height) == Some(*hash))
+        .map(|(height, _)| *height)
+        .max()
+}
+
+/// Parse a wallet-sent journal of `(height, hex_hash)` pairs into
+/// `(height, Hash)`, rejecting any malformed or wrong-length hash. Used by
+/// the `find_fork_point` JSON-RPC handler to sanitize untrusted input before
+/// it reaches [`fork_point_in_journal`]. A `0x` prefix is tolerated.
+pub(crate) fn parse_journal_hex(
+    entries: &[(u64, String)],
+) -> std::result::Result<Vec<(u64, crate::primitives::Hash)>, String> {
+    entries
+        .iter()
+        .map(|(height, hex_hash)| {
+            let mut bytes = [0u8; 32];
+            hex::decode_to_slice(hex_hash.trim_start_matches("0x"), &mut bytes)
+                .map_err(|_| format!("bad hash hex at height {height} (want 64 hex chars)"))?;
+            Ok((*height, crate::primitives::Hash::from_bytes(bytes)))
+        })
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -523,6 +587,79 @@ fn is_output_for_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── v1.1 fork-finding (find_fork_point_from_journal) ──────────────────
+
+    fn h(n: u8) -> crate::primitives::Hash {
+        crate::primitives::Hash::from_bytes([n; 32])
+    }
+
+    #[test]
+    fn fork_point_journal_empty_is_none() {
+        assert_eq!(fork_point_in_journal(&[], |_| None), None);
+    }
+
+    #[test]
+    fn fork_point_journal_all_canonical_returns_tip() {
+        // Node's canonical chain matches the wallet's journal at every height
+        // -> the wallet wasn't reorged off -> fork point is its tip.
+        let journal = [(100u64, h(1)), (200, h(2)), (300, h(3))];
+        let canonical = |ht: u64| match ht {
+            100 => Some(h(1)),
+            200 => Some(h(2)),
+            300 => Some(h(3)),
+            _ => None,
+        };
+        assert_eq!(fork_point_in_journal(&journal, canonical), Some(300));
+    }
+
+    #[test]
+    fn fork_point_journal_returns_last_common_ancestor() {
+        // Wallet agrees with canonical up to 200, then diverges (its 300 hash
+        // is no longer canonical). Fork point = 200; wallet rewinds there.
+        let journal = [(100u64, h(1)), (200, h(2)), (300, h(3))];
+        let canonical = |ht: u64| match ht {
+            100 => Some(h(1)),
+            200 => Some(h(2)),
+            300 => Some(h(9)), // reorged: different hash now canonical
+            _ => None,
+        };
+        assert_eq!(fork_point_in_journal(&journal, canonical), Some(200));
+    }
+
+    #[test]
+    fn fork_point_journal_none_when_no_entry_canonical() {
+        // Reorg deeper than the wallet's whole journal -> no common ancestor
+        // in it -> None (caller falls back to a full rescan).
+        let journal = [(100u64, h(1)), (200, h(2))];
+        let canonical = |ht: u64| match ht {
+            100 => Some(h(8)),
+            200 => Some(h(9)),
+            _ => None,
+        };
+        assert_eq!(fork_point_in_journal(&journal, canonical), None);
+    }
+
+    #[test]
+    fn fork_point_journal_skips_unknown_heights() {
+        // The node has no block at some journal heights (pruned / above tip).
+        // Those simply don't match; the deepest *known* match wins.
+        let journal = [(100u64, h(1)), (500, h(5))];
+        let canonical = |ht: u64| if ht == 100 { Some(h(1)) } else { None };
+        assert_eq!(fork_point_in_journal(&journal, canonical), Some(100));
+    }
+
+    #[test]
+    fn parse_journal_hex_roundtrips_and_rejects_malformed() {
+        let good = vec![
+            (100u64, "01".repeat(32)),                  // 64 hex chars -> [1; 32]
+            (200u64, format!("0x{}", "02".repeat(32))), // 0x prefix tolerated
+        ];
+        assert_eq!(parse_journal_hex(&good).expect("valid"), vec![(100, h(1)), (200, h(2))]);
+        // Non-hex rejected; wrong length rejected.
+        assert!(parse_journal_hex(&[(5u64, "zz".repeat(32))]).is_err());
+        assert!(parse_journal_hex(&[(5u64, "0102".to_string())]).is_err());
+    }
 
     #[test]
     fn coin_spec_is_correct() {

@@ -954,6 +954,13 @@ async fn cmd_scan(
                 if blocks_json.is_empty() {
                     break;
                 }
+                // Reorg auto-recovery bookkeeping for this batch: on a
+                // detected reorg we rewind and set `reorg_resume` to the
+                // height to continue from; a reorg deeper than the whole
+                // journal sets `reorg_abort` to stop and require a full
+                // rescan. Both break out of the per-block loop below.
+                let mut reorg_resume: Option<u64> = None;
+                let mut reorg_abort = false;
                 for b in &blocks_json {
                     let height = b.get("height").and_then(|v| v.as_u64()).unwrap_or(cursor);
                     let bytes_hex = b
@@ -965,26 +972,61 @@ async fn cmd_scan(
                     let block: Block = borsh::from_slice(&block_bytes)
                         .map_err(|e| format!("bad block decode: {}", e))?;
 
-                    // Reorg-aware scan (Tasks #2b + #1b). If the
-                    // scanner detects the incoming block doesn't extend
-                    // its journal cleanly (prev_hash mismatch or non-
-                    // monotonic height), it returns ReorgDetected and
-                    // the caller MUST stop applying further blocks from
-                    // this batch — they'd be on the orphaned chain.
-                    // Full recovery (find_fork_point + rewind) is a
-                    // CLI-level concern that's out of scope for this
-                    // function; we surface the signal and abort so the
-                    // operator can re-run with a fresh sync.
+                    // Reorg-aware scan (Tasks #2b + #1b). If the scanner
+                    // detects the incoming block doesn't extend its journal
+                    // cleanly (prev_hash mismatch), it returns ReorgDetected.
+                    // We AUTO-RECOVER: ask the node for our fork point using
+                    // the scanner's (height,hash) journal, rewind wallet
+                    // state (balance + history) to it, and resume from
+                    // fork+1 — instead of stopping and forcing a manual
+                    // rescan. A reorg deeper than the whole journal (which,
+                    // with the journal sized to the reorg cap, is
+                    // unreachable for a consensus-legal reorg) falls back to
+                    // a warn + stop.
                     use coincync::wallet::scanner::ScanResult;
                     let outs = match scanner.scan_block_with_result(&block) {
                         ScanResult::Scanned { outputs, .. } => outputs,
                         ScanResult::ReorgDetected { at_height, actual_prev, expected_prev } => {
                             eprintln!(
-                                "WARN: reorg detected at height {} (block prev_hash={:?} != wallet's last hash={:?}); \
-                                 stopping scan. Re-run after node settles or full-rescan to recover.",
+                                "reorg detected at height {} (block prev_hash={:?} != wallet's last hash={:?}); recovering…",
                                 at_height, actual_prev, expected_prev,
                             );
-                            break;
+                            let journal_hex: Vec<(u64, String)> = scanner
+                                .journal_pairs()
+                                .into_iter()
+                                .map(|(h, hash)| (h, hex::encode(hash.as_bytes())))
+                                .collect();
+                            match rpc_find_fork_point(node, &journal_hex).await? {
+                                Some(fork) => {
+                                    let outcome = scanner
+                                        .rewind_to_height(fork)
+                                        .map_err(|e| format!("reorg rewind to {}: {:?}", fork, e))?;
+                                    let removed = wallet.remove_outputs(&outcome.outputs_to_remove);
+                                    for ki in &outcome.key_images_to_unspend {
+                                        wallet.unmark_spent_by_key_image(ki);
+                                    }
+                                    let reverted = wallet.revert_outgoing_above_height(fork);
+                                    eprintln!(
+                                        "recovered: rewound to height {} ({} orphaned output(s) removed, {} spend(s) restored, {} outgoing reverted); resuming from {}",
+                                        fork,
+                                        removed,
+                                        outcome.key_images_to_unspend.len(),
+                                        reverted,
+                                        fork + 1,
+                                    );
+                                    reorg_resume = Some(fork + 1);
+                                    break;
+                                }
+                                None => {
+                                    eprintln!(
+                                        "WARN: reorg at height {} is deeper than the wallet journal; \
+                                         full rescan required. Re-run scan from an earlier height.",
+                                        at_height,
+                                    );
+                                    reorg_abort = true;
+                                    break;
+                                }
+                            }
                         }
                     };
                     for decrypted in &outs {
@@ -1036,7 +1078,14 @@ async fn cmd_scan(
                     scanned_blocks += 1;
                     last_height = height;
                 }
-                cursor = batch_end + 1;
+                // Reorg deeper than the journal — stop; a full rescan is
+                // needed (unreachable for a consensus-legal reorg).
+                if reorg_abort {
+                    break;
+                }
+                // Resume from the rewind target after a recovered reorg,
+                // else advance past the batch we just scanned.
+                cursor = reorg_resume.unwrap_or(batch_end + 1);
             }
             Err(e) => {
                 return Err(format!("rpc get_block_range: {}", e));
@@ -1438,6 +1487,18 @@ async fn rpc_call(
     json.get("result")
         .cloned()
         .ok_or_else(|| "rpc response missing result".into())
+}
+
+/// Call the node's `find_fork_point` RPC with the wallet's `(height, hex_hash)`
+/// journal; returns the deepest still-canonical height (the fork point), or
+/// `None` if the reorg is deeper than the journal. Response shape:
+/// `{"fork_point": <u64 | null>}`.
+async fn rpc_find_fork_point(
+    node: &str,
+    journal_hex: &[(u64, String)],
+) -> Result<Option<u64>, String> {
+    let resp = rpc_call(node, "find_fork_point", serde_json::json!([journal_hex])).await?;
+    Ok(resp.get("fork_point").and_then(|v| v.as_u64()))
 }
 
 /// Call `get_block_range(start, end)` and return the `blocks` array.

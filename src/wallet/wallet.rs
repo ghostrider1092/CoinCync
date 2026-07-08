@@ -647,6 +647,24 @@ impl Wallet {
         self.history.unmark_spent_by_key_image(&key_image_hash);
     }
 
+    /// Reorg rewind (Task #1b): drop UTXOs the wallet received in
+    /// now-orphaned blocks, from BOTH balance and history, keeping the two
+    /// layers consistent. Fed by `RewindOutcome.outputs_to_remove` from
+    /// [`WalletScanner::rewind_to_height`]. Returns the number of balance
+    /// UTXOs removed.
+    pub fn remove_outputs(&mut self, outputs: &[(Hash, u8)]) -> usize {
+        self.history.remove_incoming_outputs(outputs);
+        self.balance.remove_outputs(outputs)
+    }
+
+    /// Reorg rewind: revert outgoing history records for transactions that
+    /// were confirmed only in now-orphaned blocks (height > `new_height`),
+    /// so the UI stops showing a spend that no longer happened on the
+    /// canonical chain. Returns the number of records reverted.
+    pub fn revert_outgoing_above_height(&mut self, new_height: u64) -> usize {
+        self.history.revert_outgoing_above_height(new_height)
+    }
+
     // === Reservation API (Item 1: in-flight UTXO tracking) =============
     //
     // Wrappers over Balance::reserve_utxos / release_*. Callers (cmd_send,
