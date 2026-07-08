@@ -133,12 +133,15 @@ substrate everything else runs on top of.
 
 ## Roadmap
 
-- **Designed:** tick (shipped: HealthTick sidecar), colony (#207).
-- **Next design docs (standalone castes):** firefly → cicada → centipede →
-  mantis. Written one at a time so each gets a full mechanism +
-  timing/attack analysis + forking-hazards section, like `colony`.
-- **Folded in (modes, no separate doc):** spider (colony sensing),
-  army-ant (colony healing), stick-insect (traffic shaping).
+- **Shipped:** tick (HealthTick sidecar), colony (#207).
+- **Built (pure cores + observe-mode wiring in `coincync-tick --castes-observe`):**
+  all eight standalone castes — [cicada](caste-cicada.md),
+  [mantis](caste-mantis.md), [firefly](caste-firefly.md),
+  [centipede](caste-centipede.md), [stick-insect](caste-stick-insect.md),
+  [spider](caste-spider.md), [locust](caste-locust.md),
+  [army-ant](caste-army-ant.md). Each has its own design doc + unit tests.
+  spider/locust/centipede/army-ant are driven by real adapter signals in
+  observe mode; mantis/firefly are armed pending a node-adapter feed.
 - Implementation of any caste follows I5: observe → advise → act, off by
   default, two-node + adversarial tests before fleet, never to mainnet
   unproven.
