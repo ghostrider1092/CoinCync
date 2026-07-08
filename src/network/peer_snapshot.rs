@@ -580,9 +580,12 @@ mod tests {
 
     #[test]
     fn maintainer_pubkey_from_env_returns_none_when_unset() {
+        let _env_guard = crate::network::MAINTAINER_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Preserve any real value the operator has set — clear ONLY for
-        // this test scope, restore after. Not thread-safe in isolation
-        // but tests run sequentially by default in this crate.
+        // this test scope, restore after. The ENV_LOCK above makes the
+        // set/read/restore atomic w.r.t. the sibling env tests.
         let prior = std::env::var(MAINTAINER_PUBKEY_ENV).ok();
         std::env::remove_var(MAINTAINER_PUBKEY_ENV);
         assert_eq!(maintainer_pubkey_from_env(), None);
@@ -593,6 +596,9 @@ mod tests {
 
     #[test]
     fn maintainer_pubkey_from_env_rejects_wrong_length_hex() {
+        let _env_guard = crate::network::MAINTAINER_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var(MAINTAINER_PUBKEY_ENV).ok();
         std::env::set_var(MAINTAINER_PUBKEY_ENV, "deadbeef"); // 4 bytes, not 32
         assert_eq!(maintainer_pubkey_from_env(), None);
@@ -607,6 +613,9 @@ mod tests {
 
     #[test]
     fn maintainer_pubkey_from_env_accepts_valid_32byte_hex() {
+        let _env_guard = crate::network::MAINTAINER_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var(MAINTAINER_PUBKEY_ENV).ok();
         let sk = test_signing_key();
         let pk_hex = hex::encode(sk.verifying_key().to_bytes());

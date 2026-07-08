@@ -294,6 +294,11 @@ mod tests {
 
     #[test]
     fn maintainer_pubkey_from_env_rejects_wrong_length() {
+        // Shared lock: this var is also mutated by peer_snapshot's tests
+        // (same env string) — serialize across both modules.
+        let _env_guard = crate::network::MAINTAINER_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Save + restore any pre-existing env value; other tests may
         // have set it.
         let saved = std::env::var(MAINTAINER_PUBKEY_ENV).ok();
@@ -308,6 +313,9 @@ mod tests {
 
     #[test]
     fn maintainer_pubkey_from_env_accepts_32_byte_hex() {
+        let _env_guard = crate::network::MAINTAINER_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var(MAINTAINER_PUBKEY_ENV).ok();
         // 32 bytes of 0xAB
         let key_hex = "ab".repeat(32);

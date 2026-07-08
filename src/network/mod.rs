@@ -25,6 +25,16 @@ pub mod scoring;
 pub mod sync;
 pub mod eviction;
 pub mod relay_score;
+
+/// Shared serialization lock for tests that mutate the process-global
+/// `MAINTAINER_PUBKEY_ENV` (`COINCYNC_PEER_SNAPSHOT_PUBKEY`). Both
+/// `peer_snapshot` and `faucet_registry` have tests that set/remove this
+/// SAME var; without one shared lock they race across modules — a test
+/// removes/overwrites the var while another has just set it, causing an
+/// intermittent `is_some()`/`is_none()` failure. All such tests take this
+/// lock. Poison is ignored so a panic in one env test doesn't cascade.
+#[cfg(test)]
+pub(crate) static MAINTAINER_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub mod dht;
 pub mod noise;
 pub mod protocol;

@@ -929,10 +929,20 @@ mod tests {
         let tx_public = tx_secret.public_key();
 
         let sender_tag = compute_view_tag(&tx_secret, &view_public, 0);
-        let sender_tag2 = compute_view_tag(&tx_secret, &view_public, 1);
 
-        // Different output indices should produce different tags
-        assert_ne!(sender_tag, sender_tag2);
+        // The output index must affect the tag. The tag is a single byte, so
+        // any single pair can collide ~1/256 by chance — asserting only
+        // tag(0) != tag(1) is flaky (an intermittent CI failure). Instead
+        // require variety across 0..16: if the index were ignored, all 16
+        // would be identical; with a genuine dependency a chance all-16
+        // collision is ~256^-15 (effectively never).
+        let tags: Vec<u8> = (0..16u8)
+            .map(|i| compute_view_tag(&tx_secret, &view_public, i))
+            .collect();
+        assert!(
+            tags.iter().any(|&t| t != tags[0]),
+            "output index must affect the view tag"
+        );
 
         // Sender and receiver must compute same view tag (ECDH correctness)
         let receiver_tag = {
