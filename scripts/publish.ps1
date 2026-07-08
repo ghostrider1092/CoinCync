@@ -42,7 +42,7 @@ function Publish-Landing {
 }
 
 function Publish-Docs {
-  $bookOut = '\\wsl.localhost\Ubuntu\home\abe\coincync-docs-book'
+  $bookOut = "\\wsl.localhost\Ubuntu\home\$($env:USERNAME)\coincync-docs-book"
 
   Write-Host "=== Building mdbook in WSL ===" -ForegroundColor Cyan
   # mdbook prints "INFO ..." lines to stderr. PowerShell 5.1 with

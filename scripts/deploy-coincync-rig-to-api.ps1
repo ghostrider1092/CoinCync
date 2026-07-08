@@ -14,7 +14,7 @@ $ApiIP   = '95.179.165.225'
 $RewardAddr = 'tCYNC3ZGvevYahmapH24ZkiKudimf5p5MZZrCq7Jc9SHkgjgQgji8EfgiaNJyEB4NdTCRGr5VX6KAX94cggvnAZCpUGWTW2LqDtE'
 
 # 1. Copy the WSL-built rig binary out to the Windows release dir
-$src = "\\wsl.localhost\Ubuntu\home\abe\coincync-build\target\release\coincync-rig"
+$src = "\\wsl.localhost\Ubuntu\home\$($env:USERNAME)\coincync-build\target\release\coincync-rig"
 $dst = "C:\Users\unkno\OneDrive\coincync 1.0\release\v1.0.1-testnet\coincync-rig-linux-x86_64"
 Write-Host "Copying binary $src -> $dst"
 Copy-Item -Path $src -Destination $dst -Force

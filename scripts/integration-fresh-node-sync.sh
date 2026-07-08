@@ -26,7 +26,7 @@ mkdir -p "$DATA_DIR"
 
 LOG=/tmp/freshnode.log
 echo "Starting fresh node (logs: $LOG)..."
-/home/abe/coincync-build/target/release/coincync-node \
+"${HOME}/coincync-build/target/release/coincync-node" \
     --data-dir "$DATA_DIR" \
     --network testnet \
     --p2p-bind "0.0.0.0:$P2P_PORT" \

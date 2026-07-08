@@ -5,14 +5,14 @@
 # new Cloudflare Pages project (`coincync-docs`).
 #
 # Output:  tmp-deploy-fix\coincync-docs.zip
-#          (and also \\wsl.localhost\Ubuntu\home\abe\coincync-docs-book\
+#          (and also \\wsl.localhost\Ubuntu\home\<wsl-user>\coincync-docs-book\
 #           if you want to inspect the raw HTML before upload)
 
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = "C:\Users\unkno\OneDrive\coincync 1.0"
 $Zip = Join-Path $RepoRoot 'tmp-deploy-fix\coincync-docs.zip'
-$BookOut = "\\wsl.localhost\Ubuntu\home\abe\coincync-docs-book"
+$BookOut = "\\wsl.localhost\Ubuntu\home\$($env:USERNAME)\coincync-docs-book"
 
 # 1. Build mdbook in WSL — output to a Linux-fs path for speed
 # Write the build script to a temp file (UTF-8 NO BOM) and exec — piping
