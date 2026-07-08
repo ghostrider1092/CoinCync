@@ -17,13 +17,27 @@ use rayon::prelude::*;
 use tracing::{info, debug};
 
 /// Default bound on the scanner's per-block journal (used for reorg-aware
-/// rewind). Sized at `max_reorg_depth + safety_margin` so a reorg up to
-/// the tier-3 cap is recoverable without falling back to a full rescan.
+/// rewind). Must cover the LARGEST network reorg cap so any consensus-legal
+/// reorg is journal-recoverable without falling back to a full rescan.
+/// Per `chain::max_reorg_depth_for`: testnet/regtest cap = 1000, mainnet =
+/// 100. Sized to the largest (1000) + a safety margin.
 ///
-/// Reorgs deeper than this trigger a full rescan from a hardcoded
-/// checkpoint or genesis. See [`docs/wallet-v2-reorg-handling-design.md`]
-/// (the BlockApplyDiff section) for the design rationale.
-const JOURNAL_MAX_DEFAULT: usize = 200;
+/// A per-network value would be tighter, but journal entries are tiny
+/// (mostly-empty per-block diffs — ~72 bytes each), so ~1100 costs only tens
+/// of KB and avoids plumbing the network into every scanner constructor.
+///
+/// History: this was a flat `200` (mainnet's 100 + margin), which was too
+/// small for testnet's 1000-block cap. A reorg between 200 and 1000 — e.g.
+/// the **2026-07-04 628-block testnet reorg** — exceeded the journal and
+/// fell to the still-unautomated full-rescan path, leaving the wallet with
+/// stale state from the abandoned chain until a manual rescan.
+///
+/// Reorgs deeper than this still fall back to a full rescan. The server-side
+/// fork-walk that would locate deeper fork points (letting the wallet rewind
+/// instead of full-rescanning) is a v1.1 enhancement — see
+/// `docs/wallet-v2-reorg-handling-design.md` §3.5 and the `find_fork_point`
+/// stub in `src/rpc/lightwallet.rs`.
+const JOURNAL_MAX_DEFAULT: usize = 1100;
 
 /// Result variant returned by [`WalletScanner::scan_block_with_result`].
 ///
@@ -1643,6 +1657,26 @@ mod tests {
     // literal with Amount::from_atomic(0) for the fee. The bare module
     // imports were missing Amount, breaking `cargo test --lib`.
     use crate::primitives::Amount;
+
+    /// Regression guard for the 2026-07-04 deep-reorg wallet-stale bug: the
+    /// scanner journal must cover the LARGEST network reorg cap so any
+    /// consensus-legal reorg is journal-recoverable without falling to a full
+    /// rescan. A flat `200` (sized for mainnet's 100-cap) let a 200-1000-block
+    /// testnet reorg (cap 1000) strand the wallet. If the cap or the journal
+    /// size ever changes so the journal no longer covers the cap, this fails.
+    #[test]
+    fn journal_covers_largest_network_reorg_cap() {
+        let largest_cap = crate::chain::max_reorg_depth_for(NetworkType::Testnet)
+            .max(crate::chain::max_reorg_depth_for(NetworkType::Mainnet))
+            .max(crate::chain::max_reorg_depth_for(NetworkType::Regtest));
+        assert!(
+            JOURNAL_MAX_DEFAULT as u64 >= largest_cap,
+            "scanner journal ({}) must cover the largest network reorg cap ({}), \
+             or reorgs between them strand the wallet on a full rescan",
+            JOURNAL_MAX_DEFAULT,
+            largest_cap
+        );
+    }
 
     #[test]
     fn test_view_tag() {
