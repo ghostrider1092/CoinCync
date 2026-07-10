@@ -1,10 +1,10 @@
 # Runbook — 2026-07-08 runaway-fork recovery + prevention deploy
 
-**Incident:** After the h10042 freeze was cleared by deploying v1.0.13, miner
+**Incident:** After the h10042 freeze was cleared by deploying v1.0.12, miner
 **randomx2** (45.32.79.234) briefly lost mesh sync at restart, its difficulty
 collapsed, and it mined a **low-work private fork** (10042 → 10551+) that the
 rest of the fleet (group A, canonical/heavier, stuck at 10042) correctly
-rejects. All 8 nodes are on v1.0.13. The fork does **not** self-heal while
+rejects. All 8 nodes are on v1.0.12. The fork does **not** self-heal while
 randomx2 keeps extending it.
 
 Fixes landed in the tree (uncommitted) that PREVENT recurrence — see the bottom
@@ -51,9 +51,9 @@ CARGO_TARGET_DIR=$HOME/.cync-target cargo build --release --bin coincync-node
 cp $HOME/.cync-target/release/coincync-node out/coincync-node
 ```
 
-(Bump `Cargo.toml` `version` past 1.0.13 before tagging any release so
+(Bump `Cargo.toml` `version` past 1.0.12 before tagging any release so
 `check-update` reports correctly — see the release checklist. For a same-day
-hotfix deploy of uncommitted code you may keep 1.0.13; the deploy version-gate
+hotfix deploy of uncommitted code you may keep 1.0.12; the deploy version-gate
 treats equal versions as "not a downgrade" and allows it.)
 
 ## Step 3 — Re-render units (adds `--external-ip`) + deploy
