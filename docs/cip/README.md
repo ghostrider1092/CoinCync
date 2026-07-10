@@ -50,6 +50,7 @@ Headline: **cyncswap end-to-end with the 6-layer user-safety stack**. See [docs/
 | [CIP-010](CIP-010-testnet-hardfork-rehearsal.md) | Draft | Testnet hard-fork rehearsal — `BOOTSTRAP_MIN_RING_SIZE` 11→13 bump as a planned CIP-007 Mode A exercise. |
 | [CIP-011](CIP-011-rolling-finality-activation.md) | Draft (code prereq shipped) | Rolling-finality activation rehearsal — two-phase ENABLE → ENFORCE playbook for CIP-009.D's mainnet activation. |
 | [CIP-012](CIP-012-frost-coordinator-deployment.md) | Draft (deploy scaffolding ready) | FROST coordinator deployment rehearsal. Single-instance pre-mainnet, two-instance multi-region mainnet. |
+| [CIP-017](CIP-017-ring-size-increase.md) | Draft | Ring-size increase above 16 (phased 16→24→32) as coordinated CIP-007 Mode B hard forks. Constitutionally sanctioned (Art. III strengthening clause). Benchmarked CLSAG cost; target pending batch-verify + fleet-hardware measurement. Distinct from the 11→13 bootstrap-floor bump (CIP-010). |
 
 ## Sketch — research, not roadmap
 
