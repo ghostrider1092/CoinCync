@@ -51,7 +51,7 @@ use crate::config::NetworkType;
 
 use super::peer::{PeerId, PeerInfo, PeerState, generate_peer_id};
 use super::protocol::{
-    Message, MessageType, VersionMessage,
+    Message, MessageType, VersionMessage, FlareMessage, ChainWorkMessage,
     GetHeadersMessage, GetBlocksMessage, InvMessage,
     MAX_HEADERS_RESPONSE, MAX_BLOCK_HASHES,
 };
@@ -243,6 +243,14 @@ pub struct NodeConfig {
     pub data_dir: std::path::PathBuf,
     /// P2P encryption configuration
     pub encryption: crate::config::P2PEncryptionConfig,
+    /// Our own externally-reachable address (from `--external-ip`). When
+    /// set, it is registered as a self-address so peer gossip that echoes
+    /// our own IP back to us can never make us dial ourselves. `None` =
+    /// unknown (default); self-detection then relies solely on the
+    /// nonce-match path, which does not persist across re-gossip.
+    /// (2026-07-08: self-dials wasted outbound slots and slowed
+    /// post-restart mesh re-formation.)
+    pub external_addr: Option<SocketAddr>,
 }
 
 impl Default for NodeConfig {
@@ -258,6 +266,7 @@ impl Default for NodeConfig {
             proxy: None,
             data_dir: std::path::PathBuf::from("."),
             encryption: crate::config::P2PEncryptionConfig::default(),
+            external_addr: None,
         }
     }
 }
@@ -426,6 +435,16 @@ impl P2PNode {
         let init_height = chain.height();
         let init_tip = chain.tip_hash();
 
+        // Seed the address manager with our own external address (if the
+        // operator passed --external-ip) so peer gossip that echoes our
+        // own IP back to us can never make us dial ourselves. Read before
+        // `config` is moved into the struct below (SocketAddr is Copy).
+        let mut address_mgr = AddressManager::new(1000);
+        if let Some(ext) = config.external_addr {
+            address_mgr.mark_self_address(ext);
+            info!("Registered external address {ext} as self — peer gossip echoing our own IP will not cause self-dials");
+        }
+
         P2PNode {
             our_id,
             config,
@@ -438,7 +457,7 @@ impl P2PNode {
             chain_tip: Arc::new(RwLock::new(init_tip)),
             dandelion: Arc::new(RwLock::new(DandelionRouter::new())),
             sync: Arc::new(RwLock::new(ChainSync::new(init_height, init_tip))),
-            addresses: Arc::new(RwLock::new(AddressManager::new(1000))),
+            addresses: Arc::new(RwLock::new(address_mgr)),
             event_tx,
             cmd_tx,
             running: Arc::new(RwLock::new(false)),
@@ -598,14 +617,29 @@ impl P2PNode {
     pub async fn set_chain_state(&self, height: u64, tip: Hash) {
         *self.chain_height.write().await = height;
         *self.chain_tip.write().await = tip;
+        // Read local cumulative work before taking the sync lock (avoid
+        // holding the chain lock across the sync lock).
+        let total_diff = self.chain.stats().total_difficulty;
         let mut sync = self.sync.write().await;
         sync.set_local_tip(height, tip);
+        // Firework Phase 2: keep the sync manager's notion of our own
+        // cumulative work current so peer-work claims are compared against
+        // the right baseline (and stale lower-work peer claims get pruned).
+        sync.set_local_total_difficulty(total_diff);
         let stats = sync.stats();
         drop(sync);
         self.chain.set_sync_info(
             stats.local_height >= stats.best_known_height,
             stats.best_known_height,
         );
+        // Firework Phase 2 (I6): veto "synced" while a peer advertises more
+        // cumulative work than us — a heavier chain — even when we are taller
+        // in block height. Anti-wedge (expire/ban/prune) clears the claim if
+        // it can't be substantiated, so this can't pin us permanently.
+        self.chain.set_work_behind(stats.best_known_difficulty > stats.local_total_difficulty);
+        // Firework Phase 2: tell CAP_CHAINWORK peers our new cumulative work
+        // so a peer on a lighter (possibly higher) chain can discover ours.
+        self.announce_chain_work();
     }
 
     /// Notify the sync manager that a block has been received and processed.
@@ -833,6 +867,18 @@ impl P2PNode {
                 Ok(n) if n > 0 => info!("Loaded {} addresses from disk", n),
                 Ok(_) => {},
                 Err(e) => warn!("Failed to load address book: {}", e),
+            }
+        }
+
+        // ANCHORS: load the known-good outbound peers from the previous session
+        // and mark them to be dialed FIRST (Bitcoin Core anchor model). This is
+        // what re-establishes a working mesh immediately after a restart rather
+        // than cold-dialing the whole address book.
+        {
+            let anchors = load_anchors_from_disk(&self.config.data_dir);
+            if !anchors.is_empty() {
+                info!("Loaded {} anchor peers — dialing them first on startup", anchors.len());
+                self.addresses.write().await.set_anchors(anchors);
             }
         }
 
@@ -1106,9 +1152,15 @@ impl P2PNode {
         let connector_listen_port = self.config.listen_addr.port();
         let connector_tracker = self.conn_tracker.clone();
         let connector_relay_scores = self.relay_scores.clone();
+        let connector_data_dir = self.config.data_dir.clone();
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(10));
+            // ANCHORS: persist known-good outbound peers roughly every 60s
+            // (every 6th 10s tick) so a hard kill (SIGKILL, OOM, power loss)
+            // still leaves a recent anchor set for fast reconnect. Graceful
+            // shutdown also saves in stop().
+            let mut anchor_save_tick: u32 = 0;
             // Per-address exponential backoff for failed connections
             let backoffs: Arc<tokio::sync::Mutex<std::collections::HashMap<SocketAddr, (std::time::Instant, super::framing::ExponentialBackoff)>>> =
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1138,6 +1190,13 @@ impl P2PNode {
 
             while *connector_running.read().await {
                 interval.tick().await;
+
+                // ANCHORS: persist known-good outbound peers ~every 60s so a
+                // hard kill still leaves a recent set to reconnect to.
+                anchor_save_tick = anchor_save_tick.wrapping_add(1);
+                if anchor_save_tick % 6 == 0 {
+                    save_anchors_to_disk(&connector_peers, &connector_data_dir);
+                }
 
                 // Evaporate inbound block-relay scores each tick so they track
                 // current relay usefulness, and log a one-liner so the measure
@@ -1188,9 +1247,25 @@ impl P2PNode {
                     // surfacing — that suggests multiple leaked slots.
                     let drift = (snap_sum as i64 - outbound_count as i64).abs();
                     if drift >= 2 {
+                        // Self-heal (2026-07-09 seed1 wedge): a drift of >= 2
+                        // means leaked outbound subnet slots have pinned the
+                        // fleet's /16s at MAX_OUTBOUND_PER_SUBNET, so
+                        // try_track_outbound_subnet_owned refuses new outbound
+                        // and the node is stuck at a tiny outbound count — it
+                        // cannot sync (seed1 idle-while-behind for hours).
+                        // Reconcile the counters to the live outbound set so
+                        // those subnets admit connections again.
+                        let live_outbound: Vec<std::net::SocketAddr> = connector_peers
+                            .iter()
+                            .filter(|p| p.outbound)
+                            .map(|p| p.addr)
+                            .collect();
+                        let (old_sum, new_sum) =
+                            connector_tracker.reconcile_outbound_subnets(&live_outbound);
                         warn!(
-                            "eclipse-defense: significant drift — subnet_sum={} but outbound_count={} (diff={}) :: {}",
-                            snap_sum, outbound_count, drift, pretty.join(", ")
+                            "eclipse-defense: significant drift — subnet_sum={} but outbound_count={} (diff={}) :: {} :: RECONCILED {}→{} from {} live outbound",
+                            snap_sum, outbound_count, drift, pretty.join(", "),
+                            old_sum, new_sum, live_outbound.len()
                         );
                     } else if drift == 1 {
                         debug!(
@@ -1577,6 +1652,30 @@ impl P2PNode {
                 // Clean up expired sync bans periodically
                 sync_sync.write().await.cleanup_sync_bans(now);
 
+                // Firework Phase 2 anti-wedge: expire peer work-claims not
+                // refreshed within the TTL, then refresh the "heavier chain
+                // exists" veto from the recomputed work view. Doing this on
+                // the maintenance tick (not just on tip advance) is what lets
+                // is_synced recover even while block production is paused
+                // because a bogus claim briefly made us work-behind — without
+                // it, no tip advance would ever fire to clear the veto.
+                {
+                    // NOTE: the connection-lifecycle prune (retain_connected_peers)
+                    // was rolled back 2026-07-09 — pruning peer heights for any
+                    // peer not in `Connected` state at the tick over-pruned during
+                    // mesh churn (peers mid-handshake), dropping valid tips and
+                    // fragmenting the fleet. The method is retained for a proper
+                    // liveness-based redesign (prune on sustained silence, not
+                    // transient non-Connected state). Only the Phase 2 work-claim
+                    // TTL runs here for now.
+                    let mut s = sync_sync.write().await;
+                    s.expire_stale_work_claims(now, super::sync::WORK_CLAIM_TTL_SECS);
+                    let st = s.stats();
+                    drop(s);
+                    sync_chain
+                        .set_work_behind(st.best_known_difficulty > st.local_total_difficulty);
+                }
+
                 // ── PROGRESS-TIME STALL TRACKING (runs every tick) ────
                 // Unconditionally track when height last advanced. This
                 // is the ground truth for "is the chain actually moving."
@@ -1601,7 +1700,27 @@ impl P2PNode {
                 // regardless of what is_stalled() thinks. Re-fires every
                 // EMERGENCY_T3_REPEAT_SECS until something works.
                 let secs_since_progress = monotonic_now.saturating_sub(last_progress_time_secs);
-                let should_fire_emergency = !sync_sync.read().await.is_synced()
+                // GROUND-TRUTH behind check (2026-07-09 seed1 idle/limp-while-behind):
+                // the manager's is_synced() and even chain.target_height() derive
+                // from the peer_heights MAP, which empties under connection churn
+                // and resets the target back to local — so every recovery path
+                // stops firing and the node sits idle (or limps in bursts). The
+                // most reliable "are we behind" signal is the max height among
+                // CURRENTLY-CONNECTED peers: PeerInfo.height is set at handshake,
+                // refreshed by ChainWork, and bound to the connection lifecycle
+                // (cleared only on real disconnect), so it does not go stale-empty
+                // the way the manager map does. Fire recovery whenever our tip is
+                // below any live peer's height. This sustains recovery until we
+                // actually catch up, instead of stopping after one burst.
+                let max_connected_peer_height = sync_peers
+                    .iter()
+                    .filter(|p| p.state == PeerState::Connected)
+                    .map(|p| p.height)
+                    .max()
+                    .unwrap_or(0);
+                let chain_behind = sync_chain.height()
+                    < sync_chain.target_height().max(max_connected_peer_height);
+                let should_fire_emergency = (!sync_sync.read().await.is_synced() || chain_behind)
                     && monotonic_now >= EMERGENCY_T3_NO_PROGRESS_SECS
                     && secs_since_progress >= EMERGENCY_T3_NO_PROGRESS_SECS
                     && {
@@ -1640,6 +1759,14 @@ impl P2PNode {
                         let mut s = sync_sync.write().await;
                         s.cleanup_expired_orphans(now);
                         s.reset_headers_timeout();
+                        // Force the state machine back into Headers so it
+                        // actually re-requests. reset_headers_timeout() alone is
+                        // a no-op when the manager is stuck in Synced/Idle (the
+                        // idle-while-behind case where peer_heights went empty):
+                        // the state machine only sends GetHeaders from the
+                        // Headers state. The GetHeaders response then repopulates
+                        // peer_heights, un-wedging is_synced for good.
+                        s.set_state(SyncState::Headers);
                     }
                     // Artificially advance last_progress_time_secs so the
                     // next emergency-fire check waits REPEAT_SECS instead
@@ -2509,6 +2636,9 @@ impl P2PNode {
             }
         }
 
+        // ANCHORS: persist known-good outbound peers for fast reconnect next start.
+        save_anchors_to_disk(&self.peers, &self.config.data_dir);
+
         // Disconnect all peers
         for entry in self.peers.iter() {
             let _ = self.event_tx.send(NodeEvent::PeerDisconnected(entry.id));
@@ -2551,6 +2681,50 @@ impl P2PNode {
         let msg = Message::inv_block(self.config.magic, hash)?;
         let data = msg.to_bytes()?;
         self.broadcast_raw(data).await
+    }
+
+    /// Firework: advertise our current cumulative chain work to every peer
+    /// that negotiated `CAP_CHAINWORK`.
+    ///
+    /// Best-effort (`try_send`): a dropped advertisement is re-sent on the
+    /// next tip advance. Peers WITHOUT the capability (older nodes / external
+    /// impls) are skipped entirely — they never receive the `ChainWork`
+    /// message type (which they would reject as unknown) and keep using
+    /// height-based sync. This is the mechanism that lets a work-aware peer
+    /// discover a heavier chain even when that chain is shorter in height.
+    fn announce_chain_work(&self) {
+        use crate::network::firework::{has_cap, CAP_CHAINWORK};
+        let stats = self.chain.stats();
+        let data = match Message::chain_work(
+            self.config.magic,
+            stats.total_difficulty,
+            self.chain.height(),
+            self.chain.tip_hash(),
+        )
+        .and_then(|m| m.to_bytes())
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!("announce_chain_work: failed to build/encode ChainWork: {}", e);
+                return;
+            }
+        };
+        // Snapshot capable peer IDs first; don't hold a DashMap ref across the
+        // per-peer sender lookup.
+        let capable: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|e| has_cap(e.value().capabilities, CAP_CHAINWORK))
+            .map(|e| *e.key())
+            .collect();
+        for pid in capable {
+            let sender = self.peer_senders.get(&pid).map(|s| s.value().clone());
+            if let Some(sender) = sender {
+                // Best-effort: a full channel means the peer is congested and
+                // will receive the next advertisement instead.
+                let _ = sender.try_send(data.clone());
+            }
+        }
     }
 
     /// Broadcast raw message to all peers (with traffic shaping for
@@ -3534,6 +3708,45 @@ async fn send_to_peer(
     }
 }
 
+/// ANCHORS (Bitcoin Core model, PR #17428): persist the currently-connected
+/// OUTBOUND peers to `<data_dir>/anchors.json`. Called periodically by the
+/// connector task and on graceful shutdown. On restart these are dialed FIRST
+/// (see `AddressManager::set_anchors` / `get_next`) so the node re-establishes
+/// a known-good mesh immediately instead of cold-dialing the address book —
+/// which, during the 2026-07-08/09 incident, churned on self-dials and
+/// dead/non-p2p hosts (`broken pipe`/`reset`) and stalled sync after every
+/// restart. Only outbound peers are anchored: inbound connections are
+/// attacker-controllable, so anchoring them would aid, not resist, eclipsing.
+fn save_anchors_to_disk(peers: &DashMap<PeerId, PeerInfo>, data_dir: &std::path::Path) {
+    let anchors: Vec<SocketAddr> = peers
+        .iter()
+        .filter(|p| p.outbound && p.state == PeerState::Connected)
+        .map(|p| p.addr)
+        .collect();
+    if anchors.is_empty() {
+        return; // nothing worth persisting; keep the last good file
+    }
+    let path = data_dir.join("anchors.json");
+    match serde_json::to_string(&anchors) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                warn!("Failed to save anchors: {}", e);
+            }
+        }
+        Err(e) => warn!("Failed to serialize anchors: {}", e),
+    }
+}
+
+/// Load persisted anchor peers written by [`save_anchors_to_disk`]. Missing or
+/// malformed files yield an empty list (fall back to normal bootstrap).
+fn load_anchors_from_disk(data_dir: &std::path::Path) -> Vec<SocketAddr> {
+    let path = data_dir.join("anchors.json");
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str::<Vec<SocketAddr>>(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Process received message
 /// Data format: [msg_type (1 byte), payload...]
 /// The header has already been validated and stripped by the message framer.
@@ -3708,6 +3921,16 @@ async fn process_message(
                     if let Err(e) = sender.send(verack.to_bytes()?).await {
                         warn!("Failed to send Verack to peer {:?}: {}", &peer_id[..4], e);
                     }
+                    // Firework: advertise our capabilities immediately after
+                    // Verack. A peer predating the capability layer receives
+                    // a valid-but-unhandled Flare (type 50) and simply drops
+                    // it via the dispatch catch-all — no disconnect — so this
+                    // is safe to send to every peer. Its capabilities stay 0
+                    // and each capability-gated feature falls back gracefully.
+                    let flare = Message::flare(magic, crate::network::firework::local_capabilities())?;
+                    if let Err(e) = sender.send(flare.to_bytes()?).await {
+                        warn!("Failed to send Flare to peer {:?}: {}", &peer_id[..4], e);
+                    }
                 } else {
                     warn!("No sender for peer {:?} when sending Verack", &peer_id[..4]);
                 }
@@ -3743,9 +3966,99 @@ async fn process_message(
             }
         }
 
-        // Firework Flare capability message was removed in the 1.0 trim.
-        // The Flare variant no longer exists in protocol.rs and wouldn't
-        // be matched here.
+        MessageType::Flare => {
+            // Firework capability advertisement. Store the peer's bitfield
+            // into PeerInfo::capabilities; unknown bits are ignored by
+            // consumers (which test specific CAP_* bits via has_cap). This
+            // message is ADVISORY — an oversized or malformed payload is
+            // dropped silently and is never a disconnect reason.
+            const MAX_FLARE_MSG_SIZE: usize = 32;
+            if payload.len() > MAX_FLARE_MSG_SIZE {
+                trace!(
+                    "Oversized Flare ({} bytes) from peer {:?}, ignoring",
+                    payload.len(), &peer_id[..4]
+                );
+            } else {
+                match borsh::from_slice::<FlareMessage>(payload) {
+                    Ok(flare) => {
+                        if let Some(mut peer) = peers.get_mut(&peer_id) {
+                            peer.capabilities = flare.capabilities;
+                        }
+                        trace!(
+                            "Peer {:?} advertised capabilities {:#x}",
+                            &peer_id[..4], flare.capabilities
+                        );
+                        // Firework Phase 2: if the peer supports CAP_CHAINWORK,
+                        // send our current cumulative work immediately so it
+                        // can evaluate our chain during handshake, not only on
+                        // our next tip advance.
+                        if crate::network::firework::has_cap(
+                            flare.capabilities,
+                            crate::network::firework::CAP_CHAINWORK,
+                        ) {
+                            let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                            if let Some(sender) = sender {
+                                match Message::chain_work(
+                                    magic,
+                                    chain.stats().total_difficulty,
+                                    chain.height(),
+                                    chain.tip_hash(),
+                                )
+                                .and_then(|m| m.to_bytes())
+                                {
+                                    Ok(bytes) => {
+                                        let _ = sender.send(bytes).await;
+                                    }
+                                    Err(e) => warn!(
+                                        "Flare: failed to build ChainWork for peer {:?}: {}",
+                                        &peer_id[..4], e
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        trace!("Malformed Flare from peer {:?}: {} (ignoring)", &peer_id[..4], e);
+                    }
+                }
+            }
+        }
+
+        MessageType::ChainWork => {
+            // Firework Phase 2: a CAP_CHAINWORK peer told us its cumulative
+            // work + tip. Feed it into the sync manager's peer-work table so
+            // we can recognize a heavier chain even when it is shorter in
+            // height. The advertised work is a CLAIM, not proof — it only
+            // influences which peer we request headers from; adoption still
+            // recomputes summed PoW in fork choice. update_peer_difficulty_for
+            // already caps bogus over-claims. Advisory: malformed/oversized
+            // payloads are dropped silently, never a disconnect reason.
+            const MAX_CHAINWORK_MSG_SIZE: usize = 256;
+            if payload.len() > MAX_CHAINWORK_MSG_SIZE {
+                trace!("Oversized ChainWork ({} bytes) from peer {:?}, ignoring", payload.len(), &peer_id[..4]);
+            } else {
+                match borsh::from_slice::<ChainWorkMessage>(payload) {
+                    Ok(cw) => {
+                        if let Some(mut peer) = peers.get_mut(&peer_id) {
+                            peer.height = cw.height;
+                            peer.tip_hash = cw.best_hash;
+                        }
+                        {
+                            let mut s = sync.write().await;
+                            s.update_peer_difficulty_for(peer_id, cw.total_difficulty);
+                            s.update_peer_height_for(peer_id, cw.height);
+                        }
+                        trace!(
+                            "Peer {:?} ChainWork: td={} h={}",
+                            &peer_id[..4], cw.total_difficulty, cw.height
+                        );
+                    }
+                    Err(e) => {
+                        trace!("Malformed ChainWork from peer {:?}: {} (ignoring)", &peer_id[..4], e);
+                    }
+                }
+            }
+        }
 
         MessageType::Verack => {
             let is_outbound = peers.get(&peer_id).map(|p| p.outbound).unwrap_or(false);

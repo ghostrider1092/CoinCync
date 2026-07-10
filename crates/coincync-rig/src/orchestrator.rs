@@ -55,6 +55,25 @@ use coincync::transaction::{Transaction, TxOutput, TxType};
 use crate::daemon::DaemonClient;
 use crate::hasher::{HashInput, Hasher};
 
+/// How many blocks the local tip may lead the best peer's advertised
+/// height before we treat it as a private fork and refuse to mine.
+/// A healthy solo miner leads by 0–2 blocks (peers adopt each block
+/// within a beat); a sustained lead this large means peers are NOT
+/// adopting our blocks — the 2026-07-08 runaway-fork signature.
+const FORK_DIVERGENCE_MARGIN: u64 = 25;
+
+/// Pure predicate for the miner's fork-divergence gate.
+///
+/// Returns `true` when the local tip has run so far ahead of every peer
+/// that our blocks are provably not being adopted — i.e. we are mining a
+/// private fork and must stop. `peer_target == 0` means "no peer height
+/// reported yet", which is NOT divergence (the separate peer-count gate
+/// covers the empty-mesh case); we return `false` so we don't wedge a
+/// genuinely-fresh node that simply hasn't heard a peer height.
+fn fork_diverged(local_height: u64, peer_target: u64, margin: u64) -> bool {
+    peer_target > 0 && local_height > peer_target.saturating_add(margin)
+}
+
 /// One run of the solo mining loop. Returns when the daemon connection
 /// permanently fails or the operator sends ctrl-c (via tokio signal —
 /// tracked outside this function).
@@ -226,11 +245,44 @@ pub async fn run_solo(
                         // peer_count tracks CAUSE (mesh established
                         // vs not). Use the cause.
                         let _ = tip_age; // intentionally unused; see above
-                        let ok = is_synced && peers >= 3;
+
+                        // Fork-divergence gate (2026-07-08 runaway-fork
+                        // incident). `is_synced` is HEIGHT-based: the daemon
+                        // reports synced whenever local_height >=
+                        // peer_target_height. A node briefly isolated at
+                        // restart mines alone, its difficulty collapses, and
+                        // it races hundreds of blocks ahead of the real
+                        // network — yet still reports synced (its tip is
+                        // "ahead" of every peer) with a full peer_count. Both
+                        // legacy conditions passed while randomx2 produced a
+                        // worthless low-work private fork. The tell: NO peer
+                        // adopts the blocks, so our height runs far ahead of
+                        // every peer's advertised height and stays there. If
+                        // our blocks were valid, peers would follow within a
+                        // block or two. peer_target==0 means "no peer height
+                        // reported yet" → don't evaluate divergence (the
+                        // peers>=3 gate covers the empty-mesh case).
+                        let local_height = info
+                            .get("height")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let peer_target = info
+                            .get("peer_target_height")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let diverged =
+                            fork_diverged(local_height, peer_target, FORK_DIVERGENCE_MARGIN);
+
+                        let ok = is_synced && peers >= 3 && !diverged;
                         let reason = if !is_synced {
                             "is_synced=false".to_string()
                         } else if peers < 3 {
                             format!("peer_count={} (<3; mesh not established, possibly mid-restart)", peers)
+                        } else if diverged {
+                            format!(
+                                "fork-divergence: local height {} runs >{} blocks ahead of best peer height {} — blocks not being adopted, likely a private fork",
+                                local_height, FORK_DIVERGENCE_MARGIN, peer_target
+                            )
                         } else {
                             "OK".to_string()
                         };
@@ -781,3 +833,42 @@ fn short_hex(bytes: &[u8]) -> String {
 // Keep the import alive so future refactors don't have to chase it down.
 #[allow(unused_imports)]
 use PowAlgorithm as _PowAlgorithmStillUsedTransitively;
+
+#[cfg(test)]
+mod tests {
+    use super::{fork_diverged, FORK_DIVERGENCE_MARGIN};
+
+    #[test]
+    fn no_peer_height_is_not_divergence() {
+        // peer_target == 0 means "no peer height reported yet" — a fresh
+        // node, not a fork. Must NOT trip, or we'd wedge honest startup.
+        assert!(!fork_diverged(10_544, 0, FORK_DIVERGENCE_MARGIN));
+        assert!(!fork_diverged(0, 0, FORK_DIVERGENCE_MARGIN));
+    }
+
+    #[test]
+    fn healthy_solo_miner_leading_by_a_few_blocks_is_ok() {
+        // A solo miner is transiently a block or two ahead of peers while
+        // they ingest its latest block. That is normal, not a fork.
+        assert!(!fork_diverged(10_043, 10_042, FORK_DIVERGENCE_MARGIN));
+        assert!(!fork_diverged(10_044, 10_042, FORK_DIVERGENCE_MARGIN));
+        // Exactly at the margin boundary is still allowed (strictly-greater).
+        assert!(!fork_diverged(10_042 + FORK_DIVERGENCE_MARGIN, 10_042, FORK_DIVERGENCE_MARGIN));
+    }
+
+    #[test]
+    fn runaway_private_fork_trips_the_gate() {
+        // The 2026-07-08 signature: local tip hundreds of blocks past every
+        // peer, which stays put because it rejects our low-work blocks.
+        assert!(fork_diverged(10_544, 10_042, FORK_DIVERGENCE_MARGIN));
+        // One block past the margin is enough to trip.
+        assert!(fork_diverged(10_042 + FORK_DIVERGENCE_MARGIN + 1, 10_042, FORK_DIVERGENCE_MARGIN));
+    }
+
+    #[test]
+    fn behind_or_level_with_peers_never_diverges() {
+        // Being behind the network is handled by is_synced, not this gate.
+        assert!(!fork_diverged(10_000, 10_042, FORK_DIVERGENCE_MARGIN));
+        assert!(!fork_diverged(10_042, 10_042, FORK_DIVERGENCE_MARGIN));
+    }
+}

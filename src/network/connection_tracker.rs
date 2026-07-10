@@ -218,6 +218,43 @@ impl ConnectionTracker {
         snap
     }
 
+    /// HARDENING (Layer 4): reconcile the per-/16 outbound counters against
+    /// the actual set of live outbound connections. Returns `(old_sum,
+    /// new_sum)`.
+    ///
+    /// The counters are normally maintained by RAII
+    /// (`OutboundSubnetSlot::drop` → `untrack_outbound_subnet`). But across
+    /// the async churn of mass reconnects a slot `Arc` can be leaked — held
+    /// by a reference that outlives its connection — so its `Drop` never
+    /// fires and the counter drifts ABOVE the true count. A drifted counter
+    /// pins the fleet's /16s at `MAX_OUTBOUND_PER_SUBNET`, after which
+    /// `try_track_outbound_subnet[_owned]` REFUSES new outbound to those
+    /// subnets — silently wedging a node at a tiny outbound count so it
+    /// cannot sync (observed 2026-07-09 on seed1: subnet_sum=11 vs
+    /// outbound_count=1, node idle-while-behind for hours). RAII across task
+    /// boundaries is structurally fragile, so a security-critical counter
+    /// must be reconcilable against ground truth: we rebuild it from the live
+    /// connection set.
+    ///
+    /// Safe w.r.t. the RAII guards: leaked slots (the drift source) never
+    /// fire their `Drop`, and a live slot's future `Drop` decrements from the
+    /// reconciled value through the `> 0` guard in `untrack_outbound_subnet`,
+    /// so it cannot underflow. A concurrent `try_track` racing the rebuild
+    /// can at worst lose/gain one increment, which the next reconcile
+    /// corrects — acceptable for an infrequent self-heal.
+    pub fn reconcile_outbound_subnets(&self, live_outbound: &[SocketAddr]) -> (usize, usize) {
+        let old_sum: usize = self.outbound_per_subnet.iter().map(|e| *e.value()).sum();
+        let mut truth: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for addr in live_outbound {
+            *truth.entry(Self::subnet_key(&addr.ip())).or_insert(0) += 1;
+        }
+        self.outbound_per_subnet.clear();
+        for (subnet, count) in &truth {
+            self.outbound_per_subnet.insert(*subnet, *count);
+        }
+        (old_sum, truth.values().sum())
+    }
+
     /// Check if we can accept a connection from this IP without
     /// actually tracking it. Non-atomic — if you need TOCTOU safety,
     /// call `try_track_connection` instead.
@@ -516,6 +553,37 @@ mod tests {
         // Drop one peer; slot must free up.
         t.untrack_outbound_subnet(&peers[0]);
         assert!(t.try_track_outbound_subnet(&addr_in(10, 0, 99)));
+    }
+
+    /// 2026-07-09 seed1 wedge: leaked outbound slots pin a /16 at the cap so
+    /// no new outbound to the fleet is admitted, wedging the node. Reconcile
+    /// against the live connection set frees the phantom slots.
+    #[test]
+    fn reconcile_frees_leaked_outbound_slots() {
+        let t = ConnectionTracker::new(1024);
+        let a = addr_in(10, 0, 1);
+        let b = addr_in(10, 0, 2);
+        assert!(t.try_track_outbound_subnet(&a));
+        assert!(t.try_track_outbound_subnet(&b));
+        // At cap — a third dial in this /16 is refused (the wedge condition).
+        assert!(!t.try_track_outbound_subnet(&addr_in(10, 0, 99)));
+        // Ground truth: only `a` is a live outbound connection; `b` leaked.
+        let (old_sum, new_sum) = t.reconcile_outbound_subnets(&[a]);
+        assert_eq!(old_sum, 2);
+        assert_eq!(new_sum, 1);
+        // Subnet has room again → new outbound admitted (node can peer/sync).
+        assert!(t.try_track_outbound_subnet(&addr_in(10, 0, 99)));
+    }
+
+    #[test]
+    fn reconcile_with_empty_live_set_zeroes_all_counters() {
+        let t = ConnectionTracker::new(1024);
+        assert!(t.try_track_outbound_subnet(&addr_in(45, 32, 1)));
+        assert!(t.try_track_outbound_subnet(&addr_in(70, 34, 1)));
+        let (old_sum, new_sum) = t.reconcile_outbound_subnets(&[]);
+        assert_eq!(old_sum, 2);
+        assert_eq!(new_sum, 0);
+        assert!(t.try_track_outbound_subnet(&addr_in(45, 32, 1)));
     }
 
     #[test]

@@ -60,6 +60,13 @@ NETWORK=$(jq -r '.network' "$CONFIG" | tr -d '\r')
 # 0.0.0.0 = listen on all interfaces (public RPC).
 RPC_BIND=$(jq -r ".nodes.\"$HOSTNAME\".rpc_bind // \"127.0.0.1\"" "$CONFIG" | tr -d '\r')
 
+# This host's own public IP. Passed as --external-ip so the node marks it
+# as a self-address and never dials itself when a peer gossips our own IP
+# back to us (2026-07-08 self-dial incident — wasted outbound slots slowed
+# post-restart mesh re-formation). Every fleet node has a fixed public IP
+# in the config, so this is always known.
+SELF_IP=$(jq -r ".nodes.\"$HOSTNAME\".ip" "$CONFIG" | tr -d '\r')
+
 # Build the addnode list: every OTHER active node THAT RUNS A
 # COINCYNC-NODE, sorted by hostname for deterministic output.
 #
@@ -111,6 +118,7 @@ ExecStart=/usr/local/bin/coincync-node \\
     --network ${NETWORK} \\
     --p2p-bind 0.0.0.0:${P2P_PORT} \\
     --rpc-bind ${RPC_BIND}:${RPC_PORT} \\
+    --external-ip ${SELF_IP}:${P2P_PORT} \\
     --log-level info \\
 ${ADDNODES}
 Restart=on-failure

@@ -130,6 +130,11 @@ impl NodeRpc {
             "difficulty": self.chain.difficulty().to_string(),
             "synced": self.chain.is_synced(),
             "peer_count": self.peers(),
+            // Raw peer-advertised target height (0 = no peer height yet).
+            // Consumed by the miner's fork-divergence gate: if local `height`
+            // runs far ahead of this, our blocks aren't being adopted by the
+            // network and we're on a private fork (2026-07-08 incident).
+            "peer_target_height": self.chain.peer_advertised_height(),
             "tx_pool_size": self.mempool.len(),
             "process_count": process_count,
             // M5 (audit fix): explicit availability flag — Prometheus / monitoring

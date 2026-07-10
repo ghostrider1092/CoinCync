@@ -116,6 +116,37 @@ for HOST in $HOSTS; do
     fi
     echo "  ✓ remote SHA verified"
 
+    # 2.5. Version-downgrade guard (2026-07-08 fleet-stall prevention).
+    # The original stall was caused by deploying an OLD binary (1.0.10)
+    # over newer running nodes, reintroducing already-fixed peer-banning
+    # bugs → mesh collapse → 6.5h freeze. Refuse to install a binary
+    # OLDER than the one currently running unless ALLOW_DOWNGRADE=1 is
+    # set for an intentional rollback. Semver is compared with `sort -V`
+    # over the version string embedded in `--version` output.
+    NEW_VER=$(ssh $SSH_OPTS "root@${IP}" "chmod +x /tmp/coincync-node.new; /tmp/coincync-node.new --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1" || echo "")
+    CUR_VER=$(ssh $SSH_OPTS "root@${IP}" "${INSTALL} --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1" || echo "")
+    if [[ -z "$NEW_VER" ]]; then
+        echo "  ✗ could not read a version from the new binary on $HOST — refusing to deploy an unidentifiable binary" >&2
+        exit 4
+    fi
+    if [[ -n "$CUR_VER" ]]; then
+        OLDER=$(printf '%s\n%s\n' "$NEW_VER" "$CUR_VER" | sort -V | head -1)
+        if [[ "$NEW_VER" != "$CUR_VER" && "$OLDER" == "$NEW_VER" ]]; then
+            if [[ "${ALLOW_DOWNGRADE:-0}" == "1" ]]; then
+                echo "  ⚠ DOWNGRADE $CUR_VER → $NEW_VER on $HOST (ALLOW_DOWNGRADE=1; proceeding)" >&2
+            else
+                echo "  ✗ DOWNGRADE BLOCKED on $HOST: new $NEW_VER is OLDER than running $CUR_VER" >&2
+                echo "    Deploying an older binary reintroduces already-fixed bugs (see the 2026-07-08 fleet stall)." >&2
+                echo "    If this rollback is intentional, re-run with ALLOW_DOWNGRADE=1." >&2
+                exit 4
+            fi
+        else
+            echo "  ✓ version check: running $CUR_VER → deploying $NEW_VER"
+        fi
+    else
+        echo "  ✓ version check: no readable current version (fresh install) → deploying $NEW_VER"
+    fi
+
     # 3. Stop, swap, restart. Rig also stopped/started if this is the miner.
     EXTRA_RIG=""
     if [[ "$ROLE" == "miner" ]]; then

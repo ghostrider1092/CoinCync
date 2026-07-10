@@ -20,6 +20,7 @@ pub mod compact_blocks;
 pub mod orphan;
 pub mod proxy;
 pub mod peer;
+pub mod firework;
 pub mod block_filter;
 pub mod scoring;
 pub mod sync;

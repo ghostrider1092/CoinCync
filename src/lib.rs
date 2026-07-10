@@ -47,6 +47,7 @@ pub mod wallet;
 // ── Storage ─────────────────────────────────────────────────
 pub mod storage;
 pub mod db;
+pub mod snapshot;
 
 // ── Network + mining ────────────────────────────────────────
 pub mod network;

@@ -352,6 +352,14 @@ pub struct Blockchain {
     network: NetworkType,
     /// Sync status from P2P layer (atomic for lock-free reads from RPC)
     synced: std::sync::atomic::AtomicBool,
+    /// Firework Phase 2 (I6): set true by the P2P layer when a peer
+    /// advertises a verifiably-heavier chain (more cumulative work) that we
+    /// have not matched. A veto over `is_synced()`: we must not report
+    /// synced — and the miner must not mine — while a heavier chain exists,
+    /// even if we are taller in block height. Cleared by the sync layer's
+    /// anti-wedge machinery (expire/ban/prune) so an unsubstantiated claim
+    /// cannot pin it. Default false / inert for peers without CAP_CHAINWORK.
+    work_behind: std::sync::atomic::AtomicBool,
     /// Target height from P2P peers (0 = no peer info available)
     peer_target_height: std::sync::atomic::AtomicU64,
     /// Unix timestamp of the last block accepted from the P2P layer.
@@ -409,6 +417,7 @@ impl Blockchain {
             db: None,
             network,
             synced: std::sync::atomic::AtomicBool::new(true),
+            work_behind: std::sync::atomic::AtomicBool::new(false),
             peer_target_height: std::sync::atomic::AtomicU64::new(0),
             last_block_received_at: std::sync::atomic::AtomicU64::new(0),
             // Phase 2 stores: None until Phase 2 activation
@@ -448,6 +457,7 @@ impl Blockchain {
             db: Some(db),
             network,
             synced: std::sync::atomic::AtomicBool::new(true),
+            work_behind: std::sync::atomic::AtomicBool::new(false),
             peer_target_height: std::sync::atomic::AtomicU64::new(0),
             last_block_received_at: std::sync::atomic::AtomicU64::new(0),
             // Phase 2 stores: None until Phase 2 activation
@@ -1080,6 +1090,16 @@ impl Blockchain {
     /// A fresh tip + tiny overshoot is the textbook "essentially synced"
     /// state; reporting it as such matches user reality.
     pub fn is_synced(&self) -> bool {
+        // Firework Phase 2 (I6): a peer advertising a verifiably-heavier
+        // chain vetoes "synced" regardless of block height — this is what
+        // stops a node on a higher-block/lower-work fork from reporting
+        // synced (and its miner from mining). Inert for height-only peers
+        // (no CAP_CHAINWORK), and cleared by the sync layer's anti-wedge
+        // machinery (expire/ban/prune) once an unsubstantiated claim is
+        // dropped, so it can never wedge us permanently.
+        if self.work_behind.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
         let flag = self.synced.load(std::sync::atomic::Ordering::Relaxed);
         if flag { return true; }
         let h = self.height();
@@ -3005,10 +3025,31 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
         if peer_target > 0 { peer_target } else { self.height() }
     }
 
+    /// Raw peer-advertised target height (0 = no peer height info yet).
+    ///
+    /// Unlike [`Chain::target_height`], this does NOT fall back to the local
+    /// height when no peer info is available. Callers detecting fork
+    /// divergence must distinguish "no peer height reported yet" (0) from
+    /// "peers agree we're at the tip". Used by the miner's fork-divergence
+    /// gate (2026-07-08 runaway-fork incident): a local tip running far
+    /// ahead of every peer's advertised height means our blocks aren't
+    /// being adopted — we're mining a worthless private fork.
+    pub fn peer_advertised_height(&self) -> u64 {
+        self.peer_target_height.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Update sync info from P2P layer
     pub fn set_sync_info(&self, synced: bool, target_height: u64) {
         self.synced.store(synced, std::sync::atomic::Ordering::Relaxed);
         self.peer_target_height.store(target_height, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Firework Phase 2 (I6): update the "a heavier chain exists" veto (see
+    /// the `work_behind` field). Called by the P2P layer whenever peer work
+    /// claims or our own cumulative work change, so `is_synced()` reflects
+    /// cumulative work and not just block height.
+    pub fn set_work_behind(&self, behind: bool) {
+        self.work_behind.store(behind, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record that a block was accepted from the P2P layer right now.
@@ -3662,6 +3703,24 @@ mod tests {
             2000, 1000, crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
         );
         assert_eq!(count, 0);
+    }
+
+    /// Firework Phase 2 (I6): the work-behind veto overrides height-based
+    /// synced. A node that is flagged synced (at/above peer height) must
+    /// still report NOT synced while a heavier chain is known, and must
+    /// recover once the veto is cleared (the anti-wedge machinery clears it
+    /// when an unsubstantiated claim is dropped).
+    #[test]
+    fn work_behind_veto_overrides_height_synced() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        chain.set_sync_info(true, 0); // height-synced
+        assert!(chain.is_synced(), "baseline: height-synced reports synced");
+        chain.set_work_behind(true); // a heavier chain is discovered
+        assert!(!chain.is_synced(),
+            "work-behind must veto synced even though the height flag is true");
+        chain.set_work_behind(false); // anti-wedge clears the claim
+        assert!(chain.is_synced(), "clearing the veto restores synced");
     }
 
     /// Genesis block coinbase has 8-byte extra (height only); it must

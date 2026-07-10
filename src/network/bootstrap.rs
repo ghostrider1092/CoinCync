@@ -285,6 +285,13 @@ pub struct AddressManager {
     tried: HashSet<SocketAddr>,
     /// Self-addresses (detected via nonce match) — never connect to these
     self_addresses: HashSet<SocketAddr>,
+    /// ANCHORS (Bitcoin Core model): our known-good outbound peers from the
+    /// previous session, persisted to disk and dialed FIRST on restart.
+    /// Reconnecting to proven-reachable peers avoids the cold-start dial
+    /// churn (self-dials, dead/non-p2p hosts, repeated broken-pipe/reset)
+    /// that stalled sync after every restart during the 2026-07-08/09
+    /// incident. See docs/architecture (peer-mgmt) + Bitcoin Core PR #17428.
+    anchors: Vec<SocketAddr>,
     /// Per-address consecutive-failure count. Resets on `mark_success`;
     /// purges address from pool when it crosses `FAILURE_PURGE_THRESHOLD`.
     failures: HashMap<SocketAddr, u32>,
@@ -299,13 +306,34 @@ impl AddressManager {
             known_addrs: HashSet::new(),
             tried: HashSet::new(),
             self_addresses: HashSet::new(),
+            anchors: Vec::new(),
             failures: HashMap::new(),
             max_addresses,
         }
     }
 
+    /// Install the persisted anchor peers (loaded from `anchors.json` on
+    /// startup). They are also seeded into the general address pool so
+    /// mark_tried/mark_success + the address book treat them normally; the
+    /// `anchors` list only controls dial PRIORITY (see `get_next`). Self- and
+    /// already-known addresses are filtered by `add`.
+    pub fn set_anchors(&mut self, anchors: Vec<SocketAddr>) {
+        for a in &anchors {
+            self.add(PeerAddress::new(*a));
+        }
+        self.anchors = anchors;
+    }
+
     /// Add a new address
     pub fn add(&mut self, addr: PeerAddress) {
+        // Never (re-)admit a known self-address. mark_self_address()
+        // removes our own IP once, but without this guard the next
+        // AddrGossip that echoes our IP back to us re-inserts it and we
+        // dial ourselves again — wasting an outbound slot and slowing
+        // mesh re-formation after a restart (2026-07-08 incident).
+        if self.self_addresses.contains(&addr.addr) {
+            return;
+        }
         if self.addresses.len() >= self.max_addresses {
             // Remove oldest
             self.addresses.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
@@ -351,6 +379,17 @@ impl AddressManager {
 
     /// Get next address to try connecting
     pub fn get_next(&mut self) -> Option<SocketAddr> {
+        // ANCHORS FIRST: dial our persisted known-good outbound peers before
+        // anything else. They were reachable last session, so reconnecting to
+        // them re-establishes a working mesh immediately after a restart
+        // instead of cold-dialing the whole address book (which churns on
+        // self-dials and dead/non-p2p hosts). Skipped once tried this cycle;
+        // when the tried set is cleared below they are re-prioritized.
+        for a in &self.anchors {
+            if !self.tried.contains(a) && !self.self_addresses.contains(a) {
+                return Some(*a);
+            }
+        }
         // Sort by last_seen (most recent first)
         self.addresses.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
 
@@ -617,6 +656,74 @@ mod tests {
         }
 
         assert_eq!(mgr.len(), 5);
+    }
+
+    /// Self-address guard (2026-07-08 self-dial incident): once an address
+    /// is marked as our own, it must never be dialed AND never be
+    /// re-admitted by a later `add()` (which is how peer AddrGossip
+    /// re-injects our own IP). Without the `add()` guard, gossip re-adds
+    /// our IP and we self-dial again on the next maintenance tick.
+    #[test]
+    fn self_address_is_never_dialed_or_readded() {
+        let mut mgr = AddressManager::new(100);
+        let me: SocketAddr = "45.32.79.234:28080".parse().unwrap();
+        let peer: SocketAddr = "192.0.2.1:28080".parse().unwrap();
+
+        mgr.add(PeerAddress::new(me));
+        mgr.add(PeerAddress::new(peer));
+        mgr.mark_self_address(me);
+        // Our own address is gone; the real peer remains.
+        assert_eq!(mgr.len(), 1);
+
+        // Simulate a peer gossiping our own IP back to us.
+        mgr.add(PeerAddress::new(me));
+        assert_eq!(mgr.len(), 1, "self-address must not be re-admitted via gossip");
+
+        // get_next() must never hand back our own address.
+        for _ in 0..5 {
+            if let Some(next) = mgr.get_next() {
+                assert_ne!(next, me, "get_next() returned our own self-address");
+                mgr.mark_tried(next);
+            }
+        }
+    }
+
+    /// ANCHORS (2026-07-09): persisted known-good outbound peers are dialed
+    /// FIRST on restart, before the general address book — the Bitcoin Core
+    /// anchor model that avoids cold-start dial churn.
+    #[test]
+    fn anchors_are_dialed_before_general_pool() {
+        let mut mgr = AddressManager::new(100);
+        let general: SocketAddr = "192.0.2.50:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(general));
+        let anchor1: SocketAddr = "192.0.2.1:28080".parse().unwrap();
+        let anchor2: SocketAddr = "192.0.2.2:28080".parse().unwrap();
+        mgr.set_anchors(vec![anchor1, anchor2]);
+
+        let first = mgr.get_next().unwrap();
+        assert!(first == anchor1 || first == anchor2, "anchor dialed first, got {}", first);
+        mgr.mark_tried(first);
+        let second = mgr.get_next().unwrap();
+        assert!(
+            (second == anchor1 || second == anchor2) && second != first,
+            "second anchor dialed next, got {}", second
+        );
+        mgr.mark_tried(second);
+        // Both anchors tried this cycle → fall through to the general pool.
+        assert_eq!(mgr.get_next().unwrap(), general,
+            "general pool used only after anchors are exhausted");
+    }
+
+    /// An anchor that turns out to be a self-address (stale anchors file) is
+    /// still never dialed.
+    #[test]
+    fn self_address_anchor_is_skipped() {
+        let mut mgr = AddressManager::new(100);
+        let me: SocketAddr = "192.0.2.9:28080".parse().unwrap();
+        let good: SocketAddr = "192.0.2.1:28080".parse().unwrap();
+        mgr.mark_self_address(me);
+        mgr.set_anchors(vec![me, good]);
+        assert_eq!(mgr.get_next().unwrap(), good, "self anchor skipped, good anchor dialed");
     }
 
     /// Peer-aging (2026-06-26): after FAILURE_PURGE_THRESHOLD consecutive

@@ -52,6 +52,14 @@ struct Cli {
     #[arg(long = "addnode")]
     addnode: Vec<String>,
 
+    /// Our own externally-reachable address. Accepts a bare IP
+    /// (`45.32.79.234`, our listen port is attached) or `IP:PORT`.
+    /// Registered as a self-address so peer gossip that echoes our own IP
+    /// back to us never makes us dial ourselves. Strongly recommended for
+    /// fixed-IP fleet nodes.
+    #[arg(long = "external-ip", value_name = "IP[:PORT]")]
+    external_ip: Option<String>,
+
     /// Disable all automatic peer discovery (for isolated tests).
     #[arg(long)]
     no_peers: bool,
@@ -137,6 +145,30 @@ enum Command {
     /// mismatch). See `docs/operations/v1.0.12-hard-fork-rollout.md`
     /// for the full upgrade runbook.
     MigrateLegacyDb,
+
+    /// Export a consistent chain snapshot for trusted fast-sync bootstrap.
+    ///
+    /// The node MUST be stopped (the sled DB is single-process). Produces
+    /// `<out>/db/` + `<out>/manifest.json`; copy that directory to a lagging
+    /// node and run `snapshot-import` there instead of grinding IBD from
+    /// genesis. See `src/snapshot.rs` for the format + trust model.
+    SnapshotExport {
+        /// Output directory for the snapshot (must not already contain `db/`).
+        #[arg(long)]
+        out: PathBuf,
+    },
+
+    /// Install a chain snapshot produced by `snapshot-export`.
+    ///
+    /// The node MUST be stopped. Verifies the snapshot's network + genesis
+    /// hash (refuses a wrong-chain snapshot) and a blake3 integrity hash,
+    /// backs up any existing chaindata to a `.pre-snapshot-<ts>` sibling
+    /// (reversible), then installs the snapshot.
+    SnapshotImport {
+        /// Snapshot directory (containing `db/` + `manifest.json`).
+        #[arg(long)]
+        input: PathBuf,
+    },
 }
 
 // SECURITY (runtime resilience): force at least 4 worker threads regardless of
@@ -265,6 +297,200 @@ async fn main() {
                 }
             }
         }
+        Command::SnapshotExport { out } => {
+            let network_subdir = match network {
+                Network::Mainnet => "mainnet",
+                Network::Testnet => "testnet",
+                Network::Regtest => "regtest",
+            };
+            let chaindata_path = data_dir.join(network_subdir);
+
+            // Open the (stopped) node's DB just long enough to capture the tip
+            // for the manifest, then DROP the handle inside this block so sled
+            // flushes and releases its lock BEFORE snapshot::export copies the
+            // directory. If the daemon is still running it holds the lock and
+            // Database::open fails here — exactly the guard we want (never
+            // snapshot a live, mid-write DB).
+            let (height, tip_hex, genesis_hex) = {
+                let db = match Database::open(&chaindata_path) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        error!(
+                            "Cannot open chaindata at {} for export: {}. Is the node still running? Stop it first.",
+                            chaindata_path.display(),
+                            e
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                let chain = Blockchain::with_database(Arc::new(db), network);
+                let _ = chain.load_from_database();
+                let tip = chain.tip();
+                let genesis = match network {
+                    Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
+                    _ => coincync::testnet::expected_genesis_hash(),
+                };
+                (
+                    tip.height,
+                    hex::encode(tip.hash.as_bytes()),
+                    hex::encode(genesis.as_bytes()),
+                )
+                // `chain` (and its Arc<Database>) dropped here → sled flush + unlock.
+            };
+
+            let created_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let version = env!("CARGO_PKG_VERSION");
+
+            info!(
+                "Exporting snapshot: network={} height={} tip={} → {}",
+                network_subdir,
+                height,
+                tip_hex,
+                out.display()
+            );
+            match coincync::snapshot::export(
+                &chaindata_path,
+                &out,
+                network_subdir,
+                &genesis_hex,
+                height,
+                &tip_hex,
+                version,
+                created_at,
+            ) {
+                Ok(m) => {
+                    info!(
+                        "✓ Snapshot exported to {} (height={}, db_blake3={})",
+                        out.display(),
+                        m.height,
+                        m.db_blake3
+                    );
+
+                    // Optional: sign the manifest if COINCYNC_SNAPSHOT_SIGN_SEED_HEX
+                    // (32-byte hex Ed25519 seed) is set. Produces `manifest.sig`,
+                    // which importers with a matching trusted-signer allowlist
+                    // require. Unset = an unsigned snapshot (fine for a private
+                    // trusted fleet).
+                    match std::env::var("COINCYNC_SNAPSHOT_SIGN_SEED_HEX") {
+                        Ok(seed_hex) => {
+                            let seed_hex = seed_hex.trim();
+                            match hex::decode(seed_hex) {
+                                Ok(bytes) if bytes.len() == 32 => {
+                                    let mut seed = [0u8; 32];
+                                    seed.copy_from_slice(&bytes);
+                                    match coincync::snapshot::sign_snapshot_dir(&out, &seed) {
+                                        Ok(sig) => info!(
+                                            "✓ Snapshot manifest signed by {} → {}/manifest.sig",
+                                            sig.signer_pubkey,
+                                            out.display()
+                                        ),
+                                        Err(e) => {
+                                            error!("Snapshot signing failed: {}", e);
+                                            std::process::exit(1);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    error!("COINCYNC_SNAPSHOT_SIGN_SEED_HEX must be 32-byte (64-char) hex; snapshot exported UNSIGNED");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            info!("(unsigned — set COINCYNC_SNAPSHOT_SIGN_SEED_HEX to sign the manifest)");
+                        }
+                    }
+
+                    info!("Copy that directory to the target node and run: `coincync-node snapshot-import --input <dir>`");
+                }
+                Err(e) => {
+                    error!("Snapshot export failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::SnapshotImport { input } => {
+            let network_subdir = match network {
+                Network::Mainnet => "mainnet",
+                Network::Testnet => "testnet",
+                Network::Regtest => "regtest",
+            };
+            let chaindata_path = data_dir.join(network_subdir);
+            let genesis = match network {
+                Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
+                _ => coincync::testnet::expected_genesis_hash(),
+            };
+            let backup_stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            // Consensus checkpoints baked into this binary. The snapshot's DB
+            // must match them at every checkpoint height or the import is
+            // refused — this defeats a fabricated / wrong-fork snapshot from an
+            // untrusted source. Always includes genesis, so it's never empty.
+            let checkpoints: Vec<(u64, coincync::primitives::Hash)> = match network {
+                Network::Mainnet => coincync::mainnet::mainnet_checkpoints()
+                    .into_iter()
+                    .map(|c| (c.height, c.hash))
+                    .collect(),
+                _ => coincync::testnet::testnet_checkpoints()
+                    .into_iter()
+                    .map(|c| (c.height, c.hash))
+                    .collect(),
+            };
+            // Optional trusted-source gate. If COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS
+            // is set (comma-separated hex Ed25519 keys), the snapshot must carry
+            // a `manifest.sig` signed by one of them. Unset (the private-fleet
+            // default) means signatures are not required.
+            let trusted_signers: Vec<String> = std::env::var("COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !trusted_signers.is_empty() {
+                info!(
+                    "Snapshot signature required: {} trusted signer(s) configured",
+                    trusted_signers.len()
+                );
+            }
+            let policy = coincync::snapshot::ImportPolicy {
+                network,
+                expected_genesis: &genesis,
+                checkpoints: &checkpoints,
+                trusted_signers: &trusted_signers,
+                backup_stamp,
+            };
+
+            info!(
+                "Importing snapshot from {} into {} (network={}, verifying against {} checkpoints)",
+                input.display(),
+                chaindata_path.display(),
+                network_subdir,
+                checkpoints.len(),
+            );
+            match coincync::snapshot::import(&input, &chaindata_path, &policy) {
+                Ok(m) => {
+                    info!(
+                        "✓ Snapshot imported: height={} tip={} (produced by {} at unix {}).",
+                        m.height, m.tip_hash, m.node_version, m.created_at
+                    );
+                    info!("Start the node normally to resume from height {}.", m.height);
+                }
+                Err(e) => {
+                    error!("Snapshot import failed: {}", e);
+                    error!("Your previous chaindata (if any) was moved to a `.pre-snapshot-*` sibling and NOT deleted — see the error above.");
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Start => {
             if let Err(e) = start_node(
                 network,
@@ -274,6 +500,7 @@ async fn main() {
                 cli.rest_bind,
                 cli.rest_disable,
                 cli.addnode,
+                cli.external_ip,
                 cli.no_peers,
                 cli.explorer,
                 cli.proxy,
@@ -479,6 +706,7 @@ async fn start_node(
     rest_bind: Option<String>,
     rest_disable: bool,
     addnodes: Vec<String>,
+    external_ip: Option<String>,
     no_peers: bool,
     serve_explorer: bool,
     proxy_arg: Option<String>,
@@ -527,6 +755,24 @@ async fn start_node(
             Err(e) => {
                 warn!("Ignoring bad --addnode {:?}: {}", raw, e);
             }
+        }
+    }
+
+    // --external-ip: register our own reachable address as a self-address
+    // so peer gossip echoing our IP back to us can't make us self-dial.
+    // Accept "IP:PORT" directly, or a bare "IP" (attach our listen port).
+    if let Some(raw) = &external_ip {
+        let parsed = raw.parse::<std::net::SocketAddr>().ok().or_else(|| {
+            raw.parse::<std::net::IpAddr>()
+                .ok()
+                .map(|ip| std::net::SocketAddr::new(ip, p2p_config.listen_addr.port()))
+        });
+        match parsed {
+            Some(addr) => {
+                info!("--external-ip: registering {} as our self-address", addr);
+                p2p_config.external_addr = Some(addr);
+            }
+            None => warn!("Ignoring bad --external-ip {:?}", raw),
         }
     }
 

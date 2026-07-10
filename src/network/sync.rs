@@ -175,7 +175,25 @@ pub struct ChainSync {
     // it's a known failure mode (V3 in the state-machine doc).
     peer_difficulties: HashMap<PeerId, u128>,
     best_known_difficulty: u128,
+    /// Our own tip's cumulative work, fed by `set_local_total_difficulty`
+    /// on every tip advance. This is the baseline peer work-claims are
+    /// compared against: a peer with MORE work than this is a sync target
+    /// even when it is shorter in height (Firework Phase 2 / V3 closure).
+    local_total_difficulty: u128,
+    /// Firework Phase 2 anti-wedge: last time (unix secs) we received a
+    /// ChainWork claim from each peer. A claim not refreshed within
+    /// `WORK_CLAIM_TTL_SECS` is dropped by `expire_stale_work_claims`, so a
+    /// peer that sent one bogus over-claim and went quiet cannot pin
+    /// `is_synced=false` forever (the substantiation timeout that makes the
+    /// work-aware `synced` flag wedge-safe).
+    peer_difficulty_seen_at: HashMap<PeerId, u64>,
 }
+
+/// Firework Phase 2: a peer work-claim not refreshed within this many
+/// seconds is dropped (`expire_stale_work_claims`). Must comfortably exceed
+/// the block interval so an honest heavier peer's periodic ChainWork
+/// re-advertisements keep its claim fresh — 5× the 120 s target block time.
+pub const WORK_CLAIM_TTL_SECS: u64 = 600;
 
 /// v1.0.13 #4 — per-peer cap on pending-headers entries. 10% of the
 /// 50K-slot pool means a flood from any one peer can't displace more
@@ -211,6 +229,8 @@ impl ChainSync {
             peer_heights: HashMap::new(),
             peer_difficulties: HashMap::new(),
             best_known_difficulty: 0,
+            local_total_difficulty: 0,
+            peer_difficulty_seen_at: HashMap::new(),
             pending_header_nonces: HashSet::new(),
             next_header_nonce: 1,
             orphans_per_peer: HashMap::new(),
@@ -352,19 +372,53 @@ impl ChainSync {
         if total_difficulty > cap {
             return;
         }
+        // Drop stale-on-arrival claims at-or-below our own work: such a peer
+        // is not a sync target and would be pruned by the next
+        // set_local_total_difficulty anyway. Still remove any prior (now
+        // stale) entry for this peer and recompute so best_known can shrink.
+        if total_difficulty <= self.local_total_difficulty {
+            self.peer_difficulties.remove(&peer_id);
+            self.peer_difficulty_seen_at.remove(&peer_id);
+            self.recompute_best_difficulty();
+            return;
+        }
         self.peer_difficulties.insert(peer_id, total_difficulty);
+        self.peer_difficulty_seen_at.insert(peer_id, unix_now());
         self.recompute_best_difficulty();
+        // Firework Phase 2 / V3 closure: a peer with MORE cumulative work
+        // than us is on the better chain even when it is SHORTER in height,
+        // which height-based selection can never discover. Flip into Headers
+        // so the maintenance loop sends a locator-based GetHeaders to a
+        // scored peer; fork choice then reorgs if the branch really is
+        // heavier. Mirror of the height-triggered transition in
+        // update_peer_height_for. Only interrupt a settled state — an
+        // in-flight Headers/Blocks cycle already covers this.
+        if matches!(
+            self.state,
+            SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced
+        ) {
+            self.state = SyncState::Headers;
+            self.headers_request_time = None;
+            self.headers_received_this_cycle = false;
+        }
     }
 
-    /// Record our local cumulative difficulty. Called when local tip
-    /// advances by the chain layer.
+    /// Record our local cumulative difficulty. Called when the local tip
+    /// advances (via `set_chain_state`).
     pub fn set_local_total_difficulty(&mut self, total_difficulty: u128) {
-        if total_difficulty > self.best_known_difficulty {
-            self.best_known_difficulty = total_difficulty;
-        }
-        // Prune stale peer claims (mirrors height pruning).
-        let cutoff = total_difficulty;
-        self.peer_difficulties.retain(|_, d| *d > cutoff);
+        self.local_total_difficulty = total_difficulty;
+        // Prune stale peer claims at-or-below our own work (mirrors
+        // prune_stale_peer_heights on the height side).
+        self.peer_difficulties.retain(|_, d| *d > total_difficulty);
+        // Keep the seen-at map in lock-step so it can't leak or resurrect a
+        // pruned claim. Collect live keys first to avoid a self borrow clash.
+        let live: HashSet<PeerId> = self.peer_difficulties.keys().copied().collect();
+        self.peer_difficulty_seen_at.retain(|p, _| live.contains(p));
+        // True recompute so best_known_difficulty can SHRINK as we advance
+        // or as claims are pruned. A ratchet here would let a stale high
+        // claim pin us as "behind on work" forever — the difficulty
+        // analogue of the phantom-target height wedge (see refresh_best_known).
+        self.recompute_best_difficulty();
     }
 
     /// Best peer by cumulative work — call this once Phase 2b is live;
@@ -375,9 +429,17 @@ impl ChainSync {
 
     pub fn best_known_difficulty(&self) -> u128 { self.best_known_difficulty }
 
+    /// Re-derive `best_known_difficulty` as
+    /// `max(local_total_difficulty, max(peer_difficulties))`.
+    ///
+    /// A TRUE recompute (can shrink), NOT a ratchet — the prior
+    /// `peer_max.max(self.best_known_difficulty)` form could only grow, so a
+    /// single stale/bogus high claim latched `best_known_difficulty` above
+    /// local forever. That is the exact wedge the height side hit with
+    /// `refresh_best_known` (see its post-mortem doc-comment).
     fn recompute_best_difficulty(&mut self) {
         let peer_max = self.peer_difficulties.values().copied().max().unwrap_or(0);
-        self.best_known_difficulty = peer_max.max(self.best_known_difficulty);
+        self.best_known_difficulty = self.local_total_difficulty.max(peer_max);
     }
 
     /// Re-derive `best_known_height` from current state as
@@ -437,11 +499,66 @@ impl ChainSync {
     pub fn remove_peer_height(&mut self, peer_id: &PeerId) {
         self.peer_heights.remove(peer_id);
         self.peer_difficulties.remove(peer_id);
+        self.peer_difficulty_seen_at.remove(peer_id);
         // Departing peer was potentially the sole holder of the highest
         // claimed height/difficulty; recompute both so best_known_*
         // shrinks when appropriate (I3 closure).
         self.refresh_best_known();
         self.recompute_best_difficulty();
+    }
+
+    /// Reconcile peer height/work state against the live connected-peer set.
+    ///
+    /// `peer_heights`/`peer_difficulties` are populated on handshake + block
+    /// announcements, but were only pruned on LOCAL ADVANCE
+    /// (`prune_stale_peer_heights`) or an explicit `remove_peer_height` at
+    /// disconnect. If a peer advertised a high tip and then vanished WITHOUT
+    /// a cleanly-detected disconnect while our own tip was frozen, its stale
+    /// entry pinned `best_known_height` above local indefinitely →
+    /// `is_synced()` false → the miner refused to mine → the tip stayed
+    /// frozen: a self-reinforcing deadlock that only a node restart could
+    /// break. Observed 2026-07-08 on `randomx` (target pinned at a departed
+    /// peer's 10551 while local sat at 10042). Pruning to the connected set
+    /// every maintenance tick lets a frozen node shed a departed peer's stale
+    /// target and self-heal. Closes the V2/V3 connection-lifecycle gap in
+    /// docs/architecture/sync-state-machine.md. Returns the number pruned.
+    pub fn retain_connected_peers(&mut self, connected: &HashSet<PeerId>) -> usize {
+        let before = self.peer_heights.len();
+        self.peer_heights.retain(|p, _| connected.contains(p));
+        self.peer_difficulties.retain(|p, _| connected.contains(p));
+        self.peer_difficulty_seen_at.retain(|p, _| connected.contains(p));
+        let pruned = before.saturating_sub(self.peer_heights.len());
+        if pruned > 0 || !self.peer_difficulties.is_empty() {
+            self.refresh_best_known();
+            self.recompute_best_difficulty();
+        }
+        pruned
+    }
+
+    /// Firework Phase 2 anti-wedge: drop peer work-claims not refreshed
+    /// within `ttl` seconds. An honest heavier peer re-advertises ChainWork
+    /// on every tip advance, so its claim stays fresh; a peer that sent one
+    /// bogus over-claim and went quiet has its claim expire here, letting
+    /// `best_known_difficulty` recompute down so `is_synced` can recover.
+    /// Together with the sync-ban claim-drop (persistent non-deliverer) and
+    /// the overtake/disconnect prunes, this bounds the work-behind wedge.
+    /// Call from the sync maintenance tick. Returns the number dropped.
+    pub fn expire_stale_work_claims(&mut self, now: u64, ttl: u64) -> usize {
+        let cutoff = now.saturating_sub(ttl);
+        let stale: Vec<PeerId> = self
+            .peer_difficulty_seen_at
+            .iter()
+            .filter(|(_, &seen)| seen < cutoff)
+            .map(|(p, _)| *p)
+            .collect();
+        for p in &stale {
+            self.peer_difficulties.remove(p);
+            self.peer_difficulty_seen_at.remove(p);
+        }
+        if !stale.is_empty() {
+            self.recompute_best_difficulty();
+        }
+        stale.len()
     }
 
     pub fn peers_above_height(&self, min: u64) -> Vec<PeerId> {
@@ -883,6 +1000,14 @@ impl ChainSync {
                 let now = unix_now();
                 self.sync_banned_peers.insert(req.requested_from, now + 300);
                 self.peer_failures.remove(&req.requested_from);
+                // Firework Phase 2 anti-wedge: a peer that fails to deliver
+                // blocks has not substantiated any work claim it made. Drop
+                // its claim so best_known_difficulty recomputes down and a
+                // bogus over-claim cannot pin is_synced=false past the point
+                // the peer is proven unreliable.
+                self.peer_difficulties.remove(&req.requested_from);
+                self.peer_difficulty_seen_at.remove(&req.requested_from);
+                self.recompute_best_difficulty();
             }
         }
         self.downloading.remove(hash);
@@ -979,6 +1104,8 @@ impl ChainSync {
             local_height: self.local_height, best_known_height: self.best_known_height,
             pending_headers: self.pending_headers.len(), downloading: self.downloading.len(),
             orphans: self.orphan_blocks.len(), state: self.state,
+            local_total_difficulty: self.local_total_difficulty,
+            best_known_difficulty: self.best_known_difficulty,
         }
     }
 
@@ -1164,6 +1291,11 @@ pub struct SyncStats {
     pub downloading: usize,
     pub orphans: usize,
     pub state: SyncState,
+    /// Firework Phase 2: our tip's cumulative work.
+    pub local_total_difficulty: u128,
+    /// Firework Phase 2: `max(local, best peer work-claim)`. Enforces I6 —
+    /// `synced` should require `local_total_difficulty >= best_known_difficulty`.
+    pub best_known_difficulty: u128,
 }
 
 pub fn build_locator(tip: u64, get_hash: impl Fn(u64) -> Option<Hash>) -> Vec<Hash> {
@@ -1398,6 +1530,141 @@ mod tests {
             bytes[0] = i;
             bytes
         }).collect()
+    }
+
+    // ── Firework Phase 2 (V3 closure): work-triggered sync ──────────────
+
+    /// A peer advertising MORE cumulative work than us must flip the sync
+    /// state into Headers so we request its (possibly shorter) heavier
+    /// branch. Core of the 2026-07-08 runaway-fork fix: a node on a
+    /// higher-block/lower-work fork could never discover the honest heavier
+    /// chain under height-only selection.
+    #[test]
+    fn heavier_peer_triggers_headers_even_when_settled() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.set_state(SyncState::Synced);
+        sync.update_peer_difficulty_for(peers[0], 5_000); // heavier than us
+        assert_eq!(sync.state(), SyncState::Headers,
+            "a heavier-work peer must trigger a header sync");
+        assert_eq!(sync.best_known_difficulty(), 5_000);
+    }
+
+    /// A peer at-or-below our own work is not a sync target: it must NOT
+    /// flip us out of Synced, and its claim must be dropped.
+    #[test]
+    fn lighter_peer_does_not_trigger_and_is_dropped() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(5_000);
+        sync.set_state(SyncState::Synced);
+        sync.update_peer_difficulty_for(peers[0], 4_000); // lighter than us
+        assert_eq!(sync.state(), SyncState::Synced,
+            "a lighter-work peer must not trigger a sync");
+        assert_eq!(sync.best_peer_by_difficulty(), None,
+            "a lighter-work claim must be dropped, not tracked");
+    }
+
+    /// Anti-wedge: `best_known_difficulty` is a TRUE recompute. A heavy
+    /// claim raises it, but once the claiming peer leaves it must shrink
+    /// back to our local work — otherwise a stale/bogus claim pins us
+    /// "behind on work" forever (the difficulty analogue of the
+    /// phantom-target height wedge).
+    #[test]
+    fn best_known_difficulty_shrinks_when_heavy_peer_leaves() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000);
+        assert_eq!(sync.best_known_difficulty(), 9_000);
+        sync.remove_peer_height(&peers[0]); // peer disconnects
+        assert_eq!(sync.best_known_difficulty(), 1_000,
+            "best_known_difficulty must shrink to local work when the sole \
+             heavy-claim peer disconnects (no ratchet)");
+    }
+
+    /// Advancing our own work past a peer's claim prunes that claim.
+    #[test]
+    fn advancing_local_work_prunes_now_stale_peer_claims() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 3_000);
+        assert!(sync.best_peer_by_difficulty().is_some());
+        sync.set_local_total_difficulty(4_000); // we overtake the peer
+        assert_eq!(sync.best_peer_by_difficulty(), None,
+            "peer claims at-or-below our new work must be pruned");
+        assert_eq!(sync.best_known_difficulty(), 4_000,
+            "best_known_difficulty tracks our own work when no peer is heavier");
+    }
+
+    /// Anti-wedge (substantiation timeout): a work-claim not refreshed
+    /// within the TTL is dropped, so a send-once bogus over-claim cannot pin
+    /// best_known_difficulty above local — and thus is_synced=false — forever.
+    #[test]
+    fn stale_work_claim_expires_after_ttl() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        let t0 = unix_now();
+        sync.update_peer_difficulty_for(peers[0], 9_000);
+        assert_eq!(sync.best_known_difficulty(), 9_000);
+        // Long past the TTL with no refresh → claim expires.
+        let dropped =
+            sync.expire_stale_work_claims(t0 + WORK_CLAIM_TTL_SECS + 100, WORK_CLAIM_TTL_SECS);
+        assert_eq!(dropped, 1);
+        assert_eq!(sync.best_peer_by_difficulty(), None);
+        assert_eq!(sync.best_known_difficulty(), 1_000,
+            "best_known must recompute to local once the stale claim expires");
+    }
+
+    /// A freshly-received claim must survive an expiry pass — an honest
+    /// heavier peer re-advertising ChainWork must not be dropped.
+    #[test]
+    fn fresh_work_claim_survives_expiry() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        let t0 = unix_now();
+        sync.update_peer_difficulty_for(peers[0], 9_000);
+        let dropped = sync.expire_stale_work_claims(t0, WORK_CLAIM_TTL_SECS);
+        assert_eq!(dropped, 0);
+        assert_eq!(sync.best_known_difficulty(), 9_000);
+    }
+
+    /// Connection-lifecycle prune (2026-07-08 phantom-target deadlock): a
+    /// departed peer's stale high height must be dropped when it is no longer
+    /// in the connected set, so a FROZEN node's best_known recomputes down
+    /// and it stops reporting "behind" a peer that is gone — self-healing the
+    /// deadlock that previously needed a node restart.
+    #[test]
+    fn retain_connected_peers_drops_departed_peer_stale_target() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(10_042, Hash::zero());
+        sync.update_peer_height_for(peers[0], 10_551); // high tip from a soon-departed peer
+        assert_eq!(sync.true_best_height(), 10_551, "stale high target pins best-known");
+        assert!(!sync.is_synced(), "node reports behind the peer");
+        // Maintenance tick: peer[0] is no longer connected.
+        let connected: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
+        let pruned = sync.retain_connected_peers(&connected);
+        assert_eq!(pruned, 1);
+        assert_eq!(sync.true_best_height(), 10_042,
+            "best-known recomputes to local once the departed peer is pruned");
+        assert!(sync.is_synced(), "frozen node self-heals to synced");
+    }
+
+    /// A still-connected peer's advertised height must survive the prune.
+    #[test]
+    fn retain_connected_peers_keeps_connected_peer() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(10_042, Hash::zero());
+        sync.update_peer_height_for(peers[0], 10_600);
+        let connected: std::collections::HashSet<PeerId> =
+            [peers[0]].into_iter().collect();
+        let pruned = sync.retain_connected_peers(&connected);
+        assert_eq!(pruned, 0);
+        assert_eq!(sync.true_best_height(), 10_600, "connected peer's height is retained");
     }
 
     /// Externally-observable triggers from §3 of the doc. Each variant

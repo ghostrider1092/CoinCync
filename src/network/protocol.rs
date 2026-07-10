@@ -151,6 +151,15 @@ pub enum MessageType {
     /// Carries a u64 bitfield of supported features. Unknown bits ignored.
     Flare = 50,
 
+    /// Firework: cumulative chain-work advertisement (Phase 2 total-
+    /// difficulty sync trust). Sent only to peers that advertised
+    /// `CAP_CHAINWORK` in their Flare — on handshake completion and when
+    /// our tip advances. Lets a peer recognize a heavier chain even when
+    /// that chain is shorter in height. Gated by the capability bit so
+    /// nodes predating this message never receive it (they reject unknown
+    /// message types).
+    ChainWork = 51,
+
     // ── Personal Node (Tier 1) Protocol Messages ────────────────────
 
     /// Request compact block filters for a height range.
@@ -221,6 +230,7 @@ impl TryFrom<u8> for MessageType {
             40 => Ok(MessageType::Reject),
             41 => Ok(MessageType::Alert),
             50 => Ok(MessageType::Flare),
+            51 => Ok(MessageType::ChainWork),
             60 => Ok(MessageType::GetFilters),
             61 => Ok(MessageType::Filters),
             62 => Ok(MessageType::GetOutputDigests),
@@ -251,6 +261,7 @@ impl MessageType {
             MessageType::Ping => 256,                // 256 bytes
             MessageType::Pong => 256,                // 256 bytes
             MessageType::Flare => 1024,              // 1 KB
+            MessageType::ChainWork => 256,           // u128 + u64 + Hash (~56 B)
 
             // Request messages: moderate
             MessageType::GetHeaders => 2 * 1024,     // 2 KB (locator hashes)
@@ -322,6 +333,39 @@ pub struct VersionMessage {
     pub nonce: u64,
     pub user_agent: String,
     pub start_height: u64,
+    pub best_hash: Hash,
+}
+
+/// Firework capability advertisement.
+///
+/// Sent immediately after the Version/Verack handshake. `capabilities` is a
+/// bitfield of supported optional features; unknown bits MUST be ignored by
+/// the receiver so the field stays forward-compatible. See
+/// [`crate::network::firework`] for the bit definitions and the
+/// backward-compatibility contract (a peer that never sends a Flare has
+/// capabilities `0` and every feature falls back gracefully).
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct FlareMessage {
+    pub capabilities: u64,
+}
+
+/// Cumulative chain-work advertisement (Firework `CAP_CHAINWORK`).
+///
+/// `total_difficulty` is our tip's cumulative PoW work; `height`/`best_hash`
+/// identify the tip it refers to. The receiver feeds `total_difficulty` into
+/// its peer-work table so it can detect and sync to a heavier chain even when
+/// that chain is shorter in height (closing the higher-block/lower-work
+/// private-fork trap).
+///
+/// SECURITY: the advertised work is a CLAIM, not proof. It only gates whether
+/// we *request* a peer's headers; adoption still requires downloading those
+/// headers and recomputing their summed PoW (fork choice already does this).
+/// Never let an unverified claim mutate our tip. See the failure-modes
+/// section of docs/architecture/sync-total-difficulty-trust-design.md.
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct ChainWorkMessage {
+    pub total_difficulty: u128,
+    pub height: u64,
     pub best_hash: Hash,
 }
 
@@ -697,6 +741,29 @@ impl Message {
         Self::new(magic, MessageType::Verack, vec![])
     }
 
+    /// Firework capability advertisement, sent right after Verack. Carries
+    /// the u64 capability bitfield from [`crate::network::firework::local_capabilities`].
+    pub fn flare(magic: [u8; 4], capabilities: u64) -> Result<Self> {
+        let msg = FlareMessage { capabilities };
+        let payload = borsh::to_vec(&msg)
+            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        Ok(Self::new(magic, MessageType::Flare, payload))
+    }
+
+    /// Cumulative chain-work advertisement (Firework `CAP_CHAINWORK`). Only
+    /// sent to peers that advertised the capability in their Flare.
+    pub fn chain_work(
+        magic: [u8; 4],
+        total_difficulty: u128,
+        height: u64,
+        best_hash: Hash,
+    ) -> Result<Self> {
+        let msg = ChainWorkMessage { total_difficulty, height, best_hash };
+        let payload = borsh::to_vec(&msg)
+            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        Ok(Self::new(magic, MessageType::ChainWork, payload))
+    }
+
     pub fn ping(magic: [u8; 4]) -> Self {
         use rand::RngCore;
         let mut nonce = [0u8; 8];
@@ -799,6 +866,37 @@ mod tests {
     fn test_version_message() {
         let msg = Message::version(MAINNET_MAGIC, 100, Hash::zero()).unwrap();
         assert_eq!(msg.msg_type().unwrap(), MessageType::Version);
+    }
+
+    #[test]
+    fn flare_message_round_trips() {
+        let caps = crate::network::firework::CAP_CHAINWORK | (1 << 40);
+        let msg = Message::flare(MAINNET_MAGIC, caps).unwrap();
+        assert_eq!(msg.msg_type().unwrap(), MessageType::Flare);
+        let decoded: FlareMessage = borsh::from_slice(&msg.payload).unwrap();
+        assert_eq!(decoded.capabilities, caps);
+    }
+
+    #[test]
+    fn chain_work_message_round_trips() {
+        let td: u128 = 123_456_789_012_345_678_901;
+        let h = Hash::from_bytes([9u8; 32]);
+        let msg = Message::chain_work(MAINNET_MAGIC, td, 10_042, h).unwrap();
+        assert_eq!(msg.msg_type().unwrap(), MessageType::ChainWork);
+        // Within the per-type size cap.
+        assert!(msg.payload.len() <= MessageType::ChainWork.max_size());
+        let decoded: ChainWorkMessage = borsh::from_slice(&msg.payload).unwrap();
+        assert_eq!(decoded.total_difficulty, td);
+        assert_eq!(decoded.height, 10_042);
+        assert_eq!(decoded.best_hash, h);
+    }
+
+    #[test]
+    fn chain_work_type_byte_is_51_and_decodes() {
+        // Guards the wire discriminant: a peer that predates ChainWork must
+        // see byte 51, and TryFrom must map it back.
+        assert_eq!(MessageType::ChainWork as u8, 51);
+        assert_eq!(MessageType::try_from(51u8).unwrap(), MessageType::ChainWork);
     }
 
     /// InvMessage::validate rejects duplicates. Pre-fix the only check
