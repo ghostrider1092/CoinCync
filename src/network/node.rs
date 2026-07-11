@@ -83,6 +83,25 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ping interval
 pub const PING_INTERVAL: Duration = Duration::from_secs(120);
 
+/// CIP-019: window (in blocks) within which a not-yet-synced node is treated as
+/// "near tip" — close enough that its gap chains cleanly off its own tip —
+/// rather than as being in deep IBD. A near-tip node must keep catching up on
+/// the fast propagation path; the old `!is_synced()` InvBlock gate treated
+/// 3-behind like 3000-behind, trapping a near-tip node on slow catch-up so it
+/// stayed permanently a few blocks behind and its miner's sync gate never
+/// cleared (observed live 2026-07-11). See `docs/cip/CIP-019-*`.
+pub const NEAR_TIP_INV_WINDOW: u64 = 16;
+
+/// Pure predicate for the CIP-019 InvBlock regime split. `synced` short-circuits
+/// (already caught up); otherwise a gap within `window` blocks is "near tip"
+/// (catch up promptly) rather than deep IBD (skip the body fetch to avoid
+/// orphan pileup). Kept pure so the regime decision is unit-testable in
+/// isolation from the async handler.
+#[inline]
+pub(crate) fn invblock_near_tip(synced: bool, gap: u64, window: u64) -> bool {
+    synced || gap <= window
+}
+
 /// How often the maintenance loop re-announces our current chain tip
 /// to every connected peer via InvBlock.
 ///
@@ -3372,6 +3391,35 @@ async fn handle_connection(
                 // NOTE: >= HEADER_SIZE allows empty-payload messages (Verack, GetAddr)
                 if data.len() >= HEADER_SIZE {
                     let msg_type = data[4];
+                    // WIRETRACE (CIP-020 baseline): when COINCYNC_WIRE_TRACE=1,
+                    // emit one line per outbound packet so off-node analysis can
+                    // reconstruct the on-wire adversary view and compute the
+                    // timing-correlation r on REAL traffic. `msg_type` 99 =
+                    // MessageType::Padding (cover/dummy); anything else = real.
+                    // This is the muxed choke point — every outbound packet to
+                    // this peer (stem, fluff, inv, ping, block, padding) passes
+                    // here. Off by default; the per-packet cost when disabled is
+                    // one relaxed OnceLock load. Purely observational — it never
+                    // alters what is sent, so it cannot affect consensus or
+                    // propagation.
+                    {
+                        static WIRE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                        let on = *WIRE_TRACE.get_or_init(|| {
+                            std::env::var("COINCYNC_WIRE_TRACE").as_deref() == Ok("1")
+                        });
+                        if on {
+                            let ts_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0);
+                            let p = &peer_id[..4];
+                            info!(
+                                target: "wiretrace",
+                                "WIRETRACE {} {:02x}{:02x}{:02x}{:02x} {} {}",
+                                ts_ms, p[0], p[1], p[2], p[3], msg_type, data.len()
+                            );
+                        }
+                    }
                     let payload = &data[HEADER_SIZE..];
                     if let Err(e) = framer.write_message(msg_type, payload).await {
                         debug!("Write error to peer {:?}: {}", &peer_id[..4], e);
@@ -4376,6 +4424,19 @@ async fn process_message(
                 // node stays permanently behind (this was the launch-day stall).
                 if !sync.read().await.is_synced() {
                     let our_height = chain.height();
+                    // CIP-019: a node only a few blocks behind (near tip) must keep
+                    // catching up promptly. The old gate treated near-tip like deep
+                    // IBD, trapping such a node on slow catch-up so it stayed
+                    // permanently a few blocks behind and its miner's sync gate
+                    // never cleared (observed live 2026-07-11). Refresh headers
+                    // either way; for a near-tip node ALSO nudge a prompt resync so
+                    // the small gap closes to the exact tip. Deep-IBD behavior
+                    // (skip the body fetch to avoid orphan pileup) is unchanged.
+                    let near_tip = invblock_near_tip(
+                        false,
+                        chain.peer_advertised_height().saturating_sub(our_height),
+                        NEAR_TIP_INV_WINDOW,
+                    );
                     let chain_ref = &chain;
                     let locator = build_locator(our_height, |h| chain_ref.get_block_hash(h));
                     if !locator.is_empty() {
@@ -4395,6 +4456,11 @@ async fn process_message(
                                 }
                             }
                         }
+                    }
+                    if near_tip {
+                        // Near tip: nudge the sync layer to re-enter Headers and pull
+                        // the small gap promptly rather than waiting on the slow tick.
+                        sync.write().await.trigger_resync();
                     }
                     return Ok(());
                 }
@@ -5522,6 +5588,23 @@ async fn process_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // CIP-019: the InvBlock regime split. A not-yet-synced node that is only a
+    // few blocks behind is "near tip" (catch up promptly); one far behind is
+    // deep IBD (skip the body fetch to avoid orphan pileup).
+    #[test]
+    fn cip019_invblock_near_tip_regime() {
+        let w = NEAR_TIP_INV_WINDOW;
+        // synced short-circuits regardless of gap
+        assert!(invblock_near_tip(true, 9999, w));
+        // behind but within the window → near tip
+        assert!(invblock_near_tip(false, 0, w));
+        assert!(invblock_near_tip(false, 3, w)); // the live 2026-07-11 case
+        assert!(invblock_near_tip(false, w, w)); // boundary is inclusive
+        // beyond the window → deep IBD, not near tip
+        assert!(!invblock_near_tip(false, w + 1, w));
+        assert!(!invblock_near_tip(false, 3_000, w));
+    }
 
     #[test]
     fn test_node_config_default() {
