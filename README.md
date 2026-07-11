@@ -4,8 +4,10 @@
 
 A proof-of-work cryptocurrency with mandatory privacy at the consensus layer, an auditable supply curve, and constitutional protections against admin authority, federations, governance tokens, and compliance hooks.
 
-**Status:** Public testnet · **v1.0.11.7-testnet** stable · **[v1.0.12-rc1](https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12-rc1)** hard-fork release candidate (activates testnet h=13_000, ~2026-07-01)
-**Network:** 8-host Vultr fleet (3 seeds + explorer + miner + 2 relays + api-nginx), single operator
+Privacy is built as **Concentric Privacy** — independent, layered defenses (transaction · linkability · network · operational), each guarding a different attack surface, arranged so that no single break exposes the whole. Consensus is fail-operational; privacy is fail-closed.
+
+**Status:** Public testnet · **[v1.0.12](https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12)** — current release · hard-fork rules activate at testnet h=13,000
+**Network:** 9-host Vultr fleet (3 seeds + explorer + 2 miners + 2 relays + api), single operator
 **Mainnet:** **targeted 2026-10-01** (gated on schema-versioning + cyncswap audit; both in flight)
 **Live chain:** [api.coincync.network/rpc/testnet](https://api.coincync.network/rpc/testnet) (`get_info` JSON-RPC) · [explorer.coincync.network](https://explorer.coincync.network)
 **Discord:** [join](https://discord.gg/5tYNSCsqzy) — **actively looking for community testnet miners**, see [run-a-testnet-miner](#run-a-testnet-miner) below

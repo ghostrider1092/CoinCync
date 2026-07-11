@@ -796,9 +796,9 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
   <div title="Network hashrate implied by current difficulty (= difficulty / 120s block time). This is the chain's running average -- ASERT difficulty adjustment caps at 2x per block, so when a fast miner joins, this value tracks 10-20 minutes behind their actual reported rate. If your local miner says 'X KH/s' and this says 'Y H/s', that's expected during the catch-up window."><span class="label">Network HR</span><span class="val up" id="tk-hr">—</span><span style="color:var(--t3);font-size:9px;margin-left:3px;cursor:help" title="Hover the label for an explanation of why this can differ from your miner's reported hashrate.">&#9432;</span></div>
   <div><span class="label">Peers</span><span class="val" id="tk-peers">—</span></div>
   <div><span class="label">Mempool</span><span class="val" id="tk-pool">—</span></div>
-  <div><span class="label">Ring Size</span><span class="val">11</span></div>
+  <div><span class="label">Ring Size</span><span class="val">16</span></div>
   <div><span class="label">Supply</span><span class="val" id="tk-supply">—</span></div>
-  <div><span class="label">Version</span><span class="val">v1.0.11.7</span></div>
+  <div><span class="label">Version</span><span class="val">v1.0.12</span></div>
 </div>
 
 <div class="priv-bar">
@@ -888,7 +888,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
       <div class="stat"><div class="label">Reward</div><div class="val" id="s-reward">—</div><div class="sub">CYNC/block</div></div>
       <div class="stat" onclick="go('supply')" style="cursor:pointer"><div class="label">Supply</div><div class="val" id="s-supply">—</div><div class="sub">of 100M CYNC</div></div>
       <div class="stat" onclick="go('network')" style="cursor:pointer"><div class="label">Peers</div><div class="val" id="s-peers">—</div><div class="sub">connected</div></div>
-      <div class="stat"><div class="label">Ring Size</div><div class="val">11</div><div class="sub">CLSAG decoys</div></div>
+      <div class="stat"><div class="label">Ring Size</div><div class="val">16</div><div class="sub">CLSAG decoys</div></div>
       <div class="stat"><div class="label">Block Time</div><div class="val">120s</div><div class="sub">target</div></div>
     </div>
     <!-- MAINNET COUNTDOWN TEASER (#6) -->
@@ -1825,7 +1825,7 @@ footer::before{content:'';position:absolute;top:0;left:50%;transform:translateX(
         <tr><td class="mono">consensus</td><td><span class="badge badge-amber">PoW</span></td><td style="color:var(--t2)">VDF-anchored Proof of Work</td></tr>
         <tr><td class="mono">algorithms</td><td><span class="badge badge-purple">RandomX (CPU-only)</span></td><td style="color:var(--t2)">RandomX — CPU-only, ASIC-resistant</td></tr>
         <tr><td class="mono">block_time</td><td style="color:var(--ac2);font-family:var(--mono)">~120 seconds</td><td style="color:var(--t2)">Target time between blocks</td></tr>
-        <tr><td class="mono">ring_size</td><td style="color:var(--ac2);font-family:var(--mono)">×11</td><td style="color:var(--t2)">Decoy inputs per transaction</td></tr>
+        <tr><td class="mono">ring_size</td><td style="color:var(--ac2);font-family:var(--mono)">×16</td><td style="color:var(--t2)">Decoy inputs per transaction</td></tr>
         <tr><td class="mono">signature</td><td><span class="badge">CLSAG</span></td><td style="color:var(--t2)">Compact Linkable Spontaneous Anonymous Group</td></tr>
         <tr><td class="mono">propagation</td><td><span class="badge">Dandelion++</span></td><td style="color:var(--t2)">Privacy-preserving transaction broadcast</td></tr>
         <tr><td class="mono">supply_cap</td><td style="font-family:var(--mono)">100,000,000 CYNC</td><td style="color:var(--t2)">Compile-time enforced — Article I</td></tr>
@@ -2599,7 +2599,7 @@ async function poll(){
   // Anonymity set counter
   if(info.anonymity_set != null){
     $('aset-value').textContent = num(info.anonymity_set);
-    $('aset-sub').textContent   = `outputs · ring size ${info.effective_ring_size||11} · grows every block`;
+    $('aset-sub').textContent   = `outputs · ring size ${info.effective_ring_size||16} · grows every block`;
   }
 
   $('status').textContent=info.height>0?'Connected':'Starting...';$('live-dot').classList.remove('off');
@@ -9756,7 +9756,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
         <tr><td>Difficulty stability</td><td class="mono">20%</td><td style="color:var(--t2)">How stable difficulty is over the last 20 blocks</td></tr>
         <tr><td>Sync status</td><td class="mono">20%</td><td style="color:var(--t2)">Whether the node is fully synced</td></tr>
         <tr><td>Mempool health</td><td class="mono">10%</td><td style="color:var(--t2)">Mempool not overloaded (0 txs = perfect)</td></tr>
-        <tr><td>Ring size compliance</td><td class="mono">5%</td><td style="color:var(--t2)">All transactions use required ring size of 11</td></tr>
+        <tr><td>Ring size compliance</td><td class="mono">100%</td><td style="color:var(--t2)">All transactions use required ring size of 16</td></tr>
       </tbody></table>
     </div>
   </div>
@@ -9967,7 +9967,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
       <div class="panel">
         <div class="panel-head">Decoy ring distribution</div>
         <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:8px">
-          CLSAG ring size = <strong style="color:var(--ac2)" id="pm-ring-size">11</strong> per Article III.
+          CLSAG ring size = <strong style="color:var(--ac2)" id="pm-ring-size">16</strong> per Article III.
           Each input picks 10 decoys plus 1 real. Below: distribution of decoy ages
           across the most recent 100 ring-signature inputs. Even spread = harder to
           single out the real spend.
@@ -10906,7 +10906,7 @@ cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan -
         <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
         <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('✉','Subscribed',e.value,3000);e.value=''}else{showToast('⚠','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
       </div>
-      <div class="footer-credit">Developed by Cync Lab · v1.0.11.7 stable · v1.0.12-rc3 hard-fork RC (h=13,000) · <span class="badge">✓ Auditable</span></div>
+      <div class="footer-credit">Developed by Cync Lab · v1.0.12 stable · hard fork activates at h=13,000 · <span class="badge">✓ Auditable</span></div>
     </div>
   </div>
 </footer>
