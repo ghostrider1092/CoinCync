@@ -1267,6 +1267,33 @@ impl ChainSync {
         false
     }
 
+    /// Re-arm a header pull for a NEAR-TIP node that is stuck mid-cycle.
+    ///
+    /// `trigger_resync` only fires from `Synced`/`Idle`, so a node that is a
+    /// few blocks behind and sitting in `Headers`/`Blocks` with **nothing in
+    /// flight** (its last cycle finished at a now-stale target) never re-pulls
+    /// — it stays permanently behind, `is_synced()` stays false, and on a miner
+    /// node that keeps the rig's sync gate latched shut ("refusing to mine"),
+    /// dropping hashrate and stalling the chain (CIP-019, observed live
+    /// 2026-07-11 on randomx-2). This re-arms to `Headers` **only when we are
+    /// behind AND idle**, so a freshly-arrived `InvBlock` promptly closes the
+    /// small gap. The idle guard (no pending headers, no downloads, no pending
+    /// requests) means it can never disrupt an actively-progressing download,
+    /// and because a re-arm immediately makes us non-idle, repeated InvBlocks
+    /// can't churn the cycle. Non-consensus; affects only *when* we fetch.
+    pub fn arm_near_tip_catchup(&mut self) -> bool {
+        let idle = self.pending_headers.is_empty()
+            && self.downloading.is_empty()
+            && self.pending_requests.is_empty();
+        if idle && !self.is_synced() {
+            self.state = SyncState::Headers;
+            self.headers_received_this_cycle = false;
+            self.headers_request_time = None;
+            return true;
+        }
+        false
+    }
+
     pub fn blocks_state_stuck(&self, now: u64) -> bool {
         if self.state != SyncState::Blocks { return false; }
         let e = match self.blocks_entered_at { Some(t) => t, None => return false };
@@ -1582,6 +1609,41 @@ mod tests {
         assert_eq!(sync.best_known_difficulty(), 1_000,
             "best_known_difficulty must shrink to local work when the sole \
              heavy-claim peer disconnects (no ratchet)");
+    }
+
+    /// CIP-019 prompt near-tip catch-up. `arm_near_tip_catchup` re-arms a header
+    /// pull for a node stuck a few blocks behind mid-cycle — the case where
+    /// `trigger_resync` (which only fires from Synced/Idle) is a no-op and the
+    /// node stays permanently behind, latching a miner's is_synced gate shut
+    /// (the randomx-2 stall, 2026-07-11). Guarded so it never churns: no-op when
+    /// synced, and no-op when a fetch is in flight.
+    #[test]
+    fn arm_near_tip_catchup_rearms_stuck_but_not_synced_or_active() {
+        let peers = peer_pool();
+
+        // (1) Behind + idle + mid-cycle (Blocks) → re-arms to Headers.
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.update_peer_height_for(peers[0], 103); // tip 3 ahead → is_synced=false
+        sync.set_state(SyncState::Blocks);          // mid-cycle
+        assert!(!sync.is_synced(), "node 3 behind must not be synced");
+        assert!(!sync.trigger_resync(), "trigger_resync must be a no-op mid-cycle");
+        assert!(sync.arm_near_tip_catchup(), "must re-arm a stuck near-tip node");
+        assert_eq!(sync.state(), SyncState::Headers, "re-arm must return to Headers");
+
+        // (2) Synced → no-op (never churn a caught-up node).
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_state(SyncState::Synced);
+        assert!(sync.is_synced());
+        assert!(!sync.arm_near_tip_catchup(), "synced node must not re-arm");
+
+        // (3) Behind but a fetch IS in flight → no-op (no churn from repeated
+        //     InvBlocks disrupting an actively-progressing download).
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.update_peer_height_for(peers[0], 103);
+        sync.set_state(SyncState::Blocks);
+        sync.queue_headers(vec![Hash::from_bytes([7u8; 32])]); // non-idle: pending_headers set
+        assert!(!sync.is_synced());
+        assert!(!sync.arm_near_tip_catchup(), "must not re-arm while a fetch is in flight");
     }
 
     /// Advancing our own work past a peer's claim prunes that claim.

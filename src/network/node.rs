@@ -4458,9 +4458,17 @@ async fn process_message(
                         }
                     }
                     if near_tip {
-                        // Near tip: nudge the sync layer to re-enter Headers and pull
-                        // the small gap promptly rather than waiting on the slow tick.
-                        sync.write().await.trigger_resync();
+                        // Near tip: pull the small gap promptly rather than waiting on
+                        // the slow tick. trigger_resync only fires from Synced/Idle;
+                        // a node actively (but slowly) catching up sits in Headers/
+                        // Blocks, where trigger_resync is a no-op — so it would stay
+                        // stuck a few blocks behind forever (the randomx-2 case). Fall
+                        // back to arm_near_tip_catchup, which re-arms a header pull when
+                        // we're behind AND idle (nothing in flight), closing the gap.
+                        let mut sg = sync.write().await;
+                        if !sg.trigger_resync() {
+                            sg.arm_near_tip_catchup();
+                        }
                     }
                     return Ok(());
                 }
