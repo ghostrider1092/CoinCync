@@ -30,7 +30,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
@@ -311,6 +311,22 @@ enum ConnectionCommand {
 // by responsibility. See `super::connection_tracker::ConnectionTracker`
 // for the full implementation and its dedicated test module.
 
+/// Coherent P2P-side shadow of the chain tip (issue #249).
+///
+/// Height and tip are stored together so a handshake reader can never
+/// observe a torn pair (a height from one update, a tip from another).
+/// `seq` is the accept-order sequence of the update that produced this
+/// snapshot; `set_chain_state` rejects any update whose seq is not newer,
+/// so a detached, out-of-order update can't regress the shadow to a stale
+/// tip. The guard is on `seq`, not height — a legitimate heavier-chain
+/// reorg may lower the height, and must still be accepted.
+#[derive(Clone, Copy, Debug)]
+struct ChainShadow {
+    seq: u64,
+    height: u64,
+    tip: Hash,
+}
+
 /// P2P Node - main networking coordinator
 pub struct P2PNode {
     /// Our peer ID (derived from Noise static key if encryption enabled)
@@ -327,10 +343,16 @@ pub struct P2PNode {
     peers: Arc<DashMap<PeerId, PeerInfo>>,
     /// Peer message senders
     peer_senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
-    /// Current chain height
-    chain_height: Arc<RwLock<u64>>,
-    /// Current chain tip
-    chain_tip: Arc<RwLock<Hash>>,
+    /// Coherent, monotonically-guarded shadow of the chain tip used by the
+    /// P2P handshake + sync status (issue #249). Replaces the former
+    /// separate `chain_height` / `chain_tip` locks, which could tear on
+    /// read and regress when detached updates completed out of order.
+    chain_shadow: Arc<RwLock<ChainShadow>>,
+    /// Accept-order sequence source for `chain_shadow` updates. A caller
+    /// captures [`next_chain_seq`](P2PNode::next_chain_seq) at spawn time
+    /// (in order), and `set_chain_state` drops any update whose seq is not
+    /// newer than the one currently stored.
+    chain_seq: Arc<AtomicU64>,
     /// Dandelion router
     dandelion: Arc<RwLock<DandelionRouter>>,
     /// Chain sync manager
@@ -472,8 +494,8 @@ impl P2PNode {
             mempool,
             peers: Arc::new(DashMap::new()),
             peer_senders: Arc::new(DashMap::new()),
-            chain_height: Arc::new(RwLock::new(init_height)),
-            chain_tip: Arc::new(RwLock::new(init_tip)),
+            chain_shadow: Arc::new(RwLock::new(ChainShadow { seq: 0, height: init_height, tip: init_tip })),
+            chain_seq: Arc::new(AtomicU64::new(0)),
             dandelion: Arc::new(RwLock::new(DandelionRouter::new())),
             sync: Arc::new(RwLock::new(ChainSync::new(init_height, init_tip))),
             addresses: Arc::new(RwLock::new(address_mgr)),
@@ -632,10 +654,28 @@ impl P2PNode {
             })
     }
 
-    /// Set chain state and propagate sync info to chain
-    pub async fn set_chain_state(&self, height: u64, tip: Hash) {
-        *self.chain_height.write().await = height;
-        *self.chain_tip.write().await = tip;
+    /// Next accept-order sequence for a chain-shadow update (issue #249).
+    /// Callers capture this in order — before spawning a detached update —
+    /// so [`set_chain_state`](Self::set_chain_state) can drop stale writes
+    /// that complete out of order.
+    pub fn next_chain_seq(&self) -> u64 {
+        self.chain_seq.fetch_add(1, AtomicOrdering::Relaxed) + 1
+    }
+
+    /// Set chain state and propagate sync info to chain.
+    ///
+    /// `seq` is the accept-order sequence from [`next_chain_seq`](Self::next_chain_seq).
+    /// If a newer update has already landed (`seq <= stored`), this is a
+    /// stale out-of-order write and is dropped without touching any state
+    /// (issue #249) — so the P2P shadow can never regress to an older tip.
+    pub async fn set_chain_state(&self, seq: u64, height: u64, tip: Hash) {
+        {
+            let mut shadow = self.chain_shadow.write().await;
+            if seq <= shadow.seq {
+                return;
+            }
+            *shadow = ChainShadow { seq, height, tip };
+        }
         // Read local cumulative work before taking the sync lock (avoid
         // holding the chain lock across the sync lock).
         let total_diff = self.chain.stats().total_difficulty;
@@ -1004,8 +1044,7 @@ impl P2PNode {
         let magic = self.config.magic;
         let _our_id = self.our_id;
         let our_nonce = self.version_nonce;
-        let chain_height = self.chain_height.clone();
-        let chain_tip = self.chain_tip.clone();
+        let chain_shadow = self.chain_shadow.clone();
         let running = self.running.clone();
         let identity = self.identity.clone();
         let encryption_config = self.config.encryption.clone();
@@ -1021,8 +1060,7 @@ impl P2PNode {
         let acceptor_event_tx = event_tx.clone();
         let acceptor_msg_tx = msg_tx.clone();
         let acceptor_senders = peer_senders.clone();
-        let acceptor_height = chain_height.clone();
-        let acceptor_tip = chain_tip.clone();
+        let acceptor_shadow = chain_shadow.clone();
         let acceptor_tracker = self.conn_tracker.clone();
         let acceptor_scorer = self.peer_scorer.clone();
         let acceptor_identity = identity.clone();
@@ -1125,8 +1163,10 @@ impl P2PNode {
                         let senders = acceptor_senders.clone();
                         let event_tx = acceptor_event_tx.clone();
                         let msg_tx = acceptor_msg_tx.clone();
-                        let height = *acceptor_height.read().await;
-                        let tip = *acceptor_tip.read().await;
+                        let (height, tip) = {
+                            let s = acceptor_shadow.read().await;
+                            (s.height, s.tip)
+                        };
                         let tracker = acceptor_tracker.clone();
                         let addr_clone = addr;
                         let conn_identity = acceptor_identity.clone();
@@ -1162,8 +1202,7 @@ impl P2PNode {
         let connector_event_tx = event_tx.clone();
         let connector_msg_tx = msg_tx.clone();
         let connector_senders = peer_senders.clone();
-        let connector_height = chain_height.clone();
-        let connector_tip = chain_tip.clone();
+        let connector_shadow = chain_shadow.clone();
         let connector_proxy = self.config.proxy.clone();
         let connector_scorer = self.peer_scorer.clone();
         let connector_identity = identity.clone();
@@ -1444,8 +1483,10 @@ impl P2PNode {
                     let addresses = connector_addresses.clone();
                     let event_tx = connector_event_tx.clone();
                     let msg_tx = connector_msg_tx.clone();
-                    let height = *connector_height.read().await;
-                    let tip = *connector_tip.read().await;
+                    let (height, tip) = {
+                        let s = connector_shadow.read().await;
+                        (s.height, s.tip)
+                    };
                     let proxy = connector_proxy.clone();
                     let backoffs = backoffs.clone();
                     let conn_identity = connector_identity.clone();
@@ -2225,7 +2266,7 @@ impl P2PNode {
         // 2026-06-27: needed for periodic tip re-announce
         // (TIP_REBROADCAST_INTERVAL_SECS). See the constant's doc-comment
         // for the production gossip bug this closes (PR #123).
-        let maint_chain_tip = self.chain_tip.clone();
+        let maint_chain_shadow = self.chain_shadow.clone();
         // Take the broadcast queue receiver for the maintenance task.
         //
         // Audit fix: previously `.expect("broadcast receiver already taken")`
@@ -2442,7 +2483,7 @@ impl P2PNode {
                         // that peer specifically — the cleanup_interval below will GC
                         // it after PEER_TIMEOUT. We don't want one slow peer to stall
                         // re-announces to everyone else.
-                        let tip = *maint_chain_tip.read().await;
+                        let tip = maint_chain_shadow.read().await.tip;
                         if tip != Hash::zero() {
                             if let Ok(msg) = Message::inv_block(magic, tip) {
                                 if let Ok(data) = msg.to_bytes() {
@@ -2939,7 +2980,7 @@ impl P2PNode {
 
     /// Get current chain height (for sync guard).
     pub async fn chain_height(&self) -> u64 {
-        *self.chain_height.read().await
+        self.chain_shadow.read().await.height
     }
 
     /// Get list of connected peers
@@ -5673,6 +5714,49 @@ mod tests {
 
         assert_eq!(node.peer_count(), 0);
         assert!(!node.our_id().iter().all(|&b| b == 0));
+    }
+
+    /// Issue #249: detached `set_chain_state` tasks are not serialized, so
+    /// an older update can complete after a newer one. The monotonic `seq`
+    /// guard must drop the stale write so the P2P shadow never regresses,
+    /// and the shadow must stay a coherent (height, tip) pair.
+    #[tokio::test]
+    async fn test_set_chain_state_rejects_stale_out_of_order_update() {
+        let config = NodeConfig::default();
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let node = P2PNode::new(config, chain, mempool);
+
+        let tip_a = { let mut b = [0u8; 32]; b[0] = 0xAA; crate::primitives::Hash::from_bytes(b) };
+        let tip_b = { let mut b = [0u8; 32]; b[0] = 0xBB; crate::primitives::Hash::from_bytes(b) };
+
+        // Newer update (seq 2) lands first.
+        node.set_chain_state(2, 100, tip_b).await;
+        assert_eq!(node.chain_height().await, 100);
+
+        // Older update (seq 1) completes late — it must be dropped, not
+        // applied, so the shadow does not regress.
+        node.set_chain_state(1, 99, tip_a).await;
+        assert_eq!(node.chain_height().await, 100, "stale seq must not regress height");
+
+        // Coherent snapshot: height AND tip both come from the newer update
+        // (no torn pair).
+        {
+            let shadow = node.chain_shadow.read().await;
+            assert_eq!(shadow.height, 100);
+            assert_eq!(shadow.tip, tip_b, "stale seq must not regress tip");
+        }
+
+        // Reorg-safety: a genuinely newer update (seq 3) is accepted even
+        // when it LOWERS the height — as a heavier-chain reorg would. The
+        // guard keys on seq, not height, precisely so this case works.
+        node.set_chain_state(3, 80, tip_a).await;
+        assert_eq!(node.chain_height().await, 80,
+            "newer seq must be accepted even when height drops (reorg-safe)");
+        {
+            let shadow = node.chain_shadow.read().await;
+            assert_eq!(shadow.tip, tip_a);
+        }
     }
 
     /// Verify that the ConnectionTracker enforces the per-IP connection limit
