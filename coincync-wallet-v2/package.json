@@ -1,6 +1,6 @@
 {
   "name": "coincync-wallet-v2",
-  "version": "1.0.10",
+  "version": "1.0.12",
   "description": "CoinCync Wallet v2 â€” Apple-aesthetic redesign.",
   "private": true,
   "scripts": {
@@ -10,6 +10,6 @@
     "build": "tauri build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4"
+    "@tauri-apps/cli": "^1.6.3"
   }
 }
