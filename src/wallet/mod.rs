@@ -32,7 +32,7 @@ pub use keys::{
     // Lelantus Spark key chain (Phase 2)
     SparkSpendKey, SparkScanKey, SparkAddress,
 };
-pub use key_epoch::{KeyEpoch, ViewOnlyEpoch};
+pub use key_epoch::{KeyEpoch, ViewOnlyEpoch, ScopedViewKey};
 pub use wallet_keys::WalletKeys;
 pub use balance::{Balance, UTXO};
 pub use scanner::{WalletScanner, ScanKeys, DecryptedOutput, ScanStats, encrypt_amount, generate_view_tag};

@@ -109,3 +109,45 @@ impl Drop for ScopedViewKey {
         self.to_height = 0;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::{PublicKey, SecretKey};
+
+    fn dummy_epoch() -> KeyEpoch {
+        KeyEpoch {
+            epoch: 0,
+            spend_secret: SecretKey::from_bytes([1u8; 32]),
+            spend_public: PublicKey::from_bytes([2u8; 32]),
+            view_secret: SecretKey::from_bytes([3u8; 32]),
+            view_public: PublicKey::from_bytes([4u8; 32]),
+        }
+    }
+
+    #[test]
+    fn scoped_view_key_enforces_inclusive_range() {
+        let epoch = dummy_epoch();
+        let k = ScopedViewKey::from_epoch(&epoch, 100, 200);
+        // boundaries are inclusive
+        assert!(k.covers_height(100));
+        assert!(k.covers_height(200));
+        assert!(k.covers_height(150));
+        // anything outside [100, 200] is out of scope
+        assert!(!k.covers_height(99));
+        assert!(!k.covers_height(201));
+        assert!(!k.covers_height(0));
+    }
+
+    #[test]
+    fn scoped_view_key_json_carries_scope_and_keys() {
+        let epoch = dummy_epoch();
+        let k = ScopedViewKey::from_epoch(&epoch, 100, 200);
+        let json = k.to_json();
+        assert!(json.contains("\"from_height\":100"), "json: {json}");
+        assert!(json.contains("\"to_height\":200"), "json: {json}");
+        // carries the spend/view publics + the (scoped) view secret
+        assert!(json.contains(&hex::encode([4u8; 32])), "view_public missing");
+        assert!(json.contains(&hex::encode([2u8; 32])), "spend_public missing");
+    }
+}
