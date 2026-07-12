@@ -1,0 +1,300 @@
+<style>
+  :root{
+    --ground:#14110d; --raised:#1d1913; --sunken:#100d0a;
+    --ink:#e9e3d6; --muted:#9c9284; --faint:#6f665a;
+    --gold:#d4a35e; --gold-soft:#e6c48c; --rule:#332c22; --rule-soft:#221d16;
+    --good:#7fa86b; --warn:#c98b4b;
+    --serif:'Fraunces','Iowan Old Style','Palatino Linotype',Georgia,'Times New Roman',serif;
+    --sans:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'SF Mono','Cascadia Mono',Menlo,monospace;
+    --measure:68ch;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --ground:#f6f1e6; --raised:#fffcf5; --sunken:#efe8d8;
+      --ink:#241d14; --muted:#6b6152; --faint:#948976;
+      --gold:#9a6b1f; --gold-soft:#7e560f; --rule:#e0d6c1; --rule-soft:#eae2d2;
+      --good:#4f7a3c; --warn:#a5661f;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#14110d; --raised:#1d1913; --sunken:#100d0a;
+    --ink:#e9e3d6; --muted:#9c9284; --faint:#6f665a;
+    --gold:#d4a35e; --gold-soft:#e6c48c; --rule:#332c22; --rule-soft:#221d16;
+    --good:#7fa86b; --warn:#c98b4b;
+  }
+  :root[data-theme="light"]{
+    --ground:#f6f1e6; --raised:#fffcf5; --sunken:#efe8d8;
+    --ink:#241d14; --muted:#6b6152; --faint:#948976;
+    --gold:#9a6b1f; --gold-soft:#7e560f; --rule:#e0d6c1; --rule-soft:#eae2d2;
+    --good:#4f7a3c; --warn:#a5661f;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:var(--sans); font-size:17px; line-height:1.7;
+    -webkit-font-smoothing:antialiased; letter-spacing:.005em;
+  }
+  .wrap{max-width:820px; margin:0 auto; padding:clamp(28px,6vw,80px) clamp(20px,5vw,40px) 120px;}
+
+  /* ── Masthead ── */
+  .mast{border-bottom:1px solid var(--rule); padding-bottom:44px; margin-bottom:56px;}
+  .eyebrow{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--gold); margin:0 0 20px;}
+  h1.title{
+    font-family:var(--serif); font-weight:600; font-size:clamp(44px,9vw,88px);
+    line-height:.95; letter-spacing:-.02em; margin:0; text-wrap:balance;
+    color:var(--ink);
+  }
+  .thesis{
+    font-family:var(--serif); font-style:italic; font-weight:400;
+    font-size:clamp(19px,2.6vw,25px); line-height:1.4; color:var(--gold-soft);
+    max-width:36ch; margin:22px 0 0; text-wrap:balance;
+  }
+  .metaline{
+    display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:32px;
+    font-family:var(--mono); font-size:12.5px; letter-spacing:.04em; color:var(--muted);
+  }
+  .metaline b{color:var(--ink); font-weight:500;}
+
+  /* ── Sections ── */
+  section{margin-top:64px; max-width:var(--measure);}
+  .snum{font-family:var(--mono); font-size:12px; letter-spacing:.18em; color:var(--gold); display:block; margin-bottom:10px;}
+  h2{
+    font-family:var(--serif); font-weight:600; font-size:clamp(27px,4vw,36px);
+    line-height:1.1; letter-spacing:-.015em; margin:0 0 24px; text-wrap:balance; color:var(--ink);
+  }
+  h3{
+    font-family:var(--serif); font-weight:600; font-size:20px; line-height:1.25;
+    margin:38px 0 14px; color:var(--ink); letter-spacing:-.01em;
+  }
+  p{margin:0 0 18px; max-width:var(--measure);}
+  strong{color:var(--ink); font-weight:600;}
+  a{color:var(--gold); text-decoration:none; border-bottom:1px solid var(--rule);}
+  a:hover{border-bottom-color:var(--gold);}
+  a:focus-visible{outline:2px solid var(--gold); outline-offset:2px; border-radius:2px;}
+
+  ul{margin:0 0 20px; padding:0; list-style:none; max-width:var(--measure);}
+  ul li{position:relative; padding-left:24px; margin-bottom:11px;}
+  ul li::before{content:"—"; position:absolute; left:0; color:var(--gold); font-family:var(--mono);}
+
+  code{font-family:var(--mono); font-size:.86em; color:var(--gold-soft); background:var(--sunken); padding:.12em .4em; border-radius:4px;}
+  pre{
+    background:var(--sunken); border:1px solid var(--rule); border-left:3px solid var(--gold);
+    border-radius:8px; padding:20px 22px; overflow-x:auto; margin:0 0 22px;
+    font-family:var(--mono); font-size:13.5px; line-height:1.6; color:var(--ink);
+  }
+  pre code{background:none; padding:0; color:var(--ink); font-size:inherit;}
+  .cmt{color:var(--faint);}
+
+  /* ── Callout: honest caveat ── */
+  .caveat{
+    background:var(--raised); border:1px solid var(--rule); border-left:3px solid var(--gold);
+    border-radius:8px; padding:20px 24px; margin:26px 0; max-width:var(--measure);
+  }
+  .caveat .lab{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--gold); display:block; margin-bottom:8px;}
+  .caveat p:last-child{margin-bottom:0;}
+
+  /* ── Tables ── */
+  .tbl{overflow-x:auto; margin:0 0 24px; border:1px solid var(--rule); border-radius:8px;}
+  table{border-collapse:collapse; width:100%; font-size:14.5px; font-variant-numeric:tabular-nums;}
+  th,td{text-align:left; padding:11px 15px; border-bottom:1px solid var(--rule-soft);}
+  thead th{font-family:var(--mono); font-size:11.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); background:var(--raised); border-bottom:1px solid var(--rule);}
+  tbody tr:last-child td{border-bottom:none;}
+  td.cy{color:var(--gold); font-weight:600;}
+  .yes{color:var(--good); font-weight:600;} .no{color:var(--faint);} .part{color:var(--warn);}
+  td.num{font-family:var(--mono); text-align:right;}
+
+  hr{border:none; border-top:1px solid var(--rule); margin:56px 0;}
+  .foot{margin-top:72px; padding-top:28px; border-top:1px solid var(--rule); color:var(--muted); font-family:var(--mono); font-size:12.5px; line-height:1.7; max-width:var(--measure);}
+
+  @media (max-width:600px){ body{font-size:16px;} }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <p class="eyebrow">Whitepaper · Draft v0.1</p>
+    <h1 class="title">Cynstra</h1>
+    <p class="thesis">Privacy in concentric layers — where no single break exposes the whole.</p>
+    <div class="metaline">
+      <span><b>CoinCync</b> testnet</span>
+      <span>→ <b>Cynstra</b> mainnet</span>
+      <span>RandomX · CPU-only</span>
+      <span>Mandatory privacy</span>
+    </div>
+  </header>
+
+  <section>
+    <span class="snum">Abstract</span>
+    <h2>Abstract</h2>
+    <p>Cynstra is a permissionless, mandatory-privacy cryptocurrency mined on commodity CPUs. Its central contribution is not a new cryptographic primitive — the primitives it uses are proven, and in several cases hardened over years by the work of others — but an <strong>architecture</strong>: <em>Concentric Privacy</em>.</p>
+    <p>Concentric Privacy is a defense-in-depth model in which independent privacy layers each guard a different attack surface, <strong>degrade independently</strong>, and are composed so that the failure of one layer does not deanonymize another. Consensus is <strong>fail-operational</strong> — the chain keeps producing valid blocks when a component fails; privacy is <strong>fail-closed</strong> — the protocol never silently downgrades to a weaker-privacy transaction. These normally-opposing postures coexist because the layered structure absorbs the failure of any single mechanism: no one break reaches the center.</p>
+  </section>
+
+  <section>
+    <span class="snum">01</span>
+    <h2>Motivation</h2>
+    <p>Financial privacy is not a feature; it is a precondition for economic freedom. A payment system that records who paid whom, how much, and when — in a permanent, public ledger — is a surveillance system, regardless of intent. The protocol cannot distinguish monitoring from surveillance: it does not know who is asking. It protects everyone equally, or it protects no one reliably.</p>
+    <p>Three failures motivate the design:</p>
+    <ul>
+      <li><strong>Optional privacy fails.</strong> When a chain offers both transparent and shielded transactions, the transparent set leaks metadata about the shielded set, and pressure pushes users toward the transparent default. Privacy that can be toggled is privacy that will be toggled off — usually by those who need it most.</li>
+      <li><strong>Monolithic privacy fails catastrophically.</strong> Systems that stake their guarantees on a single mechanism have a single point of failure — from ring-signature traceability analyses to a zero-knowledge parameter bug that could have silently inflated an entire supply.</li>
+      <li><strong>Proof-of-work centralizes.</strong> When mining is captured by specialized hardware and pools, "permissionless" erodes into a handful of gatekeepers.</li>
+    </ul>
+    <p>Cynstra answers each: privacy is <strong>mandatory</strong>, privacy is <strong>layered</strong> (no single point of failure), and mining is <strong>CPU-only</strong> via RandomX so participation stays broad. This is built with deep respect for the projects that came before — Monero above all, which proved over nearly a decade, under real regulatory and academic pressure, that mandatory privacy can survive at scale. Cynstra does not aim to replace that work; it explores the layers those projects deprioritized and contributes what it learns back to the privacy commons.</p>
+  </section>
+
+  <section>
+    <span class="snum">02</span>
+    <h2>Privacy is a movement, not a market</h2>
+    <p>The adversary is not another privacy coin. It is financial surveillance. Against that adversary, every serious privacy project is on the same side.</p>
+    <p>This reframing has a concrete consequence for honesty. Because Cynstra is not trying to <em>beat</em> anyone, it is under no pressure to <em>overclaim</em>. Where it reuses proven mechanisms, it says so. Where its own additions are younger and less battle-tested than the mechanisms they sit beside, it says that too. A guarantee that cannot survive adversarial scrutiny is not a guarantee; it is marketing. This paper is written to invite that scrutiny, not to deflect it.</p>
+    <p>There is also a resilience argument — the same principle this paper is built on, one level up. A privacy ecosystem with many independent implementations, built differently and failing differently, is harder to attack, regulate, or extinguish than any single chain. Diversity is defense in depth for the movement itself.</p>
+  </section>
+
+  <section>
+    <span class="snum">03</span>
+    <h2>Concentric Privacy: the architecture</h2>
+    <p>A transaction leaks along several independent axes: <em>who</em> sent it, <em>who</em> received it, <em>how much</em>, <em>whether it links</em> to other transactions, <em>where on the network</em> it originated, and <em>whether any of it ties to a real human</em>. Concentric Privacy assigns each axis to a distinct layer and arranges the layers as concentric rings around the thing that matters most.</p>
+    <h3>The center: what we are protecting</h3>
+    <p>For a privacy currency, the catastrophic, irreversible exposure is not the amount or the network origin — those leak badly but are survivable. It is the link between a <strong>human identity and their on-chain activity</strong>. On a public, immutable ledger, once made, that link is made <em>forever</em>. So the center of the design — the keep — is not "the transaction." It is <strong>the person.</strong> Two principles govern the geometry: the riskiest <em>asset</em> sits at the center behind the most layers; and the innermost <em>wall</em> — the last line of defense — must be the strongest, most-proven mechanism, not the newest.</p>
+    <h3>The rings (as an attacker meets them)</h3>
+    <ul>
+      <li><strong>Ring 4 · Network.</strong> Where a transaction entered the P2P network, from what address, at what instant — guarded by Dandelion++ and traffic shaping (timing jitter and cover packets today; size normalization is specified but not yet wired into the send path). <em>Break it, and you learn a transaction exists — not what it says.</em></li>
+      <li><strong>Ring 3 · Linkability.</strong> Can outputs be connected, a wallet clustered, value followed over time? Guarded by decoy defense, key images, view tags, and automatic churn. <em>Break it, and you may cluster activity — not identity or amount.</em></li>
+      <li><strong>Ring 2 · Transaction content.</strong> Sender, receiver, amount — guarded by CLSAG ring-16, stealth addresses, and Bulletproofs+ commitments. <em>The ring monolithic designs stake everything on; alone, one crack is fatal.</em></li>
+      <li><strong>Ring 1 · The user.</strong> Even with all the above intact — can the person be coerced or their wallet exploited? Live today: encrypted memos and watch-only view keys. Specified and in progress: scoped view keys, deniable wallets (creation currently disabled pending a structural rewrite), and a dead-man's switch (recovery metadata is carried on-chain; consensus enforcement not yet wired). <em>The ring almost no chain even attempts — marked here honestly as design ahead of implementation.</em></li>
+    </ul>
+    <p>The arrangement is not decoration. Its purpose is <strong>graceful degradation</strong>: each ring stands on its own, so the failure of any one leaves the others holding. The layers must be <strong>connected in coverage</strong> (each guards a different door) but <strong>independent in failure</strong> (none is load-bearing on another). A lattice whose walls hold each other up collapses in a chain reaction; concentric, independent rings do not.</p>
+  </section>
+
+  <section>
+    <span class="snum">04</span>
+    <h2>Fault isolation and the two-posture rule</h2>
+    <p>Concentric Privacy borrows deliberately from reliability engineering — the <strong>bulkhead</strong> (compartmentalize so a breach cannot flood the ship), <strong>graceful degradation</strong>, the <strong>circuit breaker</strong>, and <strong>redundancy</strong>. But privacy inverts one assumption these patterns take for granted, and the inversion is the crux.</p>
+    <p>In availability engineering, failure is recoverable — the service returns, no lasting harm. In privacy, <strong>failure is permanent</strong>: a deanonymization committed to an immutable ledger cannot be undone. This forces a split ordinary systems never make:</p>
+    <ul>
+      <li><strong>Consensus and availability are fail-operational.</strong> A broken privacy feature must never halt the chain; blocks keep flowing on the remaining good parts.</li>
+      <li><strong>Privacy is fail-closed.</strong> The protocol must never quietly "keep running at reduced privacy," because reduced privacy means active, permanent leakage. The charter encodes this: no transparent mode, no reduced-privacy transaction class.</li>
+    </ul>
+    <p>Ordinarily these fight — fail-closed says <em>halt if you cannot guarantee privacy</em>; fail-operational says <em>keep going</em>. <strong>The concentric structure resolves the conflict.</strong> Because the other rings still hold when one fails, a single break never forces the choice between halting the chain and shipping weak privacy. The structure absorbs the failure: consensus continues, privacy stays whole minus one layer of margin, and the broken ring is isolated and patched. Defense-in-depth is precisely the mechanism that makes fail-operational-on-consensus and fail-closed-on-privacy achievable <em>at the same time</em> — something a monolith cannot do.</p>
+    <div class="caveat">
+      <span class="lab">Honest cost</span>
+      <p>Isolating a broken privacy layer is <em>not</em> free the way restarting a failed web service is. The remaining rings carry the load, but the margin is thinner, and transactions made while a layer is disabled are permanently less protected. Defense-in-depth cushions this; it does not erase it.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="snum">05</span>
+    <h2>Composition safety</h2>
+    <p>Stacking privacy features does not compose for free. Each mechanism hides one thing, but in doing so can create a new <em>observable regularity</em> — a distinguisher — that an adversary uses to undo a different mechanism. More privacy features can mean <em>less</em> privacy if the interactions are wrong. This is the discipline most often skipped, and where privacy quietly dies.</p>
+    <ul>
+      <li><strong>Automatic churn vs. timing patterns.</strong> Churn on a fixed rhythm or in round amounts becomes a fingerprint that re-links the outputs it was meant to unlink. It must be randomized in timing and amount so there is no cadence to lock onto.</li>
+      <li><strong>Traffic shaping vs. Dandelion++.</strong> Both are timing-based defenses on the same packets. Shaping that perturbs Dandelion's stem timing, or cover traffic distinguishable from real relay traffic, weakens the origin protection. The layers must <em>coordinate</em>, not <em>depend</em>: enough to avoid collision, never enough to make one load-bearing on the other.</li>
+      <li><strong>Padding vs. message framing.</strong> Size-normalization padding must not be parseable as another message type. In development this surfaced as a concrete framing conflict, resolved by giving padding a distinct, first-class message type rather than a hack — an instance of the discipline, not a footnote to it.</li>
+    </ul>
+    <p>The claim is therefore precise: not "many privacy features," but <strong>"many privacy features that do not eat each other."</strong> Demonstrating the second is the harder, more valuable half, treated here as a first-class obligation.</p>
+    <div class="caveat">
+      <span class="lab">Honest limitation</span>
+      <p>Breadth is not strength by itself. Every added mechanism is a potential new distinguisher, and Cynstra's stack is broader — more interaction surface — than the deliberately minimal designs it admires, and its layers are younger and less scrutinized. The analysis here is a beginning, not a proof; a systematic argument that no cross-layer distinguisher exists is future work, stated openly and offered for scrutiny.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="snum">06</span>
+    <h2>Consensus, economics &amp; parameters</h2>
+    <p>Every value below is a named constant in the reference implementation (<code>src/constants.rs</code> unless noted), cited so it can be checked against the code. No figure here is approximated.</p>
+    <h3>Proof of work</h3>
+    <ul>
+      <li><strong>Algorithm:</strong> RandomX — CPU-optimized, ASIC-resistant. Full-memory (~2&nbsp;GB dataset) or light (256&nbsp;MB cache); the key rotates every <strong>2,048 blocks</strong> (<code>RANDOMX_KEY_EPOCH</code>). A laptop competes with a server.</li>
+      <li><strong>Target block time:</strong> <strong>120 s</strong> (<code>TARGET_BLOCK_TIME</code>).</li>
+      <li><strong>Difficulty:</strong> ASERT, retargeting <strong>every block</strong> with a 1-hour halflife (<code>ASERT_HALFLIFE = 3600</code>), short/long windows (8/144) blended 70/30. Per-block retargeting absorbs hashrate swings smoothly rather than in epochs.</li>
+    </ul>
+    <h3>Supply &amp; emission</h3>
+    <p>Maximum supply <strong>100,000,000 CYNC</strong> (<code>MAX_SUPPLY</code>), 12 decimals. The curve is smooth and <strong>halving-free</strong> — each block pays <code>max(TAIL_EMISSION, (100,000,000 − mined) × COIN / 2,000,000)</code>, proportional to the remaining supply:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Circulating supply</th><th>Block reward</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0</td><td class="cy">50 CYNC</td></tr>
+        <tr><td class="num">50,000,000</td><td class="cy">25 CYNC</td></tr>
+        <tr><td class="num">75,000,000</td><td class="cy">12.5 CYNC</td></tr>
+        <tr><td class="num">~99,000,000</td><td class="cy">tail floor</td></tr>
+      </tbody>
+    </table></div>
+    <p>A <strong>0.6 CYNC per-block tail emission</strong> (<code>TAIL_EMISSION</code>) is perpetual — a permanent, predictable security subsidy so miners are still paid as the cap is approached.</p>
+    <h3>Fees &amp; the burn</h3>
+    <ul>
+      <li><strong>No premine, no dev tax, no protocol fee</strong> — Article II, enforced as <code>FEE_PROTOCOL_NORMAL_PERCENT = 0</code>.</li>
+      <li><strong>70% to the miner, 30% burned</strong> (<code>FEE_MINER_NORMAL_PERCENT</code> / <code>FEE_BURN_NORMAL_PERCENT</code>). Under congestion the miner share falls to 50% and the burn rises — spam gets more expensive exactly when the network is contended. The burn is a protocol invariant, not a tunable knob.</li>
+    </ul>
+    <h3>Privacy parameters</h3>
+    <ul>
+      <li><strong>Ring size 16</strong> (<code>RING_SIZE</code>) from block 10,000 onward; an 11-member bootstrap floor (<code>BOOTSTRAP_MIN_RING_SIZE</code>) applies earlier when a young chain lacks outputs to form a full ring. Ceiling 32; an increase above 16 is specified in CIP-017.</li>
+      <li>Pedersen commitments with Bulletproofs+ range proofs; one-time stealth addresses; 1-byte view tags.</li>
+    </ul>
+  </section>
+
+  <section>
+    <span class="snum">07</span>
+    <h2>Governance: constitutional consensus</h2>
+    <p>Most cryptocurrency governance is <em>social</em> — a promise, a foundation's goodwill, a multisig's restraint. Cynstra's founding guarantees are <strong>mechanical</strong>: enforced by the build system and the compiler, so violating them is not a policy dispute but a <strong>build failure.</strong></p>
+    <p>The project ships a <strong>Constitution</strong> (nineteen Articles) and a <strong>Bill of Rights</strong> (fifteen Rights) as protocol documents — Fixed Supply (I), No Pre-mine / No Dev Tax (II), Mandatory Privacy (III), Open Mining (V), No Surveillance Infrastructure (IX), and more.</p>
+    <h3>Two mechanical enforcement layers</h3>
+    <p><strong>Hash-locked consensus files.</strong> Eight files are pinned by SHA-256 in <code>critical_files.lock</code>:</p>
+    <pre><code>CONSTITUTION.md        src/consensus/difficulty.rs
+docs/BILL_OF_RIGHTS.md src/consensus/pow.rs
+src/testnet.rs         src/consensus/validation.rs
+src/constants.rs       src/emission/curve.rs</code></pre>
+    <p><code>build.rs</code> recomputes each hash (line endings normalized) at the start of <em>every</em> build; if any drifts, the build fails. Changing one requires an explicit, reviewed refresh — the emission curve, the validation rules, and the Constitution itself cannot be altered <em>silently.</em></p>
+    <p><strong>Compile-time tripwires.</strong> The substantive invariants are also encoded as <code>const</code> assertions the compiler evaluates:</p>
+    <pre><code>const _: () = assert!(DEV_TAX_PERCENT == 0, …);        <span class="cmt">// Article II</span>
+const _: () = assert!(MANDATORY_CONFIDENTIAL, …);      <span class="cmt">// Article III</span>
+const _: () = assert!(RANDOMX_ONLY, …);                <span class="cmt">// Article V</span>
+const _: () = assert!(!ADDRESS_BLACKLIST_ENABLED, …);  <span class="cmt">// Article IX</span>
+const _: () = assert!(!SURVEILLANCE_HOOKS_ENABLED, …);
+const _: () = assert!(NO_ADMIN_KEYS, …);
+const _: () = assert!(NO_ALGORITHMIC_PEG, …);          <span class="cmt">// the Terra failure mode</span></code></pre>
+    <p>These are not runtime checks a flag can disable — they are evaluated <em>when the code is compiled.</em> A developer who tries to add a dev tax, a blacklist, an admin key, or an algorithmic peg does not ship a controversial change; <strong>their code does not compile.</strong> The guarantee is not "we promise not to" — it is "the software cannot be built to do this."</p>
+    <div class="caveat">
+      <span class="lab">Honest limit</span>
+      <p>A <em>fork</em> can always strip these guardrails — delete the asserts, re-lock the hashes. What the mechanism prevents is <em>silent</em> or <em>accidental</em> subversion, and it makes deliberate subversion <strong>loud</strong>: a fork that removes the Constitution is visibly a different chain, not a stealth upgrade of this one. The guarantee is not that the rules can never change — it is that they cannot change <strong>invisibly.</strong></p>
+    </div>
+  </section>
+
+  <section>
+    <span class="snum">08</span>
+    <h2>Comparison</h2>
+    <p>This positions Cynstra by <strong>contribution</strong>, not superiority. On transaction and linkability it uses proven mechanisms comparable to Monero's — no claim to beat them there. Its distinctive coverage is network, operational, mandatory, and constitutional.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Layer / mechanism</th><th>BTC</th><th>Monero</th><th>Zcash</th><th>Firo</th><th>Grin</th><th>Cynstra</th></tr></thead>
+      <tbody>
+        <tr><td>Transaction privacy</td><td class="no">✗</td><td class="yes">✓</td><td class="yes">✓ zk</td><td class="yes">✓</td><td class="part">◐</td><td class="yes">✓</td></tr>
+        <tr><td>Linkability resistance</td><td class="no">✗</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="part">◐</td><td class="yes">✓</td></tr>
+        <tr><td>Network privacy</td><td class="part">◐</td><td class="part">◐</td><td class="no">✗</td><td class="part">◐</td><td class="part">◐</td><td class="yes">✓ +shaping</td></tr>
+        <tr><td>Operational privacy <span style="opacity:.6">(auto-churn + memos live; deniable / dead-man / scoped-view specified)</span></td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="part">◐</td></tr>
+        <tr><td>Mandatory (no transparent mode)</td><td class="no">✗</td><td class="yes">✓</td><td class="no">✗</td><td class="part">◐</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>CPU-only PoW</td><td class="no">✗</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="yes">✓</td></tr>
+        <tr><td>Compile-time-locked invariants</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="yes">✓</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li><strong>Transaction &amp; linkability:</strong> Cynstra <em>matches</em> Monero (CLSAG, stealth, Bulletproofs+); Zcash's zk-SNARK shielding is arguably stronger. No superiority claim here.</li>
+      <li><strong>Network:</strong> most stop at Dandelion++ (Monero's Kovri/I2P was shelved ~2019). Cynstra adds integrated traffic shaping — the one row where it is broader than the field.</li>
+      <li><strong>Operational:</strong> auto-churn and encrypted memos ship today; the deniable-wallet / dead-man's-switch / scoped-view-key layer is specified and, to our knowledge, unique among shipping chains in even being attempted — marked as design ahead of implementation, not claimed as delivered.</li>
+    </ul>
+    <div class="caveat">
+      <span class="lab">The caveat that belongs with the table</span>
+      <p>A ✓ means the mechanism is <em>present and active</em> — not that it has survived a decade of adversarial attack. Monero's ✓s are battle-tested; several of Cynstra's — especially the network and operational rows that make it distinctive — are <strong>younger and far less scrutinized.</strong> Breadth of coverage is a real, claimable property. <em>Proven</em> strength is earned over years of people trying to break you, and Cynstra has not yet earned it. This paper claims the former and explicitly disclaims the latter.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="snum">09</span>
+    <h2>Conclusion</h2>
+    <p>Cynstra's thesis is a single sentence: <strong>privacy in concentric layers, where no single break exposes the whole.</strong> It does not rest its guarantees on one clever mechanism; it layers independent defenses so a failure in any one degrades the margin without collapsing the whole, keeps consensus alive while refusing to ship weakened privacy, and takes seriously the discipline of keeping those layers from interfering. It is offered not as a competitor to the projects that proved this fight can be won, but as a fellow traveler exploring a corner they left open — and as one more independent line of defense for a cause that is safer for having many.</p>
+  </section>
+
+  <p class="foot">Draft v0.1 · Sections 6–8 cite named constants in <code>src/constants.rs</code>; the emission table reproduces that file's own worked example. This document is written to be scrutinized. Corrections, attacks, and hard questions are the point.</p>
+
+</div>
