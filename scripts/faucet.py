@@ -33,8 +33,24 @@ def decode_address(addr):
         result.append(n & 0xFF)
         n >>= 8
     result.reverse()
-    pad = sum(1 for c in raw if c == '1')
+    pad = len(raw) - len(raw.lstrip('1'))
     return bytes([0] * pad) + bytes(result)
+
+
+def extract_recipient_keys(addr):
+    addr_bytes = decode_address(addr)
+    if not addr_bytes or len(addr_bytes) < 2 or addr_bytes[0] != 1:
+        return None
+
+    expected_length = {0: 70, 1: 70, 2: 78}.get(addr_bytes[1])
+    if expected_length is None or len(addr_bytes) != expected_length:
+        return None
+
+    return addr_bytes[2:34].hex(), addr_bytes[34:66].hex()
+
+
+def wallet_send_succeeded(returncode, output):
+    return returncode == 0 and 'ok: tx accepted by mempool.' in output.lower()
 
 
 class FaucetHandler(BaseHTTPRequestHandler):
@@ -72,13 +88,12 @@ class FaucetHandler(BaseHTTPRequestHandler):
                 return
 
         try:
-            addr_bytes = decode_address(addr)
-            if not addr_bytes or len(addr_bytes) < 65:
+            recipient_keys = extract_recipient_keys(addr)
+            if recipient_keys is None:
                 self.respond(400, {'error': 'Could not decode address'})
                 return
 
-            spend_hex = addr_bytes[1:33].hex()
-            view_hex = addr_bytes[33:65].hex()
+            spend_hex, view_hex = recipient_keys
 
             result = subprocess.run(
                 [CLI, '--wallet', WALLET, '--node', NODE_HTTP, 'send',
@@ -90,7 +105,7 @@ class FaucetHandler(BaseHTTPRequestHandler):
             )
 
             output = result.stdout + result.stderr
-            if any(w in output.lower() for w in ['submitted', 'success', 'broadcast']):
+            if wallet_send_succeeded(result.returncode, output):
                 tx_match = re.search(r'[a-f0-9]{64}', output)
                 tx_hash = tx_match.group(0) if tx_match else 'pending'
 
