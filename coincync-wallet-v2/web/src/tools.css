@@ -234,9 +234,20 @@
   letter-spacing: var(--ls-snug);
 }
 
+/* Live hashrate trend under the hero number. Stretched to the hero
+   width; the non-uniform scale is fine for a decorative trend line. */
+.mining-spark {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 340px;
+  height: 46px;
+  margin: var(--sp-4) auto 0;
+}
+
 .mining-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: var(--sp-3);
 }
 

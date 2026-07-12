@@ -240,11 +240,23 @@ async function subscribeToMiningStats() {
   try {
     await window.__TAURI__.event.listen("mining_stats", (event) => {
       const p = event.payload || {};
+      const wasOn = mining.on;
       mining.on        = !!p.is_mining;
       mining.hashrate  = (typeof p.hashrate === "number") ? p.hashrate : mining.hashrate;
       mining.blocks    = (typeof p.blocks_found === "number") ? p.blocks_found : mining.blocks;
       mining.threads   = (typeof p.threads === "number") ? p.threads : mining.threads;
       mining.algorithm = p.algorithm || mining.algorithm || "RandomX";
+      // Session bookkeeping: on the off→on transition start the uptime
+      // clock and clear the prior session's trend; on on→off stop feeding
+      // the sparkline so it freezes at the last live shape.
+      if (mining.on && !wasOn) {
+        mining.startedAt = Date.now();
+        mining.samples = [];
+        mining.peak = 0;
+      }
+      if (mining.on) {
+        recordHashrateSample(mining.hashrate);
+      }
       if (state.page === "mining" || state.page === "dashboard") {
         renderShell();
       }
@@ -2078,7 +2090,28 @@ function addressesHtml() {
 }
 
 // ─── Mining ───────────────────────────────────────────────────────
-let mining = { on: false, threads: 4, hashrate: 0, blocks: 0, blocksThisSession: 0 };
+// `samples` is a client-side ring of recent hashrate readings (one per
+// mining_stats tick, ~3 s apart) driving the hero sparkline + avg/peak.
+// `startedAt` is the wall-clock ms the current mining session began,
+// for the live uptime readout. Both are frontend-only — no backend
+// plumbing — so they work today against the existing 3 s event stream.
+let mining = {
+  on: false, threads: 4, hashrate: 0, blocks: 0, blocksThisSession: 0,
+  algorithm: "RandomX", samples: [], peak: 0, startedAt: 0,
+};
+
+// How many hashrate samples to retain for the sparkline. At ~3 s per
+// tick, 40 samples ≈ 2 minutes of visible trend.
+const MINING_SAMPLE_CAP = 40;
+
+/// Push a hashrate reading into the sparkline ring, evicting the oldest
+/// past the cap, and track the session peak.
+function recordHashrateSample(hps) {
+  if (typeof hps !== "number" || !isFinite(hps)) return;
+  mining.samples.push(hps);
+  if (mining.samples.length > MINING_SAMPLE_CAP) mining.samples.shift();
+  if (hps > mining.peak) mining.peak = hps;
+}
 
 // ─── User preferences (persisted to localStorage) ─────────────────
 // Applied at boot before the splash so there's no flash of wrong theme.
@@ -2158,6 +2191,58 @@ function showToast(msg, kind) {
 // by the block_found subscription. Keep both pointing at the same impl.
 function showMiningToast(msg) { showToast(msg); }
 
+// Render recent hashrate samples as an inline SVG sparkline: a gold
+// stroke over a faint area fill with an emphasized endpoint. Pure
+// client-side, no dependency. Returns "" until there are ≥2 samples so
+// we draw nothing rather than a misleading flat line.
+function hashrateSparkline(samples) {
+  const pts = (samples || []).filter((n) => typeof n === "number" && isFinite(n));
+  if (pts.length < 2) return "";
+  const W = 300, H = 46, PAD = 4;
+  const min = Math.min(...pts);
+  const max = Math.max(...pts);
+  const span = max - min || 1;
+  const stepX = (W - PAD * 2) / (pts.length - 1);
+  const xy = pts.map((v, i) => {
+    const x = PAD + i * stepX;
+    const y = PAD + (H - PAD * 2) * (1 - (v - min) / span);
+    return [x, y];
+  });
+  const line = xy
+    .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`)
+    .join(" ");
+  const last = xy[xy.length - 1];
+  const area = `${line} L${last[0].toFixed(1)} ${H - PAD} L${xy[0][0].toFixed(1)} ${H - PAD} Z`;
+  return `
+    <svg class="mining-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--gold-400)" stop-opacity="0.26"/>
+          <stop offset="100%" stop-color="var(--gold-400)" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${area}" fill="url(#sparkFill)" stroke="none"/>
+      <path d="${line}" fill="none" stroke="var(--gold-400)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.6" fill="var(--gold-300)"/>
+    </svg>`;
+}
+
+// mm:ss (or hh:mm:ss past an hour) for the live session uptime.
+function fmtUptime(startedAtMs) {
+  if (!startedAtMs) return "00:00";
+  const s = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${p(h)}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`;
+}
+
+// Session-average hashrate over the retained sample ring.
+function avgHashrate(samples) {
+  const pts = (samples || []).filter((n) => typeof n === "number" && isFinite(n));
+  if (!pts.length) return 0;
+  return pts.reduce((a, b) => a + b, 0) / pts.length;
+}
+
 function miningHtml() {
   const hr = mining.on ? mining.hashrate : 0;
   // "Address ready" = unlocked wallet has loaded a real address (not empty, not the dev-preview placeholder).
@@ -2207,10 +2292,11 @@ function miningHtml() {
           <span class="mining-hashrate" id="hashrateValue">${hr.toFixed(1)}</span>
           <span class="mining-hashrate__unit">H/s</span>
         </div>
+        ${mining.on ? hashrateSparkline(mining.samples) : ""}
         <div class="mining-sub">
           ${mining.on
-            ? `Current effort · ${mining.threads} thread${mining.threads !== 1 ? "s" : ""} engaged`
-            : `Press start to begin mining · ${mining.threads} thread${mining.threads !== 1 ? "s" : ""} configured`}
+            ? `${mining.algorithm} · ${mining.threads} thread${mining.threads !== 1 ? "s" : ""} · avg ${avgHashrate(mining.samples).toFixed(1)} · peak ${mining.peak.toFixed(1)} H/s`
+            : `Press start to begin mining · ${mining.threads} thread${mining.threads !== 1 ? "s" : ""} configured · ${mining.algorithm}`}
         </div>
       </section>
 
@@ -2219,6 +2305,11 @@ function miningHtml() {
           <div class="mining-stat__label">Blocks found</div>
           <div class="mining-stat__value">${mining.blocksThisSession}</div>
           <div class="mining-stat__sub">+${earnedThisSession} tCYNC est. this session</div>
+        </div>
+        <div class="mining-stat">
+          <div class="mining-stat__label">Session</div>
+          <div class="mining-stat__value" style="font-feature-settings: 'tnum';">${mining.on ? fmtUptime(mining.startedAt) : "—"}</div>
+          <div class="mining-stat__sub">${mining.on ? "Uptime this session" : "Idle"}</div>
         </div>
         <div class="mining-stat">
           <div class="mining-stat__label">Network height</div>
@@ -2268,6 +2359,7 @@ function wireMining() {
           await invoke("stop_mining");
           mining.on = false;
           mining.hashrate = 0;
+          mining.startedAt = 0;
         } else {
           // The wallet's real address (loaded by primeWalletState from
           // get_wallet_address). NO PLACEHOLDER FALLBACK — mining to a
@@ -2284,6 +2376,11 @@ function wireMining() {
             threads: mining.threads,
           });
           mining.on = true;
+          // Start the uptime clock + clear the prior trend immediately so
+          // the panel reads live before the first mining_stats tick.
+          mining.startedAt = Date.now();
+          mining.samples = [];
+          mining.peak = 0;
           // mining_stats event updates the display reactively — no polling needed
         }
         renderShell();
