@@ -750,6 +750,33 @@ impl Blockchain {
                     }
                     tracing::info!("Loaded chain state: height={}, tip={}", state.height, state.tip_hash.to_hex());
 
+                    // Self-heal total_difficulty from the active chain.
+                    //
+                    // The stored value can drift from the deterministic
+                    // `1 + Σ dft(1..=height)` when the node has taken the
+                    // (pre-fix) reorg path, which accumulated against a
+                    // `dft(genesis)` base or stored a partial fork walk. A
+                    // drifted value makes this node advertise a `ChainWorkMessage`
+                    // that disagrees with peers on the SAME tip's work, which
+                    // false-positives their `work_behind` veto and locks their
+                    // (follower) miners out. Recompute the canonical value and
+                    // overwrite in memory; the corrected value persists on the
+                    // next block commit. If any block is missing we keep the
+                    // stored value rather than store a wrong partial.
+                    if let Some(recomputed) = self.recompute_total_difficulty(state.height) {
+                        let mut inner = self.inner.write();
+                        if inner.stats.total_difficulty != recomputed {
+                            tracing::warn!(
+                                "total_difficulty self-heal on load: stored={} recomputed={} delta={} \
+                                 — converging to the deterministic 1 + Σ dft(1..=height)",
+                                inner.stats.total_difficulty,
+                                recomputed,
+                                (recomputed as i128) - (inner.stats.total_difficulty as i128),
+                            );
+                            inner.stats.total_difficulty = recomputed;
+                        }
+                    }
+
                     // Rebuild UTXO set from stored blocks so that key image
                     // checks and decoy selection work immediately after restart.
                     self.rebuild_utxo_set(state.height)?;
@@ -3179,6 +3206,25 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                 break;
             }
             if let Some(parent) = self.get_block(&current_hash) {
+                // Genesis contributes the fixed base `1`, NOT its
+                // `dft(genesis_target)`. This matches the extend path, which
+                // starts from `total_difficulty = 1` at construction
+                // (chain.rs genesis init) and does `+= dft(block)` for each
+                // block height ≥ 1. Adding `dft(genesis)` here instead made
+                // this from-scratch fork walk exceed the incrementally
+                // accumulated `current total_difficulty` by
+                // `dft(genesis) - 1`, so an EQUAL-work fork looked heavier and
+                // triggered a spurious reorg — and every reorg then latched
+                // the higher base into the stored value, producing the
+                // fleet-wide `total_difficulty` divergence (nodes on the
+                // identical tip disagreeing on cumulative work) that
+                // false-positived the `work_behind` veto and locked follower
+                // miners out. See recompute_total_difficulty for the canonical
+                // definition this must agree with.
+                if parent.header.height == 0 {
+                    total_work = total_work.saturating_add(1);
+                    break; // Reached genesis
+                }
                 let prev_work = total_work;
                 total_work = total_work.saturating_add(
                     calculate_difficulty_from_target(&parent.header.target)
@@ -3192,9 +3238,6 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                         parent.header.height
                     );
                 }
-                if parent.header.height == 0 {
-                    break; // Reached genesis
-                }
                 current_hash = parent.header.prev_hash;
             } else {
                 break; // Parent not found
@@ -3202,6 +3245,42 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
         }
 
         total_work
+    }
+
+    /// Deterministically recompute cumulative chain work for the active chain
+    /// `[0, height]` as `1 + Σ dft(block_h.target)` for `h in 1..=height`.
+    ///
+    /// This is the SINGLE canonical definition of `total_difficulty`, and it
+    /// agrees by construction with:
+    ///   - the extend path (`total_difficulty += dft(block)` from a genesis
+    ///     base of `1`), and
+    ///   - the reorg path (`calculate_fork_cumulative_work`, which now also
+    ///     uses the genesis base `1`).
+    ///
+    /// Called once on load (`load_from_database`) so that a node whose stored
+    /// value drifted — via the pre-fix reorg path that used a `dft(genesis)`
+    /// base, or a partial fork walk — SELF-HEALS to the deterministic value on
+    /// restart. Because `total_difficulty` is advertised to peers in
+    /// `ChainWorkMessage` (feeding the `work_behind` heavier-chain veto),
+    /// converging every node's value is what stops the veto from
+    /// false-positiving followers whose only "sin" was computing the same
+    /// tip's work correctly.
+    ///
+    /// Returns `None` if any block in `[1, height]` is missing from storage
+    /// (caller keeps the existing value rather than storing a wrong partial).
+    ///
+    /// Cost: O(height) DB reads, once per process start. Fine at testnet
+    /// scale (~12k blocks, sub-second). A mainnet-scale chain would want a
+    /// periodically-checkpointed cumulative value instead of a full walk.
+    fn recompute_total_difficulty(&self, height: u64) -> Option<u128> {
+        let mut total: u128 = 1; // genesis base (matches genesis init + fork walk)
+        for h in 1..=height {
+            let block = self.get_block_by_height(h)?;
+            total = total.saturating_add(
+                calculate_difficulty_from_target(&block.header.target),
+            );
+        }
+        Some(total)
     }
 
     /// Find the common ancestor (fork point) between the current main chain
@@ -3429,6 +3508,67 @@ mod tests {
         let genesis_hash = chain.init_genesis().unwrap();
         assert_eq!(chain.height(), 0);
         assert_eq!(chain.tip().hash, genesis_hash);
+    }
+
+    #[test]
+    fn total_difficulty_recompute_and_fork_walk_agree_on_genesis_base() {
+        // Regression lock for the fleet-wide total_difficulty divergence bug.
+        //
+        // The extend path accumulates `total_difficulty` from a genesis base
+        // of `1` (`+= dft(block)` per block). The reorg path recomputes via
+        // `calculate_fork_cumulative_work`, which USED to add `dft(genesis)`
+        // for the genesis block instead of the base `1` — so the two
+        // definitions disagreed by `dft(genesis) - 1`. That made an EQUAL-work
+        // fork look heavier (spurious reorgs) and, once latched into the
+        // stored value, produced nodes on the identical tip disagreeing on
+        // cumulative work — which false-positived the peer `work_behind` veto
+        // and locked follower miners out. This test pins the two paths (and
+        // the on-load recompute) to the SAME genesis base.
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let genesis = chain.get_block_by_height(0).expect("genesis present");
+        let d = calculate_difficulty_from_target(&genesis.header.target);
+        assert!(d > 0, "genesis target must yield positive work");
+
+        // Append 3 child blocks, each reusing the genesis target so each
+        // contributes exactly `d` to cumulative work.
+        let mut prev = genesis.hash();
+        let mut tip_block = genesis.clone();
+        for h in 1..=3u64 {
+            let mut b = genesis.clone();
+            b.header.height = h;
+            b.header.prev_hash = prev;
+            b.header.nonce = 1000 + h; // distinct hashes
+            let hash = b.hash();
+            {
+                let mut inner = chain.inner.write();
+                inner.blocks.insert(hash, b.clone());
+                inner.height_to_hash.insert(h, hash);
+            }
+            prev = hash;
+            tip_block = b;
+        }
+
+        // Canonical definition: genesis base 1 + Σ dft(1..=3) = 1 + 3d.
+        let recomputed = chain
+            .recompute_total_difficulty(3)
+            .expect("all blocks present");
+        assert_eq!(recomputed, 1 + 3 * d, "recompute must be 1 + Σ dft(1..=height)");
+
+        // The from-scratch fork walk MUST agree with the recompute. Before the
+        // fix this differed by exactly `d - 1` (dft(genesis) vs base 1).
+        let fork_cumulative = chain.calculate_fork_cumulative_work(&tip_block);
+        assert_eq!(
+            fork_cumulative, recomputed,
+            "fork walk and recompute must share the genesis base 1"
+        );
+
+        // Genesis-only chain is the bare base.
+        assert_eq!(chain.recompute_total_difficulty(0), Some(1));
+
+        // A missing block yields None (caller keeps stored value, never a
+        // wrong partial sum).
+        assert_eq!(chain.recompute_total_difficulty(99), None);
     }
 
     #[test]
