@@ -967,7 +967,7 @@ async fn start_node(
     // height. Without this, the initial handshake advertises 0 until a
     // new block is processed, which can take minutes on a quiet chain
     // and breaks block relay in the meantime.
-    p2p.set_chain_state(tip.height, tip.hash).await;
+    p2p.set_chain_state(p2p.next_chain_seq(), tip.height, tip.hash).await;
 
     // Feed any --addnode peers into the address book so the peer-
     // discovery loop dials them on the next tick. This runs AFTER
@@ -1080,10 +1080,17 @@ async fn start_node(
                             let p2p2 = event_p2p.clone();
                             let new_height = event_chain.height();
                             let new_tip = event_chain.tip_hash();
+                            // Capture the accept-order sequence BEFORE the
+                            // detached spawn. These tasks are not serialized,
+                            // so an older one can complete after a newer one;
+                            // the seq lets set_chain_state drop the stale
+                            // write instead of regressing the P2P shadow
+                            // (issue #249).
+                            let chain_seq = event_p2p.next_chain_seq();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
                                 p2p2.notify_block_processed(hash, block_height).await;
-                                p2p2.set_chain_state(new_height, new_tip).await;
+                                p2p2.set_chain_state(chain_seq, new_height, new_tip).await;
                                 let _ = p2p2.broadcast_block(&block_for_relay).await;
                             });
                         }

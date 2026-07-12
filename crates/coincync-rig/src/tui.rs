@@ -8,7 +8,8 @@
 //!      auto-scaling unit (H/s → KH/s → MH/s → GH/s).
 //!   4. 60-sample hashrate sparkline directly under the hero.
 //!   5. Five stat cards (HEIGHT / FOUND / ACCEPT% / EARNED / UPTIME).
-//!   6. Next-block ETA gauge with Braille spinner.
+//!   6. Share-based next-block ETA gauge (expected solo time from your
+//!      slice of the network hashrate) + a solo LUCK readout.
 //!   7. Log scrollback with level-glyph bullets.
 //!   8. Found-blocks 24h timeline strip + ticker.
 //!   9. Keybinding footer.
@@ -181,6 +182,12 @@ const CELEBRATION_SECS: f32 = 1.5;
 /// Splash duration. Ratatui+crossterm initialize fast enough that
 /// 2.5s feels like an intentional reveal rather than a stutter.
 const SPLASH_SECS: f32 = 2.5;
+
+/// Testnet target block interval. The solo expected-time-to-block and
+/// luck meter are computed against this — one block lands network-wide
+/// every ~TARGET_BLOCK_SECS, and your share of the network hashrate is
+/// your share of those blocks.
+const TARGET_BLOCK_SECS: u64 = 120;
 
 /// Braille spinner frames for the ETA gauge "searching..." indicator.
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -593,6 +600,79 @@ fn auto_tune_hint(metrics: &MetricsState) -> Option<String> {
     }
 }
 
+/// Expected wall-seconds for *this miner* to find one block solo, given
+/// your share of the network hashrate. Your probability of winning any
+/// given block ≈ your_hps / net_hps, and one block lands every
+/// `TARGET_BLOCK_SECS` network-wide, so the expected gap between *your*
+/// finds is `TARGET × net / mine`.
+///
+/// `None` when we don't yet have both a local hashrate and a
+/// network-hashrate reading (fresh start / daemon not reporting it) —
+/// callers fall back to the raw target interval. u128 math avoids
+/// overflow when `mine ≪ net`.
+fn expected_secs_per_block(metrics: &MetricsState) -> Option<u64> {
+    let mine = metrics.current_hashrate_hps.load(Ordering::Relaxed);
+    let net = metrics.network_hashrate_hps.load(Ordering::Relaxed);
+    if mine == 0 || net == 0 {
+        return None;
+    }
+    let secs = (TARGET_BLOCK_SECS as u128 * net as u128) / mine as u128;
+    Some(secs.min(u64::MAX as u128) as u64)
+}
+
+/// Solo-mining "luck": accepted blocks so far vs. how many you'd expect
+/// statistically over the session. `>100%` = ahead of expectation
+/// (lucky). Returns `None` until enough time has passed that at least a
+/// quarter-block was expected — before that, solo variance makes the
+/// figure swing between 0% and thousands of percent and it's just noise.
+fn luck_pct(metrics: &MetricsState) -> Option<f64> {
+    let expected_per = expected_secs_per_block(metrics)? as f64;
+    if expected_per <= 0.0 {
+        return None;
+    }
+    let uptime = uptime_seconds(metrics) as f64;
+    let expected_blocks = uptime / expected_per;
+    if expected_blocks < 0.25 {
+        return None;
+    }
+    let actual = metrics.blocks_accepted_total.load(Ordering::Relaxed) as f64;
+    Some(actual / expected_blocks * 100.0)
+}
+
+/// Compact large-count formatter for the lifetime-hashes readout:
+/// `938`, `12.4K`, `3.1M`, `1.2B`, `4.7T`. Distinct from
+/// [`bf::format_hashrate`], which formats a *rate* (H/s); this is a
+/// cumulative total.
+fn fmt_count(n: u64) -> String {
+    const T: u64 = 1_000_000_000_000;
+    const B: u64 = 1_000_000_000;
+    const M: u64 = 1_000_000;
+    const K: u64 = 1_000;
+    if n >= T {
+        format!("{:.1}T", n as f64 / T as f64)
+    } else if n >= B {
+        format!("{:.1}B", n as f64 / B as f64)
+    } else if n >= M {
+        format!("{:.1}M", n as f64 / M as f64)
+    } else if n >= K {
+        format!("{:.1}K", n as f64 / K as f64)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Colour for a luck percentage: green when running lucky (≥110%),
+/// muted around expectation, warn when unlucky (≤90%).
+fn luck_color(pct: f64, theme: &Theme) -> ratatui::style::Color {
+    if pct >= 110.0 {
+        theme.success
+    } else if pct <= 90.0 {
+        theme.warn
+    } else {
+        theme.body
+    }
+}
+
 // ─── Stat cards ──────────────────────────────────────────────────────
 
 fn draw_stat_cards(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme) {
@@ -708,10 +788,23 @@ fn draw_worker_heatmap(f: &mut Frame, area: Rect, metrics: &MetricsState, theme:
 // ─── Next-block ETA gauge ────────────────────────────────────────────
 
 fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme, ui: &UiState) {
+    // Split the row: ETA gauge on the left, a solo LUCK readout on the
+    // right. The luck box only carries meaning once we have a network
+    // hashrate to compare against, so it degrades to "gathering…".
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(24), Constraint::Length(22)])
+        .split(area);
+
+    // Expected time between *your* finds, from your share of the network.
+    // Falls back to the raw target interval before we have a reading.
+    let (expected, share_based) = match expected_secs_per_block(metrics) {
+        Some(e) => (e.max(1), true),
+        None => (TARGET_BLOCK_SECS, false),
+    };
+
     // Anchor the elapsed-since-last-find at the most recent block-find
-    // timestamp; if no blocks yet, anchor at session start. Compared to
-    // testnet target block time (120 s) as the expected window.
-    const EXPECTED_SECS: u64 = 120;
+    // timestamp; if no blocks yet, anchor at session start.
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -721,17 +814,23 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
         .last()
         .copied()
         .unwrap_or(metrics.started_unix_seconds);
-    let elapsed = now.saturating_sub(last_find).min(EXPECTED_SECS * 4);
-    let pct = (elapsed as u16 * 100 / EXPECTED_SECS as u16).min(100);
+    let elapsed = now.saturating_sub(last_find).min(expected.saturating_mul(4));
+    let pct = ((elapsed as u128 * 100 / expected as u128).min(100)) as u16;
     let phase = (ui.started.elapsed().as_millis() / 100) as usize % SPINNER.len();
     let spinner = SPINNER[phase];
 
-    let label = if pct >= 100 {
-        format!("{} looking… overdue", spinner)
+    // Left: how long a solo block is expected to take, in human units,
+    // plus how far into that window we are.
+    let eta_word = if share_based {
+        format!("solo E[t] ~{}", format_duration(expected))
     } else {
-        format!("{} searching · ~{}s expected", spinner, EXPECTED_SECS - elapsed)
+        format!("~{}s target", expected)
     };
-
+    let label = if elapsed >= expected {
+        format!("{} overdue · {} · {}% ", spinner, eta_word, pct)
+    } else {
+        format!("{} searching · {} · {}% ", spinner, eta_word, pct)
+    };
     let gauge = Gauge::default()
         .block(
             Block::default()
@@ -749,7 +848,33 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
             label,
             Style::default().fg(theme.body).add_modifier(Modifier::BOLD),
         ));
-    f.render_widget(gauge, area);
+    f.render_widget(gauge, cols[0]);
+
+    // Right: solo luck. >100% = ahead of statistical expectation.
+    let luck_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .title(Span::styled(
+            " LUCK ",
+            Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+        ));
+    let luck_inner = luck_block.inner(cols[1]);
+    f.render_widget(luck_block, cols[1]);
+    let luck_line = match luck_pct(metrics) {
+        Some(pct) => Line::from(Span::styled(
+            format!("{:.0}%", pct),
+            Style::default().fg(luck_color(pct, theme)).add_modifier(Modifier::BOLD),
+        )),
+        None => Line::from(Span::styled(
+            "gathering…",
+            Style::default().fg(theme.muted),
+        )),
+    };
+    f.render_widget(
+        Paragraph::new(luck_line).alignment(Alignment::Center),
+        luck_inner,
+    );
 }
 
 // ─── Log scrollback ──────────────────────────────────────────────────
@@ -861,9 +986,13 @@ fn draw_blocks_timeline_and_ticker(
     } else {
         "MINING"
     };
+    let lifetime = fmt_count(metrics.hashes_total.load(Ordering::Relaxed));
+    let eta = expected_secs_per_block(metrics)
+        .map(|s| format!("solo ~{}", format_duration(s)))
+        .unwrap_or_else(|| "solo ~—".to_string());
     let raw = format!(
-        "  ◉ {} · tip h{} · net {} · share {} · 0% dev fee · no telemetry · home miner · cyncthub.xyz   ",
-        mining_status, height, fmt_hps(net), share,
+        "  ◉ {} · tip h{} · net {} · share {} · {} · {} lifetime hashes · 0% dev fee · no telemetry · home miner · cyncthub.xyz   ",
+        mining_status, height, fmt_hps(net), share, eta, lifetime,
     );
     // Scroll by area.width per frame; cycle the string.
     let scroll = (ui.started.elapsed().as_millis() / 200) as usize % raw.chars().count().max(1);
@@ -1023,19 +1152,32 @@ fn snapshot_to_tmpfile(metrics: &MetricsState) {
     let height = metrics.current_template_height.load(Ordering::Relaxed);
     let found = metrics.blocks_accepted_total.load(Ordering::Relaxed);
     let threads = metrics.threads.load(Ordering::Relaxed);
+    let lifetime = fmt_count(metrics.hashes_total.load(Ordering::Relaxed));
+    let eta = expected_secs_per_block(metrics)
+        .map(|s| format!("~{} solo", format_duration(s)))
+        .unwrap_or_else(|| "—".to_string());
+    let luck = luck_pct(metrics)
+        .map(|p| format!("{:.0}%", p))
+        .unwrap_or_else(|| "—".to_string());
     let body = format!(
         "coincync-rig snapshot @ {}\n\
          uptime    {}\n\
          hashrate  {} ({} threads)\n\
+         lifetime  {} hashes\n\
          tip       h{}\n\
          blocks    {}\n\
+         next blk  {}\n\
+         luck      {}\n\
          no telemetry · 0% dev fee\n",
         now,
         format_duration(uptime),
         fmt_hps(hps),
         threads,
+        lifetime,
         height,
         found,
+        eta,
+        luck,
     );
     let dir = std::env::temp_dir();
     let path = dir.join(format!("coincync-rig-{}.txt", now));
@@ -1055,11 +1197,16 @@ fn print_session_summary(metrics: &MetricsState) {
         samples.iter().sum::<u64>() / samples.len() as u64
     };
     let earned = found as f64 * 1.0;
+    let lifetime = fmt_count(metrics.hashes_total.load(Ordering::Relaxed));
     eprintln!();
     eprintln!("─── coincync-rig session summary ─────────────────────");
     eprintln!("  mined for     {}", format_duration(uptime));
     eprintln!("  avg hashrate  {}", fmt_hps(avg_hps));
+    eprintln!("  lifetime work {} hashes", lifetime);
     eprintln!("  blocks found  {}", found);
+    if let Some(pct) = luck_pct(metrics) {
+        eprintln!("  luck          {:.0}% of expectation", pct);
+    }
     eprintln!("  earned        ~{:.0} CYNC", earned);
     eprintln!("  status        no telemetry · 0% dev fee · come back soon");
     eprintln!();

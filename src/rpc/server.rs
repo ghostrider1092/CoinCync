@@ -1188,8 +1188,12 @@ pub async fn start_rpc_server(
                     let p2p = p2p.clone();
                     let new_height = state.chain.height();
                     let new_tip = state.chain.tip_hash();
+                    // Capture the accept-order sequence BEFORE the detached
+                    // spawn so an out-of-order completion can't regress the
+                    // P2P shadow to a stale tip (issue #249).
+                    let seq = p2p.next_chain_seq();
                     tokio::spawn(async move {
-                        p2p.set_chain_state(new_height, new_tip).await;
+                        p2p.set_chain_state(seq, new_height, new_tip).await;
                         if let Err(e) = p2p.broadcast_block(&block_for_broadcast).await {
                             warn!("Block broadcast failed: {}", e);
                         }

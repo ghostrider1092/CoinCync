@@ -150,22 +150,51 @@ pub fn audit_block(
     BlockAudit { height, supply_valid, fees_valid: fee_distribution_valid, emission_valid, issues }
 }
 
+/// A self-consistent checksum over a [`SupplyState`] snapshot — **not** an
+/// authenticated proof (issue #252).
+///
+/// `proof_hash` is an *unkeyed*, domain-separated hash over the snapshot's
+/// own public fields (`height`, `total_minted`, `total_burned`). Because
+/// every input is public and there is no secret key or chain-anchored
+/// binding, [`verify`](Self::verify) only confirms the snapshot is
+/// internally consistent (the hash matches the fields, and `circulating`
+/// is the correct derived value). It does **not** prove the figures
+/// reflect the real chain state: anyone can construct a snapshot with
+/// arbitrary supply numbers that passes `verify()`.
+///
+/// Use it as a tamper-evident checksum for transporting a supply reading,
+/// not as evidence of authenticity. Binding `proof_hash` to the block
+/// header's `supply_commitment` would make it a real proof; that is
+/// deferred until a consumer needs it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SupplyProof {
+pub struct SupplySnapshot {
     pub height: u64, pub circulating: u64, pub total_minted: u64, pub total_burned: u64, pub proof_hash: Hash,
 }
 
-impl SupplyProof {
+/// Deprecated: the type was never an authenticated proof. See
+/// [`SupplySnapshot`] and issue #252. Kept one release as a compat shim.
+#[deprecated(note = "renamed to SupplySnapshot: it is a self-consistent checksum, not an authenticated proof (issue #252)")]
+#[allow(dead_code)]
+pub type SupplyProof = SupplySnapshot;
+
+impl SupplySnapshot {
     pub fn from_state(state: &SupplyState) -> Self {
         let proof_hash = hash_domain(b"supply_proof",
             &[state.height.to_le_bytes().as_slice(), state.total_minted.to_le_bytes().as_slice(), state.total_burned.to_le_bytes().as_slice()].concat());
-        SupplyProof { height: state.height, circulating: state.circulating(), total_minted: state.total_minted, total_burned: state.total_burned, proof_hash }
+        SupplySnapshot { height: state.height, circulating: state.circulating(), total_minted: state.total_minted, total_burned: state.total_burned, proof_hash }
     }
 
+    /// Confirm the snapshot is internally self-consistent. Returns `true`
+    /// iff `circulating == total_minted - total_burned` and `proof_hash`
+    /// matches the recomputed checksum over the public fields.
+    ///
+    /// This is a checksum check, not authentication — see the type-level
+    /// docs. A `true` result does **not** attest that these figures came
+    /// from the canonical chain.
     pub fn verify(&self) -> bool {
         // AUDIT (2026-07-01): `circulating` is not covered by `proof_hash`
         // (only height, total_minted, total_burned are). Without this
-        // invariant check, an attacker could hand out a proof whose
+        // invariant check, a caller could hand out a snapshot whose
         // `circulating` field is arbitrary while the hash still verifies,
         // and any consumer that reads `.circulating` directly would trust
         // it. Enforce the derivation here so `verify() == true` implies
@@ -201,7 +230,11 @@ pub fn verify_commitment_balance(input_commitments: &[PedersenCommitment], outpu
 
 pub type SupplyCommitment = SupplyState;
 pub type SupplyAuditResult = BlockAudit;
-pub type SupplyAuditProof = SupplyProof;
+/// Deprecated: the "audit proof" was never authenticated. See
+/// [`SupplySnapshot`] and issue #252.
+#[deprecated(note = "renamed to SupplySnapshot: self-consistent checksum, not an authenticated proof (issue #252)")]
+#[allow(deprecated)]
+pub type SupplyAuditProof = SupplySnapshot;
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockSupplyDelta { pub height: u64, pub emission: u64, pub burned: u64, pub net_change: i64 }
@@ -254,7 +287,7 @@ mod tests {
     fn test_supply_proof() {
         let mut state = SupplyState::genesis();
         state.apply_block(5_000_000, 500_000, 100);
-        let proof = SupplyProof::from_state(&state);
+        let proof = SupplySnapshot::from_state(&state);
         assert!(proof.verify());
     }
 
@@ -272,7 +305,7 @@ mod tests {
     fn test_supply_proof_tamper() {
         let mut state = SupplyState::genesis();
         state.apply_block(1_000_000, 50_000, 5);
-        let mut proof = SupplyProof::from_state(&state);
+        let mut proof = SupplySnapshot::from_state(&state);
         assert!(proof.verify());
         proof.total_minted += 1;
         assert!(!proof.verify());
@@ -286,7 +319,7 @@ mod tests {
         // with total_minted - total_burned, even though proof_hash is valid.
         let mut state = SupplyState::genesis();
         state.apply_block(1_000_000, 50_000, 5);
-        let mut proof = SupplyProof::from_state(&state);
+        let mut proof = SupplySnapshot::from_state(&state);
         assert!(proof.verify(), "clean proof should verify");
         // Tamper only the derived field. The hash is untouched.
         proof.circulating = proof.circulating.saturating_add(1);

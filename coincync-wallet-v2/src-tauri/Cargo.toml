@@ -5,7 +5,10 @@ name = "coincync-wallet-v2"
 version = "1.0.10"
 edition = "2021"
 [build-dependencies]
-tauri-build = { version = "2.6", features = [] }
+# Must track the Tauri v1 line to match `tauri = "1.6"` below. A v2
+# tauri-build (2.x) parses tauri.conf.json as the v2 schema and rejects
+# v1 keys like `devPath`/`distDir`, breaking the build. Keep both on v1.
+tauri-build = { version = "1.5", features = [] }
 [dependencies]
 tauri     = { version = "1.6", features = [ "process-relaunch", "notification-all", "shell-open"] }
 serde     = { version = "1.0", features = ["derive"] }
@@ -19,7 +22,11 @@ keyring = "4"
 # Used by generate_rpc_key() to create a fresh 64-hex bearer key on
 # first launch. Pinned to 0.8 to match the workspace-wide version
 # elsewhere (root Cargo.toml + crates/coincync-rig/Cargo.toml).
-rand = "0.10"
+# Pinned to 0.8 to match the code in main.rs (`thread_rng()` +
+# `RngCore::fill_bytes`). A prior bump to "0.10" pulled a crate whose
+# API has no root `thread_rng`/`RngCore`, breaking the RPC-key generator.
+# 0.8's ThreadRng is a CSPRNG — correct for a bearer-key generator.
+rand = "0.8"
 # QR code rendering for the Receive page. SVG output keeps the bundle
 # small and scales cleanly. Same version as the workspace-wide pin in
 # the root Cargo.toml.

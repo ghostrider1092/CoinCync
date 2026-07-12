@@ -2139,14 +2139,24 @@ async fn cmd_disclose_verify_balance(proof_hex: &str) -> Result<(), String> {
         .map_err(|e| format!("verify_balance_proof: {}", e))?;
 
     if ok {
-        println!("VALID balance proof");
+        // Honesty (issue #253): this only checks the range-proof math over a
+        // caller-supplied commitment. It does NOT confirm the commitment
+        // exists in the chain's UTXO set, so it is NOT evidence of on-chain
+        // funds — anyone can commit to any amount and produce a valid range
+        // proof. Label the crypto result plainly and never imply funds.
+        println!("CRYPTOGRAPHICALLY VALID — range proof well-formed");
         println!("  threshold:   {} atomic (≈ {:.4} CYNC)",
             proof.threshold, proof.threshold as f64 / 1e12);
         println!("  timestamp:   {} (unix epoch seconds)", proof.timestamp);
         println!("  commitment:  {}", hex::encode(proof.original_commitment));
         println!();
-        println!("The prover demonstrated knowledge of a value ≥ {} atomic", proof.threshold);
+        println!("The prover knows a value ≥ {} atomic for this commitment,", proof.threshold);
         println!("without revealing the actual value.");
+        println!();
+        println!("⚠ NOT ANCHORED TO CHAIN: this does not prove the commitment");
+        println!("  corresponds to a real, unspent on-chain output. It is not");
+        println!("  proof-of-funds on its own — verify the commitment against a");
+        println!("  trusted node's UTXO set before relying on it.");
         Ok(())
     } else {
         Err("INVALID: proof verification failed".into())
@@ -2165,7 +2175,25 @@ async fn cmd_disclose_verify_ownership(proof_hex: &str) -> Result<(), String> {
         .map_err(|e| format!("verify_ownership_proof: {}", e))?;
 
     if ok {
-        println!("VALID ownership proof");
+        // Honesty (issue #253): verify_ownership_proof only checks the
+        // Schnorr signature over the (stealth_address, tx_hash, output_index)
+        // the prover chose. It does NOT query the chain to confirm that
+        // output exists, is unspent, or that its on-chain stealth address
+        // matches. So this proves "I know the key for this self-declared
+        // output", not "I control real on-chain funds". Report accordingly.
+        println!("CRYPTOGRAPHICALLY VALID — ownership signature well-formed");
+        println!("  tx_hash:        {}", hex::encode(proof.tx_hash.as_bytes()));
+        println!("  output_index:   {}", proof.output_index);
+        println!("  stealth_addr:   {}", hex::encode(proof.stealth_address.as_bytes()));
+        println!();
+        println!("The prover knows the secret key for the stealth address above,");
+        println!("bound to the referenced output and message.");
+        println!();
+        println!("⚠ NOT ANCHORED TO CHAIN: this does not confirm the referenced");
+        println!("  output exists, is unspent, or that its on-chain stealth");
+        println!("  address matches. It is not proof the prover controls real");
+        println!("  funds — check (tx_hash, output_index) against a trusted");
+        println!("  node's UTXO set before relying on it.");
         Ok(())
     } else {
         Err("INVALID: proof verification failed".into())
