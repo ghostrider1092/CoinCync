@@ -53,6 +53,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$AtomicUnitsPerCync = [int64]1000000000000
 
 # ── locate binaries ─────────────────────────────────────────────────
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -112,7 +113,7 @@ function Get-Balance {
   $out = Invoke-Wallet $Wallet balance --password $pwd
   $bal = Parse-Field $out 'Balance'
   if (-not $bal) { return 0 }
-  # Balance line format example: "Balance: 10.00000000 tCYNC (1000000000 atomic)"
+  # Balance line format example: "Balance: 10.000000000000 tCYNC (10000000000000 atomic)"
   $m = [regex]::Match($bal, '\(([0-9]+)\s+atomic\)')
   if ($m.Success) { return [int64]$m.Groups[1].Value }
   return 0
@@ -173,7 +174,7 @@ if (-not $failure) {
       $confirmedAtomic = Get-Balance $walletA
       if ($confirmedAtomic -gt 0) {
         Write-Host "      wallet A balance: " -NoNewline
-        Write-Host "$confirmedAtomic atomic (~$([math]::Round($confirmedAtomic / 100000000, 2)) tCYNC)" -ForegroundColor Green
+        Write-Host "$confirmedAtomic atomic (~$([math]::Round($confirmedAtomic / $AtomicUnitsPerCync, 2)) tCYNC)" -ForegroundColor Green
         break
       }
       $left = [int]([math]::Ceiling(($deadline - (Get-Date)).TotalSeconds))
@@ -190,7 +191,7 @@ if (-not $failure) {
 
 # ── stage 5: create wallet B + send A -> B ─────────────────────────
 $bAddr = $null
-$sendAtomic = 100000000  # 1 tCYNC at 1e8 atomic units
+$sendAtomic = $AtomicUnitsPerCync  # 1 tCYNC
 if (-not $failure) {
   try {
     Write-Host '[5/6] creating wallet B + sending 1 tCYNC A -> B...' -ForegroundColor Yellow
@@ -227,7 +228,7 @@ if (-not $failure) {
       $bAtomic = Get-Balance $walletB
       if ($bAtomic -ge $sendAtomic) {
         Write-Host "      wallet B balance: " -NoNewline
-        Write-Host "$bAtomic atomic (~$([math]::Round($bAtomic / 100000000, 2)) tCYNC)" -ForegroundColor Green
+        Write-Host "$bAtomic atomic (~$([math]::Round($bAtomic / $AtomicUnitsPerCync, 2)) tCYNC)" -ForegroundColor Green
         break
       }
       $left = [int]([math]::Ceiling(($deadline - (Get-Date)).TotalSeconds))
