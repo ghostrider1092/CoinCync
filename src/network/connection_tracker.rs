@@ -358,16 +358,18 @@ impl ConnectionTracker {
     /// two concurrent callers both see `current + bytes <= budget`
     /// based on a stale snapshot and both then commit, exceeding the
     /// budget.
-    #[allow(dead_code)]
     pub fn allocate(&self, bytes: usize) -> bool {
         loop {
             let current = self.memory_used.load(Ordering::Acquire);
-            if current + bytes > self.memory_budget {
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
+            if next > self.memory_budget {
                 return false;
             }
             match self.memory_used.compare_exchange_weak(
                 current,
-                current + bytes,
+                next,
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
@@ -378,9 +380,18 @@ impl ConnectionTracker {
     }
 
     /// Release a previously-allocated buffer back to the budget.
-    #[allow(dead_code)]
     pub fn deallocate(&self, bytes: usize) {
+        // Relaxed is sufficient because this counter does not publish buffer
+        // contents; the atomic RMW only returns capacity to the budget.
         self.memory_used.fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    /// Create an owned reservation against the global P2P payload budget.
+    pub(crate) fn reservation(self: &Arc<Self>) -> MemoryReservation {
+        MemoryReservation {
+            tracker: self.clone(),
+            bytes: 0,
+        }
     }
 
     /// Current P2P buffer memory usage (monitoring hook).
@@ -394,6 +405,39 @@ impl ConnectionTracker {
             .get(ip)
             .map(|c| *c)
             .unwrap_or(0)
+    }
+}
+
+/// RAII ownership token for bytes retained by an inbound P2P payload.
+/// Intentionally not `Clone`: accounting has exactly one owner.
+pub(crate) struct MemoryReservation {
+    tracker: Arc<ConnectionTracker>,
+    bytes: usize,
+}
+
+impl MemoryReservation {
+    pub(crate) fn try_grow(&mut self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        if !self.tracker.allocate(bytes) {
+            return false;
+        }
+        self.bytes += bytes;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for MemoryReservation {
+    fn drop(&mut self) {
+        if self.bytes != 0 {
+            self.tracker.deallocate(self.bytes);
+        }
     }
 }
 
@@ -494,6 +538,28 @@ mod tests {
         assert_eq!(t.memory_usage(), 40);
         // After freeing, we can allocate again.
         assert!(t.allocate(50));
+    }
+
+    #[test]
+    fn reservation_releases_bytes_on_drop() {
+        let tracker = Arc::new(ConnectionTracker::new(100));
+        {
+            let mut reservation = tracker.reservation();
+            assert!(reservation.try_grow(60));
+            assert_eq!(reservation.len(), 60);
+            assert_eq!(tracker.memory_usage(), 60);
+        }
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    #[test]
+    fn failed_reservation_growth_preserves_existing_bytes() {
+        let tracker = Arc::new(ConnectionTracker::new(100));
+        let mut reservation = tracker.reservation();
+        assert!(reservation.try_grow(60));
+        assert!(!reservation.try_grow(41));
+        assert_eq!(reservation.len(), 60);
+        assert_eq!(tracker.memory_usage(), 60);
     }
 
     #[test]

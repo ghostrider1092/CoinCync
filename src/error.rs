@@ -263,6 +263,9 @@ pub enum Error {
     #[error("Message too large")]
     MessageTooLarge,
 
+    #[error("P2P payload memory budget exhausted while reserving a {requested}-byte chunk")]
+    P2pMemoryBudgetExceeded { requested: usize },
+
     #[error("Invalid message: {0}")]
     InvalidMessage(String),
 

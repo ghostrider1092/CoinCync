@@ -20,9 +20,11 @@
 //! to the wire-level framing risks breaking compatibility with already-deployed nodes.
 //! If a protocol v2 is introduced, consider migrating to a codec-based design then.
 
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use crate::error::{Error, Result};
+use crate::network::connection_tracker::{ConnectionTracker, MemoryReservation};
 use crate::network::protocol::{MessageHeader, MAX_MESSAGE_SIZE};
 
 /// Default read timeout — must be longer than PING_INTERVAL (120s)
@@ -33,6 +35,18 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Message header size in bytes
 pub const HEADER_SIZE: usize = 13; // 4 (magic) + 1 (type) + 4 (length) + 4 (checksum)
+
+pub(crate) struct BudgetedMessage {
+    pub(crate) msg_type: u8,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) reservation: MemoryReservation,
+}
+
+struct FramedMessage {
+    msg_type: u8,
+    payload: Vec<u8>,
+    reservation: Option<MemoryReservation>,
+}
 
 /// Connection state for message framing.
 ///
@@ -53,11 +67,31 @@ pub struct MessageFramer<R, W> {
     expected_len: usize,
     /// Whether we're past the header and into payload bytes.
     reading_payload: bool,
+    tracker: Option<Arc<ConnectionTracker>>,
+    reservation: Option<MemoryReservation>,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
     /// Create a new message framer
     pub fn new(reader: R, writer: W, magic: [u8; 4]) -> Self {
+        Self::with_tracker(reader, writer, magic, None)
+    }
+
+    pub(crate) fn new_budgeted(
+        reader: R,
+        writer: W,
+        magic: [u8; 4],
+        tracker: Arc<ConnectionTracker>,
+    ) -> Self {
+        Self::with_tracker(reader, writer, magic, Some(tracker))
+    }
+
+    fn with_tracker(
+        reader: R,
+        writer: W,
+        magic: [u8; 4],
+        tracker: Option<Arc<ConnectionTracker>>,
+    ) -> Self {
         MessageFramer {
             reader: BufReader::new(reader),
             writer: BufWriter::new(writer),
@@ -66,12 +100,19 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
             payload_buf: Vec::new(),
             expected_len: 0,
             reading_payload: false,
+            tracker,
+            reservation: None,
         }
     }
 
     /// Read the next complete message from the stream
     /// Returns (message_type, payload) on success
     pub async fn read_message(&mut self) -> Result<(u8, Vec<u8>)> {
+        if self.tracker.is_some() {
+            return Err(Error::ProtocolError(
+                "budgeted framer requires the budget-preserving read API".into(),
+            ));
+        }
         loop {
             if !self.reading_payload {
                 // Reading header
@@ -213,6 +254,39 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
     pub async fn read_message_with_inactivity_timeout(
         &mut self, inactivity: Duration,
     ) -> Result<(u8, Vec<u8>)> {
+        if self.tracker.is_some() {
+            return Err(Error::ProtocolError(
+                "budgeted framer requires the budget-preserving read API".into(),
+            ));
+        }
+        let message = self
+            .read_message_with_inactivity_timeout_inner(inactivity)
+            .await?;
+        Ok((message.msg_type, message.payload))
+    }
+
+    pub(crate) async fn read_budgeted_message_timeout(&mut self) -> Result<BudgetedMessage> {
+        if self.tracker.is_none() {
+            return Err(Error::ProtocolError(
+                "budget-preserving read API requires a connection tracker".into(),
+            ));
+        }
+        let message = self
+            .read_message_with_inactivity_timeout_inner(DEFAULT_READ_TIMEOUT)
+            .await?;
+        let reservation = message.reservation.ok_or_else(|| {
+            Error::ProtocolError("budgeted message completed without a reservation".into())
+        })?;
+        Ok(BudgetedMessage {
+            msg_type: message.msg_type,
+            payload: message.payload,
+            reservation,
+        })
+    }
+
+    async fn read_message_with_inactivity_timeout_inner(
+        &mut self, inactivity: Duration,
+    ) -> Result<FramedMessage> {
         // Phase 1: Read HEADER_SIZE bytes with inactivity timeout per chunk.
         // self.header_buf may already contain partial bytes from a previously
         // cancelled call — that's the whole point of holding it on `self`.
@@ -276,6 +350,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
             self.reading_payload = true;
             let initial_cap = std::cmp::min(self.expected_len, 64 * 1024);
             self.payload_buf = Vec::with_capacity(initial_cap);
+            self.reservation = self.tracker.as_ref().map(|tracker| tracker.reservation());
         }
 
         // Phase 2: Read payload into self.payload_buf so partial progress
@@ -291,38 +366,49 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
             if n == 0 {
                 // Connection closed mid-payload — unrecoverable. Clear state
                 // so the (now-defunct) framer doesn't leak partial buffers.
-                self.header_buf.clear();
-                self.payload_buf.clear();
-                self.reading_payload = false;
-                self.expected_len = 0;
+                self.reset_read_state();
                 return Err(Error::ConnectionFailed("connection closed".into()));
+            }
+            let admitted = match self.reservation.as_mut() {
+                Some(reservation) => reservation.try_grow(n),
+                None => true,
+            };
+            if !admitted {
+                self.reset_read_state();
+                return Err(Error::P2pMemoryBudgetExceeded { requested: n });
             }
             self.payload_buf.extend_from_slice(&buf[..n]);
         }
 
         // Verify checksum
         if !header.verify_checksum(&self.payload_buf) {
-            self.header_buf.clear();
-            self.payload_buf.clear();
-            self.reading_payload = false;
-            self.expected_len = 0;
+            self.reset_read_state();
             return Err(Error::InvalidMessage("checksum mismatch".into()));
         }
 
         let msg_type = header.msg_type;
         let payload = std::mem::take(&mut self.payload_buf);
+        let reservation = self.reservation.take();
+        self.reset_read_state();
 
-        // Reset state for next message
-        self.header_buf.clear();
-        self.reading_payload = false;
-        self.expected_len = 0;
-
-        Ok((msg_type, payload))
+        Ok(FramedMessage {
+            msg_type,
+            payload,
+            reservation,
+        })
     }
 
     /// Read the next complete message with default timeout
     pub async fn read_message_timeout(&mut self) -> Result<(u8, Vec<u8>)> {
         self.read_message_with_inactivity_timeout(DEFAULT_READ_TIMEOUT).await
+    }
+
+    fn reset_read_state(&mut self) {
+        self.header_buf.clear();
+        self.payload_buf.clear();
+        self.reading_payload = false;
+        self.expected_len = 0;
+        self.reservation = None;
     }
 
     /// Parse header from buffer
@@ -526,6 +612,13 @@ impl Default for ExponentialBackoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::protocol::{Message, MessageType};
+
+    fn wire_message(magic: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        Message::new(magic, MessageType::Blocks, payload.to_vec())
+            .to_bytes()
+            .unwrap()
+    }
 
     #[test]
     fn test_rate_limiter() {
@@ -573,5 +666,102 @@ mod tests {
         // reassembly through MessageFramer. Skipping due to complex mocking.
         // Verify header size constant is consistent
         assert_eq!(HEADER_SIZE, 13); // 4 magic + 1 type + 4 length + 4 checksum
+    }
+
+    #[tokio::test]
+    async fn budgeted_message_holds_reservation_until_drop() {
+        let magic = [1, 2, 3, 4];
+        let tracker = Arc::new(ConnectionTracker::new(4));
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        peer.write_all(&wire_message(magic, &[1, 2, 3, 4])).await.unwrap();
+        let message = framer.read_budgeted_message_timeout().await.unwrap();
+        assert_eq!(message.payload, vec![1, 2, 3, 4]);
+        assert_eq!(tracker.memory_usage(), 4);
+        drop(message);
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    #[tokio::test]
+    async fn payload_growth_over_budget_is_rejected_without_leak() {
+        let magic = [1, 2, 3, 4];
+        let tracker = Arc::new(ConnectionTracker::new(3));
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        peer.write_all(&wire_message(magic, &[1, 2, 3, 4])).await.unwrap();
+        assert!(matches!(
+            framer.read_budgeted_message_timeout().await,
+            Err(Error::P2pMemoryBudgetExceeded { .. })
+        ));
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_partial_payload_reservation() {
+        let magic = [1, 2, 3, 4];
+        let tracker = Arc::new(ConnectionTracker::new(8));
+        let wire = wire_message(magic, &[1, 2, 3, 4]);
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        peer.write_all(&wire[..HEADER_SIZE + 2]).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                framer.read_message_with_inactivity_timeout_inner(Duration::from_secs(5)),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(tracker.memory_usage(), 2);
+        peer.write_all(&wire[HEADER_SIZE + 2..]).await.unwrap();
+        let message = framer.read_budgeted_message_timeout().await.unwrap();
+        assert_eq!(tracker.memory_usage(), 4);
+        drop(message);
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    #[tokio::test]
+    async fn checksum_failure_releases_payload_reservation() {
+        let magic = [1, 2, 3, 4];
+        let tracker = Arc::new(ConnectionTracker::new(8));
+        let mut wire = wire_message(magic, &[1, 2, 3, 4]);
+        *wire.last_mut().unwrap() ^= 0xff;
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        peer.write_all(&wire).await.unwrap();
+        assert!(matches!(
+            framer.read_budgeted_message_timeout().await,
+            Err(Error::InvalidMessage(_))
+        ));
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_payload_uses_no_budget() {
+        let magic = [1, 2, 3, 4];
+        let tracker = Arc::new(ConnectionTracker::new(0));
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        peer.write_all(&wire_message(magic, &[])).await.unwrap();
+        let message = framer.read_budgeted_message_timeout().await.unwrap();
+        assert!(message.payload.is_empty());
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_read_api_remains_unbudgeted_and_compatible() {
+        let magic = [1, 2, 3, 4];
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+        peer.write_all(&wire_message(magic, &[7])).await.unwrap();
+        let (msg_type, payload) = framer.read_message_timeout().await.unwrap();
+        assert_eq!(msg_type, MessageType::Blocks as u8);
+        assert_eq!(payload, vec![7]);
     }
 }

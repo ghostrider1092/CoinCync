@@ -61,7 +61,7 @@ use super::bootstrap::{Bootstrapper, BootstrapConfig, AddressManager, PeerAddres
 use super::scoring::{PeerScorer, ScorerStats};
 use super::relay_score::RelayScoreMap;
 use super::traffic_shaping::TrafficShaper;
-use super::connection_tracker::ConnectionTracker;
+use super::connection_tracker::{ConnectionTracker, MemoryReservation};
 
 /// Maximum number of peers (reduced to reserve outbound slots)
 pub const MAX_PEERS: usize = 72;
@@ -293,7 +293,9 @@ impl Default for NodeConfig {
 /// Message from peer connection
 struct PeerMessage {
     peer_id: PeerId,
-    data: Vec<u8>,
+    msg_type: u8,
+    payload: Vec<u8>,
+    _reservation: MemoryReservation,
 }
 
 /// Command to connection manager
@@ -1136,7 +1138,7 @@ impl P2PNode {
                             let result = handle_connection(
                                 stream, peer_id, false, magic, our_nonce, height, tip,
                                 peers, senders, event_tx, msg_tx,
-                                conn_identity, conn_encryption,
+                                tracker.clone(), conn_identity, conn_encryption,
                                 None, // inbound — no per-/16 slot to track
                             ).await;
 
@@ -1450,6 +1452,7 @@ impl P2PNode {
                     let backoffs = backoffs.clone();
                     let conn_identity = connector_identity.clone();
                     let conn_encryption = connector_encryption.clone();
+                    let tracker = connector_tracker.clone();
 
                     tokio::spawn(async move {
                         // Use proxy if configured, otherwise direct connection
@@ -1468,7 +1471,7 @@ impl P2PNode {
                                 if let Err(e) = handle_connection(
                                     stream, peer_id, true, magic, our_nonce, height, tip,
                                     peers, senders, event_tx, msg_tx,
-                                    conn_identity, conn_encryption,
+                                    tracker, conn_identity, conn_encryption,
                                     Some(outbound_slot.clone()),
                                 ).await {
                                     warn!("Outbound connection error: {}", e);
@@ -1550,28 +1553,26 @@ impl P2PNode {
                             rate_trackers.retain(|pid, _| processor_peers.contains_key(pid));
                         }
                         // Rate-limit check (before expensive processing)
-                        if !msg.data.is_empty() {
-                            let msg_type_id = msg.data[0];
-                            let tracker = rate_trackers
-                                .entry(msg.peer_id)
-                                .or_insert_with(super::scoring::PeerMessageRateTracker::new);
-                            if tracker.record(msg_type_id) {
-                                warn!(
-                                    "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
-                                    &msg.peer_id[..4], msg_type_id,
-                                );
-                                if let Some(peer_addr) = processor_peers.get(&msg.peer_id).map(|p| p.addr) {
-                                    let mut scorer = processor_scorer.write().await;
-                                    scorer.get_or_create(peer_addr)
-                                        .record_misbehavior(super::scoring::MisbehaviorType::MessageFlood);
-                                }
-                                continue; // Drop the message
+                        let tracker = rate_trackers
+                            .entry(msg.peer_id)
+                            .or_insert_with(super::scoring::PeerMessageRateTracker::new);
+                        if tracker.record(msg.msg_type) {
+                            warn!(
+                                "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
+                                &msg.peer_id[..4], msg.msg_type,
+                            );
+                            if let Some(peer_addr) = processor_peers.get(&msg.peer_id).map(|p| p.addr) {
+                                let mut scorer = processor_scorer.write().await;
+                                scorer.get_or_create(peer_addr)
+                                    .record_misbehavior(super::scoring::MisbehaviorType::MessageFlood);
                             }
+                            continue; // Drop the message and release its reservation
                         }
 
                         if let Err(e) = process_message(
                             msg.peer_id,
-                            &msg.data,
+                            msg.msg_type,
+                            &msg.payload,
                             magic,
                             processor_nonce,
                             processor_peers.clone(),
@@ -3176,6 +3177,7 @@ async fn handle_connection(
     senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     event_tx: broadcast::Sender<NodeEvent>,
     msg_tx: mpsc::Sender<PeerMessage>,
+    conn_tracker: Arc<ConnectionTracker>,
     identity: Arc<super::noise::NodeIdentity>,
     encryption_config: crate::config::P2PEncryptionConfig,
     // Per-/16 outbound slot for eclipse defense. Some for outbound
@@ -3327,7 +3329,7 @@ async fn handle_connection(
             (Box::new(tcp_reader), Box::new(tcp_writer), None)
         };
 
-    let mut framer = MessageFramer::new(app_reader, app_writer, magic);
+    let mut framer = MessageFramer::new_budgeted(app_reader, app_writer, magic, conn_tracker);
 
     // Per-peer rate limiter to prevent abuse
 
@@ -3352,12 +3354,11 @@ async fn handle_connection(
     // Connection loop with proper message framing
     loop {
         tokio::select! {
-            // SECURITY (H-2): Use read_message_timeout() to prevent Slowloris DoS.
-            // A peer sending partial data would block the untimed read_message() forever,
-            // pinning the connection slot. The 30-second timeout ensures cleanup.
-            result = framer.read_message_timeout() => {
+            // SECURITY (H-2): Use the inactivity-timed read to prevent Slowloris DoS.
+            // A peer sending partial data would otherwise pin the connection slot.
+            result = framer.read_budgeted_message_timeout() => {
                 match result {
-                    Ok((msg_type, payload)) => {
+                    Ok(message) => {
                         // DoS protection is handled by:
                         // 1. MAX_MESSAGE_SIZE check in framing.rs (16MB cap)
                         // 2. Per-peer misbehavior scoring in process_message()
@@ -3369,11 +3370,12 @@ async fn handle_connection(
                         // was not verified this session and is dropped.
                         // The DoS-vs-liveness reasoning above stands.)
 
-                        let mut data = Vec::with_capacity(1 + payload.len());
-                        data.push(msg_type);
-                        data.extend_from_slice(&payload);
-
-                        if msg_tx.send(PeerMessage { peer_id, data }).await.is_err() {
+                        if msg_tx.send(PeerMessage {
+                            peer_id,
+                            msg_type: message.msg_type,
+                            payload: message.payload,
+                            _reservation: message.reservation,
+                        }).await.is_err() {
                             break;
                         }
                     }
@@ -3796,11 +3798,12 @@ fn load_anchors_from_disk(data_dir: &std::path::Path) -> Vec<SocketAddr> {
 }
 
 /// Process received message
-/// Data format: [msg_type (1 byte), payload...]
-/// The header has already been validated and stripped by the message framer.
+/// The header has already been validated and stripped by the message framer;
+/// type and payload arrive separately to avoid another payload-sized copy.
 async fn process_message(
     peer_id: PeerId,
-    data: &[u8],
+    msg_type_id: u8,
+    payload: &[u8],
     magic: [u8; 4],
     our_nonce: u64,
     peers: Arc<DashMap<PeerId, PeerInfo>>,
@@ -3821,13 +3824,7 @@ async fn process_message(
     // only — not yet consulted by eviction.
     relay_scores: Arc<RwLock<RelayScoreMap>>,
 ) -> Result<()> {
-    // Data format is now [msg_type, ...payload] after framer processing
-    if data.is_empty() {
-        return Err(Error::InvalidMessage("empty message".into()));
-    }
-
-    let msg_type = MessageType::try_from(data[0])?;
-    let payload = if data.len() > 1 { &data[1..] } else { &[] };
+    let msg_type = MessageType::try_from(msg_type_id)?;
 
     // Traffic shaping: cover-traffic packets carry no semantic content and
     // are discarded silently. Phase 2 moved padding from the pre-launch
@@ -3844,7 +3841,9 @@ async fn process_message(
     // Update peer activity
     if let Some(mut peer) = peers.get_mut(&peer_id) {
         peer.touch();
-        peer.bytes_recv += data.len() as u64;
+        peer.bytes_recv = peer
+            .bytes_recv
+            .saturating_add(payload.len().saturating_add(1) as u64);
     }
 
     // SECURITY (H-3): Reject non-handshake messages from peers that haven't
