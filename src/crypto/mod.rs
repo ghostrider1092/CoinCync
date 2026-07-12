@@ -126,7 +126,7 @@ pub use ring_selection::{
 };
 
 pub use audit::{
-    SupplyCommitment, SupplyAuditResult, SupplyAuditProof,
+    SupplyCommitment, SupplyAuditResult, SupplySnapshot,
     BlockSupplyDelta,
 };
 
