@@ -122,7 +122,7 @@ pub use secure::{
 // rings, doesn't select them.
 pub use ring_selection::{
     RingSelector, RingSelectionConfig, RingSelectionStats,
-    RingQualityReport, OutputRef,
+    RingQualityReport, RingSelectionPool, OutputRef,
 };
 
 pub use audit::{

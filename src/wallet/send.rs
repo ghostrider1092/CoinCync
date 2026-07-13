@@ -14,7 +14,7 @@ use crate::transaction::{
 use crate::crypto::{
     BlindingFactor,
     StealthAddress, compute_one_time_secret,
-    RingSelector, RingSelectionConfig,
+    RingSelector, RingSelectionConfig, RingSelectionPool,
     OutputRef as RingOutputRef,
 };
 use crate::constants::{
@@ -312,20 +312,13 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
         ));
     }
 
-    // Deduplicate the decoy pool by public_key before computing ring size.
-    // Old coinbase outputs all share stealth_address = miner_pubkey, so the raw
-    // pool can be large but have very few unique keys.
-    let mut dedup_seen = std::collections::HashSet::new();
-    let deduped_pool: Vec<DecoyOutput> = decoy_pool.iter()
-        .filter(|d| dedup_seen.insert(*d.public_key.as_bytes()))
-        .cloned()
-        .collect();
+    let ring_pool = ring_selection_pool(decoy_pool);
 
     // Adapt ring size to the unique decoy pool.  On young chains the pool may be
     // smaller than the target — effective_ring_size lowers the requirement
     // (minimum 2) during the bootstrap period (height < 10,000).
-    let ring_size = effective_ring_size(current_height, deduped_pool.len() + 1);
-    enforce_wallet_privacy_policy(ring_size, deduped_pool.len(), PrivacyConsent::Strict)?;
+    let ring_size = effective_ring_size(current_height, ring_pool.len() + 1);
+    enforce_wallet_privacy_policy(ring_size, ring_pool.len(), PrivacyConsent::Strict)?;
 
     // Post-activation: fixed 2 inputs, 2 outputs. Pre-activation: variable.
     let input_count_est = if uniform { STANDARD_INPUT_COUNT } else { 1 };
@@ -470,10 +463,10 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     }
 
     // Check if we have enough unique decoys
-    if deduped_pool.len() < ring_size - 1 {
+    if ring_pool.len() < ring_size - 1 {
         return Err(Error::InvalidRingSize {
             expected: ring_size,
-            got: deduped_pool.len() + 1,
+            got: ring_pool.len() + 1,
         });
     }
 
@@ -506,14 +499,8 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
             height: utxo.height,
         };
 
-        // T3F5 fix (2026-07-05): the pre-fix comment said "gamma
-        // distribution" but the callee `select_ring_decoys` (see its
-        // docstring at src/wallet/send.rs:1067-1090) delegates to
-        // `RingSelector` which performs a Fisher-Yates partial shuffle,
-        // not a gamma draw. This comment is corrected rather than the
-        // behavior being changed.
         let (decoys, real_position) = select_ring_decoys(
-            &real_pubkey, utxo.height, &deduped_pool, ring_size, current_height, rng,
+            &real_pubkey, utxo.height, &ring_pool, ring_size, current_height, rng,
         )?;
         builder.add_input(input, decoys, real_position)?;
     }
@@ -604,14 +591,10 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
     let min_age = min_output_age_at_height(current_height);
     let available = balance.spendable(current_height, min_age);
 
-    let mut dedup_seen = std::collections::HashSet::new();
-    let deduped_pool: Vec<DecoyOutput> = decoy_pool.iter()
-        .filter(|d| dedup_seen.insert(*d.public_key.as_bytes()))
-        .cloned()
-        .collect();
+    let ring_pool = ring_selection_pool(decoy_pool);
 
-    let ring_size = effective_ring_size(current_height, deduped_pool.len() + 1);
-    enforce_wallet_privacy_policy(ring_size, deduped_pool.len(), PrivacyConsent::Strict)?;
+    let ring_size = effective_ring_size(current_height, ring_pool.len() + 1);
+    enforce_wallet_privacy_policy(ring_size, ring_pool.len(), PrivacyConsent::Strict)?;
     let initial_size = estimate_tx_size(1, 4, ring_size); // 1 vesting + 1 change + up to 2 dummies
     let initial_fee = Amount::from_atomic(initial_size as u64 * MIN_FEE_PER_BYTE);
     let total_needed = amount.saturating_add(initial_fee);
@@ -640,10 +623,10 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
     let output_total = amount.as_atomic().saturating_add(estimated_fee.as_atomic());
     let change_amount = input_sum.as_atomic().saturating_sub(output_total);
 
-    if ring_size == 0 || deduped_pool.len() < ring_size - 1 {
+    if ring_size == 0 || ring_pool.len() < ring_size - 1 {
         return Err(Error::InvalidRingSize {
             expected: ring_size,
-            got: deduped_pool.len() + 1,
+            got: ring_pool.len() + 1,
         });
     }
 
@@ -669,7 +652,7 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
             height: utxo.height,
         };
         let (decoys, real_position) = select_ring_decoys(
-            &real_pubkey, utxo.height, &deduped_pool, ring_size, current_height, rng,
+            &real_pubkey, utxo.height, &ring_pool, ring_size, current_height, rng,
         )?;
         builder.add_input(input, decoys, real_position)?;
     }
@@ -726,16 +709,11 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
         return Err(Error::InsufficientBalance { have: 0, need: 1 });
     }
 
-    // Deduplicate the decoy pool by public_key (same as create_privacy_transaction).
-    let mut dedup_seen = std::collections::HashSet::new();
-    let deduped_pool: Vec<DecoyOutput> = decoy_pool.iter()
-        .filter(|d| dedup_seen.insert(*d.public_key.as_bytes()))
-        .cloned()
-        .collect();
+    let ring_pool = ring_selection_pool(decoy_pool);
 
     // Use effective_ring_size to handle young chains with few unique outputs
-    let ring_size = effective_ring_size(current_height, deduped_pool.len() + 1);
-    enforce_wallet_privacy_policy(ring_size, deduped_pool.len(), PrivacyConsent::Strict)?;
+    let ring_size = effective_ring_size(current_height, ring_pool.len() + 1);
+    enforce_wallet_privacy_policy(ring_size, ring_pool.len(), PrivacyConsent::Strict)?;
 
     let uniform = current_height >= UNIFORM_TX_SHAPE_HEIGHT;
 
@@ -782,10 +760,10 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
     if ring_size == 0 {
         return Err(Error::InvalidRingSize { expected: 1, got: 0 });
     }
-    if deduped_pool.len() < ring_size - 1 {
+    if ring_pool.len() < ring_size - 1 {
         return Err(Error::InvalidRingSize {
             expected: ring_size,
-            got: deduped_pool.len() + 1,
+            got: ring_pool.len() + 1,
         });
     }
 
@@ -811,7 +789,7 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
             height: utxo.height,
         };
         let (decoys, real_position) = select_ring_decoys(
-            &real_pubkey, utxo.height, &deduped_pool, ring_size, current_height, rng,
+            &real_pubkey, utxo.height, &ring_pool, ring_size, current_height, rng,
         )?;
         builder.add_input(input, decoys, real_position)?;
     }
@@ -1062,23 +1040,14 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
     Ok(vec![utxos[i], utxos[j]])
 }
 
-/// Select ring decoys via UNIFORM Fisher-Yates through the RingSelector.
-///
-/// **Closes C40 (audit-catalogue) 2026-07-02.** The prior docstring here
-/// said "gamma distribution (shape=19.28, scale=1/1.61)" — that was
-/// stale after the Wave 15 gamma → uniform migration and directly
-/// contradicted `crypto::ring_selection`'s module-header design comment
-/// (uniform-only, see `src/crypto/ring_selection.rs` L3-22). Uniform is
-/// what CoinCync's constitutional Article III and the Möser-2018
-/// attack-model rationale actually call for; gamma is the very
-/// distribution that paper weaponizes for deanonymization.
-///
-/// Delegates to `crypto::RingSelector` which performs a Fisher-Yates
-/// partial shuffle over the eligible decoy pool (unbiased sampling with
-/// `rng.gen_range(0..=i)` — rejection-sampled, no modulo bias). Every
-/// eligible output has exactly equal probability of appearing in the
-/// returned set. The observer gains ZERO information from the age
-/// distribution of the ring.
+fn ring_selection_pool(decoy_pool: &[DecoyOutput]) -> RingSelectionPool<'_> {
+    RingSelectionPool::new(decoy_pool.iter().map(|decoy| {
+        RingOutputRef::new(decoy.height, &decoy.public_key, &decoy.commitment)
+    }))
+}
+
+/// Uses uniform sampling without replacement so every eligible output has
+/// the same inclusion probability and no output can occupy multiple slots.
 ///
 /// Prior art (academic papers in the public record; specific
 /// numerical results not re-verified this session):
@@ -1094,78 +1063,31 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
 fn select_ring_decoys<R: RngCore + CryptoRng>(
     real_pubkey: &PublicKey,
     real_height: u64,
-    pool: &[DecoyOutput],
+    pool: &RingSelectionPool<'_>,
     ring_size: usize,
     current_height: u64,
     rng: &mut R,
 ) -> Result<(Vec<DecoyOutput>, usize)> {
-    use crate::primitives::Hash;
-
-    // Derive a unique global_index from public key bytes (for deduplication).
-    let pubkey_to_gi = |pk: &PublicKey| -> u64 {
-        let b = pk.as_bytes();
-        u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-    };
-
-    // Convert real output to OutputRef
-    let real_ref = RingOutputRef {
-        height: real_height,
-        tx_hash: Hash::default(),
-        output_index: 0,
-        public_key: *real_pubkey,
-        commitment: [0u8; 32],
-        global_index: pubkey_to_gi(real_pubkey),
-    };
-
-    // Convert pool to OutputRef
-    let pool_refs: Vec<RingOutputRef> = pool.iter().map(|d| {
-        RingOutputRef {
-            height: d.height,
-            tx_hash: Hash::default(),
-            output_index: 0,
-            public_key: d.public_key,
-            commitment: d.commitment,
-            global_index: pubkey_to_gi(&d.public_key),
-        }
-    }).collect();
-
-    // T3F7 fix (2026-07-05): the pre-fix comment said "non-strict mode"
-    // but the `..RingSelectionConfig::default()` spread on the config
-    // literal below does not override `strict_privacy_mode`, and the
-    // default is `strict_privacy_mode: true` at
-    // src/crypto/ring_selection.rs:106. So the selector actually runs
-    // in strict mode. With strict mode on, pool-shortfall returns an
-    // Err at src/crypto/ring_selection.rs:340 before the fallback
-    // loop at ~L380 is reached. The pre-fix comment misdescribed
-    // this. The strict behavior is what the outer flow expects
-    // (enforce_wallet_privacy_policy already guards short pools);
-    // this comment is corrected rather than the behavior being
-    // changed.
     let config = RingSelectionConfig {
         target_ring_size: ring_size,
-        min_ring_size: ring_size,
-        max_ring_size: ring_size,
         min_decoy_age: 0,
         ..RingSelectionConfig::default()
     };
     let selector = RingSelector::new(config);
 
-    let (ring, real_index, _stats) = selector.select_ring(
-        &real_ref, &pool_refs, current_height, rng,
-    )?;
+    let (selected, real_position, _stats) =
+        selector.select_decoys(real_pubkey, real_height, pool, current_height, rng)?;
 
-    // Extract decoys (all ring members except the real output)
-    let decoys: Vec<DecoyOutput> = ring.into_iter()
-        .enumerate()
-        .filter(|(i, _)| *i != real_index)
-        .map(|(_, r)| DecoyOutput {
-            public_key: r.public_key,
-            commitment: r.commitment,
-            height: r.height,
+    let decoys = selected
+        .into_iter()
+        .map(|output| DecoyOutput {
+            public_key: *output.public_key,
+            commitment: *output.commitment,
+            height: output.height,
         })
         .collect();
 
-    Ok((decoys, real_index))
+    Ok((decoys, real_position))
 }
 
 /// Estimate transaction size in bytes
