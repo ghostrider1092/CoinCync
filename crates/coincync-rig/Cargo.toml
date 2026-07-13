@@ -32,6 +32,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+rand = "0.8"
 
 # Phase 2 — Stratum client (TCP, JSON-RPC, async runtime)
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
@@ -56,8 +57,3 @@ toml = "0.8"
 # stdout so journalctl-driven systemd setups don't change.
 ratatui   = "0.30"
 crossterm = "0.27"
-
-[dev-dependencies]
-# rand for the correctness test — generate random header inputs to
-# fuzz the hasher against the validator.
-rand = "0.8"
