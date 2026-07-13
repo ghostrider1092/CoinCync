@@ -273,9 +273,23 @@ pub async fn run_solo(
                         let diverged =
                             fork_diverged(local_height, peer_target, FORK_DIVERGENCE_MARGIN);
 
-                        let ok = is_synced && peers >= 3 && !diverged;
+                        // Regtest is an isolated, single-operator rehearsal
+                        // network (see main.rs: "local end-to-end mine + send
+                        // rehearsals against an isolated coincync-node --network
+                        // regtest instance"). The >=3-peer mesh gate and the
+                        // fork-divergence gate exist to prevent private-fork
+                        // mining on the SHARED testnet/mainnet — a failure mode
+                        // that cannot occur on an isolated regtest chain. Exempt
+                        // regtest so a local rig can mine with <3 peers. This
+                        // NEVER relaxes testnet or mainnet: `is_regtest` is false
+                        // for every non-regtest network, so their gate is byte-
+                        // for-byte unchanged.
+                        let is_regtest = matches!(network, NetworkType::Regtest);
+                        let ok = is_synced && (is_regtest || (peers >= 3 && !diverged));
                         let reason = if !is_synced {
                             "is_synced=false".to_string()
+                        } else if is_regtest {
+                            "OK (regtest: mesh/fork gates exempt for isolated rehearsal)".to_string()
                         } else if peers < 3 {
                             format!("peer_count={} (<3; mesh not established, possibly mid-restart)", peers)
                         } else if diverged {
