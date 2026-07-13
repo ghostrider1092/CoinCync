@@ -867,7 +867,7 @@ pub async fn start_rpc_server(
             "timestamp":       tip.timestamp,
             "difficulty":      stats.difficulty.to_string(),
             "total_difficulty": stats.total_difficulty.to_string(),
-            "total_supply":    stats.total_supply.as_atomic(),
+            "total_supply":    stats.total_supply_u64_saturating(),
             "mempool_size":    state.mempool.len(),
             "is_synced":       state.chain.is_synced(),
             "rpc_auth_enabled": state.auth_enabled,
@@ -934,7 +934,7 @@ pub async fn start_rpc_server(
         Ok::<_, ErrorObjectOwned>(json!({
             "height":             height,
             "current_reward":     reward.as_atomic(),
-            "total_emitted":      stats.total_supply.as_atomic(),
+            "total_emitted":      stats.total_supply_u64_saturating(),
             "emission_phase":     phase.name(),
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
@@ -1356,7 +1356,7 @@ pub async fn start_rpc_server(
         let burn_pct = crate::constants::FEE_BURN_NORMAL_PERCENT;
         let miner_pct = crate::constants::FEE_MINER_NORMAL_PERCENT;
 
-        let supply = stats.total_supply.as_atomic();
+        let supply = stats.total_supply_u64_saturating();
         let max_supply = crate::constants::MAX_SUPPLY;
         let reward = crate::emission::calculate_block_reward(height).as_atomic();
         // Fees per block needed to make chain deflationary:
@@ -1974,7 +1974,7 @@ pub async fn start_rpc_server(
             "chain_total_difficulty": stats.total_difficulty.to_string(),
             "chain_total_blocks": stats.total_blocks,
             "chain_total_transactions": stats.total_transactions,
-            "chain_supply_atomic": stats.total_supply.as_atomic(),
+            "chain_supply_atomic": stats.total_supply_u64_saturating(),
 
             // Mempool metrics
             "mempool_size": mp_stats.tx_count,
@@ -2027,7 +2027,7 @@ pub async fn start_rpc_server(
             "height": stats.height,
             "tip_hash": tip.to_hex(),
             "total_difficulty": stats.total_difficulty.to_string(),
-            "total_supply": stats.total_supply.as_atomic(),
+            "total_supply": stats.total_supply_u64_saturating(),
             "total_transactions": stats.total_transactions,
             "checkpoints": crate::testnet::testnet_checkpoints().iter()
                 .map(|cp| json!({"height": cp.height, "hash": cp.hash.to_hex()}))
