@@ -47,6 +47,56 @@ fn median_time<F: FnMut()>(mut op: F, iterations: usize) -> Duration {
     samples[TIMING_RUNS / 2]
 }
 
+/// Interleaved rounds for per-item timing (odd → unambiguous median).
+const INTERLEAVE_ROUNDS: usize = 9;
+
+/// Measure per-item timing with the items INTERLEAVED across rounds, then return
+/// each item's median batch time.
+///
+/// Fixes the flakiness (#275) of timing each item in its own back-to-back batch:
+/// there, a runner-wide CPU-frequency step or scheduler shift during one batch is
+/// attributed to whichever item was being measured, so an unrelated slowdown
+/// reads as secret-dependent timing (the post-merge red was ~0.35% over the 2x
+/// bound). Interleaving spreads any such shift evenly across all items — each
+/// item's samples span the whole measurement window — and a rotating start index
+/// keeps any item from always being measured first. A shared warmup primes
+/// caches/frequency, and each result is `black_box`ed so the op can't be elided.
+///
+/// This does NOT weaken the security assertion: a genuine secret-dependent
+/// difference is systematic and shifts the median regardless of ordering, so it
+/// is still caught by the same ratio bound. Only measurement noise is removed.
+fn interleaved_medians<T, R, F>(items: &[T], inner_iters: usize, mut op: F) -> Vec<Duration>
+where
+    F: FnMut(&T) -> R,
+{
+    let n = items.len();
+    // Shared warmup across all items (timing discarded).
+    for it in items {
+        for _ in 0..inner_iters {
+            std::hint::black_box(op(it));
+        }
+    }
+    let mut samples: Vec<Vec<Duration>> = vec![Vec::with_capacity(INTERLEAVE_ROUNDS); n];
+    for round in 0..INTERLEAVE_ROUNDS {
+        for k in 0..n {
+            // Rotate the start index each round so no item is consistently first.
+            let i = (round + k) % n;
+            let start = Instant::now();
+            for _ in 0..inner_iters {
+                std::hint::black_box(op(&items[i]));
+            }
+            samples[i].push(start.elapsed());
+        }
+    }
+    samples
+        .into_iter()
+        .map(|mut v| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        })
+        .collect()
+}
+
 // =============================================================================
 // TEST 1: Constant-time equality comparison
 // =============================================================================
@@ -94,15 +144,13 @@ fn tier9_ct_eq_timing_consistent() {
 
 #[test]
 fn tier9_scalar_mul_timing_consistent() {
-    let iterations = 5_000;
     let scalars: Vec<SecretScalar> = (0..5)
         .map(|_| SecretScalar::random(&mut OsRng))
         .collect();
 
-    let times: Vec<Duration> = scalars
-        .iter()
-        .map(|scalar| median_time(|| { let _ = scalar.to_public(); }, iterations))
-        .collect();
+    // Interleaved so a runner-wide CPU-frequency/scheduling shift can't be
+    // misattributed to a single scalar (#275).
+    let times = interleaved_medians(&scalars, 3_000, |scalar| scalar.to_public());
 
     let max_t = times.iter().max().unwrap();
     let min_t = times.iter().min().unwrap();
@@ -120,15 +168,11 @@ fn tier9_scalar_mul_timing_consistent() {
 
 #[test]
 fn tier9_key_image_timing_consistent() {
-    let iterations = 5_000;
     let secrets: Vec<SecretScalar> = (0..5)
         .map(|_| SecretScalar::random(&mut OsRng))
         .collect();
 
-    let times: Vec<Duration> = secrets
-        .iter()
-        .map(|secret| median_time(|| { let _ = KeyImage::from_secret(secret); }, iterations))
-        .collect();
+    let times = interleaved_medians(&secrets, 3_000, |secret| KeyImage::from_secret(secret));
 
     let max_t = times.iter().max().unwrap();
     let min_t = times.iter().min().unwrap();
@@ -146,14 +190,12 @@ fn tier9_key_image_timing_consistent() {
 
 #[test]
 fn tier9_pedersen_commit_timing_consistent() {
-    let iterations = 5_000;
     let bf = BlindingFactor::random(&mut OsRng);
     let amounts = [0u64, 1, u64::MAX / 2, u64::MAX - 1, 1_000_000_000];
 
-    let times: Vec<Duration> = amounts
-        .iter()
-        .map(|&amount| median_time(|| { let _ = PedersenCommitment::commit(amount, &bf); }, iterations))
-        .collect();
+    let times = interleaved_medians(&amounts, 3_000, |&amount| {
+        PedersenCommitment::commit(amount, &bf)
+    });
 
     let max_t = times.iter().max().unwrap();
     let min_t = times.iter().min().unwrap();
