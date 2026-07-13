@@ -137,7 +137,7 @@ signal-hook = "0.4"
 # â”€â”€ JSON-RPC + HTTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 jsonrpsee  = { version = "0.24", features = ["server", "client", "macros"] }
 http       = "1"
-tower      = "0.4"
+tower      = "0.5"
 tower-http = { version = "0.7", features = ["cors", "trace", "validate-request"] }
 http-body-util = "0.1"
 bytes      = "1"
