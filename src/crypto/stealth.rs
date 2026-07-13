@@ -1111,6 +1111,68 @@ pub fn is_output_ours(
     is_ours
 }
 
+/// Spend-key-INDEPENDENT portion of stealth-ownership detection, derived once
+/// per output so that testing the primary address plus N subaddresses costs one
+/// ECDH + one base multiplication plus N cheap point-adds — instead of repeating
+/// the full [`is_output_ours`] computation (a variable-base scalar mult, a hash,
+/// and a base-point mult) once per candidate (#258).
+///
+/// Detection is byte-for-byte identical to [`is_output_ours`]: same point
+/// validation, same `hash_to_scalar`, same `H(shared)·G + spend` reconstruction,
+/// same constant-time compare. Only the shared, candidate-independent prefix is
+/// hoisted out of the loop.
+pub struct OutputScanContext {
+    /// The output's destination point bytes (validated on-curve at `derive`).
+    stealth_pub: [u8; 32],
+    /// `H(view_secret · tx_public ‖ idx)·G` — the sender's one-time base, which
+    /// depends only on the output and the view secret, never on the spend key.
+    one_time_base: PublicPoint,
+}
+
+impl OutputScanContext {
+    /// Derive the context from an output's stealth address and the wallet view
+    /// secret. Returns `None` when either point is malformed — matching
+    /// [`is_output_ours`], which returns `false` (not ours) for every candidate
+    /// in that case. This performs the single expensive ECDH for the output.
+    pub fn derive(
+        stealth: &StealthAddress,
+        view_secret: &SecretKey,
+        output_idx: u8,
+    ) -> Option<Self> {
+        let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
+        // tx_public must be a valid curve point (else not ours).
+        let tx_point = PublicPoint::from_bytes(*stealth.tx_public_key.as_bytes())?;
+        // Destination must also be a valid curve point (else not ours).
+        if PublicPoint::from_bytes(*stealth.public_key.as_bytes()).is_none() {
+            return None;
+        }
+        // ECDH shared point — the expensive, spend-key-independent step.
+        let shared_point = tx_point.mul(&view_scalar);
+        // SECURITY: scalar_input holds the ECDH shared secret — zeroize after
+        // use, exactly as `is_output_ours` does.
+        let mut scalar_input = [shared_point.to_bytes().as_slice(), &[output_idx]].concat();
+        let one_time_scalar = hash_to_scalar(&scalar_input);
+        scalar_input.zeroize();
+        let one_time_base = SecretScalar::from_scalar(one_time_scalar).to_public();
+        Some(OutputScanContext {
+            stealth_pub: *stealth.public_key.as_bytes(),
+            one_time_base,
+        })
+    }
+
+    /// Constant-time ownership test for one candidate spend key. Cheap: one point
+    /// decode + add + compare, no ECDH. Equivalent to the tail of
+    /// [`is_output_ours`]: `stealth.public_key == H(shared)·G + spend_public`.
+    pub fn matches(&self, spend_pub: &PublicKey) -> bool {
+        let spend_point = match PublicPoint::from_bytes(*spend_pub.as_bytes()) {
+            Some(p) => p,
+            None => return false, // invalid spend key = not ours
+        };
+        let expected_point = self.one_time_base.add(&spend_point);
+        ct_eq(&self.stealth_pub, &expected_point.to_bytes())
+    }
+}
+
 /// Check using KeyEpoch from wallet
 pub fn is_output_ours_with_epoch(
     stealth: &StealthAddress,
@@ -1346,6 +1408,75 @@ mod tests {
             !is_output_ours(&stealth, &view_secret, &spend_public, 1),
             "Wrong output index should not match"
         );
+    }
+
+    #[test]
+    fn output_scan_context_matches_is_output_ours_across_candidates() {
+        // #258: OutputScanContext.matches(spend) must be identical to
+        // is_output_ours(stealth, view, spend, idx) for the owner AND every
+        // non-owner candidate. Hoisting the shared ECDH out of the per-candidate
+        // loop must change nothing about detection.
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+        let (stealth, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
+
+        // Owner + a spread of non-owner "subaddress" spend keys.
+        let mut candidates = vec![spend_public];
+        for _ in 0..5 {
+            let (_, other) = generate_ec_keypair();
+            candidates.push(other);
+        }
+
+        let ctx = OutputScanContext::derive(&stealth, &view_secret, 0)
+            .expect("valid output must derive a context");
+        for cand in &candidates {
+            assert_eq!(
+                ctx.matches(cand),
+                is_output_ours(&stealth, &view_secret, cand, 0),
+                "context.matches disagreed with is_output_ours for a candidate"
+            );
+        }
+        assert!(ctx.matches(&spend_public), "owner must match");
+        assert!(!ctx.matches(&candidates[1]), "non-owner must not match");
+    }
+
+    #[test]
+    fn output_scan_context_is_output_index_scoped() {
+        // The context is derived per output index; a context for idx 0 must not
+        // match at idx 1 — same index-keying as is_output_ours.
+        let (_s, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+        let (stealth, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
+
+        assert!(OutputScanContext::derive(&stealth, &view_secret, 0)
+            .unwrap()
+            .matches(&spend_public));
+        assert!(!OutputScanContext::derive(&stealth, &view_secret, 1)
+            .unwrap()
+            .matches(&spend_public));
+    }
+
+    #[test]
+    fn output_scan_context_none_on_malformed_points() {
+        // Malformed tx_public / destination point ⇒ derive returns None (not ours
+        // under any candidate), matching is_output_ours returning false there.
+        let (_s, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+        let (good, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
+
+        let bad_tx = StealthAddress {
+            public_key: good.public_key,
+            tx_public_key: PublicKey::from_bytes([0xFF; 32]),
+        };
+        assert!(OutputScanContext::derive(&bad_tx, &view_secret, 0).is_none());
+        assert!(!is_output_ours(&bad_tx, &view_secret, &spend_public, 0));
+
+        let bad_dest = StealthAddress {
+            public_key: PublicKey::from_bytes([0xFF; 32]),
+            tx_public_key: good.tx_public_key,
+        };
+        assert!(OutputScanContext::derive(&bad_dest, &view_secret, 0).is_none());
+        assert!(!is_output_ours(&bad_dest, &view_secret, &spend_public, 0));
     }
 
     #[test]

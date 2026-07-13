@@ -79,7 +79,7 @@ pub use stealth::{
     // grep shows only internal tests). Keeping it cfg(test)-gated inside
     // stealth.rs preserves the test fixtures without exposing a
     // panic-on-RPC-input surface to downstream crates.
-    StealthAddress, is_output_ours,
+    StealthAddress, is_output_ours, OutputScanContext,
     generate_stealth_address_for, generate_stealth_address_checked,
     generate_stealth_outputs, is_output_ours_with_epoch,
     compute_one_time_secret, scan_outputs,

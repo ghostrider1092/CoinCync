@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::primitives::{PublicKey, SecretKey, Hash, KeyImage, hash_domain};
 use crate::transaction::{Transaction, TxOutput, TxType};
 use crate::consensus::Block;
-use crate::crypto::{StealthAddress, is_output_ours, BlindingFactor, SecretScalar, PublicPoint, PedersenCommitment};
+use crate::crypto::{StealthAddress, is_output_ours, OutputScanContext, BlindingFactor, SecretScalar, PublicPoint, PedersenCommitment};
 use crate::db::{WalletDb, OwnedOutput, ScanState};
 use crate::error::Result;
 
@@ -690,22 +690,30 @@ impl WalletScanner {
                 tx_public_key: output.tx_public_key,
             };
 
-            // Check primary address first
+            // #258: derive the spend-key-independent ECDH context ONCE, then
+            // test the primary address and each subaddress with a cheap
+            // point-add + constant-time compare instead of a full ECDH per
+            // candidate. `derive` returning None (malformed tx_public/stealth
+            // point) means not-ours under every candidate — identical to
+            // `is_output_ours` returning false there.
             let mut matched_spend_pub = None;
             let mut matched_subaddr: Option<(u32, u32)> = None;
-            if is_output_ours(&stealth, &keys.view_secret, &keys.spend_public, output_index) {
-                matched_spend_pub = Some(keys.spend_public);
-                // Primary address: subaddress_index stays None
-            }
-
-            // If not primary, check all subaddress spend keys
-            if matched_spend_pub.is_none() {
-                for &(account, index, ref sub_spend) in &keys.subaddress_keys {
-                    if is_output_ours(&stealth, &keys.view_secret, sub_spend, output_index) {
-                        matched_spend_pub = Some(*sub_spend);
-                        // SECURITY (C9-FIX): Preserve subaddress index for persistence
-                        matched_subaddr = Some((account, index));
-                        break;
+            if let Some(scan_ctx) =
+                OutputScanContext::derive(&stealth, &keys.view_secret, output_index)
+            {
+                // Check primary address first.
+                if scan_ctx.matches(&keys.spend_public) {
+                    matched_spend_pub = Some(keys.spend_public);
+                    // Primary address: subaddress_index stays None
+                } else {
+                    // Not primary — check all subaddress spend keys.
+                    for &(account, index, ref sub_spend) in &keys.subaddress_keys {
+                        if scan_ctx.matches(sub_spend) {
+                            matched_spend_pub = Some(*sub_spend);
+                            // SECURITY (C9-FIX): Preserve subaddress index for persistence
+                            matched_subaddr = Some((account, index));
+                            break;
+                        }
                     }
                 }
             }
@@ -1125,20 +1133,29 @@ fn scan_output_with_keys(
             tx_public_key: output.tx_public_key,
         };
 
-        // Check primary address first
-        let mut matched = is_output_ours(&stealth, &key_set.view_secret, &key_set.spend_public, output_index);
+        // #258: one ECDH context per output, then cheap per-candidate checks
+        // (same optimization + identical detection as the sequential scanner
+        // above). `derive` == None (malformed point) ⇒ not ours anywhere.
+        let scan_ctx = OutputScanContext::derive(&stealth, &key_set.view_secret, output_index);
+        // Check primary address first.
+        let mut matched = scan_ctx
+            .as_ref()
+            .map(|c| c.matches(&key_set.spend_public))
+            .unwrap_or(false);
         let mut matched_subaddr: Option<(u32, u32)> = None;
 
         // SECURITY (BUG-6): If not primary, check all subaddress spend keys.
         // Previously the parallel scanner only checked spend_public, permanently
         // missing all outputs sent to subaddresses.
         if !matched {
-            for &(account, index, ref sub_spend) in &key_set.subaddress_keys {
-                if is_output_ours(&stealth, &key_set.view_secret, sub_spend, output_index) {
-                    matched = true;
-                    // SECURITY (C9-FIX): Preserve subaddress index for persistence
-                    matched_subaddr = Some((account, index));
-                    break;
+            if let Some(ref c) = scan_ctx {
+                for &(account, index, ref sub_spend) in &key_set.subaddress_keys {
+                    if c.matches(sub_spend) {
+                        matched = true;
+                        // SECURITY (C9-FIX): Preserve subaddress index for persistence
+                        matched_subaddr = Some((account, index));
+                        break;
+                    }
                 }
             }
         }
