@@ -310,7 +310,7 @@ pub fn clsag_verify(
     pseudo_output: &Commitment,
     signature: &ClsagSignature,
 ) -> bool {
-    use curve25519_dalek::traits::Identity;
+    use curve25519_dalek::traits::{Identity, VartimeMultiscalarMul};
 
     let n = ring.len();
 
@@ -404,7 +404,13 @@ pub fn clsag_verify(
         .map(|m| {
             let p = m.public_key.as_point();
             let c_diff = m.commitment.sub(pseudo_output);
-            mu_p * p + mu_c * c_diff.as_point().as_point()
+            // W_i = mu_p·P_i + mu_c·(C_i − C′) as a single 2-point vartime MSM
+            // (#259). All operands are public, so variable-time is fine here;
+            // the result is the same group element as the sequential form.
+            RistrettoPoint::vartime_multiscalar_mul(
+                [mu_p, mu_c],
+                [*p, *c_diff.as_point().as_point()],
+            )
         })
         .collect();
 
@@ -413,8 +419,15 @@ pub fn clsag_verify(
     // `signature.key_image`, `signature.commitment_image`) are fixed
     // before the loop starts and are not indexed by the loop variable,
     // so the value is loop-invariant. Bit-identical output.
-    let aggregate_key_image = mu_p * signature.key_image.as_point().as_point() +
-                    mu_c * signature.commitment_image.as_point();
+    // J = mu_p·I + mu_c·D as a 2-point vartime MSM (#259). Loop-invariant, so
+    // still computed once; kept here for the same identical-result reasoning.
+    let aggregate_key_image = RistrettoPoint::vartime_multiscalar_mul(
+        [mu_p, mu_c],
+        [
+            *signature.key_image.as_point().as_point(),
+            *signature.commitment_image.as_point(),
+        ],
+    );
 
     // Verify the challenge chain by computing all challenges and checking closure
     // The ring signature forms a closed loop: c[1] -> c[2] -> ... -> c[n-1] -> c[0] -> c[1]
@@ -427,11 +440,20 @@ pub fn clsag_verify(
 
         let hp_idx = hash_to_point(&ring[idx].public_key.to_bytes());
 
-        // L_idx = s_idx * G + c_idx * W_idx
-        let l_idx = responses[idx] * generator() + current_challenge * aggregate_keys[idx];
+        // L_idx = s_idx·G + c_idx·W_idx. G is the Ristretto basepoint
+        // (curve::generator == RISTRETTO_BASEPOINT_POINT), so use the
+        // basepoint-specialized 2-scalar mul: a·A + b·B with a=c, A=W, b=s (#259).
+        let l_idx = RistrettoPoint::vartime_double_scalar_mul_basepoint(
+            &current_challenge,
+            &aggregate_keys[idx],
+            &responses[idx],
+        );
 
-        // R_idx = s_idx * Hp(P_idx) + c_idx * J where J = mu_p * I + mu_c * D
-        let r_idx = responses[idx] * hp_idx + current_challenge * aggregate_key_image;
+        // R_idx = s_idx·Hp(P_idx) + c_idx·J where J = mu_p·I + mu_c·D — 2-point MSM (#259).
+        let r_idx = RistrettoPoint::vartime_multiscalar_mul(
+            [responses[idx], current_challenge],
+            [hp_idx, aggregate_key_image],
+        );
 
         current_challenge = clsag_hash(
             b"c",
@@ -751,6 +773,82 @@ mod tests {
         // Wrong pseudo_output should fail
         let wrong_pseudo = Commitment::commit(value + 1, &SecretScalar::random(&mut OsRng));
         assert!(!clsag_verify(message, &ring, &wrong_pseudo, &sig));
+    }
+
+    #[test]
+    fn clsag_msm_verify_accepts_valid_and_rejects_tampering() {
+        // #259 guard: the vartime-MSM verifier must accept a valid signature and
+        // reject tampering of the exact operands the MSM combines — the response
+        // scalars (s_i), the seed challenge (c1), and the ring. A wrong MSM
+        // pairing/order would either reject a valid sig or accept a tampered one;
+        // this pins the accept/reject boundary the optimization must preserve.
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let value = 4242u64;
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(value, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(value, &z_pseudo);
+        let blinding_diff =
+            SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+
+        // Ring of 4 with the real signer at index 2, so the MSM challenge loop
+        // runs several iterations rather than the minimum.
+        let mut ring = vec![
+            RingMember::new(
+                SecretScalar::random(&mut OsRng).to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+            RingMember::new(
+                SecretScalar::random(&mut OsRng).to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+            RingMember::new(public, real_commitment),
+            RingMember::new(
+                SecretScalar::random(&mut OsRng).to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        let real_index = 2;
+        let message = b"clsag msm regression";
+
+        let sig = clsag_sign(
+            message, &ring, real_index, &secret, &blinding_diff, &pseudo_output, &mut OsRng,
+        )
+        .unwrap();
+        assert!(
+            clsag_verify(message, &ring, &pseudo_output, &sig),
+            "valid signature must verify under the MSM verifier"
+        );
+
+        // Flip a bit in each response scalar in turn → must reject.
+        for i in 0..sig.responses.len() {
+            let mut bad = sig.clone();
+            bad.responses[i][0] ^= 0x01;
+            assert!(
+                !clsag_verify(message, &ring, &pseudo_output, &bad),
+                "tampered response[{i}] must be rejected"
+            );
+        }
+
+        // Flip a bit in the seed challenge c1 → must reject.
+        let mut bad_c1 = sig.clone();
+        bad_c1.c1[0] ^= 0x01;
+        assert!(
+            !clsag_verify(message, &ring, &pseudo_output, &bad_c1),
+            "tampered c1 must be rejected"
+        );
+
+        // Swap a decoy ring member (breaks W_i) → must reject.
+        let mut bad_ring = ring.clone();
+        bad_ring[0] = RingMember::new(
+            SecretScalar::random(&mut OsRng).to_public(),
+            Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+        );
+        assert!(
+            !clsag_verify(message, &bad_ring, &pseudo_output, &sig),
+            "tampered ring member must be rejected"
+        );
     }
 
     #[test]
