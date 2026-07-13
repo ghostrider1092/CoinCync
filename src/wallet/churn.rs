@@ -325,34 +325,73 @@ impl ChurnEngine {
             .cloned()
             .ok_or_else(|| "wallet has no current key epoch".to_string())?;
 
-        // Check balance
-        let balance = wallet.balance();
-        let spendable = wallet.total_balance();
-        let spendable_atomic = spendable.as_atomic();
-        if spendable_atomic == 0 {
-            return Err("no spendable balance for churn".into());
-        }
-
-        let churn_amount = self.pick_churn_amount(spendable_atomic);
-        if churn_amount == 0 {
-            return Err("churn amount is zero (balance too low)".into());
-        }
-
-        debug!(spendable = spendable_atomic, churn_amount, "churn: building self-send");
-
-        // Query chain state from node
+        // Query chain state first — the mature-spendable set and the real
+        // per-tx capacity below both depend on the current height.
         let info = rpc_call_simple(&self.config.node_url, "get_info").await?;
         let current_height = info
             .get("height")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let min_age = crate::constants::min_output_age_at_height(current_height);
 
-        // Fetch decoys
+        // Pick the churn amount against what a single tx can ACTUALLY spend.
+        //
+        // BUG (pre-fix): the amount was `pick_churn_amount(total_balance())` —
+        // a percentage of the *whole* balance, immature coinbase outputs
+        // included. But a uniform privacy transaction spends exactly **2
+        // inputs**, so no single churn can move more than the two largest
+        // *mature* UTXOs. For a wallet composed of many small outputs (a miner,
+        // a faucet, an active spender), even 1% of the total routinely exceeded
+        // 2-UTXO capacity, and EVERY churn failed with "cannot find 2 UTXOs
+        // whose sum covers X" or "balance pending maturity: spendable 0". Fix:
+        // base the percentage on the *mature spendable* balance AND cap it to
+        // the two-largest-mature-UTXO sum, so a covering input pair always
+        // exists and churn builds a valid tx.
+        let balance = wallet.balance();
+        let mut mature_vals: Vec<u64> = balance
+            .available_utxos(current_height, min_age)
+            .iter()
+            .map(|u| u.amount.as_atomic())
+            .collect();
+        if mature_vals.len() < 2 {
+            return Err(format!(
+                "churn needs >= 2 mature UTXOs to build a 2-input tx; have {} \
+                 (the rest are pending coinbase maturity)",
+                mature_vals.len()
+            ));
+        }
+        mature_vals.sort_unstable_by(|a, b| b.cmp(a)); // descending
+        let two_input_cap = mature_vals[0].saturating_add(mature_vals[1]);
+        let mature_spendable = balance.spendable(current_height, min_age).as_atomic();
+        let base = mature_spendable.min(two_input_cap);
+
+        let churn_amount = self.pick_churn_amount(base);
+        if churn_amount == 0 {
+            return Err("churn amount is zero (mature balance too low)".into());
+        }
+
+        debug!(
+            mature_spendable, two_input_cap, churn_amount,
+            "churn: building self-send"
+        );
+
+        // Fetch decoys.
+        //
+        // min_age MUST be the consensus output-age floor, not 0. A ring member
+        // that references an immature coinbase output (age < the floor) makes
+        // the whole tx invalid — the node rejects it with "ring member
+        // references immature coinbase output". Passing 0 here let the node
+        // return recent (immature) coinbase outputs as decoys, so churn txs
+        // failed intermittently on any chain with recent coinbases (and *every*
+        // time on a coinbase-dense chain). This mirrors the 2026-06-07 fix in
+        // `bin/wallet.rs` (min_age 0 → `min_output_age_at_height`) that was
+        // never propagated to auto-churn.
         let ring_size = 16usize;
+        let min_decoy_age = crate::constants::min_output_age_at_height(current_height);
         let decoys_json = rpc_call(
             &self.config.node_url,
             "get_decoys",
-            serde_json::json!([ring_size * 8, 0]),
+            serde_json::json!([ring_size * 8, min_decoy_age]),
         )
         .await?;
         let decoys_arr = decoys_json
