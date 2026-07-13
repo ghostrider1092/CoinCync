@@ -135,7 +135,7 @@ flume       = "0.12"
 signal-hook = "0.4"
 
 # â”€â”€ JSON-RPC + HTTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-jsonrpsee  = { version = "0.24", features = ["server", "client", "macros"] }
+jsonrpsee  = { version = "0.26", features = ["server", "client", "macros"] }
 http       = "1"
 tower      = "0.4"
 tower-http = { version = "0.7", features = ["cors", "trace", "validate-request"] }
