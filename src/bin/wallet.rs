@@ -398,6 +398,28 @@ enum DiscloseAction {
         #[arg(long)]
         proof: String,
     },
+    /// Export a time-scoped view key: a read-only key that decrypts only
+    /// outputs in blocks [--from-height, --to-height]. Discloses your
+    /// history for a bounded period (e.g. a tax year) without giving up
+    /// past-or-future privacy. Contains a view secret — share carefully.
+    ScopedViewKey {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// First block height the exported key can decrypt (inclusive).
+        #[arg(long)]
+        from_height: u64,
+        /// Last block height the exported key can decrypt (inclusive).
+        #[arg(long)]
+        to_height: u64,
+    },
+    /// Auditor side: scan a scoped view key's block range and list the
+    /// outputs it can see. Read-only, no wallet, bounded to the key's
+    /// disclosed range.
+    ScanScoped {
+        /// The scoped view key JSON (from `disclose scoped-view-key`).
+        #[arg(long)]
+        view_key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -516,6 +538,12 @@ async fn main() {
             }
             DiscloseAction::VerifyBalance { proof } => {
                 cmd_disclose_verify_balance(&proof).await
+            }
+            DiscloseAction::ScopedViewKey { password, from_height, to_height } => {
+                cmd_disclose_scoped_view_key(&wallet_path, password, from_height, to_height).await
+            }
+            DiscloseAction::ScanScoped { view_key } => {
+                cmd_disclose_scan_scoped(&view_key, &cli.node).await
             }
             DiscloseAction::VerifyOwnership { proof } => {
                 cmd_disclose_verify_ownership(&proof).await
@@ -2124,6 +2152,121 @@ async fn cmd_disclose_balance(
     println!();
     println!("Verifier needs only the bytes above — no chain access, no wallet keys.");
     println!("Run `coincync-wallet disclose verify-balance --proof <hex>` to check.");
+    Ok(())
+}
+
+/// Export a time-scoped view key covering blocks [from_height, to_height].
+/// The key can decrypt only the wallet's outputs inside that range —
+/// bounded disclosure ("particular description"), not a full view key.
+async fn cmd_disclose_scoped_view_key(
+    path: &PathBuf,
+    password: Option<String>,
+    from_height: u64,
+    to_height: u64,
+) -> Result<(), String> {
+    use coincync::wallet::{ScopedViewKey, Wallet};
+
+    if from_height > to_height {
+        return Err(format!(
+            "--from-height ({}) must be <= --to-height ({})",
+            from_height, to_height
+        ));
+    }
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet.unlock(&password).map_err(|e| format!("unlock wallet: {}", e))?;
+    let epoch = wallet
+        .current_keys()
+        .ok_or_else(|| "wallet has no active key epoch".to_string())?;
+    let scoped = ScopedViewKey::from_epoch(&epoch, from_height, to_height);
+
+    println!("Scoped view key — blocks {}..={} (inclusive)", from_height, to_height);
+    println!();
+    println!("{}", scoped.to_json());
+    println!();
+    println!("⚠ This key contains a VIEW SECRET. It lets the holder see every");
+    println!("  output your wallet received in this height range — and nothing");
+    println!("  outside it. It cannot spend. Share only with the intended auditor,");
+    println!("  who imports it as a read-only view bounded to this height range.");
+    Ok(())
+}
+
+/// Auditor side of a scoped view key: scan the disclosed block range and
+/// list the outputs the key can see. Read-only, no wallet, no spend
+/// capability, and bounded to [from_height, to_height] — nothing outside
+/// the disclosed scope is visible.
+async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(), String> {
+    use coincync::consensus::Block;
+    use coincync::primitives::{PublicKey, SecretKey};
+    use coincync::wallet::scanner::ScanResult;
+    use coincync::wallet::WalletScanner;
+
+    let v: serde_json::Value = serde_json::from_str(view_key_json)
+        .map_err(|e| format!("invalid scoped-view-key JSON: {}", e))?;
+    let get_bytes = |k: &str| -> Result<[u8; 32], String> {
+        let s = v.get(k).and_then(|x| x.as_str())
+            .ok_or_else(|| format!("scoped-view-key missing field '{}'", k))?;
+        let raw = hex::decode(s).map_err(|e| format!("bad hex for '{}': {}", k, e))?;
+        if raw.len() != 32 {
+            return Err(format!("'{}' must be 32 bytes, got {}", k, raw.len()));
+        }
+        let mut b = [0u8; 32];
+        b.copy_from_slice(&raw);
+        Ok(b)
+    };
+    let view_secret = SecretKey::from_bytes(get_bytes("view_secret")?);
+    let spend_public = PublicKey::from_bytes(get_bytes("spend_public")?);
+    let from_height = v.get("from_height").and_then(|x| x.as_u64())
+        .ok_or("scoped-view-key missing from_height")?;
+    let to_height = v.get("to_height").and_then(|x| x.as_u64())
+        .ok_or("scoped-view-key missing to_height")?;
+    if from_height > to_height {
+        return Err(format!("from_height ({}) > to_height ({})", from_height, to_height));
+    }
+
+    let mut scanner = WalletScanner::new();
+    scanner.add_keys(view_secret, spend_public, 0);
+
+    println!("Scoped scan — blocks {}..={} via {}", from_height, to_height, node);
+    let (mut found, mut total) = (0usize, 0u64);
+    let mut cursor = from_height;
+    while cursor <= to_height {
+        let batch_end = (cursor + 99).min(to_height);
+        let blocks = rpc_get_block_range(node, cursor, batch_end).await?;
+        if blocks.is_empty() {
+            break;
+        }
+        for b in &blocks {
+            let height = b.get("height").and_then(|x| x.as_u64()).unwrap_or(cursor);
+            let bytes_hex = b.get("bytes").and_then(|x| x.as_str())
+                .ok_or("block missing bytes")?;
+            let block_bytes = hex::decode(bytes_hex)
+                .map_err(|e| format!("bad block hex: {}", e))?;
+            let block: Block = borsh::from_slice(&block_bytes)
+                .map_err(|e| format!("block decode: {}", e))?;
+            if let ScanResult::Scanned { outputs, .. } = scanner.scan_block_with_result(&block) {
+                for o in &outputs {
+                    found += 1;
+                    total = total.saturating_add(o.amount);
+                    println!(
+                        "  h{:<8} {:>16} atomic (~{:.6} CYNC)  tx={} out={}",
+                        height, o.amount, o.amount as f64 / 1e12,
+                        hex::encode(&o.tx_hash.as_bytes()[..8]), o.output_index,
+                    );
+                }
+            }
+        }
+        cursor = batch_end + 1;
+    }
+    println!();
+    println!(
+        "Found {} output(s), total {} atomic (~{:.6} CYNC) in blocks {}..={}.",
+        found, total, total as f64 / 1e12, from_height, to_height,
+    );
+    println!("Bounded to the disclosed range — nothing outside it is visible to this key.");
     Ok(())
 }
 

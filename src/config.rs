@@ -210,6 +210,19 @@ impl NetworkType {
         self.params().name
     }
 
+    /// Human / brand name for user-facing surfaces (banners, wallet, explorer,
+    /// release notes). Distinct from [`name`](Self::name), which stays the
+    /// stable lowercase identifier (`"mainnet"`) used in data-dir paths, CLI
+    /// args, config files, and magic-byte lookup — those must never change.
+    /// The mainnet network is branded **Cynstra**; the testnet remains CoinCync.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            NetworkType::Mainnet => "Cynstra",
+            NetworkType::Testnet => "CoinCync Testnet",
+            NetworkType::Regtest => "CoinCync Regtest",
+        }
+    }
+
     /// Returns true if this is any non-production network.
     pub fn is_test_network(&self) -> bool {
         !matches!(self, NetworkType::Mainnet)

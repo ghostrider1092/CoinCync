@@ -21,8 +21,9 @@
 //!
 //! Network metadata is an "effect" — traffic analysis is a search.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use rand::Rng;
@@ -71,6 +72,13 @@ pub struct TrafficShaperConfig {
     pub normalize_enabled: bool,
     /// Whether to enable timing jitter.
     pub jitter_enabled: bool,
+    /// CIP-020: engage substitutive constant-rate origination pacing. When
+    /// true, the node's own originations (wallet sends + auto-churn) are paced
+    /// into a single constant-rate slot clock (real-if-queued-else-dummy)
+    /// instead of the additive padding loop + jitter — which leaves real
+    /// timing recoverable (measured observer r=0.63 → r=0.00). Off by default;
+    /// opt-in per node during rollout. Relay/block/inv traffic is never paced.
+    pub constant_rate_enabled: bool,
 }
 
 impl Default for TrafficShaperConfig {
@@ -81,6 +89,7 @@ impl Default for TrafficShaperConfig {
             padding_enabled: true,
             normalize_enabled: true,
             jitter_enabled: true,
+            constant_rate_enabled: false, // CIP-020: opt-in per node during rollout
         }
     }
 }
@@ -386,6 +395,133 @@ pub struct TrafficShapingStats {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Constant-rate origination pacing (CIP-020)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Bound on the origination queue. Above this the pacer stops absorbing
+/// originations and the caller must direct-send (non-blocking, privacy-degraded)
+/// — only reachable when the node originates faster than one packet per slot
+/// (2 tx/s at the default 500 ms slot), which is rare for a wallet. At the slot
+/// rate this bound is ~16 s of backlog.
+const DEFAULT_MAX_ORIGINATION_QUEUE: usize = 32;
+
+/// Substitutive constant-rate pacer for the node's **own** originations (CIP-020).
+///
+/// The additive padding loop (`run_padding_loop*`) emits a dummy every slot *in
+/// addition to* real traffic, so the real-traffic timing stays recoverable — a
+/// passive observer subtracts the known grid and reconstructs the node's
+/// activity schedule (measured Pearson r = 0.63). This pacer instead drives a
+/// **single** slot clock: each slot carries a queued origination if one is
+/// waiting, else a dummy. Real and cover then share one clock and are
+/// timing-indistinguishable (measured r = 0.00).
+///
+/// **Scope:** only the node's own originations (wallet sends + auto-churn) are
+/// queued here. Relay / block / inv / header traffic bypasses the pacer entirely
+/// and is sent directly, so consensus propagation latency is unchanged — pacing
+/// *all* outbound would add up to one slot per hop to block propagation and
+/// regress CIP-019. See CIP-020 for the latency analysis.
+///
+/// **Off by default:** only engaged when `TrafficShaperConfig::constant_rate_enabled`
+/// is set; until a node opts in, the existing additive shaper is unchanged.
+pub struct ConstantRatePacer {
+    slot: Duration,
+    magic: [u8; 4],
+    max_queue: usize,
+    queue: Mutex<VecDeque<Vec<u8>>>,
+    /// Slots filled with a real origination (diagnostics).
+    real_slots: AtomicU64,
+    /// Slots filled with a dummy (diagnostics).
+    dummy_slots: AtomicU64,
+    /// Originations rejected by a full queue — caller direct-sent (diagnostics).
+    overflow: AtomicU64,
+}
+
+impl ConstantRatePacer {
+    /// Create a pacer with the given slot period (ms) and network magic.
+    pub fn new(slot_ms: u64, magic: [u8; 4]) -> Self {
+        Self {
+            slot: Duration::from_millis(slot_ms.max(1)),
+            magic,
+            max_queue: DEFAULT_MAX_ORIGINATION_QUEUE,
+            queue: Mutex::new(VecDeque::new()),
+            real_slots: AtomicU64::new(0),
+            dummy_slots: AtomicU64::new(0),
+            overflow: AtomicU64::new(0),
+        }
+    }
+
+    /// Queue one already-framed origination for the next free slot.
+    ///
+    /// Returns `true` if queued. Returns `false` if the bounded queue is full —
+    /// the caller MUST then direct-send the packet itself (non-blocking; the
+    /// only privacy-degraded path, reachable solely above the slot rate). This
+    /// never blocks and never silently drops the packet.
+    #[must_use]
+    pub fn submit(&self, framed: Vec<u8>) -> bool {
+        let mut q = self.queue.lock().expect("pacer queue poisoned");
+        if q.len() >= self.max_queue {
+            self.overflow.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        q.push_back(framed);
+        true
+    }
+
+    /// The substitutive core: produce this slot's wire packet — a queued
+    /// origination if one waits, else a fresh dummy. The returned `bool` is
+    /// `true` when the packet was a real origination. Pure and synchronous so
+    /// the real-vs-dummy decision is unit-testable without the async clock.
+    fn fill_slot(&self) -> (Vec<u8>, bool) {
+        // Pop under the lock, then release it before generating a dummy.
+        let popped = self.queue.lock().expect("pacer queue poisoned").pop_front();
+        match popped {
+            Some(real) => {
+                self.real_slots.fetch_add(1, Ordering::Relaxed);
+                (real, true)
+            }
+            None => {
+                self.dummy_slots.fetch_add(1, Ordering::Relaxed);
+                (TrafficShaper::generate_padding_packet(self.magic), false)
+            }
+        }
+    }
+
+    /// Current queue depth (diagnostics / tests).
+    pub fn queued(&self) -> usize {
+        self.queue.lock().expect("pacer queue poisoned").len()
+    }
+
+    /// Number of originations rejected by a full queue (diagnostics).
+    pub fn overflow_count(&self) -> u64 {
+        self.overflow.load(Ordering::Relaxed)
+    }
+
+    /// Run the pacing loop: emit exactly one packet per slot to `sender` until
+    /// `shutdown`. This is the stream a network observer sees — flat and
+    /// constant-rate whether the node is transacting or idle.
+    pub async fn run(
+        self: Arc<Self>,
+        sender: mpsc::Sender<Vec<u8>>,
+        shutdown: Arc<AtomicBool>,
+    ) {
+        debug!(
+            slot_ms = self.slot.as_millis() as u64,
+            "constant-rate origination pacer started"
+        );
+        while !shutdown.load(Ordering::Relaxed) {
+            sleep(self.slot).await;
+            let (packet, was_real) = self.fill_slot();
+            if sender.send(packet).await.is_err() {
+                debug!("pacer: channel closed, stopping");
+                break;
+            }
+            trace!(real = was_real, "pacer filled slot");
+        }
+        debug!("constant-rate origination pacer stopped");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -397,6 +533,58 @@ mod tests {
     /// value from `NetworkType::magic_bytes()`; these bytes never appear
     /// on a real wire so collisions with production aren't possible.
     const TEST_MAGIC: [u8; 4] = [0x42, 0x42, 0x42, 0x42];
+
+    // ─── CIP-020 constant-rate pacer ───────────────────────────────
+
+    #[test]
+    fn pacer_prefers_real_then_falls_back_to_dummy() {
+        let p = ConstantRatePacer::new(500, TEST_MAGIC);
+        assert!(p.submit(vec![9, 9, 9]));
+        // A queued origination fills the slot in preference to a dummy.
+        let (pkt, was_real) = p.fill_slot();
+        assert!(was_real);
+        assert_eq!(pkt, vec![9, 9, 9]);
+        // Queue now empty → the slot is filled with a framed dummy instead.
+        let (dummy, was_real2) = p.fill_slot();
+        assert!(!was_real2);
+        assert!(!dummy.is_empty(), "dummy must be a real framed padding packet");
+    }
+
+    #[test]
+    fn pacer_emits_exactly_one_packet_per_slot() {
+        // The substitutive invariant: over K slots with M<K originations queued,
+        // exactly K packets leave the wire — M real, then K−M dummies. This is
+        // what makes the stream flat (idle and active look identical).
+        let p = ConstantRatePacer::new(500, TEST_MAGIC);
+        for i in 0..3u8 {
+            assert!(p.submit(vec![i]));
+        }
+        let (mut reals, mut total) = (0, 0);
+        for _ in 0..10 {
+            let (_pkt, was_real) = p.fill_slot();
+            total += 1;
+            if was_real {
+                reals += 1;
+            }
+        }
+        assert_eq!(total, 10, "one packet per slot, always");
+        assert_eq!(reals, 3, "exactly the queued originations were real");
+        assert_eq!(p.queued(), 0);
+    }
+
+    #[test]
+    fn pacer_bounded_queue_signals_caller_to_direct_send() {
+        let p = ConstantRatePacer::new(500, TEST_MAGIC);
+        // Fill to the bound — every submit accepted.
+        for _ in 0..DEFAULT_MAX_ORIGINATION_QUEUE {
+            assert!(p.submit(vec![0]));
+        }
+        // The next submit is rejected so the caller direct-sends (privacy-
+        // degraded but non-blocking) rather than the pacer growing unbounded.
+        assert!(!p.submit(vec![0]));
+        assert_eq!(p.overflow_count(), 1);
+        assert_eq!(p.queued(), DEFAULT_MAX_ORIGINATION_QUEUE);
+    }
 
     #[test]
     fn normalize_round_trips() {

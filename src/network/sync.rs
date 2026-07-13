@@ -761,7 +761,19 @@ impl ChainSync {
         let connects = block.header.prev_hash == self.local_tip || height == 0;
         if connects || was_req {
             let mut out = vec![block];
-            if connects {
+            // Catch-up-stall fix (2026-07-12): reprocess orphans waiting on
+            // this block whether it extends the active tip (`connects`) OR is
+            // a requested side-chain block (`was_req`). Gating the walk on
+            // `connects` was the stall: a canonical block arriving on a
+            // minority fork has `prev_hash != local_tip`, so it was delivered
+            // ALONE — without its already-orphaned descendants — and the
+            // heavier branch was never assembled, so the reorg never fired
+            // and the node wedged behind forever. Delivering the side block
+            // plus its orphan children (all PoW-validated above, all keyed by
+            // prev_hash == this block) lets the chain layer see the whole
+            // branch and perform the reorg it already knows how to do. The
+            // BFS terminates: each orphan is removed from the pool once.
+            {
                 let mut q = VecDeque::new();
                 q.push_back(hash);
                 while let Some(ph) = q.pop_front() {
@@ -1524,6 +1536,90 @@ mod tests {
              concern arises, use cause-based mitigation (peer refused to \
              deliver parents) not per-peer count cap. See const doc-comment.",
         );
+    }
+
+    /// Catch-up-stall repro (2026-07-12). A node on a 1-block minority fork
+    /// receives the canonical N+1 first (orphaned — its parent is unknown),
+    /// then fetches the canonical N: a SIDE block whose `prev_hash` is the
+    /// common ancestor, NOT our fork tip. Before the fix, the orphan-
+    /// reprocessing walk was gated on `connects` (block extends the active
+    /// tip), so the side block was delivered ALONE — its orphan child (N+1)
+    /// stayed in the pool, the heavier branch was never assembled, and the
+    /// node wedged. After the fix the walk also runs for requested side
+    /// blocks (`was_req`), delivering N and N+1 together so the chain layer
+    /// can reorg. This test fails on the pre-fix code.
+    #[test]
+    fn catch_up_stall_side_block_delivers_orphan_descendant() {
+        use crate::consensus::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        // Mine a block at `height`/`prev` against an easy (non-degenerate)
+        // target so it clears on_block_received's PoW gate. Block::hash() is
+        // header-only, so empty transactions are fine and the nonce loop
+        // varies the header.
+        let mine = |height: u64, prev: Hash, seed: u8| -> Block {
+            let easy = { let mut b = [0xFFu8; 32]; b[31] = 0xFE; Hash::from_bytes(b) };
+            let mut blk = Block {
+                header: BlockHeader {
+                    network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
+                    version: 1,
+                    height,
+                    timestamp: 1_000 + height,
+                    prev_hash: prev,
+                    tx_root: { let mut b = [0u8; 32]; b[0] = seed; Hash::from_bytes(b) },
+                    anchor: Hash::zero(),
+                    algorithm: 0,
+                    nonce: 0,
+                    target: easy,
+                    miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                    supply_commitment: [0u8; 32],
+                    checkpoint_vote: None,
+                    spark_set_root: [0u8; 32],
+                    mw_kernel_root: [0u8; 32],
+                },
+                transactions: vec![],
+            };
+            for n in 0u64..1_000_000 {
+                blk.header.nonce = n;
+                if blk.hash().meets_difficulty(&blk.header.target) {
+                    return blk;
+                }
+            }
+            panic!("could not mine a test block under the easy target");
+        };
+
+        // Common ancestor J @ 99; our node sits on a MINORITY fork tip F @ 100.
+        let j = { let mut b = [0u8; 32]; b[0] = 0xAA; Hash::from_bytes(b) };
+        let fork_tip = { let mut b = [0u8; 32]; b[0] = 0xFF; Hash::from_bytes(b) };
+        let mut sync = ChainSync::new(100, fork_tip);
+
+        // Canonical N (=100): child of J, a side block (prev = J != our tip).
+        let k = mine(100, j, 1);
+        let k_hash = k.hash();
+        // Canonical N+1 (=101): child of K.
+        let c = mine(101, k_hash, 2);
+        let c_hash = c.hash();
+
+        // 1) N+1 arrives first → stored as an orphan (parent unknown), nothing delivered.
+        let out_c = sync.on_block_received(c).expect("orphan store ok");
+        assert!(out_c.is_empty(), "orphaned N+1 must deliver nothing");
+        assert!(sync.orphan_blocks.contains_key(&c_hash), "N+1 must be in the orphan pool");
+
+        // 2) We fetch canonical N (requested → was_req path); prev = J != our tip.
+        sync.downloading.insert(k_hash);
+        let out_k = sync.on_block_received(k).expect("side block ok");
+
+        // THE FIX: N must be delivered WITH its orphan child N+1, parent first.
+        let hashes: Vec<Hash> = out_k.iter().map(|b| b.hash()).collect();
+        assert!(hashes.contains(&k_hash), "must deliver the side block N");
+        assert!(
+            hashes.contains(&c_hash),
+            "REGRESSION (catch-up stall): a requested side block must deliver \
+             its orphan descendant N+1 so the chain layer can reorg — pre-fix \
+             this returned only [N] and the node wedged forever."
+        );
+        assert_eq!(hashes.first(), Some(&k_hash), "parent N must precede child N+1");
+        assert!(!sync.orphan_blocks.contains_key(&c_hash), "orphan pool must be drained once reconnected");
     }
 
     // ─────────────────────────────────────────────────────────────────────
