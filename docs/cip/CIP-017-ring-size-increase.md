@@ -52,10 +52,17 @@ scale linearly. Benchmark (dev box, release, single-signature verify):
    vCPU nodes are slower — treat as lower bounds. A block with 20 inputs at
    ring 32 ≈ 260 ms of CLSAG verify per block; block-verify throughput is
    exactly what the 2026-07 sync-wedge incidents were about.
-2. Production block validation should use the **batch verifier**
-   (`src/crypto/batch_verify.rs`), which amortizes cost well below these
-   standalone figures. The real per-block cost must be measured with batching,
-   on fleet-class hardware, before a target is locked in.
+2. The **batch verifier** (`src/crypto/batch_verify.rs`) does **NOT**
+   cryptographically amortize this cost (confirmed by reading `verify_all`): it
+   verifies each signature with the same per-signature `clsag_verify`, and only
+   (a) **parallelizes** across cores via rayon and (b) **caches** already-seen
+   signatures (mempool→block reuse). So the per-signature figures above hold as
+   the true cost; block-verify throughput improves only by `min(cores, inputs)`
+   parallelism plus cache hits. On the fleet's **1–2 vCPU** seed/relay boxes the
+   parallelism benefit is small, so the weakest nodes pay close to the full
+   per-signature cost. The remaining decision input is a per-signature verify
+   measured on that weakest fleet hardware (a dev-box batch benchmark would
+   *overstate* fleet capability and is not run for that reason).
 
 ## Specification
 
