@@ -1267,8 +1267,38 @@ impl SharedMempool {
         // tx passes accept, it cannot evict for a chain-state reason
         // (only for true state churn AFTER acceptance, e.g. its real
         // input getting spent in a competing tx that landed first).
-        chain.validate_transaction(&tx)?;
-        self.write_lock().add(tx)
+        // #260: bind admission to the chain generation (tip hash) to close a
+        // TOCTOU window. `validate_transaction` runs WITHOUT the mempool lock;
+        // if a block lands and its `shadow_evict_invalid` pass finishes in the
+        // gap before we insert, an already-stale tx slips in AFTER the cleanup
+        // that should have dropped it, then lingers (relay + memory + verify
+        // work) until a later eviction. Fix: snapshot the tip, run the full
+        // validator, then insert only while holding the write lock AND the tip
+        // is unchanged. `tip_hash` uniquely identifies chain state, so equal
+        // before/after means (a) the validation is current and (b) no
+        // newer-state evict could have run between validate and insert
+        // (block-apply updates the tip before calling `shadow_evict_invalid`,
+        // and that pass needs the write lock we hold). If the tip moved, the
+        // validation is stale — drop the lock and re-validate against the new
+        // state. Bounded so a pathological reorg storm can't spin forever.
+        const MAX_ADMISSION_RETRIES: usize = 5;
+        for _ in 0..MAX_ADMISSION_RETRIES {
+            let tip_before = chain.tip_hash();
+            chain.validate_transaction(&tx)?;
+            let mut guard = self.write_lock();
+            if chain.tip_hash() == tip_before {
+                return guard.add(tx);
+            }
+            // Tip advanced between the snapshot and acquiring the lock; the
+            // validation above is stale. Release and re-validate.
+            drop(guard);
+        }
+        // A block would have to land on every single retry (each validation is
+        // sub-millisecond vs a ~120s target) — practically impossible. Reject so
+        // the submitter can retry rather than admit against a stale tip.
+        Err(Error::InvalidMessage(
+            "mempool admission raced repeated chain updates; please retry".into(),
+        ))
     }
 
     /// Re-admit transactions that were mined in blocks that just got
