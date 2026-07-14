@@ -790,6 +790,50 @@ pub fn build_claim_tx(
     Ok(bitcoin::consensus::encode::serialize(&tx))
 }
 
+/// Verify that signed transaction bytes encode exactly the claim
+/// described by `base`.
+///
+/// Rebuilding through [`build_claim_tx`] keeps broadcast-time
+/// validation aligned with the transaction and signature checks used
+/// during construction. This rejects alternate inputs, outputs,
+/// transaction metadata, or witness shapes before a caller advances
+/// swap state for an unrelated broadcast.
+pub fn validate_claim_tx(
+    config: &BtcConfig,
+    base: &ClaimTxBase,
+    tx_bytes: &[u8],
+) -> Result<()> {
+    let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(tx_bytes)
+        .map_err(|_| Error::Verification("claim transaction consensus decode failed"))?;
+    if tx.input.len() != 1 {
+        return Err(Error::Verification(
+            "claim transaction must contain exactly one input",
+        ));
+    }
+    let input = &tx.input[0];
+    if input.witness.len() != 1 {
+        return Err(Error::Verification(
+            "claim transaction must contain one key-path witness element",
+        ));
+    }
+    let signature: &[u8; 64] = input
+        .witness
+        .iter()
+        .next()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(Error::Verification(
+            "claim transaction witness must contain a 64-byte BIP-340 signature",
+        ))?;
+
+    let expected = build_claim_tx(config, base, signature)?;
+    if expected != tx_bytes {
+        return Err(Error::Verification(
+            "claim transaction does not match the expected swap claim",
+        ));
+    }
+    Ok(())
+}
+
 /// Construct the unsigned claim transaction and the corresponding
 /// previous-output (`TxOut`) record. Internal helper shared by
 /// `claim_sighash` (needs the tx to hash over) and `build_claim_tx`
@@ -1982,6 +2026,65 @@ mod tests {
         assert_eq!(parsed.input[0].witness.len(), 1);
         let wit_bytes: &[u8] = &parsed.input[0].witness.iter().next().unwrap();
         assert_eq!(wit_bytes, &sig[..]);
+    }
+
+    #[test]
+    fn validate_claim_tx_accepts_exact_constructed_claim() {
+        let cfg = standard_regtest_config();
+        let (sig, _, base) =
+            sign_real_claim(&cfg, Txid([0xbc; 32]), 500_000, 1_000, 52, 0x71);
+        let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
+
+        validate_claim_tx(&cfg, &base, &bytes).unwrap();
+    }
+
+    #[test]
+    fn validate_claim_tx_rejects_different_lock_outpoint() {
+        let cfg = standard_regtest_config();
+        let (sig, _, base) =
+            sign_real_claim(&cfg, Txid([0xbd; 32]), 500_000, 1_000, 53, 0x72);
+        let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
+        let mut tx: bitcoin::Transaction =
+            bitcoin::consensus::encode::deserialize(&bytes).unwrap();
+        tx.input[0].previous_output.vout += 1;
+        let altered = bitcoin::consensus::encode::serialize(&tx);
+
+        assert!(matches!(
+            validate_claim_tx(&cfg, &base, &altered),
+            Err(Error::Verification(_))
+        ));
+    }
+
+    #[test]
+    fn validate_claim_tx_rejects_different_claim_output() {
+        let cfg = standard_regtest_config();
+        let (sig, _, base) =
+            sign_real_claim(&cfg, Txid([0xbe; 32]), 500_000, 1_000, 54, 0x73);
+        let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
+        let mut tx: bitcoin::Transaction =
+            bitcoin::consensus::encode::deserialize(&bytes).unwrap();
+        tx.output[0].value = bitcoin::Amount::from_sat(498_999);
+        let altered = bitcoin::consensus::encode::serialize(&tx);
+
+        assert!(matches!(
+            validate_claim_tx(&cfg, &base, &altered),
+            Err(Error::Verification(_))
+        ));
+    }
+
+    #[test]
+    fn validate_claim_tx_rejects_different_session_amount() {
+        let cfg = standard_regtest_config();
+        let (sig, _, base) =
+            sign_real_claim(&cfg, Txid([0xbf; 32]), 500_000, 1_000, 55, 0x74);
+        let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
+        let mut expected = base.clone();
+        expected.lock_value_sats += 1;
+
+        assert!(matches!(
+            validate_claim_tx(&cfg, &expected, &bytes),
+            Err(Error::Verification(_))
+        ));
     }
 
     #[test]

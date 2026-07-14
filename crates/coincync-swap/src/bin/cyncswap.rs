@@ -365,6 +365,28 @@ enum Command {
         /// Optional RPC pass. Coupled with `--rpc-user`.
         #[arg(long)]
         rpc_pass: Option<String>,
+        /// Lock transaction's txid, 64-char lowercase hex.
+        #[arg(long)]
+        lock_txid: String,
+        /// Lock UTXO's output index.
+        #[arg(long, default_value_t = 0)]
+        lock_vout: u32,
+        /// 32-byte x-only Taproot internal key committed by the lock.
+        #[arg(long)]
+        lock_internal_key: String,
+        /// Alice's negotiated BTC claim destination.
+        #[arg(long)]
+        dest_address: String,
+        /// Claim fee in satoshis.
+        #[arg(long, default_value_t = 1000)]
+        fee_sats: u64,
+        /// Bob's refund-branch x-only pubkey, when the lock has a
+        /// script-path refund branch.
+        #[arg(long)]
+        refund_bob_pubkey: Option<String>,
+        /// Refund CSV delay. Required iff `--refund-bob-pubkey` is set.
+        #[arg(long)]
+        refund_csv_blocks: Option<u16>,
         /// The signed claim tx as hex. From the wallet after
         /// `construct-btc-claim` + `decrypt-btc-adaptor` (which
         /// produces the BIP-340 signature) + witness assembly.
@@ -1517,6 +1539,13 @@ fn run(cli: Cli) -> Result<(), String> {
             rpc_url,
             rpc_user,
             rpc_pass,
+            lock_txid,
+            lock_vout,
+            lock_internal_key,
+            dest_address,
+            fee_sats,
+            refund_bob_pubkey,
+            refund_csv_blocks,
             signed_tx_hex,
         } => claim_btc_orchestration_cmd(
             resolve_state_path(state_file)?,
@@ -1524,6 +1553,13 @@ fn run(cli: Cli) -> Result<(), String> {
             rpc_url,
             rpc_user,
             rpc_pass,
+            lock_txid,
+            lock_vout,
+            lock_internal_key,
+            dest_address,
+            fee_sats,
+            refund_bob_pubkey,
+            refund_csv_blocks,
             signed_tx_hex,
         ),
         Command::ClaimCync {
@@ -2341,6 +2377,33 @@ fn parse_refund_branch_flags(
         ),
         (None, None) => Ok(None),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_claim_tx_base(
+    lock_txid_hex: &str,
+    lock_vout: u32,
+    lock_value_sats: u64,
+    lock_internal_key_hex: &str,
+    dest_address: String,
+    fee_sats: u64,
+    refund_bob_pubkey_hex: Option<String>,
+    refund_csv_blocks: Option<u16>,
+) -> Result<coincync_swap::btc::ClaimTxBase, String> {
+    use coincync_swap::btc::{ClaimTxBase, Txid};
+
+    Ok(ClaimTxBase {
+        lock_txid: Txid(parse_hex_32("lock-txid", lock_txid_hex)?),
+        lock_vout,
+        lock_value_sats,
+        lock_internal_key: parse_hex_32("lock-internal-key", lock_internal_key_hex)?,
+        refund_branch: parse_refund_branch_flags(
+            refund_bob_pubkey_hex,
+            refund_csv_blocks,
+        )?,
+        dest_address,
+        fee_sats,
+    })
 }
 
 fn derive_cync_recipient_pubkey_cmd(
@@ -3531,13 +3594,19 @@ fn construct_btc_claim_cmd(
     refund_bob_pubkey_hex: Option<String>,
     refund_csv_blocks: Option<u16>,
 ) -> Result<(), String> {
-    use coincync_swap::btc::{build_claim_tx, BtcConfig, ClaimTxBase, Txid};
+    use coincync_swap::btc::{build_claim_tx, BtcConfig};
 
-    // ── Parse + validate inputs ──────────────────────────────────
-    let lock_txid_bytes = parse_hex_32("lock-txid", &lock_txid_hex)?;
-    let lock_internal_key = parse_hex_32("lock-internal-key", &lock_internal_key_hex)?;
     let claim_signature = parse_hex_64("claim-signature", &claim_signature_hex)?;
-    let refund_branch = parse_refund_branch_flags(refund_bob_pubkey_hex, refund_csv_blocks)?;
+    let base = parse_claim_tx_base(
+        &lock_txid_hex,
+        lock_vout,
+        lock_value_sats,
+        &lock_internal_key_hex,
+        dest_address,
+        fee_sats,
+        refund_bob_pubkey_hex,
+        refund_csv_blocks,
+    )?;
 
     let config = BtcConfig {
         network,
@@ -3546,16 +3615,6 @@ fn construct_btc_claim_cmd(
         // constructor's URL-shape check past.
         rpc_url: "http://127.0.0.1:18443".into(),
         rpc_auth: None,
-    };
-
-    let base = ClaimTxBase {
-        lock_txid: Txid(lock_txid_bytes),
-        lock_vout,
-        lock_value_sats,
-        lock_internal_key,
-        refund_branch,
-        dest_address,
-        fee_sats,
     };
 
     // ── Construct (with full BIP-340 verification) + emit ────────
@@ -3675,12 +3734,20 @@ fn lock_btc_orchestration_cmd(
 /// `recover-secret-from-btc-sig`. Bob's chain watcher catches the
 /// claim, advances his own swap to `SecretRevealed`, and the
 /// `claim-cync` step becomes available to him.
+#[allow(clippy::too_many_arguments)]
 fn claim_btc_orchestration_cmd(
     state_path: PathBuf,
     network: String,
     rpc_url: String,
     rpc_user: Option<String>,
     rpc_pass: Option<String>,
+    lock_txid_hex: String,
+    lock_vout: u32,
+    lock_internal_key_hex: String,
+    dest_address: String,
+    fee_sats: u64,
+    refund_bob_pubkey_hex: Option<String>,
+    refund_csv_blocks: Option<u16>,
     signed_tx_hex: String,
 ) -> Result<(), String> {
     use coincync_swap::protocol::{Role, State, Transition};
@@ -3718,7 +3785,21 @@ fn claim_btc_orchestration_cmd(
     if tx_bytes.is_empty() {
         return Err("signed-tx-hex: empty transaction bytes".into());
     }
+    // A second CLI amount would let one operator input validate another;
+    // the persisted swap amount is the independent authority here.
+    let base = parse_claim_tx_base(
+        &lock_txid_hex,
+        lock_vout,
+        swap.parameters.btc_amount_sats,
+        &lock_internal_key_hex,
+        dest_address,
+        fee_sats,
+        refund_bob_pubkey_hex,
+        refund_csv_blocks,
+    )?;
     let config = build_btc_rpc_config(network, rpc_url, rpc_user, rpc_pass)?;
+    coincync_swap::btc::validate_claim_tx(&config, &base, &tx_bytes)
+        .map_err(|e| format!("signed claim does not match this swap: {e}"))?;
 
     let txid_hex = coincync_swap::btc::broadcast(&config, &tx_bytes)
         .map_err(|e| format!("btc broadcast: {e}"))?;
