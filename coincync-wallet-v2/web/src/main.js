@@ -1953,7 +1953,7 @@ function settingsTabHtml() {
             <div class="settings-row__value">${state.blockHeight ? state.blockHeight.toLocaleString() : "—"}</div>
           </div>
           <div class="settings-row is-link">
-            <div><div class="settings-row__label">Project repository</div><div class="settings-row__sub">github.com/ghostrider1092/Coincync-Testnet-</div></div>
+            <div><div class="settings-row__label">Project repository</div><div class="settings-row__sub">github.com/Coincync/Coincync-Testnet-</div></div>
             <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
           </div>
           <div class="settings-row is-link">

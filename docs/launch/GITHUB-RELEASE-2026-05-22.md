@@ -106,7 +106,7 @@ gh release create v1.0.9-testnet-pre-audit `
   --prerelease
 ```
 
-Alternatively, paste the body into https://github.com/ghostrider1092/Coincync-Testnet-/releases/new via the UI.
+Alternatively, paste the body into https://github.com/Coincync/Coincync-Testnet-/releases/new via the UI.
 
 ---
 

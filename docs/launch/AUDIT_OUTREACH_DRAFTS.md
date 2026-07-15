@@ -49,7 +49,7 @@ and shipping.
 
 The wayfinding doc is here:
 
-https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/v1.0-mainnet-audit-prep.md
+https://github.com/Coincync/Coincync-Testnet-/blob/main/docs/v1.0-mainnet-audit-prep.md
 
 It includes the scope table, the 16-primitive cryptographic map, 14
 prioritized review targets, test-vector inventory, knowingly-missing
@@ -78,7 +78,7 @@ Thanks for considering it.
 
 — [Your name]
    CoinCync solo dev / maintainer
-   github.com/ghostrider1092/Coincync-Testnet-
+   github.com/Coincync/Coincync-Testnet-
 ```
 
 ---
@@ -128,7 +128,7 @@ audit engagement planned ~30 days post-mainnet ship.
 Audit-prep wayfinding doc, scope table, primitives map, prioritized
 review targets, and reproducibility commands:
 
-https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/v1.0-mainnet-audit-prep.md
+https://github.com/Coincync/Coincync-Testnet-/blob/main/docs/v1.0-mainnet-audit-prep.md
 
 **What I'm asking for:**
 
@@ -150,7 +150,7 @@ more detail in whatever intake format you prefer.
 
 — [Your name]
    CoinCync solo dev / maintainer
-   github.com/ghostrider1092/Coincync-Testnet-
+   github.com/Coincync/Coincync-Testnet-
 ```
 
 ---
@@ -206,7 +206,7 @@ engagement post-mainnet.
 
 Wayfinding doc + scope + primitives map + prioritized review targets:
 
-https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/v1.0-mainnet-audit-prep.md
+https://github.com/Coincync/Coincync-Testnet-/blob/main/docs/v1.0-mainnet-audit-prep.md
 
 **Funding + timing:**
 
@@ -224,7 +224,7 @@ Thanks.
 
 — [Your name]
    CoinCync solo dev / maintainer
-   github.com/ghostrider1092/Coincync-Testnet-
+   github.com/Coincync/Coincync-Testnet-
 ```
 
 ---

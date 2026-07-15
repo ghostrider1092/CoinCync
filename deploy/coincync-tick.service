@@ -1,6 +1,6 @@
 [Unit]
 Description=CoinCync tick — read-only health-monitoring sidecar (HealthTick)
-Documentation=https://github.com/ghostrider1092/Coincync-Testnet-
+Documentation=https://github.com/Coincync/Coincync-Testnet-
 # Start after the node so the local RPC is up. Wants (not Requires): the
 # sidecar tolerates a down node and simply reports the RPC as unreachable,
 # so it must not be torn down when the node restarts.

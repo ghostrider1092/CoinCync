@@ -80,7 +80,7 @@ After SSH-ing into your new VPS:
 # 1. Download the latest testnet binary (Linux x86_64)
 #    Native Linux binaries are added by the v1.0.10 release workflow;
 #    for v1.0.9-testnet-pre-audit you'll need to build from source:
-git clone https://github.com/ghostrider1092/Coincync-Testnet- coincync
+git clone https://github.com/Coincync/Coincync-Testnet- coincync
 cd coincync && cargo build --release --bin coincync-node
 
 # 2. Open port 28080 inbound (Ubuntu/Debian with ufw)
@@ -166,7 +166,7 @@ The maintainer will:
 
 - **Run a recent release.** Don't stick on a binary from 6 months
   ago — that's how the network forks. Watch
-  github.com/ghostrider1092/Coincync-Testnet-/releases for new
+  github.com/Coincync/Coincync-Testnet-/releases for new
   versions.
 - **Tell us if you're going to stop running it.** Doesn't have to
   be advance notice — even "I shut it down last week" lets us

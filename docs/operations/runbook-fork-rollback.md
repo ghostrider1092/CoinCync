@@ -92,7 +92,7 @@ ssh -i ~/.ssh/coincync_fleet root@<host> '
   systemctl stop coincync-rig 2>/dev/null
   cp /usr/local/bin/coincync-node /usr/local/bin/coincync-node.previous
   wget -O /usr/local/bin/coincync-node \
-    https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.12-rc1/coincync-node-v1.0.12-rc1
+    https://github.com/Coincync/Coincync-Testnet-/releases/download/v1.0.12-rc1/coincync-node-v1.0.12-rc1
   chmod +x /usr/local/bin/coincync-node
   sha256sum /usr/local/bin/coincync-node  # expect 5d099719ace...
   systemctl start coincync-node

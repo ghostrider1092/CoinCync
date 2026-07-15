@@ -93,7 +93,7 @@ In rough order:
 
 ### How to follow / contribute
 
-- **Source:** [github.com/ghostrider1092/Coincync-Testnet-](https://github.com/ghostrider1092/Coincync-Testnet-)
+- **Source:** [github.com/Coincync/Coincync-Testnet-](https://github.com/Coincync/Coincync-Testnet-)
 - **Live testnet:** mainnet target is October 1, 2026; testnet is live now at [explorer.coincync.network](https://explorer.coincync.network)
 - **Discord:** community + dev-updates channels for technical discussion
 - **Roadmap:** [`docs/roadmap.md`](../roadmap.md) is the source of truth for what ships when. v1.0 → v1.3 is the committed window; anything past v1.3 is research, not roadmap.
@@ -209,7 +209,7 @@ unchanged. v1.0 ships the chain. v1.1 ships the swaps.
 Next 6 months: base-chain audit, genesis ceremony prep,
 mainnet seed nodes, October 1 launch.
 
-Source: github.com/ghostrider1092/Coincync-Testnet-
+Source: github.com/Coincync/Coincync-Testnet-
 Roadmap: coincync.org
 ```
 

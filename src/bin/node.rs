@@ -543,7 +543,7 @@ fn print_genesis_hash(network: Network) {
 /// restart. Running `coincync-node check-update` explicitly is the
 /// informed-consent alternative.
 async fn check_update() {
-    const REPO: &str = "ghostrider1092/Coincync-Testnet-";
+    const REPO: &str = "Coincync/Coincync-Testnet-";
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: {}", current);
     println!("Contacting api.github.com to check for releases...");

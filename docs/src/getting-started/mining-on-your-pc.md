@@ -18,7 +18,7 @@ account.
 ## Quick start
 
 All testnet binaries are published as a single GitHub release at
-[`v1.0.2-testnet`](https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.2-testnet)
+[`v1.0.2-testnet`](https://github.com/Coincync/Coincync-Testnet-/releases/tag/v1.0.2-testnet)
 along with `SHA256SUMS.txt`. Verify after download with
 `sha256sum -c SHA256SUMS.txt`.
 
@@ -28,8 +28,8 @@ Download the node binary:
 
 |Binary|URL|
 |---|---|
-|coincync-node|<https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.2-testnet/coincync-node.exe>|
-|coincync-rig (miner)|<https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.2-testnet/coincync-rig.exe>|
+|coincync-node|<https://github.com/Coincync/Coincync-Testnet-/releases/download/v1.0.2-testnet/coincync-node.exe>|
+|coincync-rig (miner)|<https://github.com/Coincync/Coincync-Testnet-/releases/download/v1.0.2-testnet/coincync-rig.exe>|
 
 Open PowerShell in the folder where you saved them and run:
 
@@ -48,7 +48,7 @@ scrolling log). Press `q` or `Esc` to quit.
 ### Linux
 
 ```bash
-BASE=https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.2-testnet
+BASE=https://github.com/Coincync/Coincync-Testnet-/releases/download/v1.0.2-testnet
 curl -L -O $BASE/coincync-node-linux-x86_64
 curl -L -O $BASE/coincync-rig-linux-x86_64
 curl -L -O $BASE/SHA256SUMS.txt

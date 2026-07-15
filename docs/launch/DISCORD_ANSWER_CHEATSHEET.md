@@ -56,7 +56,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 
 **Q: Where's the source code?**
 > Canonical: **git.coincync.network/coincync/cync-protocol** (self-hosted Forgejo)
-> Public mirror: github.com/ghostrider1092/Coincync-Testnet-
+> Public mirror: github.com/Coincync/Coincync-Testnet-
 >
 > MIT licensed. Build with `cargo build --release --features "randomx testnet"`.
 
@@ -289,7 +289,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 ## Bug reporting
 
 **Q: I found a bug. Where do I report it?**
-> Non-security: open an issue on **github.com/ghostrider1092/Coincync-Testnet-** with the bug-report template (auto-fills environment + repro). The template asks for node version, OS, repro steps, last 200 lines of logs.
+> Non-security: open an issue on **github.com/Coincync/Coincync-Testnet-** with the bug-report template (auto-fills environment + repro). The template asks for node version, OS, repro steps, last 200 lines of logs.
 >
 > Security-sensitive (consensus, privacy, key handling, wallet integrity): email **CyncLabs@proton.me**, NOT a public issue. Proton auto-publishes a PGP key at the address; plaintext fine for non-critical reports.
 

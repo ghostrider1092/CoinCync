@@ -1,7 +1,7 @@
 # GitHub Rulesets
 
 Importable JSON for the protection rules on the public mirror at
-`github.com/ghostrider1092/Coincync-Testnet-`. Apply both before
+`github.com/Coincync/Coincync-Testnet-`. Apply both before
 inviting external contributors or shipping signed releases.
 
 ## Files

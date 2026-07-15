@@ -74,7 +74,7 @@ mkdir -p ~/coincync-bootstrap
 cd ~/coincync-bootstrap
 
 BASE="coincync-chaindata-testnet-h14800"
-RELEASE="https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.9.1-testnet"
+RELEASE="https://github.com/Coincync/Coincync-Testnet-/releases/download/v1.0.9.1-testnet"
 
 wget "$RELEASE/${BASE}.tar.gz"
 wget "$RELEASE/${BASE}.manifest.json"
@@ -174,7 +174,7 @@ Same steps, PowerShell syntax for the file operations:
 ```powershell
 # 1-3: download + verify
 $base = "coincync-chaindata-testnet-h14800"
-$release = "https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.9.1-testnet"
+$release = "https://github.com/Coincync/Coincync-Testnet-/releases/download/v1.0.9.1-testnet"
 $dest = "$env:USERPROFILE\coincync-bootstrap"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Set-Location $dest

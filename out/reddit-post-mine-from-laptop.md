@@ -66,7 +66,7 @@ the launch warms up.
 Open PowerShell, paste:
 
 ```powershell
-$base = 'https://github.com/ghostrider1092/Coincync-Testnet-/releases/latest/download'
+$base = 'https://github.com/Coincync/Coincync-Testnet-/releases/latest/download'
 Invoke-WebRequest -Uri "$base/coincync-rig.exe"    -OutFile coincync-rig.exe
 Invoke-WebRequest -Uri "$base/coincync-wallet.exe" -OutFile coincync-wallet.exe
 .\coincync-wallet.exe --network testnet --wallet testnet.bin create
@@ -83,7 +83,7 @@ shipped Windows .exe only). Build from source — 10-15 min, you only
 need this once:
 
 ```bash
-git clone https://github.com/ghostrider1092/Coincync-Testnet- coincync
+git clone https://github.com/Coincync/Coincync-Testnet- coincync
 cd coincync
 cargo build --release --bin coincync-rig --bin coincync-wallet
 ./target/release/coincync-wallet --network testnet --wallet testnet.bin create
@@ -133,7 +133,7 @@ Standard RandomX hashrate ranges (same as any RandomX coin):
 - **Deniable wallets** — two-password plausible deniability. Decoy and real data in one size-padded file; loading tries the password against both regions.
 - **Dead man's switch** — time-locked recovery metadata in the tx extra field. After 24 h – 2 y a recovery address can sweep without the owner's spend key. Validated at consensus.
 
-Full feature table — Bulletproofs+, stealth addresses, scoped view keys, encrypted memos, selective disclosure, CLSAG multisig, Noise XX P2P, auto-churn, subaddresses, etc. — at https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/PRIVACY_FEATURES.md
+Full feature table — Bulletproofs+, stealth addresses, scoped view keys, encrypted memos, selective disclosure, CLSAG multisig, Noise XX P2P, auto-churn, subaddresses, etc. — at https://github.com/Coincync/Coincync-Testnet-/blob/main/docs/PRIVACY_FEATURES.md
 
 **What's on the roadmap (NOT in v1.0):**
 
@@ -151,7 +151,7 @@ You won't get any USD value from testnet coins, but you:
 
 If you join the Discord (https://discord.gg/5tYNSCsqzy), there's a #miners channel where people are comparing rigs and configurations.
 
-Source: https://github.com/ghostrider1092/Coincync-Testnet-
+Source: https://github.com/Coincync/Coincync-Testnet-
 Block explorer: https://explorer.coincync.network
 
 ---
@@ -186,12 +186,12 @@ If you have a few cores you don't mind donating to a testnet,
 pre-mainnet miners get acknowledged in the launch announcement.
 Setup is the same Windows / Linux commands as the post in
 r/CPUMining; full quickstart at:
-https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/src/getting-started/mine-in-5-minutes.md
+https://github.com/Coincync/Coincync-Testnet-/blob/main/docs/src/getting-started/mine-in-5-minutes.md
 
 Skeptical questions welcome.
 
 Discord: https://discord.gg/5tYNSCsqzy
-Source: https://github.com/ghostrider1092/Coincync-Testnet-
+Source: https://github.com/Coincync/Coincync-Testnet-
 
 ---
 
@@ -212,9 +212,9 @@ Privacy stack: CLSAG ring sigs, Pedersen commitments, Bulletproofs+
 range proofs, stealth addresses. PoW: RandomX (CPU-only).
 
 Mining quickstart (3 PowerShell commands):
-https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/src/getting-started/mine-in-5-minutes.md
+https://github.com/Coincync/Coincync-Testnet-/blob/main/docs/src/getting-started/mine-in-5-minutes.md
 
-Source: https://github.com/ghostrider1092/Coincync-Testnet-
+Source: https://github.com/Coincync/Coincync-Testnet-
 Explorer: https://explorer.coincync.network
 Discord: https://discord.gg/5tYNSCsqzy
 
@@ -231,7 +231,7 @@ Discord: https://discord.gg/5tYNSCsqzy
 If anyone in the community can't currently mine testnet because the
 docs assume Cargo familiarity, that's fixed. New quickstart:
 
-https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/src/getting-started/mine-in-5-minutes.md
+https://github.com/Coincync/Coincync-Testnet-/blob/main/docs/src/getting-started/mine-in-5-minutes.md
 
 Three copy-paste PowerShell commands. No build step on Windows. Uses
 the public RPC at api.coincync.network — no local node required.

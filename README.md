@@ -6,7 +6,7 @@ A proof-of-work cryptocurrency with mandatory privacy at the consensus layer, an
 
 Privacy is built as **Concentric Privacy** — independent, layered defenses (transaction · linkability · network · operational), each guarding a different attack surface, arranged so that no single break exposes the whole. Consensus is fail-operational; privacy is fail-closed.
 
-**Status:** Public testnet · **[v1.0.12](https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12)** — current release · hard-fork rules activate at testnet h=13,000
+**Status:** Public testnet · **[v1.0.12](https://github.com/Coincync/Coincync-Testnet-/releases/tag/v1.0.12)** — current release · hard-fork rules activate at testnet h=13,000
 **Network:** 9-host Vultr fleet (3 seeds + explorer + 2 miners + 2 relays + api), single operator
 **Mainnet:** **targeted 2026-10-01** (gated on schema-versioning + cyncswap audit; both in flight)
 **Live chain:** [api.coincync.network/rpc/testnet](https://api.coincync.network/rpc/testnet) (`get_info` JSON-RPC) · [explorer.coincync.network](https://explorer.coincync.network)
@@ -56,7 +56,7 @@ Use at your own risk. Testnet coins have no real value. Mainnet binaries are not
 
 ```bash
 # Download the v1.0.11.7 testnet release (Linux x86_64 binary)
-wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.11.7-testnet/coincync-node-linux-x86_64-v1.0.11.7-testnet
+wget https://github.com/Coincync/Coincync-Testnet-/releases/download/v1.0.11.7-testnet/coincync-node-linux-x86_64-v1.0.11.7-testnet
 chmod +x coincync-node-linux-x86_64-v1.0.11.7-testnet
 mv coincync-node-linux-x86_64-v1.0.11.7-testnet coincync-node
 
@@ -101,7 +101,7 @@ This is the most useful thing you can do for the project right now. Same setup a
 # Save the tCYNC... address — that's where your block rewards land.
 
 # 2. On the miner box: get the rig binary (release attaches both coincync-node and coincync-rig)
-wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/latest/download/coincync-rig
+wget https://github.com/Coincync/Coincync-Testnet-/releases/latest/download/coincync-rig
 
 # 3. Run the rig pointing at your local node + payout address
 ./coincync-rig run-solo \

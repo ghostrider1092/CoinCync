@@ -307,7 +307,7 @@ Forgejo (and `git.coincync.network` will be the canonical source).
 
 | What | Where |
 |---|---|
-| Bug in the protocol / wallet / node | <https://github.com/ghostrider1092/Coincync-Testnet-/issues> with the bug-report template |
+| Bug in the protocol / wallet / node | <https://github.com/Coincync/Coincync-Testnet-/issues> with the bug-report template |
 | Security vulnerability (consensus, privacy, key handling) | `CyncLabs@proton.me` (Proton auto-publishes a PGP key at the address — fetch from inbox profile or keys.openpgp.org; plaintext fine for non-critical reports) — DO NOT file publicly |
 | "Just a question" | Discord `#faq` (read pins first) |
 | Reproducibility check failure | Open an issue with both your `sha256sum` and the published hash |

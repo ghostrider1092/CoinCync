@@ -46,7 +46,7 @@ Full nine-item priority table at [§5 of the audit-prep doc](cyncswap-audit-prep
 
 ```bash
 # Clone + check out the audited commit.
-git clone https://github.com/ghostrider1092/Coincync-Testnet-.git
+git clone https://github.com/Coincync/Coincync-Testnet-.git
 cd Coincync-Testnet-
 git checkout <commit-sha>   # from §9 out-of-band materials
 

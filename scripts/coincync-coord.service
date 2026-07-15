@@ -1,6 +1,6 @@
 [Unit]
 Description=CoinCync FROST signing coordinator (CIP-008)
-Documentation=https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/crates/coincync-frost-coordinator/src/bin/coord.rs
+Documentation=https://github.com/Coincync/Coincync-Testnet-/blob/main/crates/coincync-frost-coordinator/src/bin/coord.rs
 After=network-online.target
 Wants=network-online.target
 

@@ -2165,7 +2165,7 @@ struct UpdateInfo {
 
 #[tauri::command]
 fn check_for_update() -> UpdateInfo {
-    const REPO: &str = "ghostrider1092/Coincync-Testnet-";
+    const REPO: &str = "Coincync/Coincync-Testnet-";
     let current = env!("CARGO_PKG_VERSION").to_string();
 
     let mut info = UpdateInfo {

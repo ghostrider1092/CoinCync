@@ -88,7 +88,7 @@ foreach ($u in @(
   'https://coincync.network/release/v1.0.1-testnet/CoinCync-Wallet-Setup.exe',
   'https://coincync.network/release/v1.0.1-testnet/SHA256SUMS.txt',
   'https://releases.coincync.network/wallet/latest.json',
-  'https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.2-testnet'
+  'https://github.com/Coincync/Coincync-Testnet-/releases/tag/v1.0.2-testnet'
 )) {
   try {
     $r = Invoke-WebRequest -Uri $u -Method Head -TimeoutSec 10 `

@@ -327,7 +327,7 @@ each could surface under load or persistence-failure conditions.
 ### GitHub repository
 
 - **Public mirror published** at
-  `github.com/ghostrider1092/Coincync-Testnet-`. 669 files
+  `github.com/Coincync/Coincync-Testnet-`. 669 files
   pushed; 27 session commits visible in main.
 - **Branch + tag rulesets imported** (11eed02) —
   `release/github/main-protection-ruleset.json` (block

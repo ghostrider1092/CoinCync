@@ -16,7 +16,7 @@ Open PowerShell (Start menu → type `powershell` → Enter), then:
 
 ```powershell
 # 1. Download the miner + wallet (~30 sec)
-$base = 'https://github.com/ghostrider1092/Coincync-Testnet-/releases/latest/download'
+$base = 'https://github.com/Coincync/Coincync-Testnet-/releases/latest/download'
 Invoke-WebRequest -Uri "$base/coincync-rig.exe"    -OutFile coincync-rig.exe
 Invoke-WebRequest -Uri "$base/coincync-wallet.exe" -OutFile coincync-wallet.exe
 
@@ -48,7 +48,7 @@ For now, build locally — you only need this once.
 # Ubuntu / Debian:  sudo apt-get install build-essential pkg-config libssl-dev
 # macOS:            xcode-select --install
 
-git clone https://github.com/ghostrider1092/Coincync-Testnet- coincync
+git clone https://github.com/Coincync/Coincync-Testnet- coincync
 cd coincync
 cargo build --release --bin coincync-rig --bin coincync-wallet
 

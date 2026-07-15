@@ -54,7 +54,7 @@ The testnet history up to the current production state. Highlights:
 - v1.0.9.1 — chaindata-snapshot distribution introduced
 - v1.0.10 — current fleet binary; reorg handling complete, 59 tests + 2,304 proptest cases all green; full testnet wipe to genesis on 2026-06-04
 
-For exact tags and changelogs see [GitHub Releases](https://github.com/ghostrider1092/Coincync-Testnet-/releases).
+For exact tags and changelogs see [GitHub Releases](https://github.com/Coincync/Coincync-Testnet-/releases).
 
 ### ✅ v1.0.11 — canonical CLSAG ring signatures
 
@@ -350,7 +350,7 @@ When plans change, this document gets a PR. The commit message explains what cha
 - [CONSTITUTION.md](CONSTITUTION.md) — what cannot change, ever
 - [`docs/BILL_OF_RIGHTS.md`](docs/BILL_OF_RIGHTS.md) — user rights protected by consensus
 - [`docs/decisions/`](docs/decisions/) — architectural decision records
-- [GitHub Releases](https://github.com/ghostrider1092/Coincync-Testnet-/releases) — shipped binaries with download counts
+- [GitHub Releases](https://github.com/Coincync/Coincync-Testnet-/releases) — shipped binaries with download counts
 - [`MAINTAINERS.md`](MAINTAINERS.md) — bus-factor inventory and recovery tree
 
 ---

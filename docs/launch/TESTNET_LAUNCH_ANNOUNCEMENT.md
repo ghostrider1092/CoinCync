@@ -504,7 +504,7 @@ Run through this 30 minutes before posting. None of these should still be open b
 - [ ] **Operator note: local-node P2P lag** — long-running local nodes occasionally drift behind the fleet tip if a peer connection goes half-open. The MIN_DIFFICULTY floor (v1.0.6) prevents runaway, but residual lag persists. **Workaround:** if `tip_age_secs > 600` on the explorer, run `scripts/configure-fleet-mesh.sh` to refresh the mesh — restoring connections fixes it within ~60s. Permanent fix queued post-launch (peer-stall watchdog).
 - [ ] GitHub Release created at v1.0.6-testnet with binaries (manually attach files from `cync-release-v1.0.6-testnet/` or Downloads)
 - [ ] CI green for the latest commit
-- [ ] Forgejo `git.coincync.network/coincync/cync-protocol` — if NOT yet deployed, swap all references in this doc to `https://github.com/ghostrider1092/Coincync-Testnet-` before posting
+- [ ] Forgejo `git.coincync.network/coincync/cync-protocol` — if NOT yet deployed, swap all references in this doc to `https://github.com/Coincync/Coincync-Testnet-` before posting
 - [ ] Block height + hashrate updated to current values (run `curl https://api.coincync.network/rpc/testnet -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' | python3 -m json.tool` to grab fresh numbers)
 - [ ] Discord invite tested in private browser (not rate-limited)
 - [ ] Wallet installer download URL points at v1.0.6-testnet release artifacts (in README + announcement bodies)

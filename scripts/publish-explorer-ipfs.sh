@@ -148,7 +148,7 @@ in the browser console and reload.
 
 The frontend's SHA256 is recorded in the Fort-Knox item 4 rollout
 runbook. If you want to verify this snapshot matches source, clone
-`https://github.com/ghostrider1092/Coincync-Testnet-` at the commit
+`https://github.com/Coincync/Coincync-Testnet-` at the commit
 recorded in `BUILD_INFO.txt` (see next to this README) and run
 `bash scripts/publish-explorer-ipfs.sh --dry-run`. The `$DIST` output
 must sha256sum-match the bytes here.

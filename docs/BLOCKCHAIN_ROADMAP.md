@@ -11,7 +11,7 @@ days), **L** (two to five days), **XL** (more than a week).
 
 ## Most recently shipped — v1.0.9-testnet-pre-audit
 
-The v1.0.9 release is tagged and binaries are published at <https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.9-testnet-pre-audit>. Non-consensus, audit-prep-focused cut. **No protocol break** — operators upgrade at their own pace. Headline content:
+The v1.0.9 release is tagged and binaries are published at <https://github.com/Coincync/Coincync-Testnet-/releases/tag/v1.0.9-testnet-pre-audit>. Non-consensus, audit-prep-focused cut. **No protocol break** — operators upgrade at their own pace. Headline content:
 
 - **Reorg-handling track complete** — 9 wallet tasks shipped end-to-end (BlockApplyDiff detection journal, `scan_block_with_result` returning `Scanned`|`ReorgDetected`, `rewind_to_height` with `RewindOutcome`, `find_fork_point` MVP RPC, orchestrator recovery paths A (scan-detected) + B (periodic 30s tip-poll), Tauri `WalletStateEvent` for the wallet UI, in-app reorg banner). **59 unit + integration tests + 9 proptest properties × 256 cases = 2,304 generated cases, all green.**
 - **Wallet v2 polish** — history page empty-state icon, dashboard `tCYNC` consistency + Swap v1.1 chip, reactive Send review pane (was hardcoded zeros + dash), Receive copy button wired, `alert()` → toast across multiple flows, reorg banner CSS using the real design tokens.

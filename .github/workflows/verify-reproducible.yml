@@ -162,7 +162,7 @@ jobs:
           echo "===================================================="
           echo
           echo "Community can independently confirm with:"
-          echo "  git clone https://github.com/ghostrider1092/Coincync-Testnet-"
+          echo "  git clone https://github.com/Coincync/Coincync-Testnet-"
           echo "  cd Coincync-Testnet- && git checkout ${{ github.sha }}"
           echo "  ./scripts/build-in-docker.sh"
           echo "  sha256sum -c out/SHA256SUMS"

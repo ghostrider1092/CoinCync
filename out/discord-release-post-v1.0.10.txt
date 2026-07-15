@@ -4,7 +4,7 @@
 
 This release is the audit-prep + first-real-hard-fork milestone. Three big things: (1) the `MIN_OUTPUT_AGE` 10 → 100 consensus rule tightens the coinbase-maturity window from ~20 min to ~3.3 hours, closing the practical-attack window where an adversary with >50% hashpower could double-spend a freshly-confirmed output; (2) RandomX gets a 5-10× per-hash speedup PLUS unlocks multi-thread mining parallelism (combined → up to N× thread-count throughput improvement for miners); (3) a real secret-leak SECURITY fix in the forward-secret view-key implementation.
 
-📦  **Download:** https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.10-testnet
+📦  **Download:** https://github.com/Coincync/Coincync-Testnet-/releases/tag/v1.0.10-testnet
 
 ═══════════════════════════════════════════
 **🔴 SECURITY FIX (call this out)**
@@ -120,7 +120,7 @@ v1.0.10 closes out the v1.0.x audit-prep series. The audit firm engagement begin
 ═══════════════════════════════════════════
 
 **Sources**
-• Release: https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.10-testnet
+• Release: https://github.com/Coincync/Coincync-Testnet-/releases/tag/v1.0.10-testnet
 • Full changelog: `CHANGELOG.md` in the repo
 • Audit-prep ledger: `docs/v1.0-base-chain-hardening-punchlist.md`
 • Hard fork plan + risk register: `docs/launch/v1.0.10-CHECKLIST.md`

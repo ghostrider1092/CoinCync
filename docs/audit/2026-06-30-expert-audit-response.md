@@ -247,7 +247,7 @@ CoinCync is a privacy-preserving proof-of-work Layer 1 blockchain launching main
 - **Chain type:** Privacy PoW L1 with RandomX + CLSAG ring signatures + Bulletproofs+ range proofs + stealth addresses
 - **Language:** Rust (v1.88.0 pinned)
 - **Codebase size:** ~117,000 LOC across a workspace of ~5 approved production crates (post-scope-freeze per docs/audit/2026-06-30-expert-audit-response.md §4)
-- **Public repo:** github.com/ghostrider1092/Coincync-Testnet-
+- **Public repo:** github.com/Coincync/Coincync-Testnet-
 - **Docs:** `docs/cip/` (consensus improvement proposals), `CONSTITUTION.md`, `docs/BILL_OF_RIGHTS.md`
 - **Existing quality signals:**
   - Kani formal proofs on fee_market + difficulty helpers
