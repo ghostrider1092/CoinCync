@@ -57,6 +57,14 @@ impl BlockDb {
         self.blocks.is_empty()
     }
 
+    /// Fresh initialization is safe only when every block-related tree is empty.
+    pub fn has_any_chain_data(&self) -> bool {
+        !self.blocks.is_empty()
+            || !self.height_index.is_empty()
+            || !self.meta.is_empty()
+            || !self.pruned_headers.is_empty()
+    }
+
     /// Store a block (block data only, by hash)
     ///
     /// SECURITY (M-1): Split from old insert() which unconditionally overwrote

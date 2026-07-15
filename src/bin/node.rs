@@ -10,7 +10,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
-use coincync::chain::Blockchain;
+use coincync::chain::{Blockchain, ChainLoadOutcome};
 use coincync::config::Network;
 use coincync::db::Database;
 use coincync::mempool::SharedMempool;
@@ -324,7 +324,20 @@ async fn main() {
                     }
                 };
                 let chain = Blockchain::with_database(Arc::new(db), network);
-                let _ = chain.load_from_database();
+                match chain.load_from_database_with_outcome() {
+                    Ok(ChainLoadOutcome::Loaded) => {}
+                    Ok(ChainLoadOutcome::Fresh) => {
+                        error!(
+                            "Cannot export a snapshot from an uninitialized database at {}",
+                            chaindata_path.display()
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        error!("Cannot load chaindata for snapshot export: {}", e);
+                        std::process::exit(1);
+                    }
+                }
                 let tip = chain.tip();
                 let genesis = match network {
                     Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
@@ -684,7 +697,19 @@ async fn show_status(network: Network, data_dir: &PathBuf) {
     match Database::open(&db_path) {
         Ok(db) => {
             let chain = Blockchain::with_database(Arc::new(db), network);
-            let _ = chain.load_from_database();
+            match chain.load_from_database_with_outcome() {
+                Ok(ChainLoadOutcome::Loaded) => {}
+                Ok(ChainLoadOutcome::Fresh) => {
+                    println!("Network:   {:?}", network);
+                    println!("Data dir:  {:?}", db_path);
+                    println!("Chain:     not initialized");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("Failed to load database at {:?}: {}", db_path, e);
+                    std::process::exit(1);
+                }
+            }
             let tip = chain.tip();
             println!("Network:   {:?}", network);
             println!("Data dir:  {:?}", db_path);
@@ -932,16 +957,19 @@ async fn start_node(
         coincync::crypto::mw_cutthrough::CutThroughEngine::new(),
     )));
 
-    if let Err(e) = chain.load_from_database() {
-        warn!("load_from_database: {} (will init genesis)", e);
-        let _ = chain.init_genesis();
-    } else if chain.tip().hash.is_zero() && chain.height() == 0 {
-        // Fresh DB: load_from_database returned Ok(()) with nothing
-        // to load (no saved tip state), so genesis was never inserted.
-        // Without this, every submitted block becomes an orphan because
-        // its parent (genesis) doesn't exist in the chain.
-        info!("Fresh database: initializing genesis block");
-        let _ = chain.init_genesis();
+    match chain.load_from_database_with_outcome() {
+        Ok(ChainLoadOutcome::Loaded) => {}
+        Ok(ChainLoadOutcome::Fresh) => {
+            info!("Fresh database: initializing genesis block");
+            if let Err(e) = chain.init_genesis() {
+                error!("Failed to initialize genesis: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            error!("Failed to load chain database: {}", e);
+            std::process::exit(1);
+        }
     }
 
     let tip = chain.tip();
