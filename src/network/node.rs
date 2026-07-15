@@ -895,28 +895,43 @@ impl P2PNode {
 
     /// Start the P2P node
     pub async fn start(&self) -> Result<()> {
-        if *self.running.read().await {
+        // Keep lifecycle transitions serialized until every fallible startup
+        // resource has been acquired and the background tasks are installed.
+        let mut running_state = self.running.write().await;
+        if *running_state {
             return Err(Error::InvalidState("node already running".into()));
         }
 
-        *self.running.write().await = true;
         info!("Starting P2P node on {}", self.config.listen_addr);
 
-        // Setup UPnP if enabled. UPnP is opportunistic — many home routers
-        // refuse the request, ISPs block it, and the node works fine without
-        // it (manual port-forwarding or accept-inbound-only-from-peers-that-
-        // dial-us are both fine fallbacks). New community operators were
-        // reading the WARN as "my node is broken" — demoted to debug! so it
-        // only surfaces when explicitly looking at trace output. Reported by
-        // barns1253 on 2026-06-01 alongside getheaders + noise issues.
-        if self.config.upnp {
-            let port = self.config.listen_addr.port();
-            tokio::spawn(async move {
-                if let Err(e) = super::bootstrap::setup_upnp(port, port).await {
-                    debug!("UPnP setup failed (non-fatal — node works without it): {}", e);
-                }
-            });
-        }
+        // Bind before loading mutable startup state or launching detached work,
+        // so a port conflict leaves the node fully stopped and retryable.
+        let socket = socket2::Socket::new(
+            if self.config.listen_addr.is_ipv6() {
+                socket2::Domain::IPV6
+            } else {
+                socket2::Domain::IPV4
+            },
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .map_err(|e| Error::ConnectionFailed(format!("socket create: {e}")))?;
+        socket
+            .set_reuse_address(true)
+            .map_err(|e| Error::ConnectionFailed(format!("SO_REUSEADDR: {e}")))?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|e| Error::ConnectionFailed(format!("set_nonblocking: {e}")))?;
+        socket.bind(&self.config.listen_addr.into()).map_err(|e| {
+            Error::ConnectionFailed(format!("bind {}: {e}", self.config.listen_addr))
+        })?;
+        socket
+            .listen(128)
+            .map_err(|e| Error::ConnectionFailed(format!("listen: {e}")))?;
+        let listener = TcpListener::from_std(socket.into())
+            .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
+
+        info!("P2P node listening on {}", self.config.listen_addr);
 
         // Load persisted address book and ban list from disk
         let addr_book_path = self.config.data_dir.join("address_book.json");
@@ -980,27 +995,19 @@ impl P2PNode {
                 self.addresses.read().await.len());
         }
 
-        // Start listener
-        // Use SO_REUSEADDR to allow immediate restart after process kill.
-        // Without this, the kernel holds the socket in TIME_WAIT for 60s,
-        // preventing the node from restarting.
-        let socket = socket2::Socket::new(
-            if self.config.listen_addr.is_ipv6() { socket2::Domain::IPV6 } else { socket2::Domain::IPV4 },
-            socket2::Type::STREAM,
-            Some(socket2::Protocol::TCP),
-        ).map_err(|e| Error::ConnectionFailed(format!("socket create: {e}")))?;
-        socket.set_reuse_address(true)
-            .map_err(|e| Error::ConnectionFailed(format!("SO_REUSEADDR: {e}")))?;
-        socket.set_nonblocking(true)
-            .map_err(|e| Error::ConnectionFailed(format!("set_nonblocking: {e}")))?;
-        socket.bind(&self.config.listen_addr.into())
-            .map_err(|e| Error::ConnectionFailed(format!("bind {}: {e}", self.config.listen_addr)))?;
-        socket.listen(128)
-            .map_err(|e| Error::ConnectionFailed(format!("listen: {e}")))?;
-        let listener = TcpListener::from_std(socket.into())
-            .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
-
-        info!("P2P node listening on {}", self.config.listen_addr);
+        // Consume the one-shot receiver only after the async preparation is
+        // complete, so cancellation before this point leaves startup retryable.
+        let mut broadcast_rx = match self.tx_broadcast_rx.lock().take() {
+            Some(rx) => rx,
+            None => {
+                return Err(Error::InvalidState(
+                    "P2PNode::start called twice on the same instance — \
+                     broadcast receiver was already consumed by a prior call. \
+                     This indicates a supervisor bug or unintended re-init."
+                        .into(),
+                ));
+            }
+        };
 
         // ── Phase 2: constant-rate cover-traffic loop ──────────────────
         //
@@ -2268,31 +2275,6 @@ impl P2PNode {
         // (TIP_REBROADCAST_INTERVAL_SECS). See the constant's doc-comment
         // for the production gossip bug this closes (PR #123).
         let maint_chain_shadow = self.chain_shadow.clone();
-        // Take the broadcast queue receiver for the maintenance task.
-        //
-        // Audit fix: previously `.expect("broadcast receiver already taken")`
-        // panicked on a second start() call, terminating the async task
-        // without a graceful error path. Replaced with a typed error
-        // return so the caller can detect double-start (e.g. supervisor
-        // restart after a crash without dropping the prior P2PNode) and
-        // recover. Reference: Bitcoin Core's `CConnman::Start()` is
-        // VERIFIED at net.h:1166 in the master read this session as a
-        // `bool`-returning method on `CConnman`. The prior comment
-        // additionally asserted a specific "refuses re-start if
-        // `interruptNet` was never armed" behavioural detail; that
-        // internal precondition was not re-read this session and is
-        // dropped.
-        let mut broadcast_rx = match self.tx_broadcast_rx.lock().take() {
-            Some(rx) => rx,
-            None => {
-                return Err(Error::InvalidState(
-                    "P2PNode::start called twice on the same instance — \
-                     broadcast receiver was already consumed by a prior call. \
-                     This indicates a supervisor bug or unintended re-init.".into()
-                ));
-            }
-        };
-
         // Spawn the maintenance task with panic supervision. Previously
         // a panic inside this task (e.g., a poisoned RwLock during
         // `.write().await`) would terminate the task silently — the node
@@ -2668,7 +2650,23 @@ impl P2PNode {
             }
         });
 
+        // Launch optional external side effects only after the node's required
+        // resources and internal tasks are ready, so cancellation stays clean.
+        if self.config.upnp {
+            let port = self.config.listen_addr.port();
+            tokio::spawn(async move {
+                if let Err(e) = super::bootstrap::setup_upnp(port, port).await {
+                    debug!(
+                        "UPnP setup failed (non-fatal — node works without it): {}",
+                        e
+                    );
+                }
+            });
+        }
+
+        *running_state = true;
         info!("P2P node started successfully");
+        drop(running_state);
         Ok(())
     }
 
@@ -5713,6 +5711,29 @@ mod tests {
 
         assert_eq!(node.peer_count(), 0);
         assert!(!node.our_id().iter().all(|&b| b == 0));
+    }
+
+    #[tokio::test]
+    async fn start_bind_failure_keeps_node_stopped_and_retryable() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.listen_addr = occupied.local_addr().unwrap();
+        config.data_dir = data_dir.path().to_path_buf();
+        config.upnp = false;
+
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let node = P2PNode::new(config, chain, mempool);
+
+        let result = node.start().await;
+
+        assert!(matches!(
+            result,
+            Err(Error::ConnectionFailed(message)) if message.starts_with("bind ")
+        ));
+        assert!(!*node.running.read().await);
+        assert!(node.tx_broadcast_rx.lock().is_some());
     }
 
     /// Issue #249: detached `set_chain_state` tasks are not serialized, so
