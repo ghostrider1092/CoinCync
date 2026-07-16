@@ -437,6 +437,31 @@ pub struct SumProof {
     pub challenge: Hash,
 }
 
+/// Deterministic challenge for a sum proof (v2). Binds not just the COUNT of
+/// output references but their exact canonical identities, so references cannot
+/// be duplicated, reordered, or substituted without changing the challenge
+/// (#279). `refs` must be canonically sorted and duplicate-free.
+fn sum_proof_challenge(
+    total: u64,
+    sum_blinding: &[u8; 32],
+    height_range: (u64, u64),
+    timestamp: u64,
+    refs: &[OutputRef],
+) -> Hash {
+    let mut data: Vec<u8> = Vec::with_capacity(60 + refs.len() * 33);
+    data.extend_from_slice(&total.to_le_bytes());
+    data.extend_from_slice(&sum_blinding[..]);
+    data.extend_from_slice(&height_range.0.to_le_bytes());
+    data.extend_from_slice(&height_range.1.to_le_bytes());
+    data.extend_from_slice(&timestamp.to_le_bytes());
+    data.extend_from_slice(&(refs.len() as u32).to_le_bytes());
+    for r in refs {
+        data.extend_from_slice(r.tx_hash.as_bytes());
+        data.push(r.output_index);
+    }
+    hash_domain(b"COINCYNC_SUM_PROOF_v2", &data)
+}
+
 /// Create a proof of total received amount.
 ///
 /// # Arguments
@@ -450,12 +475,20 @@ pub fn create_sum_proof(
         return Err(Error::CryptoError("Cannot create sum proof with no outputs".into()));
     }
 
-    // Compute total and combined blinding
+    // Compute total + combined blinding, and reject duplicate references up
+    // front: a repeated (tx_hash, output_index) would double-count that
+    // commitment on the verifier side and inflate the aggregate (#279).
+    let mut seen = std::collections::HashSet::with_capacity(outputs.len());
     let mut total: u64 = 0;
     let mut blinding_sum = BlindingFactor::zero();
     let mut output_refs = Vec::with_capacity(outputs.len());
 
     for (amount, blinding, tx_hash, idx) in outputs {
+        if !seen.insert((*tx_hash.as_bytes(), *idx)) {
+            return Err(Error::CryptoError(
+                "Duplicate output reference in sum proof".into(),
+            ));
+        }
         total = total.checked_add(*amount)
             .ok_or_else(|| Error::CryptoError("Sum overflow".into()))?;
         blinding_sum = blinding_sum.add(blinding);
@@ -465,22 +498,27 @@ pub fn create_sum_proof(
         });
     }
 
+    // Canonical order so the proof and its challenge are deterministic
+    // regardless of input order (#279).
+    output_refs.sort_by(|a, b| {
+        a.tx_hash
+            .as_bytes()
+            .cmp(b.tx_hash.as_bytes())
+            .then(a.output_index.cmp(&b.output_index))
+    });
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    // Challenge: binds all fields together to prevent tampering
-    let challenge = hash_domain(
-        b"COINCYNC_SUM_PROOF_v1",
-        &[
-            &total.to_le_bytes()[..],
-            &blinding_sum.to_bytes()[..],
-            &height_range.0.to_le_bytes(),
-            &height_range.1.to_le_bytes(),
-            &timestamp.to_le_bytes(),
-            &(outputs.len() as u32).to_le_bytes(),
-        ].concat(),
+    // Challenge binds every field AND the exact canonical references (#279).
+    let challenge = sum_proof_challenge(
+        total,
+        &blinding_sum.to_bytes(),
+        height_range,
+        timestamp,
+        &output_refs,
     );
 
     Ok(SumProof {
@@ -515,18 +553,32 @@ pub fn verify_sum_proof(
         return Ok(false);
     }
 
-    // Verify challenge hash integrity
+    // Reject duplicate references: a repeated (tx_hash, output_index) would
+    // double-count its commitment and inflate the aggregate (#279).
+    let mut seen = std::collections::HashSet::with_capacity(proof.output_refs.len());
+    for r in &proof.output_refs {
+        if !seen.insert((*r.tx_hash.as_bytes(), r.output_index)) {
+            return Ok(false);
+        }
+    }
+    // Enforce canonical ordering — the challenge binds this exact order, so a
+    // reordered reference list must be rejected.
+    let canonical = proof.output_refs.windows(2).all(|w| {
+        (w[0].tx_hash.as_bytes(), w[0].output_index)
+            <= (w[1].tx_hash.as_bytes(), w[1].output_index)
+    });
+    if !canonical {
+        return Ok(false);
+    }
+
+    // Verify challenge integrity: binds all fields AND the exact references.
     let blinding = BlindingFactor::from_bytes(proof.sum_blinding);
-    let expected_challenge = hash_domain(
-        b"COINCYNC_SUM_PROOF_v1",
-        &[
-            &proof.claimed_total.to_le_bytes()[..],
-            &proof.sum_blinding[..],
-            &proof.height_range.0.to_le_bytes(),
-            &proof.height_range.1.to_le_bytes(),
-            &proof.timestamp.to_le_bytes(),
-            &(proof.output_refs.len() as u32).to_le_bytes(),
-        ].concat(),
+    let expected_challenge = sum_proof_challenge(
+        proof.claimed_total,
+        &proof.sum_blinding,
+        proof.height_range,
+        proof.timestamp,
+        &proof.output_refs,
     );
 
     if proof.challenge != expected_challenge {
@@ -1034,6 +1086,95 @@ mod tests {
         let wrong_commitment = PedersenCommitment::commit(200_000, &wrong_blinding);
 
         assert!(!verify_sum_proof(&proof, &[wrong_commitment]).unwrap());
+    }
+
+    #[test]
+    fn sum_proof_create_rejects_duplicate_reference() {
+        // #279: a repeated (tx_hash, output_index) must be rejected at creation.
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let b2 = BlindingFactor::random(&mut OsRng);
+        let v = 100_000u64;
+        let h = Hash::from_bytes([1u8; 32]);
+        // Same (tx_hash, output_index) twice — a duplicate reference.
+        let outputs = vec![(v, b1, h, 0u8), (v, b2, h, 0u8)];
+        assert!(
+            create_sum_proof(&outputs, (0, 100)).is_err(),
+            "duplicate reference must be rejected at creation"
+        );
+    }
+
+    #[test]
+    fn sum_proof_verify_rejects_duplicate_reference_inflation() {
+        // #279 attack: duplicate one real reference so its commitment is counted
+        // twice. sum(C, C) = 2C = commit(2v, 2b) would match a crafted
+        // claimed_total=2v / sum_blinding=2b — inflating the proven aggregate.
+        // The duplicate must be rejected before the commitment math is reached.
+        let b = BlindingFactor::random(&mut OsRng);
+        let v = 100_000u64;
+        let c = PedersenCommitment::commit(v, &b);
+        let h = Hash::from_bytes([7u8; 32]);
+
+        let two_b = b.add(&b);
+        let refs = vec![
+            OutputRef { tx_hash: h, output_index: 0 },
+            OutputRef { tx_hash: h, output_index: 0 },
+        ];
+        let timestamp = 123;
+        let inflated = SumProof {
+            claimed_total: 2 * v,
+            output_refs: refs.clone(),
+            sum_blinding: two_b.to_bytes(),
+            height_range: (0, 100),
+            timestamp,
+            // A correctly-computed challenge, so rejection is due to the dup
+            // check — not a challenge mismatch.
+            challenge: sum_proof_challenge(2 * v, &two_b.to_bytes(), (0, 100), timestamp, &refs),
+        };
+        assert!(
+            !verify_sum_proof(&inflated, &[c, c]).unwrap(),
+            "duplicate-reference inflation must be rejected"
+        );
+    }
+
+    #[test]
+    fn sum_proof_verify_rejects_reordered_references() {
+        // #279: references are canonically ordered and bound into the challenge;
+        // a reordered list (even with matching commitments) must be rejected.
+        let (b1, b2) = (BlindingFactor::random(&mut OsRng), BlindingFactor::random(&mut OsRng));
+        let (v1, v2) = (100_000u64, 200_000u64);
+        let c1 = PedersenCommitment::commit(v1, &b1);
+        let c2 = PedersenCommitment::commit(v2, &b2);
+        let h1 = Hash::from_bytes([1u8; 32]);
+        let h2 = Hash::from_bytes([2u8; 32]);
+
+        let mut proof =
+            create_sum_proof(&vec![(v1, b1, h1, 0u8), (v2, b2, h2, 0u8)], (0, 100)).unwrap();
+        assert!(verify_sum_proof(&proof, &[c1, c2]).unwrap(), "canonical order verifies");
+
+        proof.output_refs.reverse(); // now non-canonical
+        assert!(
+            !verify_sum_proof(&proof, &[c2, c1]).unwrap(),
+            "non-canonical reference order must be rejected"
+        );
+    }
+
+    #[test]
+    fn sum_proof_verify_rejects_substituted_reference() {
+        // #279: the challenge now binds the exact reference identities, so
+        // swapping a reference for a different one must be rejected.
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let v1 = 100_000u64;
+        let c1 = PedersenCommitment::commit(v1, &b1);
+        let h1 = Hash::from_bytes([1u8; 32]);
+
+        let mut proof = create_sum_proof(&vec![(v1, b1, h1, 0u8)], (0, 100)).unwrap();
+        assert!(verify_sum_proof(&proof, &[c1]).unwrap());
+
+        proof.output_refs[0].tx_hash = Hash::from_bytes([9u8; 32]);
+        assert!(
+            !verify_sum_proof(&proof, &[c1]).unwrap(),
+            "substituted reference must be rejected — challenge binds identities"
+        );
     }
 
     // ---- Source Proof ----
