@@ -897,24 +897,7 @@ impl P2PNode {
             return Err(Error::InvalidState("node already running".into()));
         }
 
-        *self.running.write().await = true;
         info!("Starting P2P node on {}", self.config.listen_addr);
-
-        // Setup UPnP if enabled. UPnP is opportunistic — many home routers
-        // refuse the request, ISPs block it, and the node works fine without
-        // it (manual port-forwarding or accept-inbound-only-from-peers-that-
-        // dial-us are both fine fallbacks). New community operators were
-        // reading the WARN as "my node is broken" — demoted to debug! so it
-        // only surfaces when explicitly looking at trace output. Reported by
-        // barns1253 on 2026-06-01 alongside getheaders + noise issues.
-        if self.config.upnp {
-            let port = self.config.listen_addr.port();
-            tokio::spawn(async move {
-                if let Err(e) = super::bootstrap::setup_upnp(port, port).await {
-                    debug!("UPnP setup failed (non-fatal — node works without it): {}", e);
-                }
-            });
-        }
 
         // Load persisted address book and ban list from disk
         let addr_book_path = self.config.data_dir.join("address_book.json");
@@ -999,6 +982,31 @@ impl P2PNode {
             .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
 
         info!("P2P node listening on {}", self.config.listen_addr);
+
+        // #278: publish the running state and spawn detached side effects only
+        // AFTER the listener has successfully bound above. Previously `running`
+        // was set true and UPnP spawned before the bind, so a bind failure
+        // returned Err while leaving the node observably `running` with a
+        // detached UPnP task still in flight. Startup is now transactional: if
+        // any bind step above fails via `?`, we return before marking running or
+        // spawning anything.
+        *self.running.write().await = true;
+
+        // Setup UPnP if enabled. UPnP is opportunistic — many home routers
+        // refuse the request, ISPs block it, and the node works fine without
+        // it (manual port-forwarding or accept-inbound-only-from-peers-that-
+        // dial-us are both fine fallbacks). New community operators were
+        // reading the WARN as "my node is broken" — demoted to debug! so it
+        // only surfaces when explicitly looking at trace output. Reported by
+        // barns1253 on 2026-06-01 alongside getheaders + noise issues.
+        if self.config.upnp {
+            let port = self.config.listen_addr.port();
+            tokio::spawn(async move {
+                if let Err(e) = super::bootstrap::setup_upnp(port, port).await {
+                    debug!("UPnP setup failed (non-fatal — node works without it): {}", e);
+                }
+            });
+        }
 
         // ── Phase 2: constant-rate cover-traffic loop ──────────────────
         //
