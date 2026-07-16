@@ -105,7 +105,7 @@ pbkdf2 = { version = "0.12", features = ["simple"] }
 rand        = "0.8"
 rand_chacha = "0.3"
 rand_core   = "0.6"
-rand_distr  = "0.4"
+rand_distr  = "0.6"
 getrandom   = { version = "0.2", features = ["std"] }
 
 # â”€â”€ Serialization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
