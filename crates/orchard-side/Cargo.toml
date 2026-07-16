@@ -33,7 +33,7 @@ path = "src/lib.rs"
 halo2_proofs  = "0.3"
 halo2_gadgets = "0.3"
 pasta_curves  = "0.5"
-ff            = "0.13"
+ff            = "0.14"
 group         = "0.13"
 
 # Opaque 32-byte boundary types — the SAME interface
