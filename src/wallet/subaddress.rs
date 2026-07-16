@@ -166,19 +166,13 @@ impl SubaddressManager {
     /// the next allocator hit. Build the buffer explicitly and
     /// wipe before scope-exit.
     fn derive_scalar(&self, index: SubaddressIndex) -> SecretScalar {
-        let mut input = Vec::with_capacity(32 + 8 + 8);
-        input.extend_from_slice(self.view_secret.as_bytes());
-        input.extend_from_slice(&index.account.to_le_bytes());
-        input.extend_from_slice(&index.index.to_le_bytes());
-
-        let hash = hash_domain(b"COINCYNC_SUBADDR_v1", &input);
-        // R-85: wipe the heap buffer (contains view_secret bytes)
-        // before it goes out of scope.
-        {
-            use zeroize::Zeroize;
-            input.zeroize();
-        }
-        SecretScalar::from_bytes(*hash.as_bytes())
+        // #280: delegate to the ONE canonical primitive in the crypto layer so
+        // the wallet, the crypto Subaddress helper, and the audit scanner all
+        // derive identically. The byte layout is unchanged
+        // (COINCYNC_SUBADDR_v1 over view_secret ‖ account_le32 ‖ index_le32),
+        // so existing subaddresses remain byte-for-byte identical — no funds are
+        // lost. The R-85 secret-wipe now lives inside the primitive.
+        crate::crypto::subaddress_spend_scalar(&self.view_secret, index.account, index.index)
     }
 
     /// Generate a subaddress at a specific index

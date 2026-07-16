@@ -80,6 +80,7 @@ pub use stealth::{
     // stealth.rs preserves the test fixtures without exposing a
     // panic-on-RPC-input surface to downstream crates.
     StealthAddress, is_output_ours, OutputScanContext,
+    subaddress_spend_scalar, subaddress_spend_public,
     generate_stealth_address_for, generate_stealth_address_checked,
     generate_stealth_outputs, is_output_ours_with_epoch,
     compute_one_time_secret, scan_outputs,

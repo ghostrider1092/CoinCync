@@ -58,7 +58,7 @@
 //! - Domain-separated hashing (prevents cross-protocol attacks)
 //! - Proper ECDH using curve25519-dalek (not hash-based approximation)
 
-use crate::primitives::{PublicKey, SecretKey, Address, hash_data};
+use crate::primitives::{PublicKey, SecretKey, Address, hash_data, hash_domain};
 use crate::wallet::KeyEpoch;
 use crate::error::{Error, Result};
 use super::curve::{SecretScalar, PublicPoint, hash_to_scalar};
@@ -360,8 +360,8 @@ impl RecipientKeys {
 /// ```
 pub struct ViewOnlyScanner {
     keys: RecipientKeys,
-    /// Optional: subaddresses to scan
-    subaddresses: Vec<(u32, RecipientKeys)>,
+    /// Optional: subaddresses to scan, each tagged with its (account, index).
+    subaddresses: Vec<(u32, u32, RecipientKeys)>,
 }
 
 impl ViewOnlyScanner {
@@ -378,9 +378,9 @@ impl ViewOnlyScanner {
         Self::new(&keys.view_secret, &keys.spend_public)
     }
 
-    /// Add a subaddress to scan
-    pub fn add_subaddress(&mut self, index: u32, subaddress_keys: RecipientKeys) {
-        self.subaddresses.push((index, subaddress_keys));
+    /// Add a subaddress to scan, tagged with its (account, index).
+    pub fn add_subaddress(&mut self, account: u32, index: u32, subaddress_keys: RecipientKeys) {
+        self.subaddresses.push((account, index, subaddress_keys));
     }
 
     /// Scan outputs and return information about owned outputs
@@ -393,19 +393,19 @@ impl ViewOnlyScanner {
                 results.push(ScanResult {
                     output_index: i,
                     stealth: output.stealth,
-                    subaddress_index: None,
+                    subaddress: None,
                     amount: output.amount,
                 });
                 continue;
             }
 
             // Check subaddresses
-            for (sub_idx, sub_keys) in &self.subaddresses {
+            for (acc, sub_idx, sub_keys) in &self.subaddresses {
                 if sub_keys.owns(&output.stealth, output.output_idx) {
                     results.push(ScanResult {
                         output_index: i,
                         stealth: output.stealth,
-                        subaddress_index: Some(*sub_idx),
+                        subaddress: Some((*acc, *sub_idx)),
                         amount: output.amount,
                     });
                     break;
@@ -422,7 +422,7 @@ impl ViewOnlyScanner {
             if self.keys.owns(stealth, *idx) {
                 return true;
             }
-            for (_, sub_keys) in &self.subaddresses {
+            for (_, _, sub_keys) in &self.subaddresses {
                 if sub_keys.owns(stealth, *idx) {
                     return true;
                 }
@@ -445,7 +445,8 @@ pub struct ScanOutput {
 pub struct ScanResult {
     pub output_index: usize,
     pub stealth: StealthAddress,
-    pub subaddress_index: Option<u32>,
+    /// (account, index) of the subaddress that matched, or None for the main address.
+    pub subaddress: Option<(u32, u32)>,
     pub amount: Option<u64>,
 }
 
@@ -453,13 +454,57 @@ pub struct ScanResult {
 // Subaddress Support
 // ============================================================================
 
+/// The ONE canonical subaddress derivation, shared by the wallet, the crypto
+/// [`Subaddress`] helper, and the audit scanner (#280).
+///
+/// EXACT bytes — this must NEVER change: the wallet has already issued receiving
+/// addresses with this derivation, so any change would make existing subaddress
+/// funds undiscoverable. The scalar offsets the main spend key:
+///
+/// ```text
+///   m         = SecretScalar::from_bytes( H )
+///   H         = hash_domain("COINCYNC_SUBADDR_v1",
+///                           view_secret ‖ account_le32 ‖ index_le32)
+///   sub_spend = m·G + spend_public
+/// ```
+///
+/// Both `account` and `index` are `u32`, little-endian (4 bytes each). Extracted
+/// from the wallet's original `SubaddressManager::derive_scalar` verbatim.
+pub fn subaddress_spend_scalar(view_secret: &SecretKey, account: u32, index: u32) -> SecretScalar {
+    let mut input = Vec::with_capacity(32 + 4 + 4);
+    input.extend_from_slice(view_secret.as_bytes());
+    input.extend_from_slice(&account.to_le_bytes());
+    input.extend_from_slice(&index.to_le_bytes());
+    let hash = hash_domain(b"COINCYNC_SUBADDR_v1", &input);
+    // `input` holds the view secret — wipe before it drops (R-85 class).
+    input.zeroize();
+    SecretScalar::from_bytes(*hash.as_bytes())
+}
+
+/// Canonical subaddress spend public key: `m·G + spend_public`, where `m` is
+/// [`subaddress_spend_scalar`]. Errors only if `spend_public` is off-curve.
+pub fn subaddress_spend_public(
+    spend_public: &PublicKey,
+    view_secret: &SecretKey,
+    account: u32,
+    index: u32,
+) -> Result<PublicKey> {
+    let spend_point = PublicPoint::from_bytes(*spend_public.as_bytes())
+        .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key".into()))?;
+    let m = subaddress_spend_scalar(view_secret, account, index);
+    let sub_point = m.to_public().add(&spend_point);
+    Ok(PublicKey::from_bytes(sub_point.to_bytes()))
+}
+
 /// A subaddress derived from the main wallet keys
 ///
 /// Each subaddress is unlinkable to the main address and to other subaddresses,
 /// but all can be scanned with a single view key.
 #[derive(Clone)]
 pub struct Subaddress {
-    /// Subaddress index
+    /// Account index (0 = main account)
+    pub account: u32,
+    /// Subaddress index within the account
     pub index: u32,
     /// Derived spend public key for this subaddress
     pub spend_public: PublicKey,
@@ -499,39 +544,30 @@ impl Subaddress {
     pub fn generate(
         spend_public: &PublicKey,
         view_secret: &SecretKey,
+        account: u32,
         index: u32,
     ) -> Result<Self> {
         let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
         let view_public = view_scalar.to_public();
 
-        let spend_point = PublicPoint::from_bytes(*spend_public.as_bytes())
-            .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key".into()))?;
-
-        // R-10 + R-11: build the buffer with the versioned domain
-        // separator, hash, then zeroize BEFORE dropping.
-        let mut data = Vec::with_capacity(32 + 16 + 4);
-        data.extend_from_slice(view_secret.as_bytes());
-        data.extend_from_slice(b"CYNC1_SUBADDR_v1");
-        data.extend_from_slice(&index.to_le_bytes());
-        let sub_scalar = hash_to_scalar(&data);
-        // R-10: wipe the buffer (contains view_secret bytes) before
-        // it goes out of scope.
-        data.zeroize();
-        let sub_point = SecretScalar::from_scalar(sub_scalar).to_public();
-
-        // subaddress_spend = spend_public + H(...) * G
-        let subaddr_spend_point = spend_point.add(&sub_point);
+        // #280: derive through the ONE canonical primitive
+        // (`subaddress_spend_public`, COINCYNC_SUBADDR_v1 over account+index) so
+        // the crypto/audit path matches wallet-generated subaddresses. The prior
+        // CYNC1_SUBADDR_v1 / index-only derivation here was incompatible with the
+        // wallet and is removed outright (no legacy fallback).
+        let subaddr_spend = subaddress_spend_public(spend_public, view_secret, account, index)?;
 
         Ok(Subaddress {
+            account,
             index,
-            spend_public: PublicKey::from_bytes(subaddr_spend_point.to_bytes()),
+            spend_public: subaddr_spend,
             view_public: PublicKey::from_bytes(view_public.to_bytes()),
         })
     }
 
     /// Generate from KeyEpoch
-    pub fn from_epoch(keys: &KeyEpoch, index: u32) -> Result<Self> {
-        Self::generate(&keys.spend_public, &keys.view_secret, index)
+    pub fn from_epoch(keys: &KeyEpoch, account: u32, index: u32) -> Result<Self> {
+        Self::generate(&keys.spend_public, &keys.view_secret, account, index)
     }
 
     /// Create RecipientKeys for scanning this subaddress
@@ -582,7 +618,10 @@ impl SubaddressManager {
     /// Get or generate a specific subaddress
     pub fn get_or_generate(&mut self, index: u32) -> Result<&Subaddress> {
         if !self.generated.contains_key(&index) {
-            let subaddr = Subaddress::generate(&self.spend_public, &self.view_secret, index)?;
+            // This convenience manager is account-0 scoped; multi-account
+            // derivation is handled by the wallet's SubaddressManager and by
+            // callers using `Subaddress::generate` with an explicit account.
+            let subaddr = Subaddress::generate(&self.spend_public, &self.view_secret, 0, index)?;
             self.generated.insert(index, subaddr);
         }
         // safe: we just inserted above if missing
@@ -696,13 +735,13 @@ pub struct AuditKey {
     start_height: Option<u64>,
     /// Optional restriction: only audit before this block
     end_height: Option<u64>,
-    /// R-9 surgical fix (2026-07-03): highest subaddress index the
-    /// audited wallet ever generated. When `to_scanner()` runs, it
-    /// enumerates every subaddress from 0..=subaddress_max_index and
-    /// registers each recipient key set on the ViewOnlyScanner, so
-    /// outputs to subaddresses ARE detected. `None` = main-address-only
-    /// audit (backward-compatible with pre-fix export bundles).
-    subaddress_max_index: Option<u32>,
+    /// #280: account-aware subaddress scan metadata — a list of
+    /// `(account, max_index)` pairs. `to_scanner()` enumerates, per account,
+    /// every subaddress index `0..=max_index` and registers its recipient key
+    /// set, so outputs to multi-account subaddresses ARE detected. `None` =
+    /// main-address-only audit. Replaces the prior single `subaddress_max_index`
+    /// (index-only), which could never reach account > 0.
+    subaddress_scan: Option<Vec<(u32, u32)>>,
 }
 
 impl AuditKey {
@@ -713,7 +752,7 @@ impl AuditKey {
             spend_public,
             start_height: None,
             end_height: None,
-            subaddress_max_index: None,
+            subaddress_scan: None,
         }
     }
 
@@ -729,12 +768,19 @@ impl AuditKey {
         self
     }
 
-    /// R-9 surgical fix: tell the audit key how many subaddress
-    /// indices to enumerate when a scanner is built. Pass the
-    /// wallet's `highest_index` from its subaddress book.
-    pub fn with_subaddress_max_index(mut self, max_index: u32) -> Self {
-        self.subaddress_max_index = Some(max_index);
+    /// #280: tell the audit key which subaddresses to enumerate, per account,
+    /// as `(account, max_index)` pairs. For each account, indices
+    /// `0..=max_index` are scanned. The auditor sources these from the wallet's
+    /// subaddress book (highest index used per account).
+    pub fn with_subaddress_accounts(mut self, accounts: Vec<(u32, u32)>) -> Self {
+        self.subaddress_scan = Some(accounts);
         self
+    }
+
+    /// Convenience for the common single-account case: enumerate `0..=max_index`
+    /// under account 0.
+    pub fn with_subaddress_max_index(self, max_index: u32) -> Self {
+        self.with_subaddress_accounts(vec![(0, max_index)])
     }
 
     /// Check if a block height is within audit range
@@ -770,21 +816,26 @@ impl AuditKey {
     /// pass in — that value is the source-of-truth ceiling.
     pub fn to_scanner(&self) -> Result<ViewOnlyScanner> {
         let mut scanner = ViewOnlyScanner::new(&self.view_secret, &self.spend_public)?;
-        if let Some(max_index) = self.subaddress_max_index {
-            for i in 0..=max_index {
-                // Skip index 0 = main address (already registered
-                // by ViewOnlyScanner::new via the main spend_public).
-                if i == 0 { continue; }
-                let subaddr = Subaddress::generate(
-                    &self.spend_public,
-                    &self.view_secret,
-                    i,
-                )?;
-                let sub_recipient = RecipientKeys::new(
-                    &self.view_secret,
-                    &subaddr.spend_public,
-                )?;
-                scanner.add_subaddress(i, sub_recipient);
+        if let Some(accounts) = &self.subaddress_scan {
+            for &(account, max_index) in accounts {
+                for index in 0..=max_index {
+                    // Skip the TRUE main address (account 0, index 0) — already
+                    // registered by ViewOnlyScanner::new via the main spend key.
+                    // (account>0, index 0) is a real subaddress and IS scanned.
+                    if account == 0 && index == 0 {
+                        continue;
+                    }
+                    // #280: derive via the ONE canonical primitive so these keys
+                    // match wallet-generated subaddresses.
+                    let sub_spend = subaddress_spend_public(
+                        &self.spend_public,
+                        &self.view_secret,
+                        account,
+                        index,
+                    )?;
+                    let sub_recipient = RecipientKeys::new(&self.view_secret, &sub_spend)?;
+                    scanner.add_subaddress(account, index, sub_recipient);
+                }
             }
         }
         Ok(scanner)
@@ -802,7 +853,7 @@ impl AuditKey {
             spend_public_hex: hex::encode(self.spend_public.as_bytes()),
             start_height: self.start_height,
             end_height: self.end_height,
-            subaddress_max_index: self.subaddress_max_index,
+            subaddress_scan: self.subaddress_scan.clone(),
         }
     }
 
@@ -827,17 +878,16 @@ impl AuditKey {
             spend_public: PublicKey::from_bytes(spend_arr),
             start_height: export.start_height,
             end_height: export.end_height,
-            subaddress_max_index: export.subaddress_max_index,
+            subaddress_scan: export.subaddress_scan.clone(),
         })
     }
 }
 
 /// Serializable audit key export format.
 ///
-/// R-9 surgical fix (2026-07-03): `subaddress_max_index` added.
-/// Older exports without this field decode as None (via serde's
-/// default-missing behavior for Option), preserving backward
-/// compat.
+/// #280: `subaddress_scan` carries account-aware `(account, max_index)` pairs
+/// (replaces the prior index-only `subaddress_max_index`). Older/absent field
+/// decodes as None via `#[serde(default)]` = main-address-only audit.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuditKeyExport {
     pub view_secret_hex: String,
@@ -845,7 +895,7 @@ pub struct AuditKeyExport {
     pub start_height: Option<u64>,
     pub end_height: Option<u64>,
     #[serde(default)]
-    pub subaddress_max_index: Option<u32>,
+    pub subaddress_scan: Option<Vec<(u32, u32)>>,
 }
 
 // ============================================================================
@@ -1358,7 +1408,7 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, view_public) = generate_ec_keypair();
 
-        let sub = Subaddress::generate(&spend_public, &view_secret, 0).unwrap();
+        let sub = Subaddress::generate(&spend_public, &view_secret, 0, 0).unwrap();
 
         // Subaddress should have different spend key
         assert_ne!(sub.spend_public.as_bytes(), spend_public.as_bytes());
@@ -1620,12 +1670,87 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, _view_public) = generate_ec_keypair();
 
-        let sub0 = Subaddress::generate(&spend_public, &view_secret, 0).unwrap();
-        let sub1 = Subaddress::generate(&spend_public, &view_secret, 1).unwrap();
-        let sub2 = Subaddress::generate(&spend_public, &view_secret, 2).unwrap();
+        let sub0 = Subaddress::generate(&spend_public, &view_secret, 0, 0).unwrap();
+        let sub1 = Subaddress::generate(&spend_public, &view_secret, 0, 1).unwrap();
+        let sub2 = Subaddress::generate(&spend_public, &view_secret, 0, 2).unwrap();
 
         assert_ne!(sub0.spend_public.as_bytes(), sub1.spend_public.as_bytes());
         assert_ne!(sub1.spend_public.as_bytes(), sub2.spend_public.as_bytes());
         assert_ne!(sub0.spend_public.as_bytes(), sub2.spend_public.as_bytes());
+    }
+
+    #[test]
+    fn subaddress_derivation_is_consolidated_wallet_crypto_canonical() {
+        // #280: the wallet's SubaddressManager, the crypto `Subaddress` helper,
+        // and the canonical primitive must all derive the SAME subaddress spend
+        // key for a given (account, index). Proven for a non-zero account.
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+        let (account, index) = (2u32, 7u32);
+
+        let mut mgr = SubaddressManager::new(view_secret.clone(), spend_public, view_public);
+        let wallet_sub = mgr
+            .generate_at(SubaddressIndex::new(account, index))
+            .expect("wallet subaddress")
+            .spend_public;
+
+        let canonical =
+            subaddress_spend_public(&spend_public, &view_secret, account, index).unwrap();
+        let crypto_sub = Subaddress::generate(&spend_public, &view_secret, account, index)
+            .unwrap()
+            .spend_public;
+
+        assert_eq!(
+            wallet_sub.as_bytes(),
+            canonical.as_bytes(),
+            "wallet and canonical primitive must derive identically"
+        );
+        assert_eq!(
+            canonical.as_bytes(),
+            crypto_sub.as_bytes(),
+            "crypto Subaddress must use the canonical primitive"
+        );
+    }
+
+    #[test]
+    fn audit_scanner_discovers_wallet_generated_subaddress_output() {
+        // #280 cross-module contract: an output paid to a WALLET-generated
+        // subaddress (canonical derivation, non-zero account) MUST be discovered
+        // by the crypto AuditKey scanner configured with account-aware metadata.
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+        let (account, index) = (1u32, 5u32);
+
+        // Wallet issues a subaddress at (account, index).
+        let mut mgr = SubaddressManager::new(view_secret.clone(), spend_public, view_public);
+        let sub_spend = mgr
+            .generate_at(SubaddressIndex::new(account, index))
+            .expect("wallet subaddress")
+            .spend_public;
+
+        // A sender pays it: a stealth output to (sub_spend, view_public).
+        let (stealth, _) = generate_stealth_address(&sub_spend, &view_public, 0, &mut OsRng);
+        let output = ScanOutput { stealth, output_idx: 0, amount: None };
+
+        // Auditor scans with account-aware metadata covering (account, up to index).
+        let scanner = AuditKey::new(view_secret, spend_public)
+            .with_subaddress_accounts(vec![(account, index)])
+            .to_scanner()
+            .expect("scanner");
+        let results = scanner.scan(&[output]);
+        assert_eq!(
+            results.len(),
+            1,
+            "audit scanner must discover the wallet-generated subaddress output"
+        );
+        assert_eq!(
+            results[0].subaddress,
+            Some((account, index)),
+            "discovered at the correct (account, index)"
+        );
     }
 }
