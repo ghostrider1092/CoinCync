@@ -56,4 +56,4 @@ toml = "0.8"
 # when the operator asks for it; default still emits tracing logs to
 # stdout so journalctl-driven systemd setups don't change.
 ratatui   = "0.30"
-crossterm = "0.27"
+crossterm = "0.29"
