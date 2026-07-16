@@ -280,10 +280,25 @@ impl RecipientKeys {
     /// point never matches a real recipient's expected point.
     pub fn owns(&self, stealth: &StealthAddress, output_idx: u8) -> bool {
         // Convert tx_public to curve point for ECDH.
-        // On decode failure, substitute PublicPoint::identity() so the
-        // rest of the pipeline runs identically. See R-8 note above.
-        let tx_point = PublicPoint::from_bytes(*stealth.tx_public_key.as_bytes())
-            .unwrap_or_else(PublicPoint::identity);
+        // On decode failure, substitute PublicPoint::identity() so the rest of
+        // the pipeline runs identically (uniform timing, R-8) — BUT record the
+        // failure and force the final result to `false` below.
+        //
+        // SECURITY (#280): the substituted identity is not merely
+        // "won't match" — it is exploitable. `identity · view_scalar == identity`
+        // for ANY view secret, so the shared point (and thus the expected
+        // one-time point `H(identity‖idx)·G + spend_public`) becomes a value an
+        // attacker can compute from public data alone (the recipient's public
+        // spend key). By setting `stealth.public_key` to that value with a
+        // malformed `tx_public`, the constant-time compare would succeed and
+        // forge ownership with no knowledge of the view secret. ANDing the
+        // decode-validity flag into the result closes that: a malformed
+        // `tx_public` is always rejected, while the timing stays uniform because
+        // the full ECDH/hash/compare pipeline still runs.
+        let (tx_point, tx_valid) = match PublicPoint::from_bytes(*stealth.tx_public_key.as_bytes()) {
+            Some(p) => (p, true),
+            None => (PublicPoint::identity(), false),
+        };
 
         // ECDH: shared_point = view_secret * tx_public
         let mut shared_point = tx_point.mul(&self.view_scalar);
@@ -303,8 +318,11 @@ impl RecipientKeys {
         let one_time_base = SecretScalar::from_scalar(one_time_scalar).to_public();
         let expected_point = one_time_base.add(&self.spend_point);
 
-        // SECURITY: Use constant-time comparison to prevent timing attacks
-        ct_eq(stealth.public_key.as_bytes(), &expected_point.to_bytes())
+        // SECURITY: constant-time comparison, then AND with the decode-validity
+        // flag (non-short-circuiting `&`) so a malformed tx_public — which was
+        // identity-substituted for uniform timing — is never accepted (#280).
+        let matches = ct_eq(stealth.public_key.as_bytes(), &expected_point.to_bytes());
+        tx_valid & matches
     }
 
     /// Scan a batch of outputs and return indices of owned outputs
@@ -1477,6 +1495,40 @@ mod tests {
         };
         assert!(OutputScanContext::derive(&bad_dest, &view_secret, 0).is_none());
         assert!(!is_output_ours(&bad_dest, &view_secret, &spend_public, 0));
+    }
+
+    #[test]
+    fn recipient_owns_rejects_malformed_tx_public_forgery() {
+        // #280: a malformed tx_public makes the ECDH shared point `identity`
+        // regardless of the view secret (identity·k == identity), so the
+        // expected one-time point H(identity‖idx)·G + spend_public is computable
+        // from PUBLIC data alone. An attacker could set stealth.public_key to
+        // that value with a malformed tx_public and forge ownership without the
+        // view secret. owns() must reject it.
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+        let recipient = RecipientKeys::new(&view_secret, &spend_public).unwrap();
+
+        // Positive control: a genuinely owned output still verifies.
+        let (real_stealth, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
+        assert!(recipient.owns(&real_stealth, 0), "genuine output must be owned");
+
+        // Reconstruct the forged expected point using ONLY public data.
+        let output_idx = 3u8;
+        let shared = PublicPoint::identity(); // == identity·view_scalar, view-secret-independent
+        let si = [shared.to_bytes().as_slice(), &[output_idx]].concat();
+        let one_time_base = SecretScalar::from_scalar(hash_to_scalar(&si)).to_public();
+        let spend_point = PublicPoint::from_bytes(*spend_public.as_bytes()).unwrap();
+        let forged_expected = one_time_base.add(&spend_point);
+
+        let forged = StealthAddress {
+            public_key: PublicKey::from_bytes(forged_expected.to_bytes()),
+            tx_public_key: PublicKey::from_bytes([0xFF; 32]), // malformed (not a valid point)
+        };
+        assert!(
+            !recipient.owns(&forged, output_idx),
+            "malformed tx_public must never satisfy owns() — forgery must be closed"
+        );
     }
 
     #[test]
