@@ -220,7 +220,7 @@ colored   = "2"
 indicatif = { version = "0.18", features = ["tokio"] }
 dialoguer = { version = "0.12", features = ["password"] }
 console   = "0.16"
-rustyline = "13"
+rustyline = "17"
 strsim    = "0.11"
 
 # â”€â”€ Terminal UI (kept as workspace-level shared deps; no
