@@ -1433,7 +1433,7 @@ async fn get_chain_events(State(st): State<RestState>) -> Result<Json<Value>, (S
 /// Listens on `listen_addr` and proxies requests to `jsonrpc_addr`.
 ///
 /// When `serve_explorer == true`, additionally mounts the embedded
-/// block explorer (`crate::rpc::explorer::EXPLORER_HTML`) at `GET /`
+/// block explorer assets (`crate::rpc::explorer`) at `GET /`
 /// — this gives operators a one-flag local-development explorer
 /// without any extra deployment infra. Default `false` because
 /// shipping a new exposed route turned-on-by-default surprises
@@ -1518,10 +1518,9 @@ pub async fn run_rest_api(
 
     // ─── Embedded block explorer (optional) ──────────────────
     //
-    // When `serve_explorer == true`, mount the embedded HTML
-    // from `crate::rpc::explorer::EXPLORER_HTML` at `GET /`.
-    // The HTML is a `&'static str` baked into the binary at
-    // compile time, so this is a zero-allocation handler.
+    // When `serve_explorer == true`, mount the embedded HTML, CSS,
+    // theme bootstrap, and application scripts. Every body is a
+    // `&'static str` baked into the binary at compile time.
     //
     // SAFETY NOTE: this is a local-dev convenience. For public
     // production deployment, run the standalone Caddy stack in
@@ -1530,15 +1529,52 @@ pub async fn run_rest_api(
     // TLS via Let's Encrypt, vendored CDN assets, rate limiting,
     // and persistent ACME state across container restarts.
     if serve_explorer {
-        app = app.route(
-            "/",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    crate::rpc::explorer::EXPLORER_HTML,
-                )
-            }),
-        );
+        app = app
+            .route(
+                "/",
+                get(|| async {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                        crate::rpc::explorer::EXPLORER_HTML,
+                    )
+                }),
+            )
+            .route(
+                "/explorer.css",
+                get(|| async {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                        crate::rpc::explorer::EXPLORER_CSS,
+                    )
+                }),
+            )
+            .route(
+                "/theme-init.js",
+                get(|| async {
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        )],
+                        crate::rpc::explorer::EXPLORER_THEME_JS,
+                    )
+                }),
+            );
+        for &(path, source) in crate::rpc::explorer::EXPLORER_APP_ASSETS {
+            let route = format!("/{path}");
+            app = app.route(
+                &route,
+                get(move || async move {
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        )],
+                        source,
+                    )
+                }),
+            );
+        }
     }
 
     let app = app
@@ -1729,8 +1765,8 @@ mod tests {
     #[test]
     fn test_rpc_allowlist_has_explorer_methods() {
         // These are the RPC methods that the embedded block-explorer
-        // HTML (`src/explorer/index.html`, served via
-        // `rpc::explorer::EXPLORER_HTML`) actively calls via its
+        // JavaScript (`src/explorer/app/*.js`, served via
+        // `rpc::explorer::EXPLORER_APP_ASSETS`) actively calls via its
         // same-origin `fetch('/rpc', ...)` polls. When served through
         // the REST proxy, each one MUST be in the allowlist or the
         // corresponding panel goes blank. If you add a new
@@ -1738,7 +1774,7 @@ mod tests {
         // `RPC_ALLOWED_METHODS` above.
         //
         // Locked together with the explorer-side coverage test in
-        // `crate::rpc::explorer::tests::explorer_html_calls_only_registered_methods`
+        // `crate::rpc::explorer::tests::explorer_js_calls_only_registered_methods`
         // so any drift between the two layers fails CI.
         for method in [
             "get_info",

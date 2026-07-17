@@ -1,4 +1,5 @@
 import http.server, urllib.request, json, os
+from assemble import assemble_index
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -62,6 +63,17 @@ class H(http.server.BaseHTTPRequestHandler):
             return
 
         if path == '/': path = '/index.html'
+        if path == '/index.html':
+            body = assemble_index()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-store, must-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         fp = os.path.join(HERE, path.lstrip('/').replace('/', os.sep))
         if os.path.isfile(fp):
             self.send_response(200)

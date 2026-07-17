@@ -6,6 +6,9 @@
 #
 # Layout on the box:
 #   /var/www/explorer/index.html
+#   /var/www/explorer/explorer.css
+#   /var/www/explorer/theme-init.js
+#   /var/www/explorer/app/*.js
 #   /var/www/explorer/assets/...
 #   /var/www/explorer/static/...
 #   /var/www/explorer/static/vendor/...   (chart.js, globe.gl, etc.)
@@ -44,9 +47,16 @@ try {
     throw "Windows BSD tar not found at $bsdTar -- install via 'Manage Optional Features' or use WSL"
   }
   & $bsdTar -czf $tar `
-    'src/explorer/index.html' `
+    'src/explorer/index.parts' `
+    'src/explorer/app.scripts.html' `
+    'src/explorer/fragments' `
+    'src/explorer/explorer.css' `
+    'src/explorer/theme-init.js' `
+    'src/explorer/app' `
     'src/explorer/assets' `
     'src/explorer/static' `
+    'scripts/assemble-explorer.sh' `
+    'scripts/install-explorer-bundle.sh' `
     'deploy/explorer/static/vendor'
   if ($LASTEXITCODE -ne 0) { throw "tar failed with exit $LASTEXITCODE" }
 } finally {
@@ -235,20 +245,31 @@ for f in /etc/nginx/ssl/origin.network.crt /etc/nginx/ssl/origin.network.key /et
 done
 
 # Layout the static tree
-install -d -m 0755 -o www-data -g www-data /var/www/explorer
-tar -xzf /tmp/explorer-bundle.tar.gz -C /tmp/explorer-stage --one-top-level=src 2>/dev/null || {
-  rm -rf /tmp/explorer-stage; mkdir -p /tmp/explorer-stage
-  tar -xzf /tmp/explorer-bundle.tar.gz -C /tmp/explorer-stage
-}
+rm -rf /tmp/explorer-stage
+mkdir -p /tmp/explorer-stage
+tar -xzf /tmp/explorer-bundle.tar.gz -C /tmp/explorer-stage
 
-# Move into final layout. The tar has src/explorer/* and deploy/explorer/static/vendor — flatten
-rm -rf /var/www/explorer/*
-cp -r /tmp/explorer-stage/src/explorer/index.html /var/www/explorer/
-cp -r /tmp/explorer-stage/src/explorer/assets    /var/www/explorer/   2>/dev/null || true
-cp -r /tmp/explorer-stage/src/explorer/static    /var/www/explorer/   2>/dev/null || true
-mkdir -p /var/www/explorer/static/vendor
-cp -r /tmp/explorer-stage/deploy/explorer/static/vendor/* /var/www/explorer/static/vendor/ 2>/dev/null || true
-chown -R www-data:www-data /var/www/explorer
+# Assemble before replacing the public tree so a bad manifest cannot expose a
+# partial document.
+bash /tmp/explorer-stage/scripts/assemble-explorer.sh \
+  /tmp/explorer-stage/src/explorer \
+  /tmp/explorer-stage/explorer-index.html
+
+# Build the complete web root off-path, then activate it as one directory.
+webroot=/tmp/explorer-stage/webroot
+install -d -m 0755 "$webroot/app"
+install -m 0644 /tmp/explorer-stage/explorer-index.html "$webroot/index.html"
+install -m 0644 /tmp/explorer-stage/src/explorer/explorer.css "$webroot/explorer.css"
+install -m 0644 /tmp/explorer-stage/src/explorer/theme-init.js "$webroot/theme-init.js"
+install -m 0644 /tmp/explorer-stage/src/explorer/app.scripts.html "$webroot/app.scripts.html"
+cp -r /tmp/explorer-stage/src/explorer/app/. "$webroot/app/"
+cp -r /tmp/explorer-stage/src/explorer/assets "$webroot/" 2>/dev/null || true
+cp -r /tmp/explorer-stage/src/explorer/static "$webroot/" 2>/dev/null || true
+mkdir -p "$webroot/static/vendor"
+cp -r /tmp/explorer-stage/deploy/explorer/static/vendor/. "$webroot/static/vendor/" 2>/dev/null || true
+chown -R www-data:www-data "$webroot"
+bash /tmp/explorer-stage/scripts/install-explorer-bundle.sh \
+  "$webroot" /var/www/explorer index.html --replace-all
 rm -rf /tmp/explorer-stage /tmp/explorer-bundle.tar.gz
 
 # Pull the API key from coincync.env and inject into the nginx config

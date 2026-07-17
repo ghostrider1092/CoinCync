@@ -6,7 +6,7 @@
 #
 # The published bundle is a plain static site. When served from any
 # IPFS gateway (e.g. https://cloudflare-ipfs.com/ipfs/<cid>/), the
-# frontend's `_computeApiBase()` (see src/explorer/index.html) picks
+# frontend's `_computeApiBase()` (see src/explorer/app/01-core.js) picks
 # up that we're off-origin and points its RPC calls at
 # `api.coincync.network`. Prerequisites (verified by the runbook
 # before running this script):
@@ -54,16 +54,53 @@ if [ ! -d "$SRC" ]; then
   exit 1
 fi
 
-if [ ! -f "$SRC/index.html" ]; then
-  echo "ERROR: $SRC/index.html not found" >&2
+for source_path in "$SRC/fragments/00-shell.html" "$SRC/index.parts" "$SRC/app.scripts.html" "$REPO_ROOT/scripts/assemble-explorer.sh"; do
+  if [ ! -f "$source_path" ]; then
+    echo "ERROR: required explorer source missing: $source_path" >&2
+    exit 1
+  fi
+done
+
+if [ ! -d "$SRC/app" ]; then
+  echo "ERROR: $SRC/app directory not found" >&2
+  exit 1
+fi
+
+app_assets=()
+script_prefix='<script src="'
+script_suffix='"></script>'
+while IFS= read -r raw || [ -n "$raw" ]; do
+  line="${raw%$'\r'}"
+  if [ -z "$line" ]; then
+    continue
+  fi
+  if [[ "$line" != "$script_prefix"*"$script_suffix" ]]; then
+    echo "ERROR: invalid explorer application manifest entry: $line" >&2
+    exit 1
+  fi
+  app_asset="${line#"$script_prefix"}"
+  app_asset="${app_asset%"$script_suffix"}"
+  case "$app_asset" in
+    app/*/*.js) echo "ERROR: nested explorer application asset path is not supported: $app_asset" >&2; exit 1 ;;
+    app/*.js) ;;
+    *) echo "ERROR: invalid explorer application asset path: $app_asset" >&2; exit 1 ;;
+  esac
+  if [ ! -f "$SRC/$app_asset" ]; then
+    echo "ERROR: explorer application asset missing: $SRC/$app_asset" >&2
+    exit 1
+  fi
+  app_assets+=("$app_asset")
+done < "$SRC/app.scripts.html"
+if [ "${#app_assets[@]}" -eq 0 ]; then
+  echo "ERROR: explorer HTML sources do not reference application scripts" >&2
   exit 1
 fi
 
 # Confirm the frontend already has the _computeApiBase() function. The
 # publish is meaningless without it — an origin-relative build served
 # via IPFS gateway would just 404 on every /api/ fetch.
-if ! grep -q "_computeApiBase" "$SRC/index.html"; then
-  echo "ERROR: $SRC/index.html does not contain _computeApiBase()." >&2
+if ! grep -q "_computeApiBase" "$SRC/app/01-core.js"; then
+  echo "ERROR: $SRC/app/01-core.js does not contain _computeApiBase()." >&2
   echo "       The IPFS-portable frontend fix is missing. Merge the" >&2
   echo "       Fort-Knox item 4 PR before publishing to IPFS." >&2
   exit 1
@@ -112,6 +149,10 @@ else
   find "$DIST" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
   find "$DIST" -type f -name '*.pyc' -delete 2>/dev/null || true
 fi
+
+bash "$REPO_ROOT/scripts/assemble-explorer.sh" "$SRC" "$DIST/index.html"
+rm -rf "$DIST/fragments"
+rm -f "$DIST/assemble.py" "$DIST/index.parts" "$DIST/app.scripts.html"
 
 # Add a small README so users landing directly at
 # https://ipfs.io/ipfs/<cid>/README.md understand what they're seeing.

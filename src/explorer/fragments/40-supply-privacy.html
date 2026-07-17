@@ -1,0 +1,156 @@
+<div class="page" id="page-supply">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Supply</div>
+    <div class="page-title" style="margin-bottom:6px">Supply & emission</div>
+    <div class="page-sub" style="margin-bottom:20px">Cryptographically verifiable by anyone</div>
+    <div class="info-box green">✓ Supply is cryptographically verifiable. Every CYNC traces to a coinbase tx. Zero premine. Zero dev tax. Formally verified with 13 property-based tests.</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:20px">
+      <div class="stat"><div class="label">Circulating</div><div class="val" id="sup-circ" style="color:var(--ac2)">—</div><div class="sub">CYNC mined</div></div>
+      <div class="stat"><div class="label">Max supply</div><div class="val">100M</div><div class="sub">CYNC cap</div></div>
+      <div class="stat"><div class="label">Emitted</div><div class="val" id="sup-pct">—%</div><div class="sub">of total</div></div>
+      <div class="stat"><div class="label">Per block</div><div class="val" id="sup-reward">—</div><div class="sub">CYNC reward</div></div>
+    </div>
+    <div class="two-col" style="margin-bottom:20px">
+      <div class="panel">
+        <div class="panel-head">Supply progress</div>
+        <div style="padding:20px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+            <span style="font-size:11px;color:var(--t3);font-family:var(--mono)">Mined so far</span>
+            <span class="hash" id="sup-label">— / 100,000,000 CYNC</span>
+          </div>
+          <div class="bar-bg"><div class="bar" id="sup-bar" style="width:0%"></div></div>
+          <div style="margin-top:20px;display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Premine</span><span class="mono" style="color:var(--ac2);font-weight:600">0 CYNC</span></div>
+            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Dev tax</span><span class="mono" style="color:var(--ac2);font-weight:600">0%</span></div>
+            <div style="display:flex;justify-content:space-between;padding:10px 14px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Tail emission</span><span class="mono" style="color:var(--ac2);font-weight:600">0.6 CYNC/block</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Emission schedule</div>
+        <table><thead><tr><th>Era</th><th>Block range</th><th>Reward</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Genesis</td><td class="mono">Block 0</td><td class="mono" style="color:var(--ac2)">50 CYNC</td><td><span class="badge"> Active</span></td></tr>
+          <tr><td>50% mined</td><td class="mono">~50M supply</td><td class="mono" style="color:var(--t3)">25 CYNC</td><td><span style="font-size:11px;color:var(--t3);font-family:var(--mono)">Smooth decay</span></td></tr>
+          <tr><td>75% mined</td><td class="mono">~75M supply</td><td class="mono" style="color:var(--t3)">12.5 CYNC</td><td><span style="font-size:11px;color:var(--t3);font-family:var(--mono)">Smooth decay</span></td></tr>
+          <tr><td>Tail</td><td class="mono">~99M+ supply</td><td class="mono" style="color:var(--t3)">0.6 CYNC</td><td><span style="font-size:11px;color:var(--t3);font-family:var(--mono)">Perpetual</span></td></tr>
+        </tbody></table>
+      </div>
+    </div>
+    <!-- Emission Curve Chart (#28) -->
+    <div class="panel">
+      <div class="panel-head">Emission Curve — 100M CYNC supply over time</div>
+      <div class="chart-wrap" style="height:250px"><canvas id="emission-chart-canvas"></canvas></div>
+    </div>
+    <!-- Anonymity Set Growth (#29) -->
+    <div class="panel">
+      <div class="panel-head">Anonymity Set Growth (live session)</div>
+      <div class="chart-wrap" style="height:180px"><canvas id="anon-growth-canvas"></canvas></div>
+      <div style="padding:8px 16px;font-size:10px;color:var(--t3);text-align:center;font-family:var(--mono)">Grows with every block — more outputs = more privacy for everyone</div>
+    </div>
+    <!-- Chain Events (#25) -->
+    <div class="panel">
+      <div class="panel-head">Chain Events (reorgs, forks, rejects)</div>
+      <div id="chain-events-list"><div style="padding:16px;text-align:center;color:var(--t3);font-size:11px">Loading...</div></div>
+    </div>
+  </div>
+</div>
+
+<!--  THE 4TH AMENDMENT & FINANCIAL PRIVACY  -->
+<div class="page" id="page-4thamendment">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>The CoinCync Manifesto</div>
+
+    <!-- Hero -->
+    <div style="text-align:center;padding:48px 0 36px;border-bottom:1px solid var(--b);margin-bottom:36px">
+      <div style="font-family:var(--serif);font-size:clamp(28px,5vw,42px);font-weight:300;color:var(--ac2);letter-spacing:-.02em;margin-bottom:16px;line-height:1.1">The CoinCync Manifesto</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--t3);letter-spacing:1px;text-transform:uppercase">The Constitutional Foundation of CoinCync</div>
+    </div>
+
+    <!-- CoinCync Manifesto (page header) -->
+    <div style="max-width:680px;margin:0 auto 36px;padding:28px 32px;background:linear-gradient(135deg,rgba(158,122,62,.08),rgba(158,122,62,.02));border:1px solid rgba(158,122,62,.2);border-radius:12px">
+      <div style="font-family:var(--serif);font-size:18px;font-style:italic;color:var(--t);line-height:1.8;font-weight:300">"We built CoinCync on one principle: your money is yours. Not visible to surveillance. Not subject to seizure. Not dependent on permission. Enforced by proofs, not promises."</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--ac2);margin-top:14px;text-align:right;letter-spacing:1px">— THE COINCYNC MANIFESTO</div>
+    </div>
+
+    <!-- Why a manifesto -->
+    <div style="max-width:680px;margin:0 auto 36px">
+      <div style="font-family:var(--serif);font-size:22px;font-weight:300;color:var(--t);margin-bottom:16px">Why a manifesto?</div>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px;font-weight:300">Most cryptocurrencies ship a whitepaper. We shipped a manifesto, then a Constitution, then code that enforces both. The reason is simple: privacy in money has always been a <em>request</em> &mdash; you ask a bank not to freeze your account, you ask a payment processor not to deplatform you, you ask a chain-analytics firm not to sell your transaction history. Every piece of financial freedom you currently have, you have because nobody got around to taking it yet.</p>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8">CoinCync is built on the opposite premise: privacy is a <strong style="color:var(--ac2)">property of the system</strong>, not a request you make of it. There is nothing to ask, no permission to grant, no policy to lobby for. The math runs whether anyone wants it to or not.</p>
+    </div>
+
+    <!-- The two failure modes -->
+    <div style="max-width:680px;margin:0 auto 36px">
+      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:20px">The two failure modes we eliminated</div>
+
+      <div style="display:grid;gap:20px">
+        <!-- Custody capture -->
+        <div style="padding:24px;background:var(--s2);border:1px solid var(--b);border-radius:12px">
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:12px">1. Custody capture</div>
+          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">When somebody else holds your money, they can freeze it, monitor it, report it, restrict where it goes. This is not theory: bank accounts get closed for political donations, payment processors deplatform customers without notice, exchange withdrawals get suspended overnight. The custodian becomes the choke point.</div>
+          <div style="padding:14px 16px;background:rgba(239,68,68,.06);border-left:3px solid #EF4444;border-radius:0 8px 8px 0;font-size:13px;color:var(--t2);line-height:1.6;font-style:italic">CoinCync answer: there is no custodian. The wallet runs on your machine, the keys live on your disk, the network has no operator to call. You own the coin in the literal sense &mdash; you hold the only thing that can spend it.</div>
+        </div>
+
+        <!-- Ledger surveillance -->
+        <div style="padding:24px;background:var(--s2);border:1px solid var(--b);border-radius:12px">
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:12px">2. Ledger surveillance</div>
+          <div style="font-size:14px;color:var(--t2);line-height:1.7;margin-bottom:12px">A blockchain anyone can read is a blockchain anyone can surveil. Bitcoin's transparent ledger is its most-marketed feature and its biggest privacy hole &mdash; an entire industry exists to re-identify wallets, cluster addresses, and sell transaction histories to governments and corporations. "Permissionless" did not mean "private."</div>
+          <div style="padding:14px 16px;background:rgba(212,160,89,.06);border-left:3px solid var(--ac2);border-radius:0 8px 8px 0;font-size:13px;color:var(--t2);line-height:1.6;font-style:italic">CoinCync answer: the chain itself encrypts every input, output, amount, and signing key. Even with full read access to every block ever produced, an observer sees ring members instead of senders, stealth outputs instead of receivers, Pedersen commitments instead of amounts. There is nothing to read.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- How it adds up -->
+    <div style="max-width:680px;margin:0 auto 36px">
+      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:16px">How it adds up</div>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:16px">Custody capture is solved by self-custody &mdash; your keys, your coins, no operator in the loop. Ledger surveillance is solved by encrypting every field that matters &mdash; sender, receiver, amount, IP. Combined, the result is a financial network with <strong style="color:var(--ac2)">nothing to seize and nothing to surveil</strong>.</p>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8">No subpoena reaches a custodian (there isn't one). No chain-analysis firm reconstructs your spending pattern (the chain is encrypted). No payment processor freezes your account (you don't have one). The privacy isn't a promise we made &mdash; it's a property of how the system was built.</p>
+    </div>
+
+    <!-- Math beats policy -->
+    <div style="max-width:680px;margin:0 auto 36px">
+      <div style="font-family:var(--serif);font-size:22px;color:var(--t);margin-bottom:20px">Math beats policy.</div>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8;margin-bottom:20px">Policies can be reinterpreted overnight. Code that has been audited, signed, and merge-mined into the chain at block height N cannot be reinterpreted at all &mdash; it can only be hard-forked, and only if every node operator agrees to upgrade. That is the difference between a privacy <em>promise</em> and a privacy <em>property</em>. Four primitives carry the weight:</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
+        <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
+          <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">CLSAG</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">Ring signatures &mdash; sender hidden</div>
+        </div>
+        <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
+          <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">Stealth</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">One-time addresses &mdash; receiver hidden</div>
+        </div>
+        <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
+          <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">BP+</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">Bulletproofs+ &mdash; amount hidden</div>
+        </div>
+        <div style="padding:16px;background:var(--s2);border:1px solid var(--b);border-radius:8px;text-align:center">
+          <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--ac2)">D++</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:4px">Dandelion++ &mdash; IP hidden</div>
+        </div>
+      </div>
+      <p style="font-size:14px;color:var(--t2);line-height:1.8">These aren't features. They aren't options. They are mandatory on every transaction, enforced by consensus, written into the Constitution at Block 0. No governance vote can remove them. No fork can disable them without breaking the chain.</p>
+    </div>
+
+    <!-- Closing -->
+    <div style="max-width:680px;margin:0 auto 48px;text-align:center;padding:32px;background:linear-gradient(135deg,rgba(158,122,62,.08),rgba(158,122,62,.02));border:1px solid rgba(158,122,62,.15);border-radius:16px">
+      <div style="font-family:var(--serif);font-size:26px;color:var(--ac2);margin-bottom:12px">Privacy money that requires no permission.</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.7;font-weight:300">CoinCync's privacy isn't a feature flag, a premium tier, or an opt-in. It's the only mode the network knows how to run in. Ring signatures hide the sender. Stealth addresses hide the receiver. Pedersen commitments hide the amount. Dandelion++ hides the IP. And a Constitution that makes all of this mandatory &mdash; permanently.</div>
+      <div style="margin-top:20px;display:flex;gap:12px;justify-content:center">
+        <button onclick="go('home')" class="btn btn-outline">Back to home</button>
+        <button onclick="go('supply')" class="btn btn-outline">Supply</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  SEARCH  -->
+<div class="page" id="page-search">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Search</div>
+    <div class="page-title" style="margin-bottom:4px">Search results</div>
+    <div class="page-sub" id="sq-label" style="margin-bottom:20px">—</div>
+    <div id="search-body"><div class="loading">Searching...</div></div>
+  </div>
+</div>

@@ -37,15 +37,25 @@ def main() -> int:
     if "COINCYNC_FAUCET_BIND" not in faucet or "127.0.0.1" not in faucet:
         failures.append("scripts/faucet.py must default bind to loopback")
 
-    explorer = read("src/explorer/index.html")
+    explorer_manifest = ROOT / "src/explorer/index.parts"
+    explorer_parts = [
+        read(f"src/explorer/{entry}")
+        for raw in explorer_manifest.read_text(encoding="utf-8").splitlines()
+        if (entry := raw.strip()) and not entry.startswith("#")
+    ]
+    explorer_parts.extend(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "src/explorer/app").glob("*.js"))
+    )
+    explorer = "".join(explorer_parts)
     if "allow_remote_crypto" not in explorer:
-        failures.append("src/explorer/index.html must gate remote crypto import behind explicit opt-in")
+        failures.append("explorer sources must gate remote crypto import behind explicit opt-in")
     if "enable_browser_wallet" not in explorer:
-        failures.append("src/explorer/index.html must gate browser wallet generation behind explicit dev opt-in")
+        failures.append("explorer sources must gate browser wallet generation behind explicit dev opt-in")
     if "window.location.hostname === 'localhost'" not in explorer:
-        failures.append("src/explorer/index.html should restrict browser wallet generation to localhost")
+        failures.append("explorer sources should restrict browser wallet generation to localhost")
     if "dev_explorer" not in explorer:
-        failures.append("src/explorer/index.html must gate non-core explorer pages behind explicit dev_explorer opt-in")
+        failures.append("explorer sources must gate non-core explorer pages behind explicit dev_explorer opt-in")
 
     dev_server = read("src/explorer/serve.py")
     if "COINCYNC_EXPLORER_DEV_PROXY" not in dev_server:

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────
-# CoinCync explorer — flip CDN URLs to vendored paths in index.html
+# CoinCync explorer — flip CDN URLs to vendored paths in frontend sources
 # ──────────────────────────────────────────────────────────────────────
 #
-# This script does the destructive HTML edit that turns the embedded
+# This script does the destructive source edit that turns the embedded
 # block explorer from "fetches from cdn.jsdelivr.net" into "fetches
 # from /static/vendor/...". Run it AFTER `./fetch-vendor.sh` succeeds,
 # so the vendored files actually exist on disk.
@@ -11,17 +11,17 @@
 # Why it's a separate script:
 #
 #   - fetch-vendor.sh is idempotent (TOFU-pinned, safe to re-run)
-#   - patch-vendor.sh is a one-way HTML edit that, if run twice,
+#   - patch-vendor.sh is a one-way source edit that, if run twice,
 #     would either no-op or produce broken output
 #   - Splitting them means CI / ops can verify vendored files exist
-#     BEFORE rewriting the HTML, instead of leaving the explorer
+#     BEFORE rewriting the sources, instead of leaving the explorer
 #     broken between the download step and the patch step
 #
 # Workflow:
 #
 #   ./fetch-vendor.sh        # populate static/vendor/
-#   ./patch-vendor.sh        # rewrite src/explorer/index.html
-#   git diff src/explorer/index.html  # review the changes
+#   ./patch-vendor.sh        # rewrite the explorer shell + app/*.js
+#   git diff src/explorer/fragments/00-shell.html src/explorer/app
 #   cargo test --lib -p coincync explorer
 #                            # the existing CDN-enumeration test in
 #                            # rpc/explorer.rs::tests will fail until
@@ -37,7 +37,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENDOR_DIR="$SCRIPT_DIR/static/vendor"
-HTML_PATH="$SCRIPT_DIR/../../src/explorer/index.html"
+SOURCE_PATHS=(
+  "$SCRIPT_DIR/../../src/explorer/fragments/00-shell.html"
+  "$SCRIPT_DIR/../../src/explorer/app/"*.js
+)
 
 if [ -t 1 ]; then
   RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
@@ -45,10 +48,12 @@ else
   RED=''; GRN=''; YLW=''; DIM=''; RST=''
 fi
 
-if [ ! -f "$HTML_PATH" ]; then
-  echo "${RED}ERROR${RST}: $HTML_PATH not found"
-  exit 1
-fi
+for source_path in "${SOURCE_PATHS[@]}"; do
+  if [ ! -f "$source_path" ]; then
+    echo "${RED}ERROR${RST}: $source_path not found"
+    exit 1
+  fi
+done
 
 # ── Pre-flight: every vendored file must exist ────────────────────────
 #
@@ -81,16 +86,18 @@ if [ "$missing" -gt 0 ]; then
   exit 1
 fi
 
-# ── Backup ────────────────────────────────────────────────────────────
-backup="$HTML_PATH.pre-vendor-patch.bak"
-cp "$HTML_PATH" "$backup"
-echo "${DIM}backup${RST}   $backup"
+# ── Backups ───────────────────────────────────────────────────────────
+for source_path in "${SOURCE_PATHS[@]}"; do
+  backup="$source_path.pre-vendor-patch.bak"
+  cp "$source_path" "$backup"
+  echo "${DIM}backup${RST}   $backup"
+done
 
 # ── Patch table ───────────────────────────────────────────────────────
 #
 # Each entry: "<find>|<replace>"
 #
-# The find side is the EXACT URL that appears in index.html today.
+# The find side is the exact URL that appears in the explorer sources today.
 # The replace side is the vendored same-origin path (relative to
 # /static/vendor/), served by the production web server from
 # `deploy/explorer/static/vendor`.
@@ -107,14 +114,14 @@ echo "${DIM}backup${RST}   $backup"
 # pattern that doesn't match anything in the file. Discovered the
 # hard way during the first vendoring run on Git Bash.
 PATCHES=(
-  # ── Script-tag CDN includes (lines ~22-25 of index.html) ───────
+  # ── Script-tag CDN includes in the HTML shell ──────────────────
   "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js|/static/vendor/chart.js/4.4.0/chart.umd.min.js"
   "https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js|/static/vendor/d3/7/d3.min.js"
   "https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js|/static/vendor/topojson-client/3/topojson-client.min.js"
   "https://cdn.jsdelivr.net/npm/globe.gl@2.27.3/dist/globe.gl.min.js|/static/vendor/globe.gl/2.27.3/globe.gl.min.js"
 
   # ── Inline d3.json() world-atlas fetches ───────────────────────
-  # The explorer's inline JS calls d3.json('https://...countries-110m.json')
+  # The explorer application calls d3.json('https://...countries-110m.json')
   # at multiple points (line ~3076 and ~3687). Both fetch the same
   # file we already vendored above as the script-tag asset.
   "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json|/static/vendor/world-atlas/2/countries-110m.json"
@@ -123,7 +130,7 @@ PATCHES=(
   # The 3D globe widget loads three textures via TWO different URL
   # forms (npm/... and gh/vasturiano/...) which both resolve to the
   # same upstream files. We patch both forms to the same vendored
-  # path so the globe works regardless of which URL the inline JS
+  # path so the globe works regardless of which URL the application
   # tries.
   "https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-day.jpg|/static/vendor/three-globe/textures/earth-day.jpg"
   "https://cdn.jsdelivr.net/gh/vasturiano/three-globe/example/img/earth-day.jpg|/static/vendor/three-globe/textures/earth-day.jpg"
@@ -145,8 +152,8 @@ PATCHES=(
 
 # ── Apply patches ─────────────────────────────────────────────────────
 #
-# We use perl in slurp mode (-0777) because index.html has lines
-# longer than 60,000 characters and line-based perl chokes on the
+# We use perl in slurp mode (-0777) because the source assets can have
+# lines longer than 60,000 characters and line-based perl chokes on the
 # in-place rename for files like that on some platforms.
 #
 # CRITICAL: strings are passed to perl via the FIND/REPL environment
@@ -167,39 +174,44 @@ for p in "${PATCHES[@]}"; do
   find_str="${p%|*}"
   repl_str="${p#*|}"
 
-  # Confirm the find string actually exists before we attempt the
-  # rewrite — catches the "already patched" case and bails cleanly.
-  if ! grep -qF "$find_str" "$HTML_PATH"; then
-    echo "${YLW}SKIP${RST}     $find_str  ${DIM}(not found in HTML — already patched?)${RST}"
-    continue
-  fi
+  found=0
+  for source_path in "${SOURCE_PATHS[@]}"; do
+    if ! grep -qF "$find_str" "$source_path"; then
+      continue
+    fi
+    found=1
 
-  tmp="$(mktemp)"
-  if FIND="$find_str" REPL="$repl_str" perl -0777 -pe '
-        BEGIN { $f = $ENV{FIND}; $r = $ENV{REPL}; }
-        s/\Q$f\E/$r/g;
-      ' "$HTML_PATH" > "$tmp"; then
-    mv "$tmp" "$HTML_PATH"
-    echo "${GRN}PATCHED${RST}  $find_str"
-    echo "         ${DIM}→ $repl_str${RST}"
-    applied=$((applied + 1))
-  else
-    rm -f "$tmp"
-    echo "${RED}FAILED${RST}   $find_str  ${DIM}(perl error)${RST}"
+    tmp="$(mktemp)"
+    if FIND="$find_str" REPL="$repl_str" perl -0777 -pe '
+          BEGIN { $f = $ENV{FIND}; $r = $ENV{REPL}; }
+          s/\Q$f\E/$r/g;
+        ' "$source_path" > "$tmp"; then
+      mv "$tmp" "$source_path"
+      echo "${GRN}PATCHED${RST}  $find_str"
+      echo "         ${DIM}→ $repl_str ($source_path)${RST}"
+      applied=$((applied + 1))
+    else
+      rm -f "$tmp"
+      echo "${RED}FAILED${RST}   $find_str  ${DIM}(perl error in $source_path)${RST}"
+    fi
+  done
+
+  if [ "$found" -eq 0 ]; then
+    echo "${YLW}SKIP${RST}     $find_str  ${DIM}(not found — already patched?)${RST}"
   fi
 done
 
 # ── Sanity-check the result ───────────────────────────────────────────
-remaining=$(grep -c "cdn.jsdelivr.net" "$HTML_PATH" || true)
+remaining=$({ grep -h "cdn.jsdelivr.net" "${SOURCE_PATHS[@]}" || true; } | wc -l | tr -d ' ')
 if [ "$remaining" -gt 0 ]; then
   echo
-  echo "${YLW}WARN${RST}: $remaining cdn.jsdelivr.net references remain in index.html."
-  echo "       Either the PATCHES table is incomplete or the HTML uses"
+  echo "${YLW}WARN${RST}: $remaining cdn.jsdelivr.net references remain in explorer sources."
+  echo "       Either the PATCHES table is incomplete or a source uses"
   echo "       multiple URL formats for the same asset. Review with:"
-  echo "         grep -n cdn.jsdelivr.net $HTML_PATH"
+  echo "         grep -n cdn.jsdelivr.net ${SOURCE_PATHS[*]}"
 fi
 
-google_fonts=$(grep -c "fonts.googleapis.com" "$HTML_PATH" || true)
+google_fonts=$({ grep -h "fonts.googleapis.com" "${SOURCE_PATHS[@]}" || true; } | wc -l | tr -d ' ')
 if [ "$google_fonts" -gt 0 ]; then
   echo
   echo "${YLW}NOTE${RST}: $google_fonts fonts.googleapis.com reference(s) still present."
@@ -211,8 +223,8 @@ fi
 echo
 echo "${DIM}─────────────────────────────────────────────${RST}"
 echo "${GRN}OK${RST}: applied $applied patch(es)"
-echo "${DIM}     review the diff:  git diff $HTML_PATH${RST}"
-echo "${DIM}     restore backup:   mv $backup $HTML_PATH${RST}"
+echo "${DIM}     review the diff:  git diff -- src/explorer/fragments/00-shell.html src/explorer/app${RST}"
+echo "${DIM}     restore backups:  move each *.pre-vendor-patch.bak over its source${RST}"
 echo
 echo "${YLW}NEXT${RST}: update the explorer CDN test to match the new state:"
 echo "       \`cargo test --lib -p coincync explorer_html_lists_external_cdns\`"

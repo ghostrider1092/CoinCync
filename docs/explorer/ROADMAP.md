@@ -1,7 +1,7 @@
 # Explorer — Update Log + Roadmap
 
 The public block explorer lives at [explorer.coincync.network](https://explorer.coincync.network)
-and is served from the static file at [src/explorer/index.html](../../src/explorer/index.html).
+and is served from the static asset bundle in [src/explorer/](../../src/explorer/).
 This document tracks what shipped, what's queued, and what was deliberately rejected.
 
 It's a living roadmap, not a release contract. Items move between
@@ -298,7 +298,8 @@ established pattern is:
    convention). Clear the interval when leaving the page to avoid
    wasted RPCs.
 
-The v1.0.8 status panel ([src/explorer/index.html:909-1000](../../src/explorer/index.html#L909))
+The v1.0.8 status panel in
+[src/explorer/fragments/10-home.html](../../src/explorer/fragments/10-home.html)
 is a concrete template — copy that structure for new tiles.
 
 ## Privacy invariants for explorer code

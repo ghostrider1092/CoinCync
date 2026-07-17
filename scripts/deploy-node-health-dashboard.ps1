@@ -16,7 +16,7 @@ Three actions, in this order:
    5 fleet members. Each route adds the Bearer header server-side so
    the browser never sees the API key.
 
-3. Explorer box: re-deploy the updated index.html (the GNODES/MNODES/
+3. Explorer box: re-deploy the updated first-party asset bundle (the GNODES/MNODES/
    NODES arrays are now correct for the new fleet).
 
 Idempotent — re-runnable.
@@ -139,13 +139,60 @@ try {
   Remove-Item -Force -ErrorAction SilentlyContinue $tmp
 }
 
-# ─── 3. Redeploy explorer index.html ────────────────────────────────────
+# ─── 3. Redeploy explorer first-party assets ────────────────────────────
 Write-Host ""
-Write-Host "=== explorer - redeploying index.html with new fleet arrays ==="
-$indexHtml = Join-Path $RepoRoot 'src\explorer\index.html'
-& scp -i $KeyPath -q $indexHtml "root@${ExplorerIP}:/tmp/index.html.new"
-if ($LASTEXITCODE -ne 0) { throw "SCP index.html failed" }
-& ssh -i $KeyPath "root@${ExplorerIP}" "install -m 0644 -o www-data -g www-data /tmp/index.html.new /var/www/explorer/index.html && rm /tmp/index.html.new && echo 'index.html installed'" 2>&1 | Where-Object { $_ -notmatch 'Permanently added' }
+Write-Host "=== explorer - redeploying frontend assets with new fleet arrays ==="
+$bundleName = "coincync-explorer-bundle-$([guid]::NewGuid().ToString('N'))"
+$bundleDir = Join-Path ([IO.Path]::GetTempPath()) $bundleName
+$bundleAppDir = Join-Path $bundleDir 'app'
+$remoteBundle = "/tmp/$bundleName"
+try {
+  [IO.Directory]::CreateDirectory($bundleAppDir) | Out-Null
+  $assembledIndex = Join-Path $bundleDir 'index.html'
+  & (Join-Path $RepoRoot 'scripts\assemble-explorer.ps1') `
+    -SourceRoot (Join-Path $RepoRoot 'src\explorer') `
+    -Destination $assembledIndex
+
+  foreach ($asset in @('explorer.css', 'theme-init.js', 'app.scripts.html')) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "src\explorer\$asset") `
+      -Destination (Join-Path $bundleDir $asset)
+  }
+
+  $appManifest = Join-Path $RepoRoot 'src\explorer\app.scripts.html'
+  $appAssets = @(
+    foreach ($line in Get-Content -LiteralPath $appManifest -Encoding UTF8) {
+      $entry = $line.Trim()
+      if (-not $entry) { continue }
+      if ($entry -notmatch '^<script src="(app/[^/"]+\.js)"></script>$') {
+        throw "Invalid explorer application manifest entry: $entry"
+      }
+      $Matches[1]
+    }
+  )
+  if ($appAssets.Count -eq 0) {
+    throw "Explorer application manifest contains no scripts: $appManifest"
+  }
+  if (($appAssets | Sort-Object -Unique).Count -ne $appAssets.Count) {
+    throw "Explorer application manifest contains duplicate scripts: $appManifest"
+  }
+  foreach ($relative in $appAssets) {
+    $source = Join-Path (Join-Path $RepoRoot 'src\explorer') $relative
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+      throw "Explorer application asset missing: $source"
+    }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $bundleAppDir ([IO.Path]::GetFileName($relative)))
+  }
+  Copy-Item -LiteralPath (Join-Path $RepoRoot 'scripts\install-explorer-bundle.sh') `
+    -Destination (Join-Path $bundleDir 'install-explorer-bundle.sh')
+
+  & scp -i $KeyPath -q -r $bundleDir "root@${ExplorerIP}:$remoteBundle"
+  if ($LASTEXITCODE -ne 0) { throw "SCP explorer bundle failed" }
+  & ssh -i $KeyPath "root@${ExplorerIP}" "bash '$remoteBundle/install-explorer-bundle.sh' '$remoteBundle' /var/www/explorer index.html"
+  if ($LASTEXITCODE -ne 0) { throw "Transactional explorer bundle install failed" }
+} finally {
+  & ssh -i $KeyPath "root@${ExplorerIP}" "rm -rf -- '$remoteBundle'" 2>$null
+  Remove-Item -LiteralPath $bundleDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # ─── 4. Verify each /health/* route end-to-end through Cloudflare ───────
 Write-Host ""

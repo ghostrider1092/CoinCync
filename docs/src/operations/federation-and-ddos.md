@@ -111,7 +111,7 @@ The mirror list is published as a small static JSON file at `https://docs.coincy
 }
 ```
 
-The explorer's inline JS fetches this on load and offers a "switch mirror" affordance in the UI. A failed RPC fetch on the primary auto-falls-back to the next mirror in the list.
+The explorer application fetches this on load and offers a "switch mirror" affordance in the UI. A failed RPC fetch on the primary auto-falls-back to the next mirror in the list.
 
 This file is the only thing CoinCync centralizes — and it's static, cacheable, replicable, and the failure mode is graceful (a stale mirrors list still works because the URLs in it are stable).
 

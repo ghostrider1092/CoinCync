@@ -26,6 +26,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[path = "build/explorer.rs"]
+mod explorer_assets;
+
 /// Files whose hashes are verified at build time. Kept in lock-step with
 /// `CRITICAL_FILES` in `src/bin/update_critical_hashes.rs`.
 const CRITICAL_FILES: &[&str] = &[
@@ -49,6 +52,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=PROFILE");
+    explorer_assets::assemble();
 
     // Register cfg(kani) so the compiler doesn't warn when it sees
     // `#[cfg(kani)]` gated proof modules in src/. Kani itself sets

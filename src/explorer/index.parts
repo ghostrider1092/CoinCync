@@ -1,0 +1,18 @@
+# Ordered HTML source fragments. Assemble to index.html; do not serve fragments.
+fragments/00-shell.html
+fragments/10-home.html
+fragments/20-chain.html
+fragments/30-network.html
+fragments/40-supply-privacy.html
+fragments/50-overlays-runtime.html
+app.scripts.html
+fragments/60-docs-index-node.html
+fragments/61-docs-privacy.html
+fragments/62-docs-protocol.html
+fragments/63-docs-testnet.html
+fragments/64-docs-wallet.html
+fragments/65-docs-rights.html
+fragments/70-tools.html
+fragments/80-privacy-governance.html
+fragments/90-analytics.html
+fragments/99-footer.html

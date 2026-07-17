@@ -1,0 +1,404 @@
+<div class="page" id="removed-page-walletdoc">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Wallet Guide</div>
+    <div class="doc-page"><h2>CoinCync Wallet Guide</h2>
+<div style="height:8px"></div>
+<p>This guide covers the CoinCync command-line wallet (<code>cync-wallet</code>).</p>
+<div style="height:8px"></div>
+<h3>Overview</h3>
+<div style="height:8px"></div>
+<p>The CoinCync wallet provides:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Secure key management with BIP39 mnemonics</li>
+<li>Transaction sending and receiving</li>
+<li>Balance tracking and history</li>
+<li>Subaddress management for privacy</li>
+<li>Confidential asset operations (issue, send, audit)</li>
+<li>Testnet faucet for free test coins</li>
+<li>View key export for compliance</li>
+<li>Name registration (.cync names)</li>
+<li>TLS-encrypted RPC connections</li>
+<li>Interactive shell mode</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Getting Started</h3>
+<div style="height:8px"></div>
+<h4>Creating a New Wallet</h4>
+<div style="height:8px"></div>
+<pre><code># Create a new wallet (named "mywallet")
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet create
+
+# You will receive:
+# 1. A 24-word seed phrase — WRITE IT DOWN AND STORE SECURELY
+# 2. Your primary wallet address (tCYNC... for testnet)</code></pre>
+<div style="height:8px"></div>
+<h4>Restoring a Wallet</h4>
+<div style="height:8px"></div>
+<pre><code># Restore from seed phrase
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet restore
+# You will be prompted to enter your 24-word seed phrase</code></pre>
+<div style="height:8px"></div>
+<h4>Multi-Wallet Support</h4>
+<div style="height:8px"></div>
+<p>You can manage multiple wallets by using different <code>--wallet</code> names:</p>
+<div style="height:8px"></div>
+<pre><code>cync-wallet --wallet savings --password &lt;pass&gt; --network testnet create
+cync-wallet --wallet spending --password &lt;pass&gt; --network testnet create
+
+# Each wallet is stored as a separate file (savings.cync, spending.cync)</code></pre>
+<div style="height:8px"></div>
+<h3>Basic Operations</h3>
+<div style="height:8px"></div>
+<h4>Sync with a Node</h4>
+<div style="height:8px"></div>
+<p>Before checking balances or sending, sync your wallet with a running node:</p>
+<div style="height:8px"></div>
+<pre><code>cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 sync</code></pre>
+<div style="height:8px"></div>
+<h4>Check Balance</h4>
+<div style="height:8px"></div>
+<pre><code>cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet balance
+
+# Output:
+# Balance: 123.456789012345 CYNC
+# Unlocked: 120.000000000000 CYNC
+# Locked: 3.456789012345 CYNC (requires 10 more confirmations)</code></pre>
+<div style="height:8px"></div>
+<h4>Get Your Address</h4>
+<div style="height:8px"></div>
+<pre><code>cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet address
+
+# Output:
+# tCYNCxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</code></pre>
+<div style="height:8px"></div>
+<h4>Send CYNC</h4>
+<div style="height:8px"></div>
+<pre><code># Send to an address
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 send &lt;address&gt; &lt;amount&gt;
+
+# Examples:
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 send tCYNCabc123... 10.5
+
+# Send to a registered name
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 send alice.cync 50</code></pre>
+<div style="height:8px"></div>
+<h4>Transaction History</h4>
+<div style="height:8px"></div>
+<pre><code># Show recent transactions
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet history
+
+# Show more transactions
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet history --limit 50
+
+# Show specific transaction
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet show-tx &lt;txid&gt;</code></pre>
+<div style="height:8px"></div>
+<h4>Retry a Failed Transaction</h4>
+<div style="height:8px"></div>
+<pre><code># Retry a transaction that failed to broadcast
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 retry-tx &lt;txid&gt;</code></pre>
+<div style="height:8px"></div>
+<h3>Subaddresses</h3>
+<div style="height:8px"></div>
+<p>Subaddresses provide unlinkable receive addresses from a single wallet. Each subaddress is cryptographically derived from your main keys but cannot be linked to your primary address or other subaddresses by an outside observer.</p>
+<div style="height:8px"></div>
+<h4>Managing Subaddresses</h4>
+<div style="height:8px"></div>
+<pre><code># Generate a new subaddress
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet subaddress new
+
+# List all subaddresses
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet subaddress list
+
+# Label a subaddress
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  subaddress label &lt;index&gt; "Donations"</code></pre>
+<div style="height:8px"></div>
+<h4>Use Cases</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Give each sender a unique address for payment tracking</li>
+<li>Separate business and personal payments</li>
+<li>Prevent address-based transaction linking</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Testnet Faucet</h3>
+<div style="height:8px"></div>
+<p>The testnet faucet dispenses free test coins for development:</p>
+<div style="height:8px"></div>
+<pre><code># Request testnet CYNC from a faucet-enabled node
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 faucet &lt;your_address&gt;</code></pre>
+<div style="height:8px"></div>
+<p>Rate limit: 1 request per address per hour. Each request dispenses 10 CYNC.</p>
+<div style="height:8px"></div>
+<h3>Confidential Assets</h3>
+<div style="height:8px"></div>
+<p>CoinCync supports issuing and transferring custom tokens with the same privacy as native CYNC.</p>
+<div style="height:8px"></div>
+<h4>Issue a New Asset</h4>
+<div style="height:8px"></div>
+<pre><code># Issue a new asset with a name and initial supply
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 asset issue &lt;asset_name&gt; &lt;supply&gt;
+
+# Example: issue 1,000,000 tokens called "MyToken"
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 asset issue MyToken 1000000</code></pre>
+<div style="height:8px"></div>
+<h4>Check Asset Balances</h4>
+<div style="height:8px"></div>
+<pre><code># View all asset balances
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet asset balance</code></pre>
+<div style="height:8px"></div>
+<h4>Send Assets</h4>
+<div style="height:8px"></div>
+<pre><code># Send an asset to an address
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 asset send &lt;asset_id&gt; &lt;address&gt; &lt;amount&gt;</code></pre>
+<div style="height:8px"></div>
+<h4>List and Inspect Assets</h4>
+<div style="height:8px"></div>
+<pre><code># List all known assets on the network
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet asset list
+
+# Get info about a specific asset
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet asset info &lt;asset_id&gt;</code></pre>
+<div style="height:8px"></div>
+<h3>Interactive Shell</h3>
+<div style="height:8px"></div>
+<p>For convenience when running multiple commands, use shell mode:</p>
+<div style="height:8px"></div>
+<pre><code>cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet shell
+
+# In shell mode, run commands without repeating wallet/network flags:
+&gt; balance
+&gt; address
+&gt; send tCYNCabc... 10
+&gt; subaddress list
+&gt; exit</code></pre>
+<div style="height:8px"></div>
+<h3>View Keys</h3>
+<div style="height:8px"></div>
+<p>View keys allow you to prove incoming transactions without revealing spending ability.</p>
+<div style="height:8px"></div>
+<pre><code># Export view key
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet export-view-key
+
+# Export to file
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  export-view-key --output view_key.txt
+
+# Export for specific epoch (time period)
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  export-view-key --epoch 42</code></pre>
+<div style="height:8px"></div>
+<p><strong>Use cases for view keys:</strong></p>
+<div style="height:8px"></div>
+<ul>
+<li>Tax reporting</li>
+<li>Exchange KYC requirements</li>
+<li>Legal compliance</li>
+<li>Business auditing</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Name Registration</h3>
+<div style="height:8px"></div>
+<p>Register a human-readable name for your address:</p>
+<div style="height:8px"></div>
+<pre><code># Register a name
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  --daemon 127.0.0.1:28081 register-name myname
+
+# Your address becomes: myname.cync
+# Others can send to: myname.cync instead of tCYNCxxx...
+
+# Name costs:
+# 3 characters: 100 CYNC
+# 4 characters: 50 CYNC
+# 5 characters: 10 CYNC
+# 6+ characters: 1 CYNC</code></pre>
+<div style="height:8px"></div>
+<h3>TLS Connections</h3>
+<div style="height:8px"></div>
+<p>By default, the wallet connects to nodes over TLS. Self-signed certificates are automatically accepted.</p>
+<div style="height:8px"></div>
+<pre><code># Default: TLS enabled
+cync-wallet --wallet mywallet --password &lt;pass&gt; --daemon 127.0.0.1:28081 sync
+
+# Disable TLS (for local development or plaintext nodes)
+cync-wallet --wallet mywallet --password &lt;pass&gt; --no-tls --daemon 127.0.0.1:28081 sync
+
+# Pin a specific server certificate (SHA-256 fingerprint)
+cync-wallet --wallet mywallet --password &lt;pass&gt; \
+  --tls-fingerprint &lt;hex&gt; --daemon 127.0.0.1:28081 sync</code></pre>
+<div style="height:8px"></div>
+<h3>UTXOs and Coin Control</h3>
+<div style="height:8px"></div>
+<pre><code># List unspent outputs
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet list-utxos
+
+# Send using specific UTXOs
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet \
+  send &lt;address&gt; &lt;amount&gt; --utxos &lt;txid:index&gt;,&lt;txid:index&gt;</code></pre>
+<div style="height:8px"></div>
+<h3>Wallet Security</h3>
+<div style="height:8px"></div>
+<h4>Encryption</h4>
+<div style="height:8px"></div>
+<p>Your wallet file is encrypted using:</p>
+<div style="height:8px"></div>
+<ul>
+<li><strong>Argon2id</strong>: Memory-hard key derivation</li>
+<li><strong>XChaCha20-Poly1305</strong>: Authenticated encryption</li>
+</ul>
+<div style="height:8px"></div>
+<p>Always use a strong, unique password.</p>
+<div style="height:8px"></div>
+<h4>Seed Phrase Security</h4>
+<div style="height:8px"></div>
+<p>Your 24-word seed phrase is the master key to your wallet:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Write it down on paper (not digitally)</li>
+<li>Store in multiple secure locations</li>
+<li>Never share with anyone</li>
+<li>Never enter on websites</li>
+</ul>
+<div style="height:8px"></div>
+<p><strong>If you lose your seed phrase and wallet file, your funds are lost forever.</strong></p>
+<div style="height:8px"></div>
+<h4>Key Epochs</h4>
+<div style="height:8px"></div>
+<p>CoinCync uses rotating view keys for forward secrecy:</p>
+<div style="height:8px"></div>
+<ul>
+<li>View keys change every ~3.5 days (50,000 blocks)</li>
+<li>Old view keys cannot see new transactions</li>
+<li>Limits exposure if a view key is compromised</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Best Practices</h4>
+<div style="height:8px"></div>
+<p>1. <strong>Backup your seed phrase</strong> before receiving any funds</p>
+<p>2. <strong>Use a strong password</strong> for wallet encryption</p>
+<p>3. <strong>Keep software updated</strong> for security fixes</p>
+<p>4. <strong>Verify addresses</strong> before sending large amounts</p>
+<p>5. <strong>Test with small amounts</strong> first</p>
+<p>6. <strong>Use subaddresses</strong> for each sender/purpose</p>
+<p>7. <strong>Use TLS</strong> when connecting to remote nodes</p>
+<div style="height:8px"></div>
+<h3>Command Line Options</h3>
+<div style="height:8px"></div>
+<pre><code>cync-wallet [OPTIONS] &lt;COMMAND&gt;
+
+Options:
+  --wallet &lt;NAME&gt;          Wallet name (stored as &lt;name&gt;.cync)
+  --password &lt;PASS&gt;        Wallet password
+  --network &lt;NETWORK&gt;      Network: mainnet or testnet
+  --daemon &lt;HOST:PORT&gt;     Node RPC endpoint
+  --no-tls                 Disable TLS for RPC connection
+  --tls-fingerprint &lt;HEX&gt;  Pin server certificate (SHA-256)</code></pre>
+<div style="height:8px"></div>
+<h3>Command Reference</h3>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>Description</th></tr></thead><tbody>
+<tr><td>`create`</td><td>Create a new wallet</td></tr>
+<tr><td>`restore`</td><td>Restore from seed phrase</td></tr>
+<tr><td>`balance`</td><td>Show balance</td></tr>
+<tr><td>`address`</td><td>Show primary address</td></tr>
+<tr><td>`send`</td><td>Send CYNC</td></tr>
+<tr><td>`sync`</td><td>Sync wallet with node</td></tr>
+<tr><td>`history`</td><td>Show transaction history</td></tr>
+<tr><td>`show-tx`</td><td>Show specific transaction details</td></tr>
+<tr><td>`retry-tx`</td><td>Retry a failed transaction</td></tr>
+<tr><td>`faucet`</td><td>Request testnet coins from faucet</td></tr>
+<tr><td>`subaddress new`</td><td>Generate new subaddress</td></tr>
+<tr><td>`subaddress list`</td><td>List all subaddresses</td></tr>
+<tr><td>`subaddress label`</td><td>Label a subaddress</td></tr>
+<tr><td>`asset issue`</td><td>Issue a new confidential asset</td></tr>
+<tr><td>`asset balance`</td><td>Show asset balances</td></tr>
+<tr><td>`asset send`</td><td>Send an asset</td></tr>
+<tr><td>`asset list`</td><td>List known assets</td></tr>
+<tr><td>`asset info`</td><td>Get asset details</td></tr>
+<tr><td>`export-view-key`</td><td>Export view key</td></tr>
+<tr><td>`register-name`</td><td>Register a .cync name</td></tr>
+<tr><td>`list-utxos`</td><td>List unspent outputs</td></tr>
+<tr><td>`rescan`</td><td>Rescan blockchain</td></tr>
+<tr><td>`shell`</td><td>Interactive shell mode</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h3>Troubleshooting</h3>
+<div style="height:8px"></div>
+<h4>Common Issues</h4>
+<div style="height:8px"></div>
+<p><strong>Wallet not syncing:</strong></p>
+<div style="height:8px"></div>
+<ul>
+<li>Ensure node is running and synced</li>
+<li>Check daemon address: <code>--daemon 127.0.0.1:28081</code></li>
+<li>If using TLS, try <code>--no-tls</code> to test connectivity</li>
+<li>Verify network connectivity</li>
+</ul>
+<div style="height:8px"></div>
+<p><strong>Transaction stuck:</strong></p>
+<div style="height:8px"></div>
+<ul>
+<li>Wait for network confirmation</li>
+<li>Use <code>retry-tx</code> to rebroadcast</li>
+<li>Ensure sufficient fee was paid</li>
+</ul>
+<div style="height:8px"></div>
+<p><strong>Cannot spend funds:</strong></p>
+<div style="height:8px"></div>
+<ul>
+<li>Check if outputs are locked (need more confirmations)</li>
+<li>Verify balance is unlocked</li>
+<li>Check minimum output age (10 blocks)</li>
+</ul>
+<div style="height:8px"></div>
+<p><strong>TLS connection failed:</strong></p>
+<div style="height:8px"></div>
+<ul>
+<li>Try <code>--no-tls</code> for local development</li>
+<li>Ensure the node has generated its TLS certificate</li>
+<li>Use <code>--tls-fingerprint</code> for cert pinning if needed</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Logs</h4>
+<div style="height:8px"></div>
+<pre><code># Run with debug logging
+RUST_LOG=debug cync-wallet --wallet mywallet --password &lt;pass&gt; balance
+
+# Wallet-specific logs
+RUST_LOG=coincync::wallet=debug cync-wallet --wallet mywallet --password &lt;pass&gt; balance</code></pre>
+<div style="height:8px"></div>
+<h4>Recovery</h4>
+<div style="height:8px"></div>
+<p>If your wallet file is corrupted:</p>
+<div style="height:8px"></div>
+<pre><code># Restore from seed phrase
+cync-wallet --wallet mywallet --password &lt;newpass&gt; --network testnet restore
+
+# Rescan blockchain for transactions
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet rescan --from-height 0</code></pre>
+<div style="height:8px"></div>
+<h3>Resources</h3>
+<div style="height:8px"></div>
+<ul>
+<li>[Testnet Guide](testnet-guide.md) - Getting started with testnet</li>
+<li>[RPC API Reference](rpc-api.md) - Complete RPC method reference</li>
+<li>[Mining Guide](mining.md) - Earn CYNC through mining</li>
+<li>[Compliance Guide](compliance.md) - View keys and reporting</li>
+<li>[Protocol Specification](protocol.md) - Technical details</li>
+</ul>
+<div style="height:8px"></div></div>
+  </div>
+</div>

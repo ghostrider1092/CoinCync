@@ -1,0 +1,310 @@
+<div class="page" id="page-privacy">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>&rsaquo;</span>Privacy Features</div>
+    <div class="page-title" style="margin-bottom:4px">Privacy &amp; trust-minimization stack</div>
+    <div class="page-sub" style="margin-bottom:20px">Every layer is mandatory by design — no opt-in privacy mode, no transparent class. The features below cover what every CYNC transaction gets and what wallet integrations can plug into.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 1 &mdash; Cryptographic (every transaction)</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>CLSAG-16 ring signatures</strong></td><td>Sender (which input is real)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Stealth addresses</strong></td><td>Receiver (one-time addresses, no on-chain reuse)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Pedersen commitments</strong></td><td>Amount (homomorphic, zero-revealing)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Bulletproofs+ range proofs</strong></td><td>Validity (no negative-amount inflation)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Encrypted memos</strong></td><td>Payment metadata (ChaCha20+ECDH, recipient-only)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>View tags</strong></td><td>Recipient scan efficiency (1-byte hint, no privacy loss)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Key images</strong></td><td>Double-spend prevention (single-use, unlinkable)</td><td><span class="badge">shipped</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 2 &mdash; Network</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Dandelion++ stem-then-fluff</strong></td><td>Originator IP (per-epoch random relay)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Multi-node propagation harness</strong></td><td>Verifies stem fan-out is exactly one (privacy invariant), embargo timeout fail-safe, fluff completion across the graph</td><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">new this phase</span></td></tr>
+          <tr><td><strong>Noise_XX P2P encryption</strong></td><td>Traffic content (peer-to-peer)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Traffic shaping + constant-rate padding</strong></td><td>Timing-correlation defense</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Tor / SOCKS5 transport</strong></td><td>Node IP (operator-side)</td><td><span class="badge">shipped</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 3 &mdash; Wallet</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Subaddresses</strong></td><td>Linking payments to a single wallet</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Uniform 2-in/2-out tx shape</strong></td><td>Tx-graph fingerprinting (every tx looks identical)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Decoy defense (gamma-distributed selection)</strong></td><td>Statistical-analysis attacks on ring selection</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Time-scoped view keys</strong></td><td>Forward secrecy on auditor-shared view keys</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Plausible-deniability wallets</strong></td><td>Coercion resistance (multiple credible wallet states)</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Auto-churn</strong></td><td>UTXO age correlation across user activity</td><td><span class="badge">shipped</span></td></tr>
+          <tr><td><strong>Dead man's switch</strong></td><td>Recovery path that keeps the original key out of the recovery transaction</td><td><span class="badge">shipped</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 3+ &mdash; M-of-N multisig (CIP-008, new this phase)</div>
+      <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+        <p><strong>FROST signing coordinator.</strong> Untrusted message-relay service that lets multisig participants exchange round-1 commitments and round-2 sig-shares without manual copy-paste. The coordinator holds <strong>zero key material</strong> &mdash; even a malicious or compromised coordinator cannot forge signatures or steal funds. Worst case: a session fails to complete and participants retry.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Shipped as the <code>coord</code> WSS server + <code>coord-cli</code> operator binary. State machine, HMAC invitation tokens, JSON file persistence, per-IP rate limit, idle-connection timeout, and Prometheus metrics endpoint all live. The signing protocol is <a href="https://www.rfc-editor.org/rfc/rfc9591" target="_blank" style="color:var(--ac2)">RFC 9591 FROST</a> over Ed25519 via <code>frost_ed25519</code>; the coordinator is the off-chain message relay.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Status: <span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">CIP-008 Draft</span> &middot; <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-008-frost-coordinator.md" target="_blank" style="color:var(--ac2)">spec &rarr;</a> &middot; <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-012-frost-coordinator-deployment.md" target="_blank" style="color:var(--ac2)">CIP-012 deployment plan &rarr;</a></p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 4 &mdash; Cross-chain (CIP-001, new this phase)</div>
+      <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+        <p><strong>CYNC&harr;BTC atomic swap.</strong> Trustless cross-chain swap modeled on the Comit / Farcaster XMR&harr;BTC design. Adaptor signatures over CLSAG keep the swap <strong>invisible on the privacy chain</strong> &mdash; an observer sees a normal CoinCync transaction, not a swap. Bitcoin side uses Schnorr/ECDSA adaptor signatures over secp256k1; the two adaptors are bound by a cross-curve discrete-log-equality proof. Either party can refund unilaterally if the counterparty disappears (asymmetric timeouts).</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Shipped this phase: protocol state machine (Negotiated &rarr; AliceLocked &rarr; BobLocked &rarr; SecretRevealed &rarr; Completed, with refund + abort terminal states), handshake state machine + wire-format messages, <code>SwapStore</code> JSON state persistence with atomic writes, and the <code>cyncswap</code> CLI driving all of them. Hard mainnet-launch blocker per Article XV. The cryptographic core (real adaptor sigs + Tor/Noise transport) and the audit are queued for the post-testnet window.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Status: <span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">CIP-001 Draft (mainnet blocker)</span> &middot; <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-001-atomic-swap.md" target="_blank" style="color:var(--ac2)">spec &rarr;</a></p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 4 &mdash; Light-wallet SPV (lightsync, new this phase)</div>
+      <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+        <p><strong>Server-blind compact-block sync.</strong> Wallets that don't run a full node download per-block <code>OutputDigest</code> bundles (~138 B / output) and scan locally with view-tag filtering. The server learns <strong>only the height range</strong> the wallet asked for &mdash; never which outputs the wallet cares about, never the wallet's address set. <strong>Strictly stronger privacy than BIP-157</strong>, where the wallet's filter elements leak its address set to the filter server.</p>
+        <p style="margin-top:10px;font-size:11px;color:var(--t3)">Shipped this phase as the <code>get_output_digests</code> + <code>get_sync_checkpoints</code> JSON-RPC methods and the <code>GetOutputDigests</code> P2P message handler. Pull-protected (max 100 blocks per request). Wallet-side scanning uses the existing CLSAG ECDH + view-tag fast-path.</p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 5 &mdash; Reorg defense (CIP-009 family)</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Feature</th><th>Protects</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Path B &mdash; consensus checkpoints</strong></td><td>Reorgs past project-cut checkpoints (cold horizon)</td><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">shipped</span></td></tr>
+          <tr><td><strong>Path D &mdash; miner-signed rolling checkpoints (CIP-009.D)</strong></td><td>Reorgs past the live tip (~100 blocks deep) once 2/3 of active miners attest</td><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">shipped behind <code>rolling-finality</code> feature flag</span></td></tr>
+        </tbody>
+      </table></div>
+      <div style="padding:0 18px 14px;font-size:11px;color:var(--t3);line-height:1.6">
+        <p>Path D replaces the rejected MESS approach with discrete miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners (with at least one block in the last ~14 days) have signed it. No clock readings, no decay-tuning knobs, observable on-chain. Pure-state library, real ed25519 verifier, borsh wire codec (<code>crates/coincync-rolling-finality</code>), and <code>validate_block</code> reorg-rule integration all shipped &mdash; gated by the <code>rolling-finality</code> cargo feature (default OFF). Activation heights per <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-011-rolling-finality-activation.md" target="_blank" style="color:var(--ac2)">CIP-011</a>: testnet enables at 50,000 and enforces at 75,000; mainnet at 25,000 / 50,000.</p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Layer 6 &mdash; Constitutional</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Article</th><th>Forbids</th></tr></thead>
+        <tbody>
+          <tr><td>Article VI &mdash; <strong>Mandatory privacy</strong></td><td>Optional / opt-in privacy modes; transparent transaction class</td></tr>
+          <tr><td>Article IX &mdash; <strong>No surveillance hooks</strong></td><td>Travel Rule attestation, address blacklists, balance-lookup APIs</td></tr>
+          <tr><td>Article XII &mdash; <strong>No admin authority</strong></td><td>Pause/freeze/seize functions, emergency overrides</td></tr>
+          <tr><td>Article XIII &mdash; <strong>No external trust</strong></td><td>Bridges that admit external state into consensus</td></tr>
+          <tr><td>Article XIV &mdash; <strong>No surveillance layer</strong></td><td>Smart-contract identity attestation, name services, NFT primitives</td></tr>
+          <tr><td>Right X &mdash; <strong>No address blacklists</strong></td><td>Compliance-driven transaction-set filtering</td></tr>
+        </tbody>
+      </table></div>
+      <div style="padding:0 18px 14px;font-size:11px;color:var(--t3);line-height:1.6;font-style:italic">
+        These are compile-time enforced where possible: any change that violates them by silently flipping a constant fails the build with an UNCONSTITUTIONAL: Article X error. The full Constitution lives at <a href="https://git.coincync.network/coincync/cync-protocol/blob/main/CONSTITUTION.md" target="_blank" style="color:var(--ac2)">CONSTITUTION.md</a>.
+      </div>
+    </div>
+
+    <div style="text-align:center;padding:20px 0;font-size:11px;color:var(--t3);font-family:var(--mono)">
+      Privacy money that requires no permission. &mdash; <a onclick="go('4thamendment')" style="color:var(--ac2);cursor:pointer">The CoinCync Manifesto</a>
+    </div>
+  </div>
+</div>
+
+<div class="page" id="page-proposals">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Proposals</div>
+    <div class="page-title" style="margin-bottom:4px">CoinCync Improvement Proposals</div>
+    <div class="page-sub" style="margin-bottom:20px">Every protocol change goes through a public CIP. Anyone can submit one. The list below is the live state of every proposal in the repo.</div>
+
+    <div class="info-box" style="margin-bottom:18px;background:rgba(212,160,89,.04);border:1px solid rgba(212,160,89,.25);padding:14px 18px;color:var(--t2);font-size:12px;line-height:1.65">
+      <strong style="color:var(--ac2)">How decisions actually get made:</strong>
+      Discussion happens publicly on Discord / Matrix / GitHub. Maintainers review for
+      cryptographic and constitutional fit. Activation requires <strong>95% miner version-bit
+      signaling</strong> at the fork height (Article XIV). <strong>Node operators have the final
+      say</strong> by choosing whether to upgrade. There is no token-weighted vote, no foundation
+      override, no admin authority. Article XVIII of the Constitution.
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Active proposals</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:90px">CIP</th>
+            <th style="width:90px">Status</th>
+            <th>Title</th>
+            <th style="width:140px">Type</th>
+            <th style="width:120px">Created</th>
+            <th style="width:80px">Read</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono"><strong>CIP-001</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>CYNC↔BTC Atomic Swap</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Trustless cross-chain atomic swap modeled on the Comit / Farcaster XMR↔BTC design. Adaptor signatures over CLSAG keep the swap invisible on the privacy chain. <strong style="color:var(--ac2)">Mainnet launch blocker.</strong></div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-04</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-001-atomic-swap.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-002</strong></td>
+            <td><span class="badge" style="background:rgba(140,140,140,.15);color:var(--t2);border:1px solid rgba(140,140,140,.4)">Sketch</span></td>
+            <td>
+              <strong>cynchub — Merge-Mined Liquidity Layer</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Auxiliary PoW chain merge-mined with CoinCync, hosting an on-chain order book for trustless CYNC↔BTC↔stablecoin trading. Miners coordinate; HTLCs settle. The PoW alternative to PoS bridges. <strong>18-24 months post-mainnet.</strong></div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-05</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-002-cynchub-merge-mined-liquidity-layer.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-007</strong></td>
+            <td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">Accepted</span></td>
+            <td>
+              <strong>Hard-Fork Activation Policy</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Defines Mode A (static-height) and Mode B (BIP8-style version-bit signaling) activation procedures for any future consensus rule change. The procedural backbone every other consensus CIP rides on top of.</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-007-hard-fork-activation-policy.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-008</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>FROST M-of-N Signing Coordinator</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Untrusted message-relay service that lets multisig participants exchange round-1 commitments and round-2 sig-shares without manual copy-paste. Holds zero key material — even a malicious coordinator cannot forge signatures or steal funds. Worst case: session fails to complete. State machine, invitation tokens, persistence, WSS server, operator CLI all shipped (<code>coord</code> + <code>coord-cli</code> binaries).</div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-008-frost-coordinator.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-009</strong></td>
+            <td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">Path B Active</span></td>
+            <td>
+              <strong>Reorg Defense Decision</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Three paths considered for live-tip reorg defense: A (MESS, rejected as too tunable), B (consensus checkpoints, <strong>shipped</strong>), C (PoW only). Successor for the live tip is CIP-009.D, which replaces MESS with discrete miner-signed soft-finality. Layered with B for both cold-horizon + live-tip coverage.</div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-009-reorg-defense-decision.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-009.D</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>Miner-Signed Rolling Checkpoints</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Replaces MESS with explicit miner attestation. Each block carries an ed25519 signature over a past height/hash from the producing miner; a height becomes soft-final once 2/3 of active miners have signed. No clock readings (immune to time-warp), no tuning knobs that decide security, observable on-chain. Pure-state library + ed25519 verifier + wire codec + <code>validate_block</code> reorg-rule integration all shipped behind the <code>rolling-finality</code> cargo feature (OFF by default). Activates per CIP-011 schedule.</div>
+            </td>
+            <td><span class="badge">Standards Track</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-009-D-miner-signed-rolling-checkpoints.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-010</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>Testnet Hard-Fork Rehearsal</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Concrete activation playbook for the <code>BOOTSTRAP_MIN_RING_SIZE</code> 11→13 bump as a planned CIP-007 Mode A exercise. Ships the activation pipeline end-to-end before mainnet — better to discover bugs in the activation procedure on testnet than at launch.</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-010-testnet-hardfork-rehearsal.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-011</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>Rolling-Finality Activation Rehearsal</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Two-phase activation playbook for CIP-009.D: ENABLE phase (collect attestations, no enforcement) followed by ENFORCE phase (reorg rule fires). 35-day gap between phases lets the active miner set fully populate before the rule has consensus weight. Five recovery scenarios documented.</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-011-rolling-finality-activation.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+          <tr>
+            <td class="mono"><strong>CIP-012</strong></td>
+            <td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td>
+            <td>
+              <strong>FROST Coordinator Deployment Rehearsal</strong>
+              <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.4">Operations plan for CIP-008. Single-instance pre-mainnet deployment; two-instance multi-region (Frankfurt + Singapore) at mainnet, with DNS round-robin. Six failure-mode runbooks. Per-IP rate limiting, idle timeouts, and Prometheus metrics endpoint already shipped (<code>coord</code> phase 6).</div>
+            </td>
+            <td><span class="badge">Process</span></td>
+            <td class="mono" style="color:var(--t3)">2026-05-08</td>
+            <td><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/CIP-012-frost-coordinator-deployment.md" target="_blank" style="color:var(--ac2)">spec →</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">CIP status legend</div>
+        <table>
+          <tbody>
+            <tr><td><span class="badge" style="background:rgba(140,140,140,.15);color:var(--t2);border:1px solid rgba(140,140,140,.4)">Sketch</span></td><td style="font-size:12px">Idea captured; specifics pending. No implementation commitment.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(212,160,89,.15);color:var(--ac2);border:1px solid rgba(212,160,89,.4)">Draft</span></td><td style="font-size:12px">Specifics resolved. Open for public discussion.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(228,175,78,.15);color:#E4AF4E;border:1px solid rgba(228,175,78,.4)">Discussion</span></td><td style="font-size:12px">60-day public review window in progress.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.4)">Accepted</span></td><td style="font-size:12px">Reviewed; reference implementation underway.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(127,184,121,.25);color:#7FB879;border:1px solid rgba(127,184,121,.5)">Active</span></td><td style="font-size:12px">Hard-fork activation in progress; miners signaling.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(127,184,121,.4);color:#7FB879;border:1px solid rgba(127,184,121,.7)">Final</span></td><td style="font-size:12px">Activated by node-operator consensus. Now part of the protocol.</td></tr>
+            <tr><td><span class="badge" style="background:rgba(216,99,99,.15);color:#D86363;border:1px solid rgba(216,99,99,.4)">Rejected</span></td><td style="font-size:12px">Failed review (e.g. constitutional incompatibility) or community consensus.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">Submit a proposal</div>
+        <div style="padding:14px 18px;font-size:12px;color:var(--t2);line-height:1.7">
+          <p>Anyone can submit a CIP. No fee. No minimum holdings. No identity required.</p>
+          <ol style="padding-left:18px;margin:10px 0">
+            <li>Fork the repo, add a markdown file at <code>docs/cip/CIP-NNN-short-name.md</code>.</li>
+            <li>Use CIP-001 or CIP-002 as a template. Required sections: Abstract, Motivation, Status, Mechanism, Security Considerations, Open Questions.</li>
+            <li>Open a pull request. Maintainers will assign a CIP number.</li>
+            <li>Discuss in <a href="https://discord.gg/5tYNSCsqzy" target="_blank" style="color:var(--ac2)">Discord</a> or on the PR thread.</li>
+            <li>Standards-Track CIPs require 60+ days of public discussion before reaching the activation phase.</li>
+          </ol>
+          <p style="margin-top:14px;font-size:11px;color:var(--t3);font-style:italic">Read <a href="CONTRIBUTING.md" target="_blank" style="color:var(--ac2)">CONTRIBUTING.md</a> for the full process and what's structurally out-of-scope (stablecoins, smart contracts, bridges, admin keys, governance tokens — see Article XV "Spirit and Construction").</p>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;margin-top:14px;text-align:center;font-style:italic">
+      No token-weighted votes. No foundation override. No admin authority. Just public proposals, public discussion, and node-operator opt-in. <span style="color:var(--ac2)">Article XVIII of the Constitution.</span>
+    </div>
+  </div>
+</div>
+
+<div class="page" id="page-github">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>GitHub Activity</div>
+    <div class="page-title" style="margin-bottom:4px">GitHub activity</div>
+    <div class="page-sub" style="margin-bottom:20px">Recent commits to Cync-Protocol</div>
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">Recent commits <span class="panel-action"><a href="https://git.coincync.network/coincync/cync-protocol" target="_blank" style="color:var(--ac2)">View on GitHub →</a></span></div>
+        <div id="gh-commits"><div class="loading">Loading commits...</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Repository info</div>
+        <div id="gh-repo"><div class="loading">Loading...</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  ANONYMITY-SET DEPTH VIEWER
+     Driven by get_anonymity_set RPC. Renders a histogram of decoy ages
+     across recent ring-signature inputs. Distinct from the
+     privacy-metrics page in that THIS one is interactive — operator
+     picks a block range, the chart reflects exactly that range.
+     Reinforces: every CYNC tx looks the same to a chain observer. -->

@@ -4,7 +4,7 @@ How to run the public block explorer at `https://explorer.coincync.network`. Liv
 
 ## Architecture (one-line)
 
-A single Caddy reverse proxy on port 443, fronting a localhost-bound `coincync-node` jsonrpsee server, with the embedded block explorer HTML served from `GET /` and `POST /api/{testnet,mainnet}` proxying to the cyncd RPC.
+A single Caddy reverse proxy on port 443, fronting a localhost-bound `coincync-node` jsonrpsee server, with the block explorer static asset bundle served from `/` and `POST /api/{testnet,mainnet}` proxying to the cyncd RPC.
 
 The explorer UI loads chain data **only** through that JSON-RPC surface (same-origin `/api/testnet` or `/api/mainnet`). On the **Blocks** page it walks the full canonical height range using batched `get_block_range` (100 heights per request, server-capped) so the table can list every block the upstream node stores, without thousands of per-height round trips.
 
@@ -16,7 +16,7 @@ Recent UX hardening keeps the CoinCync visual style while making chain views mor
 ```text
     public 443/tcp ── Caddy ── 127.0.0.1:28081 (cyncd testnet RPC)
                         │   └─ 127.0.0.1:19081 (cyncd mainnet RPC, post-launch)
-                        ├─── /var/www/explorer/index.html (embedded HTML)
+                        ├─── /var/www/explorer/ (HTML, CSS, and JavaScript)
                         └─── /static/vendor/* (vendored CDN assets)
 ```
 
@@ -28,7 +28,7 @@ Recent UX hardening keeps the CoinCync visual style while making chain views mor
 | `docker-compose.yml` | Caddy 2.8-alpine, host networking, persistent ACME volumes |
 | `README.md` | Operator runbook, DDoS-mitigation discussion |
 | `fetch-vendor.sh` | Downloads chart.js / d3 / globe.gl / topojson / world-atlas / three-globe textures + Google Fonts. TOFU SHA-256 pinning. |
-| `patch-vendor.sh` | Rewrites `src/explorer/index.html` to use `/static/vendor/` paths instead of external CDN URLs. |
+| `patch-vendor.sh` | Rewrites the explorer HTML/JavaScript sources to use `/static/vendor/` paths instead of external CDN URLs. |
 | `static/vendor/` | Vendored CDN assets after `fetch-vendor.sh` runs. Committed to git for reproducibility. |
 | `static/vendor/checksums.txt` | SHA-256 of every vendored file. Verified on every `fetch-vendor.sh` run. |
 
@@ -60,9 +60,10 @@ cd deploy/explorer
 # Reviews + commits checksums.txt
 git add static/vendor && git commit -m "explorer: vendor CDN deps"
 
-# Then patch index.html to use the vendored paths
+# Then patch the frontend sources to use the vendored paths
 ./patch-vendor.sh
-git add ../../src/explorer/index.html && git commit -m "explorer: use vendored assets"
+git add ../../src/explorer/fragments/00-shell.html ../../src/explorer/app
+git commit -m "explorer: use vendored assets"
 
 # Re-run lib tests to confirm the CDN-enumeration test still passes
 cargo test --lib -p coincync explorer
@@ -90,13 +91,17 @@ curl -sX POST https://explorer.coincync.network/api/mainnet \
      -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' -w '\n%{http_code}\n'
 ```
 
-## Updating the explorer HTML
+## Updating the explorer frontend
 
-The HTML is bind-mounted live from `src/explorer/index.html`. To update:
+The first-party entry assets live in `src/explorer/`. `index.parts` orders the
+HTML shell and the responsibility-scoped `fragments/`; the deploy script
+assembles those sources into the public `index.html`. It deploys that document,
+`explorer.css`, `theme-init.js`, and the `app/` script directory together:
 
 ```bash
 cd /opt/coincync
-git pull --ff-only       # pulls any changes to src/explorer/index.html
+git pull --ff-only
+deploy/explorer/deploy-explorer.sh
 # Caddy doesn't need to restart. The HTML cache is 5 minutes, so worldwide
 # rollout completes in ≤ 5 minutes.
 ```
@@ -126,7 +131,7 @@ Use this as the default trim for the public explorer. The goal is a safer, lower
 - `webhooks`, `livestream` (non-essential attack surface and data churn)
 - `status`, `miningtutorial`, `governance` (better hosted in docs pages, not top nav)
 
-### Runtime control now in `index.html`
+### Runtime control in the explorer application
 
 The explorer now defaults to **production mode**, which hides the dev-only pages above.
 

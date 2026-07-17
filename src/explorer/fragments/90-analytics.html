@@ -1,0 +1,417 @@
+<div class="page" id="page-anonset">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Anonymity set</div>
+    <div class="page-title" style="margin-bottom:4px">Anonymity-set depth viewer</div>
+    <div class="page-sub" style="margin-bottom:20px">Live histogram of decoy spread across recent CLSAG ring signatures. A wide, even distribution means the real signer is hard to single out from the public chain alone.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Sample range
+        <span class="panel-action">
+          <label style="font-size:11px;color:var(--t2);margin-right:8px">Last
+            <select id="anonset-blocks" style="background:var(--s2);border:1px solid var(--b);color:var(--t);border-radius:6px;padding:3px 6px;font-family:var(--mono);font-size:11px;margin:0 4px">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="250">250</option>
+              <option value="500">500</option>
+            </select>
+            blocks
+          </label>
+          <button id="anonset-refresh" style="background:var(--ac);color:#fff;border:none;border-radius:6px;padding:4px 10px;font-family:var(--mono);font-size:11px;cursor:pointer">Refresh</button>
+        </span>
+      </div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        <strong>What you're looking at:</strong> each ring signature picks 10 decoys + the real input. The chart bins the AGE (in blocks) of every decoy at signing time. If the histogram has a fat tail, decoy selection is drawing from a large UTXO pool — chain analysis can't bias toward the real spender via decoy-age statistics. Spikes near age=0 would suggest decoy-newness leak (mitigated by the uniform decoy selector — see CIP <a href="docs/cip/CIP-007" style="color:var(--ac2)">CIP-007</a>).
+      </div>
+      <div style="padding:0 16px 16px"><canvas id="anonset-chart" width="800" height="320"></canvas></div>
+      <div style="padding:0 16px 16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Ring inputs sampled</div>
+          <div id="anonset-stat-inputs" style="font-family:var(--mono);font-size:18px;color:var(--t);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Decoy pool size</div>
+          <div id="anonset-stat-pool" style="font-family:var(--mono);font-size:18px;color:var(--ac2);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Median decoy age</div>
+          <div id="anonset-stat-median" style="font-family:var(--mono);font-size:18px;color:var(--t);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Privacy health</div>
+          <div id="anonset-stat-health" style="font-family:var(--mono);font-size:18px;color:var(--verified);margin-top:4px">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  REORG HISTORY PAGE
+     Pulls reorg events from get_chain_events. Shows: when, fork point,
+     depth, blocks orphaned. Even rare events build confidence that the
+     defensive logic is exercised. Pairs with the 6-layer reorg-defense
+     story (MESS hybrid + Layer 5 checkpoints + dormant Layer 6). -->
+<div class="page" id="page-reorghistory">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Reorg history</div>
+    <div class="page-title" style="margin-bottom:4px">Chain reorganization history</div>
+    <div class="page-sub" style="margin-bottom:20px">Every detected reorganization since the chain started. CoinCync's six-layer reorg defense (MESS hybrid + per-node checkpoints + hardcoded checkpoints + dormant Layer 6) prevents deep reorgs from corrupting wallet state.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Defense layers active right now
+        <span class="panel-action">
+          <span id="reorg-layers-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+        <div class="reorg-layer-card" data-layer="1-3">
+          <div class="reorg-layer-card__name">L1–3: MESS hybrid</div>
+          <div class="reorg-layer-card__desc">PoW-weight + diff-adjust-aware penalty + max-reorg-depth cap. Tier-3 cap = 200 blocks.</div>
+          <div class="reorg-layer-card__status" id="reorg-l1-status">ACTIVE</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="4">
+          <div class="reorg-layer-card__name">L4: per-node checkpoints</div>
+          <div class="reorg-layer-card__desc">Local-only sentinel every 5 blocks. No consensus impact; just paranoia.</div>
+          <div class="reorg-layer-card__status" id="reorg-l4-status">ACTIVE</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="5">
+          <div class="reorg-layer-card__name">L5: hardcoded checkpoints</div>
+          <div class="reorg-layer-card__desc">Cut by release pipeline. Defends live tip past most-recent release.</div>
+          <div class="reorg-layer-card__status" id="reorg-l5-status">ACTIVE</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="6">
+          <div class="reorg-layer-card__name">L6: CIP-009.D rolling-finality</div>
+          <div class="reorg-layer-card__desc">Miner-signed rolling checkpoints. Ships dormant at v1.0 mainnet (per 2026-05-23 decision); activates post-mainnet via CIP-007.</div>
+          <div class="reorg-layer-card__status reorg-layer-card__status--dormant" id="reorg-l6-status">DORMANT</div>
+        </div>
+        <div class="reorg-layer-card" data-layer="wallet">
+          <div class="reorg-layer-card__name">Wallet: bounded rewind</div>
+          <div class="reorg-layer-card__desc">200-entry journal of BlockApplyDiff. Detects + recovers reorgs up to tier-3 depth without full rescan.</div>
+          <div class="reorg-layer-card__status" id="reorg-lw-status">ACTIVE</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        Detected reorgs
+        <span class="panel-action">
+          <span id="reorg-count" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Detected at height</th>
+              <th>Fork point</th>
+              <th>Depth</th>
+              <th>Orphaned blocks</th>
+            </tr>
+          </thead>
+          <tbody id="reorg-history-rows">
+            <tr><td colspan="5" style="text-align:center;color:var(--t3);padding:24px">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  COINCYNC PRIVACY FEATURES
+     Reframed 2026-05-23 from a competitor-comparison table to a
+     CoinCync-only feature showcase. Comparison claims age badly,
+     invite legal/community blowback, and aren't what audit firms
+     want to see. This is a focused presentation of what every CYNC
+     transaction gets, paired with the deeper /page-privacy stack
+     reference for the layer-by-layer technical breakdown. -->
+<div class="page" id="page-compare">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Privacy features</div>
+    <div class="page-title" style="margin-bottom:4px">CoinCync privacy features</div>
+    <div class="page-sub" style="margin-bottom:20px">What every CYNC transaction gets, by default, without an opt-in toggle. Privacy is a stack — each layer below handles a different attack surface, and they compose.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">What stays private on every transaction</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Who you sent it</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">CLSAG-11 ring signatures</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Every input is signed by a ring of 11 candidate spenders. A chain observer sees a possible-spender set, never the actual one. Decoys are drawn from the full UTXO pool by a uniform selector — no recency bias to single out the real signer.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Who received it</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Stealth addresses + view tags</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Each output is a fresh one-time address derived from the recipient's view key + a per-tx ephemeral key. The recipient's on-chain "address" appears nowhere on chain. View tags let wallets scan efficiently without weakening unlinkability.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">How much</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Pedersen + Bulletproofs+</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Amounts are homomorphically committed — the chain verifies inputs balance outputs without seeing either value. Bulletproofs+ prove every output is in the valid range without revealing the amount.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">What it's for</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Encrypted memos</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Optional payment metadata, encrypted to the recipient via ECDH + ChaCha20. Visible only to the recipient's view key — the chain stores ciphertext, no one else can decrypt.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Network-level privacy</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">First-hop unlinkability</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Dandelion++</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Transactions propagate through a random stem of one hop per epoch before fluffing to the whole graph. A surveilling peer can't tell whether the tx originated with you or was just relayed.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Wire-level encryption</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Noise_XX P2P</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Every peer connection is encrypted + authenticated end-to-end with the Noise protocol. ISPs, network observers, and intermediate relays see ciphertext, never plaintext blocks or txs.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Traffic-shape defense</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Constant-rate padding</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Cover packets at a constant rate make it impossible to correlate node activity with transaction events through timing analysis. The wire looks busy whether or not you've just sent.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Operator IP</div>
+          <div style="font-family:var(--serif);font-size:15px;color:var(--t);margin-bottom:6px">Tor / SOCKS5 transport</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">First-class support for routing the node through Tor or any SOCKS5 proxy. Operators can run a public-facing node without revealing their physical IP.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Defense in depth &mdash; reorg resistance</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        Six independent layers protect the chain from reorganization attacks. Each one alone is solid; together they make deep reorgs effectively impossible without producing more PoW than the rest of the network combined for hundreds of blocks.
+      </div>
+      <div style="padding:0 16px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px">
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L1&ndash;3: MESS hybrid</div><div class="reorg-layer-card__desc">PoW-weight + difficulty-adjustment-aware penalty + max-reorg-depth cap. Tier-3 caps any candidate reorg at 200 blocks.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L4: per-node rolling checkpoints</div><div class="reorg-layer-card__desc">Each node's own paranoia sentinel every 5 blocks. Zero consensus impact.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L5: hardcoded checkpoints</div><div class="reorg-layer-card__desc">Cut by the release pipeline. Defends the chain past the most recent release.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">L6: CIP-009.D rolling-finality</div><div class="reorg-layer-card__desc">Miner-signed checkpoints, dormant at v1.0 launch, activatable post-mainnet via CIP-007.</div></div>
+        <div class="reorg-layer-card"><div class="reorg-layer-card__name">Wallet: bounded rewind journal</div><div class="reorg-layer-card__desc">200-entry BlockApplyDiff journal in every wallet. Detects + recovers any reorg up to tier-3 depth without a full rescan.</div></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">Economic posture</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">No founder allocation</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--verified);margin-bottom:4px">0 % premine &middot; 0 % dev tax</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Every CYNC in circulation was mined fairly from genesis forward. Article XII of the Constitution makes any future allocation a hard-fork action requiring node-operator consent.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Tail emission</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:4px">100 M cap, 0.6 CYNC tail</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Block reward floors at 0.6 CYNC forever, so miners stay incentivized to keep securing the chain after the cap is approached.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">Fee burn</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:4px">30 % / 50 % split</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">A fraction of every transaction fee is burned, reducing supply over time even with tail emission. The burn rate scales with congestion.</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:8px;padding:14px">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px">CPU-friendly mining</div>
+          <div style="font-family:var(--serif);font-size:18px;color:var(--t);margin-bottom:4px">RandomX (memory-hard)</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.55">Memory-hard PoW algorithm hand-tuned to resist ASIC + FPGA acceleration. Mining stays accessible to anyone with a modern laptop.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;padding:0 4px">
+      Want the layer-by-layer technical breakdown? See the <a onclick="go('privacy')" style="color:var(--ac2);cursor:pointer">Privacy &amp; trust-minimization stack</a> page for the full table of every cryptographic primitive with its source-of-truth CIP and current implementation status.
+    </div>
+  </div>
+</div>
+
+<!--  MINING-LIVE TILE
+     Network-wide hashrate + block-time stats. Derived purely from
+     public chain data (get_info.difficulty + recent block timestamps);
+     no per-miner RPC required. Network hashrate = difficulty / 120s
+     (Bitcoin Core's `getnetworkhashps` formula). Refreshes every 10s
+     while this tab is active.
+
+     Rewrite 2026-06-27: previously called get_mining_live, which
+     returns LOCAL node mining state — zero on a non-mining explorer
+     node. Replaced with get_info + get_block_range derivation; the
+     existing 4 DOM tiles (hashrate / target / median / difficulty)
+     map 1:1 to what visitors actually want. -->
+<div class="page" id="page-mininglive">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Live mining</div>
+    <div class="page-title" style="margin-bottom:4px">Live mining dashboard</div>
+    <div class="page-sub" style="margin-bottom:20px">Real-time network hashrate, block-time distribution, and difficulty trajectory. Refreshes every 10 s while this tab is active.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Now
+        <span class="panel-action">
+          <span id="mininglive-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Network hashrate</div>
+          <div id="mininglive-hr" style="font-family:var(--mono);font-size:22px;color:var(--ac2);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Block target</div>
+          <div id="mininglive-target" style="font-family:var(--mono);font-size:22px;color:var(--t);margin-top:4px">120 s</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Recent median</div>
+          <div id="mininglive-median" style="font-family:var(--mono);font-size:22px;color:var(--t);margin-top:4px">—</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:12px 14px">
+          <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Current difficulty</div>
+          <div id="mininglive-diff" style="font-family:var(--mono);font-size:22px;color:var(--t);margin-top:4px">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Block-time distribution (last 50 blocks)</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        Histogram of inter-block times. A tight clustering around 120s (the target) means difficulty is well-tuned to current hashrate. Wide spread or systematic drift triggers ASERT difficulty adjustment.
+      </div>
+      <div style="padding:0 16px 16px"><canvas id="mininglive-btime" width="800" height="280"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!--  FEE ESTIMATOR
+     Derived purely from get_mempool_transactions — no new RPC needed.
+     Recommends a fee for "next block" vs "within 10 blocks" based on
+     mempool pressure and recent-block fee distributions. -->
+<div class="page" id="page-feemarket">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Fee estimator</div>
+    <div class="page-title" style="margin-bottom:4px">Fee estimator</div>
+    <div class="page-sub" style="margin-bottom:20px">Recommended fee tiers based on live mempool pressure. CoinCync fees are deterministic per kilobyte — no auction, no priority-queue gaming.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Recommended fees right now
+        <span class="panel-action">
+          <span id="feemarket-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Flash</div>
+          <div class="fee-tier-card__time">Next block (≤ 2 min)</div>
+          <div class="fee-tier-card__rate" id="feemarket-flash">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Fast</div>
+          <div class="fee-tier-card__time">≤ 5 min</div>
+          <div class="fee-tier-card__rate" id="feemarket-fast">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Normal</div>
+          <div class="fee-tier-card__time">≤ 30 min</div>
+          <div class="fee-tier-card__rate" id="feemarket-normal">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+        <div class="fee-tier-card">
+          <div class="fee-tier-card__label">Slow</div>
+          <div class="fee-tier-card__time">≤ 2 hours</div>
+          <div class="fee-tier-card__rate" id="feemarket-slow">—</div>
+          <div class="fee-tier-card__unit">CYNC / 1 KB</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Mempool fee distribution (current backlog)</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        Histogram of fee-per-byte across pending mempool transactions. Higher density at higher fees = competitive market; pile-up at low fees = quiet network. The minimum-relay floor is the dotted line.
+      </div>
+      <div style="padding:0 16px 16px"><canvas id="feemarket-hist" width="800" height="280"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<div class="page" id="page-privacypools">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Privacy pools (Phase 2)</div>
+    <div class="page-title" style="margin-bottom:4px">Privacy pools (Phase 2)</div>
+    <div class="page-sub" style="margin-bottom:20px">Live read of CoinCync's Phase 2 cryptographic state — the three accumulators that back privacy-pool transactions. All counters increment as users transact; roots advance per block. Zero values mean the pool hasn't accepted activity yet on this network.</div>
+
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head">
+        Phase 2 accumulator state
+        <span class="panel-action">
+          <span id="privacypools-as-of" style="font-size:11px;color:var(--t3);font-family:var(--mono)">—</span>
+        </span>
+      </div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+        <div class="privacy-pool-card">
+          <div class="privacy-pool-card__name">Lelantus Spark</div>
+          <div class="privacy-pool-card__desc">Sketch implementation (CIP-005). Single-curve accumulator over coin commitments + spent-serial set.</div>
+          <div class="privacy-pool-card__stats">
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Accumulator root</span><span class="privacy-pool-card__value" id="privacypools-spark-root" title="—">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Coins accumulated</span><span class="privacy-pool-card__value" id="privacypools-spark-size">—</span></div>
+          </div>
+        </div>
+        <div class="privacy-pool-card">
+          <div class="privacy-pool-card__name">Shielded pool</div>
+          <div class="privacy-pool-card__desc">BridgeTree-backed note commitment tree. Anchors `spend` proofs at the current Merkle root.</div>
+          <div class="privacy-pool-card__stats">
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Tree root</span><span class="privacy-pool-card__value" id="privacypools-shielded-root" title="—">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Notes committed</span><span class="privacy-pool-card__value" id="privacypools-shielded-size">—</span></div>
+          </div>
+        </div>
+        <div class="privacy-pool-card">
+          <div class="privacy-pool-card__name">MimbleWimble kernels</div>
+          <div class="privacy-pool-card__desc">Cut-through engine. Spent inputs are pruned when matched against later outputs — chain footprint shrinks as the kernel set compresses.</div>
+          <div class="privacy-pool-card__stats">
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Kernel root</span><span class="privacy-pool-card__value" id="privacypools-mw-root" title="—">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Kernels kept</span><span class="privacy-pool-card__value" id="privacypools-mw-kept">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Pending candidates</span><span class="privacy-pool-card__value" id="privacypools-mw-pending">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Bytes saved</span><span class="privacy-pool-card__value" id="privacypools-mw-saved">—</span></div>
+            <div class="privacy-pool-card__row"><span class="privacy-pool-card__label">Compression</span><span class="privacy-pool-card__value" id="privacypools-mw-compression">—</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Consensus-mandated privacy</div>
+      <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(2,1fr);gap:14px">
+        <div class="privacy-mandate-card">
+          <div class="privacy-mandate-card__label">Confidential amounts</div>
+          <div class="privacy-mandate-card__desc">Every transaction output value is hidden behind a Pedersen commitment. The chain validates a Bulletproofs+ range proof per output, but only the prover and recipient learn the actual amount.</div>
+          <div class="privacy-mandate-card__status" id="privacypools-mandate-confidential">—</div>
+        </div>
+        <div class="privacy-mandate-card">
+          <div class="privacy-mandate-card__label">Stealth addresses</div>
+          <div class="privacy-mandate-card__desc">Recipients publish a (view, spend) pubkey pair; senders derive a one-time output key per transaction. No on-chain link between sender and recipient address.</div>
+          <div class="privacy-mandate-card__status" id="privacypools-mandate-stealth">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">What you're looking at</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6">
+        These pools coexist with CoinCync's always-on per-tx privacy (CLSAG ring signatures + Bulletproofs+ + stealth addresses, all mandatory at consensus). They're <em>additional</em> surfaces planned for Phase 2 of the privacy stack:
+        <ul style="margin:8px 0 0;padding-left:18px">
+          <li><strong>Spark</strong> (CIP-005) — single-curve shielded coin scheme; transactions ship post-mainnet. The accumulator is live for observability today.</li>
+          <li><strong>Shielded pool</strong> — zk-SNARK style note commitment tree (Halo2 lineage). Storage layer in place; full spend/verify queued.</li>
+          <li><strong>MW cut-through</strong> — MimbleWimble-style kernel compression. Engine is live and accumulating state.</li>
+        </ul>
+        Per the staged-mainnet decision, full transaction flow for each pool ships behind its own dedicated audit. This page exists so users can <em>see</em> the cryptographic state before, during, and after each pool's full activation.
+      </div>
+    </div>
+  </div>
+</div>

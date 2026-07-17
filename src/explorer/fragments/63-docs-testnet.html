@@ -1,0 +1,507 @@
+<div class="page" id="removed-page-testnetdoc">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Testnet Guide</div>
+    <div class="doc-page"><h2>CoinCync Testnet Guide</h2>
+<div style="height:8px"></div>
+<p>Live testnet for CoinCync 1.0 — a privacy-focused cryptocurrency with ring signatures, stealth addresses, confidential transactions, and confidential assets.</p>
+<div style="height:8px"></div>
+<h3>Testnet Overview</h3>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>
+<tr><td>Network</td><td>`testnet`</td></tr>
+<tr><td>Address prefix</td><td>`tCYNC`</td></tr>
+<tr><td>P2P port</td><td>28080</td></tr>
+<tr><td>RPC port</td><td>28081</td></tr>
+<tr><td>Block time</td><td>120 seconds</td></tr>
+<tr><td>Block reward</td><td>50 CYNC (Launch phase)</td></tr>
+<tr><td>Max supply</td><td>100,000,000 CYNC</td></tr>
+<tr><td>Min ring size</td><td>11</td></tr>
+<tr><td>Magic bytes</td><td>`tCYN` (0x74 0x43 0x59 0x4E)</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h4>Testnet Fleet</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>ID</th><th>Region</th><th>Role</th></tr></thead><tbody>
+<tr><td class="mono">a7f2</td><td>LON</td><td>RandomX Miner</td></tr>
+<tr><td class="mono">3c91</td><td>SFO</td><td>RandomX Miner</td></tr>
+<tr><td class="mono">b5e8</td><td>NYC1</td><td>Mempool Node</td></tr>
+<tr><td class="mono">6d4a</td><td>FRA</td><td>Mempool Node</td></tr>
+<tr><td class="mono">2f1c</td><td>NYC3</td><td>Seed · Archive</td></tr>
+<tr><td class="mono">e8b3</td><td>TOR</td><td>Seed</td></tr>
+<tr><td class="mono">9a07</td><td>RIC</td><td>Explorer · Monitor</td></tr>
+<tr><td class="mono">4c2d</td><td>ATL</td><td>Faucet · RPC</td></tr>
+<tr><td class="mono">5f9e</td><td>AMS</td><td>Seed · Backup</td></tr>
+<tr><td class="mono">8b14</td><td>SYD</td><td>RandomX Miner</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h4>Emission Schedule</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Phase</th><th>Years</th><th>Reward/Block</th><th>Approx. Supply Added</th></tr></thead><tbody>
+<tr><td>Launch</td><td>1</td><td>50 CYNC</td><td>~150.15M</td></tr>
+<tr><td>Growth</td><td>2-3</td><td>35 CYNC</td><td>~73.58M</td></tr>
+<tr><td>Maturity</td><td>4-8</td><td>15 CYNC</td><td>~78.84M</td></tr>
+<tr><td>Decline</td><td>9-10</td><td>5 CYNC</td><td>~10.51M</td></tr>
+<tr><td>Tail</td><td>10+</td><td>0.6 CYNC</td><td>Perpetual</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Building from Source</h3>
+<div style="height:8px"></div>
+<h4>Prerequisites</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Rust toolchain (stable): https://rustup.rs</li>
+<li>CMake (for native dependencies)</li>
+<li>Linux: <code>apt install build-essential cmake pkg-config libssl-dev</code></li>
+<li>macOS: <code>xcode-select --install &amp;&amp; brew install cmake</code></li>
+<li>Windows: Install CMake from https://cmake.org and Visual Studio Build Tools</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Build All Binaries</h4>
+<div style="height:8px"></div>
+<pre><code>cargo build --release --features testnet</code></pre>
+<div style="height:8px"></div>
+<p>This builds three binaries in <code>target/release/</code>:</p>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Binary</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>`coincync-node`</td><td>Full node daemon (P2P, RPC, mining)</td></tr>
+<tr><td>`cync-tui`</td><td>Terminal dashboard (wallet, explorer, mining viz)</td></tr>
+<tr><td>`cync-wallet`</td><td>CLI wallet (create, send, receive, assets)</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Running a Node</h3>
+<div style="height:8px"></div>
+<h4>Quick Start</h4>
+<div style="height:8px"></div>
+<pre><code># Create data directory
+mkdir -p ~/.coincync/testnet
+
+# Start node with mining
+./target/release/coincync-node \
+  --network testnet \
+  --data-dir ~/.coincync/testnet \
+  --mine \
+  --mining-threads 1 \
+  --mining-address YOUR_WALLET_ADDRESS</code></pre>
+<div style="height:8px"></div>
+<h4>Node CLI Flags</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td>`--network`</td><td>mainnet</td><td>Network: `testnet`, `mainnet`, `regtest`</td></tr>
+<tr><td>`--data-dir`</td><td>`~/.coincync`</td><td>Blockchain data directory</td></tr>
+<tr><td>`--mine`</td><td>off</td><td>Enable mining</td></tr>
+<tr><td>`--mining-threads`</td><td>all cores</td><td>CPU threads for mining</td></tr>
+<tr><td>`--mining-address`</td><td>none</td><td>Address for block rewards</td></tr>
+<tr><td>`--p2p-port`</td><td>28080</td><td>P2P listen port</td></tr>
+<tr><td>`--rpc-port`</td><td>28081</td><td>RPC listen port</td></tr>
+<tr><td>`--rpc-bind`</td><td>127.0.0.1</td><td>RPC bind address (use 0.0.0.0 for remote access)</td></tr>
+<tr><td>`--peer`</td><td>—</td><td>Manual peer: `--peer 1.2.3.4:28080`</td></tr>
+<tr><td>`--no-p2p-encryption`</td><td>off</td><td>Disable Noise protocol encryption</td></tr>
+<tr><td>`--no-rpc-tls`</td><td>off</td><td>Disable RPC TLS (plaintext HTTP)</td></tr>
+<tr><td>`--require-encryption`</td><td>off</td><td>Reject plaintext P2P peers</td></tr>
+<tr><td>`--max-peers`</td><td>125</td><td>Maximum connected peers</td></tr>
+<tr><td>`--faucet-wallet`</td><td>—</td><td>Load wallet for RPC wallet methods</td></tr>
+<tr><td>`--faucet-password`</td><td>—</td><td>Password for faucet wallet (or env `CYNC_FAUCET_PASSWORD`)</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h4>Firewall Ports</h4>
+<div style="height:8px"></div>
+<p>Open these ports for a public node:</p>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Port</th><th>Protocol</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>28080</td><td>TCP</td><td>P2P peer connections</td></tr>
+<tr><td>28081</td><td>TCP</td><td>RPC API (only if exposing remotely)</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Creating a Wallet</h3>
+<div style="height:8px"></div>
+<h4>Using cync-wallet CLI</h4>
+<div style="height:8px"></div>
+<pre><code># Create wallet directory
+mkdir -p ~/.coincync/wallets
+
+# Create a new wallet
+./target/release/cync-wallet \
+  --wallet mywallet \
+  --network testnet \
+  create
+
+# You'll be prompted for a password and shown a 24-word seed phrase
+# WRITE DOWN THE SEED PHRASE - it's the only way to recover your wallet</code></pre>
+<div style="height:8px"></div>
+<h4>Wallet CLI Flags</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td>`--wallet`</td><td>—</td><td>Wallet name (stored in `~/.coincync/wallets/&lt;name&gt;.cync`)</td></tr>
+<tr><td>`--wallet-file`</td><td>`~/.coincync/wallet.cync`</td><td>Full path to wallet file</td></tr>
+<tr><td>`--network`</td><td>mainnet</td><td>Network: `testnet` or `mainnet`</td></tr>
+<tr><td>`--daemon`</td><td>auto</td><td>Node RPC address (`host:port`)</td></tr>
+<tr><td>`--no-tls`</td><td>off</td><td>Disable TLS for RPC</td></tr>
+<tr><td>`--password`</td><td>—</td><td>Wallet password (prefer env `CYNC_WALLET_PASSWORD`)</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h4>Wallet Commands</h4>
+<div style="height:8px"></div>
+<pre><code># Show address
+cync-wallet --wallet mywallet --network testnet address
+
+# Show balance (needs running node)
+cync-wallet --wallet mywallet --network testnet --daemon 127.0.0.1:28081 --no-tls balance
+
+# Send CYNC
+cync-wallet --wallet mywallet --network testnet --daemon 127.0.0.1:28081 --no-tls \
+  send RECIPIENT_ADDRESS 10.0
+
+# Create subaddress
+cync-wallet --wallet mywallet --network testnet subaddress new --label "donations"
+
+# List subaddresses
+cync-wallet --wallet mywallet --network testnet subaddress list
+
+# Restore from seed
+cync-wallet --wallet restored --network testnet restore "your 24 word seed phrase here"
+
+# Interactive shell mode
+cync-wallet --wallet mywallet --network testnet --daemon 127.0.0.1:28081 --no-tls shell</code></pre>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Connecting the TUI</h3>
+<div style="height:8px"></div>
+<p>The TUI is a full terminal dashboard that connects to a running node via RPC.</p>
+<div style="height:8px"></div>
+<h4>Watch-Only Mode (no wallet)</h4>
+<div style="height:8px"></div>
+<p>View blocks, peers, mining stats, and network health:</p>
+<div style="height:8px"></div>
+<pre><code>./target/release/cync-tui --node 165.22.173.168:28081 --no-tls --network testnet</code></pre>
+<div style="height:8px"></div>
+<h4>Full Mode (with wallet features)</h4>
+<div style="height:8px"></div>
+<p>Pass <code>--api-key</code> to enable wallet tabs (balance, send, receive, assets):</p>
+<div style="height:8px"></div>
+<pre><code>./target/release/cync-tui \
+  --node 165.22.173.168:28081 \
+  --no-tls \
+  --api-key test \
+  --network testnet</code></pre>
+<div style="height:8px"></div>
+<p>Note: The node must have a wallet loaded (<code>--faucet-wallet</code> flag) for wallet RPC methods to work.</p>
+<div style="height:8px"></div>
+<h4>TUI CLI Flags</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td>`--node`</td><td>127.0.0.1:28081</td><td>Node RPC address</td></tr>
+<tr><td>`--network`</td><td>testnet</td><td>Network name</td></tr>
+<tr><td>`--no-tls`</td><td>off</td><td>Disable TLS</td></tr>
+<tr><td>`--api-key`</td><td>—</td><td>Enable wallet features (env: `CYNC_API_KEY`)</td></tr>
+<tr><td>`--poll-ms`</td><td>1500</td><td>RPC polling interval</td></tr>
+<tr><td>`--refresh-ms`</td><td>250</td><td>UI refresh rate</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h4>TUI Navigation</h4>
+<div style="height:8px"></div>
+<h5>Main Tabs (press number or Tab/Shift+Tab)</h5>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Key</th><th>Tab</th><th>Description</th></tr></thead><tbody>
+<tr><td>`1`</td><td>Dashboard</td><td>Node overview, balance, charts</td></tr>
+<tr><td>`2`</td><td>Wallet</td><td>Balance, address, QR code, subaddresses</td></tr>
+<tr><td>`3`</td><td>Mining</td><td>Hashrate, difficulty, block times</td></tr>
+<tr><td>`4`</td><td>Transactions</td><td>Block explorer</td></tr>
+<tr><td>`5`</td><td>Network</td><td>Peers, Dandelion++ stats</td></tr>
+<tr><td>`6`</td><td>Explorer</td><td>Detailed block view</td></tr>
+<tr><td>`7`</td><td>Assets</td><td>Confidential asset list</td></tr>
+<tr><td>`8`</td><td>Supply</td><td>Emission curve, inflation charts</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h5>Action Keys</h5>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Key</th><th>Action</th><th>Privacy Feature</th></tr></thead><tbody>
+<tr><td>`s`</td><td>Send CYNC</td><td>Ring signatures + stealth addresses</td></tr>
+<tr><td>`v`</td><td>Vest (time-lock)</td><td>Lock funds until block height</td></tr>
+<tr><td>`n`</td><td>New subaddress</td><td>Unlinkable receive addresses</td></tr>
+<tr><td>`i`</td><td>Issue asset</td><td>Create confidential asset</td></tr>
+<tr><td>`A`</td><td>Send asset</td><td>Asset surjection proofs</td></tr>
+<tr><td>`w`</td><td>Create wallet</td><td>Wallet creation/restore</td></tr>
+<tr><td>`R`</td><td>Rescan</td><td>Re-scan blockchain for missed txs</td></tr>
+<tr><td>`F`</td><td>Faucet</td><td>Request testnet CYNC</td></tr>
+<tr><td>`t` / `T`</td><td>Themes</td><td>Cycle forward / backward through 9 CoinCync themes</td></tr>
+<tr><td>`?`</td><td>Help</td><td>Full keybind reference</td></tr>
+<tr><td>`q` / `Esc`</td><td>Quit</td><td>Exit TUI</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h5>Other Keys</h5>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Key</th><th>Action</th></tr></thead><tbody>
+<tr><td>`M`</td><td>Live mining visualizer</td></tr>
+<tr><td>`H`</td><td>Transaction history</td></tr>
+<tr><td>`U`</td><td>UTXO panel</td></tr>
+<tr><td>`X`</td><td>Atomic swaps</td></tr>
+<tr><td>`G`</td><td>Multisig operations</td></tr>
+<tr><td>`D`</td><td>Asset audit (surjection proof validation)</td></tr>
+<tr><td>`W`</td><td>Switch wallets</td></tr>
+<tr><td>`c`</td><td>Copy (context-aware)</td></tr>
+<tr><td>`e`</td><td>Export (JSON/CSV)</td></tr>
+<tr><td>`Ctrl+P`</td><td>Fuzzy command search</td></tr>
+<tr><td>`Ctrl+\`</td><td>Split pane view</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Testing Privacy Features</h3>
+<div style="height:8px"></div>
+<h4>1. Ring Signatures (CLSAG)</h4>
+<div style="height:8px"></div>
+<p>Every transaction uses ring signatures to hide the true sender among decoys.</p>
+<div style="height:8px"></div>
+<pre><code># In TUI: press 's' to send
+# Enter a recipient address and amount
+# The transaction automatically includes ring decoys from the blockchain</code></pre>
+<div style="height:8px"></div>
+<p>What to observe:</p>
+<ul>
+<li>Transaction has multiple input public keys (the ring)</li>
+<li>Only one is the real sender — outsiders can't tell which</li>
+<li>Ring size increases as the chain grows (min 11 at maturity)</li>
+</ul>
+<div style="height:8px"></div>
+<h4>2. Stealth Addresses</h4>
+<div style="height:8px"></div>
+<p>Every transaction creates a one-time stealth address for the recipient.</p>
+<div style="height:8px"></div>
+<pre><code># Send to the same address twice
+# Each transaction creates a different on-chain output address
+# Observers cannot link the two payments to the same recipient</code></pre>
+<div style="height:8px"></div>
+<p>What to observe:</p>
+<ul>
+<li>The on-chain <code>stealth_address</code> differs for each output</li>
+<li>Only the recipient (with their view key) can detect the payment</li>
+<li>View tags provide fast scanning without revealing the link</li>
+</ul>
+<div style="height:8px"></div>
+<h4>3. Subaddresses</h4>
+<div style="height:8px"></div>
+<p>Create unlinkable receive addresses from a single wallet.</p>
+<div style="height:8px"></div>
+<pre><code># In TUI: press 'n' to create a new subaddress
+# Or CLI: cync-wallet subaddress new --label "shop"
+# Give different subaddresses to different senders</code></pre>
+<div style="height:8px"></div>
+<p>What to observe:</p>
+<ul>
+<li>Each subaddress is cryptographically derived but unlinkable</li>
+<li>All subaddresses deposit to the same wallet</li>
+<li>Senders cannot determine if two subaddresses belong to the same wallet</li>
+</ul>
+<div style="height:8px"></div>
+<h4>4. Confidential Amounts (Pedersen Commitments + Bulletproofs)</h4>
+<div style="height:8px"></div>
+<p>All transaction amounts are hidden using Pedersen commitments.</p>
+<div style="height:8px"></div>
+<pre><code># Send any amount — the amount is never visible on-chain
+# Only the sender and recipient know the true amount
+# Bulletproofs prove the amount is valid (non-negative, no overflow)</code></pre>
+<div style="height:8px"></div>
+<p>What to observe:</p>
+<ul>
+<li>On-chain outputs show <code>commitment</code> (32 bytes) instead of plaintext amounts</li>
+<li><code>range_proof</code> (Bulletproof) proves validity without revealing the amount</li>
+<li>Validators verify commitments balance without seeing values</li>
+</ul>
+<div style="height:8px"></div>
+<h4>5. Confidential Assets</h4>
+<div style="height:8px"></div>
+<p>Issue and transfer custom assets with hidden asset types.</p>
+<div style="height:8px"></div>
+<pre><code># In TUI: press 'i' to issue a new asset
+# Enter name, precision, and initial supply
+# Press 'A' to send the asset to another address</code></pre>
+<div style="height:8px"></div>
+<p>What to observe:</p>
+<ul>
+<li>Asset type is hidden behind an <code>asset_commitment</code></li>
+<li>Asset surjection proofs (1-of-n ring) prove the output asset is one of the allowed types</li>
+<li>Observers cannot tell which asset type is being transferred</li>
+</ul>
+<div style="height:8px"></div>
+<h4>6. Dandelion++ Transaction Routing</h4>
+<div style="height:8px"></div>
+<p>Transactions propagate through a "stem" phase before broadcasting.</p>
+<div style="height:8px"></div>
+<pre><code># In TUI: press '5' for Network tab
+# Look for Dandelion++ stats
+# Transactions first travel along a random stem path, then fluff to all peers</code></pre>
+<div style="height:8px"></div>
+<p>What to observe:</p>
+<ul>
+<li>Stem peers: transaction relayed privately through 1-2 hops</li>
+<li>Fluff phase: transaction broadcast to the network</li>
+<li>Observers cannot determine which node originated the transaction</li>
+</ul>
+<div style="height:8px"></div>
+<h4>7. Time-Locked Transfers (Vesting)</h4>
+<div style="height:8px"></div>
+<p>Lock funds until a specific block height.</p>
+<div style="height:8px"></div>
+<pre><code># In TUI: press 'v' to vest
+# Enter recipient, amount, and unlock height
+# Funds cannot be spent until the chain reaches that height</code></pre>
+<div style="height:8px"></div>
+<p>What to observe:</p>
+<ul>
+<li>Output has a <code>lock_height</code> field</li>
+<li>Wallet shows locked vs unlocked balance separately</li>
+<li>Attempting to spend before unlock height fails consensus validation</li>
+</ul>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Running Your Own Seed Node</h3>
+<div style="height:8px"></div>
+<p>Full setup guide for a DigitalOcean/VPS server.</p>
+<div style="height:8px"></div>
+<h4>1. Server Requirements</h4>
+<div style="height:8px"></div>
+<ul>
+<li>2+ GB RAM (4 GB recommended for Rust builds)</li>
+<li>25+ GB disk</li>
+<li>Ubuntu 22.04 or later</li>
+<li>Open ports: 22 (SSH), 28080 (P2P), 28081 (RPC)</li>
+</ul>
+<div style="height:8px"></div>
+<h4>2. Install Rust and Dependencies</h4>
+<div style="height:8px"></div>
+<pre><code>apt update &amp;&amp; apt install -y build-essential cmake pkg-config libssl-dev git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env</code></pre>
+<div style="height:8px"></div>
+<h4>3. Clone and Build</h4>
+<div style="height:8px"></div>
+<pre><code>git clone https://git.coincync.network/coincync/cync-protocol.git /opt/coincync
+cd /opt/coincync
+cargo build --release --features testnet</code></pre>
+<div style="height:8px"></div>
+<p>If the build gets killed (OOM on 2 GB servers), add swap:</p>
+<div style="height:8px"></div>
+<pre><code>fallocate -l 4G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' &gt;&gt; /etc/fstab
+# Retry the build
+cargo build --release --features testnet</code></pre>
+<div style="height:8px"></div>
+<h4>4. Create Wallet</h4>
+<div style="height:8px"></div>
+<pre><code>mkdir -p ~/.coincync/wallets
+cd /opt/coincync
+./target/release/cync-wallet --wallet mynode --network testnet create --password YOUR_PASSWORD
+# Save the seed phrase!
+# Note the address (starts with CYNC or tCYNC)</code></pre>
+<div style="height:8px"></div>
+<h4>5. Start the Node</h4>
+<div style="height:8px"></div>
+<pre><code>nohup ./target/release/coincync-node \
+  --network testnet \
+  --data-dir /data/coincync \
+  --mine \
+  --mining-threads 1 \
+  --mining-address YOUR_WALLET_ADDRESS \
+  --no-p2p-encryption \
+  --rpc-bind 0.0.0.0 \
+  --no-rpc-tls \
+  --faucet-wallet ~/.coincync/wallets/mynode.cync \
+  --faucet-password YOUR_PASSWORD \
+  &gt; /var/log/coincync-node.log 2&gt;&amp;1 &amp;</code></pre>
+<div style="height:8px"></div>
+<h4>6. Monitor</h4>
+<div style="height:8px"></div>
+<pre><code># Live log
+tail -f /var/log/coincync-node.log
+
+# Check if running
+pgrep coincync-node</code></pre>
+<div style="height:8px"></div>
+<h4>7. Connect TUI Remotely</h4>
+<div style="height:8px"></div>
+<p>From your local machine:</p>
+<div style="height:8px"></div>
+<pre><code>cync-tui --node YOUR_SERVER_IP:28081 --no-tls --api-key test --network testnet</code></pre>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Troubleshooting</h3>
+<div style="height:8px"></div>
+<h4>Build fails with OOM (Killed/SIGKILL)</h4>
+<div style="height:8px"></div>
+<p>Rust release builds need 3-4 GB RAM. Add a swap file:</p>
+<div style="height:8px"></div>
+<pre><code>fallocate -l 4G /swapfile &amp;&amp; chmod 600 /swapfile &amp;&amp; mkswap /swapfile &amp;&amp; swapon /swapfile</code></pre>
+<div style="height:8px"></div>
+<h4>Nodes not peering (Noise handshake failed)</h4>
+<div style="height:8px"></div>
+<p>Add <code>--no-p2p-encryption</code> to all nodes. The Noise protocol encryption handshake can fail between nodes; disabling it allows plaintext P2P connections for testnet.</p>
+<div style="height:8px"></div>
+<h4>"Failed to create wallet: No such file or directory"</h4>
+<div style="height:8px"></div>
+<p>Create the wallets directory first:</p>
+<div style="height:8px"></div>
+<pre><code>mkdir -p ~/.coincync/wallets</code></pre>
+<div style="height:8px"></div>
+<h4>critical_files.lock hash mismatch</h4>
+<div style="height:8px"></div>
+<p>If you modify consensus-critical files, update the lockfile:</p>
+<div style="height:8px"></div>
+<pre><code># Compute new hash
+sha256sum src/testnet.rs
+# Edit critical_files.lock with the new hash</code></pre>
+<div style="height:8px"></div>
+<h4>ASERT integer exponent clamped</h4>
+<div style="height:8px"></div>
+<p>Normal on fresh chains. The difficulty algorithm clamps extreme adjustments when the genesis timestamp is far from the current time. This resolves as the chain grows.</p>
+<div style="height:8px"></div>
+<h4>Self-connection detected</h4>
+<div style="height:8px"></div>
+<p>Normal. The node discovers its own IP in the seed list and correctly rejects the connection.</p>
+<div style="height:8px"></div>
+<h4>TUI shows no wallet data</h4>
+<div style="height:8px"></div>
+<p>Make sure:</p>
+<p>1. The node was started with <code>--faucet-wallet</code> and <code>--faucet-password</code></p>
+<p>2. The TUI was started with <code>--api-key</code> (any value works when auth is disabled)</p>
+<p>3. RPC is reachable: <code>curl http://NODE_IP:28081</code> should respond</p>
+<div style="height:8px"></div>
+<hr style="border:none;border-top:1px solid var(--b);margin:20px 0">
+<div style="height:8px"></div>
+<h3>Privacy Technology Summary</h3>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Feature</th><th>Cryptography</th><th>What It Hides</th></tr></thead><tbody>
+<tr><td>Ring Signatures</td><td>CLSAG (Compact Linkable Spontaneous Anonymous Group)</td><td>True sender</td></tr>
+<tr><td>Stealth Addresses</td><td>ECDH one-time keys</td><td>Recipient identity</td></tr>
+<tr><td>Confidential Tx</td><td>Pedersen Commitments + Bulletproofs</td><td>Transaction amounts</td></tr>
+<tr><td>Confidential Assets</td><td>Asset Surjection Proofs (Borromean)</td><td>Asset type</td></tr>
+<tr><td>Subaddresses</td><td>Deterministic derivation (view key + index)</td><td>Address linkability</td></tr>
+<tr><td>Dandelion++</td><td>Stem-then-fluff routing</td><td>Transaction origin IP</td></tr>
+<tr><td>Key Images</td><td>Curve point: I = x * Hp(xG)</td><td>Double-spend prevention without revealing source</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div></div>
+  </div>
+</div>
