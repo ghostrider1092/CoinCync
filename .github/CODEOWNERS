@@ -28,18 +28,18 @@
 # Block validation, tx validation, supply emission curve, reorg policy,
 # difficulty adjustment, the constants file. A bug in any of these is
 # usually unrecoverable without coordinated rollback.
-/src/consensus/                     @ghostrider1092
-/src/transaction/validator.rs       @ghostrider1092
-/src/chain.rs                       @ghostrider1092
-/src/emission.rs                    @ghostrider1092
-/src/constants.rs                   @ghostrider1092
+/src/consensus/                     @ghostrider1092 @junbyjun1238
+/src/transaction/validator.rs       @ghostrider1092 @junbyjun1238
+/src/chain.rs                       @ghostrider1092 @junbyjun1238
+/src/emission.rs                    @ghostrider1092 @junbyjun1238
+/src/constants.rs                   @ghostrider1092 @junbyjun1238
 
 # ── Cryptographic primitives: any change here can break privacy ─────
 # CLSAG, Bulletproofs+, stealth-address derivation, key-image
 # computation, Pedersen commitments. Bugs here are silent: a tx looks
 # valid but leaks linkage to chain analysts, or worse, allows
 # inflation via crafted range proofs.
-/src/crypto/                        @ghostrider1092
+/src/crypto/                        @ghostrider1092 @junbyjun1238
 
 # ── Wallet send + scan: any change here can lose user funds ─────────
 # Tx-build path: ring selection, decoy logic, fee math, change
@@ -55,8 +55,8 @@
 # A bug in tx-admit that lets invalid txs persist will stall block
 # production (the 2026-05-07 "shadow conflict" stalls are the
 # canonical example).
-/src/mempool.rs                     @ghostrider1092
-/src/network/                       @ghostrider1092
+/src/mempool.rs                     @ghostrider1092 @junbyjun1238
+/src/network/                       @ghostrider1092 @junbyjun1238
 
 # ── RPC surface: anything user-facing or attack-surface ─────────────
 # REST proxy, JSON-RPC server, allowlist gating. Mistakes here can

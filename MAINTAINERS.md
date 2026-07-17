@@ -13,9 +13,9 @@ If you're a contributor who needs a PR reviewed and the listed reviewer hasn't r
 | Role | Primary | Backup | Public contact |
 |---|---|---|---|
 | **Project lead** — strategic direction, CIP final-call | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled — see [Recruiting](#recruiting)_ | Discord `@ghostrider1092` |
-| **Consensus + crypto reviewer** — PRs touching `src/consensus/`, `src/crypto/`, `src/transaction/validator.rs`, `src/chain.rs`, `src/emission.rs`, `src/constants.rs` | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | Discord `@ghostrider1092` |
-| **Wallet + RPC reviewer** — PRs touching `src/wallet/`, `src/rpc/`, `src/bin/wallet.rs`, `coincync-wallet-v2/` | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | Discord `@ghostrider1092` |
-| **Network + mempool reviewer** — PRs touching `src/network/`, `src/mempool.rs` | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | Discord `@ghostrider1092` |
+| **Consensus + crypto reviewer** — PRs touching `src/consensus/`, `src/crypto/`, `src/transaction/validator.rs`, `src/chain.rs`, `src/emission.rs`, `src/constants.rs` | [@ghostrider1092](https://github.com/ghostrider1092) | [@junbyjun1238](https://github.com/junbyjun1238) | Discord `@junbyjun1238` |
+| **Wallet + RPC reviewer** — PRs touching `src/wallet/`, `src/rpc/`, `src/bin/wallet.rs`, `coincync-wallet-v2/` | [@ghostrider1092](https://github.com/ghostrider1092) | [@junbyjun1238](https://github.com/junbyjun1238) | Discord `@junbyjun1238` |
+| **Network + mempool reviewer** — PRs touching `src/network/`, `src/mempool.rs` | [@ghostrider1092](https://github.com/ghostrider1092) | [@junbyjun1238](https://github.com/junbyjun1238) | Discord `@junbyjun1238` |
 | **Release manager** — cuts tags, signs artifacts, publishes binaries | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | n/a |
 | **Fleet operator** — SSH access to seed/explorer/api nodes; deploys + incident response | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | n/a |
 | **Security inbox** — reads `CyncLabs@proton.me`, triages disclosures | [@ghostrider1092](https://github.com/ghostrider1092) | _unfilled_ | `CyncLabs@proton.me` |
