@@ -23,12 +23,50 @@ pub struct ChainStateData {
     pub height: u64,
     /// Total difficulty
     pub total_difficulty: u128,
-    /// Total supply
-    pub total_supply: u64,
+    /// Total (cumulative) emitted supply, in atomic units.
+    ///
+    /// `u128`, not `u64`: MAX_SUPPLY = 100M CYNC × 10^12 atomic/CYNC = 10^20,
+    /// which exceeds `u64::MAX` (~1.84×10^19 ≈ 18.4M CYNC). The prior `u64`
+    /// aggregate overflowed and panicked the `checked_add` on block connect at
+    /// ~18.4M CYNC of cumulative emission (height ~408k). Individual `Amount`s
+    /// stay `u64` — only this running total widened. See `ChainStateDataLegacyV1`
+    /// for the on-disk migration.
+    pub total_supply: u128,
     /// Total burned
     pub total_burned: u64,
     /// Last checkpoint height
     pub last_checkpoint: u64,
+}
+
+/// Pre-widening on-disk layout of [`ChainStateData`] (`total_supply` was `u64`).
+///
+/// Kept only to migrate an existing state database across the supply u64→u128
+/// widening. `get_state` decodes this when the current-layout borsh decode
+/// fails (the legacy record is 8 bytes shorter), then widens via `From`.
+/// Field order MUST match the original `ChainStateData` exactly — borsh is
+/// positional. Post-migration saves use the current layout, so this path runs
+/// at most once per database.
+#[derive(BorshDeserialize)]
+struct ChainStateDataLegacyV1 {
+    tip_hash: Hash,
+    height: u64,
+    total_difficulty: u128,
+    total_supply: u64,
+    total_burned: u64,
+    last_checkpoint: u64,
+}
+
+impl From<ChainStateDataLegacyV1> for ChainStateData {
+    fn from(v: ChainStateDataLegacyV1) -> Self {
+        ChainStateData {
+            tip_hash: v.tip_hash,
+            height: v.height,
+            total_difficulty: v.total_difficulty,
+            total_supply: v.total_supply as u128,
+            total_burned: v.total_burned,
+            last_checkpoint: v.last_checkpoint,
+        }
+    }
 }
 
 /// State database
@@ -66,8 +104,22 @@ impl StateDb {
     pub fn get_state(&self) -> Result<Option<ChainStateData>> {
         match self.state.get(Self::KEY_CHAIN_STATE) {
             Ok(Some(data)) => {
-                let state: ChainStateData = deserialize(&data)?;
-                Ok(Some(state))
+                // Try the current layout first. On a node upgrading across the
+                // supply u64→u128 widening, the on-disk record is still in the
+                // pre-widening layout (total_supply as u64, 8 bytes narrower),
+                // so the current-layout borsh decode fails on length; fall back
+                // to the legacy layout and widen. Borsh is length-strict (it
+                // rejects both short reads and trailing bytes) and the two
+                // layouts differ by 8 bytes, so exactly one decode succeeds —
+                // no ambiguity. Post-migration saves use the current layout, so
+                // this fallback runs at most once per database.
+                match deserialize::<ChainStateData>(&data) {
+                    Ok(state) => Ok(Some(state)),
+                    Err(_) => {
+                        let legacy: ChainStateDataLegacyV1 = deserialize(&data)?;
+                        Ok(Some(legacy.into()))
+                    }
+                }
             }
             Ok(None) => Ok(None),
             Err(e) => Err(Error::DatabaseError(e.to_string())),
@@ -282,6 +334,55 @@ mod tests {
         let loaded = state_db.get_state().unwrap().unwrap();
         assert_eq!(loaded.height, 100);
         assert_eq!(loaded.total_supply, 1_000_000_000);
+    }
+
+    #[test]
+    fn get_state_migrates_pre_u128_supply_layout() {
+        // A node upgrading across the supply u64→u128 widening has an on-disk
+        // chain_state record in the PRE-widening layout (total_supply as u64,
+        // 8 bytes narrower). get_state must decode it via the legacy fallback
+        // and widen — not error out and wedge the DB on open.
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        // Mirror of the ORIGINAL on-disk field order, so borsh reproduces the
+        // exact legacy byte layout (total_supply as u64).
+        #[derive(BorshSerialize)]
+        struct LegacyWrite {
+            tip_hash: Hash,
+            height: u64,
+            total_difficulty: u128,
+            total_supply: u64,
+            total_burned: u64,
+            last_checkpoint: u64,
+        }
+        // A supply near the old u64 ceiling — exactly the regime that panicked.
+        let legacy = LegacyWrite {
+            tip_hash: Hash::from_bytes([7u8; 32]),
+            height: 407_838,
+            total_difficulty: 999,
+            total_supply: 18_446_744_073_000_000_000, // ~1.8446e19, just under u64::MAX
+            total_burned: 42,
+            last_checkpoint: 400_000,
+        };
+        let bytes = borsh::to_vec(&legacy).unwrap();
+        state_db.state.insert(StateDb::KEY_CHAIN_STATE, bytes).unwrap();
+
+        // Legacy record decodes and widens, no error.
+        let loaded = state_db.get_state().unwrap().unwrap();
+        assert_eq!(loaded.height, 407_838);
+        assert_eq!(loaded.total_difficulty, 999);
+        assert_eq!(loaded.total_supply, 18_446_744_073_000_000_000u128);
+        assert_eq!(loaded.total_burned, 42);
+        assert_eq!(loaded.last_checkpoint, 400_000);
+
+        // And the current layout round-trips a value BEYOND the old u64 ceiling.
+        let mut cur = loaded;
+        cur.total_supply = (u64::MAX as u128) + 1_000;
+        state_db.save_state(&cur).unwrap();
+        let reloaded = state_db.get_state().unwrap().unwrap();
+        assert_eq!(reloaded.total_supply, (u64::MAX as u128) + 1_000);
     }
 
     #[test]
