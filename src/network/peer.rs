@@ -100,10 +100,13 @@ pub struct PeerInfo {
     pub capabilities: u64,
     /// Consecutive `try_send(Full)` count for this peer's broadcast
     /// channel. Reset on any successful send. When it crosses the
-    /// stall threshold (see `node.rs::STALL_THRESHOLD`) the peer is
+    /// stall threshold (see `node/broadcast.rs::STALL_THRESHOLD`) the peer is
     /// disconnected. Atomic so the lock-free broadcast hot path can
     /// update it without taking a write lock on the peer table.
     pub consecutive_full: Arc<AtomicU32>,
+    /// Identifies the connection instance that owns this map entry so an
+    /// older task cannot remove a replacement connection with the same peer ID.
+    pub(crate) connection_token: Arc<()>,
     /// Eclipse-defense per-/16 outbound slot. Some(slot) for outbound
     /// peers, None for inbound. The slot's lifetime is tied to this
     /// PeerInfo entry: when the entry is removed from the peers map
@@ -138,6 +141,7 @@ impl PeerInfo {
             remote_static_key: None,
             capabilities: 0,
             consecutive_full: Arc::new(AtomicU32::new(0)),
+            connection_token: Arc::new(()),
             eclipse_slot: None,
         }
     }
