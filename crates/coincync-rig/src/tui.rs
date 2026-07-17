@@ -23,7 +23,9 @@
 //! for the hero-letter font.
 
 use std::collections::VecDeque;
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -1179,10 +1181,27 @@ fn snapshot_to_tmpfile(metrics: &MetricsState) {
         eta,
         luck,
     );
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("coincync-rig-{}.txt", now));
-    let _ = std::fs::write(&path, body);
-    tracing::info!(path = %path.display(), "snapshot saved");
+    let path = std::env::temp_dir().join(format!(
+        "coincync-rig-{}-{:016x}.txt",
+        now,
+        rand::random::<u64>()
+    ));
+    match write_snapshot_file(&path, &body) {
+        Ok(()) => tracing::info!(path = %path.display(), "snapshot saved"),
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            %error,
+            "snapshot could not be saved"
+        ),
+    }
+}
+
+fn write_snapshot_file(path: &Path, body: &str) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(body.as_bytes())
 }
 
 // ─── Session summary ─────────────────────────────────────────────────
@@ -1245,4 +1264,31 @@ fn scopeguard_call_on_drop<F: FnOnce()>(f: F) -> impl Drop {
         }
     }
     Guard(Some(f))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_snapshot_file;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn snapshot_file_does_not_replace_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "coincync-rig-snapshot-test-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("snapshot.txt");
+        std::fs::write(&path, "existing").unwrap();
+
+        let error_kind = write_snapshot_file(&path, "replacement")
+            .unwrap_err()
+            .kind();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+
+        assert_eq!(error_kind, ErrorKind::AlreadyExists);
+        assert_eq!(contents, "existing");
+    }
 }

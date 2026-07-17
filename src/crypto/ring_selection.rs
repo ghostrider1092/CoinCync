@@ -20,90 +20,71 @@
 //! real spends tend to use newer outputs. By matching this distribution
 //! for decoys, we make real and fake indistinguishable.
 
-use crate::primitives::{Hash, PublicKey};
 use crate::error::{Error, Result};
-use rand::{Rng, RngCore, CryptoRng};
-
+use crate::primitives::PublicKey;
+use rand::seq::index;
+use rand::{CryptoRng, Rng, RngCore};
 
 /// Output reference for ring selection
-#[derive(Clone, Debug)]
-pub struct OutputRef {
+#[derive(Clone, Copy, Debug)]
+pub struct OutputRef<'a> {
     /// Block height where output was created
     pub height: u64,
-    /// Transaction hash
-    pub tx_hash: Hash,
-    /// Output index
-    pub output_index: u8,
     /// Public key (stealth address)
-    pub public_key: PublicKey,
+    pub public_key: &'a PublicKey,
     /// Commitment bytes
-    pub commitment: [u8; 32],
-    /// Global output index (for efficient lookup)
-    pub global_index: u64,
+    pub commitment: &'a [u8; 32],
 }
 
-/// Ring selection configuration
+impl<'a> OutputRef<'a> {
+    pub fn new(height: u64, public_key: &'a PublicKey, commitment: &'a [u8; 32]) -> Self {
+        Self {
+            height,
+            public_key,
+            commitment,
+        }
+    }
+}
+
+/// Keeps ring-size policy and sampling bound to the same unique output set.
+#[derive(Debug)]
+pub struct RingSelectionPool<'a> {
+    outputs: Vec<OutputRef<'a>>,
+}
+
+impl<'a> RingSelectionPool<'a> {
+    pub fn new(outputs: impl IntoIterator<Item = OutputRef<'a>>) -> Self {
+        let mut seen_public_keys = std::collections::HashSet::new();
+        let outputs = outputs
+            .into_iter()
+            .filter(|output| seen_public_keys.insert(*output.public_key.as_bytes()))
+            .collect();
+        Self { outputs }
+    }
+
+    pub fn len(&self) -> usize {
+        self.outputs.len()
+    }
+
+}
+
 /// Configuration for ring/decoy selection.
-///
-/// AUDIT (2026-07-02 Wave 16 doc-drift cleanup): removed dead `gamma_shape`
-/// and `gamma_scale` fields. They were carry-over from the pre-uniform
-/// implementation, still declared on the struct + populated in Default,
-/// but grep-verified zero readers anywhere in the tree. Their presence
-/// suggested to future auditors that the config controlled a gamma
-/// distribution, which contradicts the module-header design comment
-/// (uniform-only, see L3–L22). Their default values were also stale
-/// Monero-derived numbers.
-///
-/// The `strict_privacy_mode` docstring was also stale — it described
-/// pre-uniform "fall back to gamma" semantics. Actual behavior post-
-/// Wave 1 is documented in the current comment: reject-on-pool-
-/// shortfall (strict) vs allow-uniform-with-replacement (relaxed).
 #[derive(Clone, Debug)]
 pub struct RingSelectionConfig {
-    /// Minimum ring size
-    pub min_ring_size: usize,
     /// Target ring size
     pub target_ring_size: usize,
-    /// Maximum ring size
-    pub max_ring_size: usize,
     /// Minimum output age in blocks before it can be a decoy
     pub min_decoy_age: u64,
     /// Maximum age for decoys (avoid ancient outputs)
     pub max_decoy_age: u64,
-    /// Require outputs from recent blocks (last N blocks must have representation)
-    pub recent_block_requirement: u64,
-    /// SECURITY: eligible-pool-shortfall behavior.
-    ///
-    /// If `true` (strict): if the uniform shuffle can't fill the ring from
-    /// the deduped eligible pool, reject the ring build. Better to surface
-    /// the shortfall to the operator than silently ship a smaller anonymity
-    /// set. This is the default and the recommended production setting.
-    ///
-    /// If `false` (relaxed): fall back to uniform-with-replacement — allow
-    /// the same output to appear more than once in the ring, still uniform
-    /// but with reduced anonymity-set diversity. Emits an ERROR-level log +
-    /// a structured `privacy_audit` event so the degradation is visible.
-    /// Only appropriate for test rigs or extreme pool-exhaustion scenarios.
-    ///
-    /// Prior version's docstring described "fall back to uniform random with
-    /// warning" as the *relaxed* mode, framing uniform as WEAKER privacy —
-    /// that framing was written before the Wave 1 gamma → uniform switch
-    /// and had the polarity inverted (uniform IS the constitutional design;
-    /// gamma is the Möser-2018-attackable form). Fixed 2026-07-02.
-    pub strict_privacy_mode: bool,
 }
 
 impl Default for RingSelectionConfig {
     fn default() -> Self {
         RingSelectionConfig {
-            min_ring_size: 11,
             target_ring_size: 11,
-            max_ring_size: 21,
             min_decoy_age: 10,
             max_decoy_age: 5_256_000 * 2, // ~2 years in blocks
-            recent_block_requirement: 50,
-            // Default to strict mode for maximum privacy
-            strict_privacy_mode: true,
         }
     }
 }
@@ -119,34 +100,11 @@ pub struct RingSelectionStats {
     pub min_age: u64,
     /// Maximum decoy age
     pub max_age: u64,
-    /// Number of retries needed
-    pub selection_retries: usize,
     /// Distribution of decoys by age bucket
     pub age_distribution: [u32; 10],
-    /// Whether the uniform-with-replacement fallback fired due to eligible-
-    /// pool shortfall. Signals a reduced-anonymity-set ring — still uniform
-    /// draws, but the same output may appear more than once. Privacy-audit
-    /// event is emitted at ERROR level; monitoring should page on this.
-    ///
-    /// AUDIT (2026-07-02): stale comment cleanup. Prior text ("uniform random
-    /// fallback was used (privacy concern)") was written before the Wave 1
-    /// gamma→uniform switch and implied that uniform ITSELF was the concern.
-    /// It's not — uniform is the constitutional design. The concern is
-    /// specifically the *with-replacement* variant, which fires only on
-    /// pool-shortfall.
-    pub fallback_used: bool,
-    /// Number of decoys selected via fallback
-    pub fallback_count: usize,
 }
 
 /// Select ring members using UNIFORM decoy selection over the eligible pool.
-///
-/// AUDIT (2026-07-02): docstring corrected. Prior text ("Select ring members
-/// using gamma distribution") was directly contradicted by the module-level
-/// design comment at L3–L22 (uniform-only) AND by the implementation
-/// (Fisher-Yates uniform shuffle). Same class of docstring drift as the
-/// storage/utxos.rs gamma → uniform Wave 15 fix — this one was inside the
-/// design-correct module but the docstring hadn't been updated.
 pub struct RingSelector {
     config: RingSelectionConfig,
 }
@@ -159,24 +117,7 @@ impl RingSelector {
     pub fn with_ring_size(ring_size: usize) -> Self {
         RingSelector {
             config: RingSelectionConfig {
-                min_ring_size: ring_size,
                 target_ring_size: ring_size,
-                max_ring_size: ring_size,
-                // Use non-strict mode for tests to avoid failures with small pools
-                strict_privacy_mode: false,
-                ..Default::default()
-            },
-        }
-    }
-
-    /// Create a selector with strict privacy mode (refuses to use uniform fallback)
-    pub fn with_ring_size_strict(ring_size: usize) -> Self {
-        RingSelector {
-            config: RingSelectionConfig {
-                min_ring_size: ring_size,
-                target_ring_size: ring_size,
-                max_ring_size: ring_size,
-                strict_privacy_mode: true,
                 ..Default::default()
             },
         }
@@ -185,20 +126,22 @@ impl RingSelector {
     /// Select decoys for a ring signature
     ///
     /// # Arguments
-    /// * `real_output` - The real output being spent
+    /// * `real_public_key` - The real output's public key
+    /// * `real_height` - The height where the real output was created
     /// * `output_pool` - Available outputs to select from
     /// * `current_height` - Current blockchain height
     /// * `rng` - Cryptographic RNG
     ///
     /// # Returns
-    /// * `(ring, real_index, stats)` - The complete ring, position of real output, and stats
-    pub fn select_ring<R: RngCore + CryptoRng>(
+    /// * `(decoys, real_position, stats)` - Selected decoys, insertion position, and stats
+    pub fn select_decoys<'a, R: RngCore + CryptoRng>(
         &self,
-        real_output: &OutputRef,
-        output_pool: &[OutputRef],
+        real_public_key: &PublicKey,
+        real_height: u64,
+        output_pool: &RingSelectionPool<'a>,
         current_height: u64,
         rng: &mut R,
-    ) -> Result<(Vec<OutputRef>, usize, RingSelectionStats)> {
+    ) -> Result<(Vec<OutputRef<'a>>, usize, RingSelectionStats)> {
         let ring_size = self.config.target_ring_size;
 
         // T3F1 fix (2026-07-05): reject ring_size < 2 explicitly so the
@@ -242,15 +185,16 @@ impl RingSelector {
         // The warn IS the signal — it tells the operator "this ring
         // is likely to leak the real spend via age analysis, defer
         // the tx until more age-similar outputs exist."
-        let real_age = current_height.saturating_sub(real_output.height);
+        let real_age = current_height.saturating_sub(real_height);
         let effective_min_age = real_age.min(self.config.min_decoy_age);
         const AGE_FUZZ_BLOCKS: u64 = 3;
         let age_similar_count = output_pool
+            .outputs
             .iter()
             .filter(|o| {
                 let o_age = current_height.saturating_sub(o.height);
                 o_age.abs_diff(real_age) <= AGE_FUZZ_BLOCKS
-                    && o.global_index != real_output.global_index
+                    && o.public_key.as_bytes() != real_public_key.as_bytes()
             })
             .count();
         let age_similar_advisory = (decoy_count / 3).max(1);
@@ -272,23 +216,19 @@ impl RingSelector {
 
         // Filter eligible outputs.
         //
-        // AUDIT (R-23 fix, 2026-07-02): the pre-fix code collected without
-        // deduplicating by global_index. If a caller (buggy scanner,
-        // adversarial RPC response) sent the same OutputRef twice — same
-        // (tx_hash, output_index, global_index) — the eligible pool
-        // contained duplicates and the Fisher-Yates shuffle at L254 could
-        // pick the same one twice with non-uniform probability. Uniform
-        // ring selection is our PRIMARY defense against age-based
-        // deanonymisation (see module header); a caller-controllable
-        // non-uniformity is a hard privacy break. We now dedup by
-        // global_index BEFORE the eligibility filter — this normalises
-        // input from any source (mempool scan, DB query, caller-supplied
-        // fixture) to the same uniform-eligible distribution.
-        let mut seen_indices = std::collections::HashSet::new();
-        let eligible: Vec<&OutputRef> = output_pool
+        // Deduplication prevents repeated pool entries from giving one output
+        // multiple chances of inclusion and weakening the anonymity set.
+        let eligible: Vec<&OutputRef<'a>> = output_pool
+            .outputs
             .iter()
-            .filter(|o| seen_indices.insert(o.global_index))
-            .filter(|o| self.is_eligible_decoy(o, real_output, current_height, effective_min_age))
+            .filter(|o| {
+                self.is_eligible_decoy(
+                    o,
+                    real_public_key,
+                    current_height,
+                    effective_min_age,
+                )
+            })
             .collect();
 
         if eligible.len() < decoy_count {
@@ -298,163 +238,14 @@ impl RingSelector {
             });
         }
 
-        // UNIFORM RANDOM SELECTION — CoinCync's defense against age-based deanonymization.
-        // Unlike Monero's gamma distribution (which leaks statistical signal about
-        // which ring member is real), uniform selection makes every member equally
-        // likely. An observer gains ZERO information from the age distribution.
-        let mut selected_decoys: Vec<OutputRef> = Vec::with_capacity(decoy_count);
-        let mut selected_indices: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        // Sampling indices preserves a uniform distribution without allocating
+        // and shuffling a second vector proportional to the eligible pool.
+        let selected_decoys: Vec<OutputRef<'a>> = index::sample(rng, eligible.len(), decoy_count)
+            .iter()
+            .map(|i| *eligible[i])
+            .collect();
         let mut stats = RingSelectionStats::default();
 
-        // Shuffle eligible pool and pick first N (truly uniform)
-        let mut shuffled: Vec<&OutputRef> = eligible.clone();
-        // Fisher-Yates shuffle with cryptographic RNG.
-        //
-        // AUDIT (2026-07-01): switched from `rng.next_u64() as usize % (i+1)`
-        // to `rng.gen_range(0..=i)`. The old modulo-based index has
-        // modulo bias: when `(i+1)` doesn't divide `2^usize::BITS`, values
-        // near 0 are slightly more likely than values near `i`. For the
-        // ring-selection privacy claim ("every ring member is equally
-        // likely to be the real spend"), any bias in the shuffle
-        // permutation weakens the guarantee. `gen_range` performs
-        // rejection sampling internally and is unbiased. The rest of this
-        // file already uses `gen_range` (see the fallback loop at ~L278
-        // and the real-index insertion at ~L317); this brings the
-        // shuffle in line.
-        for i in (1..shuffled.len()).rev() {
-            let j = rng.gen_range(0..=i);
-            shuffled.swap(i, j);
-        }
-
-        for output in &shuffled {
-            if selected_decoys.len() >= decoy_count { break; }
-            if !selected_indices.contains(&output.global_index) {
-                selected_indices.insert(output.global_index);
-                selected_decoys.push((*output).clone());
-            }
-        }
-
-        stats.selection_retries = 0; // uniform never retries
-
-        // 2026-06-03 docs-correctness fix: the prior version of this function
-        // used a gamma distribution for decoy selection. CoinCync switched to
-        // uniform shuffle (see the module-level comment at line ~3-22 for the
-        // 4th-Amendment / Möser-attack rationale). The Fisher-Yates shuffle
-        // above is the actual selection mechanism; "fallback" here means the
-        // shuffle exhausted the eligible pool without filling the ring,
-        // which can only happen when `eligible.len() < decoy_count + duplicates`
-        // (the duplicate filter at line ~209 reads from `global_index`).
-        //
-        // The strict-mode error and the privacy-audit log previously
-        // referenced "Gamma distribution could only select…" — stale text
-        // inherited from the gamma-era code that mis-described why
-        // selection failed and pointed engineers at the wrong fix. The
-        // failure cause is *eligible pool too small*, not a distribution
-        // problem. Messages updated accordingly.
-        let fallback_needed = selected_decoys.len() < decoy_count;
-        let fallback_count = decoy_count.saturating_sub(selected_decoys.len());
-
-        if fallback_needed {
-            // SECURITY: In strict mode, refuse to proceed with degraded privacy.
-            if self.config.strict_privacy_mode {
-                return Err(Error::Internal(format!(
-                    "PRIVACY CRITICAL: Ring selection failed. Uniform shuffle could only fill \
-                     {}/{} decoys from the eligible pool (after dedup by global_index). \
-                     Refusing to retry with looser constraints in strict privacy mode — that \
-                     would reduce the anonymity set without surfacing it to the operator. \
-                     Solutions: \
-                     1. Wait for more outputs to mature in the blockchain \
-                     2. Increase output pool diversity by raising max_decoy_age \
-                     3. If this is a test environment, use RingSelector::with_ring_size() instead",
-                    selected_decoys.len(),
-                    decoy_count
-                )));
-            }
-
-            // Non-strict mode: log at ERROR level since this is a privacy degradation.
-            // This should be extremely visible in production logs.
-            tracing::error!(
-                "PRIVACY DEGRADATION: Ring selection eligible-pool shortfall — \
-                 uniform shuffle filled {}/{} decoy slots; retrying with replacement \
-                 sampling for the remaining {} slots. The retry MAY reuse outputs \
-                 already present elsewhere in the same eligible pool, which can \
-                 reduce anonymity-set diversity. Cause: insufficient eligible \
-                 outputs in pool (raise max_decoy_age or wait for chain to mature).",
-                selected_decoys.len(),
-                decoy_count,
-                fallback_count
-            );
-
-            // Also emit a structured event for privacy monitoring systems.
-            tracing::warn!(
-                target: "privacy_audit",
-                event = "ring_selection_fallback",
-                shuffle_selected = selected_decoys.len(),
-                fallback_needed = fallback_count,
-                total_decoys = decoy_count,
-                "Privacy-degraded ring selection (eligible-pool shortfall)"
-            );
-        }
-
-        // R-24 fix (2026-07-02): the prior code had TWO bugs.
-        //
-        // Bug 1 (livelock): fallback loop kept the same
-        // `!selected_indices.contains(...)` dedup check that the
-        // shuffle above already failed on. If the eligible pool has
-        // fewer unique global_indices than `decoy_count`, every
-        // subsequent draw hits an already-selected index, the branch
-        // is skipped, and the loop spins forever. The docstring
-        // (L305-308) explicitly says "retry with replacement
-        // sampling for the remaining {} slots" — the code did NOT
-        // implement replacement sampling; it implemented the same
-        // no-replacement sampling that had just failed.
-        //
-        // Bug 2 (no bounded retry): even if bug 1 is fixed, an
-        // adversary who can force `eligible.len() == 0` (impossible
-        // via the L221 guard, but defense-in-depth) would still
-        // infinite-loop. We cap at MAX_FALLBACK_ITERS regardless
-        // and return an Internal error rather than spin.
-        //
-        // The docstring's "with replacement" language means the SAME
-        // OutputRef can appear TWICE in the ring — the decoy is
-        // duplicated. Anonymity-set size drops accordingly, which is
-        // WHY the tracing::error above logs it as
-        // "PRIVACY DEGRADATION", not a warn. Strict-mode callers
-        // already returned above; only permissive callers reach here.
-        if fallback_needed && !eligible.is_empty() {
-            const MAX_FALLBACK_ITERS: usize = 10_000;
-            let mut iters = 0usize;
-            while selected_decoys.len() < decoy_count {
-                if iters >= MAX_FALLBACK_ITERS {
-                    return Err(Error::Internal(format!(
-                        "ring-selection fallback loop exceeded {} iterations without \
-                         filling {}/{} decoys — eligible pool has {} outputs. This \
-                         is a defense-in-depth guard; if you're seeing it, either \
-                         `eligible` was mutated during selection (bug) or a caller \
-                         requested a ring larger than any realistic pool.",
-                        MAX_FALLBACK_ITERS,
-                        selected_decoys.len(),
-                        decoy_count,
-                        eligible.len()
-                    )));
-                }
-                let idx = rng.gen_range(0..eligible.len());
-                let output = eligible[idx];
-                // WITH-REPLACEMENT semantics — deliberately DO NOT
-                // consult selected_indices. Duplicates are the
-                // documented cost of fallback; the privacy_audit log
-                // above tells the operator this happened.
-                selected_indices.insert(output.global_index);
-                selected_decoys.push(output.clone());
-                iters += 1;
-            }
-        }
-
-        // Track fallback usage in stats for auditing
-        stats.fallback_used = fallback_needed;
-        stats.fallback_count = fallback_count;
-
-        // Compute statistics
         stats.decoys_selected = selected_decoys.len();
         let ages: Vec<u64> = selected_decoys
             .iter()
@@ -466,7 +257,6 @@ impl RingSelector {
             stats.min_age = *ages.iter().min().unwrap_or(&0);
             stats.max_age = *ages.iter().max().unwrap_or(&0);
 
-            // Age distribution buckets (logarithmic)
             // SECURITY (A4-CR-04): Handle age=0 explicitly since log2(0) = -infinity,
             // which causes undefined behavior when cast to usize.
             for age in &ages {
@@ -480,12 +270,9 @@ impl RingSelector {
             }
         }
 
-        // Insert real output at random position
-        let real_index = rng.gen_range(0..=selected_decoys.len());
-        let mut ring = selected_decoys;
-        ring.insert(real_index, real_output.clone());
+        let real_position = rng.gen_range(0..ring_size);
 
-        Ok((ring, real_index, stats))
+        Ok((selected_decoys, real_position, stats))
     }
 
     /// Check if an output is eligible as a decoy
@@ -496,13 +283,13 @@ impl RingSelector {
     /// young ring member, trivially identifiable by an observer.
     fn is_eligible_decoy(
         &self,
-        output: &OutputRef,
-        real_output: &OutputRef,
+        output: &OutputRef<'_>,
+        real_public_key: &PublicKey,
         current_height: u64,
         effective_min_age: u64,
     ) -> bool {
         // Can't use the real output as a decoy
-        if output.global_index == real_output.global_index {
+        if output.public_key.as_bytes() == real_public_key.as_bytes() {
             return false;
         }
 
@@ -519,52 +306,10 @@ impl RingSelector {
         true
     }
 
-    /// Find output near target height with randomized tie-breaking
-    ///
-    /// SECURITY (BUG-11): Previously used deterministic `min_by_key` which
-    /// always picked the same closest output for a given target height. An
-    /// adversary who knows the output pool could reconstruct decoy selections
-    /// and identify the real input. Now collects candidates within a small
-    /// window and picks one uniformly at random.
-    #[allow(dead_code)] // Retained for BUG-11 security documentation
-    fn find_output_near_height<'a>(
-        &self,
-        outputs: &[&'a OutputRef],
-        target_height: u64,
-        excluded: &std::collections::HashSet<u64>,
-        rng: &mut impl rand::Rng,
-    ) -> Option<&'a OutputRef> {
-        use rand::seq::SliceRandom;
-
-        let mut candidates: Vec<&'a OutputRef> = outputs
-            .iter()
-            .filter(|o| !excluded.contains(&o.global_index))
-            .copied()
-            .collect();
-
-        if candidates.is_empty() {
-            return None;
-        }
-
-        // Sort by distance to target, then take the top N closest
-        candidates.sort_by_key(|o| {
-            if o.height > target_height {
-                o.height - target_height
-            } else {
-                target_height - o.height
-            }
-        });
-
-        // Pick randomly from the closest ~5 candidates (or fewer if pool is small)
-        let window = 5.min(candidates.len());
-        let chosen = candidates[..window].choose(rng)?;
-        Some(chosen)
-    }
-
     /// Verify ring selection quality (for auditing)
     pub fn verify_ring_quality(
         &self,
-        ring: &[OutputRef],
+        ring: &[OutputRef<'_>],
         real_index: usize,
         current_height: u64,
     ) -> RingQualityReport {
@@ -600,7 +345,7 @@ impl RingSelector {
         // Check for duplicate commitments (shouldn't happen)
         let mut commitments = std::collections::HashSet::new();
         for output in ring {
-            if !commitments.insert(output.commitment) {
+            if !commitments.insert(*output.commitment) {
                 report.issues.push("Duplicate commitment in ring".into());
             }
         }
@@ -691,18 +436,33 @@ impl RingQualityReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
-    use crate::primitives::Hash;
+    use rand::{rngs::StdRng, SeedableRng};
 
-    fn make_output(height: u64, index: u64) -> OutputRef {
-        OutputRef {
-            height,
-            tx_hash: Hash::zero(),
-            output_index: 0,
-            public_key: PublicKey::from_bytes([index as u8; 32]),
-            commitment: [0u8; 32],
-            global_index: index,
+    #[derive(Clone)]
+    struct OwnedOutput {
+        height: u64,
+        public_key: PublicKey,
+        commitment: [u8; 32],
+    }
+
+    impl OwnedOutput {
+        fn as_ref(&self) -> OutputRef<'_> {
+            OutputRef::new(self.height, &self.public_key, &self.commitment)
         }
+    }
+
+    fn make_output(height: u64, index: u64) -> OwnedOutput {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&index.to_le_bytes());
+        OwnedOutput {
+            height,
+            public_key: PublicKey::from_bytes(bytes),
+            commitment: bytes,
+        }
+    }
+
+    fn output_pool(outputs: &[OwnedOutput]) -> RingSelectionPool<'_> {
+        RingSelectionPool::new(outputs.iter().map(OwnedOutput::as_ref))
     }
 
     #[test]
@@ -710,21 +470,35 @@ mod tests {
         let selector = RingSelector::with_ring_size(11);
         let current_height = 100_000;
 
-        // Create output pool
-        let pool: Vec<OutputRef> = (0..1000)
+        let pool_storage: Vec<OwnedOutput> = (0..1000)
             .map(|i| make_output(current_height - (i * 100), i))
             .collect();
+        let pool = output_pool(&pool_storage);
 
         let real_output = make_output(current_height - 50, 9999);
+        let mut rng = StdRng::seed_from_u64(1);
 
-        let (ring, real_idx, stats) = selector
-            .select_ring(&real_output, &pool, current_height, &mut OsRng)
+        let (decoys, real_position, stats) = selector
+            .select_decoys(
+                &real_output.public_key,
+                real_output.height,
+                &pool,
+                current_height,
+                &mut rng,
+            )
             .unwrap();
 
-        assert_eq!(ring.len(), 11);
-        assert!(real_idx < 11);
-        assert_eq!(ring[real_idx].global_index, 9999);
+        assert_eq!(decoys.len(), 10);
+        assert!(real_position < 11);
         assert_eq!(stats.decoys_selected, 10);
+        assert!(decoys.iter().all(|output| {
+            output.public_key.as_bytes() != real_output.public_key.as_bytes()
+        }));
+        let unique_public_keys = decoys
+            .iter()
+            .map(|output| *output.public_key.as_bytes())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique_public_keys.len(), decoys.len());
     }
 
     #[test]
@@ -732,11 +506,12 @@ mod tests {
         let selector = RingSelector::with_ring_size(11);
         let current_height = 100_000;
 
-        let ring: Vec<OutputRef> = (0..11)
+        let ring_storage: Vec<OwnedOutput> = (0..11)
             .map(|i| make_output(current_height - (i * 1000), i))
             .collect();
+        let ring = output_pool(&ring_storage);
 
-        let report = selector.verify_ring_quality(&ring, 5, current_height);
+        let report = selector.verify_ring_quality(&ring.outputs, 5, current_height);
         assert!(report.ring_size == 11);
     }
 
@@ -748,20 +523,27 @@ mod tests {
         let selector = RingSelector::with_ring_size(11);
         let current_height = 200_000;
 
-        let pool: Vec<OutputRef> = (0..10_000)
+        let pool_storage: Vec<OwnedOutput> = (0..10_000)
             .map(|i| make_output(current_height - (i * 10), i))
             .collect();
+        let pool = output_pool(&pool_storage);
 
         let real_output = make_output(current_height - 5, 99999);
+        let mut rng = StdRng::seed_from_u64(2);
 
         let mut recent = 0usize;
         let mut total_decoys = 0usize;
         for _ in 0..50 {
-            let (ring, real_idx, _) = selector
-                .select_ring(&real_output, &pool, current_height, &mut OsRng)
+            let (decoys, _, _) = selector
+                .select_decoys(
+                    &real_output.public_key,
+                    real_output.height,
+                    &pool,
+                    current_height,
+                    &mut rng,
+                )
                 .unwrap();
-            for (i, member) in ring.iter().enumerate() {
-                if i == real_idx { continue; }
+            for member in decoys {
                 total_decoys += 1;
                 if member.height > current_height - 10_000 {
                     recent += 1;
@@ -775,47 +557,66 @@ mod tests {
             "Uniform should NOT bias recent: got {:.2}%", recent_ratio * 100.0);
     }
 
-    /// R-24 + R-23 regression: prior code's fallback loop
-    /// livelocked when the eligible pool's unique-global_index count
-    /// was smaller than `decoy_count`.
-    ///
-    /// After R-23 (2026-07-02) landed, duplicate global_index entries
-    /// in the input pool are DEDUPED before the eligibility filter,
-    /// so this specific pathological input now bails early with
-    /// `InvalidRingSize` — the fallback loop is unreachable via this
-    /// path, which is a stronger guarantee than the R-24 bounded
-    /// retry. We keep the R-24 fix in place as defense-in-depth for
-    /// any future code path that could reach the fallback (e.g. an
-    /// unlikely eligibility filter that leaves n < decoy_count
-    /// outputs but doesn't fail the L280 guard); the test below now
-    /// verifies the R-23 pre-dedup structural rejection.
     #[test]
-    fn duplicate_global_indices_pool_rejected_structurally() {
+    fn duplicate_public_keys_pool_rejected_structurally() {
         let selector = RingSelector::with_ring_size(11);
         let current_height = 100_000;
-        let mut pool: Vec<OutputRef> = Vec::new();
+        let mut pool_storage = Vec::new();
         for i in 0u64..3 {
             for _ in 0..5 {
-                pool.push(make_output(current_height - 1_000 - i, i));
+                pool_storage.push(make_output(current_height - 1_000 - i, i));
             }
         }
+        let pool = output_pool(&pool_storage);
         let real_output = make_output(current_height - 50, 9999);
+        let mut rng = StdRng::seed_from_u64(3);
 
-        // Terminate in bounded time either way — this is a
-        // regression guard against a future re-introduction of the
-        // livelock.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = selector.select_ring(&real_output, &pool, current_height, &mut OsRng);
-            let _ = tx.send(result);
-        });
-        let result = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("regression: ring selection did not terminate within 5s");
+        let result = selector.select_decoys(
+            &real_output.public_key,
+            real_output.height,
+            &pool,
+            current_height,
+            &mut rng,
+        );
 
-        // R-23 causes this to fail with InvalidRingSize instead of
-        // reaching the fallback path.
-        assert!(matches!(result, Err(Error::InvalidRingSize { .. })),
-            "R-23: duplicate-global_index pool must be rejected structurally, got {:?}", result);
+        assert!(matches!(
+            result,
+            Err(Error::InvalidRingSize {
+                expected: 10,
+                got: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn full_public_key_distinguishes_shared_u64_prefixes() {
+        let selector = RingSelector::with_ring_size(11);
+        let current_height = 100_000;
+        let pool_storage: Vec<OwnedOutput> = (0u64..10)
+            .map(|suffix| {
+                let mut bytes = [0x5a; 32];
+                bytes[8..16].copy_from_slice(&suffix.to_le_bytes());
+                OwnedOutput {
+                    height: current_height - 1_000,
+                    public_key: PublicKey::from_bytes(bytes),
+                    commitment: bytes,
+                }
+            })
+            .collect();
+        let pool = output_pool(&pool_storage);
+        let real_output = make_output(current_height - 50, 9999);
+        let mut rng = StdRng::seed_from_u64(4);
+
+        let (decoys, _, _) = selector
+            .select_decoys(
+                &real_output.public_key,
+                real_output.height,
+                &pool,
+                current_height,
+                &mut rng,
+            )
+            .unwrap();
+
+        assert_eq!(decoys.len(), 10);
     }
 }

@@ -3,10 +3,9 @@
 //! Verifies multiple ring signatures in parallel using rayon.
 
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::crypto::cache::{global_cache, ring_sig_cache_key};
+use crate::crypto::cache::{global_cache, ring_sig_statement_cache_key};
 
 /// Result of batch verification
 #[derive(Clone, Debug)]
@@ -53,9 +52,15 @@ pub struct SignatureData {
 }
 
 impl SignatureData {
-    /// Compute cache key for this signature
+    /// Includes every verification input so a cached result cannot be reused
+    /// for a different ring or pseudo-output.
     pub fn cache_key(&self) -> [u8; 32] {
-        ring_sig_cache_key(&self.message, &self.signature)
+        ring_sig_statement_cache_key(
+            &self.message,
+            &self.signature,
+            &self.ring_data,
+            &self.pseudo_output,
+        )
     }
 }
 
@@ -129,7 +134,6 @@ impl BatchVerifier {
         let cache = if self.use_cache { Some(global_cache()) } else { None };
         let total = self.signatures.len();
 
-        // Check cache first
         let mut cached_results: Vec<Option<bool>> = Vec::with_capacity(total);
         let mut cached_count = 0usize;
 
@@ -145,69 +149,43 @@ impl BatchVerifier {
             cached_results.push(None);
         }
 
-        // Verify uncached signatures
-        let results: Vec<(usize, bool)> = if total - cached_count > self.parallel_threshold {
-            // Parallel verification
+        let verify = |(i, sig): (usize, &SignatureData)| match cached_results[i] {
+            Some(valid) => valid,
+            None => Self::verify_single(sig),
+        };
+
+        let results: Vec<bool> = if total - cached_count > self.parallel_threshold {
             self.signatures.par_iter()
                 .enumerate()
-                .filter(|(i, _)| cached_results[*i].is_none())
-                .map(|(i, sig)| (i, Self::verify_single(sig)))
+                .map(verify)
                 .collect()
         } else {
-            // Sequential verification
             self.signatures.iter()
                 .enumerate()
-                .filter(|(i, _)| cached_results[*i].is_none())
-                .map(|(i, sig)| (i, Self::verify_single(sig)))
+                .map(verify)
                 .collect()
         };
 
-        // PERF (A6-BATCH): O(n) merge using HashMap instead of O(n²) linear scan.
-        // The old code used `results.iter().find(|(idx, _)| *idx == i)` for each
-        // uncached index, which is O(total * uncached). With HashMap lookup it's O(1).
-        let results_map: HashMap<usize, bool> = results.into_iter().collect();
-
-        // Merge results and update cache
-        let mut valid = 0usize;
-        let mut invalid = 0usize;
         let mut invalid_indices = Vec::new();
 
-        for (i, cached) in cached_results.iter().enumerate() {
-            let is_valid = if let Some(v) = cached {
-                *v
-            } else {
-                // SECURITY: unwrap_or(false) is the conservative default
-                // here — a missing entry in `results_map` means the batch
-                // verifier didn't get a result for this signature (e.g.,
-                // a length-mismatch panic was swallowed upstream or the
-                // batch was sliced wrong). Treating "no result" as
-                // "invalid" rejects the signature rather than silently
-                // accepting it. Caller's invariant: every index in
-                // `cached_results` that wasn't cache-hit MUST appear in
-                // `results_map` after the batch run; this fallback is
-                // defense-in-depth, not the expected path.
-                let result = results_map.get(&i).copied().unwrap_or(false);
-
-                // Cache the result
+        for (i, is_valid) in results.into_iter().enumerate() {
+            if cached_results[i].is_none() {
                 if let Some(c) = cache {
                     let key = self.signatures[i].cache_key();
-                    c.cache_ring_sig(key, result);
+                    c.cache_ring_sig(key, is_valid);
                 }
+            }
 
-                result
-            };
-
-            if is_valid {
-                valid += 1;
-            } else {
-                invalid += 1;
+            if !is_valid {
                 invalid_indices.push(i);
             }
         }
 
+        let invalid = invalid_indices.len();
+
         BatchVerifyResult {
             total,
-            valid,
+            valid: total - invalid,
             invalid,
             cached: cached_count,
             invalid_indices,
@@ -415,6 +393,47 @@ impl VerificationStats {
 mod tests {
     use super::*;
 
+    fn valid_signature_data() -> SignatureData {
+        use crate::crypto::clsag::{clsag_sign, RingMember};
+        use crate::crypto::curve::{Commitment, SecretScalar};
+        use rand::rngs::OsRng;
+
+        let secret = SecretScalar::random(&mut OsRng);
+        let real_blinding = SecretScalar::random(&mut OsRng);
+        let pseudo_blinding = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(1_000, &real_blinding);
+        let pseudo_output = Commitment::commit(1_000, &pseudo_blinding);
+        let blinding_diff =
+            SecretScalar::from_scalar(real_blinding.as_scalar() - pseudo_blinding.as_scalar());
+        let ring = vec![
+            RingMember::new(secret.to_public(), real_commitment),
+            RingMember::new(
+                SecretScalar::random(&mut OsRng).to_public(),
+                Commitment::commit(1_000, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        let message = b"batch cache statement regression".to_vec();
+        let signature = clsag_sign(
+            &message,
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        )
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+
+        SignatureData {
+            message,
+            signature,
+            ring_data: borsh::to_vec(&ring).unwrap(),
+            pseudo_output: pseudo_output.to_bytes(),
+        }
+    }
+
     #[test]
     fn test_batch_verify_empty() {
         let verifier = BatchVerifier::new();
@@ -467,5 +486,40 @@ mod tests {
         assert_eq!(result.total, 12);
         // All should be processed (invalid since they're dummy data)
         assert_eq!(result.valid + result.invalid, 12);
+    }
+
+    #[test]
+    fn cache_does_not_reuse_result_for_different_pseudo_output() {
+        let valid = valid_signature_data();
+        let cached_message = valid.message.clone();
+        let cached_signature = valid.signature.clone();
+        let cached_ring = valid.ring_data.clone();
+        let cached_pseudo_output = valid.pseudo_output;
+
+        let mut first = BatchVerifier::new();
+        first.add(valid);
+        let first_result = first.verify_all();
+        assert_eq!(first_result.valid, 1);
+        assert_eq!(first_result.cached, 0);
+
+        let mut different_statement = BatchVerifier::new();
+        different_statement.add(SignatureData {
+            message: cached_message.clone(),
+            signature: cached_signature.clone(),
+            ring_data: cached_ring.clone(),
+            pseudo_output: cached_pseudo_output,
+        });
+        different_statement.add(SignatureData {
+            message: cached_message,
+            signature: cached_signature,
+            ring_data: cached_ring,
+            pseudo_output: [0u8; 32],
+        });
+        let second_result = different_statement.verify_all();
+
+        assert_eq!(second_result.cached, 1);
+        assert_eq!(second_result.valid, 1);
+        assert_eq!(second_result.invalid, 1);
+        assert_eq!(second_result.invalid_indices, vec![1]);
     }
 }

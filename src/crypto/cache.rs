@@ -254,6 +254,26 @@ pub fn ring_sig_cache_key(message: &[u8], sig_data: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+/// Includes every CLSAG verification input because generic callers cannot rely
+/// on the message already committing to the ring and pseudo-output.
+pub(crate) fn ring_sig_statement_cache_key(
+    message: &[u8],
+    sig_data: &[u8],
+    ring_data: &[u8],
+    pseudo_output: &[u8; 32],
+) -> [u8; 32] {
+    use blake3::Hasher;
+
+    let mut hasher = Hasher::new();
+    hasher.update(b"COINCYNC_RINGSIG_STATEMENT_CACHE_v1");
+    for field in [message, sig_data, ring_data] {
+        hasher.update(&(field.len() as u64).to_le_bytes());
+        hasher.update(field);
+    }
+    hasher.update(pseudo_output);
+    *hasher.finalize().as_bytes()
+}
+
 /// Global verification cache instance
 static GLOBAL_CACHE: once_cell::sync::Lazy<VerificationCache> =
     once_cell::sync::Lazy::new(VerificationCache::new);
@@ -309,6 +329,39 @@ mod tests {
 
         // Same proof should have same key
         assert_eq!(key1, proof_cache_key(&proof1, &commitment));
+    }
+
+    #[test]
+    fn ring_sig_statement_cache_key_commits_to_every_field() {
+        let message = b"message";
+        let signature = b"signature";
+        let ring = b"ring";
+        let pseudo_output = [7u8; 32];
+        let baseline = ring_sig_statement_cache_key(message, signature, ring, &pseudo_output);
+
+        assert_eq!(
+            baseline,
+            ring_sig_statement_cache_key(message, signature, ring, &pseudo_output)
+        );
+        assert_ne!(
+            baseline,
+            ring_sig_statement_cache_key(b"other-message", signature, ring, &pseudo_output)
+        );
+        assert_ne!(
+            baseline,
+            ring_sig_statement_cache_key(message, b"other-signature", ring, &pseudo_output)
+        );
+        assert_ne!(
+            baseline,
+            ring_sig_statement_cache_key(message, signature, b"other-ring", &pseudo_output)
+        );
+
+        let mut other_pseudo_output = pseudo_output;
+        other_pseudo_output[0] ^= 1;
+        assert_ne!(
+            baseline,
+            ring_sig_statement_cache_key(message, signature, ring, &other_pseudo_output)
+        );
     }
 
     #[test]
