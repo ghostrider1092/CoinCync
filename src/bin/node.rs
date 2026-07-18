@@ -746,15 +746,45 @@ async fn start_node(
         p2p_config.listen_addr = ([0, 0, 0, 0], network.default_p2p_port()).into();
     }
     // Parse --addnode entries up-front so any syntax errors fail before
-    // we open the database. Accept either "ip:port" or "[ipv6]:port"; the
-    // std `SocketAddr::from_str` handles both.
+    // we open the database. Accept a numeric "ip:port" / "[ipv6]:port"
+    // (std `SocketAddr::from_str`), OR a "host:port" hostname which we
+    // resolve via DNS — so operators can pass a stable DDNS seed name
+    // (e.g. seed1.coincync.network:28080) instead of an IP that rotates.
     let mut extra_peers: Vec<std::net::SocketAddr> = Vec::new();
+    // A clearnet DNS lookup here would leak the hostname under --proxy/--tor
+    // (the very leak DNS-seed resolution routes through SOCKS5 to avoid), so
+    // in proxied mode we require a numeric IP:port instead of resolving.
+    let addnode_proxied = proxy_arg.is_some() || tor_shortcut || onion_only;
     for raw in &addnodes {
-        match raw.parse::<std::net::SocketAddr>() {
-            Ok(addr) => extra_peers.push(addr),
-            Err(e) => {
-                warn!("Ignoring bad --addnode {:?}: {}", raw, e);
+        // Fast path: already a numeric socket address.
+        if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
+            extra_peers.push(addr);
+            continue;
+        }
+        if addnode_proxied {
+            warn!(
+                "--addnode {:?}: hostname resolution is disabled under --proxy/--tor \
+                 to avoid a DNS leak — pass a numeric IP:port instead",
+                raw
+            );
+            continue;
+        }
+        // Resolve "host:port" through the OS resolver, same as clearnet DNS
+        // seeds (see src/network/dns_seeds.rs).
+        match tokio::net::lookup_host(raw.as_str()).await {
+            Ok(resolved) => {
+                let addrs: Vec<std::net::SocketAddr> = resolved.collect();
+                if addrs.is_empty() {
+                    warn!("Ignoring --addnode {:?}: hostname resolved to no addresses", raw);
+                } else {
+                    info!("--addnode {:?}: resolved to {} address(es)", raw, addrs.len());
+                    extra_peers.extend(addrs);
+                }
             }
+            Err(e) => warn!(
+                "Ignoring bad --addnode {:?}: not an IP:port and DNS resolution failed: {}",
+                raw, e
+            ),
         }
     }
 
