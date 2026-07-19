@@ -22,10 +22,10 @@
 //! - Bitcoin BIP 158: Compact Block Filters
 //! - `bitcoin-master/src/blockfilter.{h,cpp}` — GCS implementation
 
-use crate::primitives::{Hash, hash_domain};
 use crate::consensus::Block;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use crate::primitives::{hash_domain, Hash};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Golomb-Rice coding parameter P.
 /// Higher P = smaller filter but more CPU to decode.
@@ -102,7 +102,13 @@ impl BlockFilter {
         }
 
         let sip_key = derive_sip_key(&self.block_hash);
-        gcs_match_any(&self.filter_data, self.n_elements, addresses, sip_key, GCS_P)
+        gcs_match_any(
+            &self.filter_data,
+            self.n_elements,
+            addresses,
+            sip_key,
+            GCS_P,
+        )
     }
 
     /// Compute this filter's hash (for chaining).
@@ -149,7 +155,11 @@ fn hash_element(element: &[u8; 32], sip_key: (u64, u64), n: u32) -> u64 {
     key_bytes[8..16].copy_from_slice(&sip_key.1.to_le_bytes());
     let hash_bytes = blake3::keyed_hash(&key_bytes, element);
     // SAFETY: blake3 output is always 32 bytes; [0..8] is a valid 8-byte slice
-    let hash = u64::from_le_bytes(hash_bytes.as_bytes()[0..8].try_into().expect("blake3 is 32 bytes"));
+    let hash = u64::from_le_bytes(
+        hash_bytes.as_bytes()[0..8]
+            .try_into()
+            .expect("blake3 is 32 bytes"),
+    );
 
     // Map into range [0, F) where F = N * M
     let f = n as u64 * GCS_M;
@@ -171,7 +181,8 @@ fn gcs_encode(elements: &[[u8; 32]], sip_key: (u64, u64), p: u8) -> Vec<u8> {
     let n = elements.len() as u32;
 
     // Step 1-2: Hash and sort
-    let mut hashed: Vec<u64> = elements.iter()
+    let mut hashed: Vec<u64> = elements
+        .iter()
         .map(|e| hash_element(e, sip_key, n))
         .collect();
     hashed.sort_unstable();
@@ -203,7 +214,8 @@ fn gcs_match_any(
     }
 
     // Hash the query addresses and sort them
-    let mut query_hashes: Vec<u64> = addresses.iter()
+    let mut query_hashes: Vec<u64> = addresses
+        .iter()
         .map(|a| hash_element(a, sip_key, n_elements))
         .collect();
     query_hashes.sort_unstable();

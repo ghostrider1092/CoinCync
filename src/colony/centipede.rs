@@ -46,7 +46,10 @@ pub struct Leg {
 
 impl Leg {
     pub fn new(id: impl Into<String>, netgroup: u16) -> Self {
-        Self { id: id.into(), netgroup }
+        Self {
+            id: id.into(),
+            netgroup,
+        }
     }
 }
 
@@ -93,14 +96,21 @@ pub fn select_legs(candidates: &[Leg], max_legs: usize) -> Vec<Leg> {
             .then_with(|| a.1.id.cmp(&b.1.id))
     });
 
-    annotated.into_iter().take(max_legs).map(|(_, leg)| leg).collect()
+    annotated
+        .into_iter()
+        .take(max_legs)
+        .map(|(_, leg)| leg)
+        .collect()
 }
 
 /// Number of distinct netgroups represented in a leg set. A diversity
 /// metric the caller can log/alert on — a low count for a healthy peer
 /// table is an eclipse warning sign.
 pub fn distinct_netgroups(legs: &[Leg]) -> usize {
-    legs.iter().map(|l| l.netgroup).collect::<std::collections::BTreeSet<_>>().len()
+    legs.iter()
+        .map(|l| l.netgroup)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 #[cfg(test)]
@@ -124,7 +134,11 @@ mod tests {
         let c = legs(&[("a1", 1), ("a2", 1), ("b1", 2), ("c1", 3)]);
         let sel = select_legs(&c, 3);
         assert_eq!(sel.len(), 3);
-        assert_eq!(distinct_netgroups(&sel), 3, "must cover all three netgroups");
+        assert_eq!(
+            distinct_netgroups(&sel),
+            3,
+            "must cover all three netgroups"
+        );
     }
 
     #[test]
@@ -137,7 +151,12 @@ mod tests {
     fn diversity_is_maximised_for_the_budget() {
         // 4 netgroups available, budget 4 -> 4 distinct netgroups.
         let c = legs(&[
-            ("a", 10), ("b", 10), ("c", 20), ("d", 30), ("e", 40), ("f", 40),
+            ("a", 10),
+            ("b", 10),
+            ("c", 20),
+            ("d", 30),
+            ("e", 40),
+            ("f", 40),
         ]);
         let sel = select_legs(&c, 4);
         assert_eq!(sel.len(), 4);
@@ -172,7 +191,11 @@ mod tests {
         let c = legs(&[("z", 3), ("a", 1), ("m", 2), ("b", 1), ("y", 3)]);
         let first = select_legs(&c, 3);
         for _ in 0..20 {
-            assert_eq!(select_legs(&c, 3), first, "selection must be stable across runs");
+            assert_eq!(
+                select_legs(&c, 3),
+                first,
+                "selection must be stable across runs"
+            );
         }
         // First round picks the id-least leg of each netgroup, in netgroup
         // order: group1->a, group2->m, group3->y.
@@ -193,6 +216,9 @@ mod tests {
         // 'd' (the only group-2 leg) must appear before the 2nd group-1 leg.
         let d_pos = sel.iter().position(|l| l.id == "d").unwrap();
         let b_pos = sel.iter().position(|l| l.id == "b").unwrap();
-        assert!(d_pos < b_pos, "diverse netgroup must be covered before doubling up");
+        assert!(
+            d_pos < b_pos,
+            "diverse netgroup must be covered before doubling up"
+        );
     }
 }

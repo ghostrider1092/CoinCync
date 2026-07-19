@@ -3,11 +3,11 @@
 //! "The privacy coin you can audit"
 //! Verify supply, fees, and ring quality without seeing private data.
 
-use crate::primitives::{Hash, Amount, hash_domain};
+use crate::constants::{FEE_BURN_CONGESTED_PERCENT, FEE_BURN_NORMAL_PERCENT};
 use crate::crypto::PedersenCommitment;
-use crate::constants::{FEE_BURN_NORMAL_PERCENT, FEE_BURN_CONGESTED_PERCENT};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use crate::primitives::{hash_domain, Amount, Hash};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SupplyState {
@@ -18,7 +18,9 @@ pub struct SupplyState {
 }
 
 impl SupplyState {
-    pub fn genesis() -> Self { SupplyState::default() }
+    pub fn genesis() -> Self {
+        SupplyState::default()
+    }
 
     pub fn circulating(&self) -> u64 {
         self.total_minted.saturating_sub(self.total_burned)
@@ -84,8 +86,13 @@ impl SupplyState {
     fn update_commitment(&mut self) {
         self.supply_commitment = *hash_domain(
             b"supply_commitment",
-            &[self.total_minted.to_le_bytes().as_slice(), self.total_burned.to_le_bytes().as_slice()].concat(),
-        ).as_bytes();
+            &[
+                self.total_minted.to_le_bytes().as_slice(),
+                self.total_burned.to_le_bytes().as_slice(),
+            ]
+            .concat(),
+        )
+        .as_bytes();
     }
 }
 
@@ -104,8 +111,15 @@ impl BlockAudit {
     }
 
     pub fn summary(&self) -> String {
-        if self.is_valid() { format!("Block {} audit: PASSED", self.height) }
-        else { format!("Block {} audit: FAILED - {}", self.height, self.issues.join(", ")) }
+        if self.is_valid() {
+            format!("Block {} audit: PASSED", self.height)
+        } else {
+            format!(
+                "Block {} audit: FAILED - {}",
+                self.height,
+                self.issues.join(", ")
+            )
+        }
     }
 }
 
@@ -113,16 +127,32 @@ impl BlockAudit {
 /// FIX: Uses constants for burn%, tolerance=0, height check separate from supply_valid.
 #[allow(dead_code)]
 pub fn audit_block(
-    height: u64, emission: Amount, expected_emission: Amount,
-    total_fees: Amount, fee_distribution_valid: bool, congested: bool,
-    supply_before: &SupplyState, supply_after: &SupplyState,
+    height: u64,
+    emission: Amount,
+    expected_emission: Amount,
+    total_fees: Amount,
+    fee_distribution_valid: bool,
+    congested: bool,
+    supply_before: &SupplyState,
+    supply_after: &SupplyState,
 ) -> BlockAudit {
     let mut issues = Vec::new();
     let emission_valid = emission == expected_emission;
-    if !emission_valid { issues.push(format!("Emission mismatch: got {}, expected {}", emission, expected_emission)); }
-    if !fee_distribution_valid { issues.push("Fee distribution invalid".into()); }
+    if !emission_valid {
+        issues.push(format!(
+            "Emission mismatch: got {}, expected {}",
+            emission, expected_emission
+        ));
+    }
+    if !fee_distribution_valid {
+        issues.push("Fee distribution invalid".into());
+    }
 
-    let burn_pct = if congested { FEE_BURN_CONGESTED_PERCENT } else { FEE_BURN_NORMAL_PERCENT };
+    let burn_pct = if congested {
+        FEE_BURN_CONGESTED_PERCENT
+    } else {
+        FEE_BURN_NORMAL_PERCENT
+    };
     // R-32 site 2/3: use u128 intermediate to keep `total_fees * burn_pct`
     // representable up to u64::MAX * 100; then narrow back. `burn_pct` is
     // 0..=100 by construction of the constant, so the u128 result is
@@ -135,19 +165,35 @@ pub fn audit_block(
     // The `apply_block` fix emits a loud log on saturation; the audit
     // path here inherits that visibility because a supply mismatch at
     // saturation triggers the "Supply mismatch" issue below.
-    let expected_circulating = supply_before.circulating()
+    let expected_circulating = supply_before
+        .circulating()
         .saturating_add(emission.as_atomic())
         .saturating_sub(approximate_burn);
 
     if supply_after.height != height {
-        issues.push(format!("Supply height mismatch: expected {}, got {}", height, supply_after.height));
+        issues.push(format!(
+            "Supply height mismatch: expected {}, got {}",
+            height, supply_after.height
+        ));
     }
 
     let diff = supply_after.circulating().abs_diff(expected_circulating);
     let supply_valid = diff == 0;
-    if diff > 0 { issues.push(format!("Supply mismatch: expected {}, got {}", expected_circulating, supply_after.circulating())); }
+    if diff > 0 {
+        issues.push(format!(
+            "Supply mismatch: expected {}, got {}",
+            expected_circulating,
+            supply_after.circulating()
+        ));
+    }
 
-    BlockAudit { height, supply_valid, fees_valid: fee_distribution_valid, emission_valid, issues }
+    BlockAudit {
+        height,
+        supply_valid,
+        fees_valid: fee_distribution_valid,
+        emission_valid,
+        issues,
+    }
 }
 
 /// A self-consistent checksum over a [`SupplyState`] snapshot — **not** an
@@ -168,20 +214,39 @@ pub fn audit_block(
 /// deferred until a consumer needs it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SupplySnapshot {
-    pub height: u64, pub circulating: u64, pub total_minted: u64, pub total_burned: u64, pub proof_hash: Hash,
+    pub height: u64,
+    pub circulating: u64,
+    pub total_minted: u64,
+    pub total_burned: u64,
+    pub proof_hash: Hash,
 }
 
 /// Deprecated: the type was never an authenticated proof. See
 /// [`SupplySnapshot`] and issue #252. Kept one release as a compat shim.
-#[deprecated(note = "renamed to SupplySnapshot: it is a self-consistent checksum, not an authenticated proof (issue #252)")]
+#[deprecated(
+    note = "renamed to SupplySnapshot: it is a self-consistent checksum, not an authenticated proof (issue #252)"
+)]
 #[allow(dead_code)]
 pub type SupplyProof = SupplySnapshot;
 
 impl SupplySnapshot {
     pub fn from_state(state: &SupplyState) -> Self {
-        let proof_hash = hash_domain(b"supply_proof",
-            &[state.height.to_le_bytes().as_slice(), state.total_minted.to_le_bytes().as_slice(), state.total_burned.to_le_bytes().as_slice()].concat());
-        SupplySnapshot { height: state.height, circulating: state.circulating(), total_minted: state.total_minted, total_burned: state.total_burned, proof_hash }
+        let proof_hash = hash_domain(
+            b"supply_proof",
+            &[
+                state.height.to_le_bytes().as_slice(),
+                state.total_minted.to_le_bytes().as_slice(),
+                state.total_burned.to_le_bytes().as_slice(),
+            ]
+            .concat(),
+        );
+        SupplySnapshot {
+            height: state.height,
+            circulating: state.circulating(),
+            total_minted: state.total_minted,
+            total_burned: state.total_burned,
+            proof_hash,
+        }
     }
 
     /// Confirm the snapshot is internally self-consistent. Returns `true`
@@ -202,29 +267,51 @@ impl SupplySnapshot {
         if self.circulating != self.total_minted.saturating_sub(self.total_burned) {
             return false;
         }
-        let expected = hash_domain(b"supply_proof",
-            &[self.height.to_le_bytes().as_slice(), self.total_minted.to_le_bytes().as_slice(), self.total_burned.to_le_bytes().as_slice()].concat());
+        let expected = hash_domain(
+            b"supply_proof",
+            &[
+                self.height.to_le_bytes().as_slice(),
+                self.total_minted.to_le_bytes().as_slice(),
+                self.total_burned.to_le_bytes().as_slice(),
+            ]
+            .concat(),
+        );
         self.proof_hash == expected
     }
 }
 
 #[allow(dead_code)]
-pub fn verify_commitment_balance(input_commitments: &[PedersenCommitment], output_commitments: &[PedersenCommitment], fee: Amount) -> bool {
+pub fn verify_commitment_balance(
+    input_commitments: &[PedersenCommitment],
+    output_commitments: &[PedersenCommitment],
+    fee: Amount,
+) -> bool {
+    use crate::crypto::BlindingFactor;
     use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
     use curve25519_dalek::traits::Identity;
-    use crate::crypto::BlindingFactor;
 
-    if input_commitments.is_empty() { return false; }
+    if input_commitments.is_empty() {
+        return false;
+    }
     let mut input_sum = RistrettoPoint::identity();
     for c in input_commitments {
-        match CompressedRistretto(c.to_bytes()).decompress() { Some(p) => input_sum += p, None => return false }
+        match CompressedRistretto(c.to_bytes()).decompress() {
+            Some(p) => input_sum += p,
+            None => return false,
+        }
     }
     let mut output_sum = RistrettoPoint::identity();
     for c in output_commitments {
-        match CompressedRistretto(c.to_bytes()).decompress() { Some(p) => output_sum += p, None => return false }
+        match CompressedRistretto(c.to_bytes()).decompress() {
+            Some(p) => output_sum += p,
+            None => return false,
+        }
     }
     let fee_commitment = PedersenCommitment::commit(fee.as_atomic(), &BlindingFactor::zero());
-    let fee_point = match CompressedRistretto(fee_commitment.to_bytes()).decompress() { Some(p) => p, None => return false };
+    let fee_point = match CompressedRistretto(fee_commitment.to_bytes()).decompress() {
+        Some(p) => p,
+        None => return false,
+    };
     input_sum == output_sum + fee_point
 }
 
@@ -232,12 +319,19 @@ pub type SupplyCommitment = SupplyState;
 pub type SupplyAuditResult = BlockAudit;
 /// Deprecated: the "audit proof" was never authenticated. See
 /// [`SupplySnapshot`] and issue #252.
-#[deprecated(note = "renamed to SupplySnapshot: self-consistent checksum, not an authenticated proof (issue #252)")]
+#[deprecated(
+    note = "renamed to SupplySnapshot: self-consistent checksum, not an authenticated proof (issue #252)"
+)]
 #[allow(deprecated, dead_code)] // kept as a deprecated compat alias; unused internally
 pub type SupplyAuditProof = SupplySnapshot;
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-pub struct BlockSupplyDelta { pub height: u64, pub emission: u64, pub burned: u64, pub net_change: i64 }
+pub struct BlockSupplyDelta {
+    pub height: u64,
+    pub emission: u64,
+    pub burned: u64,
+    pub net_change: i64,
+}
 
 impl BlockSupplyDelta {
     /// AUDIT (R-32 site 3/3, 2026-07-02): `net_change` uses i128
@@ -265,7 +359,9 @@ impl BlockSupplyDelta {
             );
         }
         BlockSupplyDelta {
-            height, emission: emission.as_atomic(), burned: burned.as_atomic(),
+            height,
+            emission: emission.as_atomic(),
+            burned: burned.as_atomic(),
             net_change: clamped as i64,
         }
     }
@@ -323,6 +419,9 @@ mod tests {
         assert!(proof.verify(), "clean proof should verify");
         // Tamper only the derived field. The hash is untouched.
         proof.circulating = proof.circulating.saturating_add(1);
-        assert!(!proof.verify(), "verify() must reject inconsistent circulating");
+        assert!(
+            !proof.verify(),
+            "verify() must reject inconsistent circulating"
+        );
     }
 }

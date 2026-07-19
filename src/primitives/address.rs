@@ -5,16 +5,28 @@
 //! - `from_bytes` is unchecked for performance in trusted contexts
 //! - Use checked variant when parsing untrusted input (network, user input)
 
+use super::{hash_data, PublicKey};
+use crate::constants::{MAINNET_MAGIC, NAME_SUFFIX, TESTNET_MAGIC};
+use crate::crypto::PublicPoint;
+use crate::error::{Error, Result};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use super::{PublicKey, hash_data};
-use crate::constants::{MAINNET_MAGIC, TESTNET_MAGIC, NAME_SUFFIX};
-use crate::error::{Error, Result};
-use crate::crypto::PublicPoint;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub enum Network {
     #[default]
     Mainnet,
@@ -22,11 +34,33 @@ pub enum Network {
 }
 
 impl Network {
-    pub fn magic(&self) -> [u8; 4] { match self { Network::Mainnet => MAINNET_MAGIC, Network::Testnet => TESTNET_MAGIC } }
-    pub fn prefix(&self) -> &'static str { match self { Network::Mainnet => "CYNC", Network::Testnet => "tCYNC" } }
+    pub fn magic(&self) -> [u8; 4] {
+        match self {
+            Network::Mainnet => MAINNET_MAGIC,
+            Network::Testnet => TESTNET_MAGIC,
+        }
+    }
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            Network::Mainnet => "CYNC",
+            Network::Testnet => "tCYNC",
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub enum AddressType {
     #[default]
     Standard,
@@ -35,8 +69,21 @@ pub enum AddressType {
 }
 
 impl AddressType {
-    pub fn type_byte(&self) -> u8 { match self { AddressType::Standard => 0, AddressType::Subaddress => 1, AddressType::Integrated => 2 } }
-    pub fn from_byte(b: u8) -> Option<Self> { match b { 0 => Some(AddressType::Standard), 1 => Some(AddressType::Subaddress), 2 => Some(AddressType::Integrated), _ => None } }
+    pub fn type_byte(&self) -> u8 {
+        match self {
+            AddressType::Standard => 0,
+            AddressType::Subaddress => 1,
+            AddressType::Integrated => 2,
+        }
+    }
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(AddressType::Standard),
+            1 => Some(AddressType::Subaddress),
+            2 => Some(AddressType::Integrated),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, BorshSerialize)]
@@ -81,16 +128,24 @@ impl BorshDeserialize for Address {
         // non-identity. Same check `from_bytes_checked` runs (see L107
         // of this file); factoring out into a helper would be nice but
         // is a separate refactor.
-        PublicKey::from_bytes_checked(*spend_public_key.as_bytes())
-            .map_err(|e| std::io::Error::new(
+        PublicKey::from_bytes_checked(*spend_public_key.as_bytes()).map_err(|e| {
+            std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Address.spend_public_key not a valid non-identity Ristretto point: {}", e),
-            ))?;
-        PublicKey::from_bytes_checked(*view_public_key.as_bytes())
-            .map_err(|e| std::io::Error::new(
+                format!(
+                    "Address.spend_public_key not a valid non-identity Ristretto point: {}",
+                    e
+                ),
+            )
+        })?;
+        PublicKey::from_bytes_checked(*view_public_key.as_bytes()).map_err(|e| {
+            std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Address.view_public_key not a valid non-identity Ristretto point: {}", e),
-            ))?;
+                format!(
+                    "Address.view_public_key not a valid non-identity Ristretto point: {}",
+                    e
+                ),
+            )
+        })?;
 
         Ok(Address {
             network,
@@ -104,34 +159,54 @@ impl BorshDeserialize for Address {
 
 impl Address {
     pub fn new(network: Network, spend: PublicKey, view: PublicKey) -> Self {
-        Address { network, address_type: AddressType::Standard, spend_public_key: spend, view_public_key: view, payment_id: None }
+        Address {
+            network,
+            address_type: AddressType::Standard,
+            spend_public_key: spend,
+            view_public_key: view,
+            payment_id: None,
+        }
     }
-    
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(70);
-        bytes.push(match self.network { Network::Mainnet => 0, Network::Testnet => 1 });
+        bytes.push(match self.network {
+            Network::Mainnet => 0,
+            Network::Testnet => 1,
+        });
         bytes.push(self.address_type.type_byte());
         bytes.extend_from_slice(self.spend_public_key.as_bytes());
         bytes.extend_from_slice(self.view_public_key.as_bytes());
-        if let Some(pid) = self.payment_id { bytes.extend_from_slice(&pid); }
+        if let Some(pid) = self.payment_id {
+            bytes.extend_from_slice(&pid);
+        }
         let hash = hash_data(&bytes);
         let checksum = &hash.as_bytes()[..4];
         bytes.extend_from_slice(checksum);
         bytes
     }
-    
+
     /// Parse address from bytes (unchecked - does not validate curve points)
     /// Use `from_bytes_checked` for untrusted input
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 70 { return Err(Error::InvalidAddress("too short".into())); }
+        if bytes.len() < 70 {
+            return Err(Error::InvalidAddress("too short".into()));
+        }
         let checksum_pos = bytes.len() - 4;
         let data = &bytes[..checksum_pos];
         let checksum = &bytes[checksum_pos..];
         let expected_checksum = hash_data(data);
-        if checksum != &expected_checksum.as_bytes()[..4] { return Err(Error::InvalidAddress("bad checksum".into())); }
+        if checksum != &expected_checksum.as_bytes()[..4] {
+            return Err(Error::InvalidAddress("bad checksum".into()));
+        }
 
-        let network = match data[0] { 0 => Network::Mainnet, 1 => Network::Testnet, _ => return Err(Error::InvalidAddress("bad network".into())) };
-        let address_type = AddressType::from_byte(data[1]).ok_or_else(|| Error::InvalidAddress("bad type".into()))?;
+        let network = match data[0] {
+            0 => Network::Mainnet,
+            1 => Network::Testnet,
+            _ => return Err(Error::InvalidAddress("bad network".into())),
+        };
+        let address_type = AddressType::from_byte(data[1])
+            .ok_or_else(|| Error::InvalidAddress("bad type".into()))?;
 
         // M-3 FIX: Reject oversized payloads — each address type has a fixed length
         // (including the 4-byte checksum already stripped into `bytes`).
@@ -140,9 +215,11 @@ impl Address {
             AddressType::Integrated => 78,
         };
         if bytes.len() != expected_len {
-            return Err(Error::InvalidAddress(
-                format!("wrong length: expected {} bytes, got {}", expected_len, bytes.len()),
-            ));
+            return Err(Error::InvalidAddress(format!(
+                "wrong length: expected {} bytes, got {}",
+                expected_len,
+                bytes.len()
+            )));
         }
 
         let spend = PublicKey::from_slice(&data[2..34])?;
@@ -152,10 +229,20 @@ impl Address {
             if data.len() < 74 {
                 return Err(Error::InvalidAddress("integrated address too short".into()));
             }
-            let mut pid = [0u8; 8]; pid.copy_from_slice(&data[66..74]); Some(pid)
-        } else { None };
+            let mut pid = [0u8; 8];
+            pid.copy_from_slice(&data[66..74]);
+            Some(pid)
+        } else {
+            None
+        };
 
-        Ok(Address { network, address_type, spend_public_key: spend, view_public_key: view, payment_id })
+        Ok(Address {
+            network,
+            address_type,
+            spend_public_key: spend,
+            view_public_key: view,
+            payment_id,
+        })
     }
 
     /// Parse address from bytes with curve point validation
@@ -166,20 +253,28 @@ impl Address {
         // SECURITY: Validate that public keys are valid curve points
         // Invalid points would cause ECDH operations to fail or produce wrong results
         if PublicPoint::from_bytes(*addr.spend_public_key.as_bytes()).is_none() {
-            return Err(Error::InvalidAddress("spend key is not a valid curve point".into()));
+            return Err(Error::InvalidAddress(
+                "spend key is not a valid curve point".into(),
+            ));
         }
         if PublicPoint::from_bytes(*addr.view_public_key.as_bytes()).is_none() {
-            return Err(Error::InvalidAddress("view key is not a valid curve point".into()));
+            return Err(Error::InvalidAddress(
+                "view key is not a valid curve point".into(),
+            ));
         }
 
         Ok(addr)
     }
-    
+
     /// Format address as string (delegates to Display impl).
     /// FIX: Previously duplicated the Display impl — could silently drift.
     /// Now removed in favour of the auto-derived to_string() from Display.
     fn format_string(&self) -> String {
-        format!("{}{}", self.network.prefix(), bs58::encode(self.to_bytes()).into_string())
+        format!(
+            "{}{}",
+            self.network.prefix(),
+            bs58::encode(self.to_bytes()).into_string()
+        )
     }
 
     /// Parse address from string representation
@@ -192,40 +287,69 @@ impl Address {
         } else {
             return Err(Error::InvalidAddress("bad prefix".into()));
         };
-        let bytes = bs58::decode(rest).into_vec().map_err(|e| Error::InvalidAddress(e.to_string()))?;
+        let bytes = bs58::decode(rest)
+            .into_vec()
+            .map_err(|e| Error::InvalidAddress(e.to_string()))?;
         // SECURITY: Use checked parsing for user input
         let addr = Self::from_bytes_checked(&bytes)?;
-        if addr.network != network { return Err(Error::InvalidAddress("network mismatch".into())); }
+        if addr.network != network {
+            return Err(Error::InvalidAddress("network mismatch".into()));
+        }
         Ok(addr)
     }
-    
+
     pub fn short(&self) -> String {
         let full = self.format_string();
-        if full.len() > 20 { format!("{}...{}", &full[..12], &full[full.len()-6..]) } else { full }
+        if full.len() > 20 {
+            format!("{}...{}", &full[..12], &full[full.len() - 6..])
+        } else {
+            full
+        }
     }
 }
 
-impl fmt::Debug for Address { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "Address({})", self.short()) } }
-impl fmt::Display for Address { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.format_string()) } }
+impl fmt::Debug for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Address({})", self.short())
+    }
+}
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.format_string())
+    }
+}
 
 impl FromStr for Address {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
-        if s.ends_with(NAME_SUFFIX) { return Err(Error::InvalidAddress("name lookup required".into())); }
+        if s.ends_with(NAME_SUFFIX) {
+            return Err(Error::InvalidAddress("name lookup required".into()));
+        }
         Address::from_string(s)
     }
 }
 
 impl Serialize for Address {
-    fn serialize<S>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> where S: serde::Serializer {
-        if ser.is_human_readable() { ser.serialize_str(&self.format_string()) } else { ser.serialize_bytes(&self.to_bytes()) }
+    fn serialize<S>(&self, ser: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if ser.is_human_readable() {
+            ser.serialize_str(&self.format_string())
+        } else {
+            ser.serialize_bytes(&self.to_bytes())
+        }
     }
 }
 impl<'de> Deserialize<'de> for Address {
-    fn deserialize<D>(de: D) -> std::result::Result<Self, D::Error> where D: serde::Deserializer<'de> {
+    fn deserialize<D>(de: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         if de.is_human_readable() {
             // `from_string` calls `from_bytes_checked` internally (see L143).
-            Address::from_string(&<String as Deserialize>::deserialize(de)?).map_err(serde::de::Error::custom)
+            Address::from_string(&<String as Deserialize>::deserialize(de)?)
+                .map_err(serde::de::Error::custom)
         } else {
             // AUDIT (2026-07-02): use `from_bytes_checked` instead of the
             // unchecked `from_bytes`. Serde is the entry point for any
@@ -247,7 +371,8 @@ impl<'de> Deserialize<'de> for Address {
             // accepts Borsh-encoded Address from a peer, a custom
             // BorshDeserialize impl mirroring this fix will be needed
             // there too.
-            Address::from_bytes_checked(&<Vec<u8> as Deserialize>::deserialize(de)?).map_err(serde::de::Error::custom)
+            Address::from_bytes_checked(&<Vec<u8> as Deserialize>::deserialize(de)?)
+                .map_err(serde::de::Error::custom)
         }
     }
 }
@@ -255,8 +380,8 @@ impl<'de> Deserialize<'de> for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
     use crate::crypto::SecretScalar;
+    use rand::rngs::OsRng;
 
     /// Generate a proper EC keypair (valid curve points)
     fn generate_ec_keypair() -> (crate::primitives::SecretKey, PublicKey) {

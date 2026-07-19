@@ -3,28 +3,28 @@
 //! Wallet file storage and encryption using authenticated encryption
 //! (XChaCha20-Poly1305) and memory-hard key derivation (Argon2id).
 
-use std::path::Path;
 use std::io::{Read, Write};
+use std::path::Path;
 // `File` is only used in the non-Unix fallback branches for
 // atomically creating temp wallet files (see cfg(not(unix)) blocks
 // further down). On Unix builds the create-with-mode(0o600) path is
 // used instead, so this import would fire an `unused_imports`
 // warning without the matching cfg gate here.
-#[cfg(not(unix))]
-use std::fs::File;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use argon2::Argon2;
+use borsh::{BorshDeserialize, BorshSerialize};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     XChaCha20Poly1305, XNonce,
 };
-use argon2::Argon2;
+use rand::rngs::OsRng;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+#[cfg(not(unix))]
+use std::fs::File;
 use zeroize::Zeroize;
 
-use crate::primitives::hash_data;
 use crate::error::{Error, Result};
+use crate::primitives::hash_data;
 
 /// Wallet file magic bytes
 const WALLET_MAGIC: &[u8; 4] = b"CYWL";
@@ -124,9 +124,9 @@ const V4_HKDF_CONTEXT_MAC: &str = "coincync/wallet-file/v4/mac-key";
 /// the binary's current default. Bumping these values affects ONLY
 /// new wallets and re-saved old wallets; pre-existing v2 wallets
 /// keep loading at their original v2 params (see LEGACY_* below).
-const ARGON2_M_COST: u32 = 262_144;  // 256 MiB memory
-const ARGON2_T_COST: u32 = 3;        // 3 iterations
-const ARGON2_P_COST: u32 = 4;        // 4 parallel lanes
+const ARGON2_M_COST: u32 = 262_144; // 256 MiB memory
+const ARGON2_T_COST: u32 = 3; // 3 iterations
+const ARGON2_P_COST: u32 = 4; // 4 parallel lanes
 
 /// Argon2id parameters from wallet format v2. Used ONLY when
 /// loading a v2 wallet file that doesn't carry its own params in
@@ -135,7 +135,7 @@ const ARGON2_P_COST: u32 = 4;        // 4 parallel lanes
 /// loading; on first save after upgrade those wallets are rewritten
 /// as v3 with the current default ARGON2_* params, so v2 is a
 /// transient backward-compat shim, not a permanent compromise.
-const LEGACY_V2_ARGON2_M_COST: u32 = 65_536;  // 64 MiB
+const LEGACY_V2_ARGON2_M_COST: u32 = 65_536; // 64 MiB
 const LEGACY_V2_ARGON2_T_COST: u32 = 3;
 const LEGACY_V2_ARGON2_P_COST: u32 = 4;
 
@@ -185,10 +185,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(
-            path,
-            std::fs::Permissions::from_mode(0o600),
-        ) {
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             tracing::error!(
                 target: "wallet::persistence::R94",
                 path = %path.display(),
@@ -207,7 +204,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                 .args([path_str, "/inheritance:r"])
                 .status()
             {
-                Ok(s) if s.success() => {},
+                Ok(s) if s.success() => {}
                 Ok(s) => tracing::error!(
                     target: "wallet::persistence::R94",
                     path = path_str,
@@ -230,7 +227,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                 .args([path_str, "/grant:r", &grant])
                 .status()
             {
-                Ok(s) if s.success() => {},
+                Ok(s) if s.success() => {}
                 Ok(s) => tracing::error!(
                     target: "wallet::persistence::R94",
                     path = path_str,
@@ -397,15 +394,15 @@ impl WalletHeader {
         // wallets to make the loader spend a full minute deriving a
         // key. Defaults (m=256 MiB, t=3, p=4) sit well below the new
         // caps, so legitimate wallets are unaffected.
-        const KDF_M_COST_MAX_KIB: u32 = 524_288;    // 512 MiB; 2× default (was 1 GiB)
-        const KDF_T_COST_MAX: u32 = 32;             // 32 iter; ~10× default (was 100)
-        const KDF_P_COST_MAX: u32 = 8;              // 8 lanes; 2× default (was 16)
-        // Argon2 crate minimums (`argon2::Params::MIN_*`). Hardcoded
-        // here so a future crate-version bump that lowers them doesn't
-        // silently widen our acceptance window.
-        const KDF_M_COST_MIN_KIB: u32 = 8;          // argon2::Params::MIN_M_COST
-        const KDF_T_COST_MIN: u32 = 2;              // argon2::Params::MIN_T_COST
-        const KDF_P_COST_MIN: u32 = 1;              // argon2::Params::MIN_P_COST
+        const KDF_M_COST_MAX_KIB: u32 = 524_288; // 512 MiB; 2× default (was 1 GiB)
+        const KDF_T_COST_MAX: u32 = 32; // 32 iter; ~10× default (was 100)
+        const KDF_P_COST_MAX: u32 = 8; // 8 lanes; 2× default (was 16)
+                                       // Argon2 crate minimums (`argon2::Params::MIN_*`). Hardcoded
+                                       // here so a future crate-version bump that lowers them doesn't
+                                       // silently widen our acceptance window.
+        const KDF_M_COST_MIN_KIB: u32 = 8; // argon2::Params::MIN_M_COST
+        const KDF_T_COST_MIN: u32 = 2; // argon2::Params::MIN_T_COST
+        const KDF_P_COST_MIN: u32 = 1; // argon2::Params::MIN_P_COST
         if self.kdf_m_cost > KDF_M_COST_MAX_KIB || self.kdf_m_cost < KDF_M_COST_MIN_KIB {
             return Err(Error::Corruption(format!(
                 "kdf_m_cost out of range: {} KiB (allowed {}..={} KiB)",
@@ -590,8 +587,14 @@ impl WalletData {
 /// process, killing every other wallet session it was serving.
 /// Both failure modes are now `Result::Err`; callers propagate via
 /// `?` in Result-returning contexts (all in-tree callers are).
-pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_cost: u32) -> Result<[u8; 32]> {
-    use argon2::{Algorithm, Version, Params};
+pub fn derive_key(
+    password: &str,
+    salt: &[u8; 32],
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<[u8; 32]> {
+    use argon2::{Algorithm, Params, Version};
 
     // Callers should still pre-validate via `WalletHeader::validate()`
     // to reject malformed on-disk params BEFORE paying the Argon2 cost.
@@ -602,12 +605,15 @@ pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_c
         m_cost,
         t_cost,
         p_cost,
-        Some(32),  // 32-byte output
-    ).map_err(|e| Error::InvalidState(format!(
-        "Argon2 params rejected (m_cost={} t_cost={} p_cost={}): {} — \
+        Some(32), // 32-byte output
+    )
+    .map_err(|e| {
+        Error::InvalidState(format!(
+            "Argon2 params rejected (m_cost={} t_cost={} p_cost={}): {} — \
          caller should invoke WalletHeader::validate() before derive_key()",
-        m_cost, t_cost, p_cost, e
-    )))?;
+            m_cost, t_cost, p_cost, e
+        ))
+    })?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
@@ -617,11 +623,14 @@ pub fn derive_key(password: &str, salt: &[u8; 32], m_cost: u32, t_cost: u32, p_c
     // process. Now propagates as InvalidState so the caller can
     // decide whether to abort the current wallet operation or surface
     // to the user.
-    argon2.hash_password_into(password.as_bytes(), salt, &mut key)
-        .map_err(|e| Error::InvalidState(format!(
-            "Argon2 hash failed (likely host memory pressure at m_cost={} KiB): {}",
-            m_cost, e
-        )))?;
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|e| {
+            Error::InvalidState(format!(
+                "Argon2 hash failed (likely host memory pressure at m_cost={} KiB): {}",
+                m_cost, e
+            ))
+        })?;
 
     Ok(key)
 }
@@ -713,7 +722,8 @@ pub fn decrypt_sidecar_with_fallback(
     // binaries. After the next save() these get rewritten as v3 and
     // this branch stops firing for the wallet.
     let mut key_v2 = derive_key(
-        password, salt,
+        password,
+        salt,
         LEGACY_V2_ARGON2_M_COST,
         LEGACY_V2_ARGON2_T_COST,
         LEGACY_V2_ARGON2_P_COST,
@@ -731,7 +741,8 @@ pub fn encrypt(data: &[u8], key: &[u8; 32], nonce: &[u8; 24]) -> Result<Vec<u8>>
     let cipher = XChaCha20Poly1305::new(key.into());
     let xnonce = XNonce::from_slice(nonce);
 
-    cipher.encrypt(xnonce, data)
+    cipher
+        .encrypt(xnonce, data)
         .map_err(|_| Error::Internal("encryption failed".into()))
 }
 
@@ -742,8 +753,9 @@ pub fn decrypt(data: &[u8], key: &[u8; 32], nonce: &[u8; 24]) -> Result<Vec<u8>>
     let cipher = XChaCha20Poly1305::new(key.into());
     let xnonce = XNonce::from_slice(nonce);
 
-    cipher.decrypt(xnonce, data)
-        .map_err(|_| Error::InvalidSecretKey("decryption failed - wrong password or corrupted data".into()))
+    cipher.decrypt(xnonce, data).map_err(|_| {
+        Error::InvalidSecretKey("decryption failed - wrong password or corrupted data".into())
+    })
 }
 
 /// Save wallet to file.
@@ -763,17 +775,16 @@ pub fn decrypt(data: &[u8], key: &[u8; 32], nonce: &[u8; 24]) -> Result<Vec<u8>>
 ///
 /// v3 save is still callable via `save_v3_internal` for round-trip
 /// tests; production code shouldn't use it.
-pub fn save_wallet(
-    path: &Path,
-    data: &WalletData,
-    password: Option<&str>,
-) -> Result<()> {
+pub fn save_wallet(path: &Path, data: &WalletData, password: Option<&str>) -> Result<()> {
     if let Some(pwd) = password {
         // STEP 6: public default flipped to v4 for encrypted wallets.
         // Any prior v3 wallet that the user loads + saves gets auto-
         // upgraded to v4 here. tracing::info logs the upgrade exactly
         // once per save so the operator has a paper trail.
-        tracing::info!("Saving wallet to {:?} in v4 format (HMAC-authenticated)", path);
+        tracing::info!(
+            "Saving wallet to {:?} in v4 format (HMAC-authenticated)",
+            path
+        );
         return save_v4(path, data, pwd);
     }
 
@@ -804,8 +815,7 @@ pub(crate) fn save_v3_internal(
     let mut header = WalletHeader::new(encrypted);
 
     // Serialize data
-    let serialized = borsh::to_vec(data)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let serialized = borsh::to_vec(data).map_err(|e| Error::SerializationError(e.to_string()))?;
 
     // Encrypt if password provided (authenticated encryption)
     // SECURITY (M-5): Zeroize plaintext serialized data after encryption
@@ -816,8 +826,13 @@ pub(crate) fn save_v3_internal(
     // so old v2 wallets get auto-upgraded to stronger params on first
     // save after the binary is upgraded.
     let final_data = if let Some(pwd) = password {
-        let mut key = derive_key(pwd, &header.kdf_salt,
-            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost)?;
+        let mut key = derive_key(
+            pwd,
+            &header.kdf_salt,
+            header.kdf_m_cost,
+            header.kdf_t_cost,
+            header.kdf_p_cost,
+        )?;
         let result = encrypt(&serialized, &key, &header.nonce);
         key.zeroize(); // SECURITY: Clear key material from memory immediately
         let mut serialized_mut = serialized;
@@ -829,7 +844,9 @@ pub(crate) fn save_v3_internal(
 
     // Compute checksum (for unencrypted data; encrypted data has auth tag)
     let checksum_hash = hash_data(&final_data);
-    header.checksum.copy_from_slice(&checksum_hash.as_bytes()[..4]);
+    header
+        .checksum
+        .copy_from_slice(&checksum_hash.as_bytes()[..4]);
 
     // Write to file atomically (write to temp, then rename)
     // SECURITY (M7): Set restrictive permissions on wallet files (owner-only on Unix)
@@ -847,8 +864,8 @@ pub(crate) fn save_v3_internal(
     #[cfg(not(unix))]
     let mut file = File::create(&temp_path)?;
 
-    let header_bytes = borsh::to_vec(&header)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let header_bytes =
+        borsh::to_vec(&header).map_err(|e| Error::SerializationError(e.to_string()))?;
 
     // Write header length first, then header, then data length, then data.
     // If any write fails, clean up the temp file to avoid leaving secret data on disk.
@@ -884,12 +901,8 @@ pub(crate) fn save_v3_internal(
 /// - File doesn't exist
 /// - Password is wrong (authentication failure)
 /// - Data is corrupted
-pub fn load_wallet(
-    path: &Path,
-    password: Option<&str>,
-) -> Result<WalletData> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| Error::WalletNotFound(e.to_string()))?;
+pub fn load_wallet(path: &Path, password: Option<&str>) -> Result<WalletData> {
+    let bytes = std::fs::read(path).map_err(|e| Error::WalletNotFound(e.to_string()))?;
     load_wallet_from_bytes(&bytes, password)
 }
 
@@ -900,10 +913,7 @@ pub fn load_wallet(
 /// `tmp_d`/`tmp_r` files, and a crash between write and remove left
 /// the chosen region's plaintext on disk — defeating the deniability
 /// property the feature exists to provide).
-pub fn load_wallet_from_bytes(
-    bytes: &[u8],
-    password: Option<&str>,
-) -> Result<WalletData> {
+pub fn load_wallet_from_bytes(bytes: &[u8], password: Option<&str>) -> Result<WalletData> {
     use std::io::Cursor;
 
     // Pre-parse: peek at the version byte at offset 8 (after the 4-byte
@@ -915,9 +925,8 @@ pub fn load_wallet_from_bytes(
         // STEP 4 of wallet-v4 implementation: v4 auto-detect lands.
         // v4 always requires a password (the HMAC concept demands a key
         // derived from one); a None password here is unrecoverable.
-        let pwd = password.ok_or_else(|| Error::InvalidSecretKey(
-            "v4 wallet requires a password".into()
-        ))?;
+        let pwd = password
+            .ok_or_else(|| Error::InvalidSecretKey("v4 wallet requires a password".into()))?;
         return load_v4_from_bytes(bytes, pwd);
     }
 
@@ -957,21 +966,23 @@ pub fn load_wallet_from_bytes(
                 .map_err(|e| Error::SerializationError(format!("v2 header: {}", e)))?;
             v2.into_v3()
         }
-        3 => {
-            borsh::from_slice(&header_bytes)
-                .map_err(|e| Error::SerializationError(format!("v3 header: {}", e)))?
-        }
+        3 => borsh::from_slice(&header_bytes)
+            .map_err(|e| Error::SerializationError(format!("v3 header: {}", e)))?,
         4 => {
             // Unreachable in practice — caught by the early peek above.
             // If we somehow get here, it means the peek heuristic missed
             // (e.g. bytes < 9). Fall through to the v4 loader anyway so
             // the file isn't silently misparsed as v3.
-            let pwd = password.ok_or_else(|| Error::InvalidSecretKey(
-                "v4 wallet requires a password".into()
-            ))?;
+            let pwd = password
+                .ok_or_else(|| Error::InvalidSecretKey("v4 wallet requires a password".into()))?;
             return load_v4_from_bytes(bytes, pwd);
         }
-        v => return Err(Error::WalletNotFound(format!("unsupported wallet version {}", v))),
+        v => {
+            return Err(Error::WalletNotFound(format!(
+                "unsupported wallet version {}",
+                v
+            )))
+        }
     };
 
     header.validate()?;
@@ -1010,8 +1021,13 @@ pub fn load_wallet_from_bytes(
     // files the params are read directly from the on-disk header.
     let decrypted = if header.encrypted {
         let pwd = password.ok_or(Error::InvalidSecretKey("password required".into()))?;
-        let mut key = derive_key(pwd, &header.kdf_salt,
-            header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost)?;
+        let mut key = derive_key(
+            pwd,
+            &header.kdf_salt,
+            header.kdf_m_cost,
+            header.kdf_t_cost,
+            header.kdf_p_cost,
+        )?;
         let result = decrypt(&encrypted_data, &key, &header.nonce);
         key.zeroize(); // SECURITY: Clear key material from memory immediately
         result?
@@ -1020,8 +1036,8 @@ pub fn load_wallet_from_bytes(
     };
 
     // Deserialize
-    let data: WalletData = borsh::from_slice(&decrypted)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let data: WalletData =
+        borsh::from_slice(&decrypted).map_err(|e| Error::SerializationError(e.to_string()))?;
 
     // SECURITY (M-5): Zeroize decrypted plaintext after deserialization
     let mut decrypted_mut = decrypted;
@@ -1035,11 +1051,7 @@ pub fn load_wallet_from_bytes(
 /// Decrypts with the old password, re-encrypts with the new password,
 /// and writes atomically to prevent data loss. Also re-encrypts sidecar
 /// files (.utxos, .history) so they remain accessible with the new password.
-pub fn change_password(
-    path: &Path,
-    old_password: &str,
-    new_password: &str,
-) -> Result<()> {
+pub fn change_password(path: &Path, old_password: &str, new_password: &str) -> Result<()> {
     // Load wallet with old password
     let data = load_wallet(path, Some(old_password))?;
 
@@ -1053,10 +1065,9 @@ pub fn change_password(
     for ext in &sidecar_extensions {
         let sidecar_path = path.with_extension(ext);
         if sidecar_path.exists() {
-            let bytes = std::fs::read(&sidecar_path)
-                .map_err(|e| crate::error::Error::InvalidState(
-                    format!("read sidecar .{}: {}", ext, e)
-                ))?;
+            let bytes = std::fs::read(&sidecar_path).map_err(|e| {
+                crate::error::Error::InvalidState(format!("read sidecar .{}: {}", ext, e))
+            })?;
 
             // Decrypt with old password (same logic as Wallet::decrypt_sidecar).
             //
@@ -1085,14 +1096,17 @@ pub fn change_password(
                 // (Item 22) Use the params-fallback decryptor: sidecars
                 // saved by pre-2026-05-08 binaries used the v2 KDF
                 // params; the new helper tries v3-default first then v2.
-                decrypt_sidecar_with_fallback(&salt, &nonce, ciphertext, old_password)
-                    .map_err(|e| crate::error::Error::InvalidState(format!(
-                        "R-98: sidecar .{} decrypt with old password failed \
+                decrypt_sidecar_with_fallback(&salt, &nonce, ciphertext, old_password).map_err(
+                    |e| {
+                        crate::error::Error::InvalidState(format!(
+                            "R-98: sidecar .{} decrypt with old password failed \
                          during change_password ({}). Refusing to overwrite \
                          with a silent-fallback wrong plaintext — this would \
                          corrupt the sidecar. Verify old_password and retry.",
-                        ext, e
-                    )))?
+                            ext, e
+                        ))
+                    },
+                )?
             } else {
                 bytes.clone()
             };
@@ -1109,23 +1123,26 @@ pub fn change_password(
             // R-99 fix: zeroize new_key BEFORE the output concat so any
             // future error return path can't leave the key on stack.
             new_key.zeroize();
-            let output = [new_salt.as_slice(), new_nonce.as_slice(), encrypted.as_slice()].concat();
+            let output = [
+                new_salt.as_slice(),
+                new_nonce.as_slice(),
+                encrypted.as_slice(),
+            ]
+            .concat();
 
             // Atomic write: write to temp then rename
             let tmp_path = sidecar_path.with_extension(format!("{}.tmp", ext));
-            std::fs::write(&tmp_path, &output)
-                .map_err(|e| crate::error::Error::InvalidState(
-                    format!("write sidecar .{}: {}", ext, e)
-                ))?;
+            std::fs::write(&tmp_path, &output).map_err(|e| {
+                crate::error::Error::InvalidState(format!("write sidecar .{}: {}", ext, e))
+            })?;
             // R-100 fix: harden sidecar perms. change_password writes
             // over each sidecar with the new-password encryption; the
             // regular wallet.rs save() path also hardens on save, so
             // this closes the change_password parity gap.
             harden_secret_file_permissions(&tmp_path);
-            std::fs::rename(&tmp_path, &sidecar_path)
-                .map_err(|e| crate::error::Error::InvalidState(
-                    format!("rename sidecar .{}: {}", ext, e)
-                ))?;
+            std::fs::rename(&tmp_path, &sidecar_path).map_err(|e| {
+                crate::error::Error::InvalidState(format!("rename sidecar .{}: {}", ext, e))
+            })?;
             harden_secret_file_permissions(&sidecar_path);
         }
     }
@@ -1172,13 +1189,15 @@ pub fn save_v4(path: &Path, data: &WalletData, password: &str) -> Result<()> {
     let mut header = WalletHeader::new_v4(true);
 
     // Serialize plaintext.
-    let serialized = borsh::to_vec(data)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let serialized = borsh::to_vec(data).map_err(|e| Error::SerializationError(e.to_string()))?;
 
     // Argon2id → ikm → HKDF-Expand to two distinct 32-byte keys.
     let (enc_key, mac_key) = derive_v4_keys(
-        password, &header.kdf_salt,
-        header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost,
+        password,
+        &header.kdf_salt,
+        header.kdf_m_cost,
+        header.kdf_t_cost,
+        header.kdf_p_cost,
     )?;
 
     // AEAD-encrypt the plaintext under enc_key. v3 uses XChaCha20-
@@ -1197,18 +1216,18 @@ pub fn save_v4(path: &Path, data: &WalletData, password: &str) -> Result<()> {
     // whole file). Keeping the same field as v3 so the header layout
     // is unchanged.
     let checksum_hash = hash_data(&ciphertext);
-    header.checksum.copy_from_slice(&checksum_hash.as_bytes()[..4]);
+    header
+        .checksum
+        .copy_from_slice(&checksum_hash.as_bytes()[..4]);
 
-    let header_bytes = borsh::to_vec(&header)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let header_bytes =
+        borsh::to_vec(&header).map_err(|e| Error::SerializationError(e.to_string()))?;
 
     // Concatenate the pre-HMAC byte sequence in memory so we can hash
     // it in one pass via blake3::keyed_hash. The file is bounded
     // (<100 KB typical wallet, with the AEAD tag), so the alloc is
     // cheap; this avoids the API gymnastics of an incremental hasher.
-    let mut prelude = Vec::with_capacity(
-        4 + header_bytes.len() + 4 + ciphertext.len()
-    );
+    let mut prelude = Vec::with_capacity(4 + header_bytes.len() + 4 + ciphertext.len());
     prelude.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
     prelude.extend_from_slice(&header_bytes);
     prelude.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
@@ -1226,7 +1245,9 @@ pub fn save_v4(path: &Path, data: &WalletData, password: &str) -> Result<()> {
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
-            .write(true).create(true).truncate(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
             .mode(0o600)
             .open(&temp_path)?
     };
@@ -1290,7 +1311,8 @@ pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
     let mut cursor = Cursor::new(prelude);
 
     let mut hdr_len_bytes = [0u8; 4];
-    cursor.read_exact(&mut hdr_len_bytes)
+    cursor
+        .read_exact(&mut hdr_len_bytes)
         .map_err(|e| Error::WalletNotFound(e.to_string()))?;
     let hdr_len = u32::from_le_bytes(hdr_len_bytes) as usize;
     if hdr_len > prelude_len.saturating_sub(8) {
@@ -1300,11 +1322,12 @@ pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
     }
 
     let mut header_bytes = vec![0u8; hdr_len];
-    cursor.read_exact(&mut header_bytes)
+    cursor
+        .read_exact(&mut header_bytes)
         .map_err(|e| Error::WalletNotFound(e.to_string()))?;
 
-    let header: WalletHeader = borsh::from_slice(&header_bytes)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let header: WalletHeader =
+        borsh::from_slice(&header_bytes).map_err(|e| Error::SerializationError(e.to_string()))?;
 
     // Step 2: validate header BEFORE Argon2. Catches malformed KDF
     // params (fuzz crash-class) cheaply.
@@ -1323,18 +1346,23 @@ pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
     }
 
     let mut ct_len_bytes = [0u8; 4];
-    cursor.read_exact(&mut ct_len_bytes)
+    cursor
+        .read_exact(&mut ct_len_bytes)
         .map_err(|e| Error::WalletNotFound(e.to_string()))?;
     let ct_len = u32::from_le_bytes(ct_len_bytes) as usize;
 
     let mut ciphertext = vec![0u8; ct_len];
-    cursor.read_exact(&mut ciphertext)
+    cursor
+        .read_exact(&mut ciphertext)
         .map_err(|e| Error::WalletNotFound(e.to_string()))?;
 
     // Step 3: derive both keys.
     let (enc_key, mac_key) = derive_v4_keys(
-        password, &header.kdf_salt,
-        header.kdf_m_cost, header.kdf_t_cost, header.kdf_p_cost,
+        password,
+        &header.kdf_salt,
+        header.kdf_m_cost,
+        header.kdf_t_cost,
+        header.kdf_p_cost,
     )?;
 
     // Step 4: HMAC verify — constant-time compare via subtle.
@@ -1369,8 +1397,8 @@ pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
     enc_key_mut.zeroize();
     let plaintext = decrypt_result?;
 
-    let data: WalletData = borsh::from_slice(&plaintext)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let data: WalletData =
+        borsh::from_slice(&plaintext).map_err(|e| Error::SerializationError(e.to_string()))?;
     Ok(data)
 }
 
@@ -1384,8 +1412,7 @@ pub fn generate_mnemonic() -> (String, [u8; 32]) {
     use super::mnemonic::WalletMnemonic;
 
     // Generate proper 24-word BIP39 mnemonic
-    let mnemonic = WalletMnemonic::generate()
-        .expect("mnemonic generation should not fail");
+    let mnemonic = WalletMnemonic::generate().expect("mnemonic generation should not fail");
 
     // Derive seed from mnemonic (no passphrase)
     let wallet_seed = mnemonic.to_seed("");
@@ -1399,8 +1426,8 @@ pub fn mnemonic_to_seed(mnemonic: &str) -> Result<[u8; 32]> {
     use super::mnemonic::WalletMnemonic;
 
     // Parse and validate BIP39 mnemonic
-    let wallet_mnemonic = WalletMnemonic::from_phrase(mnemonic)
-        .map_err(|_| Error::InvalidSeedPhrase)?;
+    let wallet_mnemonic =
+        WalletMnemonic::from_phrase(mnemonic).map_err(|_| Error::InvalidSeedPhrase)?;
 
     // Derive seed from mnemonic (no passphrase)
     let wallet_seed = wallet_mnemonic.to_seed("");
@@ -1776,13 +1803,21 @@ mod tests {
         let salt = [0xA1u8; 32];
         // R-96 update: derive_v4_keys now returns Result; unwrap in test
         // context (params are the audited default so KDF should not fail).
-        let (e1, m1) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
-        let (e2, m2) = derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
+        let (e1, m1) =
+            derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
+        let (e2, m2) =
+            derive_v4_keys(password, &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
 
         // Stability: same inputs → same outputs (no hidden randomness
         // in the v4 KDF path).
-        assert_eq!(e1, e2, "enc_key must be deterministic for fixed (pw, salt, params)");
-        assert_eq!(m1, m2, "mac_key must be deterministic for fixed (pw, salt, params)");
+        assert_eq!(
+            e1, e2,
+            "enc_key must be deterministic for fixed (pw, salt, params)"
+        );
+        assert_eq!(
+            m1, m2,
+            "mac_key must be deterministic for fixed (pw, salt, params)"
+        );
 
         // Independence: enc_key MUST differ from mac_key. If they
         // matched, the two HKDF context strings collided (or the
@@ -1794,7 +1829,14 @@ mod tests {
         );
 
         // Different password → different keys.
-        let (e3, m3) = derive_v4_keys("different-password", &salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST).unwrap();
+        let (e3, m3) = derive_v4_keys(
+            "different-password",
+            &salt,
+            ARGON2_M_COST,
+            ARGON2_T_COST,
+            ARGON2_P_COST,
+        )
+        .unwrap();
         assert_ne!(e1, e3);
         assert_ne!(m1, m3);
     }
@@ -1870,15 +1912,16 @@ mod tests {
         let flip_at = 4 + 4 + 1 + 1 + 32 + 5; // hdr_len + magic + version + encrypted + salt + into-nonce
         bytes[flip_at] ^= 0x01;
 
-        let err = load_v4_from_bytes(&bytes, "tamper-pw")
-            .expect_err("tampered header MUST fail to load");
+        let err =
+            load_v4_from_bytes(&bytes, "tamper-pw").expect_err("tampered header MUST fail to load");
         // The error must be the generic "did not authenticate" — we
         // don't want to leak "header tamper" vs "wrong password" to
         // the attacker.
         match err {
             Error::InvalidSecretKey(msg) => assert!(
                 msg.contains("did not authenticate"),
-                "expected generic auth-fail message, got: {}", msg
+                "expected generic auth-fail message, got: {}",
+                msg
             ),
             other => panic!("expected InvalidSecretKey, got: {:?}", other),
         }
@@ -1909,7 +1952,8 @@ mod tests {
         let v3_bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             v3_bytes[8], WALLET_VERSION,
-            "pre-migration file MUST be v3 (version byte = {})", WALLET_VERSION
+            "pre-migration file MUST be v3 (version byte = {})",
+            WALLET_VERSION
         );
 
         // Step 2: load via public API (auto-detects v3).
@@ -1918,8 +1962,7 @@ mod tests {
         assert_eq!(loaded.seed, seed);
 
         // Step 3: re-save via public API (defaults to v4 now).
-        save_wallet(&path, &loaded, Some("migrate-pw"))
-            .expect("save_wallet MUST succeed");
+        save_wallet(&path, &loaded, Some("migrate-pw")).expect("save_wallet MUST succeed");
 
         // Step 4: load again — v4 auto-detect.
         let reloaded = load_wallet(&path, Some("migrate-pw"))
@@ -1930,7 +1973,8 @@ mod tests {
         let v4_bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             v4_bytes[8], WALLET_VERSION_V4,
-            "post-migration file MUST be v4 (version byte = {})", WALLET_VERSION_V4
+            "post-migration file MUST be v4 (version byte = {})",
+            WALLET_VERSION_V4
         );
 
         // File size grew by exactly the 32-byte HMAC suffix (modulo
@@ -1942,7 +1986,8 @@ mod tests {
         // output is deterministic in length. Assert the +32 bound
         // exactly.
         assert_eq!(
-            v4_bytes.len(), v3_bytes.len() + 32,
+            v4_bytes.len(),
+            v3_bytes.len() + 32,
             "v4 file MUST be exactly 32 bytes longer than the v3 equivalent (HMAC suffix)"
         );
     }
@@ -1962,12 +2007,12 @@ mod tests {
         save_wallet(&path, &loaded, Some("right-pw")).unwrap();
 
         // Wrong password against the upgraded (now v4) file.
-        let err = load_wallet(&path, Some("wrong-pw"))
-            .expect_err("wrong password MUST fail");
+        let err = load_wallet(&path, Some("wrong-pw")).expect_err("wrong password MUST fail");
         match err {
             Error::InvalidSecretKey(msg) => assert!(
                 msg.contains("did not authenticate") || msg.contains("wrong password"),
-                "expected v4 auth-fail message, got: {}", msg
+                "expected v4 auth-fail message, got: {}",
+                msg
             ),
             other => panic!("expected InvalidSecretKey, got: {:?}", other),
         }
@@ -1987,13 +2032,15 @@ mod tests {
         let new_len = bytes.len() - 16;
         bytes.truncate(new_len);
 
-        let err = load_v4_from_bytes(&bytes, "trunc-pw")
-            .expect_err("truncated file MUST fail to load");
+        let err =
+            load_v4_from_bytes(&bytes, "trunc-pw").expect_err("truncated file MUST fail to load");
         // Truncation surfaces as either a framing error OR an HMAC
         // mismatch (depending on whether the ct_len lands within the
         // remaining bytes). Both are valid rejections.
         match err {
-            Error::WalletNotFound(_) | Error::InvalidSecretKey(_) | Error::SerializationError(_) => {}
+            Error::WalletNotFound(_)
+            | Error::InvalidSecretKey(_)
+            | Error::SerializationError(_) => {}
             other => panic!("expected framing/auth/parse error, got: {:?}", other),
         }
     }
@@ -2092,7 +2139,8 @@ pub fn create_deniable_wallet(
          structural rewrite that eliminates the intermediate .hidden \
          file artifact and enforces per-region padding. See \
          create_deniable_wallet's docstring for details. Track the \
-         restoration in the audit catalogue.".into()
+         restoration in the audit catalogue."
+            .into(),
     ))
 }
 
@@ -2113,8 +2161,8 @@ pub fn load_deniable_wallet(
     path: &std::path::Path,
     password: &str,
 ) -> crate::error::Result<WalletData> {
-    let data = std::fs::read(path)
-        .map_err(|e| crate::error::Error::WalletNotFound(e.to_string()))?;
+    let data =
+        std::fs::read(path).map_err(|e| crate::error::Error::WalletNotFound(e.to_string()))?;
 
     // Check if this is a combined deniable file (has the 4-byte length prefix)
     if data.len() > 8 {

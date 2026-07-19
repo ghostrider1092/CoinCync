@@ -7,21 +7,26 @@
 // regression test for the blake3 vs CLSAG mismatch was rewritten — the
 // blake3 helper has been DELETED from the codebase, so there's nothing to
 // compare against.
-use coincync::primitives::{PublicKey, SecretKey, Amount};
 use coincync::crypto::{
-    SecretScalar, KeyImage as CryptoKeyImage,
+    coinbase_stealth_address,
+    create_aggregated_range_proof,
     // 2026-06-03: switched to `generate_stealth_address_checked`
     // after the audit pass narrowed the legacy panic-on-bad-input
     // variant to `#[cfg(test)] pub(crate)`. Test fixtures here always
     // pass valid curve points so the `.expect()` on the Result is a
     // never-fires assertion documenting the test contract.
-    generate_stealth_address_checked, is_output_ours,
-    coinbase_stealth_address,
-    RecipientKeys, Subaddress,
-    BlindingFactor, PedersenCommitment,
-    create_aggregated_range_proof, verify_range_proofs,
+    generate_stealth_address_checked,
+    is_output_ours,
     verify_range_proof,
+    verify_range_proofs,
+    BlindingFactor,
+    KeyImage as CryptoKeyImage,
+    PedersenCommitment,
+    RecipientKeys,
+    SecretScalar,
+    Subaddress,
 };
+use coincync::primitives::{Amount, PublicKey, SecretKey};
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -71,7 +76,7 @@ fn test_regression_key_image_clsag_only() {
     // Verify uniqueness: a different secret produces a different image.
     // (This is a property of `Hp(x*G)` — not Hp alone, the full `x * Hp(x*G)`.)
     let other_scalar = SecretScalar::random(&mut OsRng);
-    let other_image  = CryptoKeyImage::from_secret(&other_scalar);
+    let other_image = CryptoKeyImage::from_secret(&other_scalar);
     assert_ne!(
         clsag_key_image.to_bytes(),
         other_image.to_bytes(),
@@ -104,12 +109,9 @@ fn test_regression_scanner_view_tag_gate() {
 
     // Generate a stealth address for this wallet (simulates a sender creating an output)
     let output_idx = 0u8;
-    let (stealth, _tx_secret) = generate_stealth_address_checked(
-        &spend_pk,
-        &view_pk,
-        output_idx,
-        &mut OsRng,
-    ).expect("test fixtures pass valid curve points");
+    let (stealth, _tx_secret) =
+        generate_stealth_address_checked(&spend_pk, &view_pk, output_idx, &mut OsRng)
+            .expect("test fixtures pass valid curve points");
 
     // The core fix: is_output_ours must detect the output via ECDH alone,
     // without any view_tag pre-filter
@@ -153,11 +155,8 @@ fn test_regression_range_proof_verification_mismatch() {
     let commitment = PedersenCommitment::commit(amount.as_atomic(), &blinding);
 
     // Create an aggregated proof for a SINGLE output (this is what the builder does)
-    let agg_proof = create_aggregated_range_proof(
-        &[amount],
-        &[blinding.clone()],
-        &mut OsRng,
-    ).expect("aggregated proof creation must succeed for 1 output");
+    let agg_proof = create_aggregated_range_proof(&[amount], &[blinding.clone()], &mut OsRng)
+        .expect("aggregated proof creation must succeed for 1 output");
 
     // The fix: verify_range_proofs (aggregated verifier) must accept this proof.
     // Before the fix, the validator would have called verify_range_proof (single)
@@ -208,12 +207,15 @@ fn test_regression_coinbase_stealth_uniqueness() {
     let test_miner_secret = [0xEFu8; 32];
 
     // Generate coinbase stealth addresses for consecutive block heights
-    let (stealth_h1, _) = coinbase_stealth_address(&spend_pk, &view_pk, 1, output_idx, &test_miner_secret)
-        .expect("coinbase stealth for height 1");
-    let (stealth_h2, _) = coinbase_stealth_address(&spend_pk, &view_pk, 2, output_idx, &test_miner_secret)
-        .expect("coinbase stealth for height 2");
-    let (stealth_h3, _) = coinbase_stealth_address(&spend_pk, &view_pk, 3, output_idx, &test_miner_secret)
-        .expect("coinbase stealth for height 3");
+    let (stealth_h1, _) =
+        coinbase_stealth_address(&spend_pk, &view_pk, 1, output_idx, &test_miner_secret)
+            .expect("coinbase stealth for height 1");
+    let (stealth_h2, _) =
+        coinbase_stealth_address(&spend_pk, &view_pk, 2, output_idx, &test_miner_secret)
+            .expect("coinbase stealth for height 2");
+    let (stealth_h3, _) =
+        coinbase_stealth_address(&spend_pk, &view_pk, 3, output_idx, &test_miner_secret)
+            .expect("coinbase stealth for height 3");
 
     // All stealth addresses must be DIFFERENT (the old bug made them all identical)
     assert_ne!(
@@ -257,8 +259,9 @@ fn test_regression_coinbase_stealth_uniqueness() {
     // Phase A8 (audit fix): use the same `test_miner_secret` as the loop above
     // so the determinism check is meaningful — passing a different secret would
     // legitimately produce a different result.
-    let (stealth_h1_again, _) = coinbase_stealth_address(&spend_pk, &view_pk, 1, output_idx, &test_miner_secret)
-        .expect("coinbase stealth for height 1 (repeat)");
+    let (stealth_h1_again, _) =
+        coinbase_stealth_address(&spend_pk, &view_pk, 1, output_idx, &test_miner_secret)
+            .expect("coinbase stealth for height 1 (repeat)");
     assert_eq!(
         stealth_h1.public_key.as_bytes(),
         stealth_h1_again.public_key.as_bytes(),
@@ -285,9 +288,8 @@ fn test_regression_partial_asset_transfers_power_of_2() {
         Amount::from_atomic(300_000),
         Amount::from_atomic(200_000),
     ];
-    let blindings: Vec<BlindingFactor> = (0..3)
-        .map(|_| BlindingFactor::random(&mut OsRng))
-        .collect();
+    let blindings: Vec<BlindingFactor> =
+        (0..3).map(|_| BlindingFactor::random(&mut OsRng)).collect();
     let commitments: Vec<PedersenCommitment> = amounts
         .iter()
         .zip(blindings.iter())
@@ -322,7 +324,8 @@ fn test_regression_partial_asset_transfers_power_of_2() {
             .unwrap_or_else(|_| panic!("Aggregated proof for {} outputs must succeed", count));
         assert!(
             verify_range_proofs(&cms, &p),
-            "Aggregated verifier must accept {} commitments", count
+            "Aggregated verifier must accept {} commitments",
+            count
         );
     }
 }
@@ -352,12 +355,9 @@ fn test_regression_subaddress_scanner_detection() {
 
     // Create a stealth address targeting the SUBADDRESS (not the primary address)
     let output_idx = 0u8;
-    let (stealth, _tx_secret) = generate_stealth_address_checked(
-        &subaddr.spend_public,
-        &view_pk,
-        output_idx,
-        &mut OsRng,
-    ).expect("test fixtures pass valid curve points");
+    let (stealth, _tx_secret) =
+        generate_stealth_address_checked(&subaddr.spend_public, &view_pk, output_idx, &mut OsRng)
+            .expect("test fixtures pass valid curve points");
 
     // The output must NOT match the primary spend key
     // (this was the only thing the old scanner checked)
@@ -375,8 +375,8 @@ fn test_regression_subaddress_scanner_detection() {
     );
 
     // Verify with RecipientKeys for the subaddress
-    let sub_recipient = RecipientKeys::new(&view_sk, &subaddr.spend_public)
-        .expect("RecipientKeys for subaddress");
+    let sub_recipient =
+        RecipientKeys::new(&view_sk, &subaddr.spend_public).expect("RecipientKeys for subaddress");
     assert!(
         sub_recipient.owns(&stealth, output_idx),
         "RecipientKeys::owns must detect subaddress output"
@@ -384,22 +384,20 @@ fn test_regression_subaddress_scanner_detection() {
 
     // Verify multiple subaddresses are all independently detectable
     for idx in 1..5u32 {
-        let sub = Subaddress::generate(&spend_pk, &view_sk, 0, idx)
-            .expect("subaddress generation");
-        let (sub_stealth, _) = generate_stealth_address_checked(
-            &sub.spend_public,
-            &view_pk,
-            output_idx,
-            &mut OsRng,
-        ).expect("test fixtures pass valid curve points");
+        let sub = Subaddress::generate(&spend_pk, &view_sk, 0, idx).expect("subaddress generation");
+        let (sub_stealth, _) =
+            generate_stealth_address_checked(&sub.spend_public, &view_pk, output_idx, &mut OsRng)
+                .expect("test fixtures pass valid curve points");
         assert!(
             is_output_ours(&sub_stealth, &view_sk, &sub.spend_public, output_idx),
-            "Subaddress {} output must be detectable", idx
+            "Subaddress {} output must be detectable",
+            idx
         );
         // Must not match any OTHER subaddress
         assert!(
             !is_output_ours(&sub_stealth, &view_sk, &subaddr.spend_public, output_idx),
-            "Subaddress {} output must NOT match subaddress 0", idx
+            "Subaddress {} output must NOT match subaddress 0",
+            idx
         );
     }
 }

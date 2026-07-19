@@ -261,12 +261,12 @@ impl Circuit<pallas::Base> for ActionCircuit {
             .try_into()
             .expect("ACTION_ADVICE_COLUMNS-sized vec must convert");
 
-        let lagrange_coeffs: [Column<Fixed>; ACTION_FIXED_LAGRANGE_COLUMNS] =
-            (0..ACTION_FIXED_LAGRANGE_COLUMNS)
-                .map(|_| meta.fixed_column())
-                .collect::<Vec<_>>()
-                .try_into()
-                .expect("ACTION_FIXED_LAGRANGE_COLUMNS-sized vec must convert");
+        let lagrange_coeffs: [Column<Fixed>; ACTION_FIXED_LAGRANGE_COLUMNS] = (0
+            ..ACTION_FIXED_LAGRANGE_COLUMNS)
+            .map(|_| meta.fixed_column())
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("ACTION_FIXED_LAGRANGE_COLUMNS-sized vec must convert");
 
         ActionConfig {
             instance,
@@ -603,7 +603,10 @@ mod tests {
         // Proofs are non-trivial in size even for an empty
         // circuit — the IPA commitment + Blake2b transcript add
         // structural bytes.
-        assert!(proof.bytes.len() > 16, "real halo2 proof has at least the IPA scaffold bytes");
+        assert!(
+            proof.bytes.len() > 16,
+            "real halo2 proof has at least the IPA scaffold bytes"
+        );
     }
 
     #[test]

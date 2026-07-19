@@ -2,18 +2,18 @@
 //!
 //! Manages pending transactions waiting to be included in blocks.
 
-use std::collections::{HashMap, BTreeMap, HashSet, VecDeque};
+use crate::consensus::{
+    validate_transaction_basic, verify_balance_proof, verify_output_range_proofs,
+    verify_ring_signature,
+};
+use crate::constants::{MAX_TX_SIZE, MIN_FEE_PER_BYTE};
+use crate::error::{Error, Result};
+use crate::primitives::{Amount, Hash, KeyImage};
+use crate::transaction::Transaction;
+use parking_lot::RwLock;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::RwLock;
-use crate::primitives::{Hash, KeyImage, Amount};
-use crate::transaction::Transaction;
-use crate::error::{Error, Result};
-use crate::constants::{MAX_TX_SIZE, MIN_FEE_PER_BYTE};
-use crate::consensus::{
-    validate_transaction_basic,
-    verify_output_range_proofs, verify_balance_proof, verify_ring_signature,
-};
 
 /// Minimal chain interface for `shadow_evict_invalid`. Defined as a
 /// trait so the mempool doesn't take a hard `&Blockchain` dependency
@@ -294,7 +294,9 @@ impl Mempool {
     fn expire_old_transactions(&mut self, current_height: u64) {
         use crate::constants::TX_EXPIRY_BLOCKS;
 
-        let expired: Vec<Hash> = self.transactions.iter()
+        let expired: Vec<Hash> = self
+            .transactions
+            .iter()
             .filter(|(_, entry)| {
                 current_height.saturating_sub(entry.height_added) > TX_EXPIRY_BLOCKS
             })
@@ -313,7 +315,8 @@ impl Mempool {
         if !expired.is_empty() {
             tracing::info!(
                 "Expired {} stale transactions (>{} blocks old)",
-                expired.len(), TX_EXPIRY_BLOCKS
+                expired.len(),
+                TX_EXPIRY_BLOCKS
             );
         }
     }
@@ -498,7 +501,8 @@ impl Mempool {
         for (idx, input) in tx.inputs.iter().enumerate() {
             if !verify_ring_signature(tx, input, idx) {
                 return Err(Error::InvalidTransaction(format!(
-                    "Ring signature verification failed on input {} — rejected at mempool", idx
+                    "Ring signature verification failed on input {} — rejected at mempool",
+                    idx
                 )));
             }
         }
@@ -512,7 +516,10 @@ impl Mempool {
         // Check transaction size
         let size = tx.size();
         if size > MAX_TX_SIZE {
-            let err = Error::TransactionTooLarge { size, max: MAX_TX_SIZE };
+            let err = Error::TransactionTooLarge {
+                size,
+                max: MAX_TX_SIZE,
+            };
             return Err(self.reject(tx_hash, err));
         }
 
@@ -525,16 +532,21 @@ impl Mempool {
         //   fullness 75-100%: 8x base
         let fullness_pct = if self.max_size > 0 {
             (self.current_size * 100) / self.max_size
-        } else { 0 };
+        } else {
+            0
+        };
         let fee_multiplier: u64 = match fullness_pct {
-            0..=24   => 1,
-            25..=49  => 2,
-            50..=74  => 4,
-            _        => 8,
+            0..=24 => 1,
+            25..=49 => 2,
+            50..=74 => 4,
+            _ => 8,
         };
         let min_fee = (size as u64) * MIN_FEE_PER_BYTE * fee_multiplier;
         if tx.fee.as_atomic() < min_fee {
-            let err = Error::FeeTooLow { fee: tx.fee.as_atomic(), min: min_fee };
+            let err = Error::FeeTooLow {
+                fee: tx.fee.as_atomic(),
+                min: min_fee,
+            };
             return Err(self.reject(tx_hash, err));
         }
 
@@ -546,7 +558,9 @@ impl Mempool {
         for ki in tx.key_images() {
             if self.key_images.contains(&ki) {
                 // Find the conflicting transaction for this key image
-                let conflicting = self.transactions.iter()
+                let conflicting = self
+                    .transactions
+                    .iter()
                     .find(|(_, entry)| entry.tx.key_images().iter().any(|k| k == &ki))
                     .map(|(hash, entry)| (*hash, entry.fee_per_byte));
 
@@ -557,7 +571,8 @@ impl Mempool {
                     // 125% bumps and silently allowed no-bump replacements at fee_rate=1).
                     //
                     // Accept iff: new_rate * DEN >= old_rate * NUM AND new_rate > old_rate
-                    let lhs = (new_fee_rate as u128).saturating_mul(RBF_FEE_BUMP_DENOMINATOR as u128);
+                    let lhs =
+                        (new_fee_rate as u128).saturating_mul(RBF_FEE_BUMP_DENOMINATOR as u128);
                     let rhs = (old_fee_rate as u128).saturating_mul(RBF_FEE_BUMP_NUMERATOR as u128);
                     if lhs >= rhs && new_fee_rate > old_fee_rate {
                         if !to_replace.contains(&old_hash) {
@@ -566,9 +581,8 @@ impl Mempool {
                         continue; // Check remaining key images for other conflicts
                     }
                 }
-                let err = Error::DuplicateKeyImage(
-                    "duplicate key image; fee too low to replace".into(),
-                );
+                let err =
+                    Error::DuplicateKeyImage("duplicate key image; fee too low to replace".into());
                 return Err(self.reject(tx_hash, err));
             }
         }
@@ -734,7 +748,9 @@ impl Mempool {
                 // image. Multiple mempool txs cannot share a key image
                 // (mempool invariant enforced in add()), so this find()
                 // returns at most one match per key image.
-                let conflicting = self.transactions.iter()
+                let conflicting = self
+                    .transactions
+                    .iter()
                     .find(|(_, entry)| entry.tx.key_images().iter().any(|k| k == &ki))
                     .map(|(hash, _)| *hash);
                 if let Some(h) = conflicting {
@@ -864,7 +880,9 @@ impl Mempool {
                 if total_size + entry.size <= max_size {
                     // Check for key image conflicts with already-selected txs (O(1) per key image)
                     let tx_key_images = entry.tx.key_images();
-                    let has_conflict = tx_key_images.iter().any(|ki| selected_key_images.contains(ki));
+                    let has_conflict = tx_key_images
+                        .iter()
+                        .any(|ki| selected_key_images.contains(ki));
                     if has_conflict {
                         continue;
                     }
@@ -961,10 +979,10 @@ impl Mempool {
     pub fn expire_old(&mut self, max_age_secs: u64) -> usize {
         let now = unix_now();
 
-        let expired: Vec<Hash> = self.transactions.iter()
-            .filter(|(_, entry)| {
-                now.saturating_sub(entry.added_time) > max_age_secs
-            })
+        let expired: Vec<Hash> = self
+            .transactions
+            .iter()
+            .filter(|(_, entry)| now.saturating_sub(entry.added_time) > max_age_secs)
             .map(|(hash, _)| *hash)
             .collect();
 
@@ -1011,9 +1029,15 @@ impl Mempool {
 
     /// Remove transactions that conflict with confirmed key images
     pub fn remove_conflicts(&mut self, key_images: &[KeyImage]) {
-        let to_remove: Vec<Hash> = self.transactions.iter()
+        let to_remove: Vec<Hash> = self
+            .transactions
+            .iter()
             .filter(|(_, entry)| {
-                entry.tx.key_images().iter().any(|ki| key_images.contains(ki))
+                entry
+                    .tx
+                    .key_images()
+                    .iter()
+                    .any(|ki| key_images.contains(ki))
             })
             .map(|(hash, _)| *hash)
             .collect();
@@ -1043,9 +1067,7 @@ impl Mempool {
     /// Serializes transactions using borsh and writes to `<data_dir>/mempool.dat`.
     /// Called on graceful shutdown to avoid losing unconfirmed transactions.
     pub fn save_to_disk(&self, data_dir: &Path) -> Result<usize> {
-        let txs: Vec<Transaction> = self.transactions.values()
-            .map(|e| e.tx.clone())
-            .collect();
+        let txs: Vec<Transaction> = self.transactions.values().map(|e| e.tx.clone()).collect();
         let count = txs.len();
         if count == 0 {
             // Remove stale file if mempool is empty
@@ -1053,8 +1075,7 @@ impl Mempool {
             let _ = std::fs::remove_file(&path);
             return Ok(0);
         }
-        let data = borsh::to_vec(&txs)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let data = borsh::to_vec(&txs).map_err(|e| Error::SerializationError(e.to_string()))?;
         let path = data_dir.join("mempool.dat");
 
         // Atomic write: write to .tmp first, then rename onto the target
@@ -1073,19 +1094,17 @@ impl Mempool {
         // restart — confirmed transaction loss for users.
         let tmp_path = path.with_extension("dat.tmp");
         std::fs::write(&tmp_path, &data)
-            .map_err(|e| Error::DatabaseError(format!(
-                "Failed to write mempool.dat.tmp: {}", e
-            )))?;
-        std::fs::rename(&tmp_path, &path)
-            .map_err(|e| {
-                // Best-effort cleanup of the stranded temp file. We do
-                // NOT propagate this error — the original rename error
-                // is the meaningful one for the caller.
-                let _ = std::fs::remove_file(&tmp_path);
-                Error::DatabaseError(format!(
-                    "Failed to atomically rename mempool.dat.tmp \u{2192} mempool.dat: {}", e
-                ))
-            })?;
+            .map_err(|e| Error::DatabaseError(format!("Failed to write mempool.dat.tmp: {}", e)))?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| {
+            // Best-effort cleanup of the stranded temp file. We do
+            // NOT propagate this error — the original rename error
+            // is the meaningful one for the caller.
+            let _ = std::fs::remove_file(&tmp_path);
+            Error::DatabaseError(format!(
+                "Failed to atomically rename mempool.dat.tmp \u{2192} mempool.dat: {}",
+                e
+            ))
+        })?;
         Ok(count)
     }
 
@@ -1130,7 +1149,8 @@ impl Mempool {
             let _ = std::fs::remove_file(&path);
             return Err(Error::SerializationError(format!(
                 "mempool.dat too large: {} bytes (max {})",
-                metadata.len(), crate::constants::MAX_MEMPOOL_BYTES
+                metadata.len(),
+                crate::constants::MAX_MEMPOOL_BYTES
             )));
         }
 
@@ -1145,7 +1165,8 @@ impl Mempool {
         if txs.len() > crate::constants::MAX_MEMPOOL_TXS {
             return Err(Error::SerializationError(format!(
                 "mempool.dat contains {} txs (max {})",
-                txs.len(), crate::constants::MAX_MEMPOOL_TXS
+                txs.len(),
+                crate::constants::MAX_MEMPOOL_TXS
             )));
         }
 
@@ -1160,9 +1181,7 @@ impl Mempool {
 
     /// Get mempool statistics
     pub fn stats(&self) -> MempoolStats {
-        let total_fee: Amount = self.transactions.values()
-            .map(|e| e.fee)
-            .sum();
+        let total_fee: Amount = self.transactions.values().map(|e| e.fee).sum();
 
         MempoolStats {
             tx_count: self.transactions.len(),
@@ -1333,7 +1352,8 @@ impl SharedMempool {
         if total > 0 {
             tracing::info!(
                 "Reorg: restored {}/{} orphaned tx(s) to mempool",
-                restored, total
+                restored,
+                total
             );
         }
         restored
@@ -1391,7 +1411,8 @@ impl SharedMempool {
     }
 
     pub fn get_all(&self) -> Vec<Transaction> {
-        self.read_lock().get_block_transactions(usize::MAX, usize::MAX)
+        self.read_lock()
+            .get_block_transactions(usize::MAX, usize::MAX)
     }
 
     pub fn total_fees(&self) -> Amount {
@@ -1400,7 +1421,8 @@ impl SharedMempool {
 
     pub fn oldest_timestamp(&self) -> u64 {
         self.read_lock()
-            .transactions.values()
+            .transactions
+            .values()
             .map(|e| e.added_time)
             .min()
             .unwrap_or(0)
@@ -1500,9 +1522,12 @@ impl SharedMempool {
     ) -> Result<Hash> {
         tokio::task::spawn_blocking(move || self.add_with_chain(tx, &chain))
             .await
-            .map_err(|e| Error::Internal(format!(
-                "spawn_blocking join error in add_with_chain: {}", e
-            )))?
+            .map_err(|e| {
+                Error::Internal(format!(
+                    "spawn_blocking join error in add_with_chain: {}",
+                    e
+                ))
+            })?
     }
 
     /// Async wrapper around [`SharedMempool::get_block_transactions`].
@@ -1526,8 +1551,8 @@ impl SharedMempool {
 #[cfg(any())]
 mod tests {
     use super::*;
-    use crate::transaction::TxType;
     use crate::primitives::SecretKey;
+    use crate::transaction::TxType;
 
     /// Phase A7-4 (audit fix): Build a real cryptographically-valid AssetIssuance
     /// transaction.
@@ -1567,9 +1592,8 @@ mod tests {
         };
 
         let policy_bytes = borsh::to_vec(&policy).expect("policy borsh");
-        let issuer_signature = crate::crypto::asset::sign_issuer_signature(
-            &issuer_sk, &policy_bytes, &mut OsRng,
-        );
+        let issuer_signature =
+            crate::crypto::asset::sign_issuer_signature(&issuer_sk, &policy_bytes, &mut OsRng);
 
         Transaction {
             version: 1,
@@ -1619,7 +1643,7 @@ mod tests {
         // exercises the full Transfer path with real ring sigs + range proofs.
         let mut mempool = Mempool::new();
 
-        let tx_low  = make_real_test_tx(100_000_000, 0x01);
+        let tx_low = make_real_test_tx(100_000_000, 0x01);
         let tx_high = make_real_test_tx(500_000_000, 0x02);
 
         mempool.add(tx_low).unwrap();
@@ -1628,7 +1652,10 @@ mod tests {
         let txs = mempool.get_block_transactions(1_000_000, 10);
         assert_eq!(txs.len(), 2, "both AssetIssuance txs must be selected");
         let total: u64 = txs.iter().map(|t| t.fee.as_atomic()).sum();
-        assert_eq!(total, 600_000_000, "sum of selected fees must equal both inputs");
+        assert_eq!(
+            total, 600_000_000,
+            "sum of selected fees must equal both inputs"
+        );
     }
 
     // (placeholder removed — load_from_disk tests now live in
@@ -1674,7 +1701,10 @@ mod load_from_disk_tests {
             err_msg
         );
         // And the oversized file MUST have been removed so we don't fail-loop.
-        assert!(!path.exists(), "oversized mempool.dat must be removed after rejection");
+        assert!(
+            !path.exists(),
+            "oversized mempool.dat must be removed after rejection"
+        );
     }
 
     /// Companion to the above: a mempool.dat whose borsh-decoded
@@ -1705,7 +1735,10 @@ mod load_from_disk_tests {
 
         let mut mempool = Mempool::new();
         let loaded = mempool.load_from_disk(dir.path()).unwrap();
-        assert_eq!(loaded, 0, "empty mempool.dat must load zero txs without error");
+        assert_eq!(
+            loaded, 0,
+            "empty mempool.dat must load zero txs without error"
+        );
         assert!(!path.exists(), "file is removed after successful read");
     }
 }

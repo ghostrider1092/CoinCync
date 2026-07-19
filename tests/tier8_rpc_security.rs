@@ -54,18 +54,19 @@ fn tier8_garbage_block_deserialization() {
     use coincync::consensus::Block;
 
     let garbage_inputs: Vec<Vec<u8>> = vec![
-        vec![],                    // empty
-        vec![0xFF; 32],            // short garbage
-        vec![0x00; 1000],          // zeros
+        vec![],                       // empty
+        vec![0xFF; 32],               // short garbage
+        vec![0x00; 1000],             // zeros
         vec![0xDE, 0xAD, 0xBE, 0xEF], // 4 bytes
-        (0..255).collect(),        // sequential bytes
+        (0..255).collect(),           // sequential bytes
     ];
 
     for (i, input) in garbage_inputs.iter().enumerate() {
         let result = Block::try_from_slice(input);
         assert!(
             result.is_err(),
-            "Garbage input #{} should not deserialize as Block", i
+            "Garbage input #{} should not deserialize as Block",
+            i
         );
     }
 }
@@ -91,7 +92,8 @@ fn tier8_garbage_tx_deserialization() {
         let result = Transaction::try_from_slice(input);
         assert!(
             result.is_err(),
-            "Garbage input #{} should not deserialize as Transaction", i
+            "Garbage input #{} should not deserialize as Transaction",
+            i
         );
     }
 }
@@ -142,7 +144,8 @@ fn tier8_block_hash_consistency() {
 
     let block = block_opt.unwrap();
     assert_eq!(
-        block.hash(), hash_opt.unwrap(),
+        block.hash(),
+        hash_opt.unwrap(),
         "Block hash must match get_block_hash result"
     );
 }
@@ -153,11 +156,13 @@ fn tier8_block_hash_consistency() {
 
 #[test]
 fn tier8_mempool_rapid_add_remove() {
+    use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+    use coincync::crypto::{
+        BlindingFactor, ClsagSignature, KeyImage as CKI, PedersenCommitment, SecretScalar,
+    };
     use coincync::mempool::Mempool;
     use coincync::primitives::{Amount, KeyImage};
-    use coincync::transaction::{Transaction, TxType, TxInput, TxOutput, RingMemberRef};
-    use coincync::crypto::{SecretScalar, ClsagSignature, BlindingFactor, PedersenCommitment, KeyImage as CKI};
-    use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+    use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 
     let mut pool = Mempool::new();
     let mut hashes = Vec::new();
@@ -168,26 +173,45 @@ fn tier8_mempool_rapid_add_remove() {
         let ki = CKI::from_secret(&secret);
         let bf = BlindingFactor::random(&mut OsRng);
         let commitment = PedersenCommitment::commit(1_000_000_000, &bf);
-        let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE).map(|_| {
-            RingMemberRef {
-                public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-                commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-            }
-        }).collect();
+        let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE)
+            .map(|_| RingMemberRef {
+                public_key: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
+                commitment: PedersenCommitment::commit(
+                    1_000_000_000,
+                    &BlindingFactor::random(&mut OsRng),
+                )
+                .to_bytes(),
+            })
+            .collect();
 
         let tx = Transaction {
-            version: 1, tx_type: TxType::Transfer,
+            version: 1,
+            tx_type: TxType::Transfer,
             inputs: vec![TxInput {
                 key_image: KeyImage::from_bytes(ki.to_bytes()),
                 ring_members,
-                signature: ClsagSignature { key_image: ki, commitment_image: secret.to_public(), c1: [0x42; 32], responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE] },
+                signature: ClsagSignature {
+                    key_image: ki,
+                    commitment_image: secret.to_public(),
+                    c1: [0x42; 32],
+                    responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE],
+                },
                 pseudo_output_commitment: commitment.to_bytes(),
             }],
             outputs: vec![TxOutput {
-                stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-                tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+                stealth_address: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
+                tx_public_key: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
                 commitment: commitment.to_bytes(),
-                encrypted_amount: vec![0u8; 8], view_tag: 0, lock_height: None, encrypted_memo: vec![],
+                encrypted_amount: vec![0u8; 8],
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
             }],
             fee: Amount::from_atomic(50_000_000),
             range_proof: vec![0u8; 64],
@@ -199,7 +223,7 @@ fn tier8_mempool_rapid_add_remove() {
     }
 
     // Rapid remove
-    for h in &hashes[..hashes.len()/2] {
+    for h in &hashes[..hashes.len() / 2] {
         pool.remove(h);
     }
 

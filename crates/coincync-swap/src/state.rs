@@ -301,7 +301,12 @@ impl SwapStore {
 
         // Constant-time hex comparison — defends against any future
         // hex-string equality timing oracle in serde / our parser.
-        if recomputed.as_bytes().ct_eq(envelope.hmac.as_bytes()).unwrap_u8() != 1 {
+        if recomputed
+            .as_bytes()
+            .ct_eq(envelope.hmac.as_bytes())
+            .unwrap_u8()
+            != 1
+        {
             return Err(StateError::IntegrityFailure);
         }
 
@@ -435,8 +440,8 @@ mod tests {
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".into(),
             bob_btc_address: "bob".into(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         }
     }
 
@@ -691,7 +696,10 @@ btc_network: "regtest".to_string(),
         let err = store.load().unwrap_err();
         assert!(matches!(
             err,
-            StateError::UnsupportedVersion { file_version: 1, .. }
+            StateError::UnsupportedVersion {
+                file_version: 1,
+                ..
+            }
         ));
     }
 

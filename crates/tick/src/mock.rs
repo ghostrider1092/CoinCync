@@ -171,8 +171,12 @@ impl MockAdapter {
     pub fn set_peer_pow_verdict(&self, peer_name: &str, verdict: Option<bool>) {
         let mut inner = self.inner.lock().unwrap();
         match verdict {
-            Some(v) => { inner.peer_pow_verdicts.insert(peer_name.into(), v); }
-            None => { inner.peer_pow_verdicts.remove(peer_name); }
+            Some(v) => {
+                inner.peer_pow_verdicts.insert(peer_name.into(), v);
+            }
+            None => {
+                inner.peer_pow_verdicts.remove(peer_name);
+            }
         }
     }
 
@@ -249,16 +253,13 @@ impl ChainAdapter for MockAdapter {
             .ok_or_else(|| TickError::Unreachable(format!("no mock tip for peer {}", peer.name)))
     }
 
-    fn verify_peer_header_pow(
-        &self,
-        peer: &FleetPeer,
-        _height: u64,
-    ) -> TickResult<bool> {
+    fn verify_peer_header_pow(&self, peer: &FleetPeer, _height: u64) -> TickResult<bool> {
         let inner = self.inner.lock().unwrap();
         match inner.peer_pow_verdicts.get(&peer.name) {
             Some(v) => Ok(*v),
             None => Err(TickError::Unreachable(format!(
-                "no PoW verdict registered for peer {}", peer.name
+                "no PoW verdict registered for peer {}",
+                peer.name
             ))),
         }
     }
@@ -291,11 +292,7 @@ impl ChainAdapter for MockAdapter {
         Ok(())
     }
 
-    fn rebroadcast_block(
-        &self,
-        block_id: &Self::BlockId,
-        to: &Self::PeerId,
-    ) -> TickResult<()> {
+    fn rebroadcast_block(&self, block_id: &Self::BlockId, to: &Self::PeerId) -> TickResult<()> {
         self.inner
             .lock()
             .unwrap()

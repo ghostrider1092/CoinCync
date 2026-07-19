@@ -29,13 +29,13 @@
 //! Bill of Rights, Amendment IV: protection against surveillance.
 //! Churn makes graph analysis futile even for a state-level adversary.
 
+use rand::Rng;
+use rand_distr::{Distribution, Exp};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use rand::Rng;
-use rand_distr::{Exp, Distribution};
-use tracing::{info, warn, debug};
-use serde::{Serialize, Deserialize};
+use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -63,8 +63,8 @@ impl Default for ChurnConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            min_interval_secs: 1800,  // 30 minutes
-            max_interval_secs: 7200,  // 2 hours
+            min_interval_secs: 1800, // 30 minutes
+            max_interval_secs: 7200, // 2 hours
             min_amount_pct: 10,
             max_amount_pct: 50,
             node_url: "http://127.0.0.1:28081".to_string(),
@@ -186,7 +186,8 @@ impl ChurnEngine {
     fn next_interval_secs(&self) -> u64 {
         let mean = (self.config.min_interval_secs + self.config.max_interval_secs) as f64 / 2.0;
         let lambda = 1.0 / mean;
-        let exp = Exp::new(lambda).unwrap_or_else(|_| Exp::new(1.0 / 3600.0).expect("hardcoded 1/3600 is always valid"));
+        let exp = Exp::new(lambda)
+            .unwrap_or_else(|_| Exp::new(1.0 / 3600.0).expect("hardcoded 1/3600 is always valid"));
 
         let mut rng = rand::thread_rng();
         let sample = exp.sample(&mut rng) as u64;
@@ -235,7 +236,8 @@ impl ChurnEngine {
         const TYPICAL_PRIV_TX_BYTES: u64 = 2_500;
         let min_fee_reserve = TYPICAL_PRIV_TX_BYTES
             .saturating_mul(crate::constants::MIN_FEE_PER_BYTE)
-            .saturating_mul(3) / 2; // ×1.5 congestion headroom
+            .saturating_mul(3)
+            / 2; // ×1.5 congestion headroom
         if amount.saturating_add(min_fee_reserve) > spendable_balance {
             spendable_balance.saturating_sub(min_fee_reserve)
         } else {
@@ -310,14 +312,15 @@ impl ChurnEngine {
     /// Opens the wallet, picks a random amount, builds a self-send
     /// transaction, and submits it to the node.
     async fn execute_churn(&self) -> Result<u64, String> {
-        use crate::wallet::{Wallet, KeyEpoch};
         use crate::primitives::Amount;
         use crate::transaction::DecoyOutput;
+        use crate::wallet::{KeyEpoch, Wallet};
 
         // Open and unlock wallet
-        let mut wallet = Wallet::open(self.wallet_path.clone())
-            .map_err(|e| format!("open wallet: {}", e))?;
-        wallet.unlock(&self.wallet_password)
+        let mut wallet =
+            Wallet::open(self.wallet_path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+        wallet
+            .unlock(&self.wallet_password)
             .map_err(|e| format!("unlock wallet: {}", e))?;
 
         let keys: KeyEpoch = wallet
@@ -328,10 +331,7 @@ impl ChurnEngine {
         // Query chain state first — the mature-spendable set and the real
         // per-tx capacity below both depend on the current height.
         let info = rpc_call_simple(&self.config.node_url, "get_info").await?;
-        let current_height = info
-            .get("height")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let current_height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
         let min_age = crate::constants::min_output_age_at_height(current_height);
 
         // Pick the churn amount against what a single tx can ACTUALLY spend.
@@ -371,8 +371,8 @@ impl ChurnEngine {
         }
 
         debug!(
-            mature_spendable, two_input_cap, churn_amount,
-            "churn: building self-send"
+            mature_spendable,
+            two_input_cap, churn_amount, "churn: building self-send"
         );
 
         // Fetch decoys.
@@ -495,7 +495,8 @@ impl ChurnEngine {
         for ki in tx.key_images() {
             wallet.mark_spent_by_key_image(&ki);
         }
-        wallet.save(Some(&self.wallet_password))
+        wallet
+            .save(Some(&self.wallet_password))
             .map_err(|e| format!("save wallet: {}", e))?;
         tracing::info!(
             target: "wallet::churn::R89",

@@ -22,7 +22,9 @@ use serde_json::Value;
 pub struct WalletRpc;
 
 impl WalletRpc {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     fn not_yet(method: &'static str) -> Error {
         Error::NotImplemented(format!(
@@ -67,7 +69,9 @@ impl WalletRpc {
 }
 
 impl Default for WalletRpc {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -81,21 +85,24 @@ mod tests {
         // includes the method name — so a future caller (or a CI dashboard)
         // can tell which RPC method is missing without guessing.
         let cases: Vec<(&str, Result<Value>)> = vec![
-            ("get_balance",       w.get_balance()),
-            ("get_address",       w.get_address()),
-            ("get_history",       w.get_history()),
-            ("send_transaction",  w.send_transaction(Value::Null)),
-            ("export_ivk",        w.export_ivk()),
+            ("get_balance", w.get_balance()),
+            ("get_address", w.get_address()),
+            ("get_history", w.get_history()),
+            ("send_transaction", w.send_transaction(Value::Null)),
+            ("export_ivk", w.export_ivk()),
             ("create_subaddress", w.create_subaddress()),
             ("list_subaddresses", w.list_subaddresses()),
-            ("rescan",            w.rescan(Value::Null)),
+            ("rescan", w.rescan(Value::Null)),
         ];
         for (name, result) in cases {
             match result {
                 Err(Error::NotImplemented(msg)) => {
-                    assert!(msg.contains(name),
+                    assert!(
+                        msg.contains(name),
                         "NotImplemented for `{}` must mention method name; got: {}",
-                        name, msg);
+                        name,
+                        msg
+                    );
                 }
                 other => panic!("`{}` did not return NotImplemented: {:?}", name, other),
             }

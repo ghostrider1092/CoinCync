@@ -8,14 +8,14 @@
 //         └── Incoming Viewing Key (IVK)  — sees received funds only
 //               └── Diversified Payment Address  — share to receive
 
+use crate::error::{Error, Result};
+use blake2b_simd::Params as Blake2bParams;
 use curve25519_dalek::{
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
 };
-use blake2b_simd::Params as Blake2bParams;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use crate::error::{Error, Result};
 
 // ── Spend Key ────────────────────────────────────────────────
 
@@ -26,7 +26,9 @@ pub struct SpendKey {
 }
 
 impl SpendKey {
-    pub fn from_bytes(bytes: [u8; 32]) -> Self { Self { bytes } }
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self { bytes }
+    }
 
     pub fn to_scalar(&self) -> Scalar {
         Scalar::from_bytes_mod_order(self.bytes)
@@ -36,13 +38,15 @@ impl SpendKey {
     pub fn to_full_viewing_key(&self) -> FullViewingKey {
         use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT as G;
         let sk = self.to_scalar();
-        let ak = G * sk;                       // spend authorizing key
+        let ak = G * sk; // spend authorizing key
         let nk = hash_to_point(b"yrc_nk", &self.bytes); // nullifier key
         let rivk = scalar_from_hash(b"yrc_rivk", &self.bytes);
         FullViewingKey { ak, nk, rivk }
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.bytes }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
 }
 
 // ── Full Viewing Key ─────────────────────────────────────────
@@ -60,9 +64,9 @@ impl SpendKey {
 /// feature (which the workspace enables), so we can call it directly.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FullViewingKey {
-    pub ak:   RistrettoPoint,   // spend validating key
-    pub nk:   RistrettoPoint,   // nullifier deriving key
-    pub rivk: Scalar,           // internal viewing key randomness
+    pub ak: RistrettoPoint, // spend validating key
+    pub nk: RistrettoPoint, // nullifier deriving key
+    pub rivk: Scalar,       // internal viewing key randomness
 }
 
 impl Drop for FullViewingKey {
@@ -235,7 +239,7 @@ impl OutgoingViewingKey {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentAddress {
     pub diversifier: [u8; 11],
-    pub pk_d:        RistrettoPoint,
+    pub pk_d: RistrettoPoint,
 }
 
 impl PaymentAddress {
@@ -263,13 +267,13 @@ impl PaymentAddress {
     }
 
     pub fn from_bech32(s: &str) -> Result<Self> {
-        let (_hrp, raw) = bech32::decode(s)
-            .map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
+        let (_hrp, raw) =
+            bech32::decode(s).map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
         if raw.len() != 43 {
             return Err(Error::Other("bad address length".into()));
         }
         let diversifier: [u8; 11] = raw[..11].try_into().expect("len==43");
-        let pk_bytes: [u8; 32]   = raw[11..43].try_into().expect("len==43");
+        let pk_bytes: [u8; 32] = raw[11..43].try_into().expect("len==43");
         let pk_d = CompressedRistretto(pk_bytes)
             .decompress()
             .ok_or_else(|| Error::Other("bad address point".into()))?;
@@ -358,7 +362,7 @@ mod tests {
 
     #[test]
     fn key_derivation_is_deterministic() {
-        let sk  = test_spend_key();
+        let sk = test_spend_key();
         let fvk1 = sk.to_full_viewing_key();
         let fvk2 = sk.to_full_viewing_key();
         assert_eq!(fvk1.ak.compress(), fvk2.ak.compress());
@@ -367,7 +371,7 @@ mod tests {
 
     #[test]
     fn ivk_cannot_derive_spend_key() {
-        let sk  = test_spend_key();
+        let sk = test_spend_key();
         let fvk = sk.to_full_viewing_key();
         let ivk = fvk.to_incoming_viewing_key();
         // IVK is a scalar — there's no path back to sk
@@ -376,22 +380,22 @@ mod tests {
 
     #[test]
     fn different_diversifiers_give_different_addresses() {
-        let sk  = test_spend_key();
+        let sk = test_spend_key();
         let fvk = sk.to_full_viewing_key();
         let ivk = fvk.to_incoming_viewing_key();
-        let a1  = ivk.to_payment_address([0u8; 11]).unwrap();
-        let a2  = ivk.to_payment_address([1u8; 11]).unwrap();
+        let a1 = ivk.to_payment_address([0u8; 11]).unwrap();
+        let a2 = ivk.to_payment_address([1u8; 11]).unwrap();
         assert_ne!(a1.pk_d.compress(), a2.pk_d.compress());
     }
 
     #[test]
     fn address_bech32_roundtrip() {
-        let sk   = test_spend_key();
-        let fvk  = sk.to_full_viewing_key();
-        let ivk  = fvk.to_incoming_viewing_key();
+        let sk = test_spend_key();
+        let fvk = sk.to_full_viewing_key();
+        let ivk = fvk.to_incoming_viewing_key();
         let addr = ivk.to_payment_address([7u8; 11]).unwrap();
-        let enc  = addr.to_bech32("yc").expect("test HRP is valid");
-        let dec  = PaymentAddress::from_bech32(&enc).unwrap();
+        let enc = addr.to_bech32("yc").expect("test HRP is valid");
+        let dec = PaymentAddress::from_bech32(&enc).unwrap();
         assert_eq!(addr.diversifier, dec.diversifier);
         assert_eq!(addr.pk_d.compress(), dec.pk_d.compress());
     }
@@ -399,18 +403,18 @@ mod tests {
     #[test]
     fn view_tag_deterministic() {
         use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT as G;
-        let sk  = test_spend_key();
+        let sk = test_spend_key();
         let fvk = sk.to_full_viewing_key();
         let ivk = fvk.to_incoming_viewing_key();
         let eph = G * Scalar::from(99u64);
-        let t1  = ivk.view_tag(&eph);
-        let t2  = ivk.view_tag(&eph);
+        let t1 = ivk.view_tag(&eph);
+        let t2 = ivk.view_tag(&eph);
         assert_eq!(t1, t2);
     }
 
     #[test]
     fn spark_key_chain_derives() {
-        let sk  = test_spend_key();
+        let sk = test_spend_key();
         let ssk = sk.to_spark_spend_key();
         let ssc = ssk.to_spark_scan_key();
         let addr = ssc.to_spark_address([1u8; 11]);
@@ -506,8 +510,8 @@ impl SparkAddress {
     }
 
     pub fn from_bech32(s: &str) -> Result<Self> {
-        let (_hrp, raw) = bech32::decode(s)
-            .map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
+        let (_hrp, raw) =
+            bech32::decode(s).map_err(|e| Error::Other(format!("bech32 decode: {}", e)))?;
         if raw.len() != 43 {
             return Err(Error::Other("bad Spark address length".into()));
         }

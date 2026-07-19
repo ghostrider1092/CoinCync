@@ -56,25 +56,29 @@ fn spending_key_full_viewing_key_matches_zcash_nu5() {
             .unwrap_or_else(|e| panic!("vector {i}: full_viewing_key: {e:?}"));
 
         assert_eq!(
-            fvk.ak, v.ak,
+            fvk.ak,
+            v.ak,
             "vector {i}: ak mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.ak),
             hex::encode(fvk.ak)
         );
         assert_eq!(
-            fvk.nk, v.nk,
+            fvk.nk,
+            v.nk,
             "vector {i}: nk mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.nk),
             hex::encode(fvk.nk)
         );
         assert_eq!(
-            fvk.rivk, v.rivk,
+            fvk.rivk,
+            v.rivk,
             "vector {i}: rivk mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.rivk),
             hex::encode(fvk.rivk)
         );
         assert_eq!(
-            fvk.ovk, v.ovk,
+            fvk.ovk,
+            v.ovk,
             "vector {i}: ovk mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.ovk),
             hex::encode(fvk.ovk)
@@ -98,7 +102,8 @@ fn full_viewing_key_to_ivk_matches_zcash_nu5() {
 
         let ivk_bytes = ivk.as_bytes();
         assert_eq!(
-            ivk_bytes, &v.ivk,
+            ivk_bytes,
+            &v.ivk,
             "vector {i}: ivk mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.ivk),
             hex::encode(ivk_bytes)
@@ -126,7 +131,8 @@ fn address_at_default_d_matches_zcash_nu5() {
             .unwrap_or_else(|e| panic!("vector {i}: address_at: {e:?}"));
 
         assert_eq!(
-            pk_d_bytes, v.default_pk_d,
+            pk_d_bytes,
+            v.default_pk_d,
             "vector {i}: default_pk_d mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.default_pk_d),
             hex::encode(pk_d_bytes)
@@ -168,7 +174,8 @@ fn note_commitment_matches_zcash_nu5() {
         let cmx_bytes = cmx.to_bytes();
 
         assert_eq!(
-            cmx_bytes, v.note_cmx,
+            cmx_bytes,
+            v.note_cmx,
             "vector {i}: note_cmx mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.note_cmx),
             hex::encode(cmx_bytes)
@@ -212,7 +219,8 @@ fn nullifier_matches_zcash_nu5() {
         let nf_bytes = nf.0.to_bytes();
 
         assert_eq!(
-            nf_bytes, v.note_nf,
+            nf_bytes,
+            v.note_nf,
             "vector {i}: note_nf mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.note_nf),
             hex::encode(nf_bytes)
@@ -250,7 +258,8 @@ fn ask_matches_zcash_nu5() {
         let ask_bytes = sk._test_only_ask_bytes();
         let _ = fvk;
         assert_eq!(
-            ask_bytes, v.ask,
+            ask_bytes,
+            v.ask,
             "vector {i}: ask mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.ask),
             hex::encode(ask_bytes)
@@ -267,7 +276,8 @@ fn dk_matches_zcash_nu5() {
         let sk = SpendingKey::from_bytes(v.sk).unwrap();
         let fvk = sk.full_viewing_key().unwrap();
         assert_eq!(
-            fvk.dk, v.dk,
+            fvk.dk,
+            v.dk,
             "vector {i}: dk mismatch — Zcash NU5 reference produces {} but we got {}",
             hex::encode(v.dk),
             hex::encode(fvk.dk)
@@ -529,5 +539,8 @@ fn boundary_zero_diversifier_does_not_panic() {
     // Should produce some valid (gd, pkd) tuple — the spec's
     // identity-substitution fallback covers the edge case.
     let r = ivk.address_at([0u8; 11]);
-    assert!(r.is_ok(), "zero diversifier should resolve via substitution, got: {r:?}");
+    assert!(
+        r.is_ok(),
+        "zero diversifier should resolve via substitution, got: {r:?}"
+    );
 }

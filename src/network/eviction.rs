@@ -146,8 +146,11 @@ where
     // Step 2: protect the N most-recently-active peers (mutual traffic).
     let mut by_active = candidates.clone();
     by_active.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
-    let protect_active: std::collections::HashSet<PeerId> =
-        by_active.iter().take(PROTECT_PER_AXIS).map(|p| p.id).collect();
+    let protect_active: std::collections::HashSet<PeerId> = by_active
+        .iter()
+        .take(PROTECT_PER_AXIS)
+        .map(|p| p.id)
+        .collect();
 
     // Step 3: protect the N highest-reputation peers (well-behaved).
     let mut by_rep = candidates.clone();
@@ -193,9 +196,7 @@ where
     for p in &candidates {
         groups.entry(netgroup(p.addr)).or_default().push(p);
     }
-    let (_, largest_group) = groups
-        .into_iter()
-        .max_by_key(|(_, peers)| peers.len())?;
+    let (_, largest_group) = groups.into_iter().max_by_key(|(_, peers)| peers.len())?;
 
     // Step 6: within the largest netgroup, evict the YOUNGEST peer
     // (last-in-first-out). Tie-break on reputation (lower first), then on
@@ -221,7 +222,14 @@ mod tests {
     use crate::primitives::Hash;
     use std::time::Duration;
 
-    fn mk(id_byte: u8, ip: &str, age_secs: u64, rep: i32, encrypted: bool, outbound: bool) -> PeerInfo {
+    fn mk(
+        id_byte: u8,
+        ip: &str,
+        age_secs: u64,
+        rep: i32,
+        encrypted: bool,
+        outbound: bool,
+    ) -> PeerInfo {
         let mut id = [0u8; 32];
         id[0] = id_byte;
         let addr: SocketAddr = format!("{}:28080", ip).parse().unwrap();
@@ -250,7 +258,10 @@ mod tests {
 
     #[test]
     fn no_candidates_returns_none() {
-        assert!(select_inbound_to_evict(std::iter::empty(), Instant::now(), &RelayScoreMap::new()).is_none());
+        assert!(
+            select_inbound_to_evict(std::iter::empty(), Instant::now(), &RelayScoreMap::new())
+                .is_none()
+        );
     }
 
     #[test]
@@ -260,8 +271,10 @@ mod tests {
             mk(2, "1.2.3.5", 3600, 50, true, true /*outbound*/),
         ];
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
-            "outbound peers must never be evicted");
+        assert!(
+            select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
+            "outbound peers must never be evicted"
+        );
     }
 
     #[test]
@@ -271,8 +284,10 @@ mod tests {
             mk(2, "1.2.3.5", 10, 50, true, false), // 10s old, still too young
         ];
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
-            "peers younger than MIN_AGE_BEFORE_EVICT must be protected");
+        assert!(
+            select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
+            "peers younger than MIN_AGE_BEFORE_EVICT must be protected"
+        );
     }
 
     #[test]
@@ -281,8 +296,10 @@ mod tests {
             .map(|i| mk(i, &format!("1.2.3.{}", i + 10), 3600, 100, false, false))
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
-            "all-high-reputation peer pool must yield no eviction candidate");
+        assert!(
+            select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
+            "all-high-reputation peer pool must yield no eviction candidate"
+        );
     }
 
     #[test]
@@ -311,8 +328,12 @@ mod tests {
             IpAddr::V4(v4) => v4.octets(),
             _ => panic!("expected IPv4"),
         };
-        assert_eq!(octets[0..2], [10, 0],
-            "eviction must hit the concentrated attacker /16, got {:?}", evictee_peer.addr);
+        assert_eq!(
+            octets[0..2],
+            [10, 0],
+            "eviction must hit the concentrated attacker /16, got {:?}",
+            evictee_peer.addr
+        );
     }
 
     #[test]
@@ -323,7 +344,16 @@ mod tests {
         // connected_at among the seeded range (youngest in terms of
         // "last to connect" — though all are well above MIN_AGE).
         let peers: Vec<PeerInfo> = (0..20u8)
-            .map(|i| mk(i, &format!("10.0.0.{}", i + 1), 3600 + (i as u64) * 60, 50, false, false))
+            .map(|i| {
+                mk(
+                    i,
+                    &format!("10.0.0.{}", i + 1),
+                    3600 + (i as u64) * 60,
+                    50,
+                    false,
+                    false,
+                )
+            })
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
         let evictee = select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new())
@@ -354,7 +384,16 @@ mod tests {
         let now = Instant::now();
         // 20 flood peers, all in 1.2.0.0/16, candidates (old enough, low rep).
         let flood: Vec<PeerInfo> = (0..20u8)
-            .map(|i| mk(100 + i, &format!("1.2.{}.1", i), 300 + i as u64, 0, false, false))
+            .map(|i| {
+                mk(
+                    100 + i,
+                    &format!("1.2.{}.1", i),
+                    300 + i as u64,
+                    0,
+                    false,
+                    false,
+                )
+            })
             .collect();
         // 2 honest inbound peers in DIFFERENT /16s.
         let honest = [
@@ -369,8 +408,8 @@ mod tests {
         }
 
         let all: Vec<&PeerInfo> = flood.iter().chain(honest.iter()).collect();
-        let victim = select_inbound_to_evict(all, now, &relay)
-            .expect("a candidate must be evictable");
+        let victim =
+            select_inbound_to_evict(all, now, &relay).expect("a candidate must be evictable");
 
         // The eclipse defense holds: eviction falls on the flooded /16, never
         // on an honest peer in a diverse netgroup — despite the flood's score.
@@ -411,16 +450,28 @@ mod tests {
         // Different /32s for "diverse" group
         let v6_b1: SocketAddr = "[2002:db8::1]:28080".parse().unwrap();
         let v6_b2: SocketAddr = "[2003:db8::1]:28080".parse().unwrap();
-        assert_eq!(netgroup(v6_a1), netgroup(v6_a2),
-            "same /32 must produce same netgroup");
-        assert_ne!(netgroup(v6_a1), netgroup(v6_b1),
-            "different /32 must produce different netgroup");
-        assert_ne!(netgroup(v6_b1), netgroup(v6_b2),
-            "different /32 must produce different netgroup");
+        assert_eq!(
+            netgroup(v6_a1),
+            netgroup(v6_a2),
+            "same /32 must produce same netgroup"
+        );
+        assert_ne!(
+            netgroup(v6_a1),
+            netgroup(v6_b1),
+            "different /32 must produce different netgroup"
+        );
+        assert_ne!(
+            netgroup(v6_b1),
+            netgroup(v6_b2),
+            "different /32 must produce different netgroup"
+        );
         // Disambiguation: v4 (1, 2) and v6 with first u16=1 must not collide.
         let v4: SocketAddr = "0.1.0.0:28080".parse().unwrap(); // /16 key = 1
         let v6_collision: SocketAddr = "[1::]:28080".parse().unwrap();
-        assert_ne!(netgroup(v4), netgroup(v6_collision),
-            "v4 and v6 netgroup keys must not collide");
+        assert_ne!(
+            netgroup(v4),
+            netgroup(v6_collision),
+            "v4 and v6 netgroup keys must not collide"
+        );
     }
 }

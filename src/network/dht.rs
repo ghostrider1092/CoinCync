@@ -27,9 +27,9 @@
 //! - CKB discovery protocol: `network/src/protocols/discovery/` in the
 //!   CKB source tree (not verified against upstream this session).
 
-use crate::primitives::{KeyImage, hash_domain};
 use crate::config::NetworkTierConfig;
 use crate::network::peer::PeerId;
+use crate::primitives::{hash_domain, KeyImage};
 
 /// Default number of DHT stripes.
 pub const DEFAULT_STRIPE_COUNT: u32 = 8;
@@ -74,7 +74,8 @@ impl DhtState {
     /// Create a new DHT state for a node.
     pub fn new(our_id: &PeerId, config: &NetworkTierConfig) -> Self {
         let stripe_count = config.dht_stripe_count;
-        let our_stripe = config.dht_stripe
+        let our_stripe = config
+            .dht_stripe
             .unwrap_or_else(|| node_stripe(our_id, stripe_count));
 
         let mut peers_by_stripe = Vec::with_capacity(stripe_count as usize);
@@ -84,7 +85,8 @@ impl DhtState {
 
         tracing::info!(
             "DHT initialized: stripe {}/{} (node stores ~{:.1}% of key images)",
-            our_stripe, stripe_count,
+            our_stripe,
+            stripe_count,
             100.0 / stripe_count as f64
         );
 
@@ -129,12 +131,12 @@ impl DhtState {
 
     /// Get statistics about stripe coverage.
     pub fn coverage_stats(&self) -> DhtCoverageStats {
-        let covered = self.peers_by_stripe.iter()
+        let covered = self
+            .peers_by_stripe
+            .iter()
             .filter(|peers| !peers.is_empty())
             .count() as u32;
-        let total_peers: usize = self.peers_by_stripe.iter()
-            .map(|peers| peers.len())
-            .sum();
+        let total_peers: usize = self.peers_by_stripe.iter().map(|peers| peers.len()).sum();
 
         DhtCoverageStats {
             our_stripe: self.our_stripe,
@@ -185,7 +187,9 @@ mod tests {
         for (i, &count) in counts.iter().enumerate() {
             assert!(
                 count > 60 && count < 200,
-                "Stripe {} has {} entries (expected ~125)", i, count
+                "Stripe {} has {} entries (expected ~125)",
+                i,
+                count
             );
         }
     }

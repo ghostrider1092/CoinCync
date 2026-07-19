@@ -36,7 +36,6 @@
 //! file, explicitly states the distributed variant is NOT
 //! implemented, and drops the fragile line reference.
 
-
 /// **Design-only.** Parameters the coordinator WOULD compute and share
 /// with FROST signers in the fully-distributed CLSAG variant. Unused
 /// by the shipped code. Kept so the design's data flow stays

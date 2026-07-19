@@ -82,7 +82,9 @@ use crate::error::{Error, Result};
 
 /// Value generator `G` (Ristretto base).
 #[inline]
-fn gen_g() -> RistrettoPoint { G }
+fn gen_g() -> RistrettoPoint {
+    G
+}
 
 /// Serial generator `H`, deterministic but independent of `G`.
 /// Derived with a nothing-up-my-sleeve hash.
@@ -118,7 +120,11 @@ pub fn spark_commit(value: u64, serial: &Scalar, randomness: &Scalar) -> Ristret
 /// The prover, who knows `s`, can produce a Schnorr proof of knowledge
 /// for `P` under `H`. The verifier only needs `P` and the Schnorr
 /// transcript.
-pub fn spark_pubkey(commitment: &RistrettoPoint, value: u64, randomness: &Scalar) -> RistrettoPoint {
+pub fn spark_pubkey(
+    commitment: &RistrettoPoint,
+    value: u64,
+    randomness: &Scalar,
+) -> RistrettoPoint {
     commitment - gen_g() * Scalar::from(value) - gen_k() * randomness
 }
 
@@ -214,7 +220,10 @@ pub struct SparkAccumulator {
 
 impl SparkAccumulator {
     pub fn new() -> Self {
-        Self { coins: Vec::new(), root: [0u8; 32] }
+        Self {
+            coins: Vec::new(),
+            root: [0u8; 32],
+        }
     }
 
     pub fn add_coin(&mut self, commitment: &RistrettoPoint) {
@@ -222,9 +231,13 @@ impl SparkAccumulator {
         self.update_root();
     }
 
-    pub fn current_root(&self) -> [u8; 32] { self.root }
+    pub fn current_root(&self) -> [u8; 32] {
+        self.root
+    }
 
-    pub fn size(&self) -> usize { self.coins.len() }
+    pub fn size(&self) -> usize {
+        self.coins.len()
+    }
 
     fn update_root(&mut self) {
         let mut h = blake3::Hasher::new();
@@ -277,9 +290,7 @@ impl SparkAccumulator {
         // default), so this has no v1.0 activation impact — landing
         // now closes the gap before any future v1.1 turn-on.
         let mut rng = rand::rngs::OsRng;
-        let mut indices: Vec<usize> = (0..self.coins.len())
-            .filter(|&i| i != real_idx)
-            .collect();
+        let mut indices: Vec<usize> = (0..self.coins.len()).filter(|&i| i != real_idx).collect();
         indices.shuffle(&mut rng);
         let mut set = indices[..n.saturating_sub(1).min(indices.len())].to_vec();
         set.push(real_idx);
@@ -289,7 +300,9 @@ impl SparkAccumulator {
 }
 
 impl Default for SparkAccumulator {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -368,7 +381,9 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
         return Err(Error::CryptoError("real_index out of bounds".into()));
     }
     if anon_set.len() != anon_set_indices.len() {
-        return Err(Error::CryptoError("anon set / index vectors mismatched".into()));
+        return Err(Error::CryptoError(
+            "anon set / index vectors mismatched".into(),
+        ));
     }
 
     let n = anon_set.len();
@@ -506,10 +521,7 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
 /// ```
 ///
 /// and checks the serial tag decompresses to a valid curve point.
-pub fn verify_spark_spend(
-    proof: &SparkSpendProof,
-    pubkeys: &[RistrettoPoint],
-) -> Result<()> {
+pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -> Result<()> {
     let n = pubkeys.len();
     if n == 0 {
         return Err(Error::SparkVerifyFailed);
@@ -521,9 +533,7 @@ pub fn verify_spark_spend(
         return Err(Error::SparkVerifyFailed);
     }
 
-    let serial_tag = proof
-        .serial_tag_point()
-        .ok_or(Error::SparkVerifyFailed)?;
+    let serial_tag = proof.serial_tag_point().ok_or(Error::SparkVerifyFailed)?;
 
     let h_gen = gen_h();
 
@@ -562,9 +572,7 @@ pub fn verify_spark_spend(
         .map_err(|_| Error::SparkVerifyFailed)?;
 
     // Recompute L_i = z_i*H + c_i*P_i for every i
-    let l: Vec<RistrettoPoint> = (0..n)
-        .map(|i| h_gen * z[i] + pubkeys[i] * c[i])
-        .collect();
+    let l: Vec<RistrettoPoint> = (0..n).map(|i| h_gen * z[i] + pubkeys[i] * c[i]).collect();
 
     // ── Degenerate ring of size 1 ───────────────────────────────────
     //
@@ -952,6 +960,9 @@ mod tests {
             .build_anon_set(3, SPARK_ANON_SET_MIN)
             .expect("pool == MIN must succeed");
         assert_eq!(set.len(), SPARK_ANON_SET_MIN);
-        assert!(set.contains(&3), "anonymity set must contain the real index");
+        assert!(
+            set.contains(&3),
+            "anonymity set must contain the real index"
+        );
     }
 }

@@ -162,17 +162,14 @@ impl DaemonClient {
             .await
             .with_context(|| format!("reading response body for {method} (http {status})"))?;
 
-        let envelope: JsonRpcEnvelope = serde_json::from_str(&body_text)
-            .with_context(|| {
-                let preview = if body_text.len() > 512 {
-                    format!("{}... [{}B total]", &body_text[..512], body_text.len())
-                } else {
-                    body_text.clone()
-                };
-                format!(
-                    "parsing JSON-RPC response for {method} (http {status}); body: {preview}"
-                )
-            })?;
+        let envelope: JsonRpcEnvelope = serde_json::from_str(&body_text).with_context(|| {
+            let preview = if body_text.len() > 512 {
+                format!("{}... [{}B total]", &body_text[..512], body_text.len())
+            } else {
+                body_text.clone()
+            };
+            format!("parsing JSON-RPC response for {method} (http {status}); body: {preview}")
+        })?;
 
         if !envelope.error.is_null() {
             return Err(anyhow!(

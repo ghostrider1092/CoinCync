@@ -275,7 +275,7 @@ fn build_query(id: u16, hostname: &str, qtype: QueryType) -> Result<Vec<u8>> {
 
     // Header: 12 bytes.
     buf.extend_from_slice(&id.to_be_bytes()); // ID
-    // Flags: standard query, recursion desired (RD=1)
+                                              // Flags: standard query, recursion desired (RD=1)
     buf.extend_from_slice(&0x0100u16.to_be_bytes());
     buf.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1
     buf.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT = 0
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(&q[0..2], &[0x12, 0x34]);
         assert_eq!(&q[2..4], &[0x01, 0x00]); // RD set
         assert_eq!(&q[4..6], &[0x00, 0x01]); // QDCOUNT
-        // First label length byte
+                                             // First label length byte
         assert_eq!(q[12], 5);
         assert_eq!(&q[13..18], b"seed1");
         // QTYPE at the end
@@ -494,7 +494,7 @@ mod tests {
         resp.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT
         resp.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
         resp.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
-        // Question: example.com A IN
+                                                     // Question: example.com A IN
         resp.push(7);
         resp.extend_from_slice(b"example");
         resp.push(3);
@@ -502,8 +502,8 @@ mod tests {
         resp.push(0);
         resp.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
         resp.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
-        // Answer: compression pointer back to offset 12 (the qname),
-        // type A, class IN, TTL 60, rdlen 4, rdata 1.2.3.4
+                                                     // Answer: compression pointer back to offset 12 (the qname),
+                                                     // type A, class IN, TTL 60, rdlen 4, rdata 1.2.3.4
         resp.extend_from_slice(&[0xC0, 0x0C]);
         resp.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
         resp.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
@@ -557,6 +557,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_nanos(50));
         let b = transaction_id();
         // Either differ or at minimum the XOR mask is applied
-        assert!(a != 0xC0FE || b != 0xC0FE, "transaction_id seed leaked through");
+        assert!(
+            a != 0xC0FE || b != 0xC0FE,
+            "transaction_id seed leaked through"
+        );
     }
 }

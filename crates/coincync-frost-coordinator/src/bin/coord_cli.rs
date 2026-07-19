@@ -554,8 +554,7 @@ fn read_random(buf: &mut [u8]) -> std::io::Result<()> {
     // who knew approximate process-start time and PID range
     // could brute-force the secret in seconds and forge attach
     // tokens. Replaced with getrandom — no fallback, fail-fast.
-    getrandom::getrandom(buf)
-        .map_err(|e| std::io::Error::other(e.to_string()))
+    getrandom::getrandom(buf).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 // ──────────────────────────────────────────────────────────────────

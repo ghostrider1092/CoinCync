@@ -2,9 +2,9 @@
 //!
 //! Thin wrapper around the `lru` crate with cache statistics tracking.
 
+use hashlink::LruCache as HashlinkLruCache;
 use std::collections::HashMap;
 use std::hash::Hash;
-use hashlink::LruCache as HashlinkLruCache;
 
 /// Generic LRU cache with O(1) operations
 ///

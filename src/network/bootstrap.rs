@@ -2,17 +2,17 @@
 //!
 //! DNS seeds, peer discovery, and network bootstrapping.
 
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
-use std::time::Duration;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use std::collections::{HashMap, HashSet};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::path::PathBuf;
+use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::error::{Error, Result};
-use crate::testnet::{TESTNET_DNS_SEEDS, TESTNET_SEED_NODES, TESTNET_P2P_PORT};
 use crate::network::socks_dns;
+use crate::testnet::{TESTNET_DNS_SEEDS, TESTNET_P2P_PORT, TESTNET_SEED_NODES};
 
 /// Bootstrap configuration
 #[derive(Clone, Debug)]
@@ -37,7 +37,8 @@ impl Default for BootstrapConfig {
     fn default() -> Self {
         BootstrapConfig {
             dns_seeds: TESTNET_DNS_SEEDS.iter().map(|s| s.to_string()).collect(),
-            seed_nodes: TESTNET_SEED_NODES.iter()
+            seed_nodes: TESTNET_SEED_NODES
+                .iter()
                 .filter_map(|s| s.parse().ok())
                 .collect(),
             dns_timeout: Duration::from_secs(5),
@@ -87,7 +88,8 @@ impl Bootstrapper {
     /// SOCKS5 CONNECT to a configurable resolver (default 1.1.1.1:53,
     /// override via `COINCYNC_SOCKS_DNS_RESOLVER`).
     pub async fn get_peers(&self, onion_only: bool, proxy_active: bool) -> Vec<SocketAddr> {
-        self.get_peers_with_proxy(onion_only, proxy_active, None).await
+        self.get_peers_with_proxy(onion_only, proxy_active, None)
+            .await
     }
 
     /// Same as [`get_peers`] but with an optional proxy. When supplied
@@ -119,10 +121,7 @@ impl Bootstrapper {
         //     a proxy reference     → skip DNS (legacy callers; same
         //                             posture as before #9 fix).
         //   plain clearnet          → OS resolver (hickory).
-        let use_proxy_dns = proxy
-            .map(|p| p.is_active())
-            .unwrap_or(false)
-            && !force_disable_dns;
+        let use_proxy_dns = proxy.map(|p| p.is_active()).unwrap_or(false) && !force_disable_dns;
 
         if force_disable_dns {
             info!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
@@ -175,9 +174,8 @@ impl Bootstrapper {
             }
         }
 
-        let mut result: Vec<SocketAddr> = peers.into_iter()
-            .take(self.config.max_addresses)
-            .collect();
+        let mut result: Vec<SocketAddr> =
+            peers.into_iter().take(self.config.max_addresses).collect();
 
         if let Some(allowed) = allowlist {
             result.retain(|p| allowed.contains(p));
@@ -336,7 +334,8 @@ impl AddressManager {
         }
         if self.addresses.len() >= self.max_addresses {
             // Remove oldest
-            self.addresses.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
+            self.addresses
+                .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
             if let Some(evicted) = self.addresses.pop() {
                 self.known_addrs.remove(&evicted.addr);
             }
@@ -362,10 +361,7 @@ impl AddressManager {
 
     /// Get addresses for peer exchange
     pub fn get_for_exchange(&self, max: usize) -> Vec<PeerAddress> {
-        self.addresses.iter()
-            .take(max)
-            .cloned()
-            .collect()
+        self.addresses.iter().take(max).cloned().collect()
     }
 
     /// Mark an address as our own (detected via self-connection nonce match).
@@ -391,7 +387,8 @@ impl AddressManager {
             }
         }
         // Sort by last_seen (most recent first)
-        self.addresses.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
+        self.addresses
+            .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
 
         // Find first address not in tried set and not a self-address
         for addr in &self.addresses {
@@ -439,11 +436,16 @@ impl AddressManager {
         self.tried.insert(addr);
 
         // Bump per-address failure count; purge if we've crossed the threshold.
-        let count = self.failures.entry(addr).and_modify(|c| *c += 1).or_insert(1);
+        let count = self
+            .failures
+            .entry(addr)
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
         if *count >= FAILURE_PURGE_THRESHOLD {
             tracing::debug!(
                 "AddressManager: purging {} after {} consecutive failures",
-                addr, count
+                addr,
+                count
             );
             self.addresses.retain(|a| a.addr != addr);
             self.known_addrs.remove(&addr);
@@ -497,11 +499,15 @@ impl AddressManager {
 
     /// Save address book to disk for persistence across restarts
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<()> {
-        let entries: Vec<PeerAddressSerde> = self.addresses.iter().map(|a| PeerAddressSerde {
-            addr: a.addr.to_string(),
-            last_seen: a.last_seen,
-            services: a.services,
-        }).collect();
+        let entries: Vec<PeerAddressSerde> = self
+            .addresses
+            .iter()
+            .map(|a| PeerAddressSerde {
+                addr: a.addr.to_string(),
+                last_seen: a.last_seen,
+                services: a.services,
+            })
+            .collect();
 
         let json = serde_json::to_string_pretty(&entries)
             .map_err(|e| Error::InvalidState(format!("serialize addresses: {}", e)))?;
@@ -545,7 +551,8 @@ impl AddressManager {
             let _ = std::fs::remove_file(path);
             return Err(Error::InvalidState(format!(
                 "address book file too large: {} bytes (max {})",
-                metadata.len(), MAX_ADDRBOOK_BYTES
+                metadata.len(),
+                MAX_ADDRBOOK_BYTES
             )));
         }
 
@@ -557,7 +564,8 @@ impl AddressManager {
         if entries.len() > MAX_ADDRBOOK_ENTRIES {
             return Err(Error::InvalidState(format!(
                 "address book file has {} entries (max {})",
-                entries.len(), MAX_ADDRBOOK_ENTRIES
+                entries.len(),
+                MAX_ADDRBOOK_ENTRIES
             )));
         }
 
@@ -589,21 +597,27 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
         .map_err(|e| Error::ConnectionFailed(format!("UPnP gateway not found: {}", e)))?;
 
     // Get local address
-    let _local_addr = gateway.get_external_ip()
+    let _local_addr = gateway
+        .get_external_ip()
         .await
         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
     // Add port mapping
-    gateway.add_port(
-        PortMappingProtocol::TCP,
-        external_port,
-        SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), internal_port),
-        3600, // 1 hour lease
-        "CoinCync",
-    ).await
+    gateway
+        .add_port(
+            PortMappingProtocol::TCP,
+            external_port,
+            SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), internal_port),
+            3600, // 1 hour lease
+            "CoinCync",
+        )
+        .await
         .map_err(|e| Error::ConnectionFailed(format!("UPnP port mapping failed: {}", e)))?;
 
-    info!("UPnP port mapping successful: {} -> {}", external_port, internal_port);
+    info!(
+        "UPnP port mapping successful: {} -> {}",
+        external_port, internal_port
+    );
     Ok(())
 }
 
@@ -619,17 +633,28 @@ mod tests {
         // ranges instead of exact counts so future seed additions don't
         // require touching this test.
         let config = BootstrapConfig::default();
-        assert!(config.dns_seeds.len()  >= 1, "must have at least one DNS seed");
-        assert!(config.seed_nodes.len() >= 3, "must have at least 3 seed nodes");
-        assert!(config.seed_nodes.len() <= 32,
-            "more than 32 seed nodes suggests a config bug");
+        assert!(
+            config.dns_seeds.len() >= 1,
+            "must have at least one DNS seed"
+        );
+        assert!(
+            config.seed_nodes.len() >= 3,
+            "must have at least 3 seed nodes"
+        );
+        assert!(
+            config.seed_nodes.len() <= 32,
+            "more than 32 seed nodes suggests a config bug"
+        );
         assert_eq!(config.dns_timeout, Duration::from_secs(5));
         assert_eq!(config.max_addresses, 100);
         // Sanity: every seed must use a non-zero port and a non-loopback IP.
         for seed in &config.seed_nodes {
             assert!(seed.port() != 0, "seed {} has zero port", seed);
-            assert!(!seed.ip().is_unspecified(),
-                "seed {} has unspecified IP", seed);
+            assert!(
+                !seed.ip().is_unspecified(),
+                "seed {} has unspecified IP",
+                seed
+            );
         }
     }
 
@@ -677,7 +702,11 @@ mod tests {
 
         // Simulate a peer gossiping our own IP back to us.
         mgr.add(PeerAddress::new(me));
-        assert_eq!(mgr.len(), 1, "self-address must not be re-admitted via gossip");
+        assert_eq!(
+            mgr.len(),
+            1,
+            "self-address must not be re-admitted via gossip"
+        );
 
         // get_next() must never hand back our own address.
         for _ in 0..5 {
@@ -701,17 +730,25 @@ mod tests {
         mgr.set_anchors(vec![anchor1, anchor2]);
 
         let first = mgr.get_next().unwrap();
-        assert!(first == anchor1 || first == anchor2, "anchor dialed first, got {}", first);
+        assert!(
+            first == anchor1 || first == anchor2,
+            "anchor dialed first, got {}",
+            first
+        );
         mgr.mark_tried(first);
         let second = mgr.get_next().unwrap();
         assert!(
             (second == anchor1 || second == anchor2) && second != first,
-            "second anchor dialed next, got {}", second
+            "second anchor dialed next, got {}",
+            second
         );
         mgr.mark_tried(second);
         // Both anchors tried this cycle → fall through to the general pool.
-        assert_eq!(mgr.get_next().unwrap(), general,
-            "general pool used only after anchors are exhausted");
+        assert_eq!(
+            mgr.get_next().unwrap(),
+            general,
+            "general pool used only after anchors are exhausted"
+        );
     }
 
     /// An anchor that turns out to be a self-address (stale anchors file) is
@@ -723,7 +760,11 @@ mod tests {
         let good: SocketAddr = "192.0.2.1:28080".parse().unwrap();
         mgr.mark_self_address(me);
         mgr.set_anchors(vec![me, good]);
-        assert_eq!(mgr.get_next().unwrap(), good, "self anchor skipped, good anchor dialed");
+        assert_eq!(
+            mgr.get_next().unwrap(),
+            good,
+            "self anchor skipped, good anchor dialed"
+        );
     }
 
     /// Peer-aging (2026-06-26): after FAILURE_PURGE_THRESHOLD consecutive
@@ -741,7 +782,9 @@ mod tests {
         assert_eq!(mgr.len(), 2, "both addresses present pre-failures");
 
         // 4 failures on dead: still present (threshold is 5)
-        for _ in 0..4 { mgr.mark_tried(dead); }
+        for _ in 0..4 {
+            mgr.mark_tried(dead);
+        }
         assert!(
             mgr.addresses.iter().any(|a| a.addr == dead),
             "address must persist until threshold reached"
@@ -769,11 +812,15 @@ mod tests {
         mgr.add(PeerAddress::new(addr));
 
         // 4 failures, then a success — count resets
-        for _ in 0..4 { mgr.mark_tried(addr); }
+        for _ in 0..4 {
+            mgr.mark_tried(addr);
+        }
         mgr.mark_success(addr);
 
         // 4 more failures — still under threshold (count was reset, so we're at 4)
-        for _ in 0..4 { mgr.mark_tried(addr); }
+        for _ in 0..4 {
+            mgr.mark_tried(addr);
+        }
         assert!(
             mgr.addresses.iter().any(|a| a.addr == addr),
             "mark_success must reset the failure counter so a flaky-then-healthy peer isn't purged"
@@ -796,7 +843,9 @@ mod tests {
         let addr: SocketAddr = "192.0.2.42:28080".parse().unwrap();
 
         mgr.add(PeerAddress::new(addr));
-        for _ in 0..5 { mgr.mark_tried(addr); }
+        for _ in 0..5 {
+            mgr.mark_tried(addr);
+        }
         assert!(!mgr.addresses.iter().any(|a| a.addr == addr), "purged");
 
         // Re-add via gossip
@@ -807,7 +856,9 @@ mod tests {
         );
 
         // Failure count starts fresh — takes another 5 failures to purge again
-        for _ in 0..4 { mgr.mark_tried(addr); }
+        for _ in 0..4 {
+            mgr.mark_tried(addr);
+        }
         assert!(
             mgr.addresses.iter().any(|a| a.addr == addr),
             "after re-add, counter is fresh — 4 failures must not yet purge"
@@ -841,7 +892,10 @@ mod tests {
             "error must surface size-cap reason, got: {}",
             err_msg
         );
-        assert!(!path.exists(), "oversized address book must be removed after rejection");
+        assert!(
+            !path.exists(),
+            "oversized address book must be removed after rejection"
+        );
     }
 
     /// Empty-vec roundtrip: a valid empty JSON `[]` must load cleanly
@@ -874,7 +928,9 @@ mod tests {
         // ~50 bytes serialized; 10,001 × ~50 ≈ 500 KB — well under 1 MiB.
         let mut s = String::from("[");
         for i in 0..10_001 {
-            if i > 0 { s.push(','); }
+            if i > 0 {
+                s.push(',');
+            }
             s.push_str(&format!(
                 r#"{{"addr":"1.2.3.4:1","last_seen":0,"services":0}}"#
             ));
@@ -911,8 +967,11 @@ mod tests {
         let config = BootstrapConfig::default();
         for seed in &config.seed_nodes {
             assert!(seed.port() != 0, "seed {} has zero port", seed);
-            assert!(!seed.ip().is_unspecified(),
-                "seed {} has unspecified IP (0.0.0.0/::)", seed);
+            assert!(
+                !seed.ip().is_unspecified(),
+                "seed {} has unspecified IP (0.0.0.0/::)",
+                seed
+            );
         }
     }
 }
@@ -922,8 +981,8 @@ mod tests {
 // the plain fallback lists and the `initial_peers` helper that the
 // 1.0 CLI (bin/node.rs) calls when starting up.
 
-use crate::config::{Network, NodeConfig};
 use super::dns_seeds::resolve_seeds_with_proxy;
+use crate::config::{Network, NodeConfig};
 
 const BOOTSTRAP_MANIFEST_DOMAIN: &[u8] = b"coincync/bootstrap-manifest/v1";
 
@@ -1027,7 +1086,10 @@ fn load_signed_manifest_peers(network: Network) -> Vec<SocketAddr> {
     let signature = match load_signature(&sig_path) {
         Some(v) => Signature::from_bytes(&v),
         None => {
-            warn!("Unable to read bootstrap manifest signature at {}", sig_path.display());
+            warn!(
+                "Unable to read bootstrap manifest signature at {}",
+                sig_path.display()
+            );
             return Vec::new();
         }
     };
@@ -1058,7 +1120,11 @@ fn load_signed_manifest_peers(network: Network) -> Vec<SocketAddr> {
     let mut file = match std::fs::File::open(&manifest_path) {
         Ok(f) => f,
         Err(e) => {
-            warn!("Unable to open bootstrap manifest {}: {}", manifest_path.display(), e);
+            warn!(
+                "Unable to open bootstrap manifest {}: {}",
+                manifest_path.display(),
+                e
+            );
             return Vec::new();
         }
     };
@@ -1070,7 +1136,11 @@ fn load_signed_manifest_peers(network: Network) -> Vec<SocketAddr> {
     // is admitted; anything larger is refused.
     let read_cap = MAX_MANIFEST_BYTES.saturating_add(1);
     if let Err(e) = (&mut file).take(read_cap).read_to_end(&mut manifest_bytes) {
-        warn!("Unable to read bootstrap manifest {}: {}", manifest_path.display(), e);
+        warn!(
+            "Unable to read bootstrap manifest {}: {}",
+            manifest_path.display(),
+            e
+        );
         return Vec::new();
     }
     if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
@@ -1122,10 +1192,10 @@ pub const TESTNET_NODES: &[(&str, &str)] = &[
     // not 28333 — the previous 28333 entries were Bitcoin testnet
     // leftovers that never resolved to a real CoinCync peer).
     // Earlier NYC/LON/RIC/TOR/ATL/SFO entries are decommissioned.
-    ("66.135.23.193:28080",    "seed1 — New York"),
-    ("140.82.57.168:28080",    "seed2 — Amsterdam"),
-    ("207.148.111.76:28080",   "seed3 — Tokyo"),
-    ("207.148.6.50:28080",     "explorer — Dallas"),
+    ("66.135.23.193:28080", "seed1 — New York"),
+    ("140.82.57.168:28080", "seed2 — Amsterdam"),
+    ("207.148.111.76:28080", "seed3 — Tokyo"),
+    ("207.148.6.50:28080", "explorer — Dallas"),
 ];
 
 pub const MAINNET_NODES: &[(&str, &str)] = &[
@@ -1169,11 +1239,8 @@ pub async fn initial_peers(config: &NodeConfig) -> Vec<SocketAddr> {
         // through SOCKS5 (DNS-over-TCP) when a proxy is active rather than
         // leaking queries to the user's ISP via the OS resolver. The
         // proxy=None path is identical to the legacy clearnet behaviour.
-        let mut seed_peers = resolve_seeds_with_proxy(
-            config.network,
-            config.p2p.proxy.as_ref(),
-        )
-        .await;
+        let mut seed_peers =
+            resolve_seeds_with_proxy(config.network, config.p2p.proxy.as_ref()).await;
         peers.append(&mut seed_peers);
     } else if force_disable_dns {
         tracing::warn!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");

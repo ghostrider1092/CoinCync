@@ -250,12 +250,13 @@ pub fn pedersen_commit_cync(value: u64, blinding: &[u8; 32]) -> Result<[u8; 32]>
     }
 
     let blinding_scalar =
-        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(*blinding))
-            .ok_or(Error::Verification("blinding not a canonical Ristretto scalar"))?;
+        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(*blinding)).ok_or(
+            Error::Verification("blinding not a canonical Ristretto scalar"),
+        )?;
 
-    let h_cync = h_cync_generator()
-        .decompress()
-        .ok_or(Error::Verification("H_cync generator decompress (impossible)"))?;
+    let h_cync = h_cync_generator().decompress().ok_or(Error::Verification(
+        "H_cync generator decompress (impossible)",
+    ))?;
 
     // Scalar arithmetic: value (u64) lifts to a Curve25519Scalar
     // via from() — Ristretto scalars are large enough that no u64
@@ -602,12 +603,7 @@ pub fn prove_bit_btc(
         (*e_sim, e_honest_bytes, *s_sim, s_honest_bytes)
     };
 
-    Ok(BitOrProofBtc {
-        e_0,
-        e_1,
-        s_0,
-        s_1,
-    })
+    Ok(BitOrProofBtc { e_0, e_1, s_0, s_1 })
 }
 
 /// Verify a [`BitOrProofBtc`] against the commitment `c_btc`. Returns
@@ -676,8 +672,9 @@ pub fn verify_bit_btc(c_btc: &[u8; 33], proof: &BitOrProofBtc) -> Result<()> {
 
     // ── Compute c = H(tag || C || A_0 || A_1) mod n ──
     let c_bytes = or_proof_challenge_btc(c_btc, &a_0.serialize(), &a_1.serialize());
-    let c_scalar = Secp256k1Scalar::from_be_bytes(c_bytes)
-        .map_err(|_| Error::Verification("challenge hash ≥ n — extremely unlikely in honest run"))?;
+    let c_scalar = Secp256k1Scalar::from_be_bytes(c_bytes).map_err(|_| {
+        Error::Verification("challenge hash ≥ n — extremely unlikely in honest run")
+    })?;
 
     // ── Check e_0 + e_1 ≡ c (mod n) ──
     // Use SecretKey arithmetic: e_0 + e_1 == c iff SecretKey(e_0).add(e_1) == c.
@@ -799,22 +796,16 @@ pub fn prove_bit_cync(
 pub fn verify_bit_cync(c_cync: &[u8; 32], proof: &BitOrProofCync) -> Result<()> {
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 
-    let e_0 =
-        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.e_0))
-            .ok_or(Error::Verification("e_0 not canonical"))?;
-    let e_1 =
-        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.e_1))
-            .ok_or(Error::Verification("e_1 not canonical"))?;
-    let s_0 =
-        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.s_0))
-            .ok_or(Error::Verification("s_0 not canonical"))?;
-    let s_1 =
-        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.s_1))
-            .ok_or(Error::Verification("s_1 not canonical"))?;
+    let e_0 = Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.e_0))
+        .ok_or(Error::Verification("e_0 not canonical"))?;
+    let e_1 = Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.e_1))
+        .ok_or(Error::Verification("e_1 not canonical"))?;
+    let s_0 = Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.s_0))
+        .ok_or(Error::Verification("s_0 not canonical"))?;
+    let s_1 = Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.s_1))
+        .ok_or(Error::Verification("s_1 not canonical"))?;
 
-    let h_cync = h_cync_generator()
-        .decompress()
-        .expect("H_cync decompress");
+    let h_cync = h_cync_generator().decompress().expect("H_cync decompress");
     let c_pt = CompressedRistretto::from_slice(c_cync)
         .map_err(|_| Error::Verification("c_cync decode"))?
         .decompress()
@@ -955,9 +946,7 @@ pub fn verify_bit_pair(pair: &BitProofPair) -> Result<()> {
 ///
 /// - `Verification` if any input `r_i` is not a canonical secp256k1
 ///   scalar.
-pub fn compute_blinder_sum_btc(
-    blinders: &[[u8; 32]; STRICT_BIT_COUNT],
-) -> Result<[u8; 32]> {
+pub fn compute_blinder_sum_btc(blinders: &[[u8; 32]; STRICT_BIT_COUNT]) -> Result<[u8; 32]> {
     use bitcoin::secp256k1::{Scalar as Secp256k1Scalar, SecretKey};
 
     // Compute `Σ 2^i · r_i mod n` iteratively. We maintain a running
@@ -998,8 +987,7 @@ pub fn compute_blinder_sum_btc(
         acc = Some(match acc {
             None => term,
             Some(acc_sk) => {
-                let term_scalar =
-                    Secp256k1Scalar::from_be_bytes(term.secret_bytes()).unwrap();
+                let term_scalar = Secp256k1Scalar::from_be_bytes(term.secret_bytes()).unwrap();
                 acc_sk
                     .add_tweak(&term_scalar)
                     .map_err(|_| Error::Verification("blinder sum overflow"))?
@@ -1016,9 +1004,7 @@ pub fn compute_blinder_sum_btc(
 /// Sum the per-bit blinders `r_i` weighted by `2^i`, mod ℓ (Ristretto
 /// scalar field). Returns the 32-byte LE-encoded sum. Mirrors
 /// [`compute_blinder_sum_btc`] on Ristretto255.
-pub fn compute_blinder_sum_cync(
-    blinders: &[[u8; 32]; STRICT_BIT_COUNT],
-) -> Result<[u8; 32]> {
+pub fn compute_blinder_sum_cync(blinders: &[[u8; 32]; STRICT_BIT_COUNT]) -> Result<[u8; 32]> {
     let mut acc = Curve25519Scalar::ZERO;
     // Maintain the running power of 2: `weight = 2^i`. Initially 1,
     // then doubled each iteration. Curve25519Scalar arithmetic is
@@ -1027,9 +1013,10 @@ pub fn compute_blinder_sum_cync(
     let two = Curve25519Scalar::ONE + Curve25519Scalar::ONE;
 
     for r in blinders.iter() {
-        let r_scalar =
-            Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(*r))
-                .ok_or(Error::Verification("blinder not canonical Ristretto scalar"))?;
+        let r_scalar = Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(*r))
+            .ok_or(Error::Verification(
+                "blinder not canonical Ristretto scalar",
+            ))?;
         acc += weight * r_scalar;
         weight *= two;
     }
@@ -1114,9 +1101,7 @@ pub fn verify_linear_combination_cync(
 ) -> Result<()> {
     use curve25519_dalek::traits::Identity;
 
-    let h_cync = h_cync_generator()
-        .decompress()
-        .expect("H_cync decompress");
+    let h_cync = h_cync_generator().decompress().expect("H_cync decompress");
     let t_pt = CompressedRistretto::from_slice(t_cync)
         .map_err(|_| Error::Verification("T_cync decode"))?
         .decompress()
@@ -1220,11 +1205,10 @@ impl CrossCurveDlProofStrict {
     ///   r_btc_sum                               // 32 bytes
     ///   r_cync_sum                              // 32 bytes
     /// ```
-    pub const CANONICAL_LEN: usize =
-        crate::adaptor::CrossCurveDlProof::CANONICAL_LEN
-            + STRICT_BIT_COUNT * BitProofPair::CANONICAL_LEN
-            + 32
-            + 32;
+    pub const CANONICAL_LEN: usize = crate::adaptor::CrossCurveDlProof::CANONICAL_LEN
+        + STRICT_BIT_COUNT * BitProofPair::CANONICAL_LEN
+        + 32
+        + 32;
 
     /// Serialize to the canonical wire form. Used by external test
     /// vectors + by any consumer that wants to byte-compare or hash
@@ -1367,12 +1351,8 @@ pub fn prove_cross_curve_strict(
     //    nonces). The fast prover requires the nonce as a Ristretto-
     //    canonical scalar (since it must reduce mod both n and ℓ).
     let fast_nonce = prf_cync_scalar(seed, b"fast_nonce", 0);
-    let fast = crate::adaptor::prove_cross_curve(
-        secret,
-        btc_pub_bytes,
-        cync_pub_bytes,
-        &fast_nonce,
-    )?;
+    let fast =
+        crate::adaptor::prove_cross_curve(secret, btc_pub_bytes, cync_pub_bytes, &fast_nonce)?;
 
     Ok(CrossCurveDlProofStrict {
         fast,
@@ -1577,9 +1557,18 @@ mod tests {
         let c2 = pedersen_commit_cync(50, &r2).unwrap();
         let c_sum = pedersen_commit_cync(150, &r3).unwrap();
 
-        let p1 = CompressedRistretto::from_slice(&c1).unwrap().decompress().unwrap();
-        let p2 = CompressedRistretto::from_slice(&c2).unwrap().decompress().unwrap();
-        let p_expected = CompressedRistretto::from_slice(&c_sum).unwrap().decompress().unwrap();
+        let p1 = CompressedRistretto::from_slice(&c1)
+            .unwrap()
+            .decompress()
+            .unwrap();
+        let p2 = CompressedRistretto::from_slice(&c2)
+            .unwrap()
+            .decompress()
+            .unwrap();
+        let p_expected = CompressedRistretto::from_slice(&c_sum)
+            .unwrap()
+            .decompress()
+            .unwrap();
         let p_actual = p1 + p2;
         assert_eq!(p_actual, p_expected);
     }
@@ -1604,7 +1593,10 @@ mod tests {
         let r = canonical_blinding(0x55);
         let c1 = pedersen_commit_cync(100, &r).unwrap();
         let c2 = pedersen_commit_cync(101, &r).unwrap();
-        assert_ne!(c1, c2, "different values must produce different commitments");
+        assert_ne!(
+            c1, c2,
+            "different values must produce different commitments"
+        );
     }
 
     #[test]
@@ -1613,7 +1605,10 @@ mod tests {
         let r2 = canonical_blinding(0x66);
         let c1 = pedersen_commit_cync(100, &r1).unwrap();
         let c2 = pedersen_commit_cync(100, &r2).unwrap();
-        assert_ne!(c1, c2, "different blindings must produce different commitments");
+        assert_ne!(
+            c1, c2,
+            "different blindings must produce different commitments"
+        );
     }
 
     // ── Bit decomposition tests ──────────────────────────────────
@@ -1699,7 +1694,10 @@ mod tests {
         for i in 0..31 {
             assert_eq!(le[i], 0xFF, "byte {} should be 0xFF", i);
         }
-        assert_eq!(le[31], 0x0F, "byte 31 should be 0x0F (bits 248..251 = 1, 252..255 = 0)");
+        assert_eq!(
+            le[31], 0x0F,
+            "byte 31 should be 0x0F (bits 248..251 = 1, 252..255 = 0)"
+        );
     }
 
     // ── Bit-OR-proof tests ──────────────────────────────────────
@@ -1708,9 +1706,12 @@ mod tests {
     /// scalars are deterministic + in the canonical range for both
     /// curves (high byte 0x01 ensures < ℓ < n).
     fn nonces(label: u8) -> ([u8; 32], [u8; 32], [u8; 32]) {
-        let mut k = [label.wrapping_add(0x10); 32]; k[31] = 0x01;
-        let mut e = [label.wrapping_add(0x20); 32]; e[31] = 0x01;
-        let mut s = [label.wrapping_add(0x30); 32]; s[31] = 0x01;
+        let mut k = [label.wrapping_add(0x10); 32];
+        k[31] = 0x01;
+        let mut e = [label.wrapping_add(0x20); 32];
+        e[31] = 0x01;
+        let mut s = [label.wrapping_add(0x30); 32];
+        s[31] = 0x01;
         (k, e, s)
     }
 
@@ -1764,7 +1765,11 @@ mod tests {
         // enough to break the e_0 + e_1 ≡ c relation.
         p.e_0[0] ^= 0x01;
         let r = verify_bit_btc(&c, &p);
-        assert!(matches!(r, Err(Error::Verification(_))), "flipped e_0 must reject; got {:?}", r);
+        assert!(
+            matches!(r, Err(Error::Verification(_))),
+            "flipped e_0 must reject; got {:?}",
+            r
+        );
     }
 
     #[test]
@@ -1776,7 +1781,10 @@ mod tests {
         p.s_0[0] ^= 0x01;
         // Flipping s_0 changes A_0, which changes c, which breaks
         // e_0 + e_1 ≡ c.
-        assert!(matches!(verify_bit_btc(&c, &p), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_btc(&c, &p),
+            Err(Error::Verification(_))
+        ));
     }
 
     #[test]
@@ -1786,7 +1794,10 @@ mod tests {
         let c = pedersen_commit_btc(1, &r).unwrap();
         let mut p = prove_bit_btc(true, &r, &k, &e, &s).unwrap();
         p.s_1[0] ^= 0x01;
-        assert!(matches!(verify_bit_btc(&c, &p), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_btc(&c, &p),
+            Err(Error::Verification(_))
+        ));
     }
 
     #[test]
@@ -1796,7 +1807,10 @@ mod tests {
         let c = pedersen_commit_cync(0, &r).unwrap();
         let mut p = prove_bit_cync(false, &r, &k, &e, &s).unwrap();
         p.e_1[0] ^= 0x01;
-        assert!(matches!(verify_bit_cync(&c, &p), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_cync(&c, &p),
+            Err(Error::Verification(_))
+        ));
     }
 
     #[test]
@@ -1806,7 +1820,10 @@ mod tests {
         let c = pedersen_commit_cync(0, &r).unwrap();
         let mut p = prove_bit_cync(false, &r, &k, &e, &s).unwrap();
         p.s_0[0] ^= 0x01;
-        assert!(matches!(verify_bit_cync(&c, &p), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_cync(&c, &p),
+            Err(Error::Verification(_))
+        ));
     }
 
     #[test]
@@ -1818,7 +1835,10 @@ mod tests {
         let (k, e, s) = nonces(10);
         let p = prove_bit_btc(false, &r, &k, &e, &s).unwrap();
         let wrong_c = pedersen_commit_btc(1, &r).unwrap();
-        assert!(matches!(verify_bit_btc(&wrong_c, &p), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_btc(&wrong_c, &p),
+            Err(Error::Verification(_))
+        ));
     }
 
     #[test]
@@ -1827,7 +1847,10 @@ mod tests {
         let (k, e, s) = nonces(11);
         let p = prove_bit_cync(false, &r, &k, &e, &s).unwrap();
         let wrong_c = pedersen_commit_cync(1, &r).unwrap();
-        assert!(matches!(verify_bit_cync(&wrong_c, &p), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_cync(&wrong_c, &p),
+            Err(Error::Verification(_))
+        ));
     }
 
     // ── Cross-curve pair ──
@@ -1883,7 +1906,10 @@ mod tests {
         )
         .unwrap();
         pair.btc.s_1[0] ^= 0x01;
-        assert!(matches!(verify_bit_pair(&pair), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_pair(&pair),
+            Err(Error::Verification(_))
+        ));
     }
 
     #[test]
@@ -1901,7 +1927,10 @@ mod tests {
         )
         .unwrap();
         pair.cync.e_0[0] ^= 0x01;
-        assert!(matches!(verify_bit_pair(&pair), Err(Error::Verification(_))));
+        assert!(matches!(
+            verify_bit_pair(&pair),
+            Err(Error::Verification(_))
+        ));
     }
 
     // ── Linear-combination opening tests ────────────────────────
@@ -2126,8 +2155,7 @@ mod tests {
         // 0x0000...0042 = 66 — same value on both curves.
         let mut secret_le = [0u8; 32];
         secret_le[0] = 0x42;
-        let secret =
-            crate::adaptor::AdaptorSecret::from_ristretto_bytes(secret_le).unwrap();
+        let secret = crate::adaptor::AdaptorSecret::from_ristretto_bytes(secret_le).unwrap();
 
         // T_btc = secret · G_btc
         let secp = Secp256k1::new();
@@ -2258,8 +2286,7 @@ mod tests {
         // Important for testability + bisectability of any future
         // soundness regression.
         let (secret, t_btc, t_cync, proof1) = honest_strict_proof_fixture();
-        let proof2 =
-            prove_cross_curve_strict(&secret, &t_btc, &t_cync, &[0x77u8; 32]).unwrap();
+        let proof2 = prove_cross_curve_strict(&secret, &t_btc, &t_cync, &[0x77u8; 32]).unwrap();
         assert_eq!(proof1, proof2, "deterministic prove under fixed seed");
     }
 
@@ -2269,9 +2296,11 @@ mod tests {
         // randomness shifts). The PROOFS both verify the same
         // statement.
         let (secret, t_btc, t_cync, proof1) = honest_strict_proof_fixture();
-        let proof2 =
-            prove_cross_curve_strict(&secret, &t_btc, &t_cync, &[0x88u8; 32]).unwrap();
-        assert_ne!(proof1, proof2, "different seed must produce different proof");
+        let proof2 = prove_cross_curve_strict(&secret, &t_btc, &t_cync, &[0x88u8; 32]).unwrap();
+        assert_ne!(
+            proof1, proof2,
+            "different seed must produce different proof"
+        );
         verify_cross_curve_strict(&proof2, &t_btc, &t_cync)
             .expect("second proof under different seed must also verify");
     }

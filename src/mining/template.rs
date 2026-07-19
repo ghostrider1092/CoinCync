@@ -1,8 +1,8 @@
 //! Block template for mining
 
 use crate::consensus::BlockHeader;
-use crate::transaction::Transaction;
 use crate::primitives::{Amount, Hash};
+use crate::transaction::Transaction;
 
 // H-5 FIX: Complete header fields for external miners
 pub struct BlockTemplate {
@@ -39,9 +39,13 @@ impl BlockTemplate {
             checkpoint_vote,
         }
     }
-    
-    pub fn update_nonce(&mut self, nonce: u64) { self.header.nonce = nonce; }
-    pub fn update_timestamp(&mut self, ts: u64) { self.header.timestamp = ts; }
+
+    pub fn update_nonce(&mut self, nonce: u64) {
+        self.header.nonce = nonce;
+    }
+    pub fn update_timestamp(&mut self, ts: u64) {
+        self.header.timestamp = ts;
+    }
 }
 
 /// Build the JSON template consumed by the standalone miner via RPC
@@ -87,7 +91,8 @@ pub fn build_template_json(
             Err(e) => {
                 tracing::debug!(
                     "Template: skipping mempool tx {} (chain-invalid): {}",
-                    tx.hash(), e
+                    tx.hash(),
+                    e
                 );
                 false
             }

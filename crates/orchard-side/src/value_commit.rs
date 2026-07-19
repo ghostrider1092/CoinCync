@@ -329,8 +329,8 @@ mod tests {
         // Reconstruct the expected commitment from the combined
         // value and combined randomness.
         let combined_scalar = *rcv_a.scalar() + *rcv_b.scalar();
-        let expected_point =
-            (value_generator() * pallas::Scalar::from(1_000_000u64)) + (randomness_generator() * combined_scalar);
+        let expected_point = (value_generator() * pallas::Scalar::from(1_000_000u64))
+            + (randomness_generator() * combined_scalar);
         let expected = ValueCommitment(expected_point);
         assert!(
             cv_sum.point_eq(&expected),

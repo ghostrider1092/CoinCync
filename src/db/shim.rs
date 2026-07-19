@@ -40,8 +40,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rocksdb::{
-    BoundColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBWithThreadMode,
-    IteratorMode, MultiThreaded, Options, ReadOptions, WriteBatch as RocksBatch,
+    BoundColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBWithThreadMode, IteratorMode,
+    MultiThreaded, Options, ReadOptions, WriteBatch as RocksBatch,
 };
 
 use parking_lot::Mutex;
@@ -262,7 +262,8 @@ impl Db {
                     b.len()
                 );
                 return Err(Error(format!(
-                    "R-49: monotonic counter has {} bytes, expected 8", b.len()
+                    "R-49: monotonic counter has {} bytes, expected 8",
+                    b.len()
                 )));
             }
             None => 0,
@@ -381,11 +382,7 @@ impl Tree {
     /// hold an external write lock that serializes inserts on the key.
     /// Switching to `WriteBatchWithIndex` for true read-your-write
     /// atomicity is available if a future caller needs it.
-    pub fn insert<K: AsRef<[u8]>, V: AsRef<[u8]>>(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<Option<IVec>> {
+    pub fn insert<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<Option<IVec>> {
         let cf = self.cf();
         let old = self.db.inner.get_cf(&cf, key.as_ref())?.map(IVec::from);
         self.db.inner.put_cf(&cf, key.as_ref(), value.as_ref())?;
@@ -837,7 +834,9 @@ pub mod transaction {
             // sequential (closure is single-threaded), so this never fires.
             // A panic here would indicate a caller violating the transaction
             // API contract (e.g. spawning a thread that holds a TxTree).
-            self.batch.borrow_mut().put_cf(&cf, key.as_ref(), value.as_ref());
+            self.batch
+                .borrow_mut()
+                .put_cf(&cf, key.as_ref(), value.as_ref());
             Ok(None)
         }
 
@@ -852,7 +851,12 @@ pub mod transaction {
             // batch are NOT visible. No current caller reads inside a
             // transaction, so this is fine for the migration.
             let cf = self.tree.cf();
-            Ok(self.tree.db.inner.get_cf(&cf, key.as_ref())?.map(IVec::from))
+            Ok(self
+                .tree
+                .db
+                .inner
+                .get_cf(&cf, key.as_ref())?
+                .map(IVec::from))
         }
     }
 

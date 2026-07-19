@@ -3,11 +3,13 @@
 //! Tests mempool flooding, capacity enforcement, and rate limiting.
 //! NO MOCKS. Real mempool, real transactions, real limits.
 
+use coincync::constants::{BOOTSTRAP_MIN_RING_SIZE, MAX_TX_SIZE, MIN_FEE_PER_BYTE};
+use coincync::crypto::{
+    BlindingFactor, ClsagSignature, KeyImage as CryptoKeyImage, PedersenCommitment, SecretScalar,
+};
 use coincync::mempool::Mempool;
-use coincync::primitives::{Amount, PublicKey, KeyImage};
-use coincync::transaction::{Transaction, TxType, TxInput, TxOutput, RingMemberRef};
-use coincync::crypto::{SecretScalar, ClsagSignature, BlindingFactor, PedersenCommitment, KeyImage as CryptoKeyImage};
-use coincync::constants::{MAX_TX_SIZE, MIN_FEE_PER_BYTE, BOOTSTRAP_MIN_RING_SIZE};
+use coincync::primitives::{Amount, KeyImage, PublicKey};
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -21,14 +23,16 @@ fn make_unique_tx(fee: u64) -> Transaction {
     let commitment = PedersenCommitment::commit(1_000_000_000, &bf);
     let ring_size = BOOTSTRAP_MIN_RING_SIZE;
 
-    let ring_members: Vec<RingMemberRef> = (0..ring_size).map(|_| {
-        let s = SecretScalar::random(&mut OsRng);
-        let c = PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng));
-        RingMemberRef {
-            public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
-            commitment: c.to_bytes(),
-        }
-    }).collect();
+    let ring_members: Vec<RingMemberRef> = (0..ring_size)
+        .map(|_| {
+            let s = SecretScalar::random(&mut OsRng);
+            let c = PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng));
+            RingMemberRef {
+                public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
+                commitment: c.to_bytes(),
+            }
+        })
+        .collect();
 
     let ki = CryptoKeyImage::from_secret(&secret);
     let sig = ClsagSignature {
@@ -48,8 +52,12 @@ fn make_unique_tx(fee: u64) -> Transaction {
             pseudo_output_commitment: commitment.to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: commitment.to_bytes(),
             encrypted_amount: vec![0u8; 8],
             view_tag: rand::random::<u8>(),
@@ -58,7 +66,11 @@ fn make_unique_tx(fee: u64) -> Transaction {
         }],
         fee: Amount::from_atomic(fee),
         range_proof: vec![0u8; 64],
-        extra: vec![rand::random::<u8>(), rand::random::<u8>(), rand::random::<u8>()],
+        extra: vec![
+            rand::random::<u8>(),
+            rand::random::<u8>(),
+            rand::random::<u8>(),
+        ],
     };
 
     let size = tx.size();
@@ -90,7 +102,11 @@ fn tier6_mempool_has_finite_capacity() {
     assert!(admitted > 0, "Mempool must accept valid transactions");
     // Pool size must be bounded
     let size = pool.size();
-    assert!(size < 500 * 1024 * 1024, "Mempool size must be bounded, got {}", size);
+    assert!(
+        size < 500 * 1024 * 1024,
+        "Mempool size must be bounded, got {}",
+        size
+    );
 }
 
 // =============================================================================
@@ -117,7 +133,8 @@ fn tier6_duplicate_keyimage_flood_contained() {
 
     assert!(
         rejected > 200,
-        "Most duplicate key image txs must be rejected. Only {}/254 rejected.", rejected
+        "Most duplicate key image txs must be rejected. Only {}/254 rejected.",
+        rejected
     );
 }
 
@@ -132,7 +149,10 @@ fn tier6_oversized_transaction_rejected() {
     tx.extra = vec![0xAB; MAX_TX_SIZE + 1];
 
     let result = pool.add_skip_crypto(tx);
-    assert!(result.is_err(), "Transaction exceeding MAX_TX_SIZE must be rejected");
+    assert!(
+        result.is_err(),
+        "Transaction exceeding MAX_TX_SIZE must be rejected"
+    );
 }
 
 // =============================================================================
@@ -153,7 +173,11 @@ fn tier6_zero_fee_flood_all_rejected() {
         }
     }
 
-    assert_eq!(rejected, 100, "ALL zero-fee txs must be rejected. Only {}/100 rejected.", rejected);
+    assert_eq!(
+        rejected, 100,
+        "ALL zero-fee txs must be rejected. Only {}/100 rejected.",
+        rejected
+    );
 }
 
 // =============================================================================
@@ -207,8 +231,12 @@ fn tier6_coinbase_injection_flood_rejected() {
             tx_type: TxType::Coinbase,
             inputs: vec![],
             outputs: vec![TxOutput {
-                stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-                tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+                stealth_address: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
+                tx_public_key: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
                 commitment: [i; 32],
                 encrypted_amount: vec![0u8; 8],
                 view_tag: i,
@@ -225,7 +253,11 @@ fn tier6_coinbase_injection_flood_rejected() {
         }
     }
 
-    assert_eq!(rejected, 100, "ALL coinbase injections must be rejected. Only {}/100.", rejected);
+    assert_eq!(
+        rejected, 100,
+        "ALL coinbase injections must be rejected. Only {}/100.",
+        rejected
+    );
 }
 
 // =============================================================================
@@ -262,7 +294,10 @@ fn tier6_below_minimum_fee_rejected() {
     tx.fee = Amount::from_atomic(1);
 
     let result = pool.add_skip_crypto(tx);
-    assert!(result.is_err(), "Fee of 1 atomic unit must be rejected (below MIN_FEE_PER_BYTE * size)");
+    assert!(
+        result.is_err(),
+        "Fee of 1 atomic unit must be rejected (below MIN_FEE_PER_BYTE * size)"
+    );
 }
 
 // =============================================================================

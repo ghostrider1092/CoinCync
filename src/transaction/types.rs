@@ -1,11 +1,17 @@
 //! Transaction types for CoinCync 1.0 (single-asset — asset layer stripped).
 
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use crate::primitives::{Hash, PublicKey, KeyImage, Amount, hash_concat};
+use crate::primitives::{hash_concat, Amount, Hash, KeyImage, PublicKey};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-pub enum TxType { Coinbase, Transfer, Churn }
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub enum TxType {
+    Coinbase,
+    Transfer,
+    Churn,
+}
 
 /// Ring member for ring signatures.
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -80,11 +86,17 @@ impl Transaction {
             }
         }
     }
-    
-    pub fn is_coinbase(&self) -> bool { self.tx_type == TxType::Coinbase }
-    pub fn input_count(&self) -> usize { self.inputs.len() }
-    pub fn output_count(&self) -> usize { self.outputs.len() }
-    
+
+    pub fn is_coinbase(&self) -> bool {
+        self.tx_type == TxType::Coinbase
+    }
+    pub fn input_count(&self) -> usize {
+        self.inputs.len()
+    }
+    pub fn output_count(&self) -> usize {
+        self.outputs.len()
+    }
+
     pub fn key_images(&self) -> Vec<KeyImage> {
         self.inputs.iter().map(|i| i.key_image).collect()
     }
@@ -168,8 +180,13 @@ impl Transaction {
             data.push(output.view_tag);
             // Lock height: encode Some/None explicitly so Some(0) and None differ.
             match output.lock_height {
-                Some(h) => { data.push(1); data.extend_from_slice(&h.to_le_bytes()); }
-                None    => { data.push(0); }
+                Some(h) => {
+                    data.push(1);
+                    data.extend_from_slice(&h.to_le_bytes());
+                }
+                None => {
+                    data.push(0);
+                }
             }
             data.extend_from_slice(&(output.encrypted_memo.len() as u32).to_le_bytes());
             data.extend_from_slice(&output.encrypted_memo);
@@ -210,7 +227,11 @@ impl<'a> SigningInputView<'a> {
         pseudo_output_commitment: &'a [u8; 32],
         ring_members: &'a [RingMemberRef],
     ) -> Self {
-        Self { key_image, pseudo_output_commitment, ring_members }
+        Self {
+            key_image,
+            pseudo_output_commitment,
+            ring_members,
+        }
     }
 }
 
@@ -273,7 +294,10 @@ mod tests {
         tx1.version = 1;
         let mut tx2 = make_minimal_tx();
         tx2.version = 2;
-        assert_ne!(tx1.signing_hash(), tx2.signing_hash(),
-            "version byte must be covered by signing_hash");
+        assert_ne!(
+            tx1.signing_hash(),
+            tx2.signing_hash(),
+            "version byte must be covered by signing_hash"
+        );
     }
 }

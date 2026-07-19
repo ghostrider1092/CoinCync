@@ -8,14 +8,12 @@
 //!
 //! The builder/signing_hash divergence bug would have been caught by test #3.
 
-use coincync::primitives::{Amount, PublicKey, SecretKey, Hash};
 use coincync::crypto::{
-    SecretScalar, PublicPoint, BlindingFactor, PedersenCommitment,
-    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch,
+    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, BlindingFactor,
+    PedersenCommitment, PublicPoint, SecretScalar,
 };
-use coincync::transaction::{
-    TransactionBuilder, SpendableInput, Recipient, DecoyOutput, TxType,
-};
+use coincync::primitives::{Amount, Hash, PublicKey, SecretKey};
+use coincync::transaction::{DecoyOutput, Recipient, SpendableInput, TransactionBuilder, TxType};
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -71,7 +69,10 @@ fn test_keypair_roundtrip() {
 
     // Round-trip through bytes
     let recovered = PublicPoint::from_bytes(public.to_bytes());
-    assert!(recovered.is_some(), "Public key must survive byte round-trip");
+    assert!(
+        recovered.is_some(),
+        "Public key must survive byte round-trip"
+    );
     assert_eq!(
         recovered.unwrap().to_bytes(),
         public.to_bytes(),
@@ -133,9 +134,7 @@ fn test_signing_hash_deterministic_and_nonzero() {
     let decoys = create_decoys(10);
 
     let mut builder = TransactionBuilder::transfer();
-    builder
-        .add_input(input, decoys, 5)
-        .expect("add_input");
+    builder.add_input(input, decoys, 5).expect("add_input");
     builder
         .add_output(
             &Recipient {
@@ -183,9 +182,7 @@ fn test_full_transaction_build() {
     let decoys = create_decoys(10);
 
     let mut builder = TransactionBuilder::transfer().with_target_height(0);
-    builder
-        .add_input(input, decoys, 3)
-        .expect("add_input");
+    builder.add_input(input, decoys, 3).expect("add_input");
     builder
         .add_output(
             &Recipient {
@@ -209,7 +206,9 @@ fn test_full_transaction_build() {
         .expect("add_change");
     builder.set_fee(Amount::from_atomic(50_000_000));
 
-    let tx = builder.build(&mut rng).expect("Transaction build must succeed");
+    let tx = builder
+        .build(&mut rng)
+        .expect("Transaction build must succeed");
 
     // Structure checks
     assert_eq!(tx.tx_type, TxType::Transfer);
@@ -222,7 +221,12 @@ fn test_full_transaction_build() {
 
     // CLSAG signature must be present
     assert!(
-        !tx.inputs[0].signature.to_bytes().unwrap().iter().all(|&b| b == 0),
+        !tx.inputs[0]
+            .signature
+            .to_bytes()
+            .unwrap()
+            .iter()
+            .all(|&b| b == 0),
         "CLSAG signature must not be zero"
     );
 

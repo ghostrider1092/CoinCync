@@ -12,8 +12,8 @@
 #![cfg(kani)]
 
 use crate::constants::{
-    activity_bonus_rate, min_output_age_at_height, MIN_OUTPUT_AGE,
-    MIN_OUTPUT_AGE_HARDFORK_HEIGHT, MIN_OUTPUT_AGE_POST_FORK,
+    activity_bonus_rate, min_output_age_at_height, MIN_OUTPUT_AGE, MIN_OUTPUT_AGE_HARDFORK_HEIGHT,
+    MIN_OUTPUT_AGE_POST_FORK,
 };
 
 /// **Binary switch**: `min_output_age_at_height` returns exactly one

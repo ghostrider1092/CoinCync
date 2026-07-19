@@ -17,30 +17,30 @@
 //! - Optimized segment size for blockchain workloads
 //! - Optional compression for storage efficiency
 
-pub mod shim;
 mod blocks;
-mod utxos;
-mod state;
+pub mod filters;
 mod keys;
 mod mempool;
-mod wallet;
 mod output_index;
-pub mod filters;
 pub mod pruning;
+pub mod shim;
+mod state;
+mod utxos;
+mod wallet;
 
 pub use blocks::BlockDb;
-pub use utxos::{UtxoDb, OutputEntry};
-pub use state::{StateDb, ChainStateData};
-pub use keys::{KeyDb, EncryptedKey, KeyEntry, KeyMetadata};
-pub use mempool::{MempoolDb, MempoolEntry};
-pub use wallet::{WalletDb, OwnedOutput, ScanState};
-pub use output_index::{OutputIndexDb, OutputIndexEntry};
 pub use filters::FilterDb;
-pub use pruning::{PruneResult, prune_blocks, is_pruned};
+pub use keys::{EncryptedKey, KeyDb, KeyEntry, KeyMetadata};
+pub use mempool::{MempoolDb, MempoolEntry};
+pub use output_index::{OutputIndexDb, OutputIndexEntry};
+pub use pruning::{is_pruned, prune_blocks, PruneResult};
+pub use state::{ChainStateData, StateDb};
+pub use utxos::{OutputEntry, UtxoDb};
+pub use wallet::{OwnedOutput, ScanState, WalletDb};
 
-use std::path::Path;
 use crate::error::{Error, Result};
 use crate::primitives::Hash;
+use std::path::Path;
 
 /// Database performance mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,11 +84,11 @@ pub struct DbConfig {
 impl Default for DbConfig {
     fn default() -> Self {
         DbConfig {
-            cache_size_mb: 512,                    // 512 MB cache
-            flush_interval_ms: Some(1000),         // Flush every second
+            cache_size_mb: 512,            // 512 MB cache
+            flush_interval_ms: Some(1000), // Flush every second
             mode: DbMode::Balanced,
-            use_compression: true,                 // Enable zstd compression
-            segment_size: 16 * 1024 * 1024,       // 16 MB segments (sled max)
+            use_compression: true,          // Enable zstd compression
+            segment_size: 16 * 1024 * 1024, // 16 MB segments (sled max)
             max_readers: 128,
             print_profile_on_drop: false,
         }
@@ -99,11 +99,11 @@ impl DbConfig {
     /// Configuration optimized for initial blockchain sync
     pub fn fast_sync() -> Self {
         DbConfig {
-            cache_size_mb: 1024,                   // 1 GB cache for sync
-            flush_interval_ms: Some(5000),         // Flush every 5 seconds
+            cache_size_mb: 1024,           // 1 GB cache for sync
+            flush_interval_ms: Some(5000), // Flush every 5 seconds
             mode: DbMode::Fast,
-            use_compression: false,                // Skip compression during sync
-            segment_size: 16 * 1024 * 1024,        // 16 MB (sled max)
+            use_compression: false,         // Skip compression during sync
+            segment_size: 16 * 1024 * 1024, // 16 MB (sled max)
             max_readers: 64,
             print_profile_on_drop: false,
         }
@@ -112,11 +112,11 @@ impl DbConfig {
     /// Configuration optimized for low-memory systems
     pub fn low_memory() -> Self {
         DbConfig {
-            cache_size_mb: 128,                    // 128 MB cache
-            flush_interval_ms: Some(500),          // Flush more often
+            cache_size_mb: 128,           // 128 MB cache
+            flush_interval_ms: Some(500), // Flush more often
             mode: DbMode::Safe,
-            use_compression: true,                 // Save disk space
-            segment_size: 8 * 1024 * 1024,        // 8 MB segments
+            use_compression: true,         // Save disk space
+            segment_size: 8 * 1024 * 1024, // 8 MB segments
             max_readers: 32,
             print_profile_on_drop: false,
         }
@@ -126,10 +126,10 @@ impl DbConfig {
     pub fn maximum_safety() -> Self {
         DbConfig {
             cache_size_mb: 256,
-            flush_interval_ms: Some(100),          // Flush very often
+            flush_interval_ms: Some(100), // Flush very often
             mode: DbMode::Safe,
             use_compression: true,
-            segment_size: 16 * 1024 * 1024,       // 16 MB (sled max)
+            segment_size: 16 * 1024 * 1024, // 16 MB (sled max)
             max_readers: 64,
             print_profile_on_drop: false,
         }
@@ -351,14 +351,13 @@ pub struct Database {
 /// same purpose. Neither internal check-shape was re-traced this
 /// session, so the concrete inner primitives are dropped in favour
 /// of the verified enclosing-function receipts above.
-fn verify_or_stamp_schema_version(
-    metadata: &shim::Tree,
-    blocks: &BlockDb,
-) -> Result<()> {
-    let stored = metadata.get(SCHEMA_VERSION_KEY)
-        .map_err(|e| Error::DatabaseError(format!(
-            "failed to read schema_version from metadata tree: {}", e
-        )))?;
+fn verify_or_stamp_schema_version(metadata: &shim::Tree, blocks: &BlockDb) -> Result<()> {
+    let stored = metadata.get(SCHEMA_VERSION_KEY).map_err(|e| {
+        Error::DatabaseError(format!(
+            "failed to read schema_version from metadata tree: {}",
+            e
+        ))
+    })?;
 
     match stored {
         None => {
@@ -367,10 +366,14 @@ fn verify_or_stamp_schema_version(
             if blocks.is_empty() {
                 // Fresh DB: stamp it.
                 let version_bytes = EXPECTED_DB_SCHEMA_VERSION.to_le_bytes();
-                metadata.insert(SCHEMA_VERSION_KEY, &version_bytes)
-                    .map_err(|e| Error::DatabaseError(format!(
-                        "failed to stamp initial schema_version: {}", e
-                    )))?;
+                metadata
+                    .insert(SCHEMA_VERSION_KEY, &version_bytes)
+                    .map_err(|e| {
+                        Error::DatabaseError(format!(
+                            "failed to stamp initial schema_version: {}",
+                            e
+                        ))
+                    })?;
                 tracing::info!(
                     "Fresh database initialized with schema_version = {}",
                     EXPECTED_DB_SCHEMA_VERSION,
@@ -411,10 +414,7 @@ fn verify_or_stamp_schema_version(
 
             match stored_version.cmp(&EXPECTED_DB_SCHEMA_VERSION) {
                 std::cmp::Ordering::Equal => {
-                    tracing::debug!(
-                        "DB schema_version = {} (matches expected)",
-                        stored_version,
-                    );
+                    tracing::debug!("DB schema_version = {} (matches expected)", stored_version,);
                     Ok(())
                 }
                 std::cmp::Ordering::Greater => {
@@ -441,8 +441,10 @@ fn verify_or_stamp_schema_version(
                          run the registered migration. For now: wipe the data dir \
                          and resync from genesis, OR downgrade to a binary that \
                          expects schema_version {}.",
-                        stored_version, EXPECTED_DB_SCHEMA_VERSION,
-                        stored_version, EXPECTED_DB_SCHEMA_VERSION,
+                        stored_version,
+                        EXPECTED_DB_SCHEMA_VERSION,
+                        stored_version,
+                        EXPECTED_DB_SCHEMA_VERSION,
                         stored_version,
                     )))
                 }
@@ -530,21 +532,17 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
         .cache_capacity((config.cache_size_mb * 1024 * 1024) as u64)
         .flush_every_ms(config.flush_interval_ms)
         .open()
-        .map_err(|e| Error::DatabaseError(format!(
-            "failed to open DB for migration: {}", e
-        )))?;
+        .map_err(|e| Error::DatabaseError(format!("failed to open DB for migration: {}", e)))?;
 
     let blocks = BlockDb::new(&db)?;
-    let metadata = db.open_tree(METADATA_TREE_NAME)
-        .map_err(|e| Error::DatabaseError(format!(
-            "failed to open metadata tree: {}", e
-        )))?;
+    let metadata = db
+        .open_tree(METADATA_TREE_NAME)
+        .map_err(|e| Error::DatabaseError(format!("failed to open metadata tree: {}", e)))?;
 
     // Step 1: idempotency check — already stamped?
-    let stored = metadata.get(SCHEMA_VERSION_KEY)
-        .map_err(|e| Error::DatabaseError(format!(
-            "failed to read schema_version: {}", e
-        )))?;
+    let stored = metadata
+        .get(SCHEMA_VERSION_KEY)
+        .map_err(|e| Error::DatabaseError(format!("failed to read schema_version: {}", e)))?;
     match stored {
         None => { /* legacy DB — proceed with migration */ }
         Some(bytes) if bytes.len() == 4 => {
@@ -579,7 +577,8 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
         return Err(Error::DatabaseError(
             "Database is empty (no block at height 0). This helper migrates \
              EXISTING pre-v1 chaindata. For a fresh install, use normal \
-             startup (`coincync-node`) which auto-stamps new DBs.".into()
+             startup (`coincync-node`) which auto-stamps new DBs."
+                .into(),
         ));
     }
 
@@ -587,14 +586,16 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
     // This is the SAFETY GATE — without it we could silently stamp a DB
     // belonging to mainnet with a testnet binary (or any other chain
     // mismatch). The hash of block-0 is the canonical chain identifier.
-    let actual_genesis = blocks.get_hash_by_height(0)
-        .map_err(|e| Error::DatabaseError(format!(
-            "failed to read block-0 hash: {}", e
-        )))?
-        .ok_or_else(|| Error::DatabaseError(
-            "block height index has no entry at height 0 — DB corruption, \
-             refusing to migrate".into()
-        ))?;
+    let actual_genesis = blocks
+        .get_hash_by_height(0)
+        .map_err(|e| Error::DatabaseError(format!("failed to read block-0 hash: {}", e)))?
+        .ok_or_else(|| {
+            Error::DatabaseError(
+                "block height index has no entry at height 0 — DB corruption, \
+             refusing to migrate"
+                    .into(),
+            )
+        })?;
 
     if &actual_genesis != expected_genesis {
         return Err(Error::DatabaseError(format!(
@@ -610,26 +611,31 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
 
     // Step 4: stamp.
     let version_bytes = EXPECTED_DB_SCHEMA_VERSION.to_le_bytes();
-    metadata.insert(SCHEMA_VERSION_KEY, &version_bytes)
-        .map_err(|e| Error::DatabaseError(format!(
-            "failed to write schema_version stamp: {}", e
-        )))?;
+    metadata
+        .insert(SCHEMA_VERSION_KEY, &version_bytes)
+        .map_err(|e| {
+            Error::DatabaseError(format!("failed to write schema_version stamp: {}", e))
+        })?;
 
     // Flush to disk before reporting success. If the binary crashes
     // between insert() and a subsequent flush, the stamp would be lost
     // and the operator would have to re-run migration. Force a flush
     // so the operation is durable once we return Ok.
-    db.flush()
-        .map_err(|e| Error::DatabaseError(format!(
-            "failed to flush schema_version stamp to disk: {}", e
-        )))?;
+    db.flush().map_err(|e| {
+        Error::DatabaseError(format!(
+            "failed to flush schema_version stamp to disk: {}",
+            e
+        ))
+    })?;
 
     tracing::info!(
         "Legacy DB migrated: schema_version stamped as {} (genesis verified: {})",
         EXPECTED_DB_SCHEMA_VERSION,
         actual_genesis,
     );
-    Ok(MigrationOutcome::Stamped { genesis_hash: actual_genesis })
+    Ok(MigrationOutcome::Stamped {
+        genesis_hash: actual_genesis,
+    })
 }
 
 /// Current DB schema version. Bump on ANY incompatible on-disk
@@ -685,9 +691,11 @@ impl Database {
         let mempool = MempoolDb::new(&db)?;
         let output_index = OutputIndexDb::new(&db)?;
         let filters = FilterDb::new(&db)?;
-        let tx_index = db.open_tree("tx_index")
+        let tx_index = db
+            .open_tree("tx_index")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let metadata = db.open_tree(METADATA_TREE_NAME)
+        let metadata = db
+            .open_tree(METADATA_TREE_NAME)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         // Schema-version check runs AFTER every tree is opened. We need
@@ -726,7 +734,9 @@ impl Database {
     /// they're running. Differential schema versions across a fleet are
     /// invisible without an explicit accessor like this.
     pub fn schema_version(&self) -> Result<u32> {
-        match self.metadata.get(SCHEMA_VERSION_KEY)
+        match self
+            .metadata
+            .get(SCHEMA_VERSION_KEY)
             .map_err(|e| Error::DatabaseError(e.to_string()))?
         {
             Some(bytes) if bytes.len() == 4 => {
@@ -740,7 +750,8 @@ impl Database {
             ))),
             None => Err(Error::DatabaseError(
                 "schema_version key missing from metadata tree (should be impossible \
-                 after successful Database::open — file a bug)".into()
+                 after successful Database::open — file a bug)"
+                    .into(),
             )),
         }
     }
@@ -748,8 +759,8 @@ impl Database {
     /// Open a temporary database (for testing)
     #[cfg(test)]
     pub fn open_temp() -> Result<Self> {
-        let dir = tempfile::tempdir()
-            .map_err(|e: std::io::Error| Error::DatabaseError(e.to_string()))?;
+        let dir =
+            tempfile::tempdir().map_err(|e: std::io::Error| Error::DatabaseError(e.to_string()))?;
         Self::open(dir.keep())
     }
 
@@ -758,7 +769,8 @@ impl Database {
         let mut value = [0u8; 12];
         value[..8].copy_from_slice(&height.to_le_bytes());
         value[8..].copy_from_slice(&tx_idx.to_le_bytes());
-        self.tx_index.insert(tx_hash, &value)
+        self.tx_index
+            .insert(tx_hash, &value)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -860,7 +872,10 @@ impl Database {
         // up-front against the committed DB.
         let mut oi_to_insert: Vec<(&[u8; 32], &Vec<u8>)> = Vec::new();
         for (stealth, entry_bytes) in output_additions {
-            if self.output_index.tree.get(stealth.as_slice())
+            if self
+                .output_index
+                .tree
+                .get(stealth.as_slice())
                 .map_err(|e| Error::DatabaseError(e.to_string()))?
                 .is_none()
             {
@@ -875,50 +890,52 @@ impl Database {
             &self.tx_index,
         ];
 
-        trees.transaction(|tx_trees| {
-            let oi_tree = &tx_trees[0];
-            let hi_tree = &tx_trees[1];
-            let st_tree = &tx_trees[2];
-            let ti_tree = &tx_trees[3];
+        trees
+            .transaction(|tx_trees| {
+                let oi_tree = &tx_trees[0];
+                let hi_tree = &tx_trees[1];
+                let st_tree = &tx_trees[2];
+                let ti_tree = &tx_trees[3];
 
-            // 1. Remove disconnected outputs from output_index
-            for stealth in output_removals {
-                oi_tree.remove(stealth.as_slice())?;
-            }
+                // 1. Remove disconnected outputs from output_index
+                for stealth in output_removals {
+                    oi_tree.remove(stealth.as_slice())?;
+                }
 
-            // 2. Add fork-block outputs (filtered for oldest-wins above)
-            for (stealth, entry_bytes) in &oi_to_insert {
-                oi_tree.insert(stealth.as_slice(), entry_bytes.as_slice())?;
-            }
+                // 2. Add fork-block outputs (filtered for oldest-wins above)
+                for (stealth, entry_bytes) in &oi_to_insert {
+                    oi_tree.insert(stealth.as_slice(), entry_bytes.as_slice())?;
+                }
 
-            // 3. Set height→hash for fork blocks + new tip
-            for (height, hash) in height_sets {
-                hi_tree.insert(&height.to_be_bytes(), hash.as_slice())?;
-            }
+                // 3. Set height→hash for fork blocks + new tip
+                for (height, hash) in height_sets {
+                    hi_tree.insert(&height.to_be_bytes(), hash.as_slice())?;
+                }
 
-            // 4. Remove stale heights above new tip
-            for height in height_removals {
-                hi_tree.remove(&height.to_be_bytes())?;
-            }
+                // 4. Remove stale heights above new tip
+                for height in height_removals {
+                    hi_tree.remove(&height.to_be_bytes())?;
+                }
 
-            // 5. Update chain state
-            st_tree.insert(b"chain_state", new_state)?;
+                // 5. Update chain state
+                st_tree.insert(b"chain_state", new_state)?;
 
-            // 6. Update tx index
-            for hash in tx_index_removes {
-                ti_tree.remove(hash.as_slice())?;
-            }
-            for (hash, height, tx_idx) in tx_index_adds {
-                let mut value = [0u8; 12];
-                value[..8].copy_from_slice(&height.to_le_bytes());
-                value[8..].copy_from_slice(&tx_idx.to_le_bytes());
-                ti_tree.insert(hash.as_slice(), &value)?;
-            }
+                // 6. Update tx index
+                for hash in tx_index_removes {
+                    ti_tree.remove(hash.as_slice())?;
+                }
+                for (hash, height, tx_idx) in tx_index_adds {
+                    let mut value = [0u8; 12];
+                    value[..8].copy_from_slice(&height.to_le_bytes());
+                    value[8..].copy_from_slice(&tx_idx.to_le_bytes());
+                    ti_tree.insert(hash.as_slice(), &value)?;
+                }
 
-            Ok(())
-        }).map_err(|e: shim::transaction::TransactionError| {
-            Error::DatabaseError(format!("Atomic reorg transaction failed: {:?}", e))
-        })?;
+                Ok(())
+            })
+            .map_err(|e: shim::transaction::TransactionError| {
+                Error::DatabaseError(format!("Atomic reorg transaction failed: {:?}", e))
+            })?;
 
         // Sync to disk after atomic transaction completes
         self.flush()?;
@@ -928,7 +945,8 @@ impl Database {
 
     /// Flush all pending writes to disk
     pub fn flush(&self) -> Result<()> {
-        self.db.flush()
+        self.db
+            .flush()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -973,16 +991,22 @@ impl Database {
     /// Get database statistics for monitoring.
     /// Returns (total_entries_across_trees, disk_size_bytes).
     pub fn cache_stats(&self) -> (u64, u64) {
-        let entries = self.db.tree_names().iter().filter_map(|name| {
-            let name_str = std::str::from_utf8(name).ok()?;
-            self.db.open_tree(name_str).ok().map(|t| t.len() as u64)
-        }).sum::<u64>();
+        let entries = self
+            .db
+            .tree_names()
+            .iter()
+            .filter_map(|name| {
+                let name_str = std::str::from_utf8(name).ok()?;
+                self.db.open_tree(name_str).ok().map(|t| t.len() as u64)
+            })
+            .sum::<u64>();
         (entries, self.size_on_disk())
     }
 
     /// Generate a monotonically increasing ID
     pub fn generate_id(&self) -> Result<u64> {
-        self.db.generate_id()
+        self.db
+            .generate_id()
             .map_err(|e| Error::DatabaseError(e.to_string()))
     }
 
@@ -1028,14 +1052,12 @@ pub struct DbStats {
 
 /// Helper to serialize data for storage
 pub fn serialize<T: borsh::BorshSerialize>(value: &T) -> Result<Vec<u8>> {
-    borsh::to_vec(value)
-        .map_err(|e| Error::SerializationError(e.to_string()))
+    borsh::to_vec(value).map_err(|e| Error::SerializationError(e.to_string()))
 }
 
 /// Helper to deserialize data from storage
 pub fn deserialize<T: borsh::BorshDeserialize>(bytes: &[u8]) -> Result<T> {
-    borsh::from_slice(bytes)
-        .map_err(|e| Error::SerializationError(e.to_string()))
+    borsh::from_slice(bytes).map_err(|e| Error::SerializationError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -1111,10 +1133,14 @@ mod tests {
         // Reopen MUST fail.
         let result = Database::open(dir.path());
         assert!(result.is_err(), "future-version DB must refuse to open");
-        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        let msg = match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e.to_string(),
+        };
         assert!(
             msg.contains("created by a newer binary") || msg.contains("future"),
-            "error message should explain the downgrade scenario; got: {}", msg,
+            "error message should explain the downgrade scenario; got: {}",
+            msg,
         );
     }
 
@@ -1141,11 +1167,18 @@ mod tests {
             db.flush().unwrap();
         }
         let result = Database::open(dir.path());
-        assert!(result.is_err(), "older-version DB without migration must refuse to open");
-        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        assert!(
+            result.is_err(),
+            "older-version DB without migration must refuse to open"
+        );
+        let msg = match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e.to_string(),
+        };
         assert!(
             msg.contains("No migration is registered"),
-            "error should request a migration; got: {}", msg,
+            "error should request a migration; got: {}",
+            msg,
         );
     }
 
@@ -1166,11 +1199,18 @@ mod tests {
             db.flush().unwrap();
         }
         let result = Database::open(dir.path());
-        assert!(result.is_err(), "wrong-length schema_version must refuse to open");
-        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        assert!(
+            result.is_err(),
+            "wrong-length schema_version must refuse to open"
+        );
+        let msg = match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e.to_string(),
+        };
         assert!(
             msg.contains("wrong length") || msg.contains("4 bytes"),
-            "error should describe the length mismatch; got: {}", msg,
+            "error should describe the length mismatch; got: {}",
+            msg,
         );
     }
 
@@ -1193,22 +1233,30 @@ mod tests {
             // no schema_version stamp. Insert a sentinel key into the
             // blocks tree (bypassing the typed API — we don't care if
             // the value is a real block, only that the tree isn't empty).
-            db.blocks.height_index.insert(b"\x00\x00\x00\x00\x00\x00\x00\x00", b"sentinel")
+            db.blocks
+                .height_index
+                .insert(b"\x00\x00\x00\x00\x00\x00\x00\x00", b"sentinel")
                 .unwrap();
             // Wait — height_index isn't the tree we check. Open the
             // actual blocks tree and stuff a key into it.
             let blocks_tree = db.db.open_tree("blocks").unwrap();
-            blocks_tree.insert(b"sentinel_key", b"sentinel_value").unwrap();
+            blocks_tree
+                .insert(b"sentinel_key", b"sentinel_value")
+                .unwrap();
             // Now remove the schema_version stamp.
             db.metadata.remove(SCHEMA_VERSION_KEY).unwrap();
             db.flush().unwrap();
         }
         let result = Database::open(dir.path());
         assert!(result.is_err(), "legacy unstamped DB must refuse to open");
-        let msg = match result { Ok(_) => panic!("expected error, got Ok"), Err(e) => e.to_string() };
+        let msg = match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e.to_string(),
+        };
         assert!(
             msg.contains("Legacy database") || msg.contains("schema_version stamp"),
-            "error should identify the legacy DB scenario; got: {}", msg,
+            "error should identify the legacy DB scenario; got: {}",
+            msg,
         );
     }
 
@@ -1223,9 +1271,12 @@ mod tests {
         let db = Database::open(path).unwrap();
         // Make blocks tree non-empty so is_empty() returns false.
         let blocks_tree = db.db.open_tree("blocks").unwrap();
-        blocks_tree.insert(genesis.as_bytes(), b"sentinel_block_body").unwrap();
+        blocks_tree
+            .insert(genesis.as_bytes(), b"sentinel_block_body")
+            .unwrap();
         // Index height 0 → genesis hash so get_hash_by_height(0) works.
-        db.blocks.height_index
+        db.blocks
+            .height_index
             .insert(&0u64.to_be_bytes(), genesis.as_bytes())
             .unwrap();
         // Strip the schema_version stamp — this is what makes it "legacy".
@@ -1241,13 +1292,15 @@ mod tests {
         let genesis = Hash::from_bytes([0x42; 32]);
         build_synthetic_legacy_db(dir.path(), genesis);
 
-        let outcome = migrate_legacy_db_to_v1(
-            dir.path(), DbConfig::default(), &genesis,
-        ).expect("migration should succeed on legacy DB with matching genesis");
+        let outcome = migrate_legacy_db_to_v1(dir.path(), DbConfig::default(), &genesis)
+            .expect("migration should succeed on legacy DB with matching genesis");
 
         match outcome {
             MigrationOutcome::Stamped { genesis_hash } => {
-                assert_eq!(genesis_hash, genesis, "outcome should report verified genesis");
+                assert_eq!(
+                    genesis_hash, genesis,
+                    "outcome should report verified genesis"
+                );
             }
             other => panic!("expected Stamped, got {:?}", other),
         }
@@ -1268,15 +1321,14 @@ mod tests {
         let wrong_expected = Hash::from_bytes([0xAB; 32]);
         build_synthetic_legacy_db(dir.path(), actual);
 
-        let result = migrate_legacy_db_to_v1(
-            dir.path(), DbConfig::default(), &wrong_expected,
-        );
+        let result = migrate_legacy_db_to_v1(dir.path(), DbConfig::default(), &wrong_expected);
 
         let err = result.expect_err("must reject wrong-genesis migration");
         let msg = err.to_string();
         assert!(
             msg.contains("Genesis hash mismatch") || msg.contains("different network"),
-            "error should name the mismatch; got: {}", msg,
+            "error should name the mismatch; got: {}",
+            msg,
         );
 
         // Critical: confirm the DB was NOT stamped despite the error.
@@ -1285,8 +1337,10 @@ mod tests {
         let db_path_again = dir.path();
         let db_check = shim::Config::new().path(db_path_again).open().unwrap();
         let meta = db_check.open_tree(METADATA_TREE_NAME).unwrap();
-        assert!(meta.get(SCHEMA_VERSION_KEY).unwrap().is_none(),
-            "stamp must not be written on a failed migration");
+        assert!(
+            meta.get(SCHEMA_VERSION_KEY).unwrap().is_none(),
+            "stamp must not be written on a failed migration"
+        );
     }
 
     /// Empty DB (no blocks) — operator pointed migration at a freshly-
@@ -1306,13 +1360,16 @@ mod tests {
         }
 
         let result = migrate_legacy_db_to_v1(
-            dir.path(), DbConfig::default(), &Hash::from_bytes([0xAA; 32]),
+            dir.path(),
+            DbConfig::default(),
+            &Hash::from_bytes([0xAA; 32]),
         );
         let err = result.expect_err("must reject empty-DB migration");
         let msg = err.to_string();
         assert!(
             msg.contains("empty") || msg.contains("EXISTING pre-v1"),
-            "error should point at empty-DB scenario; got: {}", msg,
+            "error should point at empty-DB scenario; got: {}",
+            msg,
         );
     }
 
@@ -1333,8 +1390,11 @@ mod tests {
         // expected-genesis arg doesn't matter for this path — idempotency
         // checks happen before the genesis-hash check.
         let outcome = migrate_legacy_db_to_v1(
-            dir.path(), DbConfig::default(), &Hash::from_bytes([0xFF; 32]),
-        ).expect("migration should report idempotency");
+            dir.path(),
+            DbConfig::default(),
+            &Hash::from_bytes([0xFF; 32]),
+        )
+        .expect("migration should report idempotency");
         assert_eq!(outcome, MigrationOutcome::AlreadyStamped);
 
         // And the stamp is still correct after the no-op.

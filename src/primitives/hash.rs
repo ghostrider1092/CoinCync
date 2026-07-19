@@ -7,30 +7,42 @@
 //! - Standard `==` comparison is fine for public data (block hashes, merkle roots, difficulty)
 //! - The derived `PartialEq` uses standard comparison for performance in non-sensitive contexts
 
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
-use borsh::{BorshSerialize, BorshDeserialize};
 
 /// A 32-byte hash (256 bits)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BorshSerialize, BorshDeserialize,
+)]
 pub struct Hash([u8; 32]);
 
 impl Hash {
     pub const LEN: usize = 32;
 
-    pub fn from_bytes(bytes: [u8; 32]) -> Self { Hash(bytes) }
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Hash(bytes)
+    }
 
     pub fn from_slice(slice: &[u8]) -> Option<Self> {
-        if slice.len() != 32 { return None; }
+        if slice.len() != 32 {
+            return None;
+        }
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(slice);
         Some(Hash(bytes))
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
-    pub fn as_slice(&self) -> &[u8] { &self.0 }
-    pub fn to_hex(&self) -> String { hex::encode(self.0) }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
 
     /// Constant-time equality comparison (for security-sensitive contexts)
     /// Use this when comparing hashes in authentication/verification
@@ -44,15 +56,25 @@ impl Hash {
         let bytes = hex::decode(s).ok()?;
         Self::from_slice(&bytes)
     }
-    
-    pub const fn zero() -> Self { Hash([0u8; 32]) }
-    pub fn is_zero(&self) -> bool { self.0 == [0u8; 32] }
-    pub fn first_byte(&self) -> u8 { self.0[0] }
-    
+
+    pub const fn zero() -> Self {
+        Hash([0u8; 32])
+    }
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0u8; 32]
+    }
+    pub fn first_byte(&self) -> u8 {
+        self.0[0]
+    }
+
     pub fn meets_difficulty(&self, target: &Hash) -> bool {
         for i in 0..32 {
-            if self.0[i] < target.0[i] { return true; }
-            if self.0[i] > target.0[i] { return false; }
+            if self.0[i] < target.0[i] {
+                return true;
+            }
+            if self.0[i] > target.0[i] {
+                return false;
+            }
         }
         true
     }
@@ -68,7 +90,11 @@ impl Hash {
         // M-2 FIX: off-by-one — from_difficulty(1) must equal max_target
         // Simple implementation: calculate leading zeros based on log2(difficulty)
         // For each doubling of difficulty, we need one more leading zero bit
-        let leading_zero_bits = if difficulty == 0 { 0 } else { 63 - difficulty.leading_zeros() as usize };
+        let leading_zero_bits = if difficulty == 0 {
+            0
+        } else {
+            63 - difficulty.leading_zeros() as usize
+        };
 
         let mut bytes = [0xFF; 32];
         let full_zero_bytes = leading_zero_bits / 8;
@@ -124,17 +150,31 @@ impl FromStr for Hash {
     /// FIX: Report byte count (not char count) on mismatch.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let decoded = hex::decode(s).map_err(|_| crate::error::Error::InvalidHashLength {
-            expected: 32, got: s.len() / 2,
+            expected: 32,
+            got: s.len() / 2,
         })?;
         Self::from_slice(&decoded).ok_or(crate::error::Error::InvalidHashLength {
-            expected: 32, got: decoded.len(),
+            expected: 32,
+            got: decoded.len(),
         })
     }
 }
 
-impl AsRef<[u8]> for Hash { fn as_ref(&self) -> &[u8] { &self.0 } }
-impl From<[u8; 32]> for Hash { fn from(bytes: [u8; 32]) -> Self { Hash(bytes) } }
-impl From<Hash> for [u8; 32] { fn from(hash: Hash) -> Self { hash.0 } }
+impl AsRef<[u8]> for Hash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl From<[u8; 32]> for Hash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Hash(bytes)
+    }
+}
+impl From<Hash> for [u8; 32] {
+    fn from(hash: Hash) -> Self {
+        hash.0
+    }
+}
 
 impl Serialize for Hash {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -164,7 +204,9 @@ pub fn hash_data(data: &[u8]) -> Hash {
 
 pub fn hash_concat(parts: &[&[u8]]) -> Hash {
     let mut hasher = blake3::Hasher::new();
-    for part in parts { hasher.update(part); }
+    for part in parts {
+        hasher.update(part);
+    }
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -177,15 +219,18 @@ pub fn hash_domain(domain: &[u8], data: &[u8]) -> Hash {
 }
 
 pub fn merkle_root(hashes: &[Hash]) -> Hash {
-    if hashes.is_empty() { return Hash::zero(); }
+    if hashes.is_empty() {
+        return Hash::zero();
+    }
     if hashes.len() == 1 {
         // H-4 FIX: Single-leaf trees still get domain separation
         return hash_concat(&[&[0x00], hashes[0].as_slice()]);
     }
-    
+
     // H-4 FIX: RFC 6962 domain separation prevents merkle malleability (CVE-2012-2459)
     // Leaf nodes are prefixed with 0x00; internal nodes with 0x01.
-    let mut level: Vec<Hash> = hashes.iter()
+    let mut level: Vec<Hash> = hashes
+        .iter()
         .map(|h| hash_concat(&[&[0x00], h.as_slice()]))
         .collect();
     while level.len() > 1 {

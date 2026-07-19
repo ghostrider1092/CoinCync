@@ -210,7 +210,9 @@ mod tests {
             _ => None,
         };
         let err = verify_chain_binding(&m, 100, &tip, &cps, lookup).unwrap_err();
-        assert!(format!("{:?}", err).to_lowercase().contains("missing a block"));
+        assert!(format!("{:?}", err)
+            .to_lowercase()
+            .contains("missing a block"));
     }
 
     #[test]

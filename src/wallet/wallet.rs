@@ -2,20 +2,22 @@
 //!
 //! Main wallet struct that combines keys, balance, and operations.
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
+use crate::error::{Error, Result};
+use crate::primitives::{Amount, Hash, KeyImage};
 use rand::RngCore;
 use zeroize::Zeroize;
-use crate::primitives::{Hash, Amount, KeyImage};
-use crate::error::{Error, Result};
 
-use super::wallet_keys::WalletKeys;
-use super::key_epoch::KeyEpoch;
 use super::balance::{Balance, UTXO};
-use super::persistence::{WalletData, save_wallet, load_wallet, generate_mnemonic, mnemonic_to_seed};
 use super::history::{TransactionHistory, TransactionRecord};
+use super::key_epoch::KeyEpoch;
+use super::persistence::{
+    generate_mnemonic, load_wallet, mnemonic_to_seed, save_wallet, WalletData,
+};
+use super::wallet_keys::WalletKeys;
 
 /// Wallet state
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,11 +71,7 @@ pub struct Wallet {
 
 impl Wallet {
     /// Create a new wallet
-    pub fn create(
-        path: PathBuf,
-        password: Option<&str>,
-        network: &str,
-    ) -> Result<(Self, String)> {
+    pub fn create(path: PathBuf, password: Option<&str>, network: &str) -> Result<(Self, String)> {
         if path.exists() {
             return Err(Error::WalletExists(path.display().to_string()));
         }
@@ -177,7 +175,9 @@ impl Wallet {
         let spend_bytes = hex::decode(spend_public_hex)
             .map_err(|e| Error::InvalidParams(format!("invalid spend public key hex: {}", e)))?;
         if spend_bytes.len() != 32 {
-            return Err(Error::InvalidParams("spend public key must be 32 bytes".into()));
+            return Err(Error::InvalidParams(
+                "spend public key must be 32 bytes".into(),
+            ));
         }
         let mut spend_arr = [0u8; 32];
         spend_arr.copy_from_slice(&spend_bytes);
@@ -213,7 +213,12 @@ impl Wallet {
 
     /// Check if this is a watch-only wallet
     pub fn is_watch_only(&self) -> bool {
-        self.watch_only || self.keys.as_ref().map(|k| k.is_watch_only()).unwrap_or(false)
+        self.watch_only
+            || self
+                .keys
+                .as_ref()
+                .map(|k| k.is_watch_only())
+                .unwrap_or(false)
     }
 
     /// Restore wallet from mnemonic
@@ -302,13 +307,15 @@ impl Wallet {
         // the hex-encoded spend public key, OR seed is all zeros (legacy format)
         let keys = if data.label.starts_with("watch-only:") {
             let spend_hex = &data.label["watch-only:".len()..];
-            let spend_bytes = hex::decode(spend_hex)
-                .map_err(|e| Error::InvalidState(format!(
-                    "corrupt watch-only wallet: invalid spend key hex: {}", e
-                )))?;
+            let spend_bytes = hex::decode(spend_hex).map_err(|e| {
+                Error::InvalidState(format!(
+                    "corrupt watch-only wallet: invalid spend key hex: {}",
+                    e
+                ))
+            })?;
             if spend_bytes.len() != 32 {
                 return Err(Error::InvalidState(
-                    "corrupt watch-only wallet: spend key must be 32 bytes".into()
+                    "corrupt watch-only wallet: spend key must be 32 bytes".into(),
                 ));
             }
             let mut spend_arr = [0u8; 32];
@@ -323,7 +330,8 @@ impl Wallet {
             // Legacy watch-only format with zero seed - cannot restore keys
             return Err(Error::InvalidState(
                 "legacy watch-only wallet with zero seed cannot be unlocked; \
-                 re-import using view key and spend public key".into()
+                 re-import using view key and spend public key"
+                    .into(),
             ));
         } else {
             self.watch_only = false;
@@ -396,8 +404,12 @@ impl Wallet {
         if reservations_path.exists() {
             if let Ok(bytes) = std::fs::read(&reservations_path) {
                 let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
-                if let Ok(entries) = serde_json::from_slice::<Vec<((Hash, u8), super::balance::Reservation)>>(&json_bytes) {
-                    self.balance.restore_reservations(entries, self.scanned_height);
+                if let Ok(entries) = serde_json::from_slice::<
+                    Vec<((Hash, u8), super::balance::Reservation)>,
+                >(&json_bytes)
+                {
+                    self.balance
+                        .restore_reservations(entries, self.scanned_height);
                 }
                 json_bytes.zeroize();
             }
@@ -446,10 +458,13 @@ impl Wallet {
     pub fn address(&self) -> Result<String> {
         use crate::primitives::{Address, Network};
 
-        let keys = self.keys.as_ref()
+        let keys = self
+            .keys
+            .as_ref()
             .ok_or(Error::InvalidState("wallet locked".into()))?;
 
-        let epoch = keys.current()
+        let epoch = keys
+            .current()
             .ok_or(Error::InvalidState("no key epoch".into()))?;
 
         // Determine network from wallet config
@@ -505,7 +520,8 @@ impl Wallet {
         let _ = epoch;
         Err(Error::InvalidState(
             "export_view_key requires password re-confirmation; \
-             call export_view_key_confirmed(password, epoch) instead".into()
+             call export_view_key_confirmed(password, epoch) instead"
+                .into(),
         ))
     }
 
@@ -516,11 +532,7 @@ impl Wallet {
     /// with the supplied password and reject on cipher-tag mismatch. The
     /// password is held in memory only for the verify call; it is dropped
     /// before the view key is returned.
-    pub fn export_view_key_confirmed(
-        &self,
-        password: &str,
-        epoch: Option<u64>,
-    ) -> Result<String> {
+    pub fn export_view_key_confirmed(&self, password: &str, epoch: Option<u64>) -> Result<String> {
         // Re-verify password by attempting wallet load. A wrong password
         // surfaces as a decrypt error (Argon2id KDF + AEAD tag check).
         // We discard the loaded data — we only need confirmation that
@@ -533,13 +545,17 @@ impl Wallet {
              this reveals transaction history to the recipient"
         );
 
-        let keys = self.keys.as_ref()
+        let keys = self
+            .keys
+            .as_ref()
             .ok_or(Error::InvalidState("wallet locked".into()))?;
 
         let key_epoch = match epoch {
-            Some(e) => keys.get_epoch(e)
+            Some(e) => keys
+                .get_epoch(e)
                 .ok_or(Error::InvalidState(format!("epoch {} not found", e)))?,
-            None => keys.current()
+            None => keys
+                .current()
                 .ok_or(Error::InvalidState("no key epoch".into()))?,
         };
 
@@ -548,10 +564,13 @@ impl Wallet {
 
     /// Get current key epoch number
     pub fn current_epoch(&self) -> Result<u64> {
-        let keys = self.keys.as_ref()
+        let keys = self
+            .keys
+            .as_ref()
             .ok_or(Error::InvalidState("wallet locked".into()))?;
 
-        let epoch = keys.current()
+        let epoch = keys
+            .current()
             .ok_or(Error::InvalidState("no key epoch".into()))?;
 
         Ok(epoch.epoch)
@@ -707,7 +726,12 @@ impl Wallet {
         subaddress: Option<super::SubaddressIndex>,
     ) {
         let record = TransactionRecord::incoming(
-            tx_hash, amount, block_height, timestamp, output_index, subaddress,
+            tx_hash,
+            amount,
+            block_height,
+            timestamp,
+            output_index,
+            subaddress,
         );
         self.history.add(record);
     }
@@ -721,9 +745,7 @@ impl Wallet {
         block_height: u64,
         timestamp: u64,
     ) {
-        let record = TransactionRecord::outgoing(
-            tx_hash, amount, fee, block_height, timestamp,
-        );
+        let record = TransactionRecord::outgoing(tx_hash, amount, fee, block_height, timestamp);
         self.history.add(record);
     }
 
@@ -737,9 +759,7 @@ impl Wallet {
         timestamp: u64,
         recipient_address: &str,
     ) {
-        let mut record = TransactionRecord::outgoing(
-            tx_hash, amount, fee, block_height, timestamp,
-        );
+        let mut record = TransactionRecord::outgoing(tx_hash, amount, fee, block_height, timestamp);
         record.recipient_address = Some(recipient_address.to_string());
         self.history.add(record);
     }
@@ -776,12 +796,12 @@ impl Wallet {
 
     /// Derive next key epoch
     pub fn derive_next_epoch(&mut self) -> Result<u64> {
-        let keys = self.keys.as_mut()
+        let keys = self
+            .keys
+            .as_mut()
             .ok_or(Error::InvalidState("wallet locked".into()))?;
 
-        let next_epoch = keys.current()
-            .map(|e| e.epoch + 1)
-            .unwrap_or(0);
+        let next_epoch = keys.current().map(|e| e.epoch + 1).unwrap_or(0);
 
         keys.derive_epoch(next_epoch);
         Ok(next_epoch)
@@ -837,7 +857,9 @@ impl Wallet {
     ///     replaces the sidecar entries (idempotent: keyed by (tx_hash,
     ///     output_index)). No data loss; some redundant work.
     pub fn save(&self, password: Option<&str>) -> Result<()> {
-        let keys = self.keys.as_ref()
+        let keys = self
+            .keys
+            .as_ref()
             .ok_or(Error::InvalidState("wallet locked".into()))?;
 
         // === Step 1: UTXO sidecar ===
@@ -861,8 +883,9 @@ impl Wallet {
                 json
             };
             let utxo_tmp_path = self.path.with_extension("utxos.tmp");
-            std::fs::write(&utxo_tmp_path, &bytes_to_write)
-                .map_err(|e| Error::InvalidState(format!("failed to write UTXO temp file: {}", e)))?;
+            std::fs::write(&utxo_tmp_path, &bytes_to_write).map_err(|e| {
+                Error::InvalidState(format!("failed to write UTXO temp file: {}", e))
+            })?;
             // R-100 fix: harden BEFORE the atomic rename so the
             // as-visible-to-others file always has restrictive perms.
             super::persistence::harden_secret_file_permissions(&utxo_tmp_path);
@@ -884,8 +907,9 @@ impl Wallet {
         let reservations_path = self.path.with_extension("reservations");
         let reservations = self.balance.all_reservations();
         if !reservations.is_empty() {
-            let mut json = serde_json::to_vec(&reservations)
-                .map_err(|e| Error::InvalidState(format!("failed to serialize reservations: {}", e)))?;
+            let mut json = serde_json::to_vec(&reservations).map_err(|e| {
+                Error::InvalidState(format!("failed to serialize reservations: {}", e))
+            })?;
             let bytes_to_write = if let Some(pw) = password {
                 let mut salt = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut salt);
@@ -900,12 +924,14 @@ impl Wallet {
                 json
             };
             let reservations_tmp_path = self.path.with_extension("reservations.tmp");
-            std::fs::write(&reservations_tmp_path, &bytes_to_write)
-                .map_err(|e| Error::InvalidState(format!("failed to write reservations temp file: {}", e)))?;
+            std::fs::write(&reservations_tmp_path, &bytes_to_write).map_err(|e| {
+                Error::InvalidState(format!("failed to write reservations temp file: {}", e))
+            })?;
             // R-100 fix: harden reservations sidecar (same defense as .utxos).
             super::persistence::harden_secret_file_permissions(&reservations_tmp_path);
-            std::fs::rename(&reservations_tmp_path, &reservations_path)
-                .map_err(|e| Error::InvalidState(format!("failed to rename reservations file: {}", e)))?;
+            std::fs::rename(&reservations_tmp_path, &reservations_path).map_err(|e| {
+                Error::InvalidState(format!("failed to rename reservations file: {}", e))
+            })?;
             super::persistence::harden_secret_file_permissions(&reservations_path);
         } else if reservations_path.exists() {
             let _ = std::fs::remove_file(&reservations_path);
@@ -932,12 +958,14 @@ impl Wallet {
                 json
             };
             let history_tmp_path = self.path.with_extension("history.tmp");
-            std::fs::write(&history_tmp_path, &bytes_to_write)
-                .map_err(|e| Error::InvalidState(format!("failed to write history temp file: {}", e)))?;
+            std::fs::write(&history_tmp_path, &bytes_to_write).map_err(|e| {
+                Error::InvalidState(format!("failed to write history temp file: {}", e))
+            })?;
             // R-100 fix: harden history sidecar (same defense as .utxos).
             super::persistence::harden_secret_file_permissions(&history_tmp_path);
-            std::fs::rename(&history_tmp_path, &history_path)
-                .map_err(|e| Error::InvalidState(format!("failed to rename history file: {}", e)))?;
+            std::fs::rename(&history_tmp_path, &history_path).map_err(|e| {
+                Error::InvalidState(format!("failed to rename history file: {}", e))
+            })?;
             super::persistence::harden_secret_file_permissions(&history_path);
         } else if history_path.exists() {
             let _ = std::fs::remove_file(&history_path);
@@ -987,7 +1015,7 @@ impl Wallet {
         // up to add `WalletKeys::mnemonic: Option<Zeroizing<String>>`
         // is queued separately.
         let data = WalletData {
-            seed,  // Copy'd into WalletData.seed; original local zeroed below.
+            seed, // Copy'd into WalletData.seed; original local zeroed below.
             current_epoch: keys.current().map(|e| e.epoch).unwrap_or(0),
             scanned_height: self.scanned_height,
             label: self.label.clone(),
@@ -1025,9 +1053,9 @@ impl Wallet {
             let mut nonce = [0u8; 24];
             nonce.copy_from_slice(&bytes[32..56]);
             let ciphertext = &bytes[56..];
-            if let Ok(plaintext) = super::decrypt_sidecar_with_fallback(
-                &salt, &nonce, ciphertext, password,
-            ) {
+            if let Ok(plaintext) =
+                super::decrypt_sidecar_with_fallback(&salt, &nonce, ciphertext, password)
+            {
                 return plaintext;
             }
         }
@@ -1043,10 +1071,14 @@ impl Wallet {
             address: self.address().unwrap_or_default(),
             balance: self.total_balance(),
             spendable: self.spendable_balance(current_height),
-            pending: self.total_balance().saturating_sub(self.spendable_balance(current_height)),
+            pending: self
+                .total_balance()
+                .saturating_sub(self.spendable_balance(current_height)),
             scanned_height: self.scanned_height,
             utxo_count: self.available_utxos(current_height).len(),
-            key_epoch: self.keys.as_ref()
+            key_epoch: self
+                .keys
+                .as_ref()
                 .and_then(|k| k.current())
                 .map(|e| e.epoch)
                 .unwrap_or(0),
@@ -1200,7 +1232,12 @@ impl SharedWallet {
         subaddress: Option<super::SubaddressIndex>,
     ) {
         self.write_lock().record_incoming(
-            tx_hash, amount, block_height, timestamp, output_index, subaddress,
+            tx_hash,
+            amount,
+            block_height,
+            timestamp,
+            output_index,
+            subaddress,
         );
     }
 
@@ -1213,9 +1250,8 @@ impl SharedWallet {
         block_height: u64,
         timestamp: u64,
     ) {
-        self.write_lock().record_outgoing(
-            tx_hash, amount, fee, block_height, timestamp,
-        );
+        self.write_lock()
+            .record_outgoing(tx_hash, amount, fee, block_height, timestamp);
     }
 
     /// Record an outgoing transaction with recipient address for reuse detection
@@ -1229,28 +1265,53 @@ impl SharedWallet {
         recipient_address: &str,
     ) {
         self.write_lock().record_outgoing_with_address(
-            tx_hash, amount, fee, block_height, timestamp, recipient_address,
+            tx_hash,
+            amount,
+            fee,
+            block_height,
+            timestamp,
+            recipient_address,
         );
     }
 
     /// Get recent transactions (newest first)
     pub fn recent_transactions(&self, limit: usize) -> Vec<TransactionRecord> {
-        self.read_lock().history().recent(limit).into_iter().cloned().collect()
+        self.read_lock()
+            .history()
+            .recent(limit)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Get all incoming transactions
     pub fn incoming_transactions(&self) -> Vec<TransactionRecord> {
-        self.read_lock().history().incoming().into_iter().cloned().collect()
+        self.read_lock()
+            .history()
+            .incoming()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Get all outgoing transactions
     pub fn outgoing_transactions(&self) -> Vec<TransactionRecord> {
-        self.read_lock().history().outgoing().into_iter().cloned().collect()
+        self.read_lock()
+            .history()
+            .outgoing()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Get pending transactions
     pub fn pending_transactions(&self) -> Vec<TransactionRecord> {
-        self.read_lock().history().pending().into_iter().cloned().collect()
+        self.read_lock()
+            .history()
+            .pending()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Get transaction count
@@ -1295,7 +1356,11 @@ impl SharedWallet {
             "View key accessed via SharedWallet - this reveals transaction history"
         );
         let wallet = self.read_lock();
-        wallet.keys.as_ref()?.current().map(|epoch| hex::encode(epoch.view_secret.as_bytes()))
+        wallet
+            .keys
+            .as_ref()?
+            .current()
+            .map(|epoch| hex::encode(epoch.view_secret.as_bytes()))
     }
 
     /// Create a transfer transaction
@@ -1327,7 +1392,7 @@ impl SharedWallet {
         // failures deep in ring signature code with confusing error messages.
         if wallet.is_watch_only() {
             return Err(Error::InvalidState(
-                "Cannot create transactions from a watch-only wallet".into()
+                "Cannot create transactions from a watch-only wallet".into(),
             ));
         }
 
@@ -1337,7 +1402,9 @@ impl SharedWallet {
         }
 
         // Get keys
-        let keys = wallet.keys.as_ref()
+        let keys = wallet
+            .keys
+            .as_ref()
             .ok_or(Error::WalletLocked)?
             .current()
             .ok_or(Error::WalletLocked)?;
@@ -1366,10 +1433,14 @@ impl SharedWallet {
         let current_height = chain.height().saturating_add(1);
 
         // Convert recipients to the format needed by create_privacy_transaction
-        let privacy_recipients: Vec<(crate::primitives::PublicKey, crate::primitives::PublicKey, Amount)> =
-            recipients.iter()
-                .map(|(addr, amount)| (addr.spend_public_key, addr.view_public_key, *amount))
-                .collect();
+        let privacy_recipients: Vec<(
+            crate::primitives::PublicKey,
+            crate::primitives::PublicKey,
+            Amount,
+        )> = recipients
+            .iter()
+            .map(|(addr, amount)| (addr.spend_public_key, addr.view_public_key, *amount))
+            .collect();
 
         // Get ring size — R-117 SURGICAL FIX (2026-07-03): use
         // the CHAIN TIP height, not the wallet's scanned_height.
@@ -1450,7 +1521,9 @@ impl SharedWallet {
             return Err(Error::WalletLocked);
         }
 
-        let keys = wallet.keys.as_ref()
+        let keys = wallet
+            .keys
+            .as_ref()
             .ok_or(Error::WalletLocked)?
             .current()
             .ok_or(Error::WalletLocked)?;
@@ -1555,13 +1628,26 @@ mod tests {
         ));
         wallet.subaddress_data = Some(super::super::SubaddressData::default());
 
-        assert!(wallet.balance.total().as_atomic() > 0, "precondition: balance seeded");
-        assert!(wallet.subaddress_data.is_some(), "precondition: subaddr seeded");
+        assert!(
+            wallet.balance.total().as_atomic() > 0,
+            "precondition: balance seeded"
+        );
+        assert!(
+            wallet.subaddress_data.is_some(),
+            "precondition: subaddr seeded"
+        );
 
         wallet.lock();
 
         assert!(!wallet.is_unlocked(), "wallet should be locked");
-        assert_eq!(wallet.balance.total().as_atomic(), 0, "R-112: balance must be cleared on lock");
-        assert!(wallet.subaddress_data.is_none(), "R-112: subaddress_data must be cleared on lock");
+        assert_eq!(
+            wallet.balance.total().as_atomic(),
+            0,
+            "R-112: balance must be cleared on lock"
+        );
+        assert!(
+            wallet.subaddress_data.is_none(),
+            "R-112: subaddress_data must be cleared on lock"
+        );
     }
 }

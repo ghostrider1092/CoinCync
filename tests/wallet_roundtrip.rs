@@ -255,7 +255,11 @@ fn signing_hash_is_single_source_of_truth() {
     // Path (b): free helper with explicit fields. This is the same code
     // path the builder uses when it needs to compute the message BEFORE
     // the CLSAG signatures exist.
-    let views: Vec<SigningInputView> = tx.inputs.iter().map(SigningInputView::from_txinput).collect();
+    let views: Vec<SigningInputView> = tx
+        .inputs
+        .iter()
+        .map(SigningInputView::from_txinput)
+        .collect();
     let hash_b = Transaction::compute_signing_hash(
         tx.version,
         tx.tx_type,

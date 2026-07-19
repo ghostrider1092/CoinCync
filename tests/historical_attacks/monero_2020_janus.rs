@@ -54,13 +54,16 @@ fn monero_2020_janus_different_wallets_unrelated() {
     let e1 = keys1.current().unwrap();
     let e2 = keys2.current().unwrap();
 
-    let (s1, _) = generate_stealth_address_checked(&e1.spend_public, &e1.view_public, 0, &mut OsRng)
-        .expect("test fixtures pass valid curve points");
-    let (s2, _) = generate_stealth_address_checked(&e2.spend_public, &e2.view_public, 0, &mut OsRng)
-        .expect("test fixtures pass valid curve points");
+    let (s1, _) =
+        generate_stealth_address_checked(&e1.spend_public, &e1.view_public, 0, &mut OsRng)
+            .expect("test fixtures pass valid curve points");
+    let (s2, _) =
+        generate_stealth_address_checked(&e2.spend_public, &e2.view_public, 0, &mut OsRng)
+            .expect("test fixtures pass valid curve points");
 
     assert_ne!(
-        s1.public_key.as_bytes(), s2.public_key.as_bytes(),
+        s1.public_key.as_bytes(),
+        s2.public_key.as_bytes(),
         "JANUS VARIANT: Different wallets got same stealth address!"
     );
 }

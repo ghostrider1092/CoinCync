@@ -271,7 +271,11 @@ mod tests {
         b.rseed[31] = 0;
         let c_a = NoteCommitment::derive(&a).unwrap();
         let c_b = NoteCommitment::derive(&b).unwrap();
-        assert_ne!(c_a.to_bytes(), c_b.to_bytes(), "different recipient_d → different commitment");
+        assert_ne!(
+            c_a.to_bytes(),
+            c_b.to_bytes(),
+            "different recipient_d → different commitment"
+        );
     }
 
     #[test]
@@ -281,7 +285,11 @@ mod tests {
         b.value = a.value.wrapping_add(1);
         let c_a = NoteCommitment::derive(&a).unwrap();
         let c_b = NoteCommitment::derive(&b).unwrap();
-        assert_ne!(c_a.to_bytes(), c_b.to_bytes(), "different value → different commitment");
+        assert_ne!(
+            c_a.to_bytes(),
+            c_b.to_bytes(),
+            "different value → different commitment"
+        );
     }
 
     #[test]
@@ -291,7 +299,11 @@ mod tests {
         b.rseed[0] ^= 0x01;
         let c_a = NoteCommitment::derive(&a).unwrap();
         let c_b = NoteCommitment::derive(&b).unwrap();
-        assert_ne!(c_a.to_bytes(), c_b.to_bytes(), "different rseed → different commitment");
+        assert_ne!(
+            c_a.to_bytes(),
+            c_b.to_bytes(),
+            "different rseed → different commitment"
+        );
     }
 
     #[test]
@@ -348,6 +360,9 @@ mod tests {
         let bits: Vec<bool> = bytes_to_255_le_bits(&bytes).collect();
         assert_eq!(bits.len(), 255);
         // No bit set (the 0x80 was at index 255, which is excluded).
-        assert!(bits.iter().all(|b| !b), "top bit of byte 31 must be dropped");
+        assert!(
+            bits.iter().all(|b| !b),
+            "top bit of byte 31 must be dropped"
+        );
     }
 }

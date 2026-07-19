@@ -58,23 +58,25 @@
 //! - Domain-separated hashing (prevents cross-protocol attacks)
 //! - Proper ECDH using curve25519-dalek (not hash-based approximation)
 
-use crate::primitives::{PublicKey, SecretKey, Address, hash_data, hash_domain};
-use crate::wallet::KeyEpoch;
-use crate::error::{Error, Result};
-use super::curve::{SecretScalar, PublicPoint, hash_to_scalar};
+use super::curve::{hash_to_scalar, PublicPoint, SecretScalar};
 use super::secure::ct_eq;
-use rand::{RngCore, CryptoRng};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use zeroize::Zeroize;
+use crate::error::{Error, Result};
+use crate::primitives::{hash_data, hash_domain, Address, PublicKey, SecretKey};
+use crate::wallet::KeyEpoch;
+use borsh::{BorshDeserialize, BorshSerialize};
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use zeroize::Zeroize;
 
 // ============================================================================
 // Core Types
 // ============================================================================
 
 /// A one-time stealth address for receiving payments
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct StealthAddress {
     /// The one-time public key (derived from spend_public + shared_secret)
     pub public_key: PublicKey,
@@ -97,7 +99,10 @@ impl std::fmt::Display for StealthAddress {
 impl StealthAddress {
     /// Create a new stealth address from components
     pub fn new(public_key: PublicKey, tx_public_key: PublicKey) -> Self {
-        StealthAddress { public_key, tx_public_key }
+        StealthAddress {
+            public_key,
+            tx_public_key,
+        }
     }
 
     /// Check if this output belongs to the given recipient
@@ -148,7 +153,9 @@ impl StealthAddress {
     pub fn from_hex(s: &str) -> Result<Self> {
         let bytes = hex::decode(s).map_err(|e| Error::InvalidParams(e.to_string()))?;
         if bytes.len() != 64 {
-            return Err(Error::InvalidParams("stealth address must be 64 bytes".into()));
+            return Err(Error::InvalidParams(
+                "stealth address must be 64 bytes".into(),
+            ));
         }
         let mut pk_bytes = [0u8; 32];
         let mut tx_bytes = [0u8; 32];
@@ -156,10 +163,12 @@ impl StealthAddress {
         tx_bytes.copy_from_slice(&bytes[32..64]);
 
         // SECURITY: Validate both are valid Ristretto points before accepting
-        PublicPoint::from_bytes(pk_bytes)
-            .ok_or_else(|| Error::InvalidParams("invalid public key point in stealth address".into()))?;
-        PublicPoint::from_bytes(tx_bytes)
-            .ok_or_else(|| Error::InvalidParams("invalid tx public key point in stealth address".into()))?;
+        PublicPoint::from_bytes(pk_bytes).ok_or_else(|| {
+            Error::InvalidParams("invalid public key point in stealth address".into())
+        })?;
+        PublicPoint::from_bytes(tx_bytes).ok_or_else(|| {
+            Error::InvalidParams("invalid tx public key point in stealth address".into())
+        })?;
 
         Ok(StealthAddress {
             public_key: PublicKey::from_bytes(pk_bytes),
@@ -295,7 +304,8 @@ impl RecipientKeys {
         // decode-validity flag into the result closes that: a malformed
         // `tx_public` is always rejected, while the timing stays uniform because
         // the full ECDH/hash/compare pipeline still runs.
-        let (tx_point, tx_valid) = match PublicPoint::from_bytes(*stealth.tx_public_key.as_bytes()) {
+        let (tx_point, tx_valid) = match PublicPoint::from_bytes(*stealth.tx_public_key.as_bytes())
+        {
             Some(p) => (p, true),
             None => (PublicPoint::identity(), false),
         };
@@ -939,8 +949,9 @@ pub fn coinbase_stealth_address(
     let tx_public = tx_secret_scalar.to_public();
 
     // Convert view_public to curve point for ECDH
-    let view_point = PublicPoint::from_bytes(*view_pub.as_bytes())
-        .ok_or_else(|| Error::InvalidPublicKey("invalid view public key for coinbase stealth".into()))?;
+    let view_point = PublicPoint::from_bytes(*view_pub.as_bytes()).ok_or_else(|| {
+        Error::InvalidPublicKey("invalid view public key for coinbase stealth".into())
+    })?;
 
     // ECDH: shared_point = tx_secret * view_public
     let shared_point = view_point.mul(&tx_secret_scalar);
@@ -951,8 +962,9 @@ pub fn coinbase_stealth_address(
     scalar_input.zeroize();
 
     // Convert spend_public to curve point
-    let spend_point = PublicPoint::from_bytes(*spend_pub.as_bytes())
-        .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key for coinbase stealth".into()))?;
+    let spend_point = PublicPoint::from_bytes(*spend_pub.as_bytes()).ok_or_else(|| {
+        Error::InvalidPublicKey("invalid spend public key for coinbase stealth".into())
+    })?;
 
     // One-time public key: P = H(shared, idx)*G + spend_public
     let one_time_base = SecretScalar::from_scalar(one_time_scalar).to_public();
@@ -965,7 +977,10 @@ pub fn coinbase_stealth_address(
 
     // Return tx_secret so the caller can compute the view_tag (sender-side ECDH)
     let tx_secret_bytes = tx_secret_scalar.to_bytes();
-    Ok((stealth, crate::primitives::SecretKey::from_bytes(tx_secret_bytes)))
+    Ok((
+        stealth,
+        crate::primitives::SecretKey::from_bytes(tx_secret_bytes),
+    ))
 }
 
 /// Generate a stealth address for a recipient using their Address
@@ -1024,7 +1039,10 @@ pub fn generate_stealth_address_checked<R: RngCore + CryptoRng>(
     // Log stealth address generation
     // SECURITY: Changed from info! to trace! — logging stealth address hex bytes
     // at info level leaks output ownership to anyone with log access (ELK, Datadog).
-    tracing::trace!("Generated one-time stealth address (output #{})", output_idx);
+    tracing::trace!(
+        "Generated one-time stealth address (output #{})",
+        output_idx
+    );
 
     // Return tx_secret as primitives::SecretKey for amount encryption
     let tx_secret_bytes = tx_secret.to_bytes();
@@ -1058,8 +1076,9 @@ pub(crate) fn generate_stealth_address<R: RngCore + CryptoRng>(
 
     // Convert view_public to curve point for ECDH
     // SECURITY: Panic on invalid keys rather than silently producing unspendable outputs
-    let view_point = PublicPoint::from_bytes(*view_pub.as_bytes())
-        .expect("invalid view public key - use generate_stealth_address_checked for error handling");
+    let view_point = PublicPoint::from_bytes(*view_pub.as_bytes()).expect(
+        "invalid view public key - use generate_stealth_address_checked for error handling",
+    );
 
     // ECDH: shared_point = tx_secret * view_public
     let shared_point = view_point.mul(&tx_secret);
@@ -1071,8 +1090,9 @@ pub(crate) fn generate_stealth_address<R: RngCore + CryptoRng>(
     scalar_input.zeroize();
 
     // Convert spend_public to curve point
-    let spend_point = PublicPoint::from_bytes(*spend_pub.as_bytes())
-        .expect("invalid spend public key - use generate_stealth_address_checked for error handling");
+    let spend_point = PublicPoint::from_bytes(*spend_pub.as_bytes()).expect(
+        "invalid spend public key - use generate_stealth_address_checked for error handling",
+    );
 
     // One-time public key: P = H(shared) * G + spend_public
     let one_time_base = SecretScalar::from_scalar(one_time_scalar).to_public();
@@ -1098,16 +1118,15 @@ pub fn generate_stealth_outputs<R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> Result<Vec<(StealthAddress, SecretKey)>> {
     if recipients.len() > 255 {
-        return Err(crate::error::Error::InvalidState(
-            format!("Too many recipients ({}, max 255)", recipients.len())
-        ));
+        return Err(crate::error::Error::InvalidState(format!(
+            "Too many recipients ({}, max 255)",
+            recipients.len()
+        )));
     }
     recipients
         .iter()
         .enumerate()
-        .map(|(idx, addr)| {
-            generate_stealth_address_for(addr, idx as u8, rng)
-        })
+        .map(|(idx, addr)| generate_stealth_address_for(addr, idx as u8, rng))
         .collect()
 }
 
@@ -1297,8 +1316,8 @@ pub fn scan_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
     use crate::primitives::Network;
+    use rand::rngs::OsRng;
 
     /// Generate a proper EC keypair for testing
     fn generate_ec_keypair() -> (SecretKey, PublicKey) {
@@ -1315,12 +1334,8 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, view_public) = generate_ec_keypair();
 
-        let (stealth, _tx_secret) = generate_stealth_address(
-            &spend_public,
-            &view_public,
-            0,
-            &mut OsRng,
-        );
+        let (stealth, _tx_secret) =
+            generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
 
         assert!(
             is_output_ours(&stealth, &view_secret, &spend_public, 0),
@@ -1340,7 +1355,9 @@ mod tests {
         assert!(!stealth.is_ours(&view_secret, &spend_public, 1));
 
         // Test compute_spending_key method
-        let spending_key = stealth.compute_spending_key(&view_secret, &spend_secret, 0).unwrap();
+        let spending_key = stealth
+            .compute_spending_key(&view_secret, &spend_secret, 0)
+            .unwrap();
         let one_time_scalar = SecretScalar::from_bytes(*spending_key.as_bytes());
         let derived_public = one_time_scalar.to_public();
         assert_eq!(stealth.public_key.as_bytes(), &derived_public.to_bytes());
@@ -1369,7 +1386,8 @@ mod tests {
 
         let outputs: Vec<(StealthAddress, u8)> = (0..5)
             .map(|i| {
-                let (stealth, _) = generate_stealth_address(&spend_public, &view_public, i, &mut OsRng);
+                let (stealth, _) =
+                    generate_stealth_address(&spend_public, &view_public, i, &mut OsRng);
                 (stealth, i)
             })
             .collect();
@@ -1399,8 +1417,14 @@ mod tests {
         let hex = stealth.to_hex();
         let restored = StealthAddress::from_hex(&hex).unwrap();
 
-        assert_eq!(stealth.public_key.as_bytes(), restored.public_key.as_bytes());
-        assert_eq!(stealth.tx_public_key.as_bytes(), restored.tx_public_key.as_bytes());
+        assert_eq!(
+            stealth.public_key.as_bytes(),
+            restored.public_key.as_bytes()
+        );
+        assert_eq!(
+            stealth.tx_public_key.as_bytes(),
+            restored.tx_public_key.as_bytes()
+        );
     }
 
     #[test]
@@ -1445,12 +1469,7 @@ mod tests {
         let (_spend_secret2, spend_public2) = generate_ec_keypair();
         let (view_secret2, _view_public2) = generate_ec_keypair();
 
-        let (stealth, _) = generate_stealth_address(
-            &spend_public1,
-            &view_public1,
-            0,
-            &mut OsRng,
-        );
+        let (stealth, _) = generate_stealth_address(&spend_public1, &view_public1, 0, &mut OsRng);
 
         assert!(is_output_ours(&stealth, &view_secret1, &spend_public1, 0));
         assert!(
@@ -1464,12 +1483,7 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, view_public) = generate_ec_keypair();
 
-        let (stealth, _) = generate_stealth_address(
-            &spend_public,
-            &view_public,
-            0,
-            &mut OsRng,
-        );
+        let (stealth, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
 
         assert!(is_output_ours(&stealth, &view_secret, &spend_public, 0));
         assert!(
@@ -1560,8 +1574,12 @@ mod tests {
         let recipient = RecipientKeys::new(&view_secret, &spend_public).unwrap();
 
         // Positive control: a genuinely owned output still verifies.
-        let (real_stealth, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
-        assert!(recipient.owns(&real_stealth, 0), "genuine output must be owned");
+        let (real_stealth, _) =
+            generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
+        assert!(
+            recipient.owns(&real_stealth, 0),
+            "genuine output must be owned"
+        );
 
         // Reconstruct the forged expected point using ONLY public data.
         let output_idx = 3u8;
@@ -1608,7 +1626,8 @@ mod tests {
 
         assert!(is_output_ours(&stealth, &view_secret, &spend_public, 0));
 
-        let one_time_secret = compute_one_time_secret(&stealth, &view_secret, &spend_secret, 0).unwrap();
+        let one_time_secret =
+            compute_one_time_secret(&stealth, &view_secret, &spend_secret, 0).unwrap();
 
         let one_time_scalar = SecretScalar::from_bytes(*one_time_secret.as_bytes());
         let derived_public = one_time_scalar.to_public();
@@ -1625,8 +1644,8 @@ mod tests {
         let (_, spend_public) = generate_ec_keypair();
         let (view_secret, _view_public) = generate_ec_keypair();
 
-        let audit = AuditKey::new(view_secret.clone(), spend_public)
-            .with_range(Some(100), Some(1000));
+        let audit =
+            AuditKey::new(view_secret.clone(), spend_public).with_range(Some(100), Some(1000));
 
         assert!(audit.is_in_range(500));
         assert!(!audit.is_in_range(50));
@@ -1734,7 +1753,11 @@ mod tests {
 
         // A sender pays it: a stealth output to (sub_spend, view_public).
         let (stealth, _) = generate_stealth_address(&sub_spend, &view_public, 0, &mut OsRng);
-        let output = ScanOutput { stealth, output_idx: 0, amount: None };
+        let output = ScanOutput {
+            stealth,
+            output_idx: 0,
+            amount: None,
+        };
 
         // Auditor scans with account-aware metadata covering (account, up to index).
         let scanner = AuditKey::new(view_secret, spend_public)

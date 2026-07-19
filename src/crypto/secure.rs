@@ -274,8 +274,8 @@ pub fn ct_copy_if(condition: bool, dst: &mut [u8], src: &[u8]) {
 /// Uses OsRng which sources entropy directly from the operating system,
 /// providing cryptographically secure random bytes.
 pub fn secure_random(buf: &mut [u8]) {
-    use rand::RngCore;
     use rand::rngs::OsRng;
+    use rand::RngCore;
     OsRng.fill_bytes(buf);
 }
 
@@ -410,6 +410,9 @@ mod tests {
         // Verify non-zero before zeroize
         assert!(secure.as_bytes().iter().any(|&b| b != 0));
         secure.zeroize();
-        assert!(secure.as_bytes().iter().all(|&b| b == 0), "All bytes must be zero after zeroize");
+        assert!(
+            secure.as_bytes().iter().all(|&b| b == 0),
+            "All bytes must be zero after zeroize"
+        );
     }
 }

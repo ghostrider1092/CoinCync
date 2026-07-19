@@ -9,29 +9,29 @@
 //! yet, and the minimal method set for a live node lives directly in
 //! `server::start_rpc_server`.
 
+mod ratelimit;
 mod server;
+pub mod tls;
 pub mod types;
 mod websocket;
-mod ratelimit;
-pub mod tls;
 
 // Phase 1 RPC surface — wired in. `wallet_api` is a deliberate placeholder
 // stub that will be fleshed out once the wallet modules stabilise; the
 // other two (`node_api`, `openapi`) are self-contained.
-pub mod node_api;
-pub mod wallet_api;
-pub mod openapi;
 pub mod explorer;
-pub mod rest;
 pub mod lightwallet;
+pub mod node_api;
+pub mod openapi;
+pub mod rest;
+pub mod wallet_api;
 
-pub use server::{RpcServer, RpcConfig, start_rpc_server, MAX_RPC_AUDIT_BLOCK_SPAN};
+pub use ratelimit::{
+    create_rate_limiter, RateLimitConfig, RateLimitResult, RateLimitStats, RateLimiter,
+    SharedRateLimiter,
+};
+pub use server::{start_rpc_server, RpcConfig, RpcServer, MAX_RPC_AUDIT_BLOCK_SPAN};
 pub use types::*;
 pub use websocket::{
-    SubscriptionManager, SharedSubscriptionManager, create_subscription_manager,
-    Event, EventType, WsMessage, WsResponse,
-};
-pub use ratelimit::{
-    RateLimiter, SharedRateLimiter, create_rate_limiter,
-    RateLimitConfig, RateLimitResult, RateLimitStats,
+    create_subscription_manager, Event, EventType, SharedSubscriptionManager, SubscriptionManager,
+    WsMessage, WsResponse,
 };

@@ -10,19 +10,16 @@
 //! For each boundary, we test: H-1, H, H+1 with both old and new era
 //! transactions to ensure the gate is exact.
 
+use borsh::{from_slice, to_vec};
 use coincync::consensus::{validate_block, Block, BlockHeader};
 use coincync::constants::{
-    BOOTSTRAP_MIN_RING_SIZE, DEFAULT_RING_SIZE, MIN_FEE_PER_BYTE,
-    ring_size_at_height,
+    ring_size_at_height, BOOTSTRAP_MIN_RING_SIZE, DEFAULT_RING_SIZE, MIN_FEE_PER_BYTE,
 };
-use coincync::crypto::{
-    ClsagSignature, KeyImage as CryptoKeyImage, SecretScalar,
-};
+use coincync::crypto::{ClsagSignature, KeyImage as CryptoKeyImage, SecretScalar};
 use coincync::mempool::Mempool;
-use coincync::primitives::{Hash, PublicKey, Amount, KeyImage};
+use coincync::primitives::{Amount, Hash, KeyImage, PublicKey};
 use coincync::storage::UtxoSet;
 use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
-use borsh::{to_vec, from_slice};
 
 // =============================================================================
 // Helpers
@@ -39,11 +36,16 @@ fn make_keyimage(seed: u8) -> (KeyImage, CryptoKeyImage, SecretScalar) {
 }
 
 fn make_ring(seed: u8, size: usize) -> Vec<RingMemberRef> {
-    (0..size).map(|i| {
-        let s = make_secret(seed.wrapping_add(i as u8 + 100));
-        let p = s.to_public();
-        RingMemberRef { public_key: PublicKey::from_bytes(p.to_bytes()), commitment: p.to_bytes() }
-    }).collect()
+    (0..size)
+        .map(|i| {
+            let s = make_secret(seed.wrapping_add(i as u8 + 100));
+            let p = s.to_public();
+            RingMemberRef {
+                public_key: PublicKey::from_bytes(p.to_bytes()),
+                commitment: p.to_bytes(),
+            }
+        })
+        .collect()
 }
 
 fn make_output(seed: u8) -> TxOutput {
@@ -85,7 +87,9 @@ fn make_transfer(seed: u8, ring_size: usize) -> Transaction {
     };
     let size = tx.size();
     let min_fee = size as u64 * MIN_FEE_PER_BYTE;
-    if tx.fee.as_atomic() < min_fee { tx.fee = Amount::from_atomic(min_fee); }
+    if tx.fee.as_atomic() < min_fee {
+        tx.fee = Amount::from_atomic(min_fee);
+    }
     tx
 }
 
@@ -119,7 +123,10 @@ fn ring_11_accepted_before_cutover() {
     let mut pool = Mempool::new();
     let tx = make_transfer(10, BOOTSTRAP_MIN_RING_SIZE); // ring = 11
     let result = pool.add_skip_crypto(tx);
-    assert!(result.is_ok(), "ring size 11 should be accepted during bootstrap (< 10,000)");
+    assert!(
+        result.is_ok(),
+        "ring size 11 should be accepted during bootstrap (< 10,000)"
+    );
 }
 
 #[test]
@@ -135,17 +142,24 @@ fn ring_10_rejected_always() {
         responses: vec![[11; 32]; 10],
     };
     let tx = Transaction {
-        version: 1, tx_type: TxType::Transfer,
+        version: 1,
+        tx_type: TxType::Transfer,
         inputs: vec![TxInput {
-            key_image: ki, ring_members: ring, signature: sig,
+            key_image: ki,
+            ring_members: ring,
+            signature: sig,
             pseudo_output_commitment: secret.to_public().to_bytes(),
         }],
         outputs: vec![make_output(11), make_output(12)],
         fee: Amount::from_atomic(10_000_000),
-        range_proof: vec![0u8; 64], extra: vec![11],
+        range_proof: vec![0u8; 64],
+        extra: vec![11],
     };
     let result = pool.add_skip_crypto(tx);
-    assert!(result.is_err(), "ring size 10 must always be rejected (below bootstrap minimum 11)");
+    assert!(
+        result.is_err(),
+        "ring size 10 must always be rejected (below bootstrap minimum 11)"
+    );
 }
 
 // =============================================================================
@@ -177,7 +191,10 @@ fn v2_tx_rejected_before_activation_height() {
     // For now, verify that the basic check accepts v2 structurally
     // (height-based rejection happens in the full path)
     let result = coincync::consensus::validation::validate_transaction_basic(&tx);
-    assert!(result.is_ok(), "v2 tx passes structural validation (height gate is contextual)");
+    assert!(
+        result.is_ok(),
+        "v2 tx passes structural validation (height gate is contextual)"
+    );
 }
 
 // =============================================================================
@@ -186,17 +203,26 @@ fn v2_tx_rejected_before_activation_height() {
 
 fn expected_magic() -> [u8; 4] {
     #[cfg(feature = "testnet")]
-    { coincync::constants::TESTNET_MAGIC }
+    {
+        coincync::constants::TESTNET_MAGIC
+    }
     #[cfg(not(feature = "testnet"))]
-    { coincync::constants::MAINNET_MAGIC }
+    {
+        coincync::constants::MAINNET_MAGIC
+    }
 }
 
 fn base_header(height: u64, timestamp: u64, prev_hash: Hash) -> BlockHeader {
     BlockHeader {
         network_magic: expected_magic(),
-        version: 1, height, timestamp, prev_hash,
+        version: 1,
+        height,
+        timestamp,
+        prev_hash,
         tx_root: Hash::zero(),
-        anchor: Hash::zero(), algorithm: 0, nonce: 0,
+        anchor: Hash::zero(),
+        algorithm: 0,
+        nonce: 0,
         target: Hash::from_bytes([0xFF; 32]),
         miner_pubkey: PublicKey::from_bytes([0u8; 32]),
         supply_commitment: [0u8; 32],
@@ -214,10 +240,14 @@ fn genesis_at_height_0_with_zero_prev_accepted_structure() {
     let utxos = UtxoSet::new();
     let result = validate_block(&block, None, &utxos).expect("validator runs");
     // May fail on other checks (no coinbase, wrong merkle root) but NOT on prev_hash
-    let has_prev_hash_error = result.errors.iter().any(|e|
-        e.to_lowercase().contains("prev") && e.to_lowercase().contains("hash")
+    let has_prev_hash_error = result
+        .errors
+        .iter()
+        .any(|e| e.to_lowercase().contains("prev") && e.to_lowercase().contains("hash"));
+    assert!(
+        !has_prev_hash_error,
+        "genesis with zero prev_hash should not fail on prev_hash check"
     );
-    assert!(!has_prev_hash_error, "genesis with zero prev_hash should not fail on prev_hash check");
 }
 
 #[test]
@@ -226,7 +256,10 @@ fn fake_genesis_at_height_0_with_nonzero_prev_rejected() {
     let block = Block::new(header, Vec::new());
     let utxos = UtxoSet::new();
     let result = validate_block(&block, None, &utxos).expect("validator runs");
-    assert!(!result.valid, "fake genesis with nonzero prev_hash must be rejected");
+    assert!(
+        !result.valid,
+        "fake genesis with nonzero prev_hash must be rejected"
+    );
 }
 
 #[test]
@@ -240,7 +273,10 @@ fn block_claiming_height_0_when_chain_exists_rejected() {
 
     let utxos = UtxoSet::new();
     let result = validate_block(&child_block, Some(&parent_block), &utxos).expect("validator runs");
-    assert!(!result.valid, "child block claiming height 0 after parent at height 10 must be rejected");
+    assert!(
+        !result.valid,
+        "child block claiming height 0 after parent at height 10 must be rejected"
+    );
 }
 
 // =============================================================================
@@ -263,14 +299,23 @@ fn emission_reward_approaches_tail() {
     assert!(genesis_reward > 0, "genesis reward must be positive");
 
     let mid_reward = block_reward(500_000); // ~2 years of blocks
-    assert!(mid_reward < genesis_reward, "reward at height 500K should be less than genesis");
-    assert!(mid_reward > 0, "reward at height 500K should still be positive");
+    assert!(
+        mid_reward < genesis_reward,
+        "reward at height 500K should be less than genesis"
+    );
+    assert!(
+        mid_reward > 0,
+        "reward at height 500K should still be positive"
+    );
 
     // Very late in the chain: reward approaches tail emission
     let late_reward = block_reward(5_000_000); // ~20 years of blocks
     let _tail = 600_000_000_000u64; // 0.6 CYNC in atomic units
-    // Should be at or near tail by this point
-    assert!(late_reward <= genesis_reward / 2, "reward at height 5M should be well below genesis");
+                                    // Should be at or near tail by this point
+    assert!(
+        late_reward <= genesis_reward / 2,
+        "reward at height 5M should be well below genesis"
+    );
 }
 
 // =============================================================================
@@ -281,7 +326,10 @@ fn emission_reward_approaches_tail() {
 fn difficulty_target_is_valid_hash() {
     // A difficulty target must be a valid hash that block hashes are compared against
     let easy = Hash::from_bytes([0xFF; 32]);
-    let hard = Hash::from_bytes([0x00, 0x00, 0x01, 0x00, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
+    let hard = Hash::from_bytes([
+        0x00, 0x00, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
+    ]);
 
     // Easy target (all FF) should be easier to meet than hard target
     // We just verify these construct without panic
@@ -298,7 +346,9 @@ fn timestamp_exactly_at_drift_boundary_accepted() {
     use coincync::constants::MAX_TIMESTAMP_DRIFT;
 
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
     let parent = base_header(10, now - 120, Hash::zero());
     let parent_block = Block::new(parent.clone(), Vec::new());
@@ -309,8 +359,14 @@ fn timestamp_exactly_at_drift_boundary_accepted() {
 
     let utxos = UtxoSet::new();
     let result = validate_block(&child_block, Some(&parent_block), &utxos).expect("validator runs");
-    let has_future_error = result.errors.iter().any(|e| e.to_lowercase().contains("future"));
-    assert!(!has_future_error, "timestamp at MAX_DRIFT - 1 should not trigger future-block rejection");
+    let has_future_error = result
+        .errors
+        .iter()
+        .any(|e| e.to_lowercase().contains("future"));
+    assert!(
+        !has_future_error,
+        "timestamp at MAX_DRIFT - 1 should not trigger future-block rejection"
+    );
 }
 
 #[test]
@@ -318,7 +374,9 @@ fn timestamp_one_past_drift_boundary_rejected() {
     use coincync::constants::MAX_TIMESTAMP_DRIFT;
 
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
     let parent = base_header(10, now - 120, Hash::zero());
     let parent_block = Block::new(parent.clone(), Vec::new());
@@ -349,12 +407,18 @@ fn block_with_oversized_coinbase_rejected() {
         tx_public_key: PublicKey::from_bytes(make_secret(2).to_public().to_bytes()),
         commitment: make_secret(3).to_public().to_bytes(),
         encrypted_amount: vec![0u8; 8],
-        view_tag: 0, lock_height: None, encrypted_memo: Vec::new(),
+        view_tag: 0,
+        lock_height: None,
+        encrypted_memo: Vec::new(),
     };
     let coinbase = Transaction {
-        version: 1, tx_type: TxType::Coinbase,
-        inputs: vec![], outputs: vec![huge_output],
-        fee: Amount::ZERO, range_proof: vec![], extra: vec![],
+        version: 1,
+        tx_type: TxType::Coinbase,
+        inputs: vec![],
+        outputs: vec![huge_output],
+        fee: Amount::ZERO,
+        range_proof: vec![],
+        extra: vec![],
     };
 
     let child_header = base_header(101, parent.timestamp + 120, parent.hash());
@@ -362,7 +426,10 @@ fn block_with_oversized_coinbase_rejected() {
 
     let utxos = UtxoSet::new();
     let result = validate_block(&child, Some(&parent_block), &utxos).expect("validator runs");
-    assert!(!result.valid, "block with oversized coinbase should be rejected");
+    assert!(
+        !result.valid,
+        "block with oversized coinbase should be rejected"
+    );
 }
 
 // =============================================================================
@@ -425,14 +492,22 @@ fn block_with_two_coinbase_txs_rejected() {
     let parent_block = Block::new(parent.clone(), Vec::new());
 
     let cb1 = Transaction {
-        version: 1, tx_type: TxType::Coinbase,
-        inputs: vec![], outputs: vec![make_output(1)],
-        fee: Amount::ZERO, range_proof: vec![], extra: vec![1],
+        version: 1,
+        tx_type: TxType::Coinbase,
+        inputs: vec![],
+        outputs: vec![make_output(1)],
+        fee: Amount::ZERO,
+        range_proof: vec![],
+        extra: vec![1],
     };
     let cb2 = Transaction {
-        version: 1, tx_type: TxType::Coinbase,
-        inputs: vec![], outputs: vec![make_output(2)],
-        fee: Amount::ZERO, range_proof: vec![], extra: vec![2],
+        version: 1,
+        tx_type: TxType::Coinbase,
+        inputs: vec![],
+        outputs: vec![make_output(2)],
+        fee: Amount::ZERO,
+        range_proof: vec![],
+        extra: vec![2],
     };
 
     let child_header = base_header(11, parent.timestamp + 120, parent.hash());
@@ -440,7 +515,10 @@ fn block_with_two_coinbase_txs_rejected() {
 
     let utxos = UtxoSet::new();
     let result = validate_block(&child, Some(&parent_block), &utxos).expect("validator runs");
-    assert!(!result.valid, "block with two coinbase transactions must be rejected");
+    assert!(
+        !result.valid,
+        "block with two coinbase transactions must be rejected"
+    );
 }
 
 // =============================================================================
@@ -451,11 +529,11 @@ fn block_with_two_coinbase_txs_rejected() {
 fn malformed_block_corpus_fails_decode_without_panic() {
     // Parser hardening: malformed corpora should fail cleanly, never panic.
     let corpus: Vec<Vec<u8>> = vec![
-        vec![],                      // empty
-        vec![0u8],                   // tiny/truncated
-        vec![0xff; 7],               // short garbage
-        vec![0xff; 64],              // larger garbage
-        vec![0, 1, 2, 3, 4, 5, 6],   // random-ish bytes
+        vec![],                    // empty
+        vec![0u8],                 // tiny/truncated
+        vec![0xff; 7],             // short garbage
+        vec![0xff; 64],            // larger garbage
+        vec![0, 1, 2, 3, 4, 5, 6], // random-ish bytes
     ];
     for blob in corpus {
         let parsed: std::result::Result<Block, _> = from_slice(&blob);
@@ -473,7 +551,11 @@ fn truncated_valid_block_fails_decode() {
     for cut in [1usize, encoded.len() / 2, encoded.len().saturating_sub(1)] {
         let truncated = &encoded[..cut];
         let parsed: std::result::Result<Block, _> = from_slice(truncated);
-        assert!(parsed.is_err(), "truncated block (len={}) decoded unexpectedly", cut);
+        assert!(
+            parsed.is_err(),
+            "truncated block (len={}) decoded unexpectedly",
+            cut
+        );
     }
 }
 
@@ -484,5 +566,8 @@ fn malformed_block_with_huge_tx_vector_len_fails_decode() {
     let mut blob = to_vec(&header).expect("serialize header");
     blob.extend_from_slice(&u32::MAX.to_le_bytes()); // transactions vec length
     let parsed: std::result::Result<Block, _> = from_slice(&blob);
-    assert!(parsed.is_err(), "huge tx vector length decoded unexpectedly");
+    assert!(
+        parsed.is_err(),
+        "huge tx vector length decoded unexpectedly"
+    );
 }

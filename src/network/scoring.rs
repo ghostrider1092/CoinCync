@@ -342,7 +342,7 @@ pub struct PeerScore {
 impl Default for PeerScore {
     fn default() -> Self {
         PeerScore {
-            reputation: 50, // Start neutral
+            reputation: 50,   // Start neutral
             latency_ms: 1000, // Assume 1s until measured
             block_speed: 0.0,
             validity_rate: 1.0, // Assume valid until proven otherwise
@@ -440,18 +440,18 @@ pub struct PeerMessageRateTracker {
 const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     // Heavy request types — attacker's natural amplification vectors.
     // These are the ones the pre-audit table MEANT to limit but got wrong.
-    (0,  50),   // MessageType::Version    — 5/sec  (handshake burst detector)
-    (10, 100),  // MessageType::GetHeaders — 10/sec (IBD-request flood)
-    (12, 100),  // MessageType::GetBlocks  — 10/sec (block-fetch flood)
-    (14, 200),  // MessageType::GetData    — 20/sec (bulk fetch flood)
-    (22, 500),  // MessageType::InvTx      — 50/sec (tx-relay flood; higher because relaying txs across a mesh is normal)
-    (23, 100),  // MessageType::InvBlock   — 10/sec (block-announce flood)
-    (30, 50),   // MessageType::GetAddr    — 5/sec  (peer-list scraping)
-    (2,  30),   // MessageType::Ping       — 3/sec  (keepalive spam)
-    // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
-    // are intentionally NOT rate-limited here — we asked for them.
-    // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
-    // + per-shard framer caps.
+    (0, 50),   // MessageType::Version    — 5/sec  (handshake burst detector)
+    (10, 100), // MessageType::GetHeaders — 10/sec (IBD-request flood)
+    (12, 100), // MessageType::GetBlocks  — 10/sec (block-fetch flood)
+    (14, 200), // MessageType::GetData    — 20/sec (bulk fetch flood)
+    (22, 500), // MessageType::InvTx      — 50/sec (tx-relay flood; higher because relaying txs across a mesh is normal)
+    (23, 100), // MessageType::InvBlock   — 10/sec (block-announce flood)
+    (30, 50),  // MessageType::GetAddr    — 5/sec  (peer-list scraping)
+    (2, 30),   // MessageType::Ping       — 3/sec  (keepalive spam)
+               // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
+               // are intentionally NOT rate-limited here — we asked for them.
+               // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
+               // + per-shard framer caps.
 ];
 
 impl PeerMessageRateTracker {
@@ -485,7 +485,9 @@ impl PeerMessageRateTracker {
 }
 
 impl Default for PeerMessageRateTracker {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Threshold for orphan-flood detection: more than this many orphans from one
@@ -520,7 +522,9 @@ pub struct OrphanFloodTracker {
 
 impl OrphanFloodTracker {
     pub fn new() -> Self {
-        OrphanFloodTracker { peers: HashMap::new() }
+        OrphanFloodTracker {
+            peers: HashMap::new(),
+        }
     }
 
     /// Record an orphan from this peer. Returns `true` exactly once per
@@ -563,7 +567,9 @@ impl OrphanFloodTracker {
 }
 
 impl Default for OrphanFloodTracker {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PeerScore {
@@ -640,9 +646,8 @@ impl PeerScore {
         // fork" empty (1-2 of them) doesn't permanently demote a peer.
         self.adjust_reputation(-15);
         if self.consecutive_empty_blocks >= EMPTY_BLOCKS_BAN_THRESHOLD {
-            self.get_blocks_banned_until = Some(
-                Instant::now() + Duration::from_secs(EMPTY_BLOCKS_BAN_DURATION_SECS),
-            );
+            self.get_blocks_banned_until =
+                Some(Instant::now() + Duration::from_secs(EMPTY_BLOCKS_BAN_DURATION_SECS));
         }
     }
 
@@ -703,7 +708,9 @@ impl PeerScore {
         self.last_failure = Some(Instant::now());
         tracing::debug!(
             "Peer misbehavior: {:?} (penalty: -{}, reputation now: {})",
-            offense, penalty, self.reputation
+            offense,
+            penalty,
+            self.reputation
         );
     }
 
@@ -830,33 +837,33 @@ impl PeerScorer {
 
     /// Get top N peers for block download
     pub fn top_peers_for_download(&self, n: usize) -> Vec<SocketAddr> {
-        let mut peers: Vec<_> = self.scores.iter()
+        let mut peers: Vec<_> = self
+            .scores
+            .iter()
             .filter(|(_, score)| score.composite_score() >= self.min_download_score)
             .filter(|(_, score)| score.validated)
             .collect();
 
         peers.sort_by(|a, b| {
-            b.1.composite_score().partial_cmp(&a.1.composite_score())
+            b.1.composite_score()
+                .partial_cmp(&a.1.composite_score())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        peers.into_iter()
-            .take(n)
-            .map(|(addr, _)| *addr)
-            .collect()
+        peers.into_iter().take(n).map(|(addr, _)| *addr).collect()
     }
 
     /// Get peers sorted by latency (for time-sensitive operations)
     pub fn peers_by_latency(&self) -> Vec<SocketAddr> {
-        let mut peers: Vec<_> = self.scores.iter()
+        let mut peers: Vec<_> = self
+            .scores
+            .iter()
             .filter(|(_, score)| score.validated)
             .collect();
 
         peers.sort_by_key(|(_, score)| score.latency_ms);
 
-        peers.into_iter()
-            .map(|(addr, _)| *addr)
-            .collect()
+        peers.into_iter().map(|(addr, _)| *addr).collect()
     }
 
     /// Get statistics about peer quality
@@ -866,13 +873,21 @@ impl PeerScorer {
         let banned = self.banned.len();
 
         let avg_score = if total > 0 {
-            self.scores.values().map(|s| s.composite_score()).sum::<f64>() / total as f64
+            self.scores
+                .values()
+                .map(|s| s.composite_score())
+                .sum::<f64>()
+                / total as f64
         } else {
             0.0
         };
 
         let avg_latency = if total > 0 {
-            self.scores.values().map(|s| s.latency_ms as u64).sum::<u64>() / total as u64
+            self.scores
+                .values()
+                .map(|s| s.latency_ms as u64)
+                .sum::<u64>()
+                / total as u64
         } else {
             0
         };
@@ -901,7 +916,9 @@ impl PeerScorer {
 
     /// Check and ban peers with low scores
     pub fn auto_ban_bad_peers(&mut self) {
-        let to_ban: Vec<_> = self.scores.iter()
+        let to_ban: Vec<_> = self
+            .scores
+            .iter()
             .filter(|(_, score)| score.should_ban())
             .map(|(addr, _)| *addr)
             .collect();
@@ -930,7 +947,9 @@ impl PeerScorer {
     /// Save ban list to disk for persistence across restarts
     pub fn save_bans_to_file(&self, path: &std::path::Path) -> std::result::Result<(), String> {
         let now = Instant::now();
-        let entries: Vec<BanEntry> = self.banned.iter()
+        let entries: Vec<BanEntry> = self
+            .banned
+            .iter()
             .filter(|(_, expiry)| **expiry > now)
             .map(|(addr, expiry)| BanEntry {
                 addr: addr.to_string(),
@@ -938,22 +957,23 @@ impl PeerScorer {
             })
             .collect();
 
-        let json = serde_json::to_string_pretty(&entries)
-            .map_err(|e| format!("serialize bans: {}", e))?;
-        std::fs::write(path, json)
-            .map_err(|e| format!("write ban list: {}", e))?;
+        let json =
+            serde_json::to_string_pretty(&entries).map_err(|e| format!("serialize bans: {}", e))?;
+        std::fs::write(path, json).map_err(|e| format!("write ban list: {}", e))?;
         Ok(())
     }
 
     /// Load ban list from disk
-    pub fn load_bans_from_file(&mut self, path: &std::path::Path) -> std::result::Result<usize, String> {
+    pub fn load_bans_from_file(
+        &mut self,
+        path: &std::path::Path,
+    ) -> std::result::Result<usize, String> {
         if !path.exists() {
             return Ok(0);
         }
-        let data = std::fs::read_to_string(path)
-            .map_err(|e| format!("read ban list: {}", e))?;
-        let entries: Vec<BanEntry> = serde_json::from_str(&data)
-            .map_err(|e| format!("parse ban list: {}", e))?;
+        let data = std::fs::read_to_string(path).map_err(|e| format!("read ban list: {}", e))?;
+        let entries: Vec<BanEntry> =
+            serde_json::from_str(&data).map_err(|e| format!("parse ban list: {}", e))?;
 
         let mut loaded = 0;
         for entry in entries {
@@ -997,7 +1017,11 @@ mod tests {
         score.block_speed = 50.0;
 
         let composite = score.composite_score();
-        assert!(composite > 0.8, "Good peer should have high score: {}", composite);
+        assert!(
+            composite > 0.8,
+            "Good peer should have high score: {}",
+            composite
+        );
     }
 
     #[test]
@@ -1045,17 +1069,25 @@ mod tests {
         // Hand-poke an already-expired entry into the map. Bypasses
         // ban() so we set up the precondition without triggering the
         // very GC we're testing.
-        scorer.banned.insert(stale, Instant::now() - Duration::from_secs(60));
-        assert!(scorer.banned.contains_key(&stale),
-                "test setup: stale entry must be present before ban()");
+        scorer
+            .banned
+            .insert(stale, Instant::now() - Duration::from_secs(60));
+        assert!(
+            scorer.banned.contains_key(&stale),
+            "test setup: stale entry must be present before ban()"
+        );
 
         // ban() should sweep stale as a side effect.
         scorer.ban(live);
 
-        assert!(!scorer.banned.contains_key(&stale),
-                "ban() must opportunistically prune the expired entry");
-        assert!(scorer.banned.contains_key(&live),
-                "ban() must still record the new ban (live entry persists)");
+        assert!(
+            !scorer.banned.contains_key(&stale),
+            "ban() must opportunistically prune the expired entry"
+        );
+        assert!(
+            scorer.banned.contains_key(&live),
+            "ban() must still record the new ban (live entry persists)"
+        );
     }
 
     #[test]
@@ -1089,12 +1121,21 @@ mod tests {
         for _ in 0..(EMPTY_BLOCKS_BAN_THRESHOLD - 1) {
             score.record_empty_blocks_response();
         }
-        assert!(!score.is_get_blocks_banned(), "below threshold = not banned");
-        assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD - 1);
+        assert!(
+            !score.is_get_blocks_banned(),
+            "below threshold = not banned"
+        );
+        assert_eq!(
+            score.consecutive_empty_blocks,
+            EMPTY_BLOCKS_BAN_THRESHOLD - 1
+        );
 
         // Successful delivery resets the counter.
         score.record_block_success(Duration::from_millis(100));
-        assert_eq!(score.consecutive_empty_blocks, 0, "real delivery clears the wedge counter");
+        assert_eq!(
+            score.consecutive_empty_blocks, 0,
+            "real delivery clears the wedge counter"
+        );
         assert!(!score.is_get_blocks_banned());
     }
 
@@ -1113,7 +1154,10 @@ mod tests {
         score.get_blocks_banned_until = Some(Instant::now() - Duration::from_secs(1));
         assert!(!score.is_get_blocks_banned(), "expired ban auto-clears");
         assert_eq!(score.consecutive_empty_blocks, 0, "counter reset on expiry");
-        assert!(score.get_blocks_banned_until.is_none(), "ban field cleared on expiry");
+        assert!(
+            score.get_blocks_banned_until.is_none(),
+            "ban field cleared on expiry"
+        );
     }
 
     #[test]
@@ -1144,7 +1188,10 @@ mod tests {
         for _ in 0..101 {
             exceeded = tracker.record(msg_type_id);
         }
-        assert!(exceeded, "expected message flood threshold to trigger for GetBlocks");
+        assert!(
+            exceeded,
+            "expected message flood threshold to trigger for GetBlocks"
+        );
     }
 
     #[test]
@@ -1167,7 +1214,8 @@ mod tests {
                  MessageType. Either the table is out of sync with \
                  protocol.rs or someone wrote a hex value instead of \
                  `MessageType::X as u8`.",
-                msg_type_id, limit,
+                msg_type_id,
+                limit,
             );
         }
     }
@@ -1206,7 +1254,10 @@ mod tests {
     fn test_misbehavior_wrong_network_is_immediate_ban_threshold() {
         let mut score = PeerScore::default();
         score.record_misbehavior(MisbehaviorType::WrongNetwork);
-        assert!(score.should_ban(), "wrong-network offense should trigger ban");
+        assert!(
+            score.should_ban(),
+            "wrong-network offense should trigger ban"
+        );
     }
 
     #[test]
@@ -1214,7 +1265,12 @@ mod tests {
         let mut t = OrphanFloodTracker::new();
         let pid = [42u8; 32];
         for i in 1..=ORPHAN_FLOOD_THRESHOLD {
-            assert!(!t.record(pid), "orphan {} of {} below threshold should not flag", i, ORPHAN_FLOOD_THRESHOLD);
+            assert!(
+                !t.record(pid),
+                "orphan {} of {} below threshold should not flag",
+                i,
+                ORPHAN_FLOOD_THRESHOLD
+            );
         }
         assert_eq!(t.count_for(&pid), ORPHAN_FLOOD_THRESHOLD);
     }
@@ -1232,7 +1288,10 @@ mod tests {
         // Subsequent orphans within the same window should NOT re-flag
         // (one score per window — sustained flooders accumulate across windows).
         for _ in 0..20 {
-            assert!(!t.record(pid), "already-flagged window should not re-trigger");
+            assert!(
+                !t.record(pid),
+                "already-flagged window should not re-trigger"
+            );
         }
     }
 
@@ -1277,7 +1336,10 @@ mod tests {
         }
         scorer.auto_ban_bad_peers();
         assert!(scorer.is_banned(&addr));
-        assert!(scorer.get(&addr).is_none(), "banned peer score should be removed");
+        assert!(
+            scorer.get(&addr).is_none(),
+            "banned peer score should be removed"
+        );
     }
 
     #[test]
@@ -1287,7 +1349,11 @@ mod tests {
         let reason = "Difficulty target mismatch: expected 0147ae147ae147ae, got 028f5c28f5c28f5c";
         let m = classify_invalid_block_reason(reason);
         assert_eq!(m, MisbehaviorType::InvalidBlockPoW);
-        assert_eq!(m.penalty(), 100, "single offense must cross -50 ban threshold");
+        assert_eq!(
+            m.penalty(),
+            100,
+            "single offense must cross -50 ban threshold"
+        );
     }
 
     #[test]
@@ -1312,7 +1378,8 @@ mod tests {
             assert_eq!(
                 classify_invalid_block_reason(r),
                 MisbehaviorType::InvalidBlockPoW,
-                "reason: {}", r,
+                "reason: {}",
+                r,
             );
         }
     }
@@ -1348,7 +1415,8 @@ mod tests {
             assert_eq!(
                 classify_invalid_block_reason(r),
                 MisbehaviorType::InvalidBlockProofs,
-                "reason: {}", r,
+                "reason: {}",
+                r,
             );
         }
     }
@@ -1410,10 +1478,16 @@ mod tests {
         // the ACTUAL-invalid-block categories. All these must remain
         // instant-ban or 2-strike as before.
         let must_instant_ban = [
-            ("Difficulty target mismatch: expected X, got Y", MisbehaviorType::InvalidBlockPoW),
-            ("Hardcoded checkpoint mismatch at height 42",   MisbehaviorType::InvalidBlockPoW),
-            ("Invalid proof of work",                        MisbehaviorType::InvalidBlockPoW),
-            ("Block hash above target",                      MisbehaviorType::InvalidBlockPoW),
+            (
+                "Difficulty target mismatch: expected X, got Y",
+                MisbehaviorType::InvalidBlockPoW,
+            ),
+            (
+                "Hardcoded checkpoint mismatch at height 42",
+                MisbehaviorType::InvalidBlockPoW,
+            ),
+            ("Invalid proof of work", MisbehaviorType::InvalidBlockPoW),
+            ("Block hash above target", MisbehaviorType::InvalidBlockPoW),
         ];
         for (r, expected) in must_instant_ban {
             assert_eq!(classify_invalid_block_reason(r), expected, "reason: {}", r);
@@ -1442,7 +1516,8 @@ mod tests {
             assert_eq!(
                 classify_invalid_tx_reason(r),
                 MisbehaviorType::ProtocolViolation,
-                "reason: {}", r,
+                "reason: {}",
+                r,
             );
         }
     }
@@ -1463,7 +1538,8 @@ mod tests {
             assert_eq!(
                 classify_invalid_tx_reason(r),
                 MisbehaviorType::InvalidTransaction,
-                "reason: {}", r,
+                "reason: {}",
+                r,
             );
         }
     }
@@ -1481,11 +1557,17 @@ mod tests {
             score.record_misbehavior(MisbehaviorType::InvalidTransaction);
             assert!(
                 !score.should_ban(),
-                "strike {} should not ban yet (rep={})", i, score.reputation,
+                "strike {} should not ban yet (rep={})",
+                i,
+                score.reputation,
             );
         }
         score.record_misbehavior(MisbehaviorType::InvalidTransaction);
-        assert!(score.should_ban(), "4th strike should ban (rep={})", score.reputation);
+        assert!(
+            score.should_ban(),
+            "4th strike should ban (rep={})",
+            score.reputation
+        );
     }
 
     #[test]
@@ -1566,7 +1648,10 @@ mod tests {
         for _ in 0..ORPHAN_FLOOD_THRESHOLD {
             assert!(!t.record(pid), "below-threshold record returns false");
         }
-        assert!(t.record(pid), "at-threshold record returns true (for logging)");
+        assert!(
+            t.record(pid),
+            "at-threshold record returns true (for logging)"
+        );
     }
 
     #[test]
@@ -1575,10 +1660,8 @@ mod tests {
         // penalty=0 (besides MissingParent, which is also a "not the peer's
         // fault" category). If a new variant is added and this list needs
         // updating, the test fails so we consciously re-evaluate.
-        let zero_penalty_variants: &[MisbehaviorType] = &[
-            MisbehaviorType::OrphanFlood,
-            MisbehaviorType::MissingParent,
-        ];
+        let zero_penalty_variants: &[MisbehaviorType] =
+            &[MisbehaviorType::OrphanFlood, MisbehaviorType::MissingParent];
         for v in zero_penalty_variants {
             assert_eq!(v.penalty(), 0, "expected zero penalty for {:?}", v);
         }
@@ -1642,7 +1725,9 @@ mod tests {
                 m.penalty() < 100,
                 "reason '{}' classified as {:?} with penalty {} — that instant-bans \
                  from default reputation. F32 explicitly guards against this.",
-                r, m, m.penalty(),
+                r,
+                m,
+                m.penalty(),
             );
         }
     }

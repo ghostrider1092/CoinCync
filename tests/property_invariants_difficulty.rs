@@ -35,12 +35,10 @@ use coincync::primitives::Hash;
 /// A `DifficultyBlock` with realistic-shaped fields. Timestamps are
 /// monotonic when assembled into a sequence (per the assembly helper).
 fn arb_difficulty_block(seed_height: u64) -> impl Strategy<Value = DifficultyBlock> {
-    (any::<u64>(), any::<[u8; 32]>()).prop_map(move |(ts_jitter, target_bytes)| {
-        DifficultyBlock {
-            height: seed_height,
-            timestamp: 1_700_000_000u64.saturating_add(ts_jitter % 10_000),
-            target: Hash::from_bytes(target_bytes),
-        }
+    (any::<u64>(), any::<[u8; 32]>()).prop_map(move |(ts_jitter, target_bytes)| DifficultyBlock {
+        height: seed_height,
+        timestamp: 1_700_000_000u64.saturating_add(ts_jitter % 10_000),
+        target: Hash::from_bytes(target_bytes),
     })
 }
 

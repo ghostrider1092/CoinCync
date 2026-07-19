@@ -8,25 +8,31 @@
 //! - Amount encryption
 //! - Fee calculation and change handling
 
-use super::{Transaction, TxInput, TxOutput, TxType, RingMemberRef};
-use crate::primitives::{Amount, PublicKey, Hash, KeyImage, hash_domain};
+use super::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
+use crate::constants::{MAX_TX_INPUTS, MAX_TX_OUTPUTS, MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT};
 use crate::crypto::{
-    // Bulletproofs range proofs and commitments
-    PedersenCommitment, BlindingFactor,
+    clsag_sign,
     create_aggregated_range_proof_for_height,
-    // CLSAG ring signatures (EC-based, replacing hash-based)
-    ClsagRingMember, ClsagSignature, clsag_sign,
-    EcCommitment, SecretScalar, PublicPoint,
-    KeyImage as CryptoKeyImage,
-    // Stealth addresses
-    StealthAddress, generate_stealth_address_checked,
     // Encrypted memos
     encrypt_memo,
+    generate_stealth_address_checked,
+    BlindingFactor,
+    // CLSAG ring signatures (EC-based, replacing hash-based)
+    ClsagRingMember,
+    ClsagSignature,
+    EcCommitment,
+    KeyImage as CryptoKeyImage,
+    // Bulletproofs range proofs and commitments
+    PedersenCommitment,
+    PublicPoint,
+    SecretScalar,
+    // Stealth addresses
+    StealthAddress,
 };
-use crate::constants::{MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT, MAX_TX_INPUTS, MAX_TX_OUTPUTS};
 use crate::error::{Error, Result};
+use crate::primitives::{hash_domain, Amount, Hash, KeyImage, PublicKey};
 
-use rand::{Rng, RngCore, CryptoRng};
+use rand::{CryptoRng, Rng, RngCore};
 
 /// Input to spend in a transaction
 #[derive(Clone)]
@@ -215,10 +221,16 @@ impl TransactionBuilder {
     ) -> Result<&mut Self> {
         let ring_size = decoys.len() + 1;
         if ring_size < 2 {
-            return Err(Error::InvalidRingSize { expected: 2, got: ring_size });
+            return Err(Error::InvalidRingSize {
+                expected: 2,
+                got: ring_size,
+            });
         }
         if real_position >= ring_size {
-            return Err(Error::InvalidRingSize { expected: ring_size, got: real_position + 1 });
+            return Err(Error::InvalidRingSize {
+                expected: ring_size,
+                got: real_position + 1,
+            });
         }
 
         // Build the ring with real output at the specified position.
@@ -226,10 +238,7 @@ impl TransactionBuilder {
         // one_time_secret.public_key() equals the stealth address stored in the ring,
         // so the CLSAG verifier can confirm the key image matches the ring member.
         let real_public = input.one_time_secret.public_key();
-        let real_commitment = PedersenCommitment::commit(
-            input.amount.as_atomic(),
-            &input.blinding,
-        );
+        let real_commitment = PedersenCommitment::commit(input.amount.as_atomic(), &input.blinding);
 
         // Build both CLSAG ring (for signing) and ring refs (for serialization)
         let mut clsag_ring = Vec::with_capacity(ring_size);
@@ -243,7 +252,7 @@ impl TransactionBuilder {
                     .ok_or(Error::CryptoError("invalid real public key point".into()))?;
                 let ec_commit = EcCommitment::from_point(
                     PublicPoint::from_bytes(commitment_bytes)
-                        .ok_or(Error::CryptoError("invalid real commitment point".into()))?
+                        .ok_or(Error::CryptoError("invalid real commitment point".into()))?,
                 );
                 clsag_ring.push(ClsagRingMember::new(pub_point, ec_commit));
                 ring_refs.push(RingMemberRef {
@@ -251,13 +260,15 @@ impl TransactionBuilder {
                     commitment: commitment_bytes,
                 });
             } else {
-                let decoy = decoy_iter.next()
-                    .ok_or(Error::InvalidRingSize { expected: ring_size - 1, got: i })?;
+                let decoy = decoy_iter.next().ok_or(Error::InvalidRingSize {
+                    expected: ring_size - 1,
+                    got: i,
+                })?;
                 let pub_point = PublicPoint::from_bytes(*decoy.public_key.as_bytes())
                     .ok_or(Error::CryptoError("invalid decoy public key point".into()))?;
                 let ec_commit = EcCommitment::from_point(
                     PublicPoint::from_bytes(decoy.commitment)
-                        .ok_or(Error::CryptoError("invalid decoy commitment point".into()))?
+                        .ok_or(Error::CryptoError("invalid decoy commitment point".into()))?,
                 );
                 clsag_ring.push(ClsagRingMember::new(pub_point, ec_commit));
                 ring_refs.push(RingMemberRef {
@@ -304,14 +315,14 @@ impl TransactionBuilder {
         if self.outputs.len() >= MAX_TX_OUTPUTS {
             return Err(Error::InvalidOutputCount {
                 count: self.outputs.len() + 1,
-                max: MAX_TX_OUTPUTS
+                max: MAX_TX_OUTPUTS,
             });
         }
 
         if recipient.amount.as_atomic() < MIN_OUTPUT_AMOUNT {
             return Err(Error::OutputTooSmall {
                 amount: recipient.amount.as_atomic(),
-                min: MIN_OUTPUT_AMOUNT
+                min: MIN_OUTPUT_AMOUNT,
             });
         }
 
@@ -332,8 +343,11 @@ impl TransactionBuilder {
         // recipient reconstructs a different one, making the output unspendable.
         let blinding = {
             let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
-            let view_point = PublicPoint::from_bytes(*recipient.view_public.as_bytes())
-                .ok_or(Error::CryptoError("invalid recipient view public key for blinding derivation".into()))?;
+            let view_point = PublicPoint::from_bytes(*recipient.view_public.as_bytes()).ok_or(
+                Error::CryptoError(
+                    "invalid recipient view public key for blinding derivation".into(),
+                ),
+            )?;
             // P5-B1 SURGICAL FIX (2026-07-03): R-7 CLASS — zeroize
             // both the shared-point buffer and the RistrettoPoint.
             let mut shared_point = view_point.mul(&tx_scalar);
@@ -408,10 +422,7 @@ impl TransactionBuilder {
     /// Dummy outputs use random unspendable keys, proper stealth addresses,
     /// and valid Pedersen commitments to amount 0. They are included in
     /// range proofs and the balance equation like any other output.
-    pub fn add_dummy_output<R: RngCore + CryptoRng>(
-        &mut self,
-        rng: &mut R,
-    ) -> Result<&mut Self> {
+    pub fn add_dummy_output<R: RngCore + CryptoRng>(&mut self, rng: &mut R) -> Result<&mut Self> {
         if self.outputs.len() >= MAX_TX_OUTPUTS {
             return Ok(self); // Silently skip if at output limit
         }
@@ -423,16 +434,13 @@ impl TransactionBuilder {
         let dummy_view = dummy_view_secret.public_key();
         let output_index = self.outputs.len() as u8;
 
-        let (stealth, tx_secret) = generate_stealth_address_checked(
-            &dummy_spend, &dummy_view, output_index, rng,
-        )?;
+        let (stealth, tx_secret) =
+            generate_stealth_address_checked(&dummy_spend, &dummy_view, output_index, rng)?;
 
         let blinding = BlindingFactor::random(rng);
         let commitment = PedersenCommitment::commit(0, &blinding);
 
-        let encrypted_amount = encrypt_amount(
-            Amount::ZERO, &tx_secret, &dummy_view, output_index,
-        );
+        let encrypted_amount = encrypt_amount(Amount::ZERO, &tx_secret, &dummy_view, output_index);
         let view_tag = compute_view_tag(&tx_secret, &dummy_view, output_index);
 
         self.outputs.push(OutputBuilder {
@@ -462,7 +470,9 @@ impl TransactionBuilder {
         // Estimate transaction size
         // SECURITY: Calculate actual input sizes instead of using first input's ring size for all.
         // Different inputs may have different ring sizes, so we sum them individually.
-        let total_input_size: usize = self.inputs.iter()
+        let total_input_size: usize = self
+            .inputs
+            .iter()
             .map(|i| 32 + 64 * i.ring.len()) // key_image + ring_sig per member
             .sum();
 
@@ -473,7 +483,7 @@ impl TransactionBuilder {
             + total_input_size
             + self.outputs.len() * output_size
             + proof_size
-            + 8;  // fee
+            + 8; // fee
 
         Amount::from_atomic((total_size as u64) * MIN_FEE_PER_BYTE)
     }
@@ -483,9 +493,10 @@ impl TransactionBuilder {
     /// Callers that need to encrypt asset IDs post-build should use this
     /// method instead of `build()` so they can derive the correct ECDH
     /// shared secrets.
-    pub fn build_with_secrets<R: RngCore + CryptoRng>(self, rng: &mut R)
-        -> Result<(Transaction, Vec<crate::primitives::SecretKey>)>
-    {
+    pub fn build_with_secrets<R: RngCore + CryptoRng>(
+        self,
+        rng: &mut R,
+    ) -> Result<(Transaction, Vec<crate::primitives::SecretKey>)> {
         let secrets = self.output_tx_secrets.clone();
         let tx = self.build(rng)?;
         Ok((tx, secrets))
@@ -495,23 +506,34 @@ impl TransactionBuilder {
     pub fn build<R: RngCore + CryptoRng>(self, rng: &mut R) -> Result<Transaction> {
         // Validate inputs/outputs
         if self.tx_type != TxType::Coinbase && self.inputs.is_empty() {
-            return Err(Error::InvalidInputCount { count: 0, max: MAX_TX_INPUTS });
+            return Err(Error::InvalidInputCount {
+                count: 0,
+                max: MAX_TX_INPUTS,
+            });
         }
         if self.outputs.is_empty() {
-            return Err(Error::InvalidOutputCount { count: 0, max: MAX_TX_OUTPUTS });
+            return Err(Error::InvalidOutputCount {
+                count: 0,
+                max: MAX_TX_OUTPUTS,
+            });
         }
 
         // Verify balance: sum(inputs) = sum(outputs) + fee
         // SECURITY (M-1): Use checked_add to prevent silent u64 wrapping in release mode.
         // Previously used Iterator::sum() on raw u64 which bypasses Amount::Sum (saturating).
-        let input_sum: u64 = self.inputs.iter()
+        let input_sum: u64 = self
+            .inputs
+            .iter()
             .try_fold(0u64, |acc, i| acc.checked_add(i.amount.as_atomic()))
             .ok_or(Error::AmountOverflow)?;
-        let output_sum: u64 = self.outputs.iter()
+        let output_sum: u64 = self
+            .outputs
+            .iter()
             .try_fold(0u64, |acc, o| acc.checked_add(o.amount.as_atomic()))
             .ok_or(Error::AmountOverflow)?;
 
-        let outputs_plus_fee = output_sum.checked_add(self.fee.as_atomic())
+        let outputs_plus_fee = output_sum
+            .checked_add(self.fee.as_atomic())
             .ok_or(Error::AmountOverflow)?;
         if input_sum != outputs_plus_fee {
             return Err(Error::TransactionUnbalanced {
@@ -527,19 +549,19 @@ impl TransactionBuilder {
             for (idx, o) in self.outputs.iter().enumerate() {
                 if let Some(view_pub) = &o.recipient_view_public {
                     let tx_secret = &self.output_tx_secrets[idx];
-                    output_memos[idx] = encrypt_memo(
-                        memo_bytes,
-                        tx_secret.as_bytes(),
-                        view_pub.as_bytes(),
-                    )?;
+                    output_memos[idx] =
+                        encrypt_memo(memo_bytes, tx_secret.as_bytes(), view_pub.as_bytes())?;
                     break; // only attach to first recipient output
                 }
             }
         }
 
         // Build outputs
-        let tx_outputs: Vec<TxOutput> = self.outputs.iter().enumerate().map(|(idx, o)| {
-            TxOutput {
+        let tx_outputs: Vec<TxOutput> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(idx, o)| TxOutput {
                 stealth_address: o.stealth_address.public_key,
                 tx_public_key: o.stealth_address.tx_public_key,
                 commitment: o.commitment.to_bytes(),
@@ -547,21 +569,26 @@ impl TransactionBuilder {
                 view_tag: o.view_tag,
                 lock_height: o.lock_height,
                 encrypted_memo: output_memos[idx].clone(),
-            }
-        }).collect();
+            })
+            .collect();
 
         // Create aggregated range proof for all outputs (BP+ at/above activation height)
         let amounts: Vec<Amount> = self.outputs.iter().map(|o| o.amount).collect();
-        let blindings: Vec<BlindingFactor> = self.outputs.iter().map(|o| o.blinding.clone()).collect();
-        let range_proof = create_aggregated_range_proof_for_height(&amounts, &blindings, rng, self.target_height)?;
+        let blindings: Vec<BlindingFactor> =
+            self.outputs.iter().map(|o| o.blinding.clone()).collect();
+        let range_proof = create_aggregated_range_proof_for_height(
+            &amounts,
+            &blindings,
+            rng,
+            self.target_height,
+        )?;
 
         // R-6 SURGICAL FIX (2026-07-03): use try_to_bytes so a borsh
         // serialization failure propagates as a real error rather
         // than panicking the whole tx-builder.
-        let range_proof_bytes = range_proof.try_to_bytes()
-            .map_err(|e| crate::error::Error::CryptoError(format!(
-                "R-6: RangeProof serialization failed: {}", e
-            )))?;
+        let range_proof_bytes = range_proof.try_to_bytes().map_err(|e| {
+            crate::error::Error::CryptoError(format!("R-6: RangeProof serialization failed: {}", e))
+        })?;
 
         // Generate pseudo-output blinding factors for privacy
         // Each input gets a different pseudo-output blinding (r'_i), so that
@@ -597,10 +624,8 @@ impl TransactionBuilder {
 
         for (idx, input) in self.inputs.iter().enumerate() {
             let pseudo_bf = &pseudo_blindings[idx];
-            let pseudo_commitment = PedersenCommitment::commit(
-                input.amount.as_atomic(),
-                pseudo_bf,
-            ).to_bytes();
+            let pseudo_commitment =
+                PedersenCommitment::commit(input.amount.as_atomic(), pseudo_bf).to_bytes();
             pre_pseudo_commitments.push(pseudo_commitment);
 
             // Pre-compute CLSAG key image: I = x * Hp(x*G)
@@ -666,10 +691,10 @@ impl TransactionBuilder {
             let blinding_diff = SecretScalar::from_bytes(diff_bf.to_bytes());
 
             // Reconstruct pseudo-output as EC commitment for CLSAG
-            let pseudo_output = EcCommitment::from_point(
-                PublicPoint::from_bytes(pseudo_output_commitment)
-                    .ok_or(Error::CryptoError("invalid pseudo-output commitment".into()))?
-            );
+            let pseudo_output =
+                EcCommitment::from_point(PublicPoint::from_bytes(pseudo_output_commitment).ok_or(
+                    Error::CryptoError("invalid pseudo-output commitment".into()),
+                )?);
 
             let signature = clsag_sign(
                 &message,
@@ -699,7 +724,6 @@ impl TransactionBuilder {
             extra: self.extra,
         })
     }
-
 }
 
 /// Encrypt amount using ECDH shared secret derivation
@@ -820,7 +844,9 @@ pub fn decrypt_amount(
 }
 
 /// Simple builder for basic transactions (legacy interface)
-#[deprecated(note = "H28: Does NOT generate range proofs. Use TransactionBuilder::build_with_proofs() for production.")]
+#[deprecated(
+    note = "H28: Does NOT generate range proofs. Use TransactionBuilder::build_with_proofs() for production."
+)]
 pub struct SimpleTransactionBuilder {
     tx_type: TxType,
     inputs: Vec<TxInput>,
@@ -882,7 +908,10 @@ impl SimpleTransactionBuilder {
 
     pub fn build(self) -> Result<Transaction> {
         if self.outputs.is_empty() {
-            return Err(Error::InvalidOutputCount { count: 0, max: MAX_TX_OUTPUTS });
+            return Err(Error::InvalidOutputCount {
+                count: 0,
+                max: MAX_TX_OUTPUTS,
+            });
         }
 
         Ok(Transaction {
@@ -946,7 +975,7 @@ mod tests {
 
         // Sender and receiver must compute same view tag (ECDH correctness)
         let receiver_tag = {
-            use crate::crypto::{SecretScalar as SS, PublicPoint as PP};
+            use crate::crypto::{PublicPoint as PP, SecretScalar as SS};
             let vs = SS::from_bytes(*view_secret.as_bytes());
             let tp = PP::from_bytes(*tx_public.as_bytes()).unwrap();
             let shared = tp.mul(&vs);
@@ -954,7 +983,10 @@ mod tests {
             let tag_hash = crate::primitives::hash_domain(b"COINCYNC_VIEWTAG_v2", &tag_input);
             tag_hash.as_bytes()[0]
         };
-        assert_eq!(sender_tag, receiver_tag, "ECDH view tag mismatch between sender and receiver");
+        assert_eq!(
+            sender_tag, receiver_tag,
+            "ECDH view tag mismatch between sender and receiver"
+        );
     }
 
     #[test]

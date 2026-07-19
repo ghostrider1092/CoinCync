@@ -81,7 +81,6 @@ impl Theme {
 /// orbiting blockchain blocks — representing privacy, Layer 1, and
 /// the chain's cryptographic ring signature foundation.
 pub fn print_colored_banner() {
-    
     println!();
 
     // ── Name ─────────────────────────────────────────────────────────
@@ -93,9 +92,19 @@ pub fn print_colored_banner() {
      ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝   ╚═╝   ╚═╝  ╚═══╝ ╚═════╝"#;
 
     println!("{}", banner.cyan());
-    println!("                                                                 {}", "2.0".bright_cyan().bold());
+    println!(
+        "                                                                 {}",
+        "2.0".bright_cyan().bold()
+    );
     println!();
-    println!("                    {}", "The privacy coin you can audit.".white());
-    println!("                              {}{}", "v".dimmed(), env!("CARGO_PKG_VERSION").bright_white());
+    println!(
+        "                    {}",
+        "The privacy coin you can audit.".white()
+    );
+    println!(
+        "                              {}{}",
+        "v".dimmed(),
+        env!("CARGO_PKG_VERSION").bright_white()
+    );
     println!();
 }

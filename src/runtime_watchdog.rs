@@ -571,12 +571,7 @@ fn write_diagnostic_snapshot(
             writeln!(
                 f,
                 "tid={} comm={:?} wchan={} state=[{}] syscall=[{}] kernel_stack_head=[{}]",
-                t.tid,
-                t.comm,
-                t.wchan,
-                t.state_line,
-                t.syscall_line,
-                t.kernel_stack_head,
+                t.tid, t.comm, t.wchan, t.state_line, t.syscall_line, t.kernel_stack_head,
             )?;
         }
     }

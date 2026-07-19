@@ -4,9 +4,8 @@
 //! NO MOCKS. Real crypto operations measured for timing variance.
 
 use coincync::crypto::{
-    SecretScalar, PublicPoint, BlindingFactor, PedersenCommitment,
-    KeyImage, ClsagRingMember, EcCommitment,
-    clsag_sign, clsag_verify, ct_eq,
+    clsag_sign, clsag_verify, ct_eq, BlindingFactor, ClsagRingMember, EcCommitment, KeyImage,
+    PedersenCommitment, PublicPoint, SecretScalar,
 };
 use rand::rngs::OsRng;
 use std::time::{Duration, Instant};
@@ -111,7 +110,10 @@ fn tier9_ct_eq_returns_correct_results() {
 
     assert!(ct_eq(&a, &b), "Equal slices must be equal");
     assert!(!ct_eq(&a, &c), "Different slices must not be equal");
-    assert!(!ct_eq(&a, &d), "Slices differing at last byte must not be equal");
+    assert!(
+        !ct_eq(&a, &d),
+        "Slices differing at last byte must not be equal"
+    );
 }
 
 #[test]
@@ -124,9 +126,24 @@ fn tier9_ct_eq_timing_consistent() {
 
     let iterations = 10_000;
 
-    let t_equal = median_time(|| { let _ = ct_eq(&a, &b); }, iterations);
-    let t_diff_first = median_time(|| { let _ = ct_eq(&a, &c); }, iterations);
-    let t_diff_last = median_time(|| { let _ = ct_eq(&a, &d); }, iterations);
+    let t_equal = median_time(
+        || {
+            let _ = ct_eq(&a, &b);
+        },
+        iterations,
+    );
+    let t_diff_first = median_time(
+        || {
+            let _ = ct_eq(&a, &c);
+        },
+        iterations,
+    );
+    let t_diff_last = median_time(
+        || {
+            let _ = ct_eq(&a, &d);
+        },
+        iterations,
+    );
 
     let max_t = t_equal.max(t_diff_first).max(t_diff_last);
     let min_t = t_equal.min(t_diff_first).min(t_diff_last);
@@ -134,7 +151,9 @@ fn tier9_ct_eq_timing_consistent() {
     assert!(
         max_t < min_t * 3,
         "Timing variance too large! Equal: {:?}, Diff@0: {:?}, Diff@31: {:?}",
-        t_equal, t_diff_first, t_diff_last
+        t_equal,
+        t_diff_first,
+        t_diff_last
     );
 }
 
@@ -144,9 +163,7 @@ fn tier9_ct_eq_timing_consistent() {
 
 #[test]
 fn tier9_scalar_mul_timing_consistent() {
-    let scalars: Vec<SecretScalar> = (0..5)
-        .map(|_| SecretScalar::random(&mut OsRng))
-        .collect();
+    let scalars: Vec<SecretScalar> = (0..5).map(|_| SecretScalar::random(&mut OsRng)).collect();
 
     // Interleaved so a runner-wide CPU-frequency/scheduling shift can't be
     // misattributed to a single scalar (#275).
@@ -168,9 +185,7 @@ fn tier9_scalar_mul_timing_consistent() {
 
 #[test]
 fn tier9_key_image_timing_consistent() {
-    let secrets: Vec<SecretScalar> = (0..5)
-        .map(|_| SecretScalar::random(&mut OsRng))
-        .collect();
+    let secrets: Vec<SecretScalar> = (0..5).map(|_| SecretScalar::random(&mut OsRng)).collect();
 
     let times = interleaved_medians(&secrets, 3_000, |secret| KeyImage::from_secret(secret));
 
@@ -227,31 +242,48 @@ fn tier9_clsag_verify_timing_independent_of_signer() {
         let mut ring: Vec<ClsagRingMember> = Vec::new();
         for i in 0..ring_size {
             let (pk, commit) = if i == real_idx {
-                (real_secret.to_public(), PedersenCommitment::commit(1_000_000_000, &real_blinding))
+                (
+                    real_secret.to_public(),
+                    PedersenCommitment::commit(1_000_000_000, &real_blinding),
+                )
             } else {
                 let s = SecretScalar::random(&mut OsRng);
                 let bf = BlindingFactor::random(&mut OsRng);
-                (s.to_public(), PedersenCommitment::commit(1_000_000_000, &bf))
+                (
+                    s.to_public(),
+                    PedersenCommitment::commit(1_000_000_000, &bf),
+                )
             };
-            ring.push(ClsagRingMember::new(pk, EcCommitment::from_point(
-                PublicPoint::from_bytes(commit.to_bytes()).unwrap()
-            )));
+            ring.push(ClsagRingMember::new(
+                pk,
+                EcCommitment::from_point(PublicPoint::from_bytes(commit.to_bytes()).unwrap()),
+            ));
         }
 
         let pseudo_output = EcCommitment::from_point(
             PublicPoint::from_bytes(
-                PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes()
-            ).unwrap()
+                PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes(),
+            )
+            .unwrap(),
         );
-        let blinding_diff = SecretScalar::from_bytes(
-            real_blinding.sub(&pseudo_blinding).to_bytes()
-        );
+        let blinding_diff =
+            SecretScalar::from_bytes(real_blinding.sub(&pseudo_blinding).to_bytes());
 
-        let sig = clsag_sign(message, &ring, real_idx, &real_secret, &blinding_diff, &pseudo_output, &mut OsRng)
-            .expect("sign");
+        let sig = clsag_sign(
+            message,
+            &ring,
+            real_idx,
+            &real_secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        )
+        .expect("sign");
 
         let elapsed = median_time(
-            || { let _ = clsag_verify(message, &ring, &pseudo_output, &sig); },
+            || {
+                let _ = clsag_verify(message, &ring, &pseudo_output, &sig);
+            },
             iterations,
         );
         verify_times.push((real_idx, elapsed));
@@ -284,34 +316,55 @@ fn tier9_invalid_sig_not_faster_than_valid() {
     let mut ring: Vec<ClsagRingMember> = Vec::new();
     for i in 0..ring_size {
         let (pk, commit) = if i == 0 {
-            (real_secret.to_public(), PedersenCommitment::commit(1_000_000_000, &real_blinding))
+            (
+                real_secret.to_public(),
+                PedersenCommitment::commit(1_000_000_000, &real_blinding),
+            )
         } else {
             let s = SecretScalar::random(&mut OsRng);
             let bf = BlindingFactor::random(&mut OsRng);
-            (s.to_public(), PedersenCommitment::commit(1_000_000_000, &bf))
+            (
+                s.to_public(),
+                PedersenCommitment::commit(1_000_000_000, &bf),
+            )
         };
-        ring.push(ClsagRingMember::new(pk, EcCommitment::from_point(
-            PublicPoint::from_bytes(commit.to_bytes()).unwrap()
-        )));
+        ring.push(ClsagRingMember::new(
+            pk,
+            EcCommitment::from_point(PublicPoint::from_bytes(commit.to_bytes()).unwrap()),
+        ));
     }
 
     let pseudo_output = EcCommitment::from_point(
         PublicPoint::from_bytes(
-            PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes()
-        ).unwrap()
+            PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes(),
+        )
+        .unwrap(),
     );
     let blinding_diff = SecretScalar::from_bytes(real_blinding.sub(&pseudo_blinding).to_bytes());
 
-    let valid_sig = clsag_sign(message, &ring, 0, &real_secret, &blinding_diff, &pseudo_output, &mut OsRng).unwrap();
+    let valid_sig = clsag_sign(
+        message,
+        &ring,
+        0,
+        &real_secret,
+        &blinding_diff,
+        &pseudo_output,
+        &mut OsRng,
+    )
+    .unwrap();
     let mut invalid_sig = valid_sig.clone();
     invalid_sig.c1[0] ^= 0xFF;
 
     let t_valid = median_time(
-        || { let _ = clsag_verify(message, &ring, &pseudo_output, &valid_sig); },
+        || {
+            let _ = clsag_verify(message, &ring, &pseudo_output, &valid_sig);
+        },
         iterations,
     );
     let t_invalid = median_time(
-        || { let _ = clsag_verify(message, &ring, &pseudo_output, &invalid_sig); },
+        || {
+            let _ = clsag_verify(message, &ring, &pseudo_output, &invalid_sig);
+        },
         iterations,
     );
 
@@ -319,7 +372,8 @@ fn tier9_invalid_sig_not_faster_than_valid() {
     assert!(
         t_invalid > t_valid / 4,
         "Invalid sig ({:?}) is >4x faster than valid ({:?}). Timing oracle risk.",
-        t_invalid, t_valid
+        t_invalid,
+        t_valid
     );
 }
 
@@ -334,19 +388,24 @@ fn tier9_verify_returns_bool_no_index_info() {
     let ring_size = 11;
     let message = b"no_index_leak";
 
-    let ring: Vec<ClsagRingMember> = (0..ring_size).map(|_| {
-        let s = SecretScalar::random(&mut OsRng);
-        let bf = BlindingFactor::random(&mut OsRng);
-        let commit = PedersenCommitment::commit(1_000_000_000, &bf);
-        ClsagRingMember::new(s.to_public(), EcCommitment::from_point(
-            PublicPoint::from_bytes(commit.to_bytes()).unwrap()
-        ))
-    }).collect();
+    let ring: Vec<ClsagRingMember> = (0..ring_size)
+        .map(|_| {
+            let s = SecretScalar::random(&mut OsRng);
+            let bf = BlindingFactor::random(&mut OsRng);
+            let commit = PedersenCommitment::commit(1_000_000_000, &bf);
+            ClsagRingMember::new(
+                s.to_public(),
+                EcCommitment::from_point(PublicPoint::from_bytes(commit.to_bytes()).unwrap()),
+            )
+        })
+        .collect();
 
     let pseudo_output = EcCommitment::from_point(
         PublicPoint::from_bytes(
-            PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes()
-        ).unwrap()
+            PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng))
+                .to_bytes(),
+        )
+        .unwrap(),
     );
 
     let fake_ki = KeyImage::from_secret(&SecretScalar::random(&mut OsRng));

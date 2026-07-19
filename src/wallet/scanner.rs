@@ -6,15 +6,18 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::primitives::{PublicKey, SecretKey, Hash, KeyImage, hash_domain};
-use crate::transaction::{Transaction, TxOutput, TxType};
 use crate::consensus::Block;
-use crate::crypto::{StealthAddress, is_output_ours, OutputScanContext, BlindingFactor, SecretScalar, PublicPoint, PedersenCommitment};
-use crate::db::{WalletDb, OwnedOutput, ScanState};
+use crate::crypto::{
+    is_output_ours, BlindingFactor, OutputScanContext, PedersenCommitment, PublicPoint,
+    SecretScalar, StealthAddress,
+};
+use crate::db::{OwnedOutput, ScanState, WalletDb};
 use crate::error::Result;
+use crate::primitives::{hash_domain, Hash, KeyImage, PublicKey, SecretKey};
+use crate::transaction::{Transaction, TxOutput, TxType};
 
 use rayon::prelude::*;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// Default bound on the scanner's per-block journal (used for reorg-aware
 /// rewind). Must cover the LARGEST network reorg cap so any consensus-legal
@@ -396,7 +399,10 @@ impl WalletScanner {
     /// wallet's fork point after a reorg (the wallet sends this list; the node
     /// returns the deepest height still on its canonical chain).
     pub fn journal_pairs(&self) -> Vec<(u64, Hash)> {
-        self.journal.iter().map(|e| (e.height, e.block_hash)).collect()
+        self.journal
+            .iter()
+            .map(|e| (e.height, e.block_hash))
+            .collect()
     }
 
     /// Push a journal entry and trim oldest entries to maintain the
@@ -548,7 +554,9 @@ impl WalletScanner {
                 .expect("journal::pop_back: just checked back() was Some");
             outcome.entries_undone += 1;
             outcome.outputs_to_remove.extend(entry.outputs_added);
-            outcome.key_images_to_unspend.extend(entry.key_images_marked_spent);
+            outcome
+                .key_images_to_unspend
+                .extend(entry.key_images_marked_spent);
         }
 
         // Update last_height + last_hash to journal's new back (or
@@ -578,7 +586,8 @@ impl WalletScanner {
 
     /// Add keys for scanning
     pub fn add_keys(&mut self, view_secret: SecretKey, spend_public: PublicKey, epoch: u64) {
-        self.keys.push(ScanKeys::new(view_secret, spend_public, epoch));
+        self.keys
+            .push(ScanKeys::new(view_secret, spend_public, epoch));
     }
 
     /// Register subaddress spend keys so the scanner can detect outputs
@@ -657,7 +666,12 @@ impl WalletScanner {
                     public_key: output.stealth_address,
                     tx_public_key: output.tx_public_key,
                 };
-                if is_output_ours(&stealth_check, &keys.view_secret, &keys.spend_public, output_index) {
+                if is_output_ours(
+                    &stealth_check,
+                    &keys.view_secret,
+                    &keys.spend_public,
+                    output_index,
+                ) {
                     let amount = if output.encrypted_amount.len() >= 8 {
                         let mut bytes = [0u8; 8];
                         bytes.copy_from_slice(&output.encrypted_amount[..8]);
@@ -720,16 +734,11 @@ impl WalletScanner {
 
             if matched_spend_pub.is_some() {
                 // This output is ours! Decrypt the amount
-                let shared_secret = compute_shared_secret(
-                    &keys.view_secret,
-                    &output.tx_public_key,
-                    output_index,
-                );
+                let shared_secret =
+                    compute_shared_secret(&keys.view_secret, &output.tx_public_key, output_index);
 
-                let (amount, blinding_factor) = decrypt_amount(
-                    &output.encrypted_amount,
-                    &shared_secret,
-                );
+                let (amount, blinding_factor) =
+                    decrypt_amount(&output.encrypted_amount, &shared_secret);
 
                 // 2026-06-03 ghost-balance defense: recompute the
                 // Pedersen commitment from the decrypted (amount,
@@ -757,10 +766,8 @@ impl WalletScanner {
                 // is_output_ours returning false, but catches the
                 // narrow class of attacks where stealth ownership
                 // matches but the encrypted amount is forged.
-                let expected_commitment = PedersenCommitment::commit(
-                    amount,
-                    &blinding_factor,
-                ).to_bytes();
+                let expected_commitment =
+                    PedersenCommitment::commit(amount, &blinding_factor).to_bytes();
                 if expected_commitment != output.commitment {
                     // AUDIT (R-103 fix, 2026-07-03): pre-fix code
                     // logged this at DEBUG level. But the event is
@@ -817,7 +824,11 @@ impl WalletScanner {
             // idx as u8 truncation, which would cause incorrect one-time key
             // derivation and potentially miss real outputs or create phantom ones.
             if idx > 255 {
-                tracing::warn!("Transaction {} has >255 outputs, skipping index {}", tx_hash.to_hex(), idx);
+                tracing::warn!(
+                    "Transaction {} has >255 outputs, skipping index {}",
+                    tx_hash.to_hex(),
+                    idx
+                );
                 break;
             }
             self.stats.outputs_scanned += 1;
@@ -884,7 +895,11 @@ impl WalletScanner {
             };
         }
 
-        debug!("Scanning block {} at height {}", &block_hash.to_hex()[..8], height);
+        debug!(
+            "Scanning block {} at height {}",
+            &block_hash.to_hex()[..8],
+            height
+        );
         self.stats.blocks_scanned += 1;
 
         let mut all_found = Vec::new();
@@ -900,7 +915,10 @@ impl WalletScanner {
             height,
             block_hash,
             prev_block_hash: block_prev_hash,
-            outputs_added: all_found.iter().map(|o| (o.tx_hash, o.output_index)).collect(),
+            outputs_added: all_found
+                .iter()
+                .map(|o| (o.tx_hash, o.output_index))
+                .collect(),
             // Spends are journaled by the orchestrator via
             // `record_spend_for_last_block` after this method returns.
             // We seed the field empty; the caller fills it as it walks
@@ -1005,14 +1023,12 @@ impl WalletScanner {
                     let is_coinbase = tx.tx_type == TxType::Coinbase;
                     for (idx, output) in tx.outputs.iter().enumerate() {
                         // SECURITY (A6-IDX-TRUNC): Skip outputs past index 255
-                        if idx > 255 { break; }
-                        if let Some(decrypted) = scan_output_with_keys(
-                            output,
-                            idx as u8,
-                            tx_hash,
-                            &keys,
-                            is_coinbase,
-                        ) {
+                        if idx > 255 {
+                            break;
+                        }
+                        if let Some(decrypted) =
+                            scan_output_with_keys(output, idx as u8, tx_hash, &keys, is_coinbase)
+                        {
                             block_results.push(decrypted);
                         }
                     }
@@ -1025,7 +1041,9 @@ impl WalletScanner {
         // Flatten results and deduplicate by (tx_hash, output_index) to prevent
         // inflated balances when the same block range is processed concurrently.
         let mut seen = std::collections::HashSet::new();
-        let all_found: Vec<DecryptedOutput> = results.into_iter().flatten()
+        let all_found: Vec<DecryptedOutput> = results
+            .into_iter()
+            .flatten()
             .filter(|o| seen.insert((o.tx_hash, o.output_index)))
             .collect();
 
@@ -1033,10 +1051,12 @@ impl WalletScanner {
         // which were previously missing from parallel path, causing stats divergence
         // between serial and parallel scanning)
         self.stats.blocks_scanned += blocks.len() as u64;
-        self.stats.transactions_scanned += blocks.iter()
+        self.stats.transactions_scanned += blocks
+            .iter()
             .map(|b| b.transactions.len() as u64)
             .sum::<u64>();
-        self.stats.outputs_scanned += blocks.iter()
+        self.stats.outputs_scanned += blocks
+            .iter()
             .flat_map(|b| b.transactions.iter())
             .map(|tx| tx.outputs.len().min(256) as u64)
             .sum::<u64>();
@@ -1098,7 +1118,12 @@ fn scan_output_with_keys(
                 public_key: output.stealth_address,
                 tx_public_key: output.tx_public_key,
             };
-            if is_output_ours(&stealth, &key_set.view_secret, &key_set.spend_public, output_index) {
+            if is_output_ours(
+                &stealth,
+                &key_set.view_secret,
+                &key_set.spend_public,
+                output_index,
+            ) {
                 let amount = if output.encrypted_amount.len() >= 8 {
                     let mut bytes = [0u8; 8];
                     bytes.copy_from_slice(&output.encrypted_amount[..8]);
@@ -1121,11 +1146,8 @@ fn scan_output_with_keys(
         }
 
         // View tag check (diagnostic only — never skip the full ownership check)
-        let _expected_tag = compute_view_tag(
-            &key_set.view_secret,
-            &output.tx_public_key,
-            output_index,
-        );
+        let _expected_tag =
+            compute_view_tag(&key_set.view_secret, &output.tx_public_key, output_index);
 
         // Full ownership check on every output (view_tag is not a gate)
         let stealth = StealthAddress {
@@ -1161,16 +1183,11 @@ fn scan_output_with_keys(
         }
 
         if matched {
-            let shared_secret = compute_shared_secret(
-                &key_set.view_secret,
-                &output.tx_public_key,
-                output_index,
-            );
+            let shared_secret =
+                compute_shared_secret(&key_set.view_secret, &output.tx_public_key, output_index);
 
-            let (amount, blinding_factor) = decrypt_amount(
-                &output.encrypted_amount,
-                &shared_secret,
-            );
+            let (amount, blinding_factor) =
+                decrypt_amount(&output.encrypted_amount, &shared_secret);
 
             // 2026-06-22 ghost-balance defense (parallel-path parity):
             // recompute Pedersen C = amount*H + blinding*G from the decrypted
@@ -1192,10 +1209,8 @@ fn scan_output_with_keys(
             // entry. The specific "always recomputes the commitment"
             // internal step was not re-traced this session and is
             // stated qualitatively rather than as a receipt.
-            let expected_commitment = PedersenCommitment::commit(
-                amount,
-                &blinding_factor,
-            ).to_bytes();
+            let expected_commitment =
+                PedersenCommitment::commit(amount, &blinding_factor).to_bytes();
             if expected_commitment != output.commitment {
                 tracing::debug!(
                     "scanner(parallel): stealth match but commitment recompute \
@@ -1265,7 +1280,11 @@ fn compute_view_tag(view_secret: &SecretKey, tx_public: &PublicKey, output_index
 /// Compute shared secret for decryption
 ///
 /// SECURITY: Uses proper ECDH so sender and receiver derive the same shared secret.
-fn compute_shared_secret(view_secret: &SecretKey, tx_public: &PublicKey, output_index: u8) -> [u8; 32] {
+fn compute_shared_secret(
+    view_secret: &SecretKey,
+    tx_public: &PublicKey,
+    output_index: u8,
+) -> [u8; 32] {
     let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
     let tx_point = match PublicPoint::from_bytes(*tx_public.as_bytes()) {
         Some(p) => p,
@@ -1331,11 +1350,7 @@ pub fn encrypt_amount(amount: u64, shared_secret: &[u8; 32]) -> Vec<u8> {
 /// Generate view tag for output (sender side)
 ///
 /// SECURITY: Uses proper ECDH (tx_secret * view_public_POINT).
-pub fn generate_view_tag(
-    view_public: &PublicKey,
-    tx_secret: &SecretKey,
-    output_index: u8,
-) -> u8 {
+pub fn generate_view_tag(view_public: &PublicKey, tx_secret: &SecretKey, output_index: u8) -> u8 {
     let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
     let view_point = match PublicPoint::from_bytes(*view_public.as_bytes()) {
         Some(p) => p,
@@ -1379,7 +1394,8 @@ impl BackgroundScanner {
     /// Load state from database
     pub fn load_state(&mut self) -> Result<()> {
         let state = self.db.get_scan_state()?;
-        self.scanner.set_position(state.scanned_height, state.scanned_hash);
+        self.scanner
+            .set_position(state.scanned_height, state.scanned_hash);
         Ok(())
     }
 
@@ -1418,7 +1434,11 @@ impl BackgroundScanner {
 
         let found = match self.scanner.scan_block_with_result(block) {
             ScanResult::Scanned { outputs, .. } => outputs,
-            ScanResult::ReorgDetected { at_height, actual_prev, expected_prev } => {
+            ScanResult::ReorgDetected {
+                at_height,
+                actual_prev,
+                expected_prev,
+            } => {
                 return Err(crate::error::Error::InvalidState(format!(
                     "Reorg detected during scan_and_persist at height {} (block prev_hash={:?} != journal back={:?}); \
                      caller must rewind + find_fork_point + retry",
@@ -1575,7 +1595,10 @@ impl WalletSyncHandle {
     }
 
     /// Send a block for scanning
-    pub async fn scan_block(&self, block: Block) -> std::result::Result<(), tokio::sync::mpsc::error::SendError<Block>> {
+    pub async fn scan_block(
+        &self,
+        block: Block,
+    ) -> std::result::Result<(), tokio::sync::mpsc::error::SendError<Block>> {
         self.block_tx.send(block).await
     }
 
@@ -1726,7 +1749,10 @@ mod tests {
 
         // Sender and receiver tags must match (ECDH correctness)
         let sender_tag = generate_view_tag(&view_public, &tx_secret, 0);
-        assert_eq!(tag1, sender_tag, "ECDH mismatch: sender and receiver view tags differ");
+        assert_eq!(
+            tag1, sender_tag,
+            "ECDH mismatch: sender and receiver view tags differ"
+        );
     }
 
     #[test]
@@ -1798,12 +1824,18 @@ mod tests {
         assert_eq!(scanner.position().0, 5);
 
         // Rewind to height 2 — should pop entries 5, 4, 3.
-        let outcome = scanner.rewind_to_height(2).expect("rewind to in-window height should succeed");
+        let outcome = scanner
+            .rewind_to_height(2)
+            .expect("rewind to in-window height should succeed");
 
         assert_eq!(outcome.entries_undone, 3);
         assert_eq!(outcome.new_height, 2);
         assert_eq!(outcome.new_hash, Hash::from_bytes([2u8; 32]));
-        assert_eq!(scanner.journal_len(), 2, "journal should retain only heights 1 + 2");
+        assert_eq!(
+            scanner.journal_len(),
+            2,
+            "journal should retain only heights 1 + 2"
+        );
         assert_eq!(scanner.position().0, 2);
 
         // outputs_to_remove should be in reverse application order:
@@ -1821,7 +1853,9 @@ mod tests {
         for h in 1u64..=5 {
             push_diff(&mut scanner, h, h as u8);
         }
-        let outcome = scanner.rewind_to_height(5).expect("rewind to current should succeed");
+        let outcome = scanner
+            .rewind_to_height(5)
+            .expect("rewind to current should succeed");
         assert_eq!(outcome.entries_undone, 0);
         assert_eq!(outcome.outputs_to_remove.len(), 0);
         assert_eq!(outcome.new_height, 5);
@@ -1869,10 +1903,7 @@ mod tests {
                 target_height: 40,
                 earliest_in_journal: 50,
             } => {}
-            other => panic!(
-                "expected OutsideJournalWindow{{40,50}}, got {:?}",
-                other
-            ),
+            other => panic!("expected OutsideJournalWindow{{40,50}}, got {:?}", other),
         }
         // Scanner state unchanged.
         assert_eq!(scanner.journal_len(), 4);
@@ -1887,7 +1918,9 @@ mod tests {
         for h in 1u64..=5 {
             push_diff(&mut scanner, h, h as u8);
         }
-        let outcome = scanner.rewind_to_height(0).expect("rewind to 0 should succeed");
+        let outcome = scanner
+            .rewind_to_height(0)
+            .expect("rewind to 0 should succeed");
         assert_eq!(outcome.entries_undone, 5);
         assert_eq!(outcome.outputs_to_remove.len(), 5);
         assert_eq!(outcome.new_height, 0);
@@ -1910,8 +1943,10 @@ mod tests {
         for h in 1u64..=3 {
             push_diff(&mut scanner, h, h as u8);
             let ki = KeyImage::from_bytes([h as u8 + 0x80; 32]);
-            assert!(scanner.record_spend_for_last_block(ki),
-                "record_spend_for_last_block should find the just-pushed entry");
+            assert!(
+                scanner.record_spend_for_last_block(ki),
+                "record_spend_for_last_block should find the just-pushed entry"
+            );
         }
         assert_eq!(scanner.journal_len(), 3);
 
@@ -1920,10 +1955,14 @@ mod tests {
         // Reverse order: height 3's spend pops first, then height 2's.
         // Height 1 stays in journal so its spend is NOT surfaced.
         assert_eq!(outcome.key_images_to_unspend.len(), 2);
-        assert_eq!(outcome.key_images_to_unspend[0],
-                   KeyImage::from_bytes([3 + 0x80; 32]));
-        assert_eq!(outcome.key_images_to_unspend[1],
-                   KeyImage::from_bytes([2 + 0x80; 32]));
+        assert_eq!(
+            outcome.key_images_to_unspend[0],
+            KeyImage::from_bytes([3 + 0x80; 32])
+        );
+        assert_eq!(
+            outcome.key_images_to_unspend[1],
+            KeyImage::from_bytes([2 + 0x80; 32])
+        );
     }
 
     /// `record_spend_for_last_block` returns false when the journal is
@@ -2025,9 +2064,7 @@ mod tests {
         );
 
         // Newest entry should be the last height we pushed.
-        let newest = scanner
-            .journal_back()
-            .expect("journal should not be empty");
+        let newest = scanner.journal_back().expect("journal should not be empty");
         assert_eq!(
             newest.height,
             (max as u64) + 9,
@@ -2039,9 +2076,9 @@ mod tests {
     /// then verify the scanner detects and decrypts it (receiver side).
     #[test]
     fn test_scanner_stealth_roundtrip() {
-        use rand::rngs::OsRng;
         use crate::crypto::generate_stealth_address_checked;
         use crate::primitives::Amount;
+        use rand::rngs::OsRng;
 
         // Generate recipient keypair (Bob)
         let bob_view_secret = SecretKey::generate(&mut OsRng);
@@ -2058,7 +2095,8 @@ mod tests {
             &bob_view_public,
             output_index,
             &mut OsRng,
-        ).expect("stealth address generation");
+        )
+        .expect("stealth address generation");
 
         // Sender computes shared secret for amount encryption
         let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
@@ -2098,7 +2136,7 @@ mod tests {
         let tx = Transaction {
             version: 1,
             tx_type: TxType::Transfer,
-            inputs: vec![],  // Simplified for scanner test
+            inputs: vec![], // Simplified for scanner test
             outputs: vec![tx_output],
             fee: Amount::from_atomic(0),
             range_proof: vec![],
@@ -2111,12 +2149,19 @@ mod tests {
         scanner.add_keys(bob_view_secret.clone(), bob_spend_public, 0);
 
         let found = scanner.scan_transaction(&tx);
-        assert_eq!(found.len(), 1, "Scanner should detect exactly 1 output for Bob");
+        assert_eq!(
+            found.len(),
+            1,
+            "Scanner should detect exactly 1 output for Bob"
+        );
 
         let decrypted = &found[0];
         assert_eq!(decrypted.tx_hash, tx_hash);
         assert_eq!(decrypted.output_index, 0);
-        assert_eq!(decrypted.amount, send_amount, "Decrypted amount should match sent amount");
+        assert_eq!(
+            decrypted.amount, send_amount,
+            "Decrypted amount should match sent amount"
+        );
 
         // An unrelated wallet should NOT detect this output
         let other_view_secret = SecretKey::generate(&mut OsRng);
@@ -2124,14 +2169,18 @@ mod tests {
         let mut other_scanner = WalletScanner::new();
         other_scanner.add_keys(other_view_secret, other_spend_public, 0);
         let other_found = other_scanner.scan_transaction(&tx);
-        assert_eq!(other_found.len(), 0, "Unrelated wallet should not detect this output");
+        assert_eq!(
+            other_found.len(),
+            0,
+            "Unrelated wallet should not detect this output"
+        );
     }
 
     #[test]
     fn test_subaddress_detection_coverage() {
-        use rand::rngs::OsRng;
         use crate::crypto::generate_stealth_address_checked;
-        use crate::wallet::subaddress::{SubaddressManager, SubaddressIndex};
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+        use rand::rngs::OsRng;
 
         // Generate wallet keys
         let view_secret = SecretKey::generate(&mut OsRng);
@@ -2163,9 +2212,8 @@ mod tests {
 
         // Build tx to subaddress index (0,2)
         let sub2_spend = PublicKey::from_bytes(*sub2_spend_public.as_bytes());
-        let (stealth, tx_secret) = generate_stealth_address_checked(
-            &sub2_spend, &view_public, 0, &mut OsRng,
-        ).unwrap();
+        let (stealth, tx_secret) =
+            generate_stealth_address_checked(&sub2_spend, &view_public, 0, &mut OsRng).unwrap();
 
         let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
         let view_point = PublicPoint::from_bytes(*view_public.as_bytes()).unwrap();
@@ -2186,33 +2234,41 @@ mod tests {
         let commitment = PedersenCommitment::commit(send_amount, &blinding).to_bytes();
 
         let tx = Transaction {
-            version: 1, tx_type: TxType::Transfer, inputs: vec![],
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
             outputs: vec![TxOutput {
                 stealth_address: stealth.public_key,
                 tx_public_key: stealth.tx_public_key,
-                commitment, encrypted_amount, view_tag,
-                                                lock_height: None, encrypted_memo: vec![],
+                commitment,
+                encrypted_amount,
+                view_tag,
+                lock_height: None,
+                encrypted_memo: vec![],
             }],
-            fee: Amount::from_atomic(0), range_proof: vec![], extra: vec![],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
         };
 
         // Scanner with subaddress keys should detect the output
         let mut scanner = WalletScanner::new();
         scanner.add_keys(view_secret, spend_public, 0);
-        scanner.add_subaddress_keys(vec![
-            (0, 1, sub1_spend_public),
-            (0, 2, sub2_spend_public),
-        ]);
+        scanner.add_subaddress_keys(vec![(0, 1, sub1_spend_public), (0, 2, sub2_spend_public)]);
         let found = scanner.scan_transaction(&tx);
-        assert_eq!(found.len(), 1, "Scanner should detect output sent to subaddress (0,2)");
+        assert_eq!(
+            found.len(),
+            1,
+            "Scanner should detect output sent to subaddress (0,2)"
+        );
     }
 
     /// Test scanning a block with both coinbase and regular transactions
     #[test]
     fn test_scanner_block_with_transfer() {
-        use rand::rngs::OsRng;
         use crate::crypto::generate_stealth_address_checked;
         use crate::primitives::Amount;
+        use rand::rngs::OsRng;
 
         // Miner keys (Alice)
         let alice_spend_secret = SecretKey::generate(&mut OsRng);
@@ -2233,7 +2289,8 @@ mod tests {
             &bob_view_public,
             output_index,
             &mut OsRng,
-        ).unwrap();
+        )
+        .unwrap();
 
         let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
         let view_point = PublicPoint::from_bytes(*bob_view_public.as_bytes()).unwrap();
@@ -2315,7 +2372,11 @@ mod tests {
         let mut bob_scanner = WalletScanner::new();
         bob_scanner.add_keys(bob_view_secret, bob_spend_public, 0);
         let bob_found = bob_scanner.scan_block(&block);
-        assert_eq!(bob_found.len(), 1, "Bob should find 1 output (the transfer)");
+        assert_eq!(
+            bob_found.len(),
+            1,
+            "Bob should find 1 output (the transfer)"
+        );
         assert_eq!(bob_found[0].amount, send_amount);
     }
 
@@ -2330,9 +2391,9 @@ mod tests {
     /// 2026-06-03; this test pins the parallel path to the same contract.
     #[test]
     fn scan_blocks_parallel_drops_forged_commitment_output() {
-        use rand::rngs::OsRng;
         use crate::crypto::generate_stealth_address_checked;
         use crate::primitives::Amount;
+        use rand::rngs::OsRng;
 
         let bob_view_secret = SecretKey::generate(&mut OsRng);
         let _bob_spend_secret = SecretKey::generate(&mut OsRng);
@@ -2341,20 +2402,22 @@ mod tests {
 
         // Build an honest output for Bob (output index 0, real commitment).
         let honest_amount: u64 = 7_000_000_000;
-        let (honest_stealth, honest_tx_secret) = generate_stealth_address_checked(
-            &bob_spend_public, &bob_view_public, 0, &mut OsRng,
-        ).unwrap();
+        let (honest_stealth, honest_tx_secret) =
+            generate_stealth_address_checked(&bob_spend_public, &bob_view_public, 0, &mut OsRng)
+                .unwrap();
         let honest_tx_scalar = SecretScalar::from_bytes(*honest_tx_secret.as_bytes());
         let view_point = PublicPoint::from_bytes(*bob_view_public.as_bytes()).unwrap();
         let honest_shared = view_point.mul(&honest_tx_scalar);
         let honest_shared_secret: [u8; 32] = *hash_domain(
             b"COINCYNC_SHARED_v2",
             &[honest_shared.to_bytes().as_slice(), &[0u8]].concat(),
-        ).as_bytes();
+        )
+        .as_bytes();
         let honest_blinding = BlindingFactor::from_bytes(
             *hash_domain(b"COINCYNC_BLINDING", &honest_shared_secret).as_bytes(),
         );
-        let honest_commitment = PedersenCommitment::commit(honest_amount, &honest_blinding).to_bytes();
+        let honest_commitment =
+            PedersenCommitment::commit(honest_amount, &honest_blinding).to_bytes();
         let honest_output = TxOutput {
             stealth_address: honest_stealth.public_key,
             tx_public_key: honest_stealth.tx_public_key,
@@ -2370,15 +2433,16 @@ mod tests {
         // Bob's view key, but `commitment` is garbage — so the recompute check
         // must drop it.
         let forged_amount: u64 = 999_999_999_999; // huge claimed value
-        let (forged_stealth, forged_tx_secret) = generate_stealth_address_checked(
-            &bob_spend_public, &bob_view_public, 1, &mut OsRng,
-        ).unwrap();
+        let (forged_stealth, forged_tx_secret) =
+            generate_stealth_address_checked(&bob_spend_public, &bob_view_public, 1, &mut OsRng)
+                .unwrap();
         let forged_tx_scalar = SecretScalar::from_bytes(*forged_tx_secret.as_bytes());
         let forged_shared = view_point.mul(&forged_tx_scalar);
         let forged_shared_secret: [u8; 32] = *hash_domain(
             b"COINCYNC_SHARED_v2",
             &[forged_shared.to_bytes().as_slice(), &[1u8]].concat(),
-        ).as_bytes();
+        )
+        .as_bytes();
         let forged_output = TxOutput {
             stealth_address: forged_stealth.public_key,
             tx_public_key: forged_stealth.tx_public_key,
@@ -2438,7 +2502,8 @@ mod tests {
             "forged output at index 1 leaked through the parallel path"
         );
         assert_eq!(
-            scanner.stats().total_amount, honest_amount as u128,
+            scanner.stats().total_amount,
+            honest_amount as u128,
             "stats.total_amount must NOT include the forged 999_999_999_999 value"
         );
     }

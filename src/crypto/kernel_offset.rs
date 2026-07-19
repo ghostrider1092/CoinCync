@@ -107,12 +107,7 @@ impl KernelOffset {
     ///
     /// Returns `true` iff the signature was produced by the holder of
     /// the unblinded excess scalar, given the published offset.
-    pub fn verify_against(
-        &self,
-        excess: &[u8; 32],
-        signature: &[u8; 64],
-        msg: &[u8; 32],
-    ) -> bool {
+    pub fn verify_against(&self, excess: &[u8; 32], signature: &[u8; 64], msg: &[u8; 32]) -> bool {
         // Decode excess point and offset scalar
         let excess_point = match CompressedRistretto::from_slice(excess)
             .ok()
@@ -188,14 +183,16 @@ impl AggregateOffset {
 }
 
 impl Default for AggregateOffset {
-    fn default() -> Self { Self::ZERO }
+    fn default() -> Self {
+        Self::ZERO
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn generate_returns_canonical_scalar() {
@@ -231,13 +228,19 @@ mod tests {
         let c = KernelOffset::generate_with(&mut rng);
 
         let order1 = AggregateOffset::ZERO
-            .add_offset(a).unwrap()
-            .add_offset(b).unwrap()
-            .add_offset(c).unwrap();
+            .add_offset(a)
+            .unwrap()
+            .add_offset(b)
+            .unwrap()
+            .add_offset(c)
+            .unwrap();
         let order2 = AggregateOffset::ZERO
-            .add_offset(c).unwrap()
-            .add_offset(a).unwrap()
-            .add_offset(b).unwrap();
+            .add_offset(c)
+            .unwrap()
+            .add_offset(a)
+            .unwrap()
+            .add_offset(b)
+            .unwrap();
         assert_eq!(order1, order2);
     }
 

@@ -51,7 +51,8 @@ pub fn generate_shares(threshold: u16, total: u16) -> Result<KeyGenResult> {
     )
     .map_err(|e| Error::Internal(format!("FROST keygen failed: {}", e)))?;
 
-    let group_key_bytes = pubkey_package.verifying_key()
+    let group_key_bytes = pubkey_package
+        .verifying_key()
         .serialize()
         .map_err(|e| Error::Internal(format!("serialize group key: {}", e)))?;
     let mut group_key_arr = [0u8; 32];
@@ -73,9 +74,7 @@ pub fn generate_shares(threshold: u16, total: u16) -> Result<KeyGenResult> {
             .verify()
             .map_err(|e| Error::Internal(format!("share verify failed: {}", e)))?;
 
-        let signing_bytes = secret_share
-            .signing_share()
-            .serialize();
+        let signing_bytes = secret_share.signing_share().serialize();
         let verifying_bytes = verifying_share
             .serialize()
             .map_err(|e| Error::Internal(format!("serialize verifying share: {}", e)))?;
@@ -185,12 +184,10 @@ pub fn signing_round1(share: &KeyShare) -> Result<(Round1Output, Round1Secret)> 
     let key_package = build_key_package(share)?;
     let _ = key_package; // used for validation
 
-    let (nonces, commitments) = frost::round1::commit(
-        &signing_share,
-        &mut rng,
-    );
+    let (nonces, commitments) = frost::round1::commit(&signing_share, &mut rng);
 
-    let commitment_bytes = commitments.serialize()
+    let commitment_bytes = commitments
+        .serialize()
         .map_err(|e| Error::Internal(format!("serialize commitment: {}", e)))?;
 
     Ok((
@@ -228,12 +225,8 @@ pub fn signing_round2(
 
     let signing_package = frost::SigningPackage::new(commitments_map, message);
 
-    let signature_share = frost::round2::sign(
-        &signing_package,
-        &secret.nonces,
-        &key_package,
-    )
-    .map_err(|e| Error::Internal(format!("round2 sign failed: {}", e)))?;
+    let signature_share = frost::round2::sign(&signing_package, &secret.nonces, &key_package)
+        .map_err(|e| Error::Internal(format!("round2 sign failed: {}", e)))?;
 
     let share_bytes = signature_share.serialize();
 
@@ -300,7 +293,8 @@ pub fn aggregate_signature(
     )
     .map_err(|e| Error::Internal(format!("aggregate failed: {}", e)))?;
 
-    let sig_bytes = signature.serialize()
+    let sig_bytes = signature
+        .serialize()
         .map_err(|e| Error::Internal(format!("serialize signature: {}", e)))?;
 
     Ok(MultisigSignature {
@@ -310,16 +304,14 @@ pub fn aggregate_signature(
 }
 
 /// Verify a multi-sig signature against the group public key
-pub fn verify_signature(
-    sig: &MultisigSignature,
-    message: &[u8],
-) -> Result<bool> {
+pub fn verify_signature(sig: &MultisigSignature, message: &[u8]) -> Result<bool> {
     let group_key = frost::VerifyingKey::deserialize(&sig.group_public_key)
         .map_err(|e| Error::Internal(format!("deserialize key: {}", e)))?;
     let signature = frost::Signature::deserialize(&sig.signature_bytes)
         .map_err(|e| Error::Internal(format!("deserialize sig: {}", e)))?;
 
-    group_key.verify(message, &signature)
+    group_key
+        .verify(message, &signature)
         .map(|_| true)
         .map_err(|e| Error::Internal(format!("verify failed: {}", e)))
 }
@@ -378,16 +370,16 @@ use zeroize::Zeroize;
 /// `[u8; 32]` on the caller's stack waiting for manual zeroization. The
 /// internal intermediates (signing shares, the working Scalar) are still
 /// zeroized at function exit.
-pub fn reconstruct_group_secret(
-    shares: &[KeyShare],
-) -> Result<crate::crypto::SecretScalar> {
+pub fn reconstruct_group_secret(shares: &[KeyShare]) -> Result<crate::crypto::SecretScalar> {
     if shares.is_empty() {
         return Err(Error::InvalidState("no shares provided".into()));
     }
     let threshold = shares[0].config.threshold as usize;
     if shares.len() < threshold {
         return Err(Error::InvalidState(format!(
-            "need {} shares, got {}", threshold, shares.len()
+            "need {} shares, got {}",
+            threshold,
+            shares.len()
         )));
     }
 
@@ -434,8 +426,7 @@ pub fn reconstruct_group_secret(
         // until scope unwind.
         share_bytes.zeroize();
         signing_scalars.push(
-            scalar_opt
-                .ok_or_else(|| Error::Internal("invalid scalar in signing share".into()))?,
+            scalar_opt.ok_or_else(|| Error::Internal("invalid scalar in signing share".into()))?,
         );
     }
 
@@ -532,12 +523,21 @@ mod tests {
         let all_commitments = vec![r1_out_1.clone(), r1_out_2.clone()];
 
         // 3. Participants 1 and 2 do round 2
-        let r2_out_1 = signing_round2(&keygen.shares[0], &r1_secret_1, &all_commitments, message).unwrap();
-        let r2_out_2 = signing_round2(&keygen.shares[1], &r1_secret_2, &all_commitments, message).unwrap();
+        let r2_out_1 =
+            signing_round2(&keygen.shares[0], &r1_secret_1, &all_commitments, message).unwrap();
+        let r2_out_2 =
+            signing_round2(&keygen.shares[1], &r1_secret_2, &all_commitments, message).unwrap();
         let all_shares = vec![r2_out_1, r2_out_2];
 
         // 4. Aggregate into final signature
-        let sig = aggregate_signature(&all_commitments, &all_shares, &keygen.config, &keygen.shares, message).unwrap();
+        let sig = aggregate_signature(
+            &all_commitments,
+            &all_shares,
+            &keygen.config,
+            &keygen.shares,
+            message,
+        )
+        .unwrap();
 
         // 5. Verify
         assert!(verify_signature(&sig, message).unwrap());

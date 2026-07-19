@@ -10,13 +10,13 @@
 //! | nanocync  | 0.000000001       | nCYNC  | 1,000               |
 //! | sync      | 0.000000000001    | sync   | 1                   |
 
-use std::fmt;
-use std::ops::{Add, Sub, Mul, Div, AddAssign, SubAssign};
-use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use crate::constants::{ATOMIC_UNITS, MILLICYNC, MICROCYNC, NANOCYNC};
+use crate::constants::{ATOMIC_UNITS, MICROCYNC, MILLICYNC, NANOCYNC};
 use crate::error::{Error, Result};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::{Add, AddAssign, Div, Mul, Sub, SubAssign};
+use std::str::FromStr;
 
 /// Denomination unit for display
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,49 +69,94 @@ impl Denomination {
 }
 
 /// Amount in atomic units (1 CYNC = 10^12 syncs)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct Amount(u64);
 
 impl Amount {
     pub const ZERO: Amount = Amount(0);
     pub const MAX: Amount = Amount(u64::MAX);
     pub const ONE_CYNC: Amount = Amount(ATOMIC_UNITS);
-    
-    pub const fn from_atomic(atomic: u64) -> Self { Amount(atomic) }
+
+    pub const fn from_atomic(atomic: u64) -> Self {
+        Amount(atomic)
+    }
     pub fn from_cync(cync: u64) -> Result<Self> {
-        cync.checked_mul(ATOMIC_UNITS).map(Amount).ok_or(Error::AmountOverflow)
+        cync.checked_mul(ATOMIC_UNITS)
+            .map(Amount)
+            .ok_or(Error::AmountOverflow)
     }
     pub fn from_float_cync(cync: f64) -> Result<Self> {
         // SECURITY: Reject NaN and infinity
-        if cync.is_nan() || cync.is_infinite() { return Err(Error::AmountOverflow); }
-        if cync < 0.0 { return Err(Error::AmountUnderflow); }
-        if cync > u64::MAX as f64 / ATOMIC_UNITS as f64 { return Err(Error::AmountOverflow); }
+        if cync.is_nan() || cync.is_infinite() {
+            return Err(Error::AmountOverflow);
+        }
+        if cync < 0.0 {
+            return Err(Error::AmountUnderflow);
+        }
+        if cync > u64::MAX as f64 / ATOMIC_UNITS as f64 {
+            return Err(Error::AmountOverflow);
+        }
         Ok(Amount((cync * ATOMIC_UNITS as f64).round() as u64))
     }
-    
-    pub const fn as_atomic(&self) -> u64 { self.0 }
-    pub const fn as_cync(&self) -> u64 { self.0 / ATOMIC_UNITS }
-    pub fn as_float_cync(&self) -> f64 { self.0 as f64 / ATOMIC_UNITS as f64 }
-    pub const fn is_zero(&self) -> bool { self.0 == 0 }
-    
+
+    pub const fn as_atomic(&self) -> u64 {
+        self.0
+    }
+    pub const fn as_cync(&self) -> u64 {
+        self.0 / ATOMIC_UNITS
+    }
+    pub fn as_float_cync(&self) -> f64 {
+        self.0 as f64 / ATOMIC_UNITS as f64
+    }
+    pub const fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
     pub fn checked_add(&self, other: Amount) -> Result<Amount> {
-        self.0.checked_add(other.0).map(Amount).ok_or(Error::AmountOverflow)
+        self.0
+            .checked_add(other.0)
+            .map(Amount)
+            .ok_or(Error::AmountOverflow)
     }
     pub fn checked_sub(&self, other: Amount) -> Result<Amount> {
-        self.0.checked_sub(other.0).map(Amount).ok_or(Error::AmountUnderflow)
+        self.0
+            .checked_sub(other.0)
+            .map(Amount)
+            .ok_or(Error::AmountUnderflow)
     }
     pub fn checked_mul(&self, factor: u64) -> Result<Amount> {
-        self.0.checked_mul(factor).map(Amount).ok_or(Error::AmountOverflow)
+        self.0
+            .checked_mul(factor)
+            .map(Amount)
+            .ok_or(Error::AmountOverflow)
     }
     pub fn checked_div(&self, divisor: u64) -> Result<Amount> {
-        if divisor == 0 { return Err(Error::AmountOverflow); }
+        if divisor == 0 {
+            return Err(Error::AmountOverflow);
+        }
         Ok(Amount(self.0 / divisor))
     }
-    
-    pub fn saturating_add(&self, other: Amount) -> Amount { Amount(self.0.saturating_add(other.0)) }
-    pub fn saturating_sub(&self, other: Amount) -> Amount { Amount(self.0.saturating_sub(other.0)) }
-    
+
+    pub fn saturating_add(&self, other: Amount) -> Amount {
+        Amount(self.0.saturating_add(other.0))
+    }
+    pub fn saturating_sub(&self, other: Amount) -> Amount {
+        Amount(self.0.saturating_sub(other.0))
+    }
+
     /// Calculate percentage of amount using basis points (1/100th of a percent)
     /// 100 basis points = 1%, 10000 basis points = 100%
     ///
@@ -142,14 +187,20 @@ impl Amount {
         let result = self.0 as u128 * basis_points as u128 / 10000;
         Amount(result.min(u64::MAX as u128) as u64)
     }
-    
+
     pub fn format(&self, decimals: usize) -> String {
         let whole = self.0 / ATOMIC_UNITS;
         let frac = self.0 % ATOMIC_UNITS;
-        if decimals == 0 { return whole.to_string(); }
+        if decimals == 0 {
+            return whole.to_string();
+        }
         let frac_str = format!("{:012}", frac);
         let trimmed = frac_str[..decimals.min(12)].trim_end_matches('0');
-        if trimmed.is_empty() { whole.to_string() } else { format!("{}.{}", whole, trimmed) }
+        if trimmed.is_empty() {
+            whole.to_string()
+        } else {
+            format!("{}.{}", whole, trimmed)
+        }
     }
 
     /// Format amount in a specific denomination
@@ -206,18 +257,30 @@ impl Amount {
     /// Create amount from millicync
     pub fn from_millicync(mcync: f64) -> Result<Self> {
         // SECURITY (L-4): Match from_float_cync's NaN/Infinity/overflow guards
-        if mcync.is_nan() || mcync.is_infinite() { return Err(Error::AmountOverflow); }
-        if mcync < 0.0 { return Err(Error::AmountUnderflow); }
-        if mcync > u64::MAX as f64 / MILLICYNC as f64 { return Err(Error::AmountOverflow); }
+        if mcync.is_nan() || mcync.is_infinite() {
+            return Err(Error::AmountOverflow);
+        }
+        if mcync < 0.0 {
+            return Err(Error::AmountUnderflow);
+        }
+        if mcync > u64::MAX as f64 / MILLICYNC as f64 {
+            return Err(Error::AmountOverflow);
+        }
         Ok(Amount((mcync * MILLICYNC as f64).round() as u64))
     }
 
     /// Create amount from microcync
     pub fn from_microcync(ucync: f64) -> Result<Self> {
         // SECURITY (L-4): Match from_float_cync's NaN/Infinity/overflow guards
-        if ucync.is_nan() || ucync.is_infinite() { return Err(Error::AmountOverflow); }
-        if ucync < 0.0 { return Err(Error::AmountUnderflow); }
-        if ucync > u64::MAX as f64 / MICROCYNC as f64 { return Err(Error::AmountOverflow); }
+        if ucync.is_nan() || ucync.is_infinite() {
+            return Err(Error::AmountOverflow);
+        }
+        if ucync < 0.0 {
+            return Err(Error::AmountUnderflow);
+        }
+        if ucync > u64::MAX as f64 / MICROCYNC as f64 {
+            return Err(Error::AmountOverflow);
+        }
         Ok(Amount((ucync * MICROCYNC as f64).round() as u64))
     }
 
@@ -227,8 +290,16 @@ impl Amount {
     }
 }
 
-impl fmt::Debug for Amount { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "Amount({} CYNC)", self.format(4)) } }
-impl fmt::Display for Amount { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{} CYNC", self.format(4)) } }
+impl fmt::Debug for Amount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Amount({} CYNC)", self.format(4))
+    }
+}
+impl fmt::Display for Amount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} CYNC", self.format(4))
+    }
+}
 
 impl FromStr for Amount {
     type Err = Error;
@@ -236,32 +307,48 @@ impl FromStr for Amount {
     /// f64 loses precision for amounts with >3-4 integer digits + fractional syncs.
     fn from_str(s: &str) -> Result<Self> {
         let s = s.trim();
-        if s.is_empty() { return Err(Error::InvalidAddress("empty amount".into())); }
-        if s.starts_with('-') { return Err(Error::AmountUnderflow); }
+        if s.is_empty() {
+            return Err(Error::InvalidAddress("empty amount".into()));
+        }
+        if s.starts_with('-') {
+            return Err(Error::AmountUnderflow);
+        }
 
         let (int_str, frac_opt) = match s.find('.') {
-            Some(pos) => (&s[..pos], Some(&s[pos+1..])),
+            Some(pos) => (&s[..pos], Some(&s[pos + 1..])),
             None => (s, None),
         };
 
-        let int_part: u128 = int_str.parse()
+        let int_part: u128 = int_str
+            .parse()
             .map_err(|_| Error::InvalidAddress(format!("invalid amount: {}", s)))?;
         let max_int = u64::MAX as u128 / ATOMIC_UNITS as u128;
-        if int_part > max_int { return Err(Error::AmountOverflow); }
+        if int_part > max_int {
+            return Err(Error::AmountOverflow);
+        }
         let int_syncs = int_part * ATOMIC_UNITS as u128;
 
         let frac_syncs: u128 = if let Some(frac_str) = frac_opt {
-            if frac_str.is_empty() { 0 }
-            else if !frac_str.chars().all(|c| c.is_ascii_digit()) {
+            if frac_str.is_empty() {
+                0
+            } else if !frac_str.chars().all(|c| c.is_ascii_digit()) {
                 return Err(Error::InvalidAddress(format!("invalid amount: {}", s)));
             } else {
                 let padded = format!("{:0<12}", &frac_str[..frac_str.len().min(12)]);
-                padded.parse::<u128>().map_err(|_| Error::InvalidAddress(format!("invalid amount: {}", s)))?
+                padded
+                    .parse::<u128>()
+                    .map_err(|_| Error::InvalidAddress(format!("invalid amount: {}", s)))?
             }
-        } else { 0 };
+        } else {
+            0
+        };
 
-        let total = int_syncs.checked_add(frac_syncs).ok_or(Error::AmountOverflow)?;
-        if total > u64::MAX as u128 { return Err(Error::AmountOverflow); }
+        let total = int_syncs
+            .checked_add(frac_syncs)
+            .ok_or(Error::AmountOverflow)?;
+        if total > u64::MAX as u128 {
+            return Err(Error::AmountOverflow);
+        }
         Ok(Amount(total as u64))
     }
 }
@@ -336,12 +423,36 @@ impl Div<u64> for Amount {
         }
     }
 }
-impl AddAssign for Amount { fn add_assign(&mut self, other: Amount) { *self = *self + other; } }
-impl SubAssign for Amount { fn sub_assign(&mut self, other: Amount) { *self = *self - other; } }
-impl From<u64> for Amount { fn from(atomic: u64) -> Self { Amount(atomic) } }
-impl From<Amount> for u64 { fn from(a: Amount) -> Self { a.0 } }
-impl std::iter::Sum for Amount { fn sum<I: Iterator<Item=Self>>(iter: I) -> Self { iter.fold(Amount::ZERO, |a, x| a.saturating_add(x)) } }
-impl<'a> std::iter::Sum<&'a Amount> for Amount { fn sum<I: Iterator<Item=&'a Self>>(iter: I) -> Self { iter.fold(Amount::ZERO, |a, x| a.saturating_add(*x)) } }
+impl AddAssign for Amount {
+    fn add_assign(&mut self, other: Amount) {
+        *self = *self + other;
+    }
+}
+impl SubAssign for Amount {
+    fn sub_assign(&mut self, other: Amount) {
+        *self = *self - other;
+    }
+}
+impl From<u64> for Amount {
+    fn from(atomic: u64) -> Self {
+        Amount(atomic)
+    }
+}
+impl From<Amount> for u64 {
+    fn from(a: Amount) -> Self {
+        a.0
+    }
+}
+impl std::iter::Sum for Amount {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Amount::ZERO, |a, x| a.saturating_add(x))
+    }
+}
+impl<'a> std::iter::Sum<&'a Amount> for Amount {
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Amount::ZERO, |a, x| a.saturating_add(*x))
+    }
+}
 
 #[cfg(test)]
 mod tests {

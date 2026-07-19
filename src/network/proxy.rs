@@ -27,11 +27,11 @@
 //!
 //! For maximum privacy, combine with subaddresses and careful OPSEC.
 
+use crate::config::ProxyConfig;
+use crate::error::{Error, Result};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio_socks::tcp::Socks5Stream;
-use crate::config::ProxyConfig;
-use crate::error::{Error, Result};
 
 /// Connect to a peer, optionally through a SOCKS5 proxy
 pub async fn connect_peer(
@@ -40,18 +40,15 @@ pub async fn connect_peer(
     timeout: std::time::Duration,
 ) -> Result<TcpStream> {
     match proxy {
-        Some(cfg) if cfg.is_active() => {
-            connect_via_proxy(target, cfg, timeout).await
-        }
+        Some(cfg) if cfg.is_active() => connect_via_proxy(target, cfg, timeout).await,
         // SECURITY (CRIT-8): Kill switch - if onion_only is set but proxy is not active,
         // refuse ALL connections to prevent clearnet fallback that would leak the user's IP.
         // This is critical for users who depend on Tor for anonymity.
-        Some(cfg) if cfg.onion_only => {
-            Err(Error::ConnectionFailed(
-                "onion_only mode is enabled but proxy is not active — refusing clearnet connection \
-                 to prevent IP leak. Start your Tor/SOCKS5 proxy or disable onion_only mode.".into()
-            ))
-        }
+        Some(cfg) if cfg.onion_only => Err(Error::ConnectionFailed(
+            "onion_only mode is enabled but proxy is not active — refusing clearnet connection \
+                 to prevent IP leak. Start your Tor/SOCKS5 proxy or disable onion_only mode."
+                .into(),
+        )),
         _ => {
             // Direct connection (proxy not configured or not onion_only)
             tokio::time::timeout(timeout, TcpStream::connect(target))
@@ -84,7 +81,7 @@ async fn connect_via_proxy(
     // For now, only SOCKS5 is implemented
     if proxy.proxy_type != crate::config::ProxyType::Socks5 {
         return Err(Error::ConfigError(
-            "Only SOCKS5 proxy is currently supported".into()
+            "Only SOCKS5 proxy is currently supported".into(),
         ));
     }
 
@@ -97,14 +94,12 @@ async fn connect_via_proxy(
                     target,
                     user.as_str(),
                     pass.as_str(),
-                ).await
+                )
+                .await
             }
             _ => {
                 // Unauthenticated connection
-                Socks5Stream::connect(
-                    proxy_addr.as_str(),
-                    target,
-                ).await
+                Socks5Stream::connect(proxy_addr.as_str(), target).await
             }
         }
     };
@@ -129,13 +124,13 @@ pub async fn connect_onion(
 ) -> Result<TcpStream> {
     if !proxy.is_active() {
         return Err(Error::ConfigError(
-            "Proxy must be enabled to connect to .onion addresses".into()
+            "Proxy must be enabled to connect to .onion addresses".into(),
         ));
     }
 
     if proxy.proxy_type != crate::config::ProxyType::Socks5 {
         return Err(Error::ConfigError(
-            "Only SOCKS5 (Tor) can connect to .onion addresses".into()
+            "Only SOCKS5 (Tor) can connect to .onion addresses".into(),
         ));
     }
 
@@ -157,14 +152,10 @@ pub async fn connect_onion(
                     target.as_str(),
                     user.as_str(),
                     pass.as_str(),
-                ).await
+                )
+                .await
             }
-            _ => {
-                Socks5Stream::connect(
-                    proxy_addr.as_str(),
-                    target.as_str(),
-                ).await
-            }
+            _ => Socks5Stream::connect(proxy_addr.as_str(), target.as_str()).await,
         }
     };
 
@@ -190,14 +181,18 @@ pub async fn connect_peer_hostname(
 ) -> Result<TcpStream> {
     if !proxy.is_active() {
         return Err(Error::ConfigError(
-            "Proxy must be enabled for hostname-based connections".into()
+            "Proxy must be enabled for hostname-based connections".into(),
         ));
     }
 
     let proxy_addr = format!("{}:{}", proxy.address, proxy.port);
     let target = format!("{}:{}", hostname, port);
 
-    tracing::debug!("Connecting to {} via proxy at {} (DNS-safe)", target, proxy_addr);
+    tracing::debug!(
+        "Connecting to {} via proxy at {} (DNS-safe)",
+        target,
+        proxy_addr
+    );
 
     let connect_future = async {
         match (&proxy.username, &proxy.password) {
@@ -207,14 +202,10 @@ pub async fn connect_peer_hostname(
                     target.as_str(),
                     user.as_str(),
                     pass.as_str(),
-                ).await
+                )
+                .await
             }
-            _ => {
-                Socks5Stream::connect(
-                    proxy_addr.as_str(),
-                    target.as_str(),
-                ).await
-            }
+            _ => Socks5Stream::connect(proxy_addr.as_str(), target.as_str()).await,
         }
     };
 
@@ -238,7 +229,9 @@ pub async fn check_proxy(proxy: &ProxyConfig) -> Result<bool> {
     match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         TcpStream::connect(&proxy_addr),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(_)) => {
             tracing::info!("Proxy at {} is reachable", proxy_addr);
             Ok(true)
@@ -281,13 +274,15 @@ impl PeerTarget {
             if parts.len() != 2 {
                 return Err(Error::InvalidState("Invalid .onion address format".into()));
             }
-            let port: u16 = parts[0].parse()
+            let port: u16 = parts[0]
+                .parse()
                 .map_err(|_| Error::InvalidState("Invalid port in .onion address".into()))?;
             let host = parts[1].to_string();
             Ok(PeerTarget::Onion { host, port })
         } else {
             // Regular socket address
-            let socket_addr: SocketAddr = addr.parse()
+            let socket_addr: SocketAddr = addr
+                .parse()
                 .map_err(|_| Error::InvalidState("Invalid peer address".into()))?;
             Ok(PeerTarget::SocketAddr(socket_addr))
         }

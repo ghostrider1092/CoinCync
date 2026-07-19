@@ -54,7 +54,9 @@ pub struct Locust {
 
 impl Default for Locust {
     fn default() -> Self {
-        Self { mode: SwarmMode::Transitional }
+        Self {
+            mode: SwarmMode::Transitional,
+        }
     }
 }
 
@@ -155,7 +157,11 @@ mod tests {
         let mut l = Locust::new();
         l.update(0, false);
         assert_eq!(l.mode(), SwarmMode::Solitary);
-        assert_eq!(l.update(0, true), SwarmMode::Gregarious, "attack overrides low density");
+        assert_eq!(
+            l.update(0, true),
+            SwarmMode::Gregarious,
+            "attack overrides low density"
+        );
     }
 
     #[test]

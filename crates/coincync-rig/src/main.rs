@@ -219,9 +219,7 @@ fn main() -> Result<()> {
             let (layer, rx) = tui::TuiLogLayer::new();
             let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-            let subscriber = tracing_subscriber::registry()
-                .with(env_filter)
-                .with(layer);
+            let subscriber = tracing_subscriber::registry().with(env_filter).with(layer);
             tracing::subscriber::set_global_default(subscriber)
                 .expect("setting tracing subscriber failed");
             Some(rx)
@@ -239,14 +237,39 @@ fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Selftest) {
         Command::Selftest => run_selftest(),
-        Command::Verify { anchor, tx_root, height, nonce, target } => {
-            run_verify(&anchor, &tx_root, height, &nonce, target.as_deref())
-        }
+        Command::Verify {
+            anchor,
+            tx_root,
+            height,
+            nonce,
+            target,
+        } => run_verify(&anchor, &tx_root, height, &nonce, target.as_deref()),
         Command::Bench { threads, duration } => run_bench(threads, duration),
         Command::Info { node, api_key } => run_info(&node, api_key),
-        Command::RunSolo { node, api_key, address, network, poll_interval_secs, threads, metrics_port, metrics_bind, tui, signal_v1012 } => {
-            run_solo_cli(&node, api_key, &address, network, poll_interval_secs, threads, metrics_port, &metrics_bind, tui, signal_v1012, tui_log_rx)
-        }
+        Command::RunSolo {
+            node,
+            api_key,
+            address,
+            network,
+            poll_interval_secs,
+            threads,
+            metrics_port,
+            metrics_bind,
+            tui,
+            signal_v1012,
+        } => run_solo_cli(
+            &node,
+            api_key,
+            &address,
+            network,
+            poll_interval_secs,
+            threads,
+            metrics_port,
+            &metrics_bind,
+            tui,
+            signal_v1012,
+            tui_log_rx,
+        ),
         Command::RunConfig { config } => run_config_cli(&config),
     }
 }
@@ -289,7 +312,11 @@ fn run_verify(
     let anchor = decode_hash(anchor_hex).context("bad --anchor")?;
     let tx_root = decode_hash(tx_root_hex).context("bad --tx_root")?;
     let nonce = decode_nonce(nonce_hex).context("bad --nonce")?;
-    let input = HashInput { anchor, tx_root, height };
+    let input = HashInput {
+        anchor,
+        tx_root,
+        height,
+    };
 
     let h = Hasher::new().hash(&input, nonce)?;
     println!("anchor        = {}", hex::encode(input.anchor.as_bytes()));
@@ -341,9 +368,7 @@ fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
     } else {
         threads
     };
-    println!(
-        "Benchmarking with {n_threads} thread(s) for {duration_secs} seconds..."
-    );
+    println!("Benchmarking with {n_threads} thread(s) for {duration_secs} seconds...");
     println!("(RandomX VM warmup is included in the duration — first 1-2s is 0 H/s)");
     println!();
 
@@ -506,7 +531,10 @@ fn run_solo_cli(
         match client.get_info().await {
             Ok(info) => {
                 let height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                let synced = info.get("synced").and_then(|v| v.as_bool()).unwrap_or(false);
+                let synced = info
+                    .get("synced")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 println!("daemon ok: height={height} synced={synced}");
             }
             Err(e) => {
@@ -536,7 +564,8 @@ fn run_solo_cli(
         // process. The orchestrator has no cancel hook — interactive
         // miners terminate by quitting the TUI.
         if tui_enabled {
-            let metrics_for_tui = metrics_state.clone()
+            let metrics_for_tui = metrics_state
+                .clone()
                 .expect("metrics_state must exist when tui_enabled");
             let log_rx = tui_log_rx.expect("tui mode set but no log channel");
             tokio::task::spawn_blocking(move || {

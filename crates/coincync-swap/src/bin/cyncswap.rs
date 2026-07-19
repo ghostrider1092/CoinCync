@@ -1612,10 +1612,14 @@ fn run(cli: Cli) -> Result<(), String> {
             println!("  - adaptor signatures (BTC):     shipped (BIP-340 parity-correct)");
             println!("  - adaptor signatures (CYNC):    shipped (Ristretto255)");
             println!("  - cross-curve DLEQ:             shipped (dual-response Schoenmakers)");
-            println!("  - BTC tx construction:          shipped (lock + claim + refund w/ script tree)");
+            println!(
+                "  - BTC tx construction:          shipped (lock + claim + refund w/ script tree)"
+            );
             println!("  - BTC RPC client:               shipped (Bitcoin Core JSON-RPC)");
             println!("  - CYNC RPC client:              shipped (coincync-node JSON-RPC)");
-            println!("  - CYNC swap key-derivation:     shipped (CLI-accessible via `derive-cync-*`)");
+            println!(
+                "  - CYNC swap key-derivation:     shipped (CLI-accessible via `derive-cync-*`)"
+            );
             println!("  - end-to-end composition test:  shipped (17-step Alice/Bob walkthrough)");
             println!("  - CLI orchestration of crypto:  shipped (lock/claim/refund — 6 bundled commands)");
             println!("  - transport (Plain/Noise XX/Tor): shipped (3 composable layers + DoS-hardened listen)");
@@ -1734,11 +1738,7 @@ fn run(cli: Cli) -> Result<(), String> {
             pre_sig_s,
             final_sig,
             i_understand_this_is_a_secret,
-        } => recover_secret_from_cync_sig_cmd(
-            pre_sig_s,
-            final_sig,
-            i_understand_this_is_a_secret,
-        ),
+        } => recover_secret_from_cync_sig_cmd(pre_sig_s, final_sig, i_understand_this_is_a_secret),
         Command::CyncBroadcast {
             network,
             rpc_url,
@@ -1938,8 +1938,8 @@ fn alice_cmd(
         btc_timeout_blocks: DEFAULT_BTC_TIMEOUT_BLOCKS,
         alice_cync_address,
         bob_btc_address,
-cync_network: "unknown".to_string(),
-btc_network: "unknown".to_string(),
+        cync_network: "unknown".to_string(),
+        btc_network: "unknown".to_string(),
     };
     let swap = Swap::negotiate(id.clone(), Role::Alice, params)
         .map_err(|e| format!("swap construction failed: {e}"))?;
@@ -1991,8 +1991,8 @@ fn bob_cmd(
         btc_timeout_blocks: DEFAULT_BTC_TIMEOUT_BLOCKS,
         alice_cync_address,
         bob_btc_address,
-cync_network: "unknown".to_string(),
-btc_network: "unknown".to_string(),
+        cync_network: "unknown".to_string(),
+        btc_network: "unknown".to_string(),
     };
     let swap = Swap::negotiate(swap_id.clone(), Role::Bob, params)
         .map_err(|e| format!("swap construction failed: {e}"))?;
@@ -2090,8 +2090,8 @@ fn wallet_init_bob_cmd(
 ) -> Result<(), String> {
     let invite_bytes =
         hex::decode(invite_hex).map_err(|e| format!("invite_hex is not valid hex: {e}"))?;
-    let invite: serde_json::Value =
-        serde_json::from_slice(&invite_bytes).map_err(|e| format!("invite is not valid JSON: {e}"))?;
+    let invite: serde_json::Value = serde_json::from_slice(&invite_bytes)
+        .map_err(|e| format!("invite is not valid JSON: {e}"))?;
 
     // Refuse unknown wire versions so a future schema change doesn't
     // silently downgrade by ignoring new fields.
@@ -2103,9 +2103,7 @@ fn wallet_init_bob_cmd(
     }
     let role = invite.get("role").and_then(|v| v.as_str()).unwrap_or("?");
     if role != "alice" {
-        return Err(format!(
-            "expected invite from role=alice, got role={role}"
-        ));
+        return Err(format!("expected invite from role=alice, got role={role}"));
     }
 
     let swap_id = invite
@@ -2282,9 +2280,7 @@ fn cancel_cmd(state_path: PathBuf) -> Result<(), String> {
     let mut next = swap.clone();
     next.apply(Transition::Abort)
         .map_err(|e| format!("abort transition rejected: {e}"))?;
-    store
-        .save(&next)
-        .map_err(|e| format!("save failed: {e}"))?;
+    store.save(&next).map_err(|e| format!("save failed: {e}"))?;
     swap = next;
 
     println!("Swap cancelled.");
@@ -2304,8 +2300,7 @@ fn cancel_cmd(state_path: PathBuf) -> Result<(), String> {
 // ── Derive helpers (real wiring, no state-file involvement) ──────
 
 fn parse_hex_32(label: &str, hex_in: &str) -> Result<[u8; 32], String> {
-    let bytes = hex::decode(hex_in.trim())
-        .map_err(|e| format!("{label}: not valid hex: {e}"))?;
+    let bytes = hex::decode(hex_in.trim()).map_err(|e| format!("{label}: not valid hex: {e}"))?;
     if bytes.len() != 32 {
         return Err(format!(
             "{label}: expected 32 bytes ({}-char hex string), got {}",
@@ -2319,8 +2314,7 @@ fn parse_hex_32(label: &str, hex_in: &str) -> Result<[u8; 32], String> {
 }
 
 fn parse_hex_33(label: &str, hex_in: &str) -> Result<[u8; 33], String> {
-    let bytes = hex::decode(hex_in.trim())
-        .map_err(|e| format!("{label}: not valid hex: {e}"))?;
+    let bytes = hex::decode(hex_in.trim()).map_err(|e| format!("{label}: not valid hex: {e}"))?;
     if bytes.len() != 33 {
         return Err(format!(
             "{label}: expected 33 bytes ({}-char hex string for compressed secp256k1 point), got {}",
@@ -2334,8 +2328,7 @@ fn parse_hex_33(label: &str, hex_in: &str) -> Result<[u8; 33], String> {
 }
 
 fn parse_hex_64(label: &str, hex_in: &str) -> Result<[u8; 64], String> {
-    let bytes = hex::decode(hex_in.trim())
-        .map_err(|e| format!("{label}: not valid hex: {e}"))?;
+    let bytes = hex::decode(hex_in.trim()).map_err(|e| format!("{label}: not valid hex: {e}"))?;
     if bytes.len() != 64 {
         return Err(format!(
             "{label}: expected 64 bytes ({}-char hex string), got {}",
@@ -2364,16 +2357,12 @@ fn parse_refund_branch_flags(
                 csv_blocks: csv,
             }))
         }
-        (Some(_), None) => Err(
-            "--refund-bob-pubkey supplied without --refund-csv-blocks; \
+        (Some(_), None) => Err("--refund-bob-pubkey supplied without --refund-csv-blocks; \
              both are required to enable the script-tree refund branch."
-                .into(),
-        ),
-        (None, Some(_)) => Err(
-            "--refund-csv-blocks supplied without --refund-bob-pubkey; \
+            .into()),
+        (None, Some(_)) => Err("--refund-csv-blocks supplied without --refund-bob-pubkey; \
              both are required to enable the script-tree refund branch."
-                .into(),
-        ),
+            .into()),
         (None, None) => Ok(None),
     }
 }
@@ -2396,10 +2385,7 @@ fn parse_claim_tx_base(
         lock_vout,
         lock_value_sats,
         lock_internal_key: parse_hex_32("lock-internal-key", lock_internal_key_hex)?,
-        refund_branch: parse_refund_branch_flags(
-            refund_bob_pubkey_hex,
-            refund_csv_blocks,
-        )?,
+        refund_branch: parse_refund_branch_flags(refund_bob_pubkey_hex, refund_csv_blocks)?,
         dest_address,
         fee_sats,
     })
@@ -2435,7 +2421,8 @@ fn derive_cync_spender_secret_cmd(
         return Err("this subcommand prints a secret to stdout. \
              Pass --i-understand-this-is-a-secret to acknowledge \
              you have safe stdout handling (pipe to wallet stdin, \
-             write to a tmpfs file, etc.) and won't log the output.".to_string());
+             write to a tmpfs file, etc.) and won't log the output."
+            .to_string());
     }
     let counterparty_spend_secret =
         parse_hex_32("counterparty-spend-secret", &counterparty_spend_secret_hex)?;
@@ -2498,8 +2485,7 @@ fn construct_btc_lock_cmd(
     };
 
     // ── Construct + emit ─────────────────────────────────────────
-    let bytes = build_lock_tx(&config, &request)
-        .map_err(|e| format!("build_lock_tx: {e}"))?;
+    let bytes = build_lock_tx(&config, &request).map_err(|e| format!("build_lock_tx: {e}"))?;
 
     // Stdout is the hex of the unsigned consensus-encoded tx —
     // ready for the caller's wallet to sign each input and pass
@@ -2725,8 +2711,8 @@ fn prove_dleq_cmd(
 /// s_btc, s_cync)` order matching `verify_dleq_cmd`'s parameter
 /// list.
 fn parse_dleq_proof_json(json: &str) -> Result<(String, String, String, String), String> {
-    let parsed: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| format!("--proof-json: invalid JSON: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("--proof-json: invalid JSON: {e}"))?;
     let extract = |k: &str| -> Result<String, String> {
         parsed
             .get(k)
@@ -2734,7 +2720,12 @@ fn parse_dleq_proof_json(json: &str) -> Result<(String, String, String, String),
             .ok_or_else(|| format!("--proof-json: missing or non-string field `{k}`"))
             .map(|s| s.to_string())
     };
-    Ok((extract("a_btc")?, extract("a_cync")?, extract("s_btc")?, extract("s_cync")?))
+    Ok((
+        extract("a_btc")?,
+        extract("a_cync")?,
+        extract("s_btc")?,
+        extract("s_cync")?,
+    ))
 }
 
 fn verify_dleq_cmd(
@@ -2768,12 +2759,10 @@ fn adaptor_secret_flip_endian_cmd(
     acknowledged: bool,
 ) -> Result<(), String> {
     if !acknowledged {
-        return Err(
-            "this subcommand prints a secret to stdout. Pass \
+        return Err("this subcommand prints a secret to stdout. Pass \
              --i-understand-this-is-a-secret to acknowledge you have safe \
              stdout handling."
-                .into(),
-        );
+            .into());
     }
     let from = from.trim().to_lowercase();
     if from != "secp256k1" && from != "ristretto" {
@@ -2804,9 +2793,8 @@ fn create_pre_sig_cync_cmd(
     let adaptor_point = parse_hex_32("adaptor-point", &adaptor_point_hex)?;
     let nonce = parse_hex_32("nonce", &nonce_hex)?;
 
-    let (pre_sig, signer_pub) =
-        cync_create_pre_sig(&signer_secret, &msg, &adaptor_point, &nonce)
-            .map_err(|e| format!("cync_create_pre_sig: {e}"))?;
+    let (pre_sig, signer_pub) = cync_create_pre_sig(&signer_secret, &msg, &adaptor_point, &nonce)
+        .map_err(|e| format!("cync_create_pre_sig: {e}"))?;
 
     // Same JSON shape as create-pre-sig-btc, with field name
     // `signer_pub` rather than `signer_x` — Ristretto has no
@@ -2851,12 +2839,10 @@ fn recover_secret_from_cync_sig_cmd(
     acknowledged: bool,
 ) -> Result<(), String> {
     if !acknowledged {
-        return Err(
-            "this subcommand prints a secret to stdout. Pass \
+        return Err("this subcommand prints a secret to stdout. Pass \
              --i-understand-this-is-a-secret to acknowledge you have safe \
              stdout handling."
-                .into(),
-        );
+            .into());
     }
     use coincync_swap::adaptor::{cync_recover_secret, CyncAdaptorSig};
 
@@ -2911,9 +2897,8 @@ fn create_pre_sig_btc_cmd(
     let adaptor_pt = bitcoin::secp256k1::PublicKey::from_slice(&adaptor_point_bytes)
         .map_err(|e| format!("adaptor-point: not a valid compressed secp256k1 point: {e}"))?;
 
-    let (pre_sig, signer_x) =
-        create_pre_sig_bip340(&signer_secret, &msg, &adaptor_pt, &aux_rand)
-            .map_err(|e| format!("create_pre_sig_bip340: {e}"))?;
+    let (pre_sig, signer_x) = create_pre_sig_bip340(&signer_secret, &msg, &adaptor_pt, &aux_rand)
+        .map_err(|e| format!("create_pre_sig_bip340: {e}"))?;
 
     // JSON output — three logically-distinct outputs (R-point,
     // s_pre scalar, signer's x-only pubkey) wrapped so consumers
@@ -2967,13 +2952,11 @@ fn recover_secret_from_btc_sig_cmd(
     acknowledged: bool,
 ) -> Result<(), String> {
     if !acknowledged {
-        return Err(
-            "this subcommand prints a secret to stdout. Pass \
+        return Err("this subcommand prints a secret to stdout. Pass \
              --i-understand-this-is-a-secret to acknowledge you have safe stdout \
              handling (pipe directly to derive-cync-spender-secret, etc.) and \
              won't log the output."
-                .into(),
-        );
+            .into());
     }
     use coincync_swap::adaptor::{recover_secret_from_btc_sig, BtcAdaptorSig};
 
@@ -3036,10 +3019,18 @@ fn selftest_cmd() -> Result<(), String> {
             let elapsed = start.elapsed();
             match result {
                 Ok(()) => {
-                    println!("  PASS  [{:>6.2} ms]  {}", elapsed.as_secs_f64() * 1000.0, $label);
+                    println!(
+                        "  PASS  [{:>6.2} ms]  {}",
+                        elapsed.as_secs_f64() * 1000.0,
+                        $label
+                    );
                 }
                 Err(e) => {
-                    println!("  FAIL  [{:>6.2} ms]  {}", elapsed.as_secs_f64() * 1000.0, $label);
+                    println!(
+                        "  FAIL  [{:>6.2} ms]  {}",
+                        elapsed.as_secs_f64() * 1000.0,
+                        $label
+                    );
                     println!("        → {}", e);
                     failures += 1;
                 }
@@ -3049,10 +3040,10 @@ fn selftest_cmd() -> Result<(), String> {
 
     // ── 1. Fast cross-curve DLEQ round-trip ──
     check!("fast cross-curve DLEQ (dual-response Schoenmakers)", {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
         use coincync_swap::adaptor::{
             cync_adaptor_point, prove_cross_curve, verify_cross_curve_proof, AdaptorSecret,
         };
-        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
         let mut secret_le = [0u8; 32];
         secret_le[0] = 0x42;
         let secret = AdaptorSecret::from_ristretto_bytes(secret_le)
@@ -3069,18 +3060,16 @@ fn selftest_cmd() -> Result<(), String> {
         nonce[0] = 0x11;
         let proof = prove_cross_curve(&secret, &t_btc, &t_cync, &nonce)
             .map_err(|e| format!("prove: {e:?}"))?;
-        verify_cross_curve_proof(&proof, &t_btc, &t_cync)
-            .map_err(|e| format!("verify: {e:?}"))?;
+        verify_cross_curve_proof(&proof, &t_btc, &t_cync).map_err(|e| format!("verify: {e:?}"))?;
         Ok(())
     });
 
     // ── 2. BTC Schnorr adaptor pre-sig → decrypt → recover round-trip ──
     check!("BTC Schnorr adaptor (pre-sig → decrypt → recover)", {
-        use coincync_swap::adaptor::{
-            create_pre_sig_bip340, decrypt_btc_adaptor, recover_secret_from_btc_sig,
-            AdaptorSecret,
-        };
         use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        use coincync_swap::adaptor::{
+            create_pre_sig_bip340, decrypt_btc_adaptor, recover_secret_from_btc_sig, AdaptorSecret,
+        };
         let mut secret_le = [0u8; 32];
         secret_le[0] = 0x55;
         let secret = AdaptorSecret::from_ristretto_bytes(secret_le)
@@ -3094,8 +3083,8 @@ fn selftest_cmd() -> Result<(), String> {
         let mut signer_bytes = [0u8; 32];
         signer_bytes[31] = 1;
         signer_bytes[30] = 1;
-        let signer_sk = SecretKey::from_slice(&signer_bytes)
-            .map_err(|e| format!("SecretKey signer: {e}"))?;
+        let signer_sk =
+            SecretKey::from_slice(&signer_bytes).map_err(|e| format!("SecretKey signer: {e}"))?;
         let msg = [0x77u8; 32];
         let aux = [0xAAu8; 32];
         let (pre_sig, _signer_x) = create_pre_sig_bip340(&signer_sk, &msg, &t_btc_pk, &aux)
@@ -3114,8 +3103,8 @@ fn selftest_cmd() -> Result<(), String> {
     // ── 3. CYNC (Ristretto) adaptor round-trip ──
     check!("CYNC Ristretto adaptor (pre-sig → decrypt → recover)", {
         use coincync_swap::adaptor::{
-            cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor,
-            cync_recover_secret, AdaptorSecret,
+            cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor, cync_recover_secret,
+            AdaptorSecret,
         };
         let mut secret_le = [0u8; 32];
         secret_le[0] = 0x33;
@@ -3155,7 +3144,9 @@ fn selftest_cmd() -> Result<(), String> {
         let bob_scalar = Scalar::from_canonical_bytes(bob_secret)
             .into_option()
             .ok_or("bob scalar canonical".to_string())?;
-        let bob_pub = (&bob_scalar * RISTRETTO_BASEPOINT_TABLE).compress().to_bytes();
+        let bob_pub = (&bob_scalar * RISTRETTO_BASEPOINT_TABLE)
+            .compress()
+            .to_bytes();
 
         // Alice's key share (the "adaptor secret t" in our framing).
         let mut t = [0u8; 32];
@@ -3198,11 +3189,9 @@ fn selftest_cmd() -> Result<(), String> {
     // ── 6. Strict-DLEQ round-trip (feature-gated) ──
     #[cfg(feature = "strict-dleq")]
     check!("strict cross-curve DLEQ (Noether 2018, ~81 KB proof)", {
-        use coincync_swap::adaptor::{cync_adaptor_point, AdaptorSecret};
-        use coincync_swap::strict_dleq::{
-            prove_cross_curve_strict, verify_cross_curve_strict,
-        };
         use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        use coincync_swap::adaptor::{cync_adaptor_point, AdaptorSecret};
+        use coincync_swap::strict_dleq::{prove_cross_curve_strict, verify_cross_curve_strict};
         let mut secret_le = [0u8; 32];
         secret_le[0] = 0x42;
         let secret = AdaptorSecret::from_ristretto_bytes(secret_le)
@@ -3236,10 +3225,7 @@ fn selftest_cmd() -> Result<(), String> {
 
 fn transition_cmd(state_path: PathBuf, kind: TransitionKind) -> Result<(), String> {
     let store = SwapStore::new(&state_path);
-    let mut swap = match store
-        .load()
-        .map_err(|e| format!("load failed: {e}"))?
-    {
+    let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
         None => {
             return Err(format!(
@@ -3253,9 +3239,7 @@ fn transition_cmd(state_path: PathBuf, kind: TransitionKind) -> Result<(), Strin
     swap.apply(kind.to_protocol())
         .map_err(|e| format!("apply {kind:?}: {e}"))?;
     let after = swap.state;
-    store
-        .save(&swap)
-        .map_err(|e| format!("save failed: {e}"))?;
+    store.save(&swap).map_err(|e| format!("save failed: {e}"))?;
 
     println!(
         "transition applied: {} → {}",
@@ -3269,10 +3253,7 @@ fn transition_cmd(state_path: PathBuf, kind: TransitionKind) -> Result<(), Strin
 /// coordinator transport. Writes the raw bytes to `out` (or stdout
 /// if `out` is None), and prints the derived public-key fingerprint
 /// to stderr.
-fn noise_keygen_cmd(
-    out: Option<PathBuf>,
-    i_understand: bool,
-) -> Result<(), String> {
+fn noise_keygen_cmd(out: Option<PathBuf>, i_understand: bool) -> Result<(), String> {
     use rand::RngCore;
 
     // If writing to stdout, force operator acknowledgment — the raw
@@ -3296,17 +3277,22 @@ fn noise_keygen_cmd(
             // here because Windows vs Unix divergence isn't worth
             // the surface area for a single file.
             let path_display = path.display().to_string();
-            std::fs::write(&path, private).map_err(|e| {
-                format!("write private key to {path_display}: {e}")
-            })?;
+            std::fs::write(&path, private)
+                .map_err(|e| format!("write private key to {path_display}: {e}"))?;
             eprintln!("wrote 32-byte Noise static private to {path_display}");
             eprintln!("REMEMBER to restrict permissions (chmod 0400 / icacls).");
-            eprintln!("public-key fingerprint (share out-of-band): {}", hex::encode(public));
+            eprintln!(
+                "public-key fingerprint (share out-of-band): {}",
+                hex::encode(public)
+            );
             println!("{}", hex::encode(public));
         }
         None => {
             // Stdout for both halves; operator already acknowledged.
-            eprintln!("public-key fingerprint (share out-of-band): {}", hex::encode(public));
+            eprintln!(
+                "public-key fingerprint (share out-of-band): {}",
+                hex::encode(public)
+            );
             println!("private:{}", hex::encode(private));
             println!("public:{}", hex::encode(public));
         }
@@ -3336,8 +3322,8 @@ fn noise_pubkey_cmd(
             bytes.try_into().expect("length-checked above")
         }
         (None, Some(hex)) => {
-            let bytes = hex::decode(hex.trim())
-                .map_err(|e| format!("secret-hex: not valid hex: {e}"))?;
+            let bytes =
+                hex::decode(hex.trim()).map_err(|e| format!("secret-hex: not valid hex: {e}"))?;
             if bytes.len() != 32 {
                 return Err(format!(
                     "secret-hex: decoded length {} bytes, expected 32",
@@ -3380,8 +3366,7 @@ fn build_btc_rpc_config(
         }
         (None, Some(_)) => {
             return Err(
-                "--rpc-pass supplied without --rpc-user; both required for basic-auth."
-                    .into(),
+                "--rpc-pass supplied without --rpc-user; both required for basic-auth.".into(),
             );
         }
     };
@@ -3418,8 +3403,7 @@ fn cync_broadcast_cmd(
     // tx_hex must be valid hex AND non-empty. Borsh decoding
     // happens on the node side; client-side we only enforce
     // hex-shape.
-    let tx_bytes = hex::decode(tx_hex.trim())
-        .map_err(|e| format!("tx-hex: not valid hex: {e}"))?;
+    let tx_bytes = hex::decode(tx_hex.trim()).map_err(|e| format!("tx-hex: not valid hex: {e}"))?;
     if tx_bytes.is_empty() {
         return Err("tx-hex: empty transaction bytes".into());
     }
@@ -3473,8 +3457,7 @@ fn btc_broadcast_cmd(
     // the bitcoin crate's deserialization that the construct-*
     // subcommands already exercised. The sync `broadcast`
     // wrapper takes raw bytes; decode from hex first.
-    let tx_bytes = hex::decode(tx_hex.trim())
-        .map_err(|e| format!("tx-hex: not valid hex: {e}"))?;
+    let tx_bytes = hex::decode(tx_hex.trim()).map_err(|e| format!("tx-hex: not valid hex: {e}"))?;
     if tx_bytes.is_empty() {
         return Err("tx-hex: empty transaction bytes".into());
     }
@@ -3532,9 +3515,7 @@ fn construct_btc_refund_cmd(
     fee_sats: u64,
     refund_signature_hex: String,
 ) -> Result<(), String> {
-    use coincync_swap::btc::{
-        build_refund_tx, BtcConfig, RefundBranch, RefundTxBase, Txid,
-    };
+    use coincync_swap::btc::{build_refund_tx, BtcConfig, RefundBranch, RefundTxBase, Txid};
 
     // ── Parse + validate inputs ──────────────────────────────────
     let lock_txid_bytes = parse_hex_32("lock-txid", &lock_txid_hex)?;
@@ -3654,10 +3635,7 @@ fn lock_btc_orchestration_cmd(
     use coincync_swap::protocol::{Role, State, Transition};
 
     let store = SwapStore::new(&state_path);
-    let mut swap = match store
-        .load()
-        .map_err(|e| format!("load failed: {e}"))?
-    {
+    let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
         None => {
             return Err(format!(
@@ -3750,10 +3728,7 @@ fn claim_btc_orchestration_cmd(
     use coincync_swap::protocol::{Role, State, Transition};
 
     let store = SwapStore::new(&state_path);
-    let mut swap = match store
-        .load()
-        .map_err(|e| format!("load failed: {e}"))?
-    {
+    let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
         None => {
             return Err(format!(
@@ -3842,10 +3817,7 @@ fn lock_cync_orchestration_cmd(
     use coincync_swap::protocol::{Role, State, Transition};
 
     let store = SwapStore::new(&state_path);
-    let mut swap = match store
-        .load()
-        .map_err(|e| format!("load failed: {e}"))?
-    {
+    let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
         None => {
             return Err(format!(
@@ -3920,10 +3892,7 @@ fn claim_cync_orchestration_cmd(
     use coincync_swap::protocol::{Role, State, Transition};
 
     let store = SwapStore::new(&state_path);
-    let mut swap = match store
-        .load()
-        .map_err(|e| format!("load failed: {e}"))?
-    {
+    let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
         None => {
             return Err(format!(
@@ -3995,10 +3964,7 @@ fn refund_btc_orchestration_cmd(
     use coincync_swap::protocol::{Role, State, Transition};
 
     let store = SwapStore::new(&state_path);
-    let mut swap = match store
-        .load()
-        .map_err(|e| format!("load failed: {e}"))?
-    {
+    let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
         None => {
             return Err(format!(
@@ -4074,10 +4040,7 @@ fn refund_cync_orchestration_cmd(
     use coincync_swap::protocol::{Role, State, Transition};
 
     let store = SwapStore::new(&state_path);
-    let mut swap = match store
-        .load()
-        .map_err(|e| format!("load failed: {e}"))?
-    {
+    let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
         None => {
             return Err(format!(

@@ -67,7 +67,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut entries: Vec<_> = bans.into_iter().collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             for (ip, e) in entries {
-                let state = if e.banned_until > now { "BANNED" } else { "not-banned" };
+                let state = if e.banned_until > now {
+                    "BANNED"
+                } else {
+                    "not-banned"
+                };
                 println!(
                     "{}  state={}  score={}  banned_until={}  last_seen={}",
                     ip, state, e.score, e.banned_until, e.last_seen
@@ -101,7 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_banlist(path: &PathBuf) -> Result<HashMap<String, PersistedBanEntry>, Box<dyn std::error::Error>> {
+fn load_banlist(
+    path: &PathBuf,
+) -> Result<HashMap<String, PersistedBanEntry>, Box<dyn std::error::Error>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }

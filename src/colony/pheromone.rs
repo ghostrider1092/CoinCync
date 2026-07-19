@@ -56,8 +56,7 @@ impl PheromoneMap {
     /// Peers ranked by score, highest first. Deterministic: ties are broken
     /// by `PeerKey` order, so the ranking is stable across runs.
     pub fn ranked(&self) -> Vec<(PeerKey, u32)> {
-        let mut v: Vec<(PeerKey, u32)> =
-            self.scores.iter().map(|(k, s)| (k.clone(), *s)).collect();
+        let mut v: Vec<(PeerKey, u32)> = self.scores.iter().map(|(k, s)| (k.clone(), *s)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v
     }
@@ -113,7 +112,10 @@ mod tests {
         for _ in 0..8 {
             m.evaporate();
         }
-        assert!(m.is_empty(), "a decayed-to-zero peer must fall out of the map");
+        assert!(
+            m.is_empty(),
+            "a decayed-to-zero peer must fall out of the map"
+        );
     }
 
     #[test]

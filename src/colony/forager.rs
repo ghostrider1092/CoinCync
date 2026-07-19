@@ -57,10 +57,7 @@ pub fn deposit_for_probe<Id>(local_height: u64, tip: &ChainTipState<Id>) -> u32 
 /// **Observe mode contract:** this function only *reads* (tip_state +
 /// probe_peer) and mutates the local pheromone `map`. It sends nothing to
 /// the node and never touches a transaction. The caller logs the result.
-pub fn observe_round<A: ChainAdapter>(
-    adapter: &A,
-    map: &mut PheromoneMap,
-) -> Vec<(PeerKey, u32)> {
+pub fn observe_round<A: ChainAdapter>(adapter: &A, map: &mut PheromoneMap) -> Vec<(PeerKey, u32)> {
     // Our own tip height — the reference the peers are scored against. If
     // the local RPC is down, fall back to 0 (every reachable peer then
     // counts as at-or-ahead, which is the safe/expected reading when we
@@ -119,8 +116,8 @@ pub fn advise(map: &PheromoneMap, max_prefer: usize) -> PeerAdvice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tick_adapter::BlockIdBytes;
     use crate::primitives::Hash;
+    use crate::tick_adapter::BlockIdBytes;
 
     fn tip(height: u64, tip_age_secs: u64, is_synced: bool) -> ChainTipState<BlockIdBytes> {
         ChainTipState {

@@ -29,39 +29,40 @@
 //! pure relocation.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, RwLock, broadcast};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::time::interval;
 #[allow(unused_imports)]
 use tokio::time::timeout;
-use tracing::{info, warn, debug, trace};
-use dashmap::DashMap;
+use tracing::{debug, info, trace, warn};
 
-use crate::primitives::Hash;
-use crate::consensus::Block;
-use crate::transaction::Transaction;
 use crate::chain::SharedBlockchain;
-use crate::mempool::SharedMempool;
-use crate::error::{Error, Result};
 use crate::config::NetworkType;
+use crate::consensus::Block;
+use crate::error::{Error, Result};
+use crate::mempool::SharedMempool;
+use crate::primitives::Hash;
+use crate::transaction::Transaction;
 
-use super::peer::{PeerId, PeerInfo, PeerState, generate_peer_id};
-use super::protocol::{
-    Message, MessageType, VersionMessage, FlareMessage, ChainWorkMessage,
-    GetHeadersMessage, GetBlocksMessage, InvMessage,
-    MAX_HEADERS_RESPONSE, MAX_BLOCK_HASHES,
-};
-use super::dandelion::{DandelionRouter, DandelionStats, StemAction, DANDELION_MONITOR_INTERVAL_SECS};
-use super::sync::{ChainSync, SyncState, SyncStats, build_locator};
-use super::bootstrap::{Bootstrapper, BootstrapConfig, AddressManager, PeerAddress};
-use super::scoring::{PeerScorer, ScorerStats};
-use super::relay_score::RelayScoreMap;
-use super::traffic_shaping::TrafficShaper;
+use super::bootstrap::{AddressManager, BootstrapConfig, Bootstrapper, PeerAddress};
 use super::connection_tracker::{ConnectionTracker, MemoryReservation};
+use super::dandelion::{
+    DandelionRouter, DandelionStats, StemAction, DANDELION_MONITOR_INTERVAL_SECS,
+};
+use super::peer::{generate_peer_id, PeerId, PeerInfo, PeerState};
+use super::protocol::{
+    ChainWorkMessage, FlareMessage, GetBlocksMessage, GetHeadersMessage, InvMessage, Message,
+    MessageType, VersionMessage, MAX_BLOCK_HASHES, MAX_HEADERS_RESPONSE,
+};
+use super::relay_score::RelayScoreMap;
+use super::scoring::{PeerScorer, ScorerStats};
+use super::sync::{build_locator, ChainSync, SyncState, SyncStats};
+use super::traffic_shaping::TrafficShaper;
 
 /// Maximum number of peers (reduced to reserve outbound slots)
 pub const MAX_PEERS: usize = 72;
@@ -209,7 +210,12 @@ impl TxAbsenceCache {
             if self.inner.len() >= self.max_size {
                 // Hard-cap eviction: oldest entry first. Linear scan is
                 // fine at 10K entries; this only fires under attack.
-                if let Some((oldest, _)) = self.inner.iter().min_by_key(|(_, ts)| *ts).map(|(h, t)| (*h, *t)) {
+                if let Some((oldest, _)) = self
+                    .inner
+                    .iter()
+                    .min_by_key(|(_, ts)| *ts)
+                    .map(|(h, t)| (*h, *t))
+                {
                     self.inner.remove(&oldest);
                 }
             }
@@ -233,12 +239,18 @@ impl TxAbsenceCache {
         before.saturating_sub(self.inner.len())
     }
 
-    pub fn len(&self) -> usize { self.inner.len() }
-    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 }
 
 impl Default for TxAbsenceCache {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// P2P node configuration
@@ -423,10 +435,7 @@ impl P2PNode {
         let identity = if identity_path.exists() {
             match super::noise::NodeIdentity::load_or_generate_fresh(&config.data_dir) {
                 Ok(id) => {
-                    tracing::info!(
-                        "Noise identity loaded: {}",
-                        hex::encode(&id.peer_id()[..8])
-                    );
+                    tracing::info!("Noise identity loaded: {}", hex::encode(&id.peer_id()[..8]));
                     Arc::new(id)
                 }
                 Err(e) => {
@@ -458,7 +467,8 @@ impl P2PNode {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "First-run identity generation failed: {}, using ephemeral", e
+                        "First-run identity generation failed: {}, using ephemeral",
+                        e
                     );
                     let id = super::noise::NodeIdentity::generate();
                     Arc::new(id)
@@ -496,7 +506,11 @@ impl P2PNode {
             mempool,
             peers: Arc::new(DashMap::new()),
             peer_senders: Arc::new(DashMap::new()),
-            chain_shadow: Arc::new(RwLock::new(ChainShadow { seq: 0, height: init_height, tip: init_tip })),
+            chain_shadow: Arc::new(RwLock::new(ChainShadow {
+                seq: 0,
+                height: init_height,
+                tip: init_tip,
+            })),
             chain_seq: Arc::new(AtomicU64::new(0)),
             dandelion: Arc::new(RwLock::new(DandelionRouter::new())),
             sync: Arc::new(RwLock::new(ChainSync::new(init_height, init_tip))),
@@ -533,7 +547,9 @@ impl P2PNode {
     ) -> Option<()> {
         let dht = self.dht.as_ref()?;
 
-        if key_images.is_empty() { return Some(()); }
+        if key_images.is_empty() {
+            return Some(());
+        }
 
         // P5-N2 SURGICAL FIX (2026-07-03): snapshot the per-stripe
         // peer selection UNDER the sync `parking_lot::Mutex`, then
@@ -556,12 +572,15 @@ impl P2PNode {
             let mut sends = Vec::new();
             for (stripe, ki_bytes) in by_stripe.into_iter() {
                 let stripe_idx = stripe as usize;
-                if stripe_idx >= dht_guard.peers_by_stripe.len() { continue; }
+                if stripe_idx >= dht_guard.peers_by_stripe.len() {
+                    continue;
+                }
                 let stripe_peers = &dht_guard.peers_by_stripe[stripe_idx];
                 if stripe_peers.is_empty() {
                     tracing::debug!(
                         "DHT: no peers for stripe {}, skipping {} key images",
-                        stripe, ki_bytes.len()
+                        stripe,
+                        ki_bytes.len()
                     );
                     continue;
                 }
@@ -594,7 +613,9 @@ impl P2PNode {
                         let _ = sender.send(data).await;
                         tracing::debug!(
                             "DHT: sent {} key image queries to stripe {} peer {:?}",
-                            ki_bytes.len(), stripe, &target[..4]
+                            ki_bytes.len(),
+                            stripe,
+                            &target[..4]
                         );
                     }
                 }
@@ -644,16 +665,15 @@ impl P2PNode {
     /// The maintenance task picks up queued transactions and routes them through
     /// the Dandelion++ stem phase for origin obfuscation.
     pub fn queue_transaction_for_broadcast(&self, tx: Transaction) -> Result<()> {
-        self.tx_broadcast_tx.try_send(tx)
-            .map_err(|e| match e {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    tracing::warn!("Transaction broadcast queue full — dropping transaction");
-                    Error::InvalidState("broadcast queue full, try again later".into())
-                }
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                    Error::InvalidState("broadcast queue closed".into())
-                }
-            })
+        self.tx_broadcast_tx.try_send(tx).map_err(|e| match e {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                tracing::warn!("Transaction broadcast queue full — dropping transaction");
+                Error::InvalidState("broadcast queue full, try again later".into())
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                Error::InvalidState("broadcast queue closed".into())
+            }
+        })
     }
 
     /// Next accept-order sequence for a chain-shadow update (issue #249).
@@ -697,7 +717,8 @@ impl P2PNode {
         // cumulative work than us — a heavier chain — even when we are taller
         // in block height. Anti-wedge (expire/ban/prune) clears the claim if
         // it can't be substantiated, so this can't pin us permanently.
-        self.chain.set_work_behind(stats.best_known_difficulty > stats.local_total_difficulty);
+        self.chain
+            .set_work_behind(stats.best_known_difficulty > stats.local_total_difficulty);
         // Firework Phase 2: tell CAP_CHAINWORK peers our new cumulative work
         // so a peer on a lighter (possibly higher) chain can discover ours.
         self.announce_chain_work();
@@ -860,7 +881,10 @@ impl P2PNode {
         // `mark_block_orphan`. Used only in the debug-log below for
         // observability; the orphan pool stores the block itself.
         let orphan_hash = block.hash();
-        self.sync.write().await.mark_block_orphan(block, Some(*peer_id), parent_hash);
+        self.sync
+            .write()
+            .await
+            .mark_block_orphan(block, Some(*peer_id), parent_hash);
 
         // Track rate for observability only. Do NOT feed into the peer scorer.
         // See method doc-comment for the 2026-06-22 partition context.
@@ -909,7 +933,7 @@ impl P2PNode {
             let mut addresses = self.addresses.write().await;
             match addresses.load_from_file(&addr_book_path) {
                 Ok(n) if n > 0 => info!("Loaded {} addresses from disk", n),
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => warn!("Failed to load address book: {}", e),
             }
         }
@@ -921,7 +945,10 @@ impl P2PNode {
         {
             let anchors = load_anchors_from_disk(&self.config.data_dir);
             if !anchors.is_empty() {
-                info!("Loaded {} anchor peers — dialing them first on startup", anchors.len());
+                info!(
+                    "Loaded {} anchor peers — dialing them first on startup",
+                    anchors.len()
+                );
                 self.addresses.write().await.set_anchors(anchors);
             }
         }
@@ -930,7 +957,7 @@ impl P2PNode {
             let mut scorer = self.peer_scorer.write().await;
             match scorer.load_bans_from_file(&ban_list_path) {
                 Ok(n) if n > 0 => info!("Loaded {} bans from disk", n),
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => warn!("Failed to load ban list: {}", e),
             }
         }
@@ -939,7 +966,10 @@ impl P2PNode {
         // When --seed-node is used, the custom seeds are already in the address manager
         // and we skip the bootstrapper to avoid polluting the address list with
         // unreachable built-in seed IPs that would be tried before the custom ones.
-        let onion_only = self.config.proxy.as_ref()
+        let onion_only = self
+            .config
+            .proxy
+            .as_ref()
             .map(|p| p.onion_only)
             .unwrap_or(false);
         // M1 (audit fix): proxy_active flag — true if any SOCKS5 proxy is
@@ -959,8 +989,10 @@ impl P2PNode {
                 addresses.add(PeerAddress::new(addr));
             }
         } else {
-            info!("Skipping bootstrap — using {} pre-configured seed addresses",
-                self.addresses.read().await.len());
+            info!(
+                "Skipping bootstrap — using {} pre-configured seed addresses",
+                self.addresses.read().await.len()
+            );
         }
 
         // Start listener
@@ -968,17 +1000,26 @@ impl P2PNode {
         // Without this, the kernel holds the socket in TIME_WAIT for 60s,
         // preventing the node from restarting.
         let socket = socket2::Socket::new(
-            if self.config.listen_addr.is_ipv6() { socket2::Domain::IPV6 } else { socket2::Domain::IPV4 },
+            if self.config.listen_addr.is_ipv6() {
+                socket2::Domain::IPV6
+            } else {
+                socket2::Domain::IPV4
+            },
             socket2::Type::STREAM,
             Some(socket2::Protocol::TCP),
-        ).map_err(|e| Error::ConnectionFailed(format!("socket create: {e}")))?;
-        socket.set_reuse_address(true)
+        )
+        .map_err(|e| Error::ConnectionFailed(format!("socket create: {e}")))?;
+        socket
+            .set_reuse_address(true)
             .map_err(|e| Error::ConnectionFailed(format!("SO_REUSEADDR: {e}")))?;
-        socket.set_nonblocking(true)
+        socket
+            .set_nonblocking(true)
             .map_err(|e| Error::ConnectionFailed(format!("set_nonblocking: {e}")))?;
-        socket.bind(&self.config.listen_addr.into())
-            .map_err(|e| Error::ConnectionFailed(format!("bind {}: {e}", self.config.listen_addr)))?;
-        socket.listen(128)
+        socket.bind(&self.config.listen_addr.into()).map_err(|e| {
+            Error::ConnectionFailed(format!("bind {}: {e}", self.config.listen_addr))
+        })?;
+        socket
+            .listen(128)
             .map_err(|e| Error::ConnectionFailed(format!("listen: {e}")))?;
         let listener = TcpListener::from_std(socket.into())
             .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
@@ -1005,7 +1046,10 @@ impl P2PNode {
             let port = self.config.listen_addr.port();
             tokio::spawn(async move {
                 if let Err(e) = super::bootstrap::setup_upnp(port, port).await {
-                    debug!("UPnP setup failed (non-fatal — node works without it): {}", e);
+                    debug!(
+                        "UPnP setup failed (non-fatal — node works without it): {}",
+                        e
+                    );
                 }
             });
         }
@@ -1084,7 +1128,10 @@ impl P2PNode {
                         // SECURITY (M-9): In onion-only mode, reject non-localhost
                         // inbound connections to prevent clearnet IP exposure.
                         if onion_only && !addr.ip().is_loopback() {
-                            debug!("Rejecting non-local inbound in onion-only mode from {}", addr);
+                            debug!(
+                                "Rejecting non-local inbound in onion-only mode from {}",
+                                addr
+                            );
                             continue;
                         }
 
@@ -1102,9 +1149,7 @@ impl P2PNode {
                             continue;
                         }
 
-                        let inbound_count = acceptor_peers.iter()
-                            .filter(|p| !p.outbound)
-                            .count();
+                        let inbound_count = acceptor_peers.iter().filter(|p| !p.outbound).count();
 
                         if inbound_count >= MAX_INBOUND {
                             // Saturation. Before rejecting, try to evict
@@ -1121,17 +1166,19 @@ impl P2PNode {
                             // selector, then disconnect the chosen victim
                             // (if any) by dropping its sender and removing
                             // it from the peers table.
-                            let snapshot: Vec<crate::network::peer::PeerInfo> =
-                                acceptor_peers.iter()
-                                    .filter(|p| !p.outbound)
-                                    .map(|p| p.clone())
-                                    .collect();
+                            let snapshot: Vec<crate::network::peer::PeerInfo> = acceptor_peers
+                                .iter()
+                                .filter(|p| !p.outbound)
+                                .map(|p| p.clone())
+                                .collect();
                             let now = std::time::Instant::now();
                             let victim_ref: Vec<&crate::network::peer::PeerInfo> =
                                 snapshot.iter().collect();
                             let relay_guard = acceptor_relay_scores.read().await;
                             match crate::network::eviction::select_inbound_to_evict(
-                                victim_ref, now, &relay_guard,
+                                victim_ref,
+                                now,
+                                &relay_guard,
                             ) {
                                 Some(victim_id) => {
                                     debug!(
@@ -1165,8 +1212,11 @@ impl P2PNode {
                             }
                         }
 
-                        debug!("Incoming connection from {} (IP has {} connections)",
-                            addr, acceptor_tracker.connections_from(&addr.ip()));
+                        debug!(
+                            "Incoming connection from {} (IP has {} connections)",
+                            addr,
+                            acceptor_tracker.connections_from(&addr.ip())
+                        );
 
                         let peer_id = generate_peer_id();
                         let peers = acceptor_peers.clone();
@@ -1184,11 +1234,23 @@ impl P2PNode {
 
                         tokio::spawn(async move {
                             let result = handle_connection(
-                                stream, peer_id, false, magic, our_nonce, height, tip,
-                                peers, senders, event_tx, msg_tx,
-                                tracker.clone(), conn_identity, conn_encryption,
+                                stream,
+                                peer_id,
+                                false,
+                                magic,
+                                our_nonce,
+                                height,
+                                tip,
+                                peers,
+                                senders,
+                                event_tx,
+                                msg_tx,
+                                tracker.clone(),
+                                conn_identity,
+                                conn_encryption,
                                 None, // inbound — no per-/16 slot to track
-                            ).await;
+                            )
+                            .await;
 
                             // Untrack connection when done
                             tracker.untrack_connection(&addr_clone);
@@ -1230,25 +1292,34 @@ impl P2PNode {
             // shutdown also saves in stop().
             let mut anchor_save_tick: u32 = 0;
             // Per-address exponential backoff for failed connections
-            let backoffs: Arc<tokio::sync::Mutex<std::collections::HashMap<SocketAddr, (std::time::Instant, super::framing::ExponentialBackoff)>>> =
-                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+            let backoffs: Arc<
+                tokio::sync::Mutex<
+                    std::collections::HashMap<
+                        SocketAddr,
+                        (std::time::Instant, super::framing::ExponentialBackoff),
+                    >,
+                >,
+            > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
             // CHANGE 3: Per-address last-attempt timestamp for minimum 30s reconnect delay
             // (Bitcoin CConnman uses 30s between attempts to the same address).
             // This prevents rapid connect/disconnect cycles that waste Noise handshake slots.
-            let last_attempt: Arc<tokio::sync::Mutex<std::collections::HashMap<SocketAddr, std::time::Instant>>> =
-                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+            let last_attempt: Arc<
+                tokio::sync::Mutex<std::collections::HashMap<SocketAddr, std::time::Instant>>,
+            > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
             const MIN_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
             // Log proxy status on startup
             if let Some(ref proxy) = connector_proxy {
                 if proxy.is_active() {
-                    info!("Outbound connections will use {} proxy at {}:{}",
+                    info!(
+                        "Outbound connections will use {} proxy at {}:{}",
                         match proxy.proxy_type {
                             crate::config::ProxyType::Socks5 => "SOCKS5",
                             crate::config::ProxyType::Socks4 => "SOCKS4",
                             crate::config::ProxyType::Http => "HTTP",
                         },
-                        proxy.address, proxy.port
+                        proxy.address,
+                        proxy.port
                     );
                     if proxy.onion_only {
                         info!("Onion-only mode enabled - will only connect to .onion peers");
@@ -1277,14 +1348,14 @@ impl P2PNode {
                     }
                 }
 
-                let outbound_count = connector_peers.iter()
-                    .filter(|p| p.outbound)
-                    .count();
+                let outbound_count = connector_peers.iter().filter(|p| p.outbound).count();
                 let total_peers = connector_peers.len();
                 let addr_count = connector_addresses.read().await.len();
                 if total_peers < 3 {
-                    info!("Peer maintenance: {} total peers ({} outbound), {} known addresses",
-                        total_peers, outbound_count, addr_count);
+                    info!(
+                        "Peer maintenance: {} total peers ({} outbound), {} known addresses",
+                        total_peers, outbound_count, addr_count
+                    );
                 }
 
                 // Eclipse-defense observability: every maintenance tick log
@@ -1296,14 +1367,19 @@ impl P2PNode {
                 let snap = connector_tracker.outbound_subnet_snapshot();
                 let snap_sum: usize = snap.iter().map(|(_, c)| *c).sum();
                 if snap.is_empty() {
-                    debug!("eclipse-defense: outbound_per_subnet empty (outbound_count={})",
-                        outbound_count);
+                    debug!(
+                        "eclipse-defense: outbound_per_subnet empty (outbound_count={})",
+                        outbound_count
+                    );
                 } else {
-                    let pretty: Vec<String> = snap.iter().map(|(k, v)| {
-                        let hi = (*k >> 8) as u8;
-                        let lo = (*k & 0xff) as u8;
-                        format!("{}.{}/16={}", hi, lo, v)
-                    }).collect();
+                    let pretty: Vec<String> = snap
+                        .iter()
+                        .map(|(k, v)| {
+                            let hi = (*k >> 8) as u8;
+                            let lo = (*k & 0xff) as u8;
+                            format!("{}.{}/16={}", hi, lo, v)
+                        })
+                        .collect();
                     // Off-by-one drift between subnet_sum and outbound_count
                     // is a cosmetic bookkeeping artifact, not a connection
                     // problem: the actual per-/16 cap is enforced atomically
@@ -1341,8 +1417,12 @@ impl P2PNode {
                             snap_sum, outbound_count, pretty.join(", ")
                         );
                     } else {
-                        debug!("eclipse-defense: subnets={} sum={} :: {}",
-                            snap.len(), snap_sum, pretty.join(", "));
+                        debug!(
+                            "eclipse-defense: subnets={} sum={} :: {}",
+                            snap.len(),
+                            snap_sum,
+                            pretty.join(", ")
+                        );
                     }
                 }
 
@@ -1385,12 +1465,17 @@ impl P2PNode {
                             || match addr.ip() {
                                 std::net::IpAddr::V4(ip) => {
                                     // Check common local addresses
-                                    ip.is_loopback() || ip.is_unspecified()
+                                    ip.is_loopback()
+                                        || ip.is_unspecified()
                                         || ip == std::net::Ipv4Addr::new(127, 0, 0, 1)
                                 }
                                 std::net::IpAddr::V6(ip) => {
-                                    ip.is_loopback() || ip.is_unspecified()
-                                        || ip.to_ipv4_mapped().map(|v4| v4.is_loopback() || v4.is_unspecified()).unwrap_or(false)
+                                    ip.is_loopback()
+                                        || ip.is_unspecified()
+                                        || ip
+                                            .to_ipv4_mapped()
+                                            .map(|v4| v4.is_loopback() || v4.is_unspecified())
+                                            .unwrap_or(false)
                                 }
                             };
                         if is_self {
@@ -1424,7 +1509,10 @@ impl P2PNode {
                     // tried set self-clears once all addresses have
                     // been tried, so this isn't permanent exclusion.
                     if connector_peers.iter().any(|p| p.addr == addr) {
-                        trace!("Skipping {} — already have an active peer at this address", addr);
+                        trace!(
+                            "Skipping {} — already have an active peer at this address",
+                            addr
+                        );
                         connector_addresses.write().await.mark_tried(addr);
                         continue;
                     }
@@ -1435,7 +1523,11 @@ impl P2PNode {
                         let la = last_attempt.lock().await;
                         if let Some(t) = la.get(&addr) {
                             if t.elapsed() < MIN_RECONNECT_DELAY {
-                                trace!("Skipping {} — last attempt was {:?} ago (min 30s)", addr, t.elapsed());
+                                trace!(
+                                    "Skipping {} — last attempt was {:?} ago (min 30s)",
+                                    addr,
+                                    t.elapsed()
+                                );
                                 continue;
                             }
                         }
@@ -1460,33 +1552,35 @@ impl P2PNode {
                     // controlling a /16 cannot saturate beyond
                     // MAX_OUTBOUND_PER_SUBNET regardless of address-book
                     // ordering or race timing.
-                    let outbound_slot = match connector_tracker
-                        .try_track_outbound_subnet_owned(&addr)
-                    {
-                        Some(slot) => Arc::new(slot),
-                        None => {
-                            debug!(
+                    let outbound_slot =
+                        match connector_tracker.try_track_outbound_subnet_owned(&addr) {
+                            Some(slot) => Arc::new(slot),
+                            None => {
+                                debug!(
                                 "Eclipse cap: /16 of {} is at MAX_OUTBOUND_PER_SUBNET, skipping",
                                 addr
                             );
-                            // Mark as tried so the connector rotates to a
-                            // different /16 next tick, instead of burning
-                            // ticks repeatedly hitting the cap on the same
-                            // address. Symmetric with the dup-dial skip
-                            // above. The tried set self-clears once all
-                            // addresses are exhausted, so this isn't a
-                            // permanent block — if the cap clears later
-                            // (peer drops), the address becomes eligible
-                            // again on the next round.
-                            connector_addresses.write().await.mark_tried(addr);
-                            continue;
-                        }
-                    };
+                                // Mark as tried so the connector rotates to a
+                                // different /16 next tick, instead of burning
+                                // ticks repeatedly hitting the cap on the same
+                                // address. Symmetric with the dup-dial skip
+                                // above. The tried set self-clears once all
+                                // addresses are exhausted, so this isn't a
+                                // permanent block — if the cap clears later
+                                // (peer drops), the address becomes eligible
+                                // again on the next round.
+                                connector_addresses.write().await.mark_tried(addr);
+                                continue;
+                            }
+                        };
 
                     debug!("Attempting outbound connection to {}", addr);
 
                     // CHANGE 3: Record attempt timestamp before spawning
-                    last_attempt.lock().await.insert(addr, std::time::Instant::now());
+                    last_attempt
+                        .lock()
+                        .await
+                        .insert(addr, std::time::Instant::now());
 
                     let peers = connector_peers.clone();
                     let senders = connector_senders.clone();
@@ -1505,11 +1599,8 @@ impl P2PNode {
 
                     tokio::spawn(async move {
                         // Use proxy if configured, otherwise direct connection
-                        let connect_result = super::proxy::connect_peer(
-                            addr,
-                            proxy.as_ref(),
-                            CONNECT_TIMEOUT,
-                        ).await;
+                        let connect_result =
+                            super::proxy::connect_peer(addr, proxy.as_ref(), CONNECT_TIMEOUT).await;
 
                         match connect_result {
                             Ok(stream) => {
@@ -1518,11 +1609,24 @@ impl P2PNode {
 
                                 let peer_id = generate_peer_id();
                                 if let Err(e) = handle_connection(
-                                    stream, peer_id, true, magic, our_nonce, height, tip,
-                                    peers, senders, event_tx, msg_tx,
-                                    tracker, conn_identity, conn_encryption,
+                                    stream,
+                                    peer_id,
+                                    true,
+                                    magic,
+                                    our_nonce,
+                                    height,
+                                    tip,
+                                    peers,
+                                    senders,
+                                    event_tx,
+                                    msg_tx,
+                                    tracker,
+                                    conn_identity,
+                                    conn_encryption,
                                     Some(outbound_slot.clone()),
-                                ).await {
+                                )
+                                .await
+                                {
                                     warn!("Outbound connection error: {}", e);
                                     addresses.write().await.mark_tried(addr);
                                 } else {
@@ -1535,8 +1639,12 @@ impl P2PNode {
 
                                 // Apply exponential backoff for this address
                                 let mut bo = backoffs.lock().await;
-                                let (next_time, backoff) = bo.entry(addr)
-                                    .or_insert_with(|| (std::time::Instant::now(), super::framing::ExponentialBackoff::new()));
+                                let (next_time, backoff) = bo.entry(addr).or_insert_with(|| {
+                                    (
+                                        std::time::Instant::now(),
+                                        super::framing::ExponentialBackoff::new(),
+                                    )
+                                });
                                 let delay = backoff.next_delay();
                                 *next_time = std::time::Instant::now() + delay;
                                 debug!("Backoff for {}: next retry in {:?}", addr, delay);
@@ -1610,10 +1718,13 @@ impl P2PNode {
                                 "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
                                 &msg.peer_id[..4], msg.msg_type,
                             );
-                            if let Some(peer_addr) = processor_peers.get(&msg.peer_id).map(|p| p.addr) {
+                            if let Some(peer_addr) =
+                                processor_peers.get(&msg.peer_id).map(|p| p.addr)
+                            {
                                 let mut scorer = processor_scorer.write().await;
-                                scorer.get_or_create(peer_addr)
-                                    .record_misbehavior(super::scoring::MisbehaviorType::MessageFlood);
+                                scorer.get_or_create(peer_addr).record_misbehavior(
+                                    super::scoring::MisbehaviorType::MessageFlood,
+                                );
                             }
                             continue; // Drop the message and release its reservation
                         }
@@ -1636,7 +1747,9 @@ impl P2PNode {
                             processor_identity.clone(),
                             processor_tx_absence_cache.clone(),
                             processor_relay_scores.clone(),
-                        ).await {
+                        )
+                        .await
+                        {
                             warn!("Message processing error: {}", e);
                         }
                     }
@@ -1704,7 +1817,7 @@ impl P2PNode {
             let mut last_progress_time_secs: u64 = sync_start.elapsed().as_secs();
             let mut emergency_t3_fires: u32 = 0;
             const EMERGENCY_T3_NO_PROGRESS_SECS: u64 = 300; // 5 minutes
-            const EMERGENCY_T3_REPEAT_SECS: u64 = 120;      // re-fire every 2 min if still stuck
+            const EMERGENCY_T3_REPEAT_SECS: u64 = 120; // re-fire every 2 min if still stuck
 
             while *sync_running.read().await {
                 tick.tick().await;
@@ -1787,8 +1900,8 @@ impl P2PNode {
                     .map(|p| p.height)
                     .max()
                     .unwrap_or(0);
-                let chain_behind = sync_chain.height()
-                    < sync_chain.target_height().max(max_connected_peer_height);
+                let chain_behind =
+                    sync_chain.height() < sync_chain.target_height().max(max_connected_peer_height);
                 let should_fire_emergency = (!sync_sync.read().await.is_synced() || chain_behind)
                     && monotonic_now >= EMERGENCY_T3_NO_PROGRESS_SECS
                     && secs_since_progress >= EMERGENCY_T3_NO_PROGRESS_SECS
@@ -1800,7 +1913,8 @@ impl P2PNode {
                             // last_progress_time_secs which we artificially
                             // advance below so the next fire-check waits
                             // REPEAT_SECS instead of immediately.
-                            monotonic_now.saturating_sub(last_progress_time_secs)
+                            monotonic_now
+                                .saturating_sub(last_progress_time_secs)
                                 .saturating_sub(EMERGENCY_T3_NO_PROGRESS_SECS)
                         };
                         elapsed_since_last_fire >= EMERGENCY_T3_REPEAT_SECS
@@ -1855,12 +1969,18 @@ impl P2PNode {
                 // Tier 2 (adaptive, on repeated failure): request_timeout doubles.
                 // Tier 3 (120s): Rotate peers entirely.
                 let live_peer_count = sync_peers.len();
-                let stall_timeout = sync_sync.read().await.request_timeout_scaled(live_peer_count);
+                let stall_timeout = sync_sync
+                    .read()
+                    .await
+                    .request_timeout_scaled(live_peer_count);
                 if monotonic_now >= 15 && sync_sync.read().await.is_stalled(now, stall_timeout) {
                     // Tier 1: Just re-request the blocks, don't rotate peers
                     let retries = sync_sync.write().await.get_blocks_to_retry(now);
                     if !retries.is_empty() {
-                        tracing::debug!("Re-requesting {} stalled blocks from other peers", retries.len());
+                        tracing::debug!(
+                            "Re-requesting {} stalled blocks from other peers",
+                            retries.len()
+                        );
                     }
 
                     stall_count += 1;
@@ -2023,7 +2143,12 @@ impl P2PNode {
                         if let Some(peer_id) = pick_scored_peer(&sync_peers, &sync_scorer) {
                             if !sync_sync.read().await.is_sync_banned(&peer_id, now) {
                                 let nonce = sync_sync.write().await.allocate_header_nonce();
-                                if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
+                                if let Ok(msg) = Message::get_headers_with_nonce(
+                                    magic,
+                                    locator,
+                                    Hash::zero(),
+                                    nonce,
+                                ) {
                                     if let Ok(data) = msg.to_bytes() {
                                         // DEADLOCK FIX: clone the sender BEFORE the
                                         // `sender.send(data).await` and the SECOND await
@@ -2031,7 +2156,8 @@ impl P2PNode {
                                         // held the DashMap shard Ref across BOTH awaits,
                                         // making this the highest-blast-radius site of
                                         // the class. See PR body for the full sweep.
-                                        let sender = sync_senders.get(&peer_id).map(|s| s.value().clone());
+                                        let sender =
+                                            sync_senders.get(&peer_id).map(|s| s.value().clone());
                                         if let Some(sender) = sender {
                                             let _ = sender.send(data).await;
                                             sync_sync.write().await.mark_headers_requested(now);
@@ -2065,11 +2191,17 @@ impl P2PNode {
                             let mut sg = sync_sync.write().await;
                             let retried = sg.get_blocks_to_retry(now);
                             if !retried.is_empty() {
-                                info!("[IBD] Recovered {} timed-out block requests back to queue", retried.len());
+                                info!(
+                                    "[IBD] Recovered {} timed-out block requests back to queue",
+                                    retried.len()
+                                );
                             }
                             let recovered = sg.recover_stuck_downloads();
                             if recovered > 0 {
-                                info!("[IBD] Recovered {} stuck downloads (no pending_request)", recovered);
+                                info!(
+                                    "[IBD] Recovered {} stuck downloads (no pending_request)",
+                                    recovered
+                                );
                             }
                         }
 
@@ -2123,9 +2255,15 @@ impl P2PNode {
                             // the next GetBlocks goes to a healthier peer.
                             let mut live_peers: Vec<(PeerId, u64)> = {
                                 let mut s = sync_scorer.write().await;
-                                sync_peers.iter()
+                                sync_peers
+                                    .iter()
                                     .filter(|p| p.state == PeerState::Connected)
-                                    .filter(|p| sync_senders.get(&p.id).map(|sd| !sd.is_closed()).unwrap_or(false))
+                                    .filter(|p| {
+                                        sync_senders
+                                            .get(&p.id)
+                                            .map(|sd| !sd.is_closed())
+                                            .unwrap_or(false)
+                                    })
                                     .filter(|p| {
                                         // Skip peers currently banned from GetBlocks.
                                         // Look up their socket addr; if missing, allow
@@ -2140,11 +2278,19 @@ impl P2PNode {
                             live_peers.sort_by(|a, b| b.1.cmp(&a.1));
 
                             // Clean up dead senders
-                            let dead: Vec<PeerId> = sync_peers.iter()
-                                .filter(|p| sync_senders.get(&p.id).map(|s| s.is_closed()).unwrap_or(true))
+                            let dead: Vec<PeerId> = sync_peers
+                                .iter()
+                                .filter(|p| {
+                                    sync_senders
+                                        .get(&p.id)
+                                        .map(|s| s.is_closed())
+                                        .unwrap_or(true)
+                                })
                                 .map(|p| p.id)
                                 .collect();
-                            for pid in &dead { sync_senders.remove(pid); }
+                            for pid in &dead {
+                                sync_senders.remove(pid);
+                            }
 
                             if live_peers.is_empty() {
                                 warn!("[IBD] No live peers for GetBlocks. Re-queuing {} hashes, falling back to Headers.", to_request.len());
@@ -2161,7 +2307,9 @@ impl P2PNode {
 
                                 for (i, (pid, peer_height)) in live_peers.iter().enumerate() {
                                     let start = i * span_size;
-                                    if start >= to_request.len() { break; }
+                                    if start >= to_request.len() {
+                                        break;
+                                    }
                                     let end = (start + span_size).min(to_request.len());
                                     let span = &to_request[start..end];
 
@@ -2169,12 +2317,14 @@ impl P2PNode {
                                         hashes: span.to_vec(),
                                     };
                                     if let Ok(payload) = borsh::to_vec(&get_blocks) {
-                                        let msg = Message::new(magic, MessageType::GetBlocks, payload);
+                                        let msg =
+                                            Message::new(magic, MessageType::GetBlocks, payload);
                                         if let Ok(data) = msg.to_bytes() {
                                             // DEADLOCK FIX: same shape as GetHeaders above
                                             // — TWO awaits (send + sync_sync.write) inside
                                             // the guard region. Clone the sender out first.
-                                            let sender = sync_senders.get(pid).map(|s| s.value().clone());
+                                            let sender =
+                                                sync_senders.get(pid).map(|s| s.value().clone());
                                             if let Some(sender) = sender {
                                                 if sender.send(data).await.is_ok() {
                                                     // Record requests
@@ -2229,8 +2379,7 @@ impl P2PNode {
 
                         let our_height = sync_chain.height();
                         let true_best = sync_sync.read().await.true_best_height();
-                        let has_peers = sync_peers.iter()
-                            .any(|p| p.state == PeerState::Connected);
+                        let has_peers = sync_peers.iter().any(|p| p.state == PeerState::Connected);
 
                         // If at height 0 with peers, always re-trigger.
                         // Also re-trigger if peers are ahead.
@@ -2296,7 +2445,8 @@ impl P2PNode {
                 return Err(Error::InvalidState(
                     "P2PNode::start called twice on the same instance — \
                      broadcast receiver was already consumed by a prior call. \
-                     This indicates a supervisor bug or unintended re-init.".into()
+                     This indicates a supervisor bug or unintended re-init."
+                        .into(),
                 ));
             }
         };
@@ -2324,7 +2474,8 @@ impl P2PNode {
             let mut ping_interval = interval(PING_INTERVAL);
             let mut cleanup_interval = interval(Duration::from_secs(60));
             // Dandelion++ monitor runs every DANDELION_MONITOR_INTERVAL_SECS
-            let mut dandelion_interval = interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
+            let mut dandelion_interval =
+                interval(Duration::from_secs(DANDELION_MONITOR_INTERVAL_SECS));
             // Periodic ban-list flush. (Prior comment claimed "same
             // cadence as Bitcoin Core's `DumpBanlist()` — every 15 min
             // via CScheduler". That specific identifier + cadence
@@ -2360,7 +2511,8 @@ impl P2PNode {
             // 2026-06-27 gossip-bug fix: periodic InvBlock re-announce of our
             // current tip to all peers. See TIP_REBROADCAST_INTERVAL_SECS docs
             // (from PR #123).
-            let mut tip_announce_interval = interval(Duration::from_secs(TIP_REBROADCAST_INTERVAL_SECS));
+            let mut tip_announce_interval =
+                interval(Duration::from_secs(TIP_REBROADCAST_INTERVAL_SECS));
 
             while *maint_running.read().await {
                 tokio::select! {
@@ -2774,7 +2926,10 @@ impl P2PNode {
         {
             Ok(bytes) => bytes,
             Err(e) => {
-                warn!("announce_chain_work: failed to build/encode ChainWork: {}", e);
+                warn!(
+                    "announce_chain_work: failed to build/encode ChainWork: {}",
+                    e
+                );
                 return;
             }
         };
@@ -2924,9 +3079,9 @@ impl P2PNode {
                 let addr = p.addr;
                 drop(p);
                 let mut scorer = self.peer_scorer.write().await;
-                scorer.get_or_create(addr).record_misbehavior(
-                    super::scoring::MisbehaviorType::ChronicSendQueueFull,
-                );
+                scorer
+                    .get_or_create(addr)
+                    .record_misbehavior(super::scoring::MisbehaviorType::ChronicSendQueueFull);
             }
             self.ban_peer(&peer_id).await;
         }
@@ -2976,7 +3131,9 @@ impl P2PNode {
         // file's PR body for the class-wide rationale.
         let sender = self.peer_senders.get(peer_id).map(|s| s.value().clone());
         if let Some(sender) = sender {
-            sender.send(data).await
+            sender
+                .send(data)
+                .await
                 .map_err(|_| Error::ConnectionFailed("peer disconnected".into()))?;
         }
         Ok(())
@@ -3124,8 +3281,8 @@ async fn noise_bridge(
     transport: super::noise::NoiseTransport,
     tcp_reader: tokio::net::tcp::OwnedReadHalf,
     tcp_writer: tokio::net::tcp::OwnedWriteHalf,
-    from_app: tokio::io::DuplexStream,   // plaintext from MessageFramer
-    to_app: tokio::io::DuplexStream,     // plaintext to MessageFramer
+    from_app: tokio::io::DuplexStream, // plaintext from MessageFramer
+    to_app: tokio::io::DuplexStream,   // plaintext to MessageFramer
 ) {
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -3239,7 +3396,8 @@ async fn handle_connection(
     // not called to preserve a concurrent reconnection).
     eclipse_slot: Option<Arc<super::connection_tracker::OutboundSubnetSlot>>,
 ) -> Result<()> {
-    let addr = stream.peer_addr()
+    let addr = stream
+        .peer_addr()
         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
     // Disable Nagle's algorithm for latency-sensitive handshake and message
@@ -3271,12 +3429,9 @@ async fn handle_connection(
         if encryption_config.preferred || encryption_config.required {
             let timeout_result = tokio::time::timeout(
                 Duration::from_secs(super::noise::NOISE_HANDSHAKE_TIMEOUT_SECS),
-                super::noise::perform_noise_handshake(
-                    &mut stream,
-                    identity.clone(),
-                    outbound,
-                ),
-            ).await;
+                super::noise::perform_noise_handshake(&mut stream, identity.clone(), outbound),
+            )
+            .await;
 
             match timeout_result {
                 Ok(Ok((transport, remote_id))) => Some((transport, remote_id)),
@@ -3289,8 +3444,11 @@ async fn handle_connection(
                     return Err(e);
                 }
                 Err(_) => {
-                    warn!("Noise handshake timed out with {} after {}s",
-                        addr, super::noise::NOISE_HANDSHAKE_TIMEOUT_SECS);
+                    warn!(
+                        "Noise handshake timed out with {} after {}s",
+                        addr,
+                        super::noise::NOISE_HANDSHAKE_TIMEOUT_SECS
+                    );
                     return Err(Error::NoiseHandshakeFailed("timeout".into()));
                 }
             }
@@ -3325,8 +3483,13 @@ async fn handle_connection(
         *remote_id
     } else {
         if !encryption_config.trusted_peers.is_empty() {
-            warn!("Plaintext connection from {} rejected (trusted_peers configured)", addr);
-            return Err(Error::NoiseHandshakeFailed("encryption required for trusted peers".into()));
+            warn!(
+                "Plaintext connection from {} rejected (trusted_peers configured)",
+                addr
+            );
+            return Err(Error::NoiseHandshakeFailed(
+                "encryption required for trusted peers".into(),
+            ));
         }
         if encryption_config.required {
             warn!("Encryption required but not established with {}", addr);
@@ -3361,22 +3524,29 @@ async fn handle_connection(
     type DynRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
     type DynWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
-    let (app_reader, app_writer, noise_bridge_handle): (DynRead, DynWrite, Option<tokio::task::JoinHandle<()>>) =
-        if let Some((transport, _remote_id)) = noise_result {
-            let (tcp_reader, tcp_writer) = stream.into_split();
-            let (app_read, bridge_write) = tokio::io::duplex(64 * 1024);
-            let (bridge_read, app_write) = tokio::io::duplex(64 * 1024);
+    let (app_reader, app_writer, noise_bridge_handle): (
+        DynRead,
+        DynWrite,
+        Option<tokio::task::JoinHandle<()>>,
+    ) = if let Some((transport, _remote_id)) = noise_result {
+        let (tcp_reader, tcp_writer) = stream.into_split();
+        let (app_read, bridge_write) = tokio::io::duplex(64 * 1024);
+        let (bridge_read, app_write) = tokio::io::duplex(64 * 1024);
 
-            // Spawn bridge task: decrypt from TCP → app, encrypt from app → TCP
-            let handle = tokio::spawn(noise_bridge(
-                transport, tcp_reader, tcp_writer, bridge_read, bridge_write,
-            ));
+        // Spawn bridge task: decrypt from TCP → app, encrypt from app → TCP
+        let handle = tokio::spawn(noise_bridge(
+            transport,
+            tcp_reader,
+            tcp_writer,
+            bridge_read,
+            bridge_write,
+        ));
 
-            (Box::new(app_read), Box::new(app_write), Some(handle))
-        } else {
-            let (tcp_reader, tcp_writer) = stream.into_split();
-            (Box::new(tcp_reader), Box::new(tcp_writer), None)
-        };
+        (Box::new(app_read), Box::new(app_write), Some(handle))
+    } else {
+        let (tcp_reader, tcp_writer) = stream.into_split();
+        (Box::new(tcp_reader), Box::new(tcp_writer), None)
+    };
 
     let mut framer = MessageFramer::new_budgeted(app_reader, app_writer, magic, conn_tracker);
 
@@ -3387,7 +3557,9 @@ async fn handle_connection(
     let version_bytes = version_msg.to_bytes()?;
     // The framer handles header creation, but version_msg already includes header
     // Write the complete message directly for initial handshake
-    framer.write_message(MessageType::Version as u8, &version_bytes[HEADER_SIZE..]).await?;
+    framer
+        .write_message(MessageType::Version as u8, &version_bytes[HEADER_SIZE..])
+        .await?;
     if let Some(mut peer) = peers.get_mut(&peer_id) {
         peer.bytes_sent = peer.bytes_sent.saturating_add(version_bytes.len() as u64);
     }
@@ -3518,16 +3690,17 @@ async fn handle_connection(
     // skip cleanup (the new connection's entries are intact).
     drop(rx);
 
-    let should_remove = senders.get(&peer_id)
-        .map(|s| s.is_closed())
-        .unwrap_or(true);
+    let should_remove = senders.get(&peer_id).map(|s| s.is_closed()).unwrap_or(true);
 
     if should_remove {
         peers.remove(&peer_id);
         senders.remove(&peer_id);
         let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
     } else {
-        tracing::debug!("Skipping cleanup for peer {:?} — new connection exists", peer_id);
+        tracing::debug!(
+            "Skipping cleanup for peer {:?} — new connection exists",
+            peer_id
+        );
     }
 
     Ok(())
@@ -3595,35 +3768,63 @@ fn is_routable(ip: std::net::IpAddr) -> bool {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
             // 10.0.0.0/8 — private
-            if octets[0] == 10 { return false; }
+            if octets[0] == 10 {
+                return false;
+            }
             // 172.16.0.0/12 — private
-            if octets[0] == 172 && (octets[1] & 0xf0) == 16 { return false; }
+            if octets[0] == 172 && (octets[1] & 0xf0) == 16 {
+                return false;
+            }
             // 192.168.0.0/16 — private
-            if octets[0] == 192 && octets[1] == 168 { return false; }
+            if octets[0] == 192 && octets[1] == 168 {
+                return false;
+            }
             // 169.254.0.0/16 — link-local (APIPA)
-            if octets[0] == 169 && octets[1] == 254 { return false; }
+            if octets[0] == 169 && octets[1] == 254 {
+                return false;
+            }
             // 100.64.0.0/10 — CGNAT (RFC 6598)
-            if octets[0] == 100 && (octets[1] & 0xc0) == 64 { return false; }
+            if octets[0] == 100 && (octets[1] & 0xc0) == 64 {
+                return false;
+            }
             // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 — docs (RFC 5737)
-            if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 { return false; }
-            if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 { return false; }
-            if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 { return false; }
+            if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 {
+                return false;
+            }
+            if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 {
+                return false;
+            }
+            if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 {
+                return false;
+            }
             // 198.18.0.0/15 — benchmark (RFC 2544)
-            if octets[0] == 198 && (octets[1] & 0xfe) == 18 { return false; }
+            if octets[0] == 198 && (octets[1] & 0xfe) == 18 {
+                return false;
+            }
             // 255.255.255.255 — broadcast
-            if octets == [255, 255, 255, 255] { return false; }
+            if octets == [255, 255, 255, 255] {
+                return false;
+            }
             // 0.0.0.0/8 — "this network" (also covers unspecified above)
-            if octets[0] == 0 { return false; }
+            if octets[0] == 0 {
+                return false;
+            }
             true
         }
         IpAddr::V6(v6) => {
             let segments = v6.segments();
             // fc00::/7 — unique local (RFC 4193)
-            if (segments[0] & 0xfe00) == 0xfc00 { return false; }
+            if (segments[0] & 0xfe00) == 0xfc00 {
+                return false;
+            }
             // fe80::/10 — link-local (RFC 4291)
-            if (segments[0] & 0xffc0) == 0xfe80 { return false; }
+            if (segments[0] & 0xffc0) == 0xfe80 {
+                return false;
+            }
             // 2001:db8::/32 — documentation (RFC 3849)
-            if segments[0] == 0x2001 && segments[1] == 0x0db8 { return false; }
+            if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+                return false;
+            }
             // IPv4-compatible IPv6 (::a.b.c.d) — deprecated per RFC 4291.
             // Reject; the legitimate IPv4-in-v6 form is IPv4-mapped
             // (::ffff:a.b.c.d) which we already converted to V4 above.
@@ -3643,14 +3844,23 @@ mod is_routable_tests {
     #[test]
     fn rejects_unroutable_ipv4() {
         let reject_v4 = [
-            "0.0.0.0", "127.0.0.1",
-            "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
-            "169.254.1.2",                         // link-local
-            "100.64.0.1", "100.127.255.255",        // CGNAT
-            "192.0.2.1", "198.51.100.1", "203.0.113.1",  // docs
-            "198.18.0.1", "198.19.255.255",         // benchmark
-            "255.255.255.255",                      // broadcast
-            "224.0.0.1", "239.255.255.255",         // multicast
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.1.2", // link-local
+            "100.64.0.1",
+            "100.127.255.255", // CGNAT
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1", // docs
+            "198.18.0.1",
+            "198.19.255.255",  // benchmark
+            "255.255.255.255", // broadcast
+            "224.0.0.1",
+            "239.255.255.255", // multicast
         ];
         for s in reject_v4 {
             let ip = IpAddr::V4(s.parse::<Ipv4Addr>().unwrap());
@@ -3670,12 +3880,14 @@ mod is_routable_tests {
     #[test]
     fn rejects_unroutable_ipv6() {
         let reject_v6 = [
-            "::",                                   // unspecified
-            "::1",                                  // loopback
-            "fe80::1",                              // link-local
-            "fc00::1", "fd00::1",                   // unique local
-            "ff00::1", "ff02::1",                   // multicast
-            "2001:db8::1",                          // documentation
+            "::",      // unspecified
+            "::1",     // loopback
+            "fe80::1", // link-local
+            "fc00::1",
+            "fd00::1", // unique local
+            "ff00::1",
+            "ff02::1",     // multicast
+            "2001:db8::1", // documentation
         ];
         for s in reject_v6 {
             let ip = IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
@@ -3686,8 +3898,8 @@ mod is_routable_tests {
     #[test]
     fn accepts_routable_ipv6() {
         let accept_v6 = [
-            "2001:4860:4860::8888",                 // Google DNS
-            "2a01:e0a:c53:63d0::1",                 // real-world routable prefix
+            "2001:4860:4860::8888", // Google DNS
+            "2a01:e0a:c53:63d0::1", // real-world routable prefix
         ];
         for s in accept_v6 {
             let ip = IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
@@ -3704,7 +3916,8 @@ fn pick_scored_peer(
     peers: &Arc<DashMap<PeerId, PeerInfo>>,
     scorer: &Arc<RwLock<PeerScorer>>,
 ) -> Option<PeerId> {
-    let connected: Vec<(PeerId, SocketAddr)> = peers.iter()
+    let connected: Vec<(PeerId, SocketAddr)> = peers
+        .iter()
         .filter(|p| p.state == PeerState::Connected)
         .map(|p| (p.id, p.addr))
         .collect();
@@ -3715,11 +3928,14 @@ fn pick_scored_peer(
 
     // Try to get scored weights
     if let Ok(s) = scorer.try_read() {
-        let weights: Vec<f64> = connected.iter().map(|(_, addr)| {
-            s.get(addr)
-                .map(|score| score.composite_score().max(0.05)) // floor at 0.05 so bad peers still have tiny chance
-                .unwrap_or(0.5) // unknown peers get neutral weight
-        }).collect();
+        let weights: Vec<f64> = connected
+            .iter()
+            .map(|(_, addr)| {
+                s.get(addr)
+                    .map(|score| score.composite_score().max(0.05)) // floor at 0.05 so bad peers still have tiny chance
+                    .unwrap_or(0.5) // unknown peers get neutral weight
+            })
+            .collect();
 
         let total: f64 = weights.iter().sum();
         if total > 0.0 {
@@ -3748,7 +3964,8 @@ fn pick_scored_peer(
 /// Pick a random connected peer for sending requests (unscored fallback)
 #[allow(dead_code)]
 fn pick_random_peer(peers: &Arc<DashMap<PeerId, PeerInfo>>) -> Option<PeerId> {
-    let connected: Vec<PeerId> = peers.iter()
+    let connected: Vec<PeerId> = peers
+        .iter()
         .filter(|p| p.state == PeerState::Connected)
         .map(|p| p.id)
         .collect();
@@ -3886,7 +4103,6 @@ async fn process_message(
 
     trace!("Received {:?} from peer {:?}", msg_type, &peer_id[..4]);
 
-
     // Update peer activity
     if let Some(mut peer) = peers.get_mut(&peer_id) {
         peer.touch();
@@ -3908,11 +4124,16 @@ async fn process_message(
             | MessageType::Flare
     );
     if !is_allowed_pre_handshake {
-        let is_connected = peers.get(&peer_id)
+        let is_connected = peers
+            .get(&peer_id)
             .map(|p| p.state == PeerState::Connected)
             .unwrap_or(false);
         if !is_connected {
-            tracing::trace!("Ignoring {:?} from peer {:?} (handshake in progress)", msg_type, &peer_id[..4]);
+            tracing::trace!(
+                "Ignoring {:?} from peer {:?} (handshake in progress)",
+                msg_type,
+                &peer_id[..4]
+            );
             return Ok(());
         }
     }
@@ -3923,9 +4144,16 @@ async fn process_message(
             // to prevent OOM from unbounded user_agent strings.
             const MAX_VERSION_MSG_SIZE: usize = 1024;
             if payload.len() > MAX_VERSION_MSG_SIZE {
-                warn!("Version message too large ({} bytes) from peer {:?}", payload.len(), &peer_id[..4]);
+                warn!(
+                    "Version message too large ({} bytes) from peer {:?}",
+                    payload.len(),
+                    &peer_id[..4]
+                );
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 peers.remove(&peer_id);
@@ -3934,20 +4162,26 @@ async fn process_message(
                 return Ok(());
             }
             // Parse version and validate before accepting
-            let version: VersionMessage = match borsh::from_slice(payload) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("Failed to deserialize Version from peer {:?}: {}", &peer_id[..4], e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+            let version: VersionMessage =
+                match borsh::from_slice(payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize Version from peer {:?}: {}",
+                            &peer_id[..4],
+                            e
+                        );
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
+                        }
+                        peers.remove(&peer_id);
+                        senders.remove(&peer_id);
+                        let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
+                        return Ok(());
                     }
-                    peers.remove(&peer_id);
-                    senders.remove(&peer_id);
-                    let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
-                    return Ok(());
-                }
-            };
+                };
             {
                 // SECURITY (NET-001 + eclipse-attack defense): Detect
                 // self-connection via nonce match — but DON'T permanently
@@ -3999,7 +4233,10 @@ async fn process_message(
                 if let Err(e) = version.validate() {
                     warn!("Rejecting peer {:?}: invalid version: {}", &peer_id[..4], e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                     // Disconnect the peer
@@ -4023,7 +4260,8 @@ async fn process_message(
                     // it via the dispatch catch-all — no disconnect — so this
                     // is safe to send to every peer. Its capabilities stay 0
                     // and each capability-gated feature falls back gracefully.
-                    let flare = Message::flare(magic, crate::network::firework::local_capabilities())?;
+                    let flare =
+                        Message::flare(magic, crate::network::firework::local_capabilities())?;
                     if let Err(e) = sender.send(flare.to_bytes()?).await {
                         warn!("Failed to send Flare to peer {:?}: {}", &peer_id[..4], e);
                     }
@@ -4054,10 +4292,7 @@ async fn process_message(
                     let stats = s.stats();
                     let true_best = s.true_best_height();
                     drop(s);
-                    chain.set_sync_info(
-                        stats.local_height >= true_best,
-                        true_best,
-                    );
+                    chain.set_sync_info(stats.local_height >= true_best, true_best);
                 }
             }
         }
@@ -4072,7 +4307,8 @@ async fn process_message(
             if payload.len() > MAX_FLARE_MSG_SIZE {
                 trace!(
                     "Oversized Flare ({} bytes) from peer {:?}, ignoring",
-                    payload.len(), &peer_id[..4]
+                    payload.len(),
+                    &peer_id[..4]
                 );
             } else {
                 match borsh::from_slice::<FlareMessage>(payload) {
@@ -4082,7 +4318,8 @@ async fn process_message(
                         }
                         trace!(
                             "Peer {:?} advertised capabilities {:#x}",
-                            &peer_id[..4], flare.capabilities
+                            &peer_id[..4],
+                            flare.capabilities
                         );
                         // Firework Phase 2: if the peer supports CAP_CHAINWORK,
                         // send our current cumulative work immediately so it
@@ -4107,14 +4344,19 @@ async fn process_message(
                                     }
                                     Err(e) => warn!(
                                         "Flare: failed to build ChainWork for peer {:?}: {}",
-                                        &peer_id[..4], e
+                                        &peer_id[..4],
+                                        e
                                     ),
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        trace!("Malformed Flare from peer {:?}: {} (ignoring)", &peer_id[..4], e);
+                        trace!(
+                            "Malformed Flare from peer {:?}: {} (ignoring)",
+                            &peer_id[..4],
+                            e
+                        );
                     }
                 }
             }
@@ -4131,7 +4373,11 @@ async fn process_message(
             // payloads are dropped silently, never a disconnect reason.
             const MAX_CHAINWORK_MSG_SIZE: usize = 256;
             if payload.len() > MAX_CHAINWORK_MSG_SIZE {
-                trace!("Oversized ChainWork ({} bytes) from peer {:?}, ignoring", payload.len(), &peer_id[..4]);
+                trace!(
+                    "Oversized ChainWork ({} bytes) from peer {:?}, ignoring",
+                    payload.len(),
+                    &peer_id[..4]
+                );
             } else {
                 match borsh::from_slice::<ChainWorkMessage>(payload) {
                     Ok(cw) => {
@@ -4146,11 +4392,17 @@ async fn process_message(
                         }
                         trace!(
                             "Peer {:?} ChainWork: td={} h={}",
-                            &peer_id[..4], cw.total_difficulty, cw.height
+                            &peer_id[..4],
+                            cw.total_difficulty,
+                            cw.height
                         );
                     }
                     Err(e) => {
-                        trace!("Malformed ChainWork from peer {:?}: {} (ignoring)", &peer_id[..4], e);
+                        trace!(
+                            "Malformed ChainWork from peer {:?}: {} (ignoring)",
+                            &peer_id[..4],
+                            e
+                        );
                     }
                 }
             }
@@ -4173,7 +4425,10 @@ async fn process_message(
             // Register outbound peers for Dandelion++ relay selection
             if is_outbound {
                 dandelion.write().await.add_outbound_peer(peer_id);
-                debug!("Added outbound peer {:?} to Dandelion++ pool", &peer_id[..4]);
+                debug!(
+                    "Added outbound peer {:?} to Dandelion++ pool",
+                    &peer_id[..4]
+                );
             }
 
             // Send GetAddr to discover more peers after handshake
@@ -4190,7 +4445,9 @@ async fn process_message(
                 let locator = build_locator(our_height, |h| chain_ref.get_block_hash(h));
                 if !locator.is_empty() {
                     let nonce = sync.write().await.allocate_header_nonce();
-                    if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
+                    if let Ok(msg) =
+                        Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce)
+                    {
                         if let Ok(data) = msg.to_bytes() {
                             // DEADLOCK FIX: inline clone-then-await to preserve the
                             // exact pre-fix log semantics — info! fires whenever the
@@ -4220,7 +4477,10 @@ async fn process_message(
             if payload.len() < 8 {
                 warn!("Malformed Ping (<8 bytes) from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                 }
                 return Ok(());
@@ -4240,7 +4500,10 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_GETHEADERS_PAYLOAD {
                 warn!("GetHeaders message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -4249,7 +4512,10 @@ async fn process_message(
                 if let Err(e) = msg.validate() {
                     warn!("Invalid GetHeaders from peer {:?}: {}", &peer_id[..4], e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                     return Ok(());
@@ -4297,7 +4563,10 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_GETBLOCKS_PAYLOAD {
                 warn!("GetBlocks message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -4307,8 +4576,9 @@ async fn process_message(
                     if let Err(e) = msg.validate() {
                         warn!("Invalid GetBlocks from peer {:?}: {}", &peer_id[..4], e);
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr)
-                                .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
                         }
                         return Ok(());
                     }
@@ -4332,7 +4602,9 @@ async fn process_message(
 
                     debug!(
                         "GetBlocks from {:?}: {} requested, {} found",
-                        &peer_id[..4], requested, blocks.len()
+                        &peer_id[..4],
+                        requested,
+                        blocks.len()
                     );
 
                     // Always respond (even with empty blocks) so the requester
@@ -4342,9 +4614,16 @@ async fn process_message(
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize GetBlocks from peer {:?}: {}", &peer_id[..4], e);
+                    warn!(
+                        "Failed to deserialize GetBlocks from peer {:?}: {}",
+                        &peer_id[..4],
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -4357,49 +4636,60 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_INV_PAYLOAD {
                 warn!("InvTx message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
             }
             match borsh::from_slice::<InvMessage>(payload) {
                 Ok(inv_msg) => {
-                if let Err(e) = inv_msg.validate() {
-                    warn!("Invalid InvTx from peer {:?}: {}", &peer_id[..4], e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    if let Err(e) = inv_msg.validate() {
+                        warn!("Invalid InvTx from peer {:?}: {}", &peer_id[..4], e);
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                let mut needed = Vec::new();
-                {
-                    // v1.0.13 #2 — single read-lock to filter both
-                    // mempool presence AND tx-absence cache (so we
-                    // don't re-request hashes a peer recently said
-                    // they don't have).
-                    let absence = tx_absence_cache.read();
-                    for inv in &inv_msg.inventory {
-                        if !mempool.contains(&inv.hash) && !absence.is_known_absent(&inv.hash) {
-                            needed.push(inv.hash);
+                    let mut needed = Vec::new();
+                    {
+                        // v1.0.13 #2 — single read-lock to filter both
+                        // mempool presence AND tx-absence cache (so we
+                        // don't re-request hashes a peer recently said
+                        // they don't have).
+                        let absence = tx_absence_cache.read();
+                        for inv in &inv_msg.inventory {
+                            if !mempool.contains(&inv.hash) && !absence.is_known_absent(&inv.hash) {
+                                needed.push(inv.hash);
+                            }
+                        }
+                    }
+                    // Request missing transactions via GetTxs
+                    if !needed.is_empty() {
+                        // Reuse GetBlocksMessage format for tx hashes
+                        let get_msg = GetBlocksMessage { hashes: needed };
+                        if let Ok(payload_bytes) = borsh::to_vec(&get_msg) {
+                            let msg = Message::new(magic, MessageType::GetTxs, payload_bytes);
+                            let _ = send_to_peer(&senders, &peer_id, msg.to_bytes()?).await;
                         }
                     }
                 }
-                // Request missing transactions via GetTxs
-                if !needed.is_empty() {
-                    // Reuse GetBlocksMessage format for tx hashes
-                    let get_msg = GetBlocksMessage { hashes: needed };
-                    if let Ok(payload_bytes) = borsh::to_vec(&get_msg) {
-                        let msg = Message::new(magic, MessageType::GetTxs, payload_bytes);
-                        let _ = send_to_peer(&senders, &peer_id, msg.to_bytes()?).await;
-                    }
-                }
-                }
                 Err(e) => {
                     // P5-N7 fix: score borsh parse failure.
-                    warn!("Failed to deserialize InvTx from peer {:?}: {}", &peer_id[..4], e);
+                    warn!(
+                        "Failed to deserialize InvTx from peer {:?}: {}",
+                        &peer_id[..4],
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -4414,7 +4704,10 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("NotFound message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -4423,7 +4716,10 @@ async fn process_message(
                 if let Err(e) = nf.validate() {
                     warn!("Invalid NotFound from peer {:?}: {}", &peer_id[..4], e);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                     return Ok(());
@@ -4435,8 +4731,11 @@ async fn process_message(
                         cache.mark_absent(h);
                     }
                 }
-                debug!("NotFound from peer {:?}: cached {} absent tx hash(es)",
-                       &peer_id[..4], n);
+                debug!(
+                    "NotFound from peer {:?}: cached {} absent tx hash(es)",
+                    &peer_id[..4],
+                    n
+                );
             }
         }
 
@@ -4446,176 +4745,189 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_INV_PAYLOAD {
                 warn!("InvBlock message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
             }
             match borsh::from_slice::<InvMessage>(payload) {
                 Ok(inv_msg) => {
-                if let Err(e) = inv_msg.validate() {
-                    warn!("Invalid InvBlock from peer {:?}: {}", &peer_id[..4], e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    if let Err(e) = inv_msg.validate() {
+                        warn!("Invalid InvBlock from peer {:?}: {}", &peer_id[..4], e);
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
 
-                // During IBD, skip the block-body fetch (a new-tip InvBlock hash
-                // generally won't chain off our current IBD position and would
-                // pile up orphans). BUT — send a GetHeaders to this peer first
-                // so peer.height refreshes from real header.height values in the
-                // response. Without this, peer.height stays frozen at the handshake-
-                // time value: when the source mines past handshake, our sync
-                // target never rises, IBD declares done at the stale tip, and the
-                // node stays permanently behind (this was the launch-day stall).
-                if !sync.read().await.is_synced() {
-                    let our_height = chain.height();
-                    // CIP-019: a node only a few blocks behind (near tip) must keep
-                    // catching up promptly. The old gate treated near-tip like deep
-                    // IBD, trapping such a node on slow catch-up so it stayed
-                    // permanently a few blocks behind and its miner's sync gate
-                    // never cleared (observed live 2026-07-11). Refresh headers
-                    // either way; for a near-tip node ALSO nudge a prompt resync so
-                    // the small gap closes to the exact tip. Deep-IBD behavior
-                    // (skip the body fetch to avoid orphan pileup) is unchanged.
-                    let near_tip = invblock_near_tip(
-                        false,
-                        chain.peer_advertised_height().saturating_sub(our_height),
-                        NEAR_TIP_INV_WINDOW,
-                    );
-                    let chain_ref = &chain;
-                    let locator = build_locator(our_height, |h| chain_ref.get_block_hash(h));
-                    if !locator.is_empty() {
-                        let nonce = sync.write().await.allocate_header_nonce();
-                        if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
-                            if let Ok(data) = msg.to_bytes() {
-                                // DEADLOCK FIX: same pattern as the Handshake GetHeaders
-                                // above — inline clone-then-await preserves the pre-fix
-                                // "log fires if peer was in map" semantics exactly.
-                                let sender = senders.get(&peer_id).map(|s| s.value().clone());
-                                if let Some(sender) = sender {
-                                    let _ = sender.send(data).await;
-                                    debug!(
+                    // During IBD, skip the block-body fetch (a new-tip InvBlock hash
+                    // generally won't chain off our current IBD position and would
+                    // pile up orphans). BUT — send a GetHeaders to this peer first
+                    // so peer.height refreshes from real header.height values in the
+                    // response. Without this, peer.height stays frozen at the handshake-
+                    // time value: when the source mines past handshake, our sync
+                    // target never rises, IBD declares done at the stale tip, and the
+                    // node stays permanently behind (this was the launch-day stall).
+                    if !sync.read().await.is_synced() {
+                        let our_height = chain.height();
+                        // CIP-019: a node only a few blocks behind (near tip) must keep
+                        // catching up promptly. The old gate treated near-tip like deep
+                        // IBD, trapping such a node on slow catch-up so it stayed
+                        // permanently a few blocks behind and its miner's sync gate
+                        // never cleared (observed live 2026-07-11). Refresh headers
+                        // either way; for a near-tip node ALSO nudge a prompt resync so
+                        // the small gap closes to the exact tip. Deep-IBD behavior
+                        // (skip the body fetch to avoid orphan pileup) is unchanged.
+                        let near_tip = invblock_near_tip(
+                            false,
+                            chain.peer_advertised_height().saturating_sub(our_height),
+                            NEAR_TIP_INV_WINDOW,
+                        );
+                        let chain_ref = &chain;
+                        let locator = build_locator(our_height, |h| chain_ref.get_block_hash(h));
+                        if !locator.is_empty() {
+                            let nonce = sync.write().await.allocate_header_nonce();
+                            if let Ok(msg) =
+                                Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce)
+                            {
+                                if let Ok(data) = msg.to_bytes() {
+                                    // DEADLOCK FIX: same pattern as the Handshake GetHeaders
+                                    // above — inline clone-then-await preserves the pre-fix
+                                    // "log fires if peer was in map" semantics exactly.
+                                    let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                                    if let Some(sender) = sender {
+                                        let _ = sender.send(data).await;
+                                        debug!(
                                         "InvBlock during IBD: sent GetHeaders nonce={} to peer {:?} to refresh tip (our_h={})",
                                         nonce, &peer_id[..4], our_height
                                     );
-                                }
-                            }
-                        }
-                    }
-                    if near_tip {
-                        // Near tip: pull the small gap promptly rather than waiting on
-                        // the slow tick. trigger_resync only fires from Synced/Idle;
-                        // a node actively (but slowly) catching up sits in Headers/
-                        // Blocks, where trigger_resync is a no-op — so it would stay
-                        // stuck a few blocks behind forever (the randomx-2 case). Fall
-                        // back to arm_near_tip_catchup, which re-arms a header pull when
-                        // we're behind AND idle (nothing in flight), closing the gap.
-                        let mut sg = sync.write().await;
-                        if !sg.trigger_resync() {
-                            sg.arm_near_tip_catchup();
-                        }
-                    }
-                    return Ok(());
-                }
-
-                // Post-IBD: peer has blocks we don't. Fetch them directly
-                // via GetBlocks (below). We do NOT speculatively bump
-                // peer_heights[peer_id] here — the bump used to be:
-                //
-                //     update_peer_height_for(peer_id, our_h + 1)
-                //
-                // as a "lower bound" estimate. In practice that was a
-                // permanent latch: if the peer never delivered the
-                // announced block (stale orphan-fork remnant, peer with
-                // a phantom hash in its known set, etc.), peer_heights
-                // stayed at our_h+1 forever. best_known_height latched
-                // to our_h+1. is_synced() returned false. coincync-rig's
-                // sync gate flipped — "refusing to mine to avoid
-                // producing blocks on a private fork" — and the chain
-                // wedged until somebody restarted the offending peer.
-                // This was the production failure mode observed
-                // 2026-06-27 (multiple wedges, including one 42-min
-                // stall that required an emergency
-                // COINCYNC_RIG_SKIP_SYNC_CHECK=1 bypass to recover).
-                //
-                // The rc5 refresh_best_known fix (PR #125) made the
-                // peer-disconnect path self-clear correctly. But a
-                // STILL-CONNECTED peer with a latched bump kept
-                // best_known pinned regardless. The bump itself is
-                // the bug — remove it.
-                //
-                // Correct peer_height updates still happen via:
-                //   - Handshake (version.start_height) at node.rs:~3033
-                //   - Header sync (max_header_height) at node.rs:~3640
-                // Both of those use ACTUAL heights, not speculation.
-                // When we successfully receive and process the block
-                // requested below, refresh_best_known runs on
-                // on_block_processed (rc5 fix) and recomputes
-                // best_known from current peer_heights + local. No
-                // speculation needed.
-                //
-                // (Prior comment asserted Bitcoin Core / Monero / zebrad
-                // all share this "no speculative peer-height bump on Inv"
-                // posture; that cross-project generalization was not
-                // verified this session and is dropped. The confirmed-
-                // message-only design stands on its own reasoning.)
-
-                let mut needed = Vec::new();
-                for inv in &inv_msg.inventory {
-                    if chain.get_block(&inv.hash).is_none() {
-                        needed.push(inv.hash);
-                    }
-                }
-                if !needed.is_empty() {
-                    if needed.len() <= 4 {
-                        // Small number of missing blocks — request them directly
-                        // (fast path: avoids full header re-sync round-trip).
-                        let get_blocks = super::protocol::GetBlocksMessage {
-                            hashes: needed.clone(),
-                        };
-                        if let Ok(payload) = borsh::to_vec(&get_blocks) {
-                            let msg_out = Message::new(magic, MessageType::GetBlocks, payload);
-                            if let Ok(data) = msg_out.to_bytes() {
-                                // DEADLOCK FIX: two awaits inside the guard (send +
-                                // sync.write). Clone the sender out first, then run
-                                // both awaits with the DashMap Ref already dropped.
-                                let sender = senders.get(&peer_id).map(|s| s.value().clone());
-                                if let Some(sender) = sender {
-                                    if sender.send(data).await.is_ok() {
-                                        // Track so timeout/retry works
-                                        let now = chrono::Utc::now().timestamp() as u64;
-                                        let mut sg = sync.write().await;
-                                        for hash in &needed {
-                                            sg.track_direct_request(*hash, peer_id, now);
-                                        }
-                                        debug!(
-                                            "InvBlock: directly requesting {} blocks from peer {:?}",
-                                            needed.len(), &peer_id[..4]
-                                        );
                                     }
                                 }
                             }
                         }
-                    } else {
-                        // Many missing blocks — full header re-sync (Bitcoin-style).
-                        let triggered = sync.write().await.trigger_resync();
-                        if triggered {
-                            debug!(
+                        if near_tip {
+                            // Near tip: pull the small gap promptly rather than waiting on
+                            // the slow tick. trigger_resync only fires from Synced/Idle;
+                            // a node actively (but slowly) catching up sits in Headers/
+                            // Blocks, where trigger_resync is a no-op — so it would stay
+                            // stuck a few blocks behind forever (the randomx-2 case). Fall
+                            // back to arm_near_tip_catchup, which re-arms a header pull when
+                            // we're behind AND idle (nothing in flight), closing the gap.
+                            let mut sg = sync.write().await;
+                            if !sg.trigger_resync() {
+                                sg.arm_near_tip_catchup();
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    // Post-IBD: peer has blocks we don't. Fetch them directly
+                    // via GetBlocks (below). We do NOT speculatively bump
+                    // peer_heights[peer_id] here — the bump used to be:
+                    //
+                    //     update_peer_height_for(peer_id, our_h + 1)
+                    //
+                    // as a "lower bound" estimate. In practice that was a
+                    // permanent latch: if the peer never delivered the
+                    // announced block (stale orphan-fork remnant, peer with
+                    // a phantom hash in its known set, etc.), peer_heights
+                    // stayed at our_h+1 forever. best_known_height latched
+                    // to our_h+1. is_synced() returned false. coincync-rig's
+                    // sync gate flipped — "refusing to mine to avoid
+                    // producing blocks on a private fork" — and the chain
+                    // wedged until somebody restarted the offending peer.
+                    // This was the production failure mode observed
+                    // 2026-06-27 (multiple wedges, including one 42-min
+                    // stall that required an emergency
+                    // COINCYNC_RIG_SKIP_SYNC_CHECK=1 bypass to recover).
+                    //
+                    // The rc5 refresh_best_known fix (PR #125) made the
+                    // peer-disconnect path self-clear correctly. But a
+                    // STILL-CONNECTED peer with a latched bump kept
+                    // best_known pinned regardless. The bump itself is
+                    // the bug — remove it.
+                    //
+                    // Correct peer_height updates still happen via:
+                    //   - Handshake (version.start_height) at node.rs:~3033
+                    //   - Header sync (max_header_height) at node.rs:~3640
+                    // Both of those use ACTUAL heights, not speculation.
+                    // When we successfully receive and process the block
+                    // requested below, refresh_best_known runs on
+                    // on_block_processed (rc5 fix) and recomputes
+                    // best_known from current peer_heights + local. No
+                    // speculation needed.
+                    //
+                    // (Prior comment asserted Bitcoin Core / Monero / zebrad
+                    // all share this "no speculative peer-height bump on Inv"
+                    // posture; that cross-project generalization was not
+                    // verified this session and is dropped. The confirmed-
+                    // message-only design stands on its own reasoning.)
+
+                    let mut needed = Vec::new();
+                    for inv in &inv_msg.inventory {
+                        if chain.get_block(&inv.hash).is_none() {
+                            needed.push(inv.hash);
+                        }
+                    }
+                    if !needed.is_empty() {
+                        if needed.len() <= 4 {
+                            // Small number of missing blocks — request them directly
+                            // (fast path: avoids full header re-sync round-trip).
+                            let get_blocks = super::protocol::GetBlocksMessage {
+                                hashes: needed.clone(),
+                            };
+                            if let Ok(payload) = borsh::to_vec(&get_blocks) {
+                                let msg_out = Message::new(magic, MessageType::GetBlocks, payload);
+                                if let Ok(data) = msg_out.to_bytes() {
+                                    // DEADLOCK FIX: two awaits inside the guard (send +
+                                    // sync.write). Clone the sender out first, then run
+                                    // both awaits with the DashMap Ref already dropped.
+                                    let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                                    if let Some(sender) = sender {
+                                        if sender.send(data).await.is_ok() {
+                                            // Track so timeout/retry works
+                                            let now = chrono::Utc::now().timestamp() as u64;
+                                            let mut sg = sync.write().await;
+                                            for hash in &needed {
+                                                sg.track_direct_request(*hash, peer_id, now);
+                                            }
+                                            debug!(
+                                            "InvBlock: directly requesting {} blocks from peer {:?}",
+                                            needed.len(), &peer_id[..4]
+                                        );
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Many missing blocks — full header re-sync (Bitcoin-style).
+                            let triggered = sync.write().await.trigger_resync();
+                            if triggered {
+                                debug!(
                                 "InvBlock from peer {:?} has {} unknown blocks, triggered header re-sync",
                                 &peer_id[..4], needed.len()
                             );
+                            }
                         }
                     }
                 }
-                }
                 Err(e) => {
                     // P5-N7 fix: score borsh parse failure.
-                    warn!("Failed to deserialize InvBlock from peer {:?}: {}", &peer_id[..4], e);
+                    warn!(
+                        "Failed to deserialize InvBlock from peer {:?}: {}",
+                        &peer_id[..4],
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -4628,7 +4940,10 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_GETTXS_PAYLOAD {
                 warn!("GetTxs message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -4636,42 +4951,50 @@ async fn process_message(
             // P5-N7 fix: match with Err scoring instead of silent-Ok.
             match borsh::from_slice::<GetBlocksMessage>(payload) {
                 Ok(msg) => {
-                if let Err(e) = msg.validate() {
-                    warn!("Invalid GetTxs from peer {:?}: {}", &peer_id[..4], e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    if let Err(e) = msg.validate() {
+                        warn!("Invalid GetTxs from peer {:?}: {}", &peer_id[..4], e);
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                let mut txs = Vec::new();
-                // v1.0.13 #2 — track which requested hashes we don't
-                // have so we can reply NotFound for them. Pre-fix we
-                // silently dropped misses; peer kept re-asking, we
-                // kept doing mempool.get() per re-ask.
-                let mut absent = Vec::new();
-                for hash in &msg.hashes {
-                    if let Some(tx) = mempool.get(hash) {
-                        txs.push(tx);
-                    } else {
-                        absent.push(*hash);
+                    let mut txs = Vec::new();
+                    // v1.0.13 #2 — track which requested hashes we don't
+                    // have so we can reply NotFound for them. Pre-fix we
+                    // silently dropped misses; peer kept re-asking, we
+                    // kept doing mempool.get() per re-ask.
+                    let mut absent = Vec::new();
+                    for hash in &msg.hashes {
+                        if let Some(tx) = mempool.get(hash) {
+                            txs.push(tx);
+                        } else {
+                            absent.push(*hash);
+                        }
                     }
-                }
-                if !txs.is_empty() {
-                    if let Ok(resp) = Message::txs(magic, txs) {
-                        let _ = send_to_peer(&senders, &peer_id, resp.to_bytes()?).await;
+                    if !txs.is_empty() {
+                        if let Ok(resp) = Message::txs(magic, txs) {
+                            let _ = send_to_peer(&senders, &peer_id, resp.to_bytes()?).await;
+                        }
                     }
-                }
-                if !absent.is_empty() {
-                    if let Ok(resp) = Message::not_found(magic, absent) {
-                        let _ = send_to_peer(&senders, &peer_id, resp.to_bytes()?).await;
+                    if !absent.is_empty() {
+                        if let Ok(resp) = Message::not_found(magic, absent) {
+                            let _ = send_to_peer(&senders, &peer_id, resp.to_bytes()?).await;
+                        }
                     }
-                }
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize GetTxs from peer {:?}: {}", &peer_id[..4], e);
+                    warn!(
+                        "Failed to deserialize GetTxs from peer {:?}: {}",
+                        &peer_id[..4],
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -4684,9 +5007,15 @@ async fn process_message(
             // (10pt / 5-strike) not ProtocolViolation (20pt / 3-strike). Pre-fix used
             // the legacy `record_protocol_violation` which applied the wrong penalty.
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
-                warn!("Txs message too large from peer {}", hex::encode(&peer_id[..8]));
+                warn!(
+                    "Txs message too large from peer {}",
+                    hex::encode(&peer_id[..8])
+                );
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -4695,86 +5024,107 @@ async fn process_message(
             // P5-N7 fix: match with Err scoring.
             match borsh::from_slice::<super::protocol::TxsMessage>(payload) {
                 Ok(txs_msg) => {
-                // SECURITY: Validate message before processing
-                if let Err(e) = txs_msg.validate() {
-                    warn!("Invalid TxsMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_invalid_tx();
-                    }
-                    return Ok(());
-                }
-                // Record successful tx relay
-                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    let mut s = scorer.write().await;
-                    for _ in 0..txs_msg.transactions.len() {
-                        s.get_or_create(addr).record_tx_success();
-                    }
-                }
-                for tx in txs_msg.transactions {
-                    // SECURITY: Quick-validate transaction structure before relay.
-                    // Prevents garbage txs from consuming CPU across the network.
-                    if let Err(e) = crate::consensus::validate_transaction_basic(&tx) {
-                        let reason = e.to_string();
-                        warn!("Rejecting invalid tx from peer {}: {}", hex::encode(&peer_id[..8]), reason);
+                    // SECURITY: Validate message before processing
+                    if let Err(e) = txs_msg.validate() {
+                        warn!(
+                            "Invalid TxsMessage from peer {}: {}",
+                            hex::encode(&peer_id[..8]),
+                            e
+                        );
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            // Score using the unified MisbehaviorType ladder
-                            // (InvalidTransaction = 25 pts, 2-3 offenses → ban).
-                            // The previous `record_invalid_tx()` path only
-                            // deducted 5 pts, requiring ~10 strikes to ban.
-                            // Active disconnect is handled by the maintenance
-                            // loop's `auto_ban_bad_peers()` tick at node.rs:1493
-                            // (within ~10s of crossing the ban threshold).
-                            let offense = super::scoring::classify_invalid_tx_reason(&reason);
-                            let mut s = scorer.write().await;
-                            let score = s.get_or_create(addr);
-                            score.record_misbehavior(offense);
-                            // Keep legacy counter in sync for stats/reporting.
-                            score.invalid_txs += 1;
+                            scorer.write().await.get_or_create(addr).record_invalid_tx();
                         }
-                        continue;
+                        return Ok(());
                     }
-                    // Route through Dandelion++ (stem/fluff/ignore)
-                    let now = chrono::Utc::now().timestamp() as u64;
-                    let action = dandelion.write().await.add_received_tx(tx.clone(), peer_id, now);
-                    match action {
-                        StemAction::Fluff(fluff_tx) => {
-                            // Fluff epoch or loop detected — broadcast to all peers
-                            if let Ok(msg) = Message::inv_tx(magic, fluff_tx.hash()) {
-                                if let Ok(data) = msg.to_bytes() {
-                                    // DEADLOCK FIX: snapshot senders before awaiting
-                                    // per-peer send. See PR body for the systematic
-                                    // sweep across this file.
-                                    let senders_snapshot: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
-                                        senders.iter().map(|s| s.value().clone()).collect();
-                                    for sender in senders_snapshot {
-                                        let _ = sender.send(data.clone()).await;
+                    // Record successful tx relay
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        let mut s = scorer.write().await;
+                        for _ in 0..txs_msg.transactions.len() {
+                            s.get_or_create(addr).record_tx_success();
+                        }
+                    }
+                    for tx in txs_msg.transactions {
+                        // SECURITY: Quick-validate transaction structure before relay.
+                        // Prevents garbage txs from consuming CPU across the network.
+                        if let Err(e) = crate::consensus::validate_transaction_basic(&tx) {
+                            let reason = e.to_string();
+                            warn!(
+                                "Rejecting invalid tx from peer {}: {}",
+                                hex::encode(&peer_id[..8]),
+                                reason
+                            );
+                            if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                                // Score using the unified MisbehaviorType ladder
+                                // (InvalidTransaction = 25 pts, 2-3 offenses → ban).
+                                // The previous `record_invalid_tx()` path only
+                                // deducted 5 pts, requiring ~10 strikes to ban.
+                                // Active disconnect is handled by the maintenance
+                                // loop's `auto_ban_bad_peers()` tick at node.rs:1493
+                                // (within ~10s of crossing the ban threshold).
+                                let offense = super::scoring::classify_invalid_tx_reason(&reason);
+                                let mut s = scorer.write().await;
+                                let score = s.get_or_create(addr);
+                                score.record_misbehavior(offense);
+                                // Keep legacy counter in sync for stats/reporting.
+                                score.invalid_txs += 1;
+                            }
+                            continue;
+                        }
+                        // Route through Dandelion++ (stem/fluff/ignore)
+                        let now = chrono::Utc::now().timestamp() as u64;
+                        let action =
+                            dandelion
+                                .write()
+                                .await
+                                .add_received_tx(tx.clone(), peer_id, now);
+                        match action {
+                            StemAction::Fluff(fluff_tx) => {
+                                // Fluff epoch or loop detected — broadcast to all peers
+                                if let Ok(msg) = Message::inv_tx(magic, fluff_tx.hash()) {
+                                    if let Ok(data) = msg.to_bytes() {
+                                        // DEADLOCK FIX: snapshot senders before awaiting
+                                        // per-peer send. See PR body for the systematic
+                                        // sweep across this file.
+                                        let senders_snapshot: Vec<
+                                            tokio::sync::mpsc::Sender<Vec<u8>>,
+                                        > = senders.iter().map(|s| s.value().clone()).collect();
+                                        for sender in senders_snapshot {
+                                            let _ = sender.send(data.clone()).await;
+                                        }
                                     }
                                 }
+                                // Immediate-fluff (loop detection or fluff epoch).
+                                // `peer_id` is the peer that just relayed this tx
+                                // to us — they're the responsible party if mempool
+                                // admit fails on full-crypto validation.
+                                let _ = event_tx
+                                    .send(NodeEvent::TransactionReceived(fluff_tx, Some(peer_id)));
                             }
-                            // Immediate-fluff (loop detection or fluff epoch).
-                            // `peer_id` is the peer that just relayed this tx
-                            // to us — they're the responsible party if mempool
-                            // admit fails on full-crypto validation.
-                            let _ = event_tx.send(NodeEvent::TransactionReceived(fluff_tx, Some(peer_id)));
-                        }
-                        StemAction::Stem => {
-                            // Stem mode: tx is in stempool, will be relayed by tick()
-                            // Do NOT add to local mempool — that would defeat Dandelion++ privacy.
-                            // The tx will enter the mempool only when it is fluffed.
-                        }
-                        StemAction::Ignore => {
-                            // Already known — skip
+                            StemAction::Stem => {
+                                // Stem mode: tx is in stempool, will be relayed by tick()
+                                // Do NOT add to local mempool — that would defeat Dandelion++ privacy.
+                                // The tx will enter the mempool only when it is fluffed.
+                            }
+                            StemAction::Ignore => {
+                                // Already known — skip
+                            }
                         }
                     }
                 }
-                }
                 Err(e) => {
-                    warn!("Failed to deserialize TxsMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    warn!(
+                        "Failed to deserialize TxsMessage from peer {}: {}",
+                        hex::encode(&peer_id[..8]),
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                         // F2 fix: migrate to unified record_misbehavior for
                         // consistent observability. Borsh decode failure is
                         // a genuine ProtocolViolation.
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -4785,9 +5135,15 @@ async fn process_message(
             // SECURITY: Limit payload size before deserialization to prevent CPU exhaustion.
             // F12 fix: OversizedMessage (10pt), not ProtocolViolation (20pt).
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
-                warn!("Blocks message too large from peer {}", hex::encode(&peer_id[..8]));
+                warn!(
+                    "Blocks message too large from peer {}",
+                    hex::encode(&peer_id[..8])
+                );
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -4795,151 +5151,203 @@ async fn process_message(
             // Parse blocks. P5-N7 fix: match with Err scoring.
             match borsh::from_slice::<super::protocol::BlocksMessage>(payload) {
                 Ok(blocks_msg) => {
-                // SECURITY: Limit number of blocks per message.
-                // F12 fix: "too many items in one message" is OversizedMessage
-                // semantically — the peer is sending too much data in one frame,
-                // not sending malformed data.
-                if blocks_msg.blocks.len() > super::protocol::MAX_BLOCK_HASHES {
-                    warn!("Too many blocks in message from peer {}", hex::encode(&peer_id[..8]));
+                    // SECURITY: Limit number of blocks per message.
+                    // F12 fix: "too many items in one message" is OversizedMessage
+                    // semantically — the peer is sending too much data in one frame,
+                    // not sending malformed data.
+                    if blocks_msg.blocks.len() > super::protocol::MAX_BLOCK_HASHES {
+                        warn!(
+                            "Too many blocks in message from peer {}",
+                            hex::encode(&peer_id[..8])
+                        );
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::OversizedMessage,
+                            );
+                        }
+                        return Ok(());
+                    }
+                    // Record successful block delivery
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
+                        let count = blocks_msg.blocks.len();
+                        let mut s = scorer.write().await;
+                        for _ in 0..count {
+                            s.get_or_create(addr)
+                                .record_block_success(Duration::from_millis(100));
+                        }
                     }
-                    return Ok(());
-                }
-                // Record successful block delivery
-                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    let count = blocks_msg.blocks.len();
-                    let mut s = scorer.write().await;
-                    for _ in 0..count {
-                        s.get_or_create(addr).record_block_success(Duration::from_millis(100));
+                    info!(
+                        "[IBD] Received Blocks message: {} blocks from peer {:?}",
+                        blocks_msg.blocks.len(),
+                        &peer_id[..4]
+                    );
+
+                    // If peer responds with 0 blocks, the hashes we requested don't
+                    // exist on their chain (different fork). DON'T clear sync state —
+                    // that destroys all progress. Instead, mark this peer as
+                    // incompatible and continue with other peers.
+                    if blocks_msg.blocks.is_empty() {
+                        debug!(
+                            "[IBD] Got 0 blocks from peer {:?} — empty Blocks reply, demoting",
+                            &peer_id[..4]
+                        );
+                        // Record an empty-Blocks response so the scorer can ban
+                        // this peer from `GetBlocks` selection after N consecutive
+                        // empties. Closes the "stall pathology" wedge pattern
+                        // (peer accepts requests but never delivers).
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer
+                                .write()
+                                .await
+                                .get_or_create(addr)
+                                .record_empty_blocks_response();
+                        }
+                        return Ok(());
                     }
-                }
-                info!("[IBD] Received Blocks message: {} blocks from peer {:?}", blocks_msg.blocks.len(), &peer_id[..4]);
 
-                // If peer responds with 0 blocks, the hashes we requested don't
-                // exist on their chain (different fork). DON'T clear sync state —
-                // that destroys all progress. Instead, mark this peer as
-                // incompatible and continue with other peers.
-                if blocks_msg.blocks.is_empty() {
-                    debug!("[IBD] Got 0 blocks from peer {:?} — empty Blocks reply, demoting", &peer_id[..4]);
-                    // Record an empty-Blocks response so the scorer can ban
-                    // this peer from `GetBlocks` selection after N consecutive
-                    // empties. Closes the "stall pathology" wedge pattern
-                    // (peer accepts requests but never delivers).
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr).record_empty_blocks_response();
-                    }
-                    return Ok(());
-                }
+                    for (bi, block) in blocks_msg.blocks.into_iter().enumerate() {
+                        debug!(
+                            "  block[{}]: height={} algo={} size={} txs={}",
+                            bi,
+                            block.header.height,
+                            block.header.algorithm,
+                            block.size(),
+                            block.transactions.len()
+                        );
 
-                for (bi, block) in blocks_msg.blocks.into_iter().enumerate() {
-                    debug!("  block[{}]: height={} algo={} size={} txs={}",
-                        bi, block.header.height, block.header.algorithm,
-                        block.size(), block.transactions.len());
-
-                    // SECURITY (NetworkTag): FIRST CHECK — reject wrong-network blocks
-                    // before any expensive validation. Costs 4 bytes comparison.
-                    // Instant-bans the peer (MisbehaviorType::WrongNetwork = -100).
-                    if block.header.network_magic != magic {
-                        warn!("Rejecting block from wrong network (magic {:?} != {:?}) from peer {}",
+                        // SECURITY (NetworkTag): FIRST CHECK — reject wrong-network blocks
+                        // before any expensive validation. Costs 4 bytes comparison.
+                        // Instant-bans the peer (MisbehaviorType::WrongNetwork = -100).
+                        if block.header.network_magic != magic {
+                            warn!("Rejecting block from wrong network (magic {:?} != {:?}) from peer {}",
                             block.header.network_magic, magic, hex::encode(&peer_id[..8]));
-                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr)
-                                .record_misbehavior(super::scoring::MisbehaviorType::WrongNetwork);
-                        }
-                        continue;
-                    }
-
-                    // SECURITY: Quick-validate block before relay to prevent
-                    // garbage blocks from consuming CPU across the network.
-                    // Check size, tx count, and basic header sanity. Full PoW
-                    // verification happens in chain.add_block() (requires prev block).
-                    let size = block.size();
-                    if size > crate::constants::MAX_BLOCK_SIZE {
-                        warn!("Rejecting oversized block ({} bytes) from peer {}",
-                            size, hex::encode(&peer_id[..8]));
-                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr).record_block_failure();
-                        }
-                        continue;
-                    }
-                    if block.transactions.len() > crate::constants::MAX_TXS_PER_BLOCK {
-                        warn!("Rejecting block with too many txs ({}) from peer {}",
-                            block.transactions.len(), hex::encode(&peer_id[..8]));
-                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr).record_block_failure();
-                        }
-                        continue;
-                    }
-                    // Verify PoW hash meets the claimed target (cheap check — no
-                    // chain lookup needed). A full PoW check (anchor recomputation,
-                    // difficulty validation) happens later in add_block().
-                    //
-                    // SECURITY (2026-07-05 audit F11 — SEV-A): The two failure
-                    // paths below map to DIFFERENT peer misbehavior categories:
-                    //
-                    //   * `compute_pow_hash(...) → Err(_)`: We failed to
-                    //     RECOMPUTE the hash locally (out-of-range algorithm
-                    //     id, dataset error, etc.). This is ambiguous — the
-                    //     peer sent a well-formed block whose hash we can't
-                    //     verify because OUR side has a state issue. Not
-                    //     clearly the peer's fault. Keep low-weight
-                    //     `record_block_failure` (-10 rep, 10-strike ban)
-                    //     which acts as a soft demotion.
-                    //
-                    //   * `!pow_hash.meets_difficulty(target)`: We recomputed
-                    //     the hash and it DOES NOT satisfy the claimed
-                    //     target. This is provable cryptographic invalidity —
-                    //     the peer is trying to waste our CPU on validation
-                    //     of a block that mathematically cannot be valid.
-                    //     Instant ban (`InvalidBlockPoW`, penalty 100).
-                    //
-                    //   Pre-audit: both paths used `record_block_failure`
-                    //   (-10), meaning a malicious peer needed 10 strikes to
-                    //   accumulate the ban threshold. That's ~10 free CPU-
-                    //   burning attempts before we cut them off. Bitcoin
-                    //   Core's `MSG_BLOCK_HEADER_LOW_WORK` maps directly to
-                    //   discouragement (their equivalent of instant ban) for
-                    //   the same reason — sub-target PoW is proof of
-                    //   attack intent, not accidental protocol drift.
-                    let pow_hash = match crate::consensus::compute_pow_hash(
-                        crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
-                        &block.header.anchor,
-                        block.header.nonce,
-                        &block.header.tx_root,
-                        block.header.height,
-                    ) {
-                        Ok(h) => h,
-                        Err(_) => {
-                            warn!("PoW hash computation failed for block from peer {}",
-                                hex::encode(&peer_id[..8]));
                             if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                                scorer.write().await.get_or_create(addr).record_block_failure();
+                                scorer.write().await.get_or_create(addr).record_misbehavior(
+                                    super::scoring::MisbehaviorType::WrongNetwork,
+                                );
                             }
                             continue;
                         }
-                    };
-                    if !pow_hash.meets_difficulty(&block.header.target) {
-                        warn!("Instant-banning peer {} — provably-invalid PoW: \
-                               block hash {:?} does not meet claimed target {:?}",
-                            hex::encode(&peer_id[..8]),
-                            pow_hash,
-                            block.header.target);
-                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr)
-                                .record_misbehavior(super::scoring::MisbehaviorType::InvalidBlockPoW);
+
+                        // SECURITY: Quick-validate block before relay to prevent
+                        // garbage blocks from consuming CPU across the network.
+                        // Check size, tx count, and basic header sanity. Full PoW
+                        // verification happens in chain.add_block() (requires prev block).
+                        let size = block.size();
+                        if size > crate::constants::MAX_BLOCK_SIZE {
+                            warn!(
+                                "Rejecting oversized block ({} bytes) from peer {}",
+                                size,
+                                hex::encode(&peer_id[..8])
+                            );
+                            if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                                scorer
+                                    .write()
+                                    .await
+                                    .get_or_create(addr)
+                                    .record_block_failure();
+                            }
+                            continue;
                         }
-                        continue;
+                        if block.transactions.len() > crate::constants::MAX_TXS_PER_BLOCK {
+                            warn!(
+                                "Rejecting block with too many txs ({}) from peer {}",
+                                block.transactions.len(),
+                                hex::encode(&peer_id[..8])
+                            );
+                            if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                                scorer
+                                    .write()
+                                    .await
+                                    .get_or_create(addr)
+                                    .record_block_failure();
+                            }
+                            continue;
+                        }
+                        // Verify PoW hash meets the claimed target (cheap check — no
+                        // chain lookup needed). A full PoW check (anchor recomputation,
+                        // difficulty validation) happens later in add_block().
+                        //
+                        // SECURITY (2026-07-05 audit F11 — SEV-A): The two failure
+                        // paths below map to DIFFERENT peer misbehavior categories:
+                        //
+                        //   * `compute_pow_hash(...) → Err(_)`: We failed to
+                        //     RECOMPUTE the hash locally (out-of-range algorithm
+                        //     id, dataset error, etc.). This is ambiguous — the
+                        //     peer sent a well-formed block whose hash we can't
+                        //     verify because OUR side has a state issue. Not
+                        //     clearly the peer's fault. Keep low-weight
+                        //     `record_block_failure` (-10 rep, 10-strike ban)
+                        //     which acts as a soft demotion.
+                        //
+                        //   * `!pow_hash.meets_difficulty(target)`: We recomputed
+                        //     the hash and it DOES NOT satisfy the claimed
+                        //     target. This is provable cryptographic invalidity —
+                        //     the peer is trying to waste our CPU on validation
+                        //     of a block that mathematically cannot be valid.
+                        //     Instant ban (`InvalidBlockPoW`, penalty 100).
+                        //
+                        //   Pre-audit: both paths used `record_block_failure`
+                        //   (-10), meaning a malicious peer needed 10 strikes to
+                        //   accumulate the ban threshold. That's ~10 free CPU-
+                        //   burning attempts before we cut them off. Bitcoin
+                        //   Core's `MSG_BLOCK_HEADER_LOW_WORK` maps directly to
+                        //   discouragement (their equivalent of instant ban) for
+                        //   the same reason — sub-target PoW is proof of
+                        //   attack intent, not accidental protocol drift.
+                        let pow_hash = match crate::consensus::compute_pow_hash(
+                            crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
+                            &block.header.anchor,
+                            block.header.nonce,
+                            &block.header.tx_root,
+                            block.header.height,
+                        ) {
+                            Ok(h) => h,
+                            Err(_) => {
+                                warn!(
+                                    "PoW hash computation failed for block from peer {}",
+                                    hex::encode(&peer_id[..8])
+                                );
+                                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                                    scorer
+                                        .write()
+                                        .await
+                                        .get_or_create(addr)
+                                        .record_block_failure();
+                                }
+                                continue;
+                            }
+                        };
+                        if !pow_hash.meets_difficulty(&block.header.target) {
+                            warn!(
+                                "Instant-banning peer {} — provably-invalid PoW: \
+                               block hash {:?} does not meet claimed target {:?}",
+                                hex::encode(&peer_id[..8]),
+                                pow_hash,
+                                block.header.target
+                            );
+                            if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                                scorer.write().await.get_or_create(addr).record_misbehavior(
+                                    super::scoring::MisbehaviorType::InvalidBlockPoW,
+                                );
+                            }
+                            continue;
+                        }
+                        let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));
                     }
-                    let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));
-                }
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize BlocksMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    warn!(
+                        "Failed to deserialize BlocksMessage from peer {}: {}",
+                        hex::encode(&peer_id[..8]),
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                         // F2 fix: unified record_misbehavior for observability.
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -4950,9 +5358,15 @@ async fn process_message(
             // SECURITY: Limit payload size before deserialization.
             // F12 fix: OversizedMessage, not ProtocolViolation.
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
-                warn!("Headers message too large from peer {}", hex::encode(&peer_id[..8]));
+                warn!(
+                    "Headers message too large from peer {}",
+                    hex::encode(&peer_id[..8])
+                );
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -4960,107 +5374,128 @@ async fn process_message(
             // Parse headers and queue for download. P5-N7 fix: match with Err scoring.
             match borsh::from_slice::<super::protocol::HeadersMessage>(payload) {
                 Ok(headers_msg) => {
-                // SECURITY: Validate message before processing.
-                // F15 fix (2026-07-05 audit): HeadersMessage struct-level validate()
-                // failure is protocol-frame-level (peer sent malformed HEADERS message),
-                // not block-content-level. Pre-fix used `record_block_failure` (-10 rep)
-                // which is the wrong category — the peer's Headers frame itself is
-                // malformed. Now uses `ProtocolViolation` (20pt / 3-strike ban) via
-                // the unified record_misbehavior.
-                if let Err(e) = headers_msg.validate() {
-                    warn!("Invalid HeadersMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    // SECURITY: Validate message before processing.
+                    // F15 fix (2026-07-05 audit): HeadersMessage struct-level validate()
+                    // failure is protocol-frame-level (peer sent malformed HEADERS message),
+                    // not block-content-level. Pre-fix used `record_block_failure` (-10 rep)
+                    // which is the wrong category — the peer's Headers frame itself is
+                    // malformed. Now uses `ProtocolViolation` (20pt / 3-strike ban) via
+                    // the unified record_misbehavior.
+                    if let Err(e) = headers_msg.validate() {
+                        warn!(
+                            "Invalid HeadersMessage from peer {}: {}",
+                            hex::encode(&peer_id[..8]),
+                            e
+                        );
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                // Update best_known_height from the highest header received.
-                // This ensures sync knows the real chain height, not just what
-                // the peer reported at connection time.
-                let max_header_height = headers_msg.headers.iter()
-                    .map(|h| h.height)
-                    .max()
-                    .unwrap_or(0);
+                    // Update best_known_height from the highest header received.
+                    // This ensures sync knows the real chain height, not just what
+                    // the peer reported at connection time.
+                    let max_header_height = headers_msg
+                        .headers
+                        .iter()
+                        .map(|h| h.height)
+                        .max()
+                        .unwrap_or(0);
 
-                // Validate nonce — only accept responses to OUR requests
-                let mut sync_guard = sync.write().await;
-                if !sync_guard.validate_header_nonce(headers_msg.nonce) {
-                    debug!(
+                    // Validate nonce — only accept responses to OUR requests
+                    let mut sync_guard = sync.write().await;
+                    if !sync_guard.validate_header_nonce(headers_msg.nonce) {
+                        debug!(
                         "Ignoring Headers with unknown nonce={} from peer {:?} (crossed response)",
                         headers_msg.nonce, &peer_id[..4]
                     );
-                    drop(sync_guard);
-                    return Ok(());
-                }
-
-                // v1.0.13 #3 — pre-PoW verification on each header.
-                //
-                // Pre-fix, Headers responses were queued unconditionally
-                // into pending_headers; PoW was only re-validated at
-                // block-receive time. A peer that wins the GetHeaders
-                // nonce race could send 2000 random-bytes headers,
-                // filling the pool with hashes whose corresponding
-                // blocks no one (including the sender) can serve.
-                //
-                // The cheap defense: every header carries a
-                // `claimed_anchor` that's a hash of (prev_hash, height,
-                // timestamp). We recompute the real anchor and reject
-                // the batch on first mismatch. This forces a flooder
-                // to actually BLAKE2b-precompute every fake header
-                // chaining off our tip — meaningful work, no longer
-                // free.
-                //
-                // Full RandomX-hash verification (the ~10-20ms-per-
-                // header expensive check) still happens at block-
-                // receive time, where it belongs (one check per
-                // actually-served block, not per advertised tip).
-                let bad_anchor_at = headers_msg.headers.iter().enumerate().find_map(|(i, hdr)| {
-                    match crate::consensus::pow::compute_full_anchor(
-                        &hdr.prev_hash, hdr.height, hdr.timestamp,
-                    ) {
-                        Ok(anchor) if anchor.mixed_hash == hdr.anchor => None,
-                        _ => Some(i),
+                        drop(sync_guard);
+                        return Ok(());
                     }
-                });
-                if let Some(idx) = bad_anchor_at {
-                    warn!(
-                        "Headers pre-PoW reject: header[{}] anchor mismatch from peer {:?} \
+
+                    // v1.0.13 #3 — pre-PoW verification on each header.
+                    //
+                    // Pre-fix, Headers responses were queued unconditionally
+                    // into pending_headers; PoW was only re-validated at
+                    // block-receive time. A peer that wins the GetHeaders
+                    // nonce race could send 2000 random-bytes headers,
+                    // filling the pool with hashes whose corresponding
+                    // blocks no one (including the sender) can serve.
+                    //
+                    // The cheap defense: every header carries a
+                    // `claimed_anchor` that's a hash of (prev_hash, height,
+                    // timestamp). We recompute the real anchor and reject
+                    // the batch on first mismatch. This forces a flooder
+                    // to actually BLAKE2b-precompute every fake header
+                    // chaining off our tip — meaningful work, no longer
+                    // free.
+                    //
+                    // Full RandomX-hash verification (the ~10-20ms-per-
+                    // header expensive check) still happens at block-
+                    // receive time, where it belongs (one check per
+                    // actually-served block, not per advertised tip).
+                    let bad_anchor_at =
+                        headers_msg.headers.iter().enumerate().find_map(|(i, hdr)| {
+                            match crate::consensus::pow::compute_full_anchor(
+                                &hdr.prev_hash,
+                                hdr.height,
+                                hdr.timestamp,
+                            ) {
+                                Ok(anchor) if anchor.mixed_hash == hdr.anchor => None,
+                                _ => Some(i),
+                            }
+                        });
+                    if let Some(idx) = bad_anchor_at {
+                        warn!(
+                            "Headers pre-PoW reject: header[{}] anchor mismatch from peer {:?} \
                          (h={}). Dropping batch + scoring peer.",
-                        idx, &peer_id[..4], headers_msg.headers[idx].height,
-                    );
-                    drop(sync_guard);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                            idx,
+                            &peer_id[..4],
+                            headers_msg.headers[idx].height,
+                        );
+                        drop(sync_guard);
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
 
-                let hashes: Vec<Hash> = headers_msg.headers.iter()
-                    .map(|h| h.hash())
-                    .collect();
-                // Update both global best_known and this specific peer's height.
-                // This peer responded with headers up to max_header_height, so it
-                // can serve blocks up to that height — critical for height-aware
-                // block request routing.
-                sync_guard.update_peer_height(max_header_height);
-                sync_guard.update_peer_height_for(peer_id, max_header_height);
-                sync_guard.reset_headers_timeout();
-                debug!(
-                    "Accepted Headers nonce={} count={} max_height={} from peer {:?}",
-                    headers_msg.nonce, hashes.len(), max_header_height, &peer_id[..4]
-                );
-                // v1.0.13 #4 — attributed queue so one peer can't
-                // fill the 50K-slot pending_headers pool. Cap is
-                // MAX_HEADERS_PER_PEER (5000) per peer.
-                sync_guard.queue_headers_from_peer(peer_id, hashes);
+                    let hashes: Vec<Hash> = headers_msg.headers.iter().map(|h| h.hash()).collect();
+                    // Update both global best_known and this specific peer's height.
+                    // This peer responded with headers up to max_header_height, so it
+                    // can serve blocks up to that height — critical for height-aware
+                    // block request routing.
+                    sync_guard.update_peer_height(max_header_height);
+                    sync_guard.update_peer_height_for(peer_id, max_header_height);
+                    sync_guard.reset_headers_timeout();
+                    debug!(
+                        "Accepted Headers nonce={} count={} max_height={} from peer {:?}",
+                        headers_msg.nonce,
+                        hashes.len(),
+                        max_header_height,
+                        &peer_id[..4]
+                    );
+                    // v1.0.13 #4 — attributed queue so one peer can't
+                    // fill the 50K-slot pending_headers pool. Cap is
+                    // MAX_HEADERS_PER_PEER (5000) per peer.
+                    sync_guard.queue_headers_from_peer(peer_id, hashes);
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize HeadersMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    warn!(
+                        "Failed to deserialize HeadersMessage from peer {}: {}",
+                        hex::encode(&peer_id[..8]),
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                         // F2 fix: unified record_misbehavior for observability.
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -5074,11 +5509,12 @@ async fn process_message(
             // passive observer map P2P topology without making a single
             // authenticated connection. Silently ignore the request instead of
             // sending an error so non-Veil nodes don't see a protocol fault.
-            let peer_encrypted = peers.get(&peer_id)
-                .map(|p| p.encrypted)
-                .unwrap_or(false);
+            let peer_encrypted = peers.get(&peer_id).map(|p| p.encrypted).unwrap_or(false);
             if !peer_encrypted {
-                debug!("Veil: ignoring GetAddr from plaintext peer {:?}", &peer_id[..4]);
+                debug!(
+                    "Veil: ignoring GetAddr from plaintext peer {:?}",
+                    &peer_id[..4]
+                );
                 return Ok(());
             }
 
@@ -5092,7 +5528,8 @@ async fn process_message(
             drop(addrs);
 
             if !peer_addrs.is_empty() {
-                let net_addrs: Vec<super::protocol::NetAddr> = peer_addrs.iter()
+                let net_addrs: Vec<super::protocol::NetAddr> = peer_addrs
+                    .iter()
                     .map(|pa| {
                         let ip_bytes = match pa.addr.ip() {
                             std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
@@ -5111,7 +5548,9 @@ async fn process_message(
                     return Ok(()); // Nothing to send after Veil filter
                 }
 
-                let addr_msg = super::protocol::AddrMessage { addresses: net_addrs };
+                let addr_msg = super::protocol::AddrMessage {
+                    addresses: net_addrs,
+                };
                 if let Ok(payload_bytes) = borsh::to_vec(&addr_msg) {
                     let msg = Message::new(magic, MessageType::Addr, payload_bytes);
                     let _ = send_to_peer(&senders, &peer_id, msg.to_bytes()?).await;
@@ -5123,9 +5562,15 @@ async fn process_message(
             // SECURITY: Validate addr messages.
             // P5-N-CLASS-A fix: tight per-type cap.
             if payload.len() > super::protocol::MAX_ADDR_PAYLOAD {
-                warn!("Addr message too large from peer {}", hex::encode(&peer_id[..8]));
+                warn!(
+                    "Addr message too large from peer {}",
+                    hex::encode(&peer_id[..8])
+                );
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -5133,76 +5578,92 @@ async fn process_message(
             // P5-N7 fix: match with Err scoring.
             match borsh::from_slice::<super::protocol::AddrMessage>(payload) {
                 Ok(addr_msg) => {
-                if let Err(e) = addr_msg.validate() {
-                    warn!("Invalid AddrMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::InvalidAddress);
-                    }
-                    return Ok(());
-                }
-
-                let now = chrono::Utc::now().timestamp() as u64;
-                let max_future = now + 600; // Allow 10 minutes of clock skew
-                // FIX: Relax age check. 3 hours was too aggressive — after a
-                // chain wipe or long downtime, ALL addresses in peers' books
-                // have old timestamps and get rejected, preventing peer discovery.
-                // 7 days allows nodes to bootstrap from peers that
-                // haven't been seen recently. (Prior comment cited a
-                // "Bitcoin Core uses 10 days" comparison; that specific
-                // upstream threshold was not re-verified this session
-                // and is dropped.)
-                let max_age = 7 * 24 * 3600; // Reject addresses older than 7 days
-
-                // 1.0: Firework "Veil" propagation removed — addresses are
-                // accepted without the CAP_VEIL / SERVICES_NOISE overlay.
-
-                let mut addrs = addresses.write().await;
-                let mut accepted = 0usize;
-                for net_addr in &addr_msg.addresses {
-                    // Freshness check: reject stale or future-dated addresses
-                    if net_addr.timestamp > max_future {
-                        continue; // Future timestamp — clock manipulation
-                    }
-                    if now.saturating_sub(net_addr.timestamp) > max_age {
-                        continue; // Stale address — too old
-                    }
-                    if let Some(socket_addr) = net_addr_to_socket_addr(net_addr) {
-                        // Expanded unroutable filter (P5-N10 audit).
-                        // (Prior comment additionally tagged this as
-                        // "Bitcoin CVE-2015-3641 class"; that CVE is
-                        // real per NVD but its "'Easy' attack" text is
-                        // too vague to specifically pin to address-book
-                        // poisoning, so the tag is dropped.) Pre-fix
-                        // this only
-                        // rejected loopback + unspecified, so an attacker
-                        // poisoning our address book with multicast /
-                        // link-local / CGNAT / IPv6-multicast / broadcast /
-                        // docs / RFC1918 private IPs would have us dial
-                        // those (burning connection slots) and gossip
-                        // them onward, causing (a) inadvertent LAN
-                        // topology leaks when peers exchanged addresses
-                        // back, (b) address-book pollution with
-                        // unreachable 10.x.x.x entries. See is_routable()
-                        // above for the full rejection table.
-                        if !is_routable(socket_addr.ip()) {
-                            continue;
+                    if let Err(e) = addr_msg.validate() {
+                        warn!(
+                            "Invalid AddrMessage from peer {}: {}",
+                            hex::encode(&peer_id[..8]),
+                            e
+                        );
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::InvalidAddress,
+                            );
                         }
-                        let mut pa = PeerAddress::new(socket_addr);
-                        pa.last_seen = net_addr.timestamp;
-                        pa.services = net_addr.services;
-                        addrs.add(pa);
-                        accepted += 1;
+                        return Ok(());
                     }
-                }
-                if accepted > 0 {
-                    debug!("Added {} peer addresses from {}", accepted, hex::encode(&peer_id[..8]));
-                }
+
+                    let now = chrono::Utc::now().timestamp() as u64;
+                    let max_future = now + 600; // Allow 10 minutes of clock skew
+                                                // FIX: Relax age check. 3 hours was too aggressive — after a
+                                                // chain wipe or long downtime, ALL addresses in peers' books
+                                                // have old timestamps and get rejected, preventing peer discovery.
+                                                // 7 days allows nodes to bootstrap from peers that
+                                                // haven't been seen recently. (Prior comment cited a
+                                                // "Bitcoin Core uses 10 days" comparison; that specific
+                                                // upstream threshold was not re-verified this session
+                                                // and is dropped.)
+                    let max_age = 7 * 24 * 3600; // Reject addresses older than 7 days
+
+                    // 1.0: Firework "Veil" propagation removed — addresses are
+                    // accepted without the CAP_VEIL / SERVICES_NOISE overlay.
+
+                    let mut addrs = addresses.write().await;
+                    let mut accepted = 0usize;
+                    for net_addr in &addr_msg.addresses {
+                        // Freshness check: reject stale or future-dated addresses
+                        if net_addr.timestamp > max_future {
+                            continue; // Future timestamp — clock manipulation
+                        }
+                        if now.saturating_sub(net_addr.timestamp) > max_age {
+                            continue; // Stale address — too old
+                        }
+                        if let Some(socket_addr) = net_addr_to_socket_addr(net_addr) {
+                            // Expanded unroutable filter (P5-N10 audit).
+                            // (Prior comment additionally tagged this as
+                            // "Bitcoin CVE-2015-3641 class"; that CVE is
+                            // real per NVD but its "'Easy' attack" text is
+                            // too vague to specifically pin to address-book
+                            // poisoning, so the tag is dropped.) Pre-fix
+                            // this only
+                            // rejected loopback + unspecified, so an attacker
+                            // poisoning our address book with multicast /
+                            // link-local / CGNAT / IPv6-multicast / broadcast /
+                            // docs / RFC1918 private IPs would have us dial
+                            // those (burning connection slots) and gossip
+                            // them onward, causing (a) inadvertent LAN
+                            // topology leaks when peers exchanged addresses
+                            // back, (b) address-book pollution with
+                            // unreachable 10.x.x.x entries. See is_routable()
+                            // above for the full rejection table.
+                            if !is_routable(socket_addr.ip()) {
+                                continue;
+                            }
+                            let mut pa = PeerAddress::new(socket_addr);
+                            pa.last_seen = net_addr.timestamp;
+                            pa.services = net_addr.services;
+                            addrs.add(pa);
+                            accepted += 1;
+                        }
+                    }
+                    if accepted > 0 {
+                        debug!(
+                            "Added {} peer addresses from {}",
+                            accepted,
+                            hex::encode(&peer_id[..8])
+                        );
+                    }
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize AddrMessage from peer {}: {}", hex::encode(&peer_id[..8]), e);
+                    warn!(
+                        "Failed to deserialize AddrMessage from peer {}: {}",
+                        hex::encode(&peer_id[..8]),
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::InvalidAddress);
                     }
                 }
@@ -5216,7 +5677,10 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_GETDATA_PAYLOAD {
                 warn!("GetData message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -5224,36 +5688,45 @@ async fn process_message(
             // P5-N7 fix: match with Err scoring.
             match borsh::from_slice::<GetBlocksMessage>(payload) {
                 Ok(msg) => {
-                if let Err(e) = msg.validate() {
-                    warn!("Invalid GetData from peer {:?}: {}", &peer_id[..4], e);
-                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
-                            .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
+                    if let Err(e) = msg.validate() {
+                        warn!("Invalid GetData from peer {:?}: {}", &peer_id[..4], e);
+                        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                            scorer.write().await.get_or_create(addr).record_misbehavior(
+                                super::scoring::MisbehaviorType::ProtocolViolation,
+                            );
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                // Send each block individually as BlockData.
-                // Layer 2: pre-fetch + serialize all blocks under
-                // block_in_place, then do the async per-peer sends after.
-                // This keeps the sync DB reads + borsh serialization off
-                // the worker thread for the duration of the request.
-                let payloads: Vec<Vec<u8>> = tokio::task::block_in_place(|| {
-                    msg.hashes.iter()
-                        .filter_map(|hash| chain.get_block(hash))
-                        .filter_map(|block| borsh::to_vec(&block).ok())
-                        .collect()
-                });
-                for block_bytes in payloads {
-                    let m = Message::new(magic, MessageType::BlockData, block_bytes);
-                    if let Ok(data) = m.to_bytes() {
-                        let _ = send_to_peer(&senders, &peer_id, data).await;
+                    // Send each block individually as BlockData.
+                    // Layer 2: pre-fetch + serialize all blocks under
+                    // block_in_place, then do the async per-peer sends after.
+                    // This keeps the sync DB reads + borsh serialization off
+                    // the worker thread for the duration of the request.
+                    let payloads: Vec<Vec<u8>> = tokio::task::block_in_place(|| {
+                        msg.hashes
+                            .iter()
+                            .filter_map(|hash| chain.get_block(hash))
+                            .filter_map(|block| borsh::to_vec(&block).ok())
+                            .collect()
+                    });
+                    for block_bytes in payloads {
+                        let m = Message::new(magic, MessageType::BlockData, block_bytes);
+                        if let Ok(data) = m.to_bytes() {
+                            let _ = send_to_peer(&senders, &peer_id, data).await;
+                        }
                     }
-                }
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize GetData from peer {:?}: {}", &peer_id[..4], e);
+                    warn!(
+                        "Failed to deserialize GetData from peer {:?}: {}",
+                        &peer_id[..4],
+                        e
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                     }
                 }
@@ -5266,7 +5739,10 @@ async fn process_message(
             if payload.len() > super::protocol::MAX_MESSAGE_SIZE {
                 warn!("BlockData message too large from peer {:?}", &peer_id[..4]);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::OversizedMessage);
                 }
                 return Ok(());
@@ -5274,10 +5750,16 @@ async fn process_message(
             if let Ok(block) = borsh::from_slice::<Block>(payload) {
                 // SECURITY (NetworkTag): reject wrong-network blocks instantly
                 if block.header.network_magic != magic {
-                    warn!("BlockData from wrong network (magic {:?}) from peer {:?}",
-                        block.header.network_magic, &peer_id[..4]);
+                    warn!(
+                        "BlockData from wrong network (magic {:?}) from peer {:?}",
+                        block.header.network_magic,
+                        &peer_id[..4]
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::WrongNetwork);
                     }
                     return Ok(());
@@ -5325,26 +5807,41 @@ async fn process_message(
                         // `record_block_failure` as with the Blocks
                         // handler. See F11 doc-comment there for the
                         // full split rationale.
-                        warn!("BlockData: PoW hash recompute failed for block from peer {:?}",
-                            &peer_id[..4]);
+                        warn!(
+                            "BlockData: PoW hash recompute failed for block from peer {:?}",
+                            &peer_id[..4]
+                        );
                         if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                            scorer.write().await.get_or_create(addr).record_block_failure();
+                            scorer
+                                .write()
+                                .await
+                                .get_or_create(addr)
+                                .record_block_failure();
                         }
                         return Ok(());
                     }
                 };
                 if !pow_hash.meets_difficulty(&block.header.target) {
-                    warn!("Instant-banning peer {:?} — BlockData block with provably-invalid PoW",
-                        &peer_id[..4]);
+                    warn!(
+                        "Instant-banning peer {:?} — BlockData block with provably-invalid PoW",
+                        &peer_id[..4]
+                    );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer.write().await.get_or_create(addr)
+                        scorer
+                            .write()
+                            .await
+                            .get_or_create(addr)
                             .record_misbehavior(super::scoring::MisbehaviorType::InvalidBlockPoW);
                     }
                     return Ok(());
                 }
                 // Now record success and hand off to the event pipeline.
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                    scorer.write().await.get_or_create(addr).record_block_success(Duration::from_millis(100));
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
+                        .record_block_success(Duration::from_millis(100));
                 }
                 // Credit this peer's inbound block-relay score (Phase 1: measure
                 // only — not yet consulted by eviction). Public block delivery is
@@ -5353,7 +5850,10 @@ async fn process_message(
                 relay_scores.write().await.credit_block(peer_id);
                 let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));
             } else {
-                warn!("Failed to deserialize BlockData from peer {:?}", &peer_id[..4]);
+                warn!(
+                    "Failed to deserialize BlockData from peer {:?}",
+                    &peer_id[..4]
+                );
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     // F14 fix (2026-07-05 audit): BlockData Borsh deserialize failure
                     // is a MALFORMED PROTOCOL FRAME (peer sent us bytes we can't parse
@@ -5362,7 +5862,10 @@ async fn process_message(
                     // the block content never existed in a form we could inspect.
                     // Now uses `ProtocolViolation` (20pt / 3-strike) via unified
                     // `record_misbehavior`.
-                    scorer.write().await.get_or_create(addr)
+                    scorer
+                        .write()
+                        .await
+                        .get_or_create(addr)
                         .record_misbehavior(super::scoring::MisbehaviorType::ProtocolViolation);
                 }
             }
@@ -5415,7 +5918,6 @@ async fn process_message(
         }
 
         // ─── Personal Node (Tier 1) Protocol ─────────────────────────────
-
         MessageType::GetFilters => {
             // Network/Archive nodes serve compact block filters to personal nodes.
             // Request contains (start_height: u64, end_height: u64).
@@ -5425,7 +5927,12 @@ async fn process_message(
 
                 // Validate range and bound to prevent DoS (max 1000 filters per request)
                 if start > end {
-                    warn!("GetFilters: start {} > end {} from peer {:?}", start, end, &peer_id[..4]);
+                    warn!(
+                        "GetFilters: start {} > end {} from peer {:?}",
+                        start,
+                        end,
+                        &peer_id[..4]
+                    );
                     return Ok(());
                 }
                 let end = end.min(start.saturating_add(999));
@@ -5433,7 +5940,10 @@ async fn process_message(
                 let end = end.min(chain_height);
 
                 tracing::debug!(
-                    "GetFilters from {:?}: heights {}..={}", &peer_id[..4], start, end
+                    "GetFilters from {:?}: heights {}..={}",
+                    &peer_id[..4],
+                    start,
+                    end
                 );
 
                 // Build filters on the fly from blocks (or serve from cache/db).
@@ -5446,7 +5956,8 @@ async fn process_message(
                     for h in start..=end {
                         if let Some(block) = chain.get_block_by_height(h) {
                             let filter = crate::network::block_filter::BlockFilter::from_block(
-                                &block, prev_filter_hash
+                                &block,
+                                prev_filter_hash,
                             );
                             prev_filter_hash = filter.filter_hash();
                             filters.push(filter);
@@ -5482,7 +5993,10 @@ async fn process_message(
             const MAX_DIGEST_BLOCKS_PER_REQ: u64 = 100;
 
             if payload.len() < 16 {
-                warn!("GetOutputDigests from {:?}: payload too short", &peer_id[..4]);
+                warn!(
+                    "GetOutputDigests from {:?}: payload too short",
+                    &peer_id[..4]
+                );
                 return Ok(());
             }
             let start = u64::from_le_bytes(payload[0..8].try_into().unwrap_or([0u8; 8]));
@@ -5490,7 +6004,9 @@ async fn process_message(
             if start > end {
                 warn!(
                     "GetOutputDigests: start {} > end {} from peer {:?}",
-                    start, end, &peer_id[..4]
+                    start,
+                    end,
+                    &peer_id[..4]
                 );
                 return Ok(());
             }
@@ -5500,16 +6016,18 @@ async fn process_message(
 
             tracing::debug!(
                 "GetOutputDigests from {:?}: heights {}..={}",
-                &peer_id[..4], start, end
+                &peer_id[..4],
+                start,
+                end
             );
 
             // Layer 2: per-height DB read + BlockDigest computation
             // wrapped in block_in_place so the worker thread is reusable
             // during the synchronous fan-out.
             let digests = tokio::task::block_in_place(|| {
-                let mut digests = Vec::with_capacity(((end - start + 1) as usize).min(
-                    MAX_DIGEST_BLOCKS_PER_REQ as usize,
-                ));
+                let mut digests = Vec::with_capacity(
+                    ((end - start + 1) as usize).min(MAX_DIGEST_BLOCKS_PER_REQ as usize),
+                );
                 for h in start..=end {
                     if let Some(block) = chain.get_block_by_height(h) {
                         digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
@@ -5552,7 +6070,8 @@ async fn process_message(
                 while h <= chain_height && checkpoints.len() < MAX_CHECKPOINTS {
                     if let Some(block) = chain.get_block_by_height(h) {
                         let filter = crate::network::block_filter::BlockFilter::from_block(
-                            &block, crate::primitives::Hash::default()
+                            &block,
+                            crate::primitives::Hash::default(),
                         );
                         checkpoints.push(crate::network::block_filter::FilterCheckpoint {
                             height: h,
@@ -5570,7 +6089,9 @@ async fn process_message(
             if checkpoints.len() == MAX_CHECKPOINTS {
                 tracing::warn!(
                     "GetFilterCheckpoints from {:?}: hit MAX_CHECKPOINTS={} cap (chain_height={})",
-                    &peer_id[..4], MAX_CHECKPOINTS, chain_height
+                    &peer_id[..4],
+                    MAX_CHECKPOINTS,
+                    chain_height
                 );
             }
 
@@ -5583,7 +6104,6 @@ async fn process_message(
         }
 
         // ─── Network Node (Tier 2) DHT Protocol ─────────────────────────
-
         MessageType::GetKeyImageStatus => {
             // DHT query: is this key image spent?
             // Payload: Vec<[u8; 32]> — list of key images to check.
@@ -5593,7 +6113,8 @@ async fn process_message(
 
                 tracing::debug!(
                     "GetKeyImageStatus from {:?}: {} key images",
-                    &peer_id[..4], key_images.len()
+                    &peer_id[..4],
+                    key_images.len()
                 );
 
                 // Check each key image against the chain's spent set.
@@ -5625,14 +6146,16 @@ async fn process_message(
         | MessageType::KeyImageStatus => {
             // These are responses — personal nodes process them via their sync loop.
             // Full nodes receiving these can safely ignore them.
-            tracing::trace!("Received response message {:?} (no-op on full node)", msg_type);
+            tracing::trace!(
+                "Received response message {:?} (no-op on full node)",
+                msg_type
+            );
         }
 
         // ChainAnchorStamp was removed in the 1.0 trim (anchor_collector /
         // anchor modules deleted). AnchorRequest / AnchorResponse message
         // variants no longer exist in protocol.rs, so the match arms below
         // would be unreachable patterns — they are gone in 1.0.
-
         _ => {
             trace!("Unhandled message type: {:?}", msg_type);
         }
@@ -5657,7 +6180,7 @@ mod tests {
         assert!(invblock_near_tip(false, 0, w));
         assert!(invblock_near_tip(false, 3, w)); // the live 2026-07-11 case
         assert!(invblock_near_tip(false, w, w)); // boundary is inclusive
-        // beyond the window → deep IBD, not near tip
+                                                 // beyond the window → deep IBD, not near tip
         assert!(!invblock_near_tip(false, w + 1, w));
         assert!(!invblock_near_tip(false, 3_000, w));
     }
@@ -5695,21 +6218,32 @@ mod tests {
             bytes[..4].copy_from_slice(&i.to_be_bytes());
             cache.mark_absent(crate::primitives::Hash::from_bytes(bytes));
         }
-        assert_eq!(cache.len(), 10_000,
-                   "hard cap must hold under attack-rate inserts");
+        assert_eq!(
+            cache.len(),
+            10_000,
+            "hard cap must hold under attack-rate inserts"
+        );
 
         // The earliest entry (i=0) should have been evicted.
         let h0 = {
-            let mut b = [0u8; 32]; b[..4].copy_from_slice(&0u32.to_be_bytes());
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&0u32.to_be_bytes());
             crate::primitives::Hash::from_bytes(b)
         };
         // The most recent (i=10999) should still be there.
         let h_last = {
-            let mut b = [0u8; 32]; b[..4].copy_from_slice(&10_999u32.to_be_bytes());
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&10_999u32.to_be_bytes());
             crate::primitives::Hash::from_bytes(b)
         };
-        assert!(!cache.is_known_absent(&h0), "oldest entry must have been evicted");
-        assert!(cache.is_known_absent(&h_last), "newest entry must still be present");
+        assert!(
+            !cache.is_known_absent(&h0),
+            "oldest entry must have been evicted"
+        );
+        assert!(
+            cache.is_known_absent(&h_last),
+            "newest entry must still be present"
+        );
     }
 
     #[tokio::test]
@@ -5734,8 +6268,16 @@ mod tests {
         let mempool = crate::mempool::SharedMempool::new();
         let node = P2PNode::new(config, chain, mempool);
 
-        let tip_a = { let mut b = [0u8; 32]; b[0] = 0xAA; crate::primitives::Hash::from_bytes(b) };
-        let tip_b = { let mut b = [0u8; 32]; b[0] = 0xBB; crate::primitives::Hash::from_bytes(b) };
+        let tip_a = {
+            let mut b = [0u8; 32];
+            b[0] = 0xAA;
+            crate::primitives::Hash::from_bytes(b)
+        };
+        let tip_b = {
+            let mut b = [0u8; 32];
+            b[0] = 0xBB;
+            crate::primitives::Hash::from_bytes(b)
+        };
 
         // Newer update (seq 2) lands first.
         node.set_chain_state(2, 100, tip_b).await;
@@ -5744,7 +6286,11 @@ mod tests {
         // Older update (seq 1) completes late — it must be dropped, not
         // applied, so the shadow does not regress.
         node.set_chain_state(1, 99, tip_a).await;
-        assert_eq!(node.chain_height().await, 100, "stale seq must not regress height");
+        assert_eq!(
+            node.chain_height().await,
+            100,
+            "stale seq must not regress height"
+        );
 
         // Coherent snapshot: height AND tip both come from the newer update
         // (no torn pair).
@@ -5758,8 +6304,11 @@ mod tests {
         // when it LOWERS the height — as a heavier-chain reorg would. The
         // guard keys on seq, not height, precisely so this case works.
         node.set_chain_state(3, 80, tip_a).await;
-        assert_eq!(node.chain_height().await, 80,
-            "newer seq must be accepted even when height drops (reorg-safe)");
+        assert_eq!(
+            node.chain_height().await,
+            80,
+            "newer seq must be accepted even when height drops (reorg-safe)"
+        );
         {
             let shadow = node.chain_shadow.read().await;
             assert_eq!(shadow.tip, tip_a);
@@ -5781,8 +6330,11 @@ mod tests {
         // Accept up to MAX_CONNECTIONS_PER_IP
         for i in 0..MAX_CONNECTIONS_PER_IP {
             let a: SocketAddr = format!("192.168.1.1:{}", 10000 + i).parse().unwrap();
-            assert!(tracker.try_track_connection(&a),
-                "should accept connection {} from same IP", i + 1);
+            assert!(
+                tracker.try_track_connection(&a),
+                "should accept connection {} from same IP",
+                i + 1
+            );
         }
 
         // At limit: should reject next connection from same IP
@@ -5984,10 +6536,8 @@ mod tests {
         // Spawn a task that broadcasts using the snapshot pattern.
         let senders_bcast = senders.clone();
         let broadcast_task = tokio::spawn(async move {
-            let snapshot: Vec<mpsc::Sender<Vec<u8>>> = senders_bcast
-                .iter()
-                .map(|s| s.value().clone())
-                .collect();
+            let snapshot: Vec<mpsc::Sender<Vec<u8>>> =
+                senders_bcast.iter().map(|s| s.value().clone()).collect();
             // After .collect(), the DashMap iterator is dropped — no
             // shard locks held. Sequential send.await per peer is fine
             // (that's correct backpressure); the invariant we're

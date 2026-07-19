@@ -1,4 +1,4 @@
-﻿//! Adaptor signature primitives shared by both swap sides.
+//! Adaptor signature primitives shared by both swap sides.
 //!
 //! Adaptor signatures are what make CYNCâ†”BTC atomic swaps work without
 //! revealing the swap to chain analysts. Instead of requiring matching
@@ -185,7 +185,9 @@ impl PartialEq for AdaptorSecret {
     /// constant-time logic.
     fn eq(&self, other: &Self) -> bool {
         use subtle::ConstantTimeEq;
-        self.secp256k1_bytes().ct_eq(&other.secp256k1_bytes()).into()
+        self.secp256k1_bytes()
+            .ct_eq(&other.secp256k1_bytes())
+            .into()
     }
 }
 impl Eq for AdaptorSecret {}
@@ -246,10 +248,10 @@ impl AdaptorSecret {
     /// `from_secp256k1_bytes` variant doesn't enforce `< â„“`.
     pub fn from_ristretto_bytes(bytes: [u8; 32]) -> Result<Self> {
         // Canonical-check via curve25519_dalek.
-        let _scalar = Option::<Curve25519Scalar>::from(
-            Curve25519Scalar::from_canonical_bytes(bytes),
-        )
-        .ok_or(Error::Verification("adaptor secret not canonical Ristretto"))?;
+        let _scalar =
+            Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(bytes)).ok_or(
+                Error::Verification("adaptor secret not canonical Ristretto"),
+            )?;
         Ok(Self {
             bytes,
             encoding: SecretEncoding::RistrettoLittleEndian,
@@ -834,7 +836,9 @@ pub fn cync_verify_pre_sig(
     if lhs == rhs {
         Ok(())
     } else {
-        Err(Error::Verification("CYNC pre-signature verification failed"))
+        Err(Error::Verification(
+            "CYNC pre-signature verification failed",
+        ))
     }
 }
 
@@ -875,11 +879,8 @@ pub fn cync_recover_secret(
     adaptor: &CyncAdaptorSig,
     final_sig: &[u8; 64],
 ) -> Result<AdaptorSecret> {
-    let s = ristretto_scalar_from_bytes(
-        final_sig[32..64]
-            .try_into()
-            .expect("constant slice length"),
-    )?;
+    let s =
+        ristretto_scalar_from_bytes(final_sig[32..64].try_into().expect("constant slice length"))?;
     let s_pre = ristretto_scalar_from_bytes(&adaptor.s_pre)?;
     let t = s - s_pre;
     // Recovered from Ristretto arithmetic â†’ bytes are little-endian.
@@ -1006,9 +1007,9 @@ pub fn prove_cross_curve(
     // Range check: secret must fit in the Ristretto scalar field.
     // The accessor reverses internally if the secret was stored in
     // secp256k1 BE form, so this works for both origins.
-    let t_cync = Option::<Curve25519Scalar>::from(
-        Curve25519Scalar::from_canonical_bytes(secret.ristretto_bytes()),
-    )
+    let t_cync = Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(
+        secret.ristretto_bytes(),
+    ))
     .ok_or(Error::Verification(
         "cross-curve secret out of Ristretto range â€” must be < â„“",
     ))?;
@@ -1019,10 +1020,9 @@ pub fn prove_cross_curve(
         .map_err(|_| Error::Verification("secret not a valid secp256k1 scalar"))?;
 
     // Commitment scalar k (same bytes, two field interpretations).
-    let k_cync = Option::<Curve25519Scalar>::from(
-        Curve25519Scalar::from_canonical_bytes(*nonce_k_bytes),
-    )
-    .ok_or(Error::Verification("nonce_k out of Ristretto range"))?;
+    let k_cync =
+        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(*nonce_k_bytes))
+            .ok_or(Error::Verification("nonce_k out of Ristretto range"))?;
     let mut k_be = *nonce_k_bytes;
     k_be.reverse();
     let k_btc = SecretKey::from_slice(&k_be)
@@ -1035,9 +1035,7 @@ pub fn prove_cross_curve(
         .map_err(|_| Error::Verification("btc_pub_bytes parse"))?;
     let expected_btc = PublicKey::from_secret_key(&secp, &t_btc);
     if btc_target != expected_btc {
-        return Err(Error::Verification(
-            "btc_pub_bytes does not equal tÂ·G_btc",
-        ));
+        return Err(Error::Verification("btc_pub_bytes does not equal tÂ·G_btc"));
     }
     let cync_target = ristretto_point_from_bytes(cync_pub_bytes)?;
     let expected_cync = &t_cync * RISTRETTO_BASEPOINT_TABLE;
@@ -1119,10 +1117,9 @@ pub fn verify_cross_curve_proof(
     // Parse responses.
     let s_btc_sk = SecretKey::from_slice(&proof.s_btc)
         .map_err(|_| Error::Verification("s_btc not a valid secp256k1 scalar"))?;
-    let s_cync = Option::<Curve25519Scalar>::from(
-        Curve25519Scalar::from_canonical_bytes(proof.s_cync),
-    )
-    .ok_or(Error::Verification("s_cync not canonical in Ristretto"))?;
+    let s_cync =
+        Option::<Curve25519Scalar>::from(Curve25519Scalar::from_canonical_bytes(proof.s_cync))
+            .ok_or(Error::Verification("s_cync not canonical in Ristretto"))?;
 
     // secp256k1 check: s_btc Â· G_btc == A_btc + c_btc Â· T_btc.
     let lhs_btc = PublicKey::from_secret_key(&secp, &s_btc_sk);
@@ -1260,8 +1257,7 @@ fn secp_scalar_from_512(c64: &[u8; 64]) -> Result<Scalar> {
             ));
         }
     };
-    let r_scalar =
-        Scalar::from_be_bytes(r_bytes).expect("hardcoded constant is < n");
+    let r_scalar = Scalar::from_be_bytes(r_bytes).expect("hardcoded constant is < n");
     let u_r = u_sk
         .mul_tweak(&r_scalar)
         .map_err(|_| Error::Verification("UÂ·r overflow"))?;
@@ -1288,11 +1284,7 @@ fn secp_scalar_from_512(c64: &[u8; 64]) -> Result<Scalar> {
 /// BIP-340 tagged hash `H_BIP340/challenge(R_x || P_x || m) mod n`.
 /// Returns a `Scalar` (secp256k1 scalar mod the curve order, with the
 /// `mod n` reduction handled by `Scalar::from_be_bytes`).
-fn bip340_challenge(
-    r: &PublicKey,
-    p: &XOnlyPublicKey,
-    m: &[u8; 32],
-) -> Result<Scalar> {
+fn bip340_challenge(r: &PublicKey, p: &XOnlyPublicKey, m: &[u8; 32]) -> Result<Scalar> {
     let (r_x, _) = r.x_only_public_key();
 
     // BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || data).
@@ -1356,8 +1348,8 @@ mod tests {
         let secp = Secp256k1::new();
         let adaptor_pt = PublicKey::from_secret_key(&secp, &t_sk);
 
-        let (pre_sig, signer_x) = create_pre_sig(&seckey, &msg, &adaptor_pt, &nonce)
-            .expect("create_pre_sig");
+        let (pre_sig, signer_x) =
+            create_pre_sig(&seckey, &msg, &adaptor_pt, &nonce).expect("create_pre_sig");
         verify_pre_sig(&pre_sig, &signer_x, &adaptor_pt, &msg)
             .expect("verify_pre_sig should accept a freshly-created pre-sig");
     }
@@ -1395,8 +1387,8 @@ mod tests {
             create_pre_sig_bip340(&seckey, &msg, &adaptor_pt, &aux_rand).unwrap();
         let final_sig_bytes = decrypt_btc_adaptor(&pre_sig, &secret, &adaptor_pt).unwrap();
 
-        let sig = secp256k1::schnorr::Signature::from_slice(&final_sig_bytes)
-            .expect("BIP-340 sig parse");
+        let sig =
+            secp256k1::schnorr::Signature::from_slice(&final_sig_bytes).expect("BIP-340 sig parse");
         let msg_obj = secp256k1::Message::from_digest(msg);
         secp.verify_schnorr(&sig, &msg_obj, &signer_x)
             .expect("BIP-340 verification of the decrypted sig must succeed");
@@ -1435,9 +1427,8 @@ mod tests {
                 a
             };
 
-            let (pre_sig, signer_x) =
-                create_pre_sig_bip340(&seckey, &msg, &adaptor_pt, &aux_rand)
-                    .unwrap_or_else(|e| panic!("seed {seed} hit parity retry ceiling: {e}"));
+            let (pre_sig, signer_x) = create_pre_sig_bip340(&seckey, &msg, &adaptor_pt, &aux_rand)
+                .unwrap_or_else(|e| panic!("seed {seed} hit parity retry ceiling: {e}"));
 
             // Also verify the pre-sig itself is well-formed.
             verify_pre_sig(&pre_sig, &signer_x, &adaptor_pt, &msg)
@@ -1530,8 +1521,15 @@ mod tests {
         le.reverse();
         let s_be = AdaptorSecret::from_secp256k1_bytes(be).unwrap();
         let s_le = AdaptorSecret::from_ristretto_bytes(le).unwrap();
-        assert_eq!(s_be, s_le, "same scalar value must compare equal across encodings");
-        assert_ne!(s_be.encoding(), s_le.encoding(), "but the encoding tags differ");
+        assert_eq!(
+            s_be, s_le,
+            "same scalar value must compare equal across encodings"
+        );
+        assert_ne!(
+            s_be.encoding(),
+            s_le.encoding(),
+            "but the encoding tags differ"
+        );
     }
 
     #[test]
@@ -1563,9 +1561,7 @@ mod tests {
         rng.fill_bytes(&mut nonce);
         rng.fill_bytes(&mut t);
         rng.fill_bytes(&mut msg);
-        let canonical = |bytes: [u8; 32]| {
-            Curve25519Scalar::from_bytes_mod_order(bytes).to_bytes()
-        };
+        let canonical = |bytes: [u8; 32]| Curve25519Scalar::from_bytes_mod_order(bytes).to_bytes();
         (canonical(sk), canonical(nonce), canonical(t), msg)
     }
 
@@ -1575,8 +1571,7 @@ mod tests {
         let secret = AdaptorSecret::from_ristretto_bytes(t_bytes).unwrap();
         let adaptor_pt = cync_adaptor_point(&secret).unwrap();
 
-        let (pre_sig, signer_pub) =
-            cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
+        let (pre_sig, signer_pub) = cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
         cync_verify_pre_sig(&pre_sig, &signer_pub, &adaptor_pt, &msg)
             .expect("CYNC pre-sig should verify");
     }
@@ -1587,12 +1582,14 @@ mod tests {
         let secret = AdaptorSecret::from_ristretto_bytes(t_bytes).unwrap();
         let adaptor_pt = cync_adaptor_point(&secret).unwrap();
 
-        let (pre_sig, _signer_pub) =
-            cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
+        let (pre_sig, _signer_pub) = cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
 
         let final_sig = cync_decrypt_adaptor(&pre_sig, &secret, &adaptor_pt).unwrap();
         let recovered = cync_recover_secret(&pre_sig, &final_sig).unwrap();
-        assert_eq!(recovered, secret, "recovered CYNC secret must equal original");
+        assert_eq!(
+            recovered, secret,
+            "recovered CYNC secret must equal original"
+        );
     }
 
     #[test]
@@ -1601,8 +1598,7 @@ mod tests {
         let secret = AdaptorSecret::from_ristretto_bytes(t_bytes).unwrap();
         let adaptor_pt = cync_adaptor_point(&secret).unwrap();
 
-        let (pre_sig, signer_pub) =
-            cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
+        let (pre_sig, signer_pub) = cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
         let mut bad_msg = msg;
         bad_msg[31] ^= 0x80;
         let r = cync_verify_pre_sig(&pre_sig, &signer_pub, &adaptor_pt, &bad_msg);
@@ -1615,8 +1611,7 @@ mod tests {
         let secret = AdaptorSecret::from_ristretto_bytes(t_bytes).unwrap();
         let adaptor_pt = cync_adaptor_point(&secret).unwrap();
 
-        let (pre_sig, signer_pub) =
-            cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
+        let (pre_sig, signer_pub) = cync_create_pre_sig(&sk, &msg, &adaptor_pt, &nonce).unwrap();
 
         // Synthesize a different T from a fresh secret.
         let (_, _, wrong_t, _) = test_cync_keys(78);
@@ -1649,9 +1644,7 @@ mod tests {
     /// Build a fresh cross-curve fixture: a secret `t` valid as a
     /// Ristretto scalar, its public points on both curves, and a
     /// fresh nonce `k` (also Ristretto-canonical).
-    fn cross_curve_fixture(
-        seed: u64,
-    ) -> (AdaptorSecret, [u8; 33], [u8; 32], [u8; 32]) {
+    fn cross_curve_fixture(seed: u64) -> (AdaptorSecret, [u8; 33], [u8; 32], [u8; 32]) {
         let secp = Secp256k1::new();
         let mut rng = StdRng::seed_from_u64(seed ^ 0xC2C2_C2C2);
 
@@ -1687,8 +1680,7 @@ mod tests {
     fn cross_curve_round_trip_verifies() {
         let (secret, t_btc, t_cync, k) = cross_curve_fixture(1);
         let proof = prove_cross_curve(&secret, &t_btc, &t_cync, &k).unwrap();
-        verify_cross_curve_proof(&proof, &t_btc, &t_cync)
-            .expect("freshly-proved DLEQ must verify");
+        verify_cross_curve_proof(&proof, &t_btc, &t_cync).expect("freshly-proved DLEQ must verify");
     }
 
     #[test]

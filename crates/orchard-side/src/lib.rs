@@ -136,7 +136,13 @@ mod tests {
         // but a value of 0 or absurdly large is wrong. This is a
         // tripwire so future PRs that fat-finger the constant get
         // caught by CI.
-        assert!(MAX_ACTIONS_PER_TX >= 2, "must permit at least spend + dummy");
-        assert!(MAX_ACTIONS_PER_TX <= 1024, "absurdly large = block-budget bug");
+        assert!(
+            MAX_ACTIONS_PER_TX >= 2,
+            "must permit at least spend + dummy"
+        );
+        assert!(
+            MAX_ACTIONS_PER_TX <= 1024,
+            "absurdly large = block-budget bug"
+        );
     }
 }

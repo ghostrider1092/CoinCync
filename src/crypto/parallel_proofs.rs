@@ -169,7 +169,11 @@ impl ParallelProofVerifier {
             };
         }
 
-        let cache = if self.use_cache { Some(global_cache()) } else { None };
+        let cache = if self.use_cache {
+            Some(global_cache())
+        } else {
+            None
+        };
 
         // Check cache first
         let mut cache_results: Vec<Option<bool>> = Vec::with_capacity(total);
@@ -188,36 +192,39 @@ impl ParallelProofVerifier {
         }
 
         // Verify uncached proofs
-        let uncached_indices: Vec<usize> = cache_results.iter()
+        let uncached_indices: Vec<usize> = cache_results
+            .iter()
             .enumerate()
             .filter(|(_, r)| r.is_none())
             .map(|(i, _)| i)
             .collect();
 
-        let verification_results: Vec<(usize, bool)> = if uncached_indices.len() >= self.parallel_threshold {
-            // Parallel verification
-            uncached_indices.par_iter()
-                .map(|&i| {
-                    let valid = Self::verify_single(&self.proofs[i]);
-                    (i, valid)
-                })
-                .collect()
-        } else {
-            // Sequential verification
-            uncached_indices.iter()
-                .map(|&i| {
-                    let valid = Self::verify_single(&self.proofs[i]);
-                    (i, valid)
-                })
-                .collect()
-        };
+        let verification_results: Vec<(usize, bool)> =
+            if uncached_indices.len() >= self.parallel_threshold {
+                // Parallel verification
+                uncached_indices
+                    .par_iter()
+                    .map(|&i| {
+                        let valid = Self::verify_single(&self.proofs[i]);
+                        (i, valid)
+                    })
+                    .collect()
+            } else {
+                // Sequential verification
+                uncached_indices
+                    .iter()
+                    .map(|&i| {
+                        let valid = Self::verify_single(&self.proofs[i]);
+                        (i, valid)
+                    })
+                    .collect()
+            };
 
         // FIX: Build HashMap for O(1) lookup instead of O(n) Vec::find() per proof.
         // The old code called .find() per uncached proof inside the merge loop —
         // for a 5000-tx block that's 25 million comparisons.
-        let verification_map: std::collections::HashMap<usize, bool> = verification_results
-            .into_iter()
-            .collect();
+        let verification_map: std::collections::HashMap<usize, bool> =
+            verification_results.into_iter().collect();
 
         // Merge results and update cache
         let mut valid_count = 0usize;
@@ -255,9 +262,15 @@ impl ParallelProofVerifier {
         };
 
         // Update stats
-        self.stats.total_verified.fetch_add(total as u64, Ordering::Relaxed);
-        self.stats.cache_hits.fetch_add(cached_count as u64, Ordering::Relaxed);
-        self.stats.total_time_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+        self.stats
+            .total_verified
+            .fetch_add(total as u64, Ordering::Relaxed);
+        self.stats
+            .cache_hits
+            .fetch_add(cached_count as u64, Ordering::Relaxed);
+        self.stats
+            .total_time_ms
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
 
         // Clear processed proofs
         self.proofs.clear();
@@ -275,7 +288,7 @@ impl ParallelProofVerifier {
 
     /// Verify a single proof
     fn verify_single(task: &ProofTask) -> bool {
-        use crate::crypto::{RangeProof, PedersenCommitment, verify_range_proof};
+        use crate::crypto::{verify_range_proof, PedersenCommitment, RangeProof};
 
         // Parse proof
         let proof = match RangeProof::from_bytes(&task.proof_data) {
@@ -355,7 +368,7 @@ impl AggregatedProofVerifier {
 
     /// Verify aggregated proof
     pub fn verify(&self) -> bool {
-        use crate::crypto::{RangeProof, PedersenCommitment, verify_range_proofs};
+        use crate::crypto::{verify_range_proofs, PedersenCommitment, RangeProof};
 
         let proof_data = match &self.proof_data {
             Some(p) => p,
@@ -373,9 +386,12 @@ impl AggregatedProofVerifier {
         };
 
         // SECURITY (A6-COMMITMENT): Use checked deserialization for all commitments
-        let commitments: Vec<PedersenCommitment> = match self.commitments.iter()
+        let commitments: Vec<PedersenCommitment> = match self
+            .commitments
+            .iter()
             .map(|c| PedersenCommitment::from_bytes_checked(*c))
-            .collect::<Option<Vec<_>>>() {
+            .collect::<Option<Vec<_>>>()
+        {
             Some(c) => c,
             None => return false, // Invalid commitment bytes detected
         };
@@ -405,8 +421,7 @@ mod tests {
 
     #[test]
     fn test_proof_task() {
-        let task = ProofTask::new([1u8; 32], vec![0u8; 100])
-            .with_id("test-proof".into());
+        let task = ProofTask::new([1u8; 32], vec![0u8; 100]).with_id("test-proof".into());
 
         assert_eq!(task.id, Some("test-proof".into()));
         assert_eq!(task.commitment, [1u8; 32]);

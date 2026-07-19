@@ -4,10 +4,10 @@
 //! and wallet state consistency under attack.
 //! NO MOCKS. Real wallet operations, real crypto.
 
-use coincync::wallet::WalletKeys;
-use coincync::wallet::mnemonic::WalletMnemonic;
+use coincync::crypto::{KeyImage as CryptoKeyImage, SecretScalar};
 use coincync::primitives::SecretKey;
-use coincync::crypto::{SecretScalar, KeyImage as CryptoKeyImage};
+use coincync::wallet::mnemonic::WalletMnemonic;
+use coincync::wallet::WalletKeys;
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -61,7 +61,8 @@ fn tier7_different_seeds_different_keys() {
         let spend = epoch.spend_secret.as_bytes().to_vec();
         assert!(
             spend_keys.insert(spend),
-            "Spend key collision at seed {}!", i
+            "Spend key collision at seed {}!",
+            i
         );
     }
 }
@@ -93,7 +94,11 @@ fn tier7_key_image_deterministic() {
     let secret = SecretScalar::random(&mut OsRng);
     let ki1 = CryptoKeyImage::from_secret(&secret);
     let ki2 = CryptoKeyImage::from_secret(&secret);
-    assert_eq!(ki1.to_bytes(), ki2.to_bytes(), "Same secret must always produce same key image");
+    assert_eq!(
+        ki1.to_bytes(),
+        ki2.to_bytes(),
+        "Same secret must always produce same key image"
+    );
 }
 
 // =============================================================================
@@ -135,7 +140,12 @@ fn tier7_mnemonic_generation_valid() {
 
     // Must have 24 words (standard BIP39)
     let words: Vec<&str> = phrase.split_whitespace().collect();
-    assert_eq!(words.len(), 24, "Mnemonic must be 24 words, got {}", words.len());
+    assert_eq!(
+        words.len(),
+        24,
+        "Mnemonic must be 24 words, got {}",
+        words.len()
+    );
 
     // Must be reproducible from same phrase
     let restored = WalletMnemonic::from_phrase(phrase);
@@ -206,7 +216,8 @@ fn tier7_key_image_uses_clsag_not_blake3() {
     let blake3_bytes: [u8; 32] = *blake3_hash.as_bytes();
 
     assert_ne!(
-        ki_clsag.to_bytes(), blake3_bytes,
+        ki_clsag.to_bytes(),
+        blake3_bytes,
         "Key image must use CLSAG formula (x * Hp(P)), not blake3(x)"
     );
 }

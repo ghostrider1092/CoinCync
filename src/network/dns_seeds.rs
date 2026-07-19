@@ -6,10 +6,10 @@
 // `resolve_seeds()`. Keep the two in sync — a refactor that
 // de-duplicates them is a reasonable future cleanup.
 
-use std::net::SocketAddr;
-use std::time::Duration;
 use crate::config::{Network, ProxyConfig};
 use crate::network::socks_dns;
+use std::net::SocketAddr;
+use std::time::Duration;
 
 pub const MAINNET_DNS_SEEDS: &[&str] = &[
     "seed1.coincync.network",
@@ -40,9 +40,9 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
 pub const MAINNET_FALLBACK: &[&str] = &[
     // 2026-06-06: rewritten to the live Vultr fleet.
     // 2026-06-21: 207.148.111.76 removed (decommissioned); 45.32.251.6 added.
-    "66.135.23.193:19080",    // seed1
-    "140.82.57.168:19080",    // seed2
-    "45.32.251.6:19080",      // seed3 (replaces dead 207.148.111.76)
+    "66.135.23.193:19080", // seed1
+    "140.82.57.168:19080", // seed2
+    "45.32.251.6:19080",   // seed3 (replaces dead 207.148.111.76)
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
@@ -100,11 +100,11 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     //   IPs" size claim was not re-measured this session and is dropped.
     // - **zebrad** DNS + hardcoded seeds pattern: not re-verified
     //   against Zebra source this session. Dropped.
-    "66.135.23.193:28080",    // seed1 — Vultr
-    "140.82.57.168:28080",    // seed2 — Vultr
-    "45.32.251.6:28080",      // seed3 — Vultr (replaces dead 207.148.111.76)
-    "207.148.6.50:28080",     // explorer — Vultr (deliberate exception, see comment)
-    "173.199.93.21:28080",    // randomx — Vultr 4 vCPU / 7.2 GB (provisioned 2026-06-20)
+    "66.135.23.193:28080", // seed1 — Vultr
+    "140.82.57.168:28080", // seed2 — Vultr
+    "45.32.251.6:28080",   // seed3 — Vultr (replaces dead 207.148.111.76)
+    "207.148.6.50:28080",  // explorer — Vultr (deliberate exception, see comment)
+    "173.199.93.21:28080", // randomx — Vultr 4 vCPU / 7.2 GB (provisioned 2026-06-20)
 ];
 
 /// Resolve DNS seeds and return a deduplicated list of socket addresses.
@@ -128,10 +128,7 @@ pub async fn resolve_seeds_with_proxy(
     resolve_seeds_inner(network, proxy).await
 }
 
-async fn resolve_seeds_inner(
-    network: Network,
-    proxy: Option<&ProxyConfig>,
-) -> Vec<SocketAddr> {
+async fn resolve_seeds_inner(network: Network, proxy: Option<&ProxyConfig>) -> Vec<SocketAddr> {
     let (seeds, fallback) = match network {
         Network::Mainnet => (MAINNET_DNS_SEEDS, MAINNET_FALLBACK),
         Network::Testnet => (TESTNET_DNS_SEEDS, TESTNET_FALLBACK),
@@ -216,8 +213,9 @@ mod tests {
     fn testnet_fallback_entries_parse() {
         use std::net::SocketAddr;
         for entry in TESTNET_FALLBACK {
-            entry.parse::<SocketAddr>()
-                .unwrap_or_else(|e| panic!("TESTNET_FALLBACK entry {:?} doesn't parse: {}", entry, e));
+            entry.parse::<SocketAddr>().unwrap_or_else(|e| {
+                panic!("TESTNET_FALLBACK entry {:?} doesn't parse: {}", entry, e)
+            });
         }
     }
 
@@ -228,8 +226,9 @@ mod tests {
     fn mainnet_fallback_entries_parse() {
         use std::net::SocketAddr;
         for entry in MAINNET_FALLBACK {
-            entry.parse::<SocketAddr>()
-                .unwrap_or_else(|e| panic!("MAINNET_FALLBACK entry {:?} doesn't parse: {}", entry, e));
+            entry.parse::<SocketAddr>().unwrap_or_else(|e| {
+                panic!("MAINNET_FALLBACK entry {:?} doesn't parse: {}", entry, e)
+            });
         }
     }
 

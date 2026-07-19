@@ -1,16 +1,15 @@
 //! REPL-style interactive wallet shell
 
-use rustyline::error::ReadlineError;
-use rustyline::{Editor, Config, EditMode, CompletionType};
 use colored::Colorize;
+use rustyline::error::ReadlineError;
+use rustyline::{CompletionType, Config, EditMode, Editor};
 
 use super::suggest::suggest_command;
 
 /// Available shell commands
 const COMMANDS: &[&str] = &[
-    "help", "balance", "address", "send", "history", "sync",
-    "info", "export", "import", "lock", "unlock", "quit", "exit",
-    "clear", "version", "peers", "height", "mempool"
+    "help", "balance", "address", "send", "history", "sync", "info", "export", "import", "lock",
+    "unlock", "quit", "exit", "clear", "version", "peers", "height", "mempool",
 ];
 
 /// Command help text
@@ -78,13 +77,25 @@ impl ShellConfig {
 pub enum ShellCommand {
     Help,
     Balance,
-    Address { new: bool },
-    Send { address: Option<String>, amount: Option<String> },
-    History { limit: usize },
+    Address {
+        new: bool,
+    },
+    Send {
+        address: Option<String>,
+        amount: Option<String>,
+    },
+    History {
+        limit: usize,
+    },
     Sync,
     Info,
-    Export { what: String },
-    Import { what: String, file: String },
+    Export {
+        what: String,
+    },
+    Import {
+        what: String,
+        file: String,
+    },
     Lock,
     Unlock,
     Peers,
@@ -119,9 +130,7 @@ impl ShellCommand {
                 ShellCommand::Send { address, amount }
             }
             "history" | "hist" | "txs" => {
-                let limit = parts.get(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(10);
+                let limit = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
                 ShellCommand::History { limit }
             }
             "sync" => ShellCommand::Sync,
@@ -174,7 +183,10 @@ impl WalletShell {
     {
         println!();
         println!("{}", "CoinCync Interactive Wallet".bright_white().bold());
-        println!("{}", "Type 'help' for available commands, 'quit' to exit.".dimmed());
+        println!(
+            "{}",
+            "Type 'help' for available commands, 'quit' to exit.".dimmed()
+        );
         println!();
 
         loop {
@@ -243,7 +255,10 @@ mod tests {
     #[test]
     fn test_parse_commands() {
         assert!(matches!(ShellCommand::parse("help"), ShellCommand::Help));
-        assert!(matches!(ShellCommand::parse("balance"), ShellCommand::Balance));
+        assert!(matches!(
+            ShellCommand::parse("balance"),
+            ShellCommand::Balance
+        ));
         assert!(matches!(ShellCommand::parse("quit"), ShellCommand::Quit));
         assert!(matches!(ShellCommand::parse("exit"), ShellCommand::Quit));
         assert!(matches!(ShellCommand::parse(""), ShellCommand::Empty));

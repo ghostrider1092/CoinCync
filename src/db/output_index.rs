@@ -5,10 +5,10 @@
 //! only during reorg (block disconnection). This enables full
 //! validation of ring member commitments even for spent outputs.
 
+use super::{deserialize, serialize};
 use crate::db::shim::{Db, Tree};
 use crate::error::{Error, Result};
-use super::{serialize, deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Minimal metadata for validating a ring member that may have been spent.
 ///
@@ -52,7 +52,8 @@ pub struct OutputIndexDb {
 impl OutputIndexDb {
     /// Create new output index database
     pub fn new(db: &Db) -> Result<Self> {
-        let tree = db.open_tree("output_index")
+        let tree = db
+            .open_tree("output_index")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         Ok(OutputIndexDb { tree })
@@ -79,14 +80,18 @@ impl OutputIndexDb {
     /// Ok(Err(_)) to Ok(()) because it's the intended no-op.
     pub fn insert(&self, stealth: &[u8; 32], entry: &OutputIndexEntry) -> Result<()> {
         let data = serialize(entry)?;
-        match self.tree.compare_and_swap(stealth, None as Option<&[u8]>, Some(data.as_slice())) {
+        match self
+            .tree
+            .compare_and_swap(stealth, None as Option<&[u8]>, Some(data.as_slice()))
+        {
             Ok(Ok(())) => Ok(()),
             // CAS observed an existing entry — oldest wins, no-op is
             // the intended outcome.
             Ok(Err(_)) => Ok(()),
             Err(e) => Err(Error::DatabaseError(format!(
                 "R-42: CAS insert on output_index failed for stealth {}: {}",
-                hex::encode(stealth), e
+                hex::encode(stealth),
+                e
             ))),
         }
     }
@@ -110,7 +115,8 @@ impl OutputIndexDb {
                         hex::encode(stealth), reason, entry.height, entry.lock_height
                     );
                     return Err(Error::DatabaseError(format!(
-                        "corrupt output_index entry: {}", reason
+                        "corrupt output_index entry: {}",
+                        reason
                     )));
                 }
                 Ok(Some(entry))
@@ -122,7 +128,8 @@ impl OutputIndexDb {
 
     /// Remove an output entry (only during reorg/block disconnection)
     pub fn remove(&self, stealth: &[u8; 32]) -> Result<()> {
-        self.tree.remove(stealth)
+        self.tree
+            .remove(stealth)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -144,7 +151,10 @@ mod tests {
 
     #[test]
     fn test_output_index_insert_and_lookup() {
-        let db = crate::db::shim::Config::new().temporary(true).open().unwrap();
+        let db = crate::db::shim::Config::new()
+            .temporary(true)
+            .open()
+            .unwrap();
         let idx = OutputIndexDb::new(&db).unwrap();
 
         let stealth = [42u8; 32];
@@ -164,7 +174,10 @@ mod tests {
 
     #[test]
     fn test_output_index_oldest_wins() {
-        let db = crate::db::shim::Config::new().temporary(true).open().unwrap();
+        let db = crate::db::shim::Config::new()
+            .temporary(true)
+            .open()
+            .unwrap();
         let idx = OutputIndexDb::new(&db).unwrap();
 
         let stealth = [99u8; 32];
@@ -190,7 +203,10 @@ mod tests {
 
     #[test]
     fn test_output_index_remove() {
-        let db = crate::db::shim::Config::new().temporary(true).open().unwrap();
+        let db = crate::db::shim::Config::new()
+            .temporary(true)
+            .open()
+            .unwrap();
         let idx = OutputIndexDb::new(&db).unwrap();
 
         let stealth = [7u8; 32];

@@ -2,7 +2,7 @@
 //!
 //! Request and response types for JSON-RPC API.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Block information
 #[derive(Debug, Clone, Serialize, Deserialize)]

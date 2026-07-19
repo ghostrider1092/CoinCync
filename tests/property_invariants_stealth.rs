@@ -29,9 +29,7 @@ use proptest::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-use coincync::crypto::{
-    compute_one_time_secret, generate_stealth_address_checked, is_output_ours,
-};
+use coincync::crypto::{compute_one_time_secret, generate_stealth_address_checked, is_output_ours};
 use coincync::crypto::{PublicPoint, SecretScalar};
 use coincync::primitives::{PublicKey, SecretKey};
 

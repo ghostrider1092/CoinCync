@@ -4,31 +4,26 @@
 //! filters, LRU caches, pruning metadata, and the Phase 2 shielded/Spark
 //! stores.
 
-mod utxos;
 mod bloom;
 mod lru_cache;
 mod pruning;
+mod utxos;
 
 // ── Phase 2 stores (in-memory stubs for now) ────────────────────
+pub mod kernels;
 pub mod shielded;
 pub mod spark;
-pub mod kernels;
 
-pub use utxos::{UtxoSet, UtxoBatch, OutputRef};
+pub use utxos::{OutputRef, UtxoBatch, UtxoSet};
 
-pub use bloom::{
-    BloomFilter, CountingBloomFilter, KeyImageFilter,
-};
+pub use bloom::{BloomFilter, CountingBloomFilter, KeyImageFilter};
 
-pub use lru_cache::{
-    LruCache, SizedLruCache, CacheStats,
-};
+pub use lru_cache::{CacheStats, LruCache, SizedLruCache};
 
 pub use pruning::{
-    PruningMode, PruningRules, PruningStats,
-    ChainPruner, PrunedBlockData, PruningPlan,
+    ChainPruner, PrunedBlockData, PruningMode, PruningPlan, PruningRules, PruningStats,
 };
 
-pub use shielded::{ShieldedStore, NoteCommitmentEntry};
-pub use spark::{SparkStore, SparkCoinEntry};
 pub use kernels::KernelStore;
+pub use shielded::{NoteCommitmentEntry, ShieldedStore};
+pub use spark::{SparkCoinEntry, SparkStore};

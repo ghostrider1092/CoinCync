@@ -41,9 +41,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::network::signed_registry::{
-    fetch_verified_json, RegistryError, RegistryPayload,
-};
+use crate::network::signed_registry::{fetch_verified_json, RegistryError, RegistryPayload};
 
 /// Domain-separator for faucet-registry signatures. See module docs.
 pub const FAUCET_REGISTRY_NAMESPACE: &[u8] = b"coincync-faucet-registry-v1";

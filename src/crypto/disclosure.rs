@@ -12,24 +12,19 @@
 //! - Domain-separated (no cross-proof forgery)
 //! - Self-contained (verifier only needs proof + public chain data)
 
-use curve25519_dalek::{
-    ristretto::CompressedRistretto,
-    scalar::Scalar,
-};
+use borsh::{BorshDeserialize, BorshSerialize};
+use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use zeroize::Zeroize;
 
-use crate::primitives::{Hash, PublicKey, SecretKey, hash_domain};
 use crate::crypto::{
-    PedersenCommitment, BlindingFactor, RangeProof,
-    create_range_proof, verify_range_proof,
-    SecretScalar, PublicPoint, KeyImage,
-    hash_to_point, hash_to_scalar,
+    create_range_proof, hash_to_point, hash_to_scalar, verify_range_proof, BlindingFactor,
+    KeyImage, PedersenCommitment, PublicPoint, RangeProof, SecretScalar,
 };
 use crate::error::{Error, Result};
+use crate::primitives::{hash_domain, Hash, PublicKey, SecretKey};
 use subtle::ConstantTimeEq;
 
 // =============================================================================
@@ -37,7 +32,9 @@ use subtle::ConstantTimeEq;
 // =============================================================================
 
 /// Disclosure proof type identifier
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 #[borsh(use_discriminant = true)]
 pub enum DisclosureType {
     /// Prove balance >= threshold
@@ -110,7 +107,7 @@ pub fn create_balance_proof(
 ) -> Result<BalanceProof> {
     if value < threshold {
         return Err(Error::CryptoError(
-            "Cannot prove balance: value is less than threshold".into()
+            "Cannot prove balance: value is less than threshold".into(),
         ));
     }
 
@@ -149,7 +146,8 @@ pub fn create_balance_proof(
     // before return.
     let k_scalar = SecretScalar::random(&mut OsRng);
 
-    let r_point = (k_scalar.as_scalar() * curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT).compress();
+    let r_point =
+        (k_scalar.as_scalar() * curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT).compress();
 
     // Challenge (64-byte SHA3-512 hash to avoid modular reduction bias)
     let mut challenge_hasher = Sha3_512::new();
@@ -238,7 +236,13 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
     let lhs = s.as_scalar() * curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT + c * diff;
 
     // SECURITY (C11-FIX): Constant-time comparison prevents timing side-channel attacks
-    if lhs.compress().as_bytes().ct_eq(r_point.compress().as_bytes()).unwrap_u8() != 1 {
+    if lhs
+        .compress()
+        .as_bytes()
+        .ct_eq(r_point.compress().as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return Ok(false);
     }
 
@@ -300,7 +304,7 @@ pub fn create_ownership_proof(
     let expected_public = secret_scalar.to_public();
     if expected_public.to_bytes() != *stealth_address.as_bytes() {
         return Err(Error::CryptoError(
-            "Secret key does not match stealth address".into()
+            "Secret key does not match stealth address".into(),
         ));
     }
 
@@ -317,7 +321,8 @@ pub fn create_ownership_proof(
             tx_hash.as_bytes(),
             &[output_index],
             message,
-        ].concat(),
+        ]
+        .concat(),
     );
     let c = hash_to_scalar(challenge_hash.as_bytes());
 
@@ -363,7 +368,8 @@ pub fn verify_ownership_proof(proof: &OwnershipProof) -> Result<bool> {
             proof.tx_hash.as_bytes(),
             &[proof.output_index],
             &proof.message,
-        ].concat(),
+        ]
+        .concat(),
     );
     let c = hash_to_scalar(challenge_hash.as_bytes());
 
@@ -472,7 +478,9 @@ pub fn create_sum_proof(
     height_range: (u64, u64),
 ) -> Result<SumProof> {
     if outputs.is_empty() {
-        return Err(Error::CryptoError("Cannot create sum proof with no outputs".into()));
+        return Err(Error::CryptoError(
+            "Cannot create sum proof with no outputs".into(),
+        ));
     }
 
     // Compute total + combined blinding, and reject duplicate references up
@@ -489,7 +497,8 @@ pub fn create_sum_proof(
                 "Duplicate output reference in sum proof".into(),
             ));
         }
-        total = total.checked_add(*amount)
+        total = total
+            .checked_add(*amount)
             .ok_or_else(|| Error::CryptoError("Sum overflow".into()))?;
         blinding_sum = blinding_sum.add(blinding);
         output_refs.push(OutputRef {
@@ -545,7 +554,7 @@ pub fn verify_sum_proof(
 ) -> Result<bool> {
     if proof.output_refs.len() != on_chain_commitments.len() {
         return Err(Error::CryptoError(
-            "Output ref count doesn't match commitment count".into()
+            "Output ref count doesn't match commitment count".into(),
         ));
     }
 
@@ -564,8 +573,7 @@ pub fn verify_sum_proof(
     // Enforce canonical ordering — the challenge binds this exact order, so a
     // reordered reference list must be rejected.
     let canonical = proof.output_refs.windows(2).all(|w| {
-        (w[0].tx_hash.as_bytes(), w[0].output_index)
-            <= (w[1].tx_hash.as_bytes(), w[1].output_index)
+        (w[0].tx_hash.as_bytes(), w[0].output_index) <= (w[1].tx_hash.as_bytes(), w[1].output_index)
     });
     if !canonical {
         return Ok(false);
@@ -592,20 +600,30 @@ pub fn verify_sum_proof(
     for c in on_chain_commitments {
         match curve25519_dalek::ristretto::CompressedRistretto(c.to_bytes()).decompress() {
             Some(point) => sum_point = sum_point + point,
-            None => return Err(Error::CryptoError("Invalid on-chain commitment point".into())),
+            None => {
+                return Err(Error::CryptoError(
+                    "Invalid on-chain commitment point".into(),
+                ))
+            }
         }
     }
 
     // Compute expected: commit(total, r_sum)
     let expected = PedersenCommitment::commit(proof.claimed_total, &blinding);
-    let expected_point = match curve25519_dalek::ristretto::CompressedRistretto(expected.to_bytes()).decompress() {
-        Some(p) => p,
-        None => return Err(Error::CryptoError("Invalid expected commitment".into())),
-    };
+    let expected_point =
+        match curve25519_dalek::ristretto::CompressedRistretto(expected.to_bytes()).decompress() {
+            Some(p) => p,
+            None => return Err(Error::CryptoError("Invalid expected commitment".into())),
+        };
 
     // Check: sum(C_i) == commit(total, r_sum)
     // SECURITY (C11-FIX): Constant-time comparison prevents timing side-channel attacks
-    Ok(sum_point.compress().as_bytes().ct_eq(expected_point.compress().as_bytes()).unwrap_u8() == 1)
+    Ok(sum_point
+        .compress()
+        .as_bytes()
+        .ct_eq(expected_point.compress().as_bytes())
+        .unwrap_u8()
+        == 1)
 }
 
 // =============================================================================
@@ -658,14 +676,18 @@ pub fn create_source_proof(
     // Verify P = x*G
     let expected_p = x.to_public();
     if expected_p.to_bytes() != *public_key.as_bytes() {
-        return Err(Error::CryptoError("Secret key doesn't match public key".into()));
+        return Err(Error::CryptoError(
+            "Secret key doesn't match public key".into(),
+        ));
     }
 
     // Verify I = x*H_p(P)
     let hp = hash_to_point(public_key.as_bytes());
     let expected_i = PublicPoint::from_point(x.as_scalar() * &hp);
     if expected_i.to_bytes() != key_image.to_bytes() {
-        return Err(Error::CryptoError("Key image doesn't match key pair".into()));
+        return Err(Error::CryptoError(
+            "Key image doesn't match key pair".into(),
+        ));
     }
 
     // Random nonce k
@@ -686,7 +708,8 @@ pub fn create_source_proof(
             public_key.as_bytes().as_slice(),
             &key_image.to_bytes()[..],
             message,
-        ].concat(),
+        ]
+        .concat(),
     );
     let c = hash_to_scalar(challenge_hash.as_bytes());
 
@@ -738,7 +761,8 @@ pub fn verify_source_proof(proof: &SourceProof) -> Result<bool> {
             proof.public_key.as_bytes().as_slice(),
             &proof.key_image.to_bytes()[..],
             &proof.message,
-        ].concat(),
+        ]
+        .concat(),
     );
     let c = hash_to_scalar(challenge_hash.as_bytes());
 
@@ -798,9 +822,13 @@ pub struct DisclosureProof {
 
 impl DisclosureProof {
     /// Wrap a BalanceProof into a DisclosureProof container
-    pub fn from_balance(proof: &BalanceProof, label: &str, expires_at: Option<u64>) -> Result<Self> {
-        let data = serde_json::to_vec(proof)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+    pub fn from_balance(
+        proof: &BalanceProof,
+        label: &str,
+        expires_at: Option<u64>,
+    ) -> Result<Self> {
+        let data =
+            serde_json::to_vec(proof).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(DisclosureProof {
             version: 1,
             proof_type: DisclosureType::Balance,
@@ -812,9 +840,13 @@ impl DisclosureProof {
     }
 
     /// Wrap an OwnershipProof
-    pub fn from_ownership(proof: &OwnershipProof, label: &str, expires_at: Option<u64>) -> Result<Self> {
-        let data = serde_json::to_vec(proof)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+    pub fn from_ownership(
+        proof: &OwnershipProof,
+        label: &str,
+        expires_at: Option<u64>,
+    ) -> Result<Self> {
+        let data =
+            serde_json::to_vec(proof).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(DisclosureProof {
             version: 1,
             proof_type: DisclosureType::Ownership,
@@ -827,8 +859,8 @@ impl DisclosureProof {
 
     /// Wrap a SumProof
     pub fn from_sum(proof: &SumProof, label: &str, expires_at: Option<u64>) -> Result<Self> {
-        let data = serde_json::to_vec(proof)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let data =
+            serde_json::to_vec(proof).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(DisclosureProof {
             version: 1,
             proof_type: DisclosureType::Sum,
@@ -841,8 +873,8 @@ impl DisclosureProof {
 
     /// Wrap a SourceProof
     pub fn from_source(proof: &SourceProof, label: &str, expires_at: Option<u64>) -> Result<Self> {
-        let data = serde_json::to_vec(proof)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let data =
+            serde_json::to_vec(proof).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(DisclosureProof {
             version: 1,
             proof_type: DisclosureType::Source,
@@ -855,14 +887,12 @@ impl DisclosureProof {
 
     /// Export to JSON string
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self)
-            .map_err(|e| Error::SerializationError(e.to_string()))
+        serde_json::to_string_pretty(self).map_err(|e| Error::SerializationError(e.to_string()))
     }
 
     /// Import from JSON string
     pub fn from_json(json: &str) -> Result<Self> {
-        serde_json::from_str(json)
-            .map_err(|e| Error::SerializationError(e.to_string()))
+        serde_json::from_str(json).map_err(|e| Error::SerializationError(e.to_string()))
     }
 
     /// Check if the proof has expired
@@ -917,8 +947,8 @@ impl DisclosureProof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::{KeyImage as CurveKeyImage, SecretScalar as CurveSecretScalar};
     use rand::rngs::OsRng;
-    use crate::crypto::{SecretScalar as CurveSecretScalar, KeyImage as CurveKeyImage};
 
     fn make_test_keys() -> (SecretKey, PublicKey) {
         let secret = CurveSecretScalar::random(&mut OsRng);
@@ -1042,11 +1072,7 @@ mod tests {
         let h2 = Hash::from_bytes([2u8; 32]);
         let h3 = Hash::from_bytes([3u8; 32]);
 
-        let outputs = vec![
-            (v1, b1, h1, 0u8),
-            (v2, b2, h2, 1u8),
-            (v3, b3, h3, 0u8),
-        ];
+        let outputs = vec![(v1, b1, h1, 0u8), (v2, b2, h2, 1u8), (v3, b3, h3, 0u8)];
 
         let proof = create_sum_proof(&outputs, (0, 100)).unwrap();
         assert_eq!(proof.claimed_total, 600_000);
@@ -1116,8 +1142,14 @@ mod tests {
 
         let two_b = b.add(&b);
         let refs = vec![
-            OutputRef { tx_hash: h, output_index: 0 },
-            OutputRef { tx_hash: h, output_index: 0 },
+            OutputRef {
+                tx_hash: h,
+                output_index: 0,
+            },
+            OutputRef {
+                tx_hash: h,
+                output_index: 0,
+            },
         ];
         let timestamp = 123;
         let inflated = SumProof {
@@ -1140,7 +1172,10 @@ mod tests {
     fn sum_proof_verify_rejects_reordered_references() {
         // #279: references are canonically ordered and bound into the challenge;
         // a reordered list (even with matching commitments) must be rejected.
-        let (b1, b2) = (BlindingFactor::random(&mut OsRng), BlindingFactor::random(&mut OsRng));
+        let (b1, b2) = (
+            BlindingFactor::random(&mut OsRng),
+            BlindingFactor::random(&mut OsRng),
+        );
         let (v1, v2) = (100_000u64, 200_000u64);
         let c1 = PedersenCommitment::commit(v1, &b1);
         let c2 = PedersenCommitment::commit(v2, &b2);
@@ -1149,7 +1184,10 @@ mod tests {
 
         let mut proof =
             create_sum_proof(&vec![(v1, b1, h1, 0u8), (v2, b2, h2, 0u8)], (0, 100)).unwrap();
-        assert!(verify_sum_proof(&proof, &[c1, c2]).unwrap(), "canonical order verifies");
+        assert!(
+            verify_sum_proof(&proof, &[c1, c2]).unwrap(),
+            "canonical order verifies"
+        );
 
         proof.output_refs.reverse(); // now non-canonical
         assert!(
@@ -1284,15 +1322,26 @@ mod tests {
         let ownership = create_ownership_proof(&tx_hash, 0, &pk, &sk, b"expiry test").unwrap();
 
         // Expire timestamp = 1 (epoch second 1, long in the past)
-        let container = DisclosureProof::from_ownership(&ownership, "should expire", Some(1)).unwrap();
+        let container =
+            DisclosureProof::from_ownership(&ownership, "should expire", Some(1)).unwrap();
 
-        assert!(container.is_expired(), "Proof with timestamp=1 should be expired");
-        assert!(!container.verify().unwrap(), "Expired proof must fail verification");
+        assert!(
+            container.is_expired(),
+            "Proof with timestamp=1 should be expired"
+        );
+        assert!(
+            !container.verify().unwrap(),
+            "Expired proof must fail verification"
+        );
 
         // Non-expired proof should pass
         let future_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 86400;
-        let valid_container = DisclosureProof::from_ownership(&ownership, "valid", Some(future_ts)).unwrap();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86400;
+        let valid_container =
+            DisclosureProof::from_ownership(&ownership, "valid", Some(future_ts)).unwrap();
         assert!(!valid_container.is_expired());
         assert!(valid_container.verify().unwrap());
     }

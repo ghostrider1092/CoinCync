@@ -27,9 +27,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
 
-use crate::primitives::{Hash, Amount, hash_concat};
-use crate::consensus::{compute_pow_hash, compute_full_anchor, PowAlgorithm};
+use crate::consensus::{compute_full_anchor, compute_pow_hash, PowAlgorithm};
 use crate::error::{Error, Result};
+use crate::primitives::{hash_concat, Amount, Hash};
 
 /// Mining pool configuration
 #[derive(Clone, Debug)]
@@ -58,7 +58,9 @@ impl Default for PoolConfig {
     fn default() -> Self {
         PoolConfig {
             // safe: literal address is always valid
-            bind_address: "127.0.0.1:3333".parse().expect("valid literal socket address"),
+            bind_address: "127.0.0.1:3333"
+                .parse()
+                .expect("valid literal socket address"),
             pool_fee: 1.0,
             min_payout: Amount::from_cync(1).expect("1 CYNC is valid"),
             target_shares_per_minute: 10,
@@ -340,7 +342,8 @@ impl MiningPool {
             }
         }
 
-        let listener = TcpListener::bind(&self.config.bind_address).await
+        let listener = TcpListener::bind(&self.config.bind_address)
+            .await
             .map_err(|e| Error::ConnectionFailed(format!("Failed to bind: {}", e)))?;
 
         tracing::info!("Mining pool listening on {}", self.config.bind_address);
@@ -442,13 +445,14 @@ impl MiningPool {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
-                    .unwrap_or(0)
+                    .unwrap_or(0),
             );
         }
 
         // Calculate payouts using PPLNS, then prune old shares
         let mut shares = self.pplns_shares.write().await;
-        let window_shares: Vec<_> = shares.iter()
+        let window_shares: Vec<_> = shares
+            .iter()
             .rev()
             .take(self.config.pplns_window as usize)
             .collect();
@@ -483,13 +487,11 @@ impl MiningPool {
         for (address, diff) in address_diff {
             let share_ratio = diff as f64 / total_diff as f64;
             let payout_f64 = net_reward.as_atomic() as f64 * share_ratio;
-            let payout = Amount::from_atomic(
-                if payout_f64.is_finite() && payout_f64 >= 0.0 {
-                    (payout_f64.min(u64::MAX as f64)) as u64
-                } else {
-                    0u64
-                }
-            );
+            let payout = Amount::from_atomic(if payout_f64.is_finite() && payout_f64 >= 0.0 {
+                (payout_f64.min(u64::MAX as f64)) as u64
+            } else {
+                0u64
+            });
             let balance = balances.entry(address).or_insert(Amount::from_atomic(0));
             *balance = balance.saturating_add(payout);
         }
@@ -505,7 +507,9 @@ impl MiningPool {
 
     /// Get pending balance for an address
     pub async fn get_balance(&self, address: &str) -> Amount {
-        self.balances.read().await
+        self.balances
+            .read()
+            .await
             .get(address)
             .copied()
             .unwrap_or(Amount::from_atomic(0))
@@ -581,7 +585,11 @@ async fn handle_miner(
             Ok(0) => break, // EOF
             Ok(_) => {
                 if !line.ends_with('\n') {
-                    tracing::warn!("Oversized message from {} (>{} bytes), disconnecting", addr, MAX_LINE_LENGTH);
+                    tracing::warn!(
+                        "Oversized message from {} (>{} bytes), disconnecting",
+                        addr,
+                        MAX_LINE_LENGTH
+                    );
                     break;
                 }
                 let trimmed = line.trim();
@@ -592,8 +600,13 @@ async fn handle_miner(
                 match serde_json::from_str::<StratumRequest>(trimmed) {
                     Ok(request) => {
                         let response = process_stratum_request(
-                            &request, &mut miner, &jobs, &pplns_shares, &config
-                        ).await;
+                            &request,
+                            &mut miner,
+                            &jobs,
+                            &pplns_shares,
+                            &config,
+                        )
+                        .await;
 
                         // SECURITY: Handle serialization errors gracefully instead of panicking
                         let response_json = match serde_json::to_string(&response) {
@@ -603,7 +616,11 @@ async fn handle_miner(
                                 continue;
                             }
                         };
-                        if writer.write_all(format!("{}\n", response_json).as_bytes()).await.is_err() {
+                        if writer
+                            .write_all(format!("{}\n", response_json).as_bytes())
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
 
@@ -613,7 +630,9 @@ async fn handle_miner(
                             if let Some(job) = jobs.values().next() {
                                 let notify = create_job_notification(job, true);
                                 if let Ok(notify_json) = serde_json::to_string(&notify) {
-                                    let _ = writer.write_all(format!("{}\n", notify_json).as_bytes()).await;
+                                    let _ = writer
+                                        .write_all(format!("{}\n", notify_json).as_bytes())
+                                        .await;
                                 }
                             }
                         }
@@ -660,7 +679,7 @@ async fn process_stratum_request(
                 result: serde_json::json!([
                     [["mining.notify", format!("{:08x}", miner.miner_id)]],
                     miner.extra_nonce1.clone(),
-                    4  // extra_nonce2 size
+                    4 // extra_nonce2 size
                 ]),
                 error: None,
             }
@@ -678,7 +697,9 @@ async fn process_stratum_request(
 
                     tracing::info!(
                         "Miner {} authorized: {} (worker: {})",
-                        miner.miner_id, miner.address, miner.worker_name
+                        miner.miner_id,
+                        miner.address,
+                        miner.worker_name
                     );
 
                     return StratumResponse {
@@ -875,7 +896,13 @@ async fn process_stratum_request(
 
                 // Compute the PoW hash
                 let algo = PowAlgorithm::from_index(job.block_template.algorithm);
-                let pow_hash = match compute_pow_hash(algo, &anchor.mixed_hash, nonce_value, &tx_root_bytes, job.block_template.height) {
+                let pow_hash = match compute_pow_hash(
+                    algo,
+                    &anchor.mixed_hash,
+                    nonce_value,
+                    &tx_root_bytes,
+                    job.block_template.height,
+                ) {
                     Ok(h) => h,
                     Err(_) => {
                         return StratumResponse {
@@ -895,7 +922,9 @@ async fn process_stratum_request(
                     miner.invalid_shares += 1;
                     tracing::debug!(
                         "Share rejected from {} (job: {}, nonce: {}) - doesn't meet share target",
-                        miner.address, job_id, nonce
+                        miner.address,
+                        job_id,
+                        nonce
                     );
                     return StratumResponse {
                         id: request.id,
@@ -916,7 +945,9 @@ async fn process_stratum_request(
                 if pow_hash.meets_difficulty(&job.target) {
                     tracing::info!(
                         "BLOCK FOUND by miner {} (job: {})! Hash: {}",
-                        miner.address, job_id, hex::encode(pow_hash.as_bytes())
+                        miner.address,
+                        job_id,
+                        hex::encode(pow_hash.as_bytes())
                     );
                     // Block submission would be handled by pool operator
                     // This is a reference implementation - actual block submission
@@ -945,7 +976,8 @@ async fn process_stratum_request(
                 // Check for vardiff adjustment
                 let elapsed = miner.vardiff_window_start.elapsed();
                 if elapsed >= Duration::from_secs(60) {
-                    let shares_per_minute = miner.vardiff_shares as f64 / elapsed.as_secs_f64() * 60.0;
+                    let shares_per_minute =
+                        miner.vardiff_shares as f64 / elapsed.as_secs_f64() * 60.0;
 
                     if shares_per_minute > config.target_shares_per_minute as f64 * 1.5 {
                         // Too many shares, increase difficulty
@@ -967,7 +999,9 @@ async fn process_stratum_request(
 
                 tracing::debug!(
                     "Share accepted from {} (job: {}, nonce: {})",
-                    miner.address, job_id, nonce
+                    miner.address,
+                    job_id,
+                    nonce
                 );
 
                 return StratumResponse {

@@ -74,11 +74,11 @@ fn io_err(ctx: &str, e: std::io::Error) -> Error {
 /// `out_dir/manifest.sig`. A separate step (mirroring peer-snapshot signing) so
 /// the producing node never has to hold a signing key in memory during export.
 pub fn sign_snapshot_dir(out_dir: &Path, seed: &[u8; 32]) -> Result<signing::ManifestSignature> {
-    let manifest_bytes =
-        std::fs::read(out_dir.join(MANIFEST_FILE)).map_err(|e| io_err("read manifest to sign", e))?;
+    let manifest_bytes = std::fs::read(out_dir.join(MANIFEST_FILE))
+        .map_err(|e| io_err("read manifest to sign", e))?;
     let sig = signing::sign_manifest(seed, &manifest_bytes);
-    let json = serde_json::to_string_pretty(&sig)
-        .map_err(|e| Error::SerializationError(e.to_string()))?;
+    let json =
+        serde_json::to_string_pretty(&sig).map_err(|e| Error::SerializationError(e.to_string()))?;
     std::fs::write(out_dir.join(SIG_FILE), json).map_err(|e| io_err("write manifest.sig", e))?;
     Ok(sig)
 }
@@ -344,8 +344,17 @@ mod tests {
 
         let out = tmp.join("snap");
         let g = Hash::from_bytes([1u8; 32]);
-        let m = export(&chaindata, &out, "testnet", &g.to_hex(), 42, "TIPHASH", "1.0.12", 1000)
-            .unwrap();
+        let m = export(
+            &chaindata,
+            &out,
+            "testnet",
+            &g.to_hex(),
+            42,
+            "TIPHASH",
+            "1.0.12",
+            1000,
+        )
+        .unwrap();
         assert_eq!(m.height, 42);
         assert_eq!(m.network, "testnet");
         assert!(out.join("manifest.json").exists());
@@ -364,8 +373,14 @@ mod tests {
         };
         let imported = import(&out, &dest, &policy).unwrap();
         assert_eq!(imported, m);
-        assert_eq!(std::fs::read(dest.join("blocks.db")).unwrap(), b"block-bytes");
-        assert_eq!(std::fs::read(dest.join("sub").join("state.db")).unwrap(), b"state-bytes");
+        assert_eq!(
+            std::fs::read(dest.join("blocks.db")).unwrap(),
+            b"block-bytes"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("sub").join("state.db")).unwrap(),
+            b"state-bytes"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -378,7 +393,17 @@ mod tests {
         let out = tmp.join("snap");
         let ga = Hash::from_bytes([0xAA; 32]);
         let gb = Hash::from_bytes([0xBB; 32]);
-        export(&chaindata, &out, "testnet", &ga.to_hex(), 1, "T", "1.0.12", 1).unwrap();
+        export(
+            &chaindata,
+            &out,
+            "testnet",
+            &ga.to_hex(),
+            1,
+            "T",
+            "1.0.12",
+            1,
+        )
+        .unwrap();
 
         let dest = tmp.join("dest");
         let policy = ImportPolicy {
@@ -401,7 +426,17 @@ mod tests {
         write_file(&chaindata, "b.db", b"original");
         let out = tmp.join("snap");
         let g = Hash::from_bytes([7u8; 32]);
-        export(&chaindata, &out, "testnet", &g.to_hex(), 1, "T", "1.0.12", 1).unwrap();
+        export(
+            &chaindata,
+            &out,
+            "testnet",
+            &g.to_hex(),
+            1,
+            "T",
+            "1.0.12",
+            1,
+        )
+        .unwrap();
 
         // Tamper with the snapshot DB after export.
         std::fs::write(out.join("db").join("b.db"), b"tampered").unwrap();
@@ -426,7 +461,17 @@ mod tests {
         write_file(&chaindata, "b.db", b"snap-content");
         let out = tmp.join("snap");
         let g = Hash::from_bytes([5u8; 32]);
-        export(&chaindata, &out, "testnet", &g.to_hex(), 5, "T", "1.0.12", 1).unwrap();
+        export(
+            &chaindata,
+            &out,
+            "testnet",
+            &g.to_hex(),
+            5,
+            "T",
+            "1.0.12",
+            1,
+        )
+        .unwrap();
 
         // Destination already has (different) chaindata.
         let dest = tmp.join("live");
@@ -443,7 +488,10 @@ mod tests {
         // New content installed; old content preserved in the backup.
         assert_eq!(std::fs::read(dest.join("b.db")).unwrap(), b"snap-content");
         let backup = tmp.join("live.pre-snapshot-777");
-        assert_eq!(std::fs::read(backup.join("b.db")).unwrap(), b"OLD-LIVE-DATA");
+        assert_eq!(
+            std::fs::read(backup.join("b.db")).unwrap(),
+            b"OLD-LIVE-DATA"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -515,7 +563,10 @@ mod tests {
 
         // The installed DB reopens as the same chain.
         let reopened = build_reopen_tip(&dest);
-        assert_eq!(reopened, genesis, "reopened DB tip must be the genesis hash");
+        assert_eq!(
+            reopened, genesis,
+            "reopened DB tip must be the genesis hash"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -649,7 +700,10 @@ mod tests {
         };
         let err = import(&out, &dest_a, &policy_a).unwrap_err();
         assert!(format!("{:?}", err).contains("trusted-signer"));
-        assert!(!dest_a.exists(), "untrusted-signed snapshot must not install");
+        assert!(
+            !dest_a.exists(),
+            "untrusted-signed snapshot must not install"
+        );
 
         // (b) Remove the signature; a trusted-signers policy must refuse the
         // now-unsigned snapshot.

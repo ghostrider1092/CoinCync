@@ -105,8 +105,8 @@ impl SparkStore {
         // Collect coins, sort by coin_id (the BE-encoded key).
         let mut loaded: Vec<(u64, SparkCoinEntry)> = Vec::new();
         for item in coins_tree.iter() {
-            let (key, value) = item
-                .map_err(|e| Error::DatabaseError(format!("spark coins iter: {}", e)))?;
+            let (key, value) =
+                item.map_err(|e| Error::DatabaseError(format!("spark coins iter: {}", e)))?;
             let key_bytes: [u8; 8] = key
                 .as_ref()
                 .try_into()
@@ -121,14 +121,16 @@ impl SparkStore {
 
         let mut spent = HashMap::new();
         for item in serials_tree.iter() {
-            let (key, value) = item
-                .map_err(|e| Error::DatabaseError(format!("spark serials iter: {}", e)))?;
-            let nf: [u8; 32] = key.as_ref().try_into().map_err(|_| {
-                Error::DatabaseError("spark_serials key must be 32 bytes".into())
-            })?;
-            let h_bytes: [u8; 8] = value.as_ref().try_into().map_err(|_| {
-                Error::DatabaseError("spark_serials value must be 8 bytes".into())
-            })?;
+            let (key, value) =
+                item.map_err(|e| Error::DatabaseError(format!("spark serials iter: {}", e)))?;
+            let nf: [u8; 32] = key
+                .as_ref()
+                .try_into()
+                .map_err(|_| Error::DatabaseError("spark_serials key must be 32 bytes".into()))?;
+            let h_bytes: [u8; 8] = value
+                .as_ref()
+                .try_into()
+                .map_err(|_| Error::DatabaseError("spark_serials value must be 8 bytes".into()))?;
             spent.insert(nf, u64::from_le_bytes(h_bytes));
         }
 
@@ -506,7 +508,10 @@ mod tests {
         assert!(store.rewind());
         assert_eq!(store.size(), size_after_1);
         assert_eq!(store.current_root(), root_after_1);
-        assert!(!store.is_serial_spent(&[0x22; 32]), "block-2 serial dropped");
+        assert!(
+            !store.is_serial_spent(&[0x22; 32]),
+            "block-2 serial dropped"
+        );
     }
 
     #[test]
@@ -602,7 +607,12 @@ mod tests {
             apply_block(&store, 1, &[coin(0, 1, 0xA1)], &[[0x11; 32]]);
             let snap = (store.current_root(), store.size());
             // Block 2 then immediately reorged out.
-            apply_block(&store, 2, &[coin(1, 2, 0xB1), coin(2, 2, 0xB2)], &[[0x22; 32]]);
+            apply_block(
+                &store,
+                2,
+                &[coin(1, 2, 0xB1), coin(2, 2, 0xB2)],
+                &[[0x22; 32]],
+            );
             assert!(store.rewind());
             assert_eq!(store.current_root(), snap.0, "in-memory back to block 1");
             assert!(!store.is_serial_spent(&[0x22; 32]));
@@ -906,8 +916,7 @@ mod tests {
             );
         }
         assert_eq!(
-            rewinds,
-            MAX_REORG_CHECKPOINTS as u64,
+            rewinds, MAX_REORG_CHECKPOINTS as u64,
             "exactly cap-many rewinds were available"
         );
         let size_after = store.size() as u64;
@@ -985,10 +994,7 @@ mod tests {
                                 store.add_coin(coin(id, h.max(1), (id & 0xFF) as u8));
                             }
                             2 => {
-                                store.mark_serial_spent(
-                                    [(s & 0xFF) as u8; 32],
-                                    h.max(1),
-                                );
+                                store.mark_serial_spent([(s & 0xFF) as u8; 32], h.max(1));
                             }
                             _ => {
                                 store.rewind();
@@ -1023,8 +1029,10 @@ mod tests {
             // Joining is the no-deadlock proof — a lock-order cycle
             // would hang one of these forever.
             writer.join().expect("writer thread panicked");
-            let total_reads: u64 =
-                readers.into_iter().map(|r| r.join().expect("reader panicked")).sum();
+            let total_reads: u64 = readers
+                .into_iter()
+                .map(|r| r.join().expect("reader panicked"))
+                .sum();
             assert!(total_reads > 0, "readers made no progress — possible stall");
 
             // Quiescent: with all threads stopped, the store is in a
@@ -1070,10 +1078,7 @@ mod tests {
                                 store.add_coin(coin(id, h.max(1), (id & 0xFF) as u8));
                             }
                             2 => {
-                                store.mark_serial_spent(
-                                    [(s & 0xFF) as u8; 32],
-                                    h.max(1),
-                                );
+                                store.mark_serial_spent([(s & 0xFF) as u8; 32], h.max(1));
                             }
                             _ => {
                                 store.rewind();

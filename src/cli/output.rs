@@ -24,11 +24,7 @@ pub fn print_info(message: &str) {
 
 /// Print a step in a process
 pub fn print_step(step: usize, total: usize, message: &str) {
-    println!(
-        "{} {}",
-        format!("[{}/{}]", step, total).dimmed(),
-        message
-    );
+    println!("{} {}", format!("[{}/{}]", step, total).dimmed(), message);
 }
 
 /// Print a labeled value
@@ -125,7 +121,7 @@ pub fn format_amount_short(atomic_units: u64) -> String {
 /// Print an address with truncation option
 pub fn print_address(label: &str, address: &str, truncate: bool) {
     let display = if truncate && address.len() > 20 {
-        format!("{}...{}", &address[..12], &address[address.len()-6..])
+        format!("{}...{}", &address[..12], &address[address.len() - 6..])
     } else {
         address.to_string()
     };
@@ -187,8 +183,16 @@ pub fn print_seed_phrase_one_at_a_time(mnemonic: &str) {
     let total = words.len();
 
     println!();
-    println!("{}", "Seed phrase display — ONE WORD AT A TIME".bright_yellow().bold());
-    println!("{}", "Make sure no one can see your screen, then press Enter to begin.".dimmed());
+    println!(
+        "{}",
+        "Seed phrase display — ONE WORD AT A TIME"
+            .bright_yellow()
+            .bold()
+    );
+    println!(
+        "{}",
+        "Make sure no one can see your screen, then press Enter to begin.".dimmed()
+    );
     let _ = std::io::stdin().read_line(&mut String::new());
     clear_screen();
 
@@ -209,7 +213,10 @@ pub fn print_seed_phrase_one_at_a_time(mnemonic: &str) {
     }
 
     println!();
-    println!("{}", "All words shown. Verify your written copy now.".bright_yellow());
+    println!(
+        "{}",
+        "All words shown. Verify your written copy now.".bright_yellow()
+    );
     println!();
 }
 
@@ -272,7 +279,11 @@ pub fn print_tx_hash(label: &str, hash: &str) {
 
 /// Print a status value with label and semantic coloring
 pub fn print_status(label: &str, status: &str, good: bool) {
-    let colored = if good { status.green() } else { status.yellow() };
+    let colored = if good {
+        status.green()
+    } else {
+        status.yellow()
+    };
     println!("  {}: {}", label.dimmed(), colored);
 }
 

@@ -111,8 +111,8 @@ async fn happy_path_full_swap_composes_end_to_end() {
     let t_btc_pub = {
         use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
         let secp = Secp256k1::new();
-        let t_sk = SecretKey::from_slice(&adaptor_secret.secp256k1_bytes())
-            .expect("secp256k1 secret");
+        let t_sk =
+            SecretKey::from_slice(&adaptor_secret.secp256k1_bytes()).expect("secp256k1 secret");
         PublicKey::from_secret_key(&secp, &t_sk).serialize()
     };
 
@@ -170,7 +170,10 @@ async fn happy_path_full_swap_composes_end_to_end() {
         "cyncswap-lock-recipient-{}",
         hex::encode(swap_recipient_spend)
     );
-    let cync_lock_txid: CyncTxid = cync_chain.broadcast(&cync_lock_tx_hex).await.expect("cync broadcast");
+    let cync_lock_txid: CyncTxid = cync_chain
+        .broadcast(&cync_lock_tx_hex)
+        .await
+        .expect("cync broadcast");
 
     // ── Step 7: Bob receives BTC claim parameters from Alice ─────
     //
@@ -332,14 +335,16 @@ async fn happy_path_full_swap_composes_end_to_end() {
         use bitcoin::secp256k1::PublicKey;
         PublicKey::from_slice(&t_btc_pub).expect("T_btc pub")
     };
-    let final_btc_sig =
-        adaptor::decrypt_btc_adaptor(&pre_sig, &adaptor_secret, &t_btc_public_key)
-            .expect("decrypt adaptor");
+    let final_btc_sig = adaptor::decrypt_btc_adaptor(&pre_sig, &adaptor_secret, &t_btc_public_key)
+        .expect("decrypt adaptor");
 
     // ── Step 14: Alice builds and broadcasts the claim tx ────────
     let claim_bytes = build_claim_tx(&btc_cfg, &claim_base, &final_btc_sig).expect("claim build");
     let claim_hex = hex::encode(&claim_bytes);
-    let btc_claim_txid = btc_chain.broadcast(&claim_hex).await.expect("claim broadcast");
+    let btc_claim_txid = btc_chain
+        .broadcast(&claim_hex)
+        .await
+        .expect("claim broadcast");
 
     // Confirm the claim.
     btc_chain.mine_blocks(1);
@@ -463,13 +468,9 @@ async fn alice_cannot_redirect_claim_after_presig() {
         use bitcoin::secp256k1::SecretKey;
         SecretKey::from_slice(&tweaked).unwrap()
     };
-    let (pre_sig, _signer_x) = adaptor::create_pre_sig_bip340(
-        &tweaked_sk,
-        &honest_sighash,
-        &t_btc_public_key,
-        &aux_rand,
-    )
-    .unwrap();
+    let (pre_sig, _signer_x) =
+        adaptor::create_pre_sig_bip340(&tweaked_sk, &honest_sighash, &t_btc_public_key, &aux_rand)
+            .unwrap();
 
     // Alice attempts to redirect: she swaps in a different
     // destination, decrypts the pre-sig, tries to build a claim.
@@ -488,8 +489,8 @@ async fn alice_cannot_redirect_claim_after_presig() {
 
     // Alice can still decrypt the pre-sig (decryption is a
     // mechanical operation that doesn't know about sighashes).
-    let claim_sig = adaptor::decrypt_btc_adaptor(&pre_sig, &adaptor_secret, &t_btc_public_key)
-        .unwrap();
+    let claim_sig =
+        adaptor::decrypt_btc_adaptor(&pre_sig, &adaptor_secret, &t_btc_public_key).unwrap();
 
     // But build_claim_tx must reject when she tries to attach the
     // sig to her tampered base — the BIP-340 verification inside
@@ -614,7 +615,7 @@ async fn refund_path_bob_recovers_btc_via_csv_branch() {
     let lock_txid_inner = lock_tx.compute_txid();
     let lock_txid_bytes: [u8; 32] = {
         use bitcoin::hashes::Hash;
-        
+
         // Bitcoin txids are stored internal-byte-order; our
         // `Txid([u8;32])` newtype takes the raw 32 bytes directly.
         lock_txid_inner.to_raw_hash().to_byte_array()

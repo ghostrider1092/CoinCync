@@ -3,7 +3,9 @@
 //! Common types and traits for convenient imports.
 
 // Re-export primitives
-pub use crate::primitives::{Hash, PublicKey, SecretKey, KeyPair, Signature, Amount, Address, KeyImage};
+pub use crate::primitives::{
+    Address, Amount, Hash, KeyImage, KeyPair, PublicKey, SecretKey, Signature,
+};
 
 // Re-export error handling
 pub use crate::error::{Error, Result};
@@ -18,5 +20,5 @@ pub use crate::chain::{Blockchain, SharedBlockchain};
 pub use crate::mempool::{Mempool, SharedMempool};
 
 // Common traits
-pub use std::str::FromStr;
 pub use std::fmt::{Debug, Display};
+pub use std::str::FromStr;

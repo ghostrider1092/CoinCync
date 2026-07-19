@@ -178,7 +178,8 @@ fn harden_secret_file_permissions(path: &PathBuf) {
         if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
             eprintln!(
                 "warning: could not set 0600 on secret-key file {}: {}",
-                path.display(), e
+                path.display(),
+                e
             );
         }
     }
@@ -190,7 +191,8 @@ fn harden_secret_file_permissions(path: &PathBuf) {
             if let Err(e) = fs::set_permissions(path, perms) {
                 eprintln!(
                     "warning: could not set read-only on secret-key file {}: {}",
-                    path.display(), e
+                    path.display(),
+                    e
                 );
             }
         }

@@ -60,10 +60,7 @@ impl std::fmt::Debug for RpcClient {
         // Debug output. Report only whether auth is set, not its value.
         f.debug_struct("RpcClient")
             .field("url", &self.url)
-            .field(
-                "bearer",
-                &self.bearer.as_ref().map(|_| "<redacted>"),
-            )
+            .field("bearer", &self.bearer.as_ref().map(|_| "<redacted>"))
             .finish_non_exhaustive()
     }
 }
@@ -141,10 +138,7 @@ impl RpcClient {
             .map_err(|e| TickError::Other(format!("{} JSON decode failed: {}", self.url, e)))?;
 
         if let Some(err) = raw.get("error") {
-            return Err(TickError::Other(format!(
-                "{} RPC error: {}",
-                self.url, err
-            )));
+            return Err(TickError::Other(format!("{} RPC error: {}", self.url, err)));
         }
 
         raw.get("result")
@@ -270,10 +264,7 @@ pub fn get_block_by_height(
     client: &RpcClient,
     height: u64,
 ) -> Result<GetBlockByHeightResponse, TickError> {
-    let raw = client.call(
-        "get_block_by_height",
-        serde_json::json!([height]),
-    )?;
+    let raw = client.call("get_block_by_height", serde_json::json!([height]))?;
     serde_json::from_value(raw).map_err(|e| {
         TickError::Other(format!(
             "{} get_block_by_height({}) decode failed: {}",

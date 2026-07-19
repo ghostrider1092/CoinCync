@@ -14,12 +14,17 @@
 //! `EpochOnly` and `TimeRange` callers, but returns false for
 //! the two enforced variants once their budget/use is exhausted.
 
-use crate::primitives::{SecretKey, hash_domain};
-use serde::{Serialize, Deserialize};
+use crate::primitives::{hash_domain, SecretKey};
+use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ViewKeyScope { EpochOnly(u64), TimeRange { start: u64, end: u64 }, AmountCapped(u64), SingleUse }
+pub enum ViewKeyScope {
+    EpochOnly(u64),
+    TimeRange { start: u64, end: u64 },
+    AmountCapped(u64),
+    SingleUse,
+}
 
 /// Forward-secret view key.
 ///
@@ -165,7 +170,9 @@ impl ViewKey {
             epoch,
             scope,
             // safe: slicing 8 bytes from a 32-byte hash always succeeds
-            watermark: watermark.as_bytes()[..8].try_into().expect("8-byte slice from 32-byte hash"),
+            watermark: watermark.as_bytes()[..8]
+                .try_into()
+                .expect("8-byte slice from 32-byte hash"),
             consumed_amount: 0,
             single_use_fired: false,
         }
@@ -175,9 +182,7 @@ impl ViewKey {
         match self.scope {
             ViewKeyScope::EpochOnly(e) => epoch == e,
             ViewKeyScope::TimeRange { start, end } => epoch >= start && epoch <= end,
-            ViewKeyScope::AmountCapped(cap) => {
-                epoch == self.epoch && self.consumed_amount < cap
-            },
+            ViewKeyScope::AmountCapped(cap) => epoch == self.epoch && self.consumed_amount < cap,
             ViewKeyScope::SingleUse => epoch == self.epoch && !self.single_use_fired,
         }
     }
@@ -189,11 +194,7 @@ impl ViewKey {
     /// is exhausted or SingleUse already fired. For EpochOnly /
     /// TimeRange variants this is a pure delegation to
     /// `is_valid_for_epoch(epoch)`.
-    pub fn authorize_scan(
-        &mut self,
-        epoch: u64,
-        amount: u64,
-    ) -> Result<(), &'static str> {
+    pub fn authorize_scan(&mut self, epoch: u64, amount: u64) -> Result<(), &'static str> {
         match self.scope {
             ViewKeyScope::EpochOnly(e) => {
                 if epoch != e {
@@ -284,7 +285,10 @@ mod tests {
         let secret = SecretKey::from_bytes([42u8; 32]);
         let vk = ViewKey::derive(&secret, 1, ViewKeyScope::EpochOnly(1));
         let debug = format!("{:?}", vk);
-        assert!(debug.contains("REDACTED"), "Debug output should redact key_data");
+        assert!(
+            debug.contains("REDACTED"),
+            "Debug output should redact key_data"
+        );
         // key_data bytes should NOT appear in debug output
         assert!(!debug.contains(&format!("{:?}", vk.key_data)));
     }
@@ -295,7 +299,13 @@ mod tests {
         let vk = ViewKey::derive(&secret, 1, ViewKeyScope::EpochOnly(1));
         let json = serde_json::to_string(&vk).unwrap();
         // JSON should NOT contain key_data
-        assert!(!json.contains("key_data"), "Serialized ViewKey should not contain key_data");
-        assert!(json.contains("epoch"), "Serialized ViewKey should contain epoch");
+        assert!(
+            !json.contains("key_data"),
+            "Serialized ViewKey should not contain key_data"
+        );
+        assert!(
+            json.contains("epoch"),
+            "Serialized ViewKey should contain epoch"
+        );
     }
 }

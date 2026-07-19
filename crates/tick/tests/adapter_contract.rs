@@ -9,11 +9,11 @@
 
 #![cfg(feature = "mock")]
 
-use tick::{
-    AggregateFleetHealth, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer,
-    HealthSnapshot, MockAdapter, Severity, TickNotice, TickNoticeKind,
-};
 use tick::mock::{MockBlockId, MockPeerId, MockTxId};
+use tick::{
+    AggregateFleetHealth, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer, HealthSnapshot,
+    MockAdapter, Severity, TickNotice, TickNoticeKind,
+};
 
 // ─── Trait-shape smoke tests ───────────────────────────────────────────────
 

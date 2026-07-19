@@ -2,18 +2,16 @@
 //!
 //! P2P protocol message definitions and serialization.
 
-use crate::primitives::Hash;
 use crate::consensus::Block;
-use crate::transaction::Transaction;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use crate::error::{Error, Result};
 use crate::constants::{
+    is_protocol_version_supported, MAX_SUPPORTED_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
-    MIN_SUPPORTED_PROTOCOL_VERSION,
-    MAX_SUPPORTED_PROTOCOL_VERSION,
-    is_protocol_version_supported,
 };
+use crate::error::{Error, Result};
+use crate::primitives::Hash;
+use crate::transaction::Transaction;
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Maximum message size (16 MB)
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
@@ -116,7 +114,9 @@ fn compute_checksum(data: &[u8]) -> [u8; 4] {
 }
 
 /// Message types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
 pub enum MessageType {
@@ -161,7 +161,6 @@ pub enum MessageType {
     ChainWork = 51,
 
     // ── Personal Node (Tier 1) Protocol Messages ────────────────────
-
     /// Request compact block filters for a height range.
     /// Personal nodes send this to network nodes.
     GetFilters = 60,
@@ -179,7 +178,6 @@ pub enum MessageType {
     FilterCheckpoints = 65,
 
     // ── Network Node (Tier 2) DHT Messages ──────────────────────────
-
     /// Query whether a key image has been spent (DHT lookup).
     GetKeyImageStatus = 70,
     /// Response with key image spend status.
@@ -256,19 +254,19 @@ impl MessageType {
     pub fn max_size(&self) -> usize {
         match self {
             // Control messages: small
-            MessageType::Version => 4 * 1024,       // 4 KB
-            MessageType::Verack => 256,              // 256 bytes
-            MessageType::Ping => 256,                // 256 bytes
-            MessageType::Pong => 256,                // 256 bytes
-            MessageType::Flare => 1024,              // 1 KB
-            MessageType::ChainWork => 256,           // u128 + u64 + Hash (~56 B)
+            MessageType::Version => 4 * 1024, // 4 KB
+            MessageType::Verack => 256,       // 256 bytes
+            MessageType::Ping => 256,         // 256 bytes
+            MessageType::Pong => 256,         // 256 bytes
+            MessageType::Flare => 1024,       // 1 KB
+            MessageType::ChainWork => 256,    // u128 + u64 + Hash (~56 B)
 
             // Request messages: moderate
-            MessageType::GetHeaders => 2 * 1024,     // 2 KB (locator hashes)
-            MessageType::GetBlocks => 16 * 1024,     // 16 KB (hash list)
-            MessageType::GetData => 16 * 1024,       // 16 KB
-            MessageType::GetTxs => 16 * 1024,        // 16 KB
-            MessageType::GetAddr => 256,             // 256 bytes
+            MessageType::GetHeaders => 2 * 1024, // 2 KB (locator hashes)
+            MessageType::GetBlocks => 16 * 1024, // 16 KB (hash list)
+            MessageType::GetData => 16 * 1024,   // 16 KB
+            MessageType::GetTxs => 16 * 1024,    // 16 KB
+            MessageType::GetAddr => 256,         // 256 bytes
 
             // Data messages: large
             // 1 MB headroom for MAX_HEADERS_RESPONSE=2000. CoinCync's
@@ -279,33 +277,33 @@ impl MessageType {
             // Headers response and broke fresh-node sync. Sandbox node
             // hit this immediately on 2026-05-09. Receiver-side fix only;
             // existing senders happily emit 574 KB and now we accept it.
-            MessageType::Headers => 1024 * 1024,     // 1 MB (up to 2000 headers @ ~287B each)
-            MessageType::Blocks => MAX_MESSAGE_SIZE,  // 16 MB (block data)
+            MessageType::Headers => 1024 * 1024, // 1 MB (up to 2000 headers @ ~287B each)
+            MessageType::Blocks => MAX_MESSAGE_SIZE, // 16 MB (block data)
             MessageType::BlockData => 4 * 1024 * 1024, // 4 MB (single block)
-            MessageType::Txs => 4 * 1024 * 1024,    // 4 MB (transaction batch)
+            MessageType::Txs => 4 * 1024 * 1024, // 4 MB (transaction batch)
 
             // Inventory: moderate
-            MessageType::InvTx => 64 * 1024,         // 64 KB
-            MessageType::InvBlock => 64 * 1024,      // 64 KB
+            MessageType::InvTx => 64 * 1024,    // 64 KB
+            MessageType::InvBlock => 64 * 1024, // 64 KB
 
             // v1.0.13 #2 — NotFound mirrors a GetTxs/GetData request
             // shape (list of hashes). Cap matches GetTxs (16 KB =
             // ~500 hashes @ 32 bytes each + framing overhead).
-            MessageType::NotFound => 16 * 1024,      // 16 KB
+            MessageType::NotFound => 16 * 1024, // 16 KB
 
             // Peer addresses: moderate
-            MessageType::Addr => 256 * 1024,         // 256 KB
+            MessageType::Addr => 256 * 1024, // 256 KB
 
             // Meta messages: small
-            MessageType::Reject => 4 * 1024,         // 4 KB
-            MessageType::Alert => 64 * 1024,         // 64 KB
+            MessageType::Reject => 4 * 1024, // 4 KB
+            MessageType::Alert => 64 * 1024, // 64 KB
 
             // Personal node (Tier 1) messages
-            MessageType::GetFilters => 1024,          // 1 KB (height range request)
-            MessageType::Filters => 2 * 1024 * 1024,  // 2 MB (batch of GCS filters)
+            MessageType::GetFilters => 1024, // 1 KB (height range request)
+            MessageType::Filters => 2 * 1024 * 1024, // 2 MB (batch of GCS filters)
             MessageType::GetOutputDigests => 16 * 1024, // 16 KB (height list)
             MessageType::OutputDigests => 4 * 1024 * 1024, // 4 MB (output digests)
-            MessageType::GetFilterCheckpoints => 1024,  // 1 KB
+            MessageType::GetFilterCheckpoints => 1024, // 1 KB
             MessageType::FilterCheckpoints => 256 * 1024, // 256 KB
 
             // Network node (Tier 2) DHT messages
@@ -313,8 +311,8 @@ impl MessageType {
             MessageType::KeyImageStatus => 4 * 1024,    // 4 KB (spend status)
 
             // ChainAnchorStamp (Invention 2) — small, bounded payloads
-            MessageType::AnchorRequest  => 1024,        // 1 KB
-            MessageType::AnchorResponse => 1024,        // 1 KB
+            MessageType::AnchorRequest => 1024,  // 1 KB
+            MessageType::AnchorResponse => 1024, // 1 KB
 
             // Traffic-shaping cover packet: bounded to the largest standard
             // padded frame (MAX_PADDED_SIZE in traffic_shaping.rs is 4096).
@@ -520,7 +518,8 @@ impl NotFoundMessage {
         if self.hashes.len() > MAX_BLOCK_HASHES {
             return Err(Error::ProtocolError(format!(
                 "NotFound has too many hashes: {} > {}",
-                self.hashes.len(), MAX_BLOCK_HASHES,
+                self.hashes.len(),
+                MAX_BLOCK_HASHES,
             )));
         }
         Ok(())
@@ -588,9 +587,7 @@ impl InvMessage {
         let mut seen = std::collections::HashSet::with_capacity(self.inventory.len());
         for inv in &self.inventory {
             if !seen.insert(inv.hash) {
-                return Err(Error::ProtocolError(
-                    "duplicate inventory hash".to_string()
-                ));
+                return Err(Error::ProtocolError("duplicate inventory hash".to_string()));
             }
         }
         Ok(())
@@ -711,8 +708,8 @@ impl Message {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let header_bytes = borsh::to_vec(&self.header)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let header_bytes =
+            borsh::to_vec(&self.header).map_err(|e| Error::SerializationError(e.to_string()))?;
         let mut bytes = header_bytes;
         bytes.extend_from_slice(&self.payload);
         Ok(bytes)
@@ -724,16 +721,19 @@ impl Message {
 
     pub fn version(magic: [u8; 4], height: u64, best_hash: Hash) -> Result<Self> {
         let msg = VersionMessage::new(height, best_hash);
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::Version, payload))
     }
 
     /// Create version message with a specific nonce (for self-connection detection)
-    pub fn version_with_nonce(magic: [u8; 4], height: u64, best_hash: Hash, nonce: u64) -> Result<Self> {
+    pub fn version_with_nonce(
+        magic: [u8; 4],
+        height: u64,
+        best_hash: Hash,
+        nonce: u64,
+    ) -> Result<Self> {
         let msg = VersionMessage::with_nonce(height, best_hash, nonce);
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::Version, payload))
     }
 
@@ -745,8 +745,7 @@ impl Message {
     /// the u64 capability bitfield from [`crate::network::firework::local_capabilities`].
     pub fn flare(magic: [u8; 4], capabilities: u64) -> Result<Self> {
         let msg = FlareMessage { capabilities };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::Flare, payload))
     }
 
@@ -758,9 +757,12 @@ impl Message {
         height: u64,
         best_hash: Hash,
     ) -> Result<Self> {
-        let msg = ChainWorkMessage { total_difficulty, height, best_hash };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let msg = ChainWorkMessage {
+            total_difficulty,
+            height,
+            best_hash,
+        };
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::ChainWork, payload))
     }
 
@@ -768,22 +770,22 @@ impl Message {
         use rand::RngCore;
         let mut nonce = [0u8; 8];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let msg = PingPongMessage { nonce: u64::from_le_bytes(nonce) };
+        let msg = PingPongMessage {
+            nonce: u64::from_le_bytes(nonce),
+        };
         // INVARIANT: PingPongMessage is a single u64 wrapper — borsh writes 8
         // bytes with no I/O and no fallible step. Changing the type's layout
         // (e.g., adding a Vec field) would break this invariant and re-introduce
         // a panic-in-network-hot-path. If the type grows, switch to a fallible
         // helper that returns Result<Self> and update node.rs:1511 + 2578.
-        let payload = borsh::to_vec(&msg)
-            .expect("PingPongMessage borsh: single u64, infallible");
+        let payload = borsh::to_vec(&msg).expect("PingPongMessage borsh: single u64, infallible");
         Self::new(magic, MessageType::Ping, payload)
     }
 
     pub fn pong(magic: [u8; 4], nonce: u64) -> Self {
         let msg = PingPongMessage { nonce };
         // INVARIANT: see ping() above — borsh of a single u64 is infallible.
-        let payload = borsh::to_vec(&msg)
-            .expect("PingPongMessage borsh: single u64, infallible");
+        let payload = borsh::to_vec(&msg).expect("PingPongMessage borsh: single u64, infallible");
         Self::new(magic, MessageType::Pong, payload)
     }
 
@@ -791,10 +793,18 @@ impl Message {
         Self::get_headers_with_nonce(magic, locator, stop_hash, 0)
     }
 
-    pub fn get_headers_with_nonce(magic: [u8; 4], locator: Vec<Hash>, stop_hash: Hash, nonce: u64) -> Result<Self> {
-        let msg = GetHeadersMessage { locator, stop_hash, nonce };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+    pub fn get_headers_with_nonce(
+        magic: [u8; 4],
+        locator: Vec<Hash>,
+        stop_hash: Hash,
+        nonce: u64,
+    ) -> Result<Self> {
+        let msg = GetHeadersMessage {
+            locator,
+            stop_hash,
+            nonce,
+        };
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::GetHeaders, payload))
     }
 
@@ -802,10 +812,13 @@ impl Message {
         Self::headers_with_nonce(magic, headers, 0)
     }
 
-    pub fn headers_with_nonce(magic: [u8; 4], headers: Vec<crate::consensus::BlockHeader>, nonce: u64) -> Result<Self> {
+    pub fn headers_with_nonce(
+        magic: [u8; 4],
+        headers: Vec<crate::consensus::BlockHeader>,
+        nonce: u64,
+    ) -> Result<Self> {
         let msg = HeadersMessage { headers, nonce };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::Headers, payload))
     }
 
@@ -813,8 +826,7 @@ impl Message {
         let msg = InvMessage {
             inventory: vec![InvVector { inv_type: 2, hash }],
         };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::InvBlock, payload))
     }
 
@@ -822,30 +834,26 @@ impl Message {
         let msg = InvMessage {
             inventory: vec![InvVector { inv_type: 1, hash }],
         };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::InvTx, payload))
     }
 
     /// v1.0.13 #2 — build a NotFound reply for a list of absent hashes.
     pub fn not_found(magic: [u8; 4], hashes: Vec<Hash>) -> Result<Self> {
         let msg = NotFoundMessage { hashes };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::NotFound, payload))
     }
 
     pub fn blocks(magic: [u8; 4], blocks: Vec<Block>) -> Result<Self> {
         let msg = BlocksMessage { blocks };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::Blocks, payload))
     }
 
     pub fn txs(magic: [u8; 4], transactions: Vec<Transaction>) -> Result<Self> {
         let msg = TxsMessage { transactions };
-        let payload = borsh::to_vec(&msg)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
         Ok(Self::new(magic, MessageType::Txs, payload))
     }
 }
@@ -908,14 +916,19 @@ mod tests {
         let h = Hash::from_bytes([7u8; 32]);
         let msg = InvMessage {
             inventory: vec![
-                InvVector { inv_type: 1, hash: h },
-                InvVector { inv_type: 1, hash: h }, // dup
+                InvVector {
+                    inv_type: 1,
+                    hash: h,
+                },
+                InvVector {
+                    inv_type: 1,
+                    hash: h,
+                }, // dup
             ],
         };
         let err = msg.validate().unwrap_err();
         let s = format!("{:?}", err).to_lowercase();
-        assert!(s.contains("duplicate"),
-                "must cite duplicate, got: {}", s);
+        assert!(s.contains("duplicate"), "must cite duplicate, got: {}", s);
     }
 
     /// A well-formed InvMessage with all-distinct hashes still passes.
@@ -923,9 +936,18 @@ mod tests {
     fn inv_validate_accepts_distinct_hashes() {
         let msg = InvMessage {
             inventory: vec![
-                InvVector { inv_type: 1, hash: Hash::from_bytes([1u8; 32]) },
-                InvVector { inv_type: 1, hash: Hash::from_bytes([2u8; 32]) },
-                InvVector { inv_type: 1, hash: Hash::from_bytes([3u8; 32]) },
+                InvVector {
+                    inv_type: 1,
+                    hash: Hash::from_bytes([1u8; 32]),
+                },
+                InvVector {
+                    inv_type: 1,
+                    hash: Hash::from_bytes([2u8; 32]),
+                },
+                InvVector {
+                    inv_type: 1,
+                    hash: Hash::from_bytes([3u8; 32]),
+                },
             ],
         };
         assert!(msg.validate().is_ok());
@@ -939,8 +961,14 @@ mod tests {
     fn inv_validate_distinct_hashes_same_type_pass() {
         let msg = InvMessage {
             inventory: vec![
-                InvVector { inv_type: 2, hash: Hash::from_bytes([10u8; 32]) },
-                InvVector { inv_type: 2, hash: Hash::from_bytes([11u8; 32]) },
+                InvVector {
+                    inv_type: 2,
+                    hash: Hash::from_bytes([10u8; 32]),
+                },
+                InvVector {
+                    inv_type: 2,
+                    hash: Hash::from_bytes([11u8; 32]),
+                },
             ],
         };
         assert!(msg.validate().is_ok());
