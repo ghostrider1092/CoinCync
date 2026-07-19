@@ -15,8 +15,8 @@
 //! When the formula drops below 0.6 CYNC, tail emission takes over.
 //! Tail emission + 30% fee burn = self-sustaining forever.
 
-use crate::primitives::Amount;
 use crate::constants::*;
+use crate::primitives::Amount;
 
 /// Emission phases for display/reporting purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,8 +33,8 @@ impl EmissionPhase {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Distribution => "Distribution",
-            Self::Mature       => "Mature",
-            Self::Tail         => "Tail",
+            Self::Mature => "Mature",
+            Self::Tail => "Tail",
         }
     }
 }
@@ -108,10 +108,15 @@ fn estimate_supply_at_height(height: u64) -> u128 {
     let mut h: u64 = 0;
 
     // Use adaptive step sizes for efficiency
-    let step = if height > 1_000_000 { 10_000 }
-               else if height > 100_000 { 1_000 }
-               else if height > 10_000 { 100 }
-               else { 10 };
+    let step = if height > 1_000_000 {
+        10_000
+    } else if height > 100_000 {
+        1_000
+    } else if height > 10_000 {
+        100
+    } else {
+        10
+    };
 
     while h < height {
         let remaining = cap_atomic.saturating_sub(supply);
@@ -128,9 +133,8 @@ fn estimate_supply_at_height(height: u64) -> u128 {
         // Discovered during 2026-06-03 critical-file review.
         if asymptotic_reward < TAIL_EMISSION as u128 {
             let remaining_blocks = (height - h) as u128;
-            supply = supply.saturating_add(
-                (TAIL_EMISSION as u128).saturating_mul(remaining_blocks),
-            );
+            supply =
+                supply.saturating_add((TAIL_EMISSION as u128).saturating_mul(remaining_blocks));
             break;
         }
 
@@ -159,8 +163,11 @@ mod tests {
     fn genesis_reward_is_50_cync() {
         // At supply 0: reward = 100M / 2M = 50 CYNC
         let reward = base_reward_from_supply(0);
-        assert_eq!(reward.as_atomic(), 50 * COIN,
-            "genesis reward must be 50 CYNC");
+        assert_eq!(
+            reward.as_atomic(),
+            50 * COIN,
+            "genesis reward must be 50 CYNC"
+        );
     }
 
     #[test]
@@ -168,8 +175,11 @@ mod tests {
         // At 50M mined: reward = 50M / 2M = 25 CYNC
         let supply_50m = 50_000_000u128 * COIN as u128;
         let reward = base_reward_from_supply(supply_50m);
-        assert_eq!(reward.as_atomic(), 25 * COIN,
-            "reward at 50M supply must be 25 CYNC");
+        assert_eq!(
+            reward.as_atomic(),
+            25 * COIN,
+            "reward at 50M supply must be 25 CYNC"
+        );
     }
 
     #[test]
@@ -177,8 +187,11 @@ mod tests {
         // At 75M mined: reward = 25M / 2M = 12.5 CYNC
         let supply_75m = 75_000_000u128 * COIN as u128;
         let reward = base_reward_from_supply(supply_75m);
-        assert_eq!(reward.as_atomic(), 12_500_000_000_000,
-            "reward at 75M supply must be 12.5 CYNC");
+        assert_eq!(
+            reward.as_atomic(),
+            12_500_000_000_000,
+            "reward at 75M supply must be 12.5 CYNC"
+        );
     }
 
     #[test]
@@ -186,8 +199,11 @@ mod tests {
         // At supply near cap, reward should be TAIL_EMISSION
         let supply_near_cap = 99_999_000u128 * COIN as u128;
         let reward = base_reward_from_supply(supply_near_cap);
-        assert_eq!(reward.as_atomic(), TAIL_EMISSION,
-            "reward near cap must be tail emission (0.6 CYNC)");
+        assert_eq!(
+            reward.as_atomic(),
+            TAIL_EMISSION,
+            "reward near cap must be tail emission (0.6 CYNC)"
+        );
     }
 
     #[test]

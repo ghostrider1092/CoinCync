@@ -14,14 +14,13 @@
 //!
 //! Weights must satisfy: SHORT_WEIGHT + LONG_WEIGHT == WEIGHT_SCALE
 
-use crate::primitives::Hash;
 use crate::constants::{
-    TARGET_BLOCK_TIME, ASERT_HALFLIFE, DIFFICULTY_SHORT_WINDOW, DIFFICULTY_LONG_WINDOW,
-    DIFFICULTY_SHORT_WEIGHT, DIFFICULTY_LONG_WEIGHT, DIFFICULTY_WEIGHT_SCALE,
-    EMERGENCY_DIFFICULTY_BLOCKS, EMERGENCY_TIME_MULTIPLIER, EMERGENCY_DROP_FACTOR,
-    MAX_DIFFICULTY_ADJ_NUM, MAX_DIFFICULTY_ADJ_DEN,
-    MIN_DIFFICULTY_ADJ_NUM, MIN_DIFFICULTY_ADJ_DEN,
+    ASERT_HALFLIFE, DIFFICULTY_LONG_WEIGHT, DIFFICULTY_LONG_WINDOW, DIFFICULTY_SHORT_WEIGHT,
+    DIFFICULTY_SHORT_WINDOW, DIFFICULTY_WEIGHT_SCALE, EMERGENCY_DIFFICULTY_BLOCKS,
+    EMERGENCY_DROP_FACTOR, EMERGENCY_TIME_MULTIPLIER, MAX_DIFFICULTY_ADJ_DEN,
+    MAX_DIFFICULTY_ADJ_NUM, MIN_DIFFICULTY_ADJ_DEN, MIN_DIFFICULTY_ADJ_NUM, TARGET_BLOCK_TIME,
 };
+use crate::primitives::Hash;
 
 /// Absolute minimum network difficulty — the consensus floor below which ASERT
 /// cannot drive the chain. Equivalent to a target ceiling of `u128::MAX / 500`.
@@ -72,8 +71,8 @@ const RADIX: u128 = 1u128 << RBITS;
 // Maximum error < 0.005% across [0, RADIX).
 const COEFF_1: u128 = 45426; // ln(2) * RADIX
 const COEFF_2: u128 = 15743; // (ln(2))^2/2! * RADIX
-const COEFF_3: u128 = 3638;  // (ln(2))^3/3! * RADIX
-const COEFF_4: u128 = 630;   // (ln(2))^4/4! * RADIX
+const COEFF_3: u128 = 3638; // (ln(2))^3/3! * RADIX
+const COEFF_4: u128 = 630; // (ln(2))^4/4! * RADIX
 const MAX_INT_EXPONENT: i32 = 64;
 
 #[derive(Clone, Debug)]
@@ -102,22 +101,41 @@ pub fn assert_weight_invariant() {
 
 /// Calculate next difficulty target using dual-anchor ASERT
 pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> Hash {
-    if blocks.len() < 2 { return max_target(); }
-    let tip = match blocks.last() { Some(t) => t, None => return max_target() };
+    if blocks.len() < 2 {
+        return max_target();
+    }
+    let tip = match blocks.last() {
+        Some(t) => t,
+        None => return max_target(),
+    };
     let tip_target = target_to_u128(&tip.target);
 
     let short_anchor = get_anchor(blocks, DIFFICULTY_SHORT_WINDOW as usize);
-    let short_target = apply_asert(tip_target, short_anchor, tip, TARGET_BLOCK_TIME, ASERT_HALFLIFE);
+    let short_target = apply_asert(
+        tip_target,
+        short_anchor,
+        tip,
+        TARGET_BLOCK_TIME,
+        ASERT_HALFLIFE,
+    );
 
     let long_anchor = get_anchor(blocks, DIFFICULTY_LONG_WINDOW as usize);
-    let long_target = apply_asert(tip_target, long_anchor, tip, TARGET_BLOCK_TIME, ASERT_HALFLIFE);
+    let long_target = apply_asert(
+        tip_target,
+        long_anchor,
+        tip,
+        TARGET_BLOCK_TIME,
+        ASERT_HALFLIFE,
+    );
 
     let short_weighted = safe_mul_u128(short_target, DIFFICULTY_SHORT_WEIGHT as u128);
     let long_weighted = safe_mul_u128(long_target, DIFFICULTY_LONG_WEIGHT as u128);
     let combined = short_weighted.saturating_add(long_weighted) / DIFFICULTY_WEIGHT_SCALE as u128;
 
-    let max_val = safe_mul_u128(tip_target, MAX_DIFFICULTY_ADJ_NUM as u128) / (MAX_DIFFICULTY_ADJ_DEN as u128);
-    let min_val = safe_mul_u128(tip_target, MIN_DIFFICULTY_ADJ_NUM as u128) / (MIN_DIFFICULTY_ADJ_DEN as u128);
+    let max_val = safe_mul_u128(tip_target, MAX_DIFFICULTY_ADJ_NUM as u128)
+        / (MAX_DIFFICULTY_ADJ_DEN as u128);
+    let min_val = safe_mul_u128(tip_target, MIN_DIFFICULTY_ADJ_NUM as u128)
+        / (MIN_DIFFICULTY_ADJ_DEN as u128);
     // Apply MIN_DIFFICULTY consensus floor: target cannot exceed
     // u128::MAX / MIN_DIFFICULTY. This caps ASERT below the unsafe range
     // where production rate outruns P2P propagation. See MIN_DIFFICULTY
@@ -129,7 +147,10 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
     let clamped = combined.clamp(min_bound, max_bound);
 
     let final_target = if needs_emergency_drop(blocks, current_height) {
-        let emergency_max = safe_mul_u128(tip_target, (MAX_DIFFICULTY_ADJ_NUM * EMERGENCY_DROP_FACTOR) as u128) / (MAX_DIFFICULTY_ADJ_DEN as u128);
+        let emergency_max = safe_mul_u128(
+            tip_target,
+            (MAX_DIFFICULTY_ADJ_NUM * EMERGENCY_DROP_FACTOR) as u128,
+        ) / (MAX_DIFFICULTY_ADJ_DEN as u128);
         let emergency_target = safe_mul_u128(clamped, EMERGENCY_DROP_FACTOR as u128);
         let emer_min = min_val.max(1);
         // Emergency drop still respects MIN_DIFFICULTY — a stalled chain
@@ -143,9 +164,17 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
     u128_to_target(final_target)
 }
 
-fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyBlock, target_time: u64, halflife: u64) -> u128 {
+fn apply_asert(
+    current_target: u128,
+    anchor: &DifficultyBlock,
+    tip: &DifficultyBlock,
+    target_time: u64,
+    halflife: u64,
+) -> u128 {
     let height_diff = tip.height.saturating_sub(anchor.height);
-    if height_diff == 0 { return current_target; }
+    if height_diff == 0 {
+        return current_target;
+    }
 
     let time_diff = (tip.timestamp as i128) - (anchor.timestamp as i128);
     let expected_time = (height_diff as i128) * (target_time as i128);
@@ -180,11 +209,17 @@ fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyB
     // merge and was missing the fix — restored 2026-06-30 (session
     // notes: [[project_session_2026_06_29_partition_recovery]]).
     let denominator = halflife as i128;
-    if denominator == 0 { return current_target; }
+    if denominator == 0 {
+        return current_target;
+    }
 
     let exponent_fp = time_error
         .checked_mul(RADIX as i128)
-        .unwrap_or(if time_error >= 0 { i128::MAX } else { i128::MIN })
+        .unwrap_or(if time_error >= 0 {
+            i128::MAX
+        } else {
+            i128::MIN
+        })
         / denominator;
 
     let (int_part, frac_part) = decompose_fixed_point(exponent_fp);
@@ -194,7 +229,9 @@ fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyB
     let adjusted = safe_mul_shift(current_target, frac_pow2);
 
     if clamped_int >= 0 {
-        adjusted.checked_shl(clamped_int as u32).unwrap_or(u128::MAX)
+        adjusted
+            .checked_shl(clamped_int as u32)
+            .unwrap_or(u128::MAX)
     } else {
         // SAFETY: `clamped_int` is bounded to [-MAX_INT_EXPONENT,
         // MAX_INT_EXPONENT] by the `.clamp(...)` on the previous block,
@@ -204,8 +241,13 @@ fn apply_asert(current_target: u128, anchor: &DifficultyBlock, tip: &DifficultyB
         // const is asserted elsewhere). The `>= 128` guard then caps
         // the shift amount before it could exceed u128's width.
         let neg = (-clamped_int) as u32;
-        if neg >= 128 { 1 } else { adjusted >> neg }
-    }.max(1)
+        if neg >= 128 {
+            1
+        } else {
+            adjusted >> neg
+        }
+    }
+    .max(1)
 }
 
 fn decompose_fixed_point(exponent_fp: i128) -> (i32, u128) {
@@ -264,7 +306,9 @@ fn u128_to_target(value: u128) -> Hash {
     Hash::from_bytes(bytes)
 }
 
-fn u128_max_target() -> u128 { u128::MAX }
+fn u128_max_target() -> u128 {
+    u128::MAX
+}
 
 fn safe_mul_u128(a: u128, b: u128) -> u128 {
     // If the product overflows u128, saturate at u128::MAX (maximum target =
@@ -290,7 +334,9 @@ fn safe_mul_u128(a: u128, b: u128) -> u128 {
 
 fn safe_mul_shift(target: u128, frac_pow2: u128) -> u128 {
     let extra = frac_pow2.saturating_sub(RADIX);
-    if extra == 0 { return target; }
+    if extra == 0 {
+        return target;
+    }
     let adjustment = if target <= u128::MAX / extra {
         (target * extra) >> RBITS
     } else {
@@ -314,16 +360,28 @@ pub fn needs_emergency_drop(blocks: &[DifficultyBlock], current_height: u64) -> 
     if current_height < min_history_height {
         return false;
     }
-    if blocks.len() < EMERGENCY_DIFFICULTY_BLOCKS as usize { return false; }
-    let tip = match blocks.last() { Some(t) => t, None => return false };
-    let check_idx = blocks.len().saturating_sub(EMERGENCY_DIFFICULTY_BLOCKS as usize);
-    let check_block = match blocks.get(check_idx) { Some(b) => b, None => return false };
+    if blocks.len() < EMERGENCY_DIFFICULTY_BLOCKS as usize {
+        return false;
+    }
+    let tip = match blocks.last() {
+        Some(t) => t,
+        None => return false,
+    };
+    let check_idx = blocks
+        .len()
+        .saturating_sub(EMERGENCY_DIFFICULTY_BLOCKS as usize);
+    let check_block = match blocks.get(check_idx) {
+        Some(b) => b,
+        None => return false,
+    };
     let time_diff = tip.timestamp.saturating_sub(check_block.timestamp);
     let expected = EMERGENCY_DIFFICULTY_BLOCKS * TARGET_BLOCK_TIME;
     time_diff > expected * EMERGENCY_TIME_MULTIPLIER
 }
 
-pub fn max_target() -> Hash { Hash::from_bytes([0xFF; 32]) }
+pub fn max_target() -> Hash {
+    Hash::from_bytes([0xFF; 32])
+}
 
 pub fn min_target() -> Hash {
     let mut bytes = [0u8; 32];
@@ -337,12 +395,22 @@ pub fn target_to_difficulty(target: &Hash) -> u128 {
 
 /// Estimate hashrate (informational, f64 is fine here — not consensus).
 pub fn estimate_hashrate(blocks: &[DifficultyBlock]) -> f64 {
-    if blocks.len() < 2 { return 0.0; }
+    if blocks.len() < 2 {
+        return 0.0;
+    }
     let first = &blocks[0];
-    let last = match blocks.last() { Some(l) => l, None => return 0.0 };
+    let last = match blocks.last() {
+        Some(l) => l,
+        None => return 0.0,
+    };
     let time_span = last.timestamp.saturating_sub(first.timestamp) as f64;
-    if time_span == 0.0 { return 0.0; }
-    let total_work: f64 = blocks.iter().map(|b| target_to_difficulty(&b.target) as f64).sum();
+    if time_span == 0.0 {
+        return 0.0;
+    }
+    let total_work: f64 = blocks
+        .iter()
+        .map(|b| target_to_difficulty(&b.target) as f64)
+        .sum();
     total_work / time_span
 }
 
@@ -356,7 +424,11 @@ mod tests {
     use super::*;
 
     fn make_block(height: u64, timestamp: u64) -> DifficultyBlock {
-        DifficultyBlock { height, timestamp, target: max_target() }
+        DifficultyBlock {
+            height,
+            timestamp,
+            target: max_target(),
+        }
     }
 
     /// Phase A7 (audit fix): build a block with a *non-saturated* target so
@@ -370,7 +442,11 @@ mod tests {
     fn make_block_realistic(height: u64, timestamp: u64) -> DifficultyBlock {
         let mut bytes = [0u8; 32];
         bytes[1] = 0x01; // first 16 bytes ≈ 2^120
-        DifficultyBlock { height, timestamp, target: Hash::from_bytes(bytes) }
+        DifficultyBlock {
+            height,
+            timestamp,
+            target: Hash::from_bytes(bytes),
+        }
     }
 
     #[test]
@@ -398,7 +474,9 @@ mod tests {
 
     #[test]
     fn test_difficulty_stable() {
-        let blocks: Vec<_> = (0..20).map(|i| make_block(i, i * TARGET_BLOCK_TIME)).collect();
+        let blocks: Vec<_> = (0..20)
+            .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
+            .collect();
         let new_target = calculate_difficulty(&blocks, 20);
         let diff = target_to_difficulty(&new_target);
         assert!(diff < 10);
@@ -406,7 +484,9 @@ mod tests {
 
     #[test]
     fn test_difficulty_increases_on_fast_blocks() {
-        let blocks: Vec<_> = (0..20).map(|i| make_block(i, i * (TARGET_BLOCK_TIME / 2))).collect();
+        let blocks: Vec<_> = (0..20)
+            .map(|i| make_block(i, i * (TARGET_BLOCK_TIME / 2)))
+            .collect();
         let new_target = calculate_difficulty(&blocks, 20);
         let old_diff = target_to_difficulty(&blocks.last().unwrap().target);
         let new_diff = target_to_difficulty(&new_target);
@@ -427,9 +507,12 @@ mod tests {
         let old_val = target_to_u128(&blocks.last().unwrap().target);
         let new_val = target_to_u128(&new_target);
         // Slow blocks → algorithm should make difficulty easier → target larger.
-        assert!(new_val >= old_val,
+        assert!(
+            new_val >= old_val,
             "slow blocks should produce target ≥ tip target: old={}, new={}",
-            old_val, new_val);
+            old_val,
+            new_val
+        );
     }
 
     #[test]
@@ -480,21 +563,33 @@ mod tests {
     fn test_polynomial_accuracy() {
         // Horner form + 4-term Taylor — verify < 0.01% error at representative points.
         let cases: &[(u128, f64)] = &[
-            (0, 1.0), (RADIX / 4, 1.18921), (RADIX / 2, 1.41421),
-            (RADIX * 3 / 4, 1.68179), (RADIX * 99 / 100, 1.98631),
+            (0, 1.0),
+            (RADIX / 4, 1.18921),
+            (RADIX / 2, 1.41421),
+            (RADIX * 3 / 4, 1.68179),
+            (RADIX * 99 / 100, 1.98631),
         ];
         for (x, expected) in cases {
             let approx = pow2_frac(*x) as f64 / RADIX as f64;
             let err = (approx - expected).abs() / expected;
-            assert!(err < 0.001, "pow2_frac error {:.4}% at x={}", err * 100.0, x);
+            assert!(
+                err < 0.001,
+                "pow2_frac error {:.4}% at x={}",
+                err * 100.0,
+                x
+            );
         }
     }
 
     #[test]
-    fn test_safe_mul_no_overflow() { assert_eq!(safe_mul_u128(100, 200), 20000); }
+    fn test_safe_mul_no_overflow() {
+        assert_eq!(safe_mul_u128(100, 200), 20000);
+    }
 
     #[test]
-    fn test_safe_mul_overflow() { assert!(safe_mul_u128(u128::MAX, 2) > 0); }
+    fn test_safe_mul_overflow() {
+        assert!(safe_mul_u128(u128::MAX, 2) > 0);
+    }
 
     #[test]
     fn test_target_roundtrip() {
@@ -507,7 +602,10 @@ mod tests {
     #[test]
     fn test_asert_same_height() {
         let block = make_block(10, 300);
-        assert_eq!(apply_asert(12345, &block, &block, TARGET_BLOCK_TIME, ASERT_HALFLIFE), 12345);
+        assert_eq!(
+            apply_asert(12345, &block, &block, TARGET_BLOCK_TIME, ASERT_HALFLIFE),
+            12345
+        );
     }
 
     #[test]
@@ -515,8 +613,11 @@ mod tests {
         // Height must be above the bootstrap guard (>= EMERGENCY_DIFFICULTY_BLOCKS * 2 = 24).
         let height_past_bootstrap = EMERGENCY_DIFFICULTY_BLOCKS * 3;
         let n = height_past_bootstrap + 5;
-        let mut blocks: Vec<_> = (0..n).map(|i| make_block(i, i * TARGET_BLOCK_TIME)).collect();
-        blocks.last_mut().unwrap().timestamp += TARGET_BLOCK_TIME * EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * 2;
+        let mut blocks: Vec<_> = (0..n)
+            .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
+            .collect();
+        blocks.last_mut().unwrap().timestamp +=
+            TARGET_BLOCK_TIME * EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * 2;
         assert!(needs_emergency_drop(&blocks, n));
     }
 
@@ -524,8 +625,11 @@ mod tests {
     fn test_emergency_drop_bootstrap_guard() {
         // Emergency drop must NOT fire during the bootstrap period (height < EMERGENCY_DIFFICULTY_BLOCKS * 2).
         let n = EMERGENCY_DIFFICULTY_BLOCKS as u64 + 5;
-        let mut blocks: Vec<_> = (0..n).map(|i| make_block(i, i * TARGET_BLOCK_TIME)).collect();
-        blocks.last_mut().unwrap().timestamp += TARGET_BLOCK_TIME * EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * 2;
+        let mut blocks: Vec<_> = (0..n)
+            .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
+            .collect();
+        blocks.last_mut().unwrap().timestamp +=
+            TARGET_BLOCK_TIME * EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * 2;
         // Same data, but height is below bootstrap threshold — must return false.
         assert!(!needs_emergency_drop(&blocks, n));
     }
