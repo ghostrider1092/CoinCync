@@ -233,7 +233,7 @@ pub type SupplyAuditResult = BlockAudit;
 /// Deprecated: the "audit proof" was never authenticated. See
 /// [`SupplySnapshot`] and issue #252.
 #[deprecated(note = "renamed to SupplySnapshot: self-consistent checksum, not an authenticated proof (issue #252)")]
-#[allow(deprecated)]
+#[allow(deprecated, dead_code)] // kept as a deprecated compat alias; unused internally
 pub type SupplyAuditProof = SupplySnapshot;
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]

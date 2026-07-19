@@ -794,7 +794,7 @@ mod tests {
 
         // Ring of 4 with the real signer at index 2, so the MSM challenge loop
         // runs several iterations rather than the minimum.
-        let mut ring = vec![
+        let ring = vec![
             RingMember::new(
                 SecretScalar::random(&mut OsRng).to_public(),
                 Commitment::commit(value, &SecretScalar::random(&mut OsRng)),

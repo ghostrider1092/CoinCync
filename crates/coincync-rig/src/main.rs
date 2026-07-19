@@ -269,7 +269,7 @@ fn run_selftest() -> Result<()> {
     println!("input.anchor   = {}", hex::encode(input.anchor.as_bytes()));
     println!("input.tx_root  = {}", hex::encode(input.tx_root.as_bytes()));
     println!("input.height   = {}", input.height);
-    println!("nonce          = {:#018x}", nonce);
+    println!("nonce          = {nonce:#018x}");
     println!("pow_hash       = {}", hex::encode(h.as_bytes()));
     println!();
     println!("OK — hasher returned a value. `cargo test -p coincync-rig`");
@@ -295,7 +295,7 @@ fn run_verify(
     println!("anchor        = {}", hex::encode(input.anchor.as_bytes()));
     println!("tx_root       = {}", hex::encode(input.tx_root.as_bytes()));
     println!("height        = {}", input.height);
-    println!("nonce         = {:#018x}", nonce);
+    println!("nonce         = {nonce:#018x}");
     println!("pow_hash      = {}", hex::encode(h.as_bytes()));
 
     if let Some(t) = target_hex {
@@ -342,8 +342,7 @@ fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
         threads
     };
     println!(
-        "Benchmarking with {} thread(s) for {} seconds...",
-        n_threads, duration_secs
+        "Benchmarking with {n_threads} thread(s) for {duration_secs} seconds..."
     );
     println!("(RandomX VM warmup is included in the duration — first 1-2s is 0 H/s)");
     println!();
@@ -403,10 +402,10 @@ fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
     let (pt_digits, pt_unit) = tui_blockfont::format_hashrate(per_thread.round() as u64);
 
     println!("Results:");
-    println!("  Total hashes:  {}", total);
+    println!("  Total hashes:  {total}");
     println!("  Elapsed:       {:.2}s", elapsed.as_secs_f64());
-    println!("  Hashrate:      {} {}", hps_digits, hps_unit);
-    println!("  Per thread:    {} {} avg", pt_digits, pt_unit);
+    println!("  Hashrate:      {hps_digits} {hps_unit}");
+    println!("  Per thread:    {pt_digits} {pt_unit} avg");
     Ok(())
 }
 
@@ -442,6 +441,7 @@ fn run_info(node: &str, api_key: Option<String>) -> Result<()> {
 
 // ─── run-solo ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // CLI dispatch: mirrors the run-solo flag set
 fn run_solo_cli(
     node: &str,
     api_key: Option<String>,

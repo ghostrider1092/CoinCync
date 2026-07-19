@@ -142,7 +142,7 @@ impl Default for RescueConfig {
 /// - 0 = explorer (frontend, no p2p critical role)
 /// - 1 = relay (gossip redundancy, but not name-serving)
 /// - 2 = miner (block production — a stalled miner doesn't take down
-///       the mesh, so recovering it later is fine)
+///   the mesh, so recovering it later is fine)
 /// - 3 = seed (name-serving, most critical)
 /// - 5 = unknown role (last — safer default)
 ///
@@ -412,10 +412,8 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                     adapter,
                     TickNoticeKind::Alert,
                     Severity::Critical,
-                    format!(
-                        "candidate canonical failed PoW verify — refusing to feed. \
-                         1 host claimed a heavier chain but header PoW is INVALID"
-                    ),
+                    "candidate canonical failed PoW verify — refusing to feed. \
+                         1 host claimed a heavier chain but header PoW is INVALID".to_string(),
                     3600,
                 );
                 return Ok(false);
@@ -463,8 +461,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
             TickNoticeKind::Hunt,
             Severity::Critical,
             format!(
-                "RescueTick engaging: 1 host feeding {} hosts on canonical fork",
-                stalled_count
+                "RescueTick engaging: 1 host feeding {stalled_count} hosts on canonical fork"
             ),
             2 * 3600,
         );
@@ -621,8 +618,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                 TickNoticeKind::Engaged,
                 Severity::Critical,
                 format!(
-                    "recovery in progress: {} hosts swapped, {} remaining",
-                    fed_count, remaining
+                    "recovery in progress: {fed_count} hosts swapped, {remaining} remaining"
                 ),
                 1800,
             );
@@ -653,8 +649,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
             TickNoticeKind::Recovered,
             Severity::Info,
             format!(
-                "fleet recovered to canonical chain — {} hosts swapped in {}s",
-                canonical_count, elapsed_secs
+                "fleet recovered to canonical chain — {canonical_count} hosts swapped in {elapsed_secs}s"
             ),
             24 * 3600,
         );

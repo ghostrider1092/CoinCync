@@ -219,7 +219,7 @@ proptest! {
         bytes in proptest::collection::vec(any::<u8>(), 0..=64)
             .prop_filter("wrong length", |b| b.len() != 32),
     ) {
-        let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        let hex_str: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let result = CyncTxid::from_hex(&hex_str);
         prop_assert!(result.is_err(),
             "CyncTxid::from_hex should reject {} bytes", bytes.len());

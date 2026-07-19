@@ -275,7 +275,7 @@ async fn happy_path_full_swap_composes_end_to_end() {
         lock_value_sats: 1_000_000,
         lock_internal_key: alice_btc_xonly,
         refund_branch: Some(refund_branch.clone()),
-        dest_address: alice_btc_dest.into(),
+        dest_address: alice_btc_dest,
         fee_sats: 1_000,
     };
     let claim_sighash_bytes = claim_sighash(&btc_cfg, &claim_base).expect("claim sighash");
@@ -496,7 +496,7 @@ async fn alice_cannot_redirect_claim_after_presig() {
     // catches the mismatch.
     let r = build_claim_tx(&btc_cfg, &base_tampered, &claim_sig);
     assert!(
-        matches!(r, Err(_)),
+        r.is_err(),
         "Alice must not be able to claim to a different destination than Bob signed for"
     );
 }
@@ -614,10 +614,10 @@ async fn refund_path_bob_recovers_btc_via_csv_branch() {
     let lock_txid_inner = lock_tx.compute_txid();
     let lock_txid_bytes: [u8; 32] = {
         use bitcoin::hashes::Hash;
-        let raw = lock_txid_inner.to_raw_hash().to_byte_array();
+        
         // Bitcoin txids are stored internal-byte-order; our
         // `Txid([u8;32])` newtype takes the raw 32 bytes directly.
-        raw
+        lock_txid_inner.to_raw_hash().to_byte_array()
     };
 
     // Drive a synthetic broadcast through MockBtcChain to make the
@@ -692,8 +692,7 @@ async fn refund_path_bob_recovers_btc_via_csv_branch() {
     let seq = refund_tx.input[0].sequence.to_consensus_u32();
     assert!(
         seq < 0xFFFFFFFF,
-        "refund input sequence must be non-final to engage CSV (got {:#x})",
-        seq
+        "refund input sequence must be non-final to engage CSV (got {seq:#x})"
     );
     assert_eq!(
         seq,

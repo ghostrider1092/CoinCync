@@ -50,23 +50,39 @@ use coincync::prelude::Hash;
 
 #[test]
 fn regression_finding_01_mempool_calls_full_validator_at_admission() {
-    // The fix is: add_with_chain calls `chain.validate_transaction(&tx)`
-    // BEFORE the inner `add`. Without this, height-gated rules are
-    // missed at admission and the tx is silently evicted later.
-    // The fix's exact sequence: validator call immediately followed by
-    // the inner add. Searching for this multi-line substring pins the
-    // ordering inside add_with_chain specifically, without confusing
-    // `self.write_lock().add(tx)` calls elsewhere in mempool.rs (e.g.
-    // re-admission paths, async wrappers).
+    // The fix is: add_with_chain runs full chain validation
+    // (`chain.validate_transaction(&tx)`) BEFORE the inner insert, so
+    // height-gated rules are caught at admission rather than 60s later in
+    // `shadow_evict_invalid`. Post-#260 the insert is additionally bound to
+    // the chain tip (validate → take write lock → re-check tip → add), so
+    // the validator call and the add are no longer textually adjacent.
+    //
+    // We therefore assert the ordering (validate before add) within the
+    // add_with_chain body specifically, rather than matching an exact
+    // multi-line substring — which was brittle to the #260 restructure.
     let mempool_rs = include_str!("../src/mempool.rs");
-    let fix_sequence = "chain.validate_transaction(&tx)?;\n        self.write_lock().add(tx)";
+    let fn_start = mempool_rs
+        .find("pub fn add_with_chain(")
+        .expect("add_with_chain must exist in mempool.rs");
+    let fn_end = mempool_rs[fn_start..]
+        .find("pub async fn add_with_chain_async")
+        .map(|i| fn_start + i)
+        .unwrap_or(mempool_rs.len());
+    let body = &mempool_rs[fn_start..fn_end];
+    let validate = body.find("chain.validate_transaction(&tx)").expect(
+        "Finding #1 regression: add_with_chain must call \
+         chain.validate_transaction(&tx) at admission. See \
+         docs/crucible/cycle-01/finding-01-silent-mempool-eviction.md.",
+    );
+    let add = body.find("guard.add(tx)").expect(
+        "Finding #1 regression: add_with_chain must insert via the write-lock \
+         guard after validation. See \
+         docs/crucible/cycle-01/finding-01-silent-mempool-eviction.md.",
+    );
     assert!(
-        mempool_rs.contains(fix_sequence),
-        "Finding #1 regression: Mempool::add_with_chain must have \
-         `chain.validate_transaction(&tx)?;` followed immediately by \
-         `self.write_lock().add(tx)`. Either the validator call was \
-         removed/reordered, or a separator was inserted between them \
-         that changed evaluation semantics. See \
+        validate < add,
+        "Finding #1 regression: chain.validate_transaction(&tx) must run BEFORE \
+         the mempool insert in add_with_chain. See \
          docs/crucible/cycle-01/finding-01-silent-mempool-eviction.md."
     );
 }

@@ -291,11 +291,10 @@ pub async fn run_solo(
                         } else if is_regtest {
                             "OK (regtest: mesh/fork gates exempt for isolated rehearsal)".to_string()
                         } else if peers < 3 {
-                            format!("peer_count={} (<3; mesh not established, possibly mid-restart)", peers)
+                            format!("peer_count={peers} (<3; mesh not established, possibly mid-restart)")
                         } else if diverged {
                             format!(
-                                "fork-divergence: local height {} runs >{} blocks ahead of best peer height {} — blocks not being adopted, likely a private fork",
-                                local_height, FORK_DIVERGENCE_MARGIN, peer_target
+                                "fork-divergence: local height {local_height} runs >{FORK_DIVERGENCE_MARGIN} blocks ahead of best peer height {peer_target} — blocks not being adopted, likely a private fork"
                             )
                         } else {
                             "OK".to_string()
@@ -316,7 +315,7 @@ pub async fn run_solo(
                         );
                         cached_synced = false;
                         last_sync_check = Some(Instant::now());
-                        (false, format!("get_info HTTP error: {}", e))
+                        (false, format!("get_info HTTP error: {e}"))
                     }
                 }
             } else {
@@ -384,7 +383,7 @@ pub async fn run_solo(
             m.current_template_height
                 .store(height, std::sync::atomic::Ordering::Relaxed);
         }
-        let target = header.target.clone();
+        let target = header.target;
         let input = HashInput {
             anchor: header.anchor,
             tx_root: header.tx_root,
@@ -517,11 +516,10 @@ async fn mine_parallel(
     let slice = u64::MAX / n_threads as u64;
 
     let mut handles = Vec::with_capacity(n_threads);
-    for tid in 0..n_threads {
+    for (tid, thread_attempts) in per_thread_attempts.iter().enumerate() {
         let stop = stop.clone();
-        let my_attempts = per_thread_attempts[tid].clone();
+        let my_attempts = thread_attempts.clone();
         let found_tx = found_tx.clone();
-        let target = target.clone();
         let input = input.clone();
         let start_nonce = (tid as u64).saturating_mul(slice);
         let end_nonce = if tid + 1 == n_threads {

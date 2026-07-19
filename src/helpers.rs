@@ -24,7 +24,7 @@ where
     let strategy = ExponentialBackoff::from_millis(initial_delay.as_millis() as u64)
         .take(max_retries);
 
-    Retry::spawn(strategy, || operation()).await
+    Retry::start(strategy, || operation()).await
 }
 
 /// Measure execution time of a block

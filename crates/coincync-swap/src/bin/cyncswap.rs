@@ -2098,8 +2098,7 @@ fn wallet_init_bob_cmd(
     let v = invite.get("v").and_then(|v| v.as_u64()).unwrap_or(0);
     if v != 1 {
         return Err(format!(
-            "invite wire version {} not supported by this build (expected 1)",
-            v
+            "invite wire version {v} not supported by this build (expected 1)"
         ));
     }
     let role = invite.get("role").and_then(|v| v.as_str()).unwrap_or("?");
@@ -2433,12 +2432,10 @@ fn derive_cync_spender_secret_cmd(
     acknowledged: bool,
 ) -> Result<(), String> {
     if !acknowledged {
-        return Err(format!(
-            "this subcommand prints a secret to stdout. \
+        return Err("this subcommand prints a secret to stdout. \
              Pass --i-understand-this-is-a-secret to acknowledge \
              you have safe stdout handling (pipe to wallet stdin, \
-             write to a tmpfs file, etc.) and won't log the output."
-        ));
+             write to a tmpfs file, etc.) and won't log the output.".to_string());
     }
     let counterparty_spend_secret =
         parse_hex_32("counterparty-spend-secret", &counterparty_spend_secret_hex)?;
@@ -3229,10 +3226,10 @@ fn selftest_cmd() -> Result<(), String> {
     println!();
     let total_ms = suite_start.elapsed().as_secs_f64() * 1000.0;
     if failures == 0 {
-        println!("All checks PASSED ({:.2} ms total)", total_ms);
+        println!("All checks PASSED ({total_ms:.2} ms total)");
         Ok(())
     } else {
-        println!("{} check(s) FAILED ({:.2} ms total)", failures, total_ms);
+        println!("{failures} check(s) FAILED ({total_ms:.2} ms total)");
         Err(format!("selftest: {failures} failure(s)"))
     }
 }
@@ -3254,7 +3251,7 @@ fn transition_cmd(state_path: PathBuf, kind: TransitionKind) -> Result<(), Strin
 
     let before = swap.state;
     swap.apply(kind.to_protocol())
-        .map_err(|e| format!("apply {:?}: {}", kind, e))?;
+        .map_err(|e| format!("apply {kind:?}: {e}"))?;
     let after = swap.state;
     store
         .save(&swap)

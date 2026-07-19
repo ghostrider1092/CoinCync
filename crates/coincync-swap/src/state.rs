@@ -280,7 +280,7 @@ impl SwapStore {
             version: u32,
         }
         let v: VersionOnly = serde_json::from_slice(&buf)?;
-        if v.version < STATE_VERSION || v.version > STATE_VERSION {
+        if v.version != STATE_VERSION {
             return Err(StateError::UnsupportedVersion {
                 file_version: v.version,
                 supported: STATE_VERSION,
@@ -396,7 +396,7 @@ fn compute_hmac_hex(key: &[u8; HMAC_KEY_LEN], body_bytes: &[u8]) -> String {
     let result = mac.finalize().into_bytes();
     let mut hex_out = String::with_capacity(HMAC_KEY_LEN * 2);
     for b in result.iter() {
-        hex_out.push_str(&format!("{:02x}", b));
+        hex_out.push_str(&format!("{b:02x}"));
     }
     hex_out
 }

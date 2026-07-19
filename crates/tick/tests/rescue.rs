@@ -11,7 +11,7 @@
 
 use tick::mock::{MockAdapter, MockBlockId};
 use tick::{
-    recovery_priority, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer,
+    recovery_priority, ChainTipState, DeploymentMode, FleetPeer,
     RescueConfig, RescueTick, Severity, TickBehavior, TickNoticeKind, TickPhase,
 };
 
@@ -20,7 +20,7 @@ use tick::{
 fn peer(name: &str, role: &str) -> FleetPeer {
     FleetPeer {
         name: name.into(),
-        rpc_url: format!("http://127.0.0.1:28081/{}", name),
+        rpc_url: format!("http://127.0.0.1:28081/{name}"),
         role: role.into(),
     }
 }

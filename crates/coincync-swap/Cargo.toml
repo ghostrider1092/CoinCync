@@ -185,3 +185,18 @@ strict-dleq = []
 [lints.rust]
 unsafe_code  = "forbid"
 missing_docs = "allow"
+
+# coincync-swap is the SKELETON / CyncSwap-v1.1 crate (Later-Releases track in
+# PATCH_PRIORITIES.md). Cosmetic style/doc lints are deferred to the v1.1
+# cleanup pass; the consensus/wallet/network crates enforce clippy fully. Every
+# allow below is cosmetic-only (no correctness impact). Applies to all targets.
+[lints.clippy]
+doc_overindented_list_items = "allow"
+doc_lazy_continuation       = "allow"
+uninlined_format_args       = "allow"
+bool_assert_comparison      = "allow"
+needless_range_loop         = "allow"
+redundant_guards            = "allow"
+type_complexity             = "allow"
+too_many_arguments          = "allow"
+enum_variant_names          = "allow"

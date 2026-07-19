@@ -332,8 +332,8 @@ mod tests {
         let bits: Vec<bool> = bytes_to_255_le_bits(&bytes).collect();
         assert_eq!(bits.len(), 255, "spec encoding is exactly 255 bits");
         assert!(bits[0], "byte 0 bit 0 should be set (LSB first)");
-        for i in 1..15 {
-            assert!(!bits[i]);
+        for &bit in &bits[1..15] {
+            assert!(!bit);
         }
         assert!(bits[15], "byte 1 bit 7 should be set");
     }

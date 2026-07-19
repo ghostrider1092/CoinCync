@@ -726,8 +726,7 @@ async fn handle_attach(
             request_id,
             code: "rate_limited",
             message: format!(
-                "attach rate limit exceeded ({} attempts/min/IP)",
-                ATTACH_RATE_PER_MINUTE_PER_IP
+                "attach rate limit exceeded ({ATTACH_RATE_PER_MINUTE_PER_IP} attempts/min/IP)"
             ),
         };
     }

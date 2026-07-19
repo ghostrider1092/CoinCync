@@ -1437,11 +1437,11 @@ mod tests {
 
             let (pre_sig, signer_x) =
                 create_pre_sig_bip340(&seckey, &msg, &adaptor_pt, &aux_rand)
-                    .unwrap_or_else(|e| panic!("seed {} hit parity retry ceiling: {}", seed, e));
+                    .unwrap_or_else(|e| panic!("seed {seed} hit parity retry ceiling: {e}"));
 
             // Also verify the pre-sig itself is well-formed.
             verify_pre_sig(&pre_sig, &signer_x, &adaptor_pt, &msg)
-                .unwrap_or_else(|e| panic!("seed {} verify_pre_sig failed: {}", seed, e));
+                .unwrap_or_else(|e| panic!("seed {seed} verify_pre_sig failed: {e}"));
         }
     }
 

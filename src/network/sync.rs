@@ -450,7 +450,9 @@ impl ChainSync {
     /// 2026-06-27 fix for the production "phantom target_height pins
     /// the chain forever" bug. Previously this was implemented as:
     ///
-    ///     if pm > self.best_known_height { self.best_known_height = pm; }
+    /// ```ignore
+    /// if pm > self.best_known_height { self.best_known_height = pm; }
+    /// ```
     ///
     /// which is a one-way RATCHET: best_known could only grow, never
     /// shrink. The documented v1.0.11.6 refactor invariant V1

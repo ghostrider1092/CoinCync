@@ -27,7 +27,8 @@ use coincync_swap::adaptor::AdaptorSecret;
 use coincync_swap::strict_dleq::{
     prove_cross_curve_strict, verify_cross_curve_strict,
 };
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::scalar::Scalar as Curve25519Scalar;
 
