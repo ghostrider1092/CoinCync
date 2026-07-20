@@ -97,7 +97,7 @@ if [ "$LEVEL" -ge 1 ]; then
 
     SI_INFO=$(rpc "get_supply_info")
     if [ "$SI_INFO" != "ERROR" ]; then
-        TS_VAL=$(jget "total_supply" "$SI_INFO")
+        TS_VAL=$(jget "total_emitted" "$SI_INFO")
         [ -n "$TS_VAL" ] && pass "Supply: $TS_VAL atomic"
     fi
 fi

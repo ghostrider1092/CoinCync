@@ -2337,6 +2337,11 @@ const NODES=[
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
+function atomicToCyncDisplayNumber(value){
+  // Keep six display decimals using integer arithmetic before converting to
+  // Number; aggregate RPC fields are decimal strings because they exceed u64.
+  return Number(BigInt(value??0)/1000000n)/1000000;
+}
 const age=ts=>{const s=Math.max(0,Math.floor(Date.now()/1000)-ts);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':s<86400?Math.floor(s/3600)+'h':Math.floor(s/86400)+'d';};
 const fmtTs=ts=>new Date(ts*1000).toUTCString();
 const fmtSize=b=>b>1024?(b/1024).toFixed(1)+' kB':b+' B';
@@ -2621,7 +2626,7 @@ async function poll(){
   $('tk-peers').textContent=info.peer_count;$('tk-pool').textContent=info.tx_pool_size+' txs';
   // Fetch real supply from get_supply_info (atomic units / 1e12 = CYNC)
   const supInfo=await rpc('get_supply_info');
-  const supCync=supInfo?(supInfo.total_emitted/1e12):0;
+  const supCync=supInfo?atomicToCyncDisplayNumber(supInfo.total_emitted):0;
   const rewCync=supInfo?(supInfo.current_reward/1e12):0;
   $('tk-supply').textContent=num(Math.round(supCync))+' CYNC';
   $('s-height').textContent=num(info.height);
@@ -2636,8 +2641,10 @@ async function poll(){
     try{
       const burnStats=await rpc('get_burn_stats');
       if(burnStats && supInfo){
-        const burnedAtomic=Math.max(0,(supInfo.total_emitted||0)-(burnStats.circulating_supply||0));
-        const burnedCync=burnedAtomic/1e12;
+        const emittedAtomic=BigInt(supInfo.total_emitted??0);
+        const circulatingAtomic=BigInt(burnStats.circulating_supply??0);
+        const burnedAtomic=emittedAtomic>circulatingAtomic?emittedAtomic-circulatingAtomic:0n;
+        const burnedCync=atomicToCyncDisplayNumber(burnedAtomic);
         // Render with 2 decimals if < 100 CYNC, else integer with commas.
         bv.textContent=burnedCync<100?burnedCync.toFixed(2):num(Math.round(burnedCync));
         const bs=$('burn-sub');
@@ -6093,7 +6100,7 @@ async function loadBurnStats(){
   if(s('burn-split-normal'))s('burn-split-normal').textContent='Miner '+d.miner_pct_normal+'% / Burn '+d.burn_pct_normal+'%';
   if(s('burn-split-congested'))s('burn-split-congested').textContent='Miner '+d.miner_pct_congested+'% / Burn '+d.burn_pct_congested+'%';
   if(s('burn-congestion-thresh'))s('burn-congestion-thresh').textContent=d.congestion_threshold_pct+'% block fullness';
-  if(s('burn-supply'))s('burn-supply').textContent=num(Math.round((d.circulating_supply||0)/1e12))+' CYNC';
+  if(s('burn-supply'))s('burn-supply').textContent=num(Math.round(atomicToCyncDisplayNumber(d.circulating_supply)))+' CYNC';
   if(s('burn-max-supply'))s('burn-max-supply').textContent='100,000,000 CYNC';
   if(s('burn-deflation-thresh'))s('burn-deflation-thresh').innerHTML=num(Math.round((d.deflation_threshold_fee_per_block||0)/1e12))+' CYNC/block <span style="color:var(--t3);font-size:10px">— fees above this = deflation</span>';
 }

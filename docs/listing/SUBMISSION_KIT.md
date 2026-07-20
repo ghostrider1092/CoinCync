@@ -158,11 +158,10 @@ loses precision above 2^53. Uses `crate::constants::COIN` and
 `crate::constants::TOTAL_SUPPLY_TARGET` so any constitutional change
 flows through automatically.
 
-**Known precision ceiling:** the JSON-RPC `total_emitted` field is
-serialized as u64, which caps representable supply at ~18.4M CYNC.
-That covers all of pre-2030+ at current emission rates. Switching
-to u128 serialization is a separate v1.x follow-up if and when
-circulating supply approaches the u64 ceiling.
+**Precision contract:** aggregate atomic-supply fields such as the JSON-RPC
+`total_emitted` value are decimal strings. This preserves the full u128 value
+past the former u64 ceiling; REST formatters parse the string with integer
+arithmetic before producing listing-site responses.
 
 **Deployment dependency:** the production nginx must proxy
 `/api/v1/(testnet|mainnet)/(.*)` to the daemon's REST port and

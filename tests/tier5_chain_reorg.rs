@@ -236,12 +236,12 @@ fn tier5_genesis_supply_matches_emission() {
     let stats = chain.stats();
     // Genesis creates the first block reward — supply must be > 0
     assert!(
-        stats.total_supply.as_atomic() > 0,
+        stats.total_supply > 0,
         "Total supply after genesis must be > 0 (genesis block reward)"
     );
     // But must not exceed the cap
     assert!(
-        stats.total_supply.as_atomic() < 100_000_000_000_000_000, // 100M CYNC in atomic
+        stats.total_supply < 100_000_000_000_000_000, // 100M CYNC in atomic
         "Genesis supply must not exceed total cap"
     );
 }
