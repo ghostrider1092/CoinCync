@@ -997,7 +997,7 @@ async fn start_node(
     // height. Without this, the initial handshake advertises 0 until a
     // new block is processed, which can take minutes on a quiet chain
     // and breaks block relay in the meantime.
-    p2p.set_chain_state(p2p.next_chain_seq(), tip.height, tip.hash).await;
+    p2p.set_chain_state(p2p.next_chain_update()).await;
 
     // Feed any --addnode peers into the address book so the peer-
     // discovery loop dials them on the next tick. This runs AFTER
@@ -1034,7 +1034,6 @@ async fn start_node(
                     // continue/loop-back.
                     let _block_timer = coincync::metrics::BLOCK_RECEIVE_TO_TIP.start_timer();
                     let hash = block.hash();
-                    let block_height = block.header.height;
                     let prev_hash = block.header.prev_hash;
                     let block_txs = block.transactions.clone();
                     let block_for_relay = block.clone();
@@ -1108,19 +1107,16 @@ async fn start_node(
                             // initial value (was a real bug: peers saw us as
                             // start_height=0 forever, broke block relay).
                             let p2p2 = event_p2p.clone();
-                            let new_height = event_chain.height();
-                            let new_tip = event_chain.tip_hash();
-                            // Capture the accept-order sequence BEFORE the
+                            // Capture the publication sequence BEFORE the
                             // detached spawn. These tasks are not serialized,
-                            // so an older one can complete after a newer one;
-                            // the seq lets set_chain_state drop the stale
-                            // write instead of regressing the P2P shadow
-                            // (issue #249).
-                            let chain_seq = event_p2p.next_chain_seq();
+                            // so an older one can complete after a newer one.
+                            // The ordered publication path reads the coherent
+                            // active-chain snapshot itself and drops stale
+                            // side effects (issue #249).
+                            let chain_update = event_p2p.next_chain_update();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_processed(hash, block_height).await;
-                                p2p2.set_chain_state(chain_seq, new_height, new_tip).await;
+                                p2p2.notify_block_processed(chain_update).await;
                                 let _ = p2p2.broadcast_block(&block_for_relay).await;
                             });
                         }

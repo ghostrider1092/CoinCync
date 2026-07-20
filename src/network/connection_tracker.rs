@@ -31,7 +31,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 
-use super::node::MAX_CONNECTIONS_PER_IP;
+/// Two permits one inbound and one outbound localhost connection without
+/// allowing a single address to occupy several peer slots.
+pub const MAX_CONNECTIONS_PER_IP: usize = 2;
 
 /// Per-IP connection tracking and memory budget for inbound P2P buffers.
 ///

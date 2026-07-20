@@ -1193,14 +1193,12 @@ pub async fn start_rpc_server(
                 // instead and would otherwise leave handshake state stale.
                 if let Some(p2p) = state.p2p.as_ref() {
                     let p2p = p2p.clone();
-                    let new_height = state.chain.height();
-                    let new_tip = state.chain.tip_hash();
-                    // Capture the accept-order sequence BEFORE the detached
+                    // Capture the publication sequence BEFORE the detached
                     // spawn so an out-of-order completion can't regress the
                     // P2P shadow to a stale tip (issue #249).
-                    let seq = p2p.next_chain_seq();
+                    let update = p2p.next_chain_update();
                     tokio::spawn(async move {
-                        p2p.set_chain_state(seq, new_height, new_tip).await;
+                        p2p.set_chain_state(update).await;
                         if let Err(e) = p2p.broadcast_block(&block_for_broadcast).await {
                             warn!("Block broadcast failed: {}", e);
                         }
