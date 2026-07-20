@@ -233,6 +233,13 @@ pub struct ChainTip {
     pub timestamp: u64,
 }
 
+/// Prevents startup callers from treating a load failure as a fresh database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainLoadOutcome {
+    Fresh,
+    Loaded,
+}
+
 /// Chain statistics
 #[derive(Debug, Clone, Default)]
 pub struct ChainStats {
@@ -641,10 +648,7 @@ impl Blockchain {
 
         // SECURITY: Verify genesis hash matches the hardcoded constant.
         // This catches accidental genesis block changes that would cause chain forks.
-        let expected = match self.network {
-            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
-            NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
-        };
+        let expected = self.expected_genesis_hash();
         if hash != expected {
             return Err(Error::InvalidState(format!(
                 "Genesis hash mismatch! Computed {} but expected {}. \
@@ -703,6 +707,13 @@ impl Blockchain {
         Ok(hash)
     }
 
+    fn expected_genesis_hash(&self) -> Hash {
+        match self.network {
+            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
+            NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
+        }
+    }
+
     /// Verify chain tip integrity after recovering from a poisoned lock.
     /// Compares in-memory tip hash against the database to detect corruption.
     /// Can also be called periodically from the maintenance loop as a health check.
@@ -729,10 +740,44 @@ impl Blockchain {
 
     /// Load chain state from database
     pub fn load_from_database(&self) -> Result<()> {
+        self.load_from_database_with_outcome().map(|_| ())
+    }
+
+    /// Genesis initialization requires an explicit fresh-database result.
+    pub fn load_from_database_with_outcome(&self) -> Result<ChainLoadOutcome> {
         if let Some(ref db) = self.db {
-            if let Some(state) = db.state.get_state()? {
-                // Load tip block
-                if let Some(tip_block) = db.blocks.get(&state.tip_hash)? {
+            let state = match db.state.get_state()? {
+                Some(state) => state,
+                None if !db.blocks.has_any_chain_data() => return Ok(ChainLoadOutcome::Fresh),
+                None => {
+                    return Err(Error::DatabaseError(
+                        "persisted block data exists without chain state; refusing to initialize genesis"
+                            .into(),
+                    ));
+                }
+            };
+
+            let actual_genesis = db.blocks.get_hash_by_height(0)?.ok_or_else(|| {
+                Error::DatabaseError(
+                    "chain state exists but the block height index has no genesis entry".into(),
+                )
+            })?;
+            let expected_genesis = self.expected_genesis_hash();
+            if actual_genesis != expected_genesis {
+                return Err(Error::DatabaseError(format!(
+                    "database genesis {} does not match the expected {} genesis {}",
+                    actual_genesis, self.network, expected_genesis,
+                )));
+            }
+
+            return match db.blocks.get(&state.tip_hash)? {
+                Some(tip_block) => {
+                    if tip_block.header.height != state.height {
+                        return Err(Error::DatabaseError(format!(
+                            "chain state height {} does not match tip block height {}",
+                            state.height, tip_block.header.height,
+                        )));
+                    }
                     let difficulty = calculate_difficulty_from_target(&tip_block.header.target);
                     {
                         let mut inner = self.inner.write();
@@ -831,11 +876,15 @@ impl Blockchain {
                     // Verify tip integrity after loading (catches poisoned lock corruption)
                     self.verify_tip_integrity()?;
 
-                    return Ok(());
+                    Ok(ChainLoadOutcome::Loaded)
                 }
-            }
+                None => Err(Error::DatabaseError(format!(
+                    "chain state references missing tip block {} at height {}",
+                    state.tip_hash, state.height,
+                ))),
+            };
         }
-        Ok(())
+        Ok(ChainLoadOutcome::Fresh)
     }
 
     /// Rebuild in-memory UTXO set by replaying all blocks from the database.
@@ -3502,6 +3551,17 @@ pub fn create_genesis_block() -> Block {
 mod tests {
     use super::*;
 
+    fn state_for_genesis(block: &Block) -> ChainStateData {
+        ChainStateData {
+            tip_hash: block.hash(),
+            height: block.header.height,
+            total_difficulty: 1,
+            total_supply: u128::from(calculate_block_reward(block.header.height).as_atomic()),
+            total_burned: 0,
+            last_checkpoint: 0,
+        }
+    }
+
     #[test]
     fn total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling() {
         // Regression for the aggregate-supply overflow (junbyjun's finding):
@@ -3546,6 +3606,75 @@ mod tests {
         let genesis_hash = chain.init_genesis().unwrap();
         assert_eq!(chain.height(), 0);
         assert_eq!(chain.tip().hash, genesis_hash);
+    }
+
+    #[test]
+    fn load_from_database_distinguishes_fresh_and_loaded_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+
+        assert_eq!(
+            chain.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Fresh
+        );
+        chain.init_genesis().unwrap();
+
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        assert_eq!(
+            reloaded.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Loaded
+        );
+    }
+
+    #[test]
+    fn load_from_database_rejects_blocks_without_chain_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(error.contains("without chain state"), "unexpected error: {}", error);
+    }
+
+    #[test]
+    fn load_from_database_rejects_missing_tip_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes([0x42; 32]),
+            height: 10,
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(error.contains("missing tip block"), "unexpected error: {}", error);
+    }
+
+    #[test]
+    fn load_from_database_rejects_wrong_network_genesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::mainnet::mainnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+        db.state.save_state(&state_for_genesis(&genesis)).unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(error.contains("does not match"), "unexpected error: {}", error);
     }
 
     #[test]
