@@ -12,7 +12,7 @@
 //!
 //! To refresh after an INTENTIONAL change:
 //!
-//!     cargo run --bin update-critical-hashes
+//!     COINCYNC_REGEN_LOCK=1 cargo run --bin update-critical-hashes
 //!
 //! The refresher lives at `src/bin/update_critical_hashes.rs` and uses a
 //! byte-identical SHA-256 implementation to the one in this file; changes
@@ -49,6 +49,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-env-changed=COINCYNC_REGEN_LOCK");
 
     // Register cfg(kani) so the compiler doesn't warn when it sees
     // `#[cfg(kani)]` gated proof modules in src/. Kani itself sets
@@ -58,15 +59,32 @@ fn main() {
 
     emit_build_metadata();
 
+    // An integrity gate you can disable by deleting a file is not a gate.
+    // The intentional re-lock path (which must build the updater binary and
+    // therefore re-run this script) sets COINCYNC_REGEN_LOCK=1, which relaxes
+    // both the missing-lock and hash-mismatch checks to warnings so that
+    // `update-critical-hashes` can regenerate the lockfile. Every OTHER build
+    // treats a missing or mismatched lock as a hard failure.
+    let regen_lock = std::env::var_os("COINCYNC_REGEN_LOCK").is_some();
+
     // ── Load the lockfile ────────────────────────────────────────────
     let lockfile = Path::new("critical_files.lock");
     if !lockfile.exists() {
-        println!(
-            "cargo:warning=critical_files.lock not found — \
-             run `cargo run --bin update-critical-hashes` to create it. \
-             Build continues for now; remove this warning by generating the lockfile."
+        if regen_lock {
+            println!(
+                "cargo:warning=critical_files.lock absent + COINCYNC_REGEN_LOCK set — \
+                 skipping the integrity check so update-critical-hashes can regenerate it."
+            );
+            return;
+        }
+        panic!(
+            "\n\ncritical_files.lock is MISSING — the consensus integrity gate cannot run.\n\
+             A missing lock is a HARD FAILURE: it must not silently permit the build, or the \
+             gate could be bypassed by deleting one file. To (re)generate it after an \
+             intentional consensus change, run:\n\
+             \n    COINCYNC_REGEN_LOCK=1 cargo run --bin update-critical-hashes\n\n\
+             then commit the regenerated critical_files.lock alongside the change.\n"
         );
-        return;
     }
 
     let expected = parse_lockfile(lockfile);
@@ -91,7 +109,7 @@ fn main() {
             None => {
                 failures.push(format!(
                     "  MISSING FROM LOCKFILE: {} \
-                     (run `cargo run --bin update-critical-hashes`)",
+                     (run `COINCYNC_REGEN_LOCK=1 cargo run --bin update-critical-hashes`)",
                     file_path
                 ));
                 continue;
@@ -108,6 +126,13 @@ fn main() {
     }
 
     if !failures.is_empty() {
+        if regen_lock {
+            println!(
+                "cargo:warning=critical files changed + COINCYNC_REGEN_LOCK set — \
+                 skipping the mismatch failure so update-critical-hashes can refresh the lock."
+            );
+            return;
+        }
         panic!(
             "\n\n\
              ╔══════════════════════════════════════════════════════════════╗\n\
@@ -121,7 +146,7 @@ fn main() {
              \n\
              If these changes are INTENTIONAL:\n\
                  1. Review the changes carefully — they affect consensus.\n\
-                 2. Run: cargo run --bin update-critical-hashes\n\
+                 2. Run: COINCYNC_REGEN_LOCK=1 cargo run --bin update-critical-hashes\n\
                  3. Commit the updated critical_files.lock alongside the change.\n\
              \n\
              If these changes are NOT intentional:\n\
