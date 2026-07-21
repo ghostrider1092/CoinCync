@@ -11,11 +11,19 @@
 //! A failure here means the crypto foundations are broken.
 
 use coincync::crypto::{
-    SecretScalar, PublicPoint, BlindingFactor, PedersenCommitment, ClsagRingMember, EcCommitment,
-    clsag_sign, clsag_verify,
-    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, RangeProof,
+    clsag_sign,
+    clsag_verify,
+    create_aggregated_range_proof_for_height,
     // 2026-06-03 audit pass: see crypto_properties.rs for the rationale.
     generate_stealth_address_checked,
+    verify_range_proofs_dispatch,
+    BlindingFactor,
+    ClsagRingMember,
+    EcCommitment,
+    PedersenCommitment,
+    PublicPoint,
+    RangeProof,
+    SecretScalar,
 };
 use coincync::primitives::{Amount, PublicKey};
 use rand::rngs::OsRng;
@@ -42,7 +50,8 @@ fn attack_pedersen_binding_property() {
     // Different amounts MUST produce different commitments
     // (unless blinding factors magically cancel — computationally infeasible)
     assert_ne!(
-        c1.to_bytes(), c2.to_bytes(),
+        c1.to_bytes(),
+        c2.to_bytes(),
         "BINDING BROKEN: Different amounts produced same commitment! \
          Discrete log is broken, inflation is trivial."
     );
@@ -50,7 +59,8 @@ fn attack_pedersen_binding_property() {
     // Same amount, different blinding MUST also differ (hiding property)
     let c3 = PedersenCommitment::commit(amount1, &bf2);
     assert_ne!(
-        c1.to_bytes(), c3.to_bytes(),
+        c1.to_bytes(),
+        c3.to_bytes(),
         "HIDING BROKEN: Same amount with different blinding produced same commitment!"
     );
 }
@@ -82,7 +92,10 @@ fn attack_pedersen_homomorphism_no_overflow() {
     // The key point: range proofs prevent this attack regardless
     // because you can't create a valid range proof for u64::MAX
     let proof_max = create_aggregated_range_proof_for_height(
-        &[Amount::from_atomic(u64::MAX)], &[bf1], &mut OsRng, 0
+        &[Amount::from_atomic(u64::MAX)],
+        &[bf1],
+        &mut OsRng,
+        0,
     );
     // Range proof for u64::MAX should either fail or produce a proof
     // that we can verify (some implementations allow max range)
@@ -94,7 +107,10 @@ fn attack_pedersen_homomorphism_no_overflow() {
         // The attack would be making it verify for a DIFFERENT commitment
         let c_fake = PedersenCommitment::commit(0, &BlindingFactor::random(&mut OsRng));
         let fake_valid = verify_range_proofs_dispatch(&[c_fake], &proof_ref, 0);
-        assert!(!fake_valid, "Range proof for u64::MAX validates for amount 0!");
+        assert!(
+            !fake_valid,
+            "Range proof for u64::MAX validates for amount 0!"
+        );
     }
 }
 
@@ -114,24 +130,30 @@ fn attack_bulletproof_only_proves_committed_value() {
     let bf = BlindingFactor::random(&mut rng);
     let commit = PedersenCommitment::commit(amount.as_atomic(), &bf);
 
-    let proof = create_aggregated_range_proof_for_height(
-        &[amount], &[bf.clone()], &mut rng, 0
-    ).unwrap();
+    let proof =
+        create_aggregated_range_proof_for_height(&[amount], &[bf.clone()], &mut rng, 0).unwrap();
     let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
 
     // Verify with correct commitment — must pass
-    assert!(verify_range_proofs_dispatch(&[commit.clone()], &proof_ref, 0));
+    assert!(verify_range_proofs_dispatch(
+        &[commit.clone()],
+        &proof_ref,
+        0
+    ));
 
     // Try with 100 different wrong commitments — ALL must fail
     for _ in 0..100 {
         let wrong_amount = rand::random::<u64>();
-        if wrong_amount == amount.as_atomic() { continue; }
+        if wrong_amount == amount.as_atomic() {
+            continue;
+        }
         let wrong_bf = BlindingFactor::random(&mut rng);
         let wrong_commit = PedersenCommitment::commit(wrong_amount, &wrong_bf);
         assert!(
             !verify_range_proofs_dispatch(&[wrong_commit], &proof_ref, 0),
             "BULLETPROOF FORGERY: Proof for {} also validates for {}!",
-            amount.as_atomic(), wrong_amount
+            amount.as_atomic(),
+            wrong_amount
         );
     }
 }
@@ -152,18 +174,27 @@ fn attack_key_image_linkability_preserved() {
     let ring_size = 11;
 
     let make_ring = |real_idx: usize| -> Vec<ClsagRingMember> {
-        (0..ring_size).map(|i| {
-            let (pk, commit) = if i == real_idx {
-                (real_secret.to_public(), PedersenCommitment::commit(1_000_000_000, &real_blinding))
-            } else {
-                let s = SecretScalar::random(&mut OsRng);
-                let bf = BlindingFactor::random(&mut OsRng);
-                (s.to_public(), PedersenCommitment::commit(1_000_000_000, &bf))
-            };
-            ClsagRingMember::new(pk, EcCommitment::from_point(
-                PublicPoint::from_bytes(commit.to_bytes()).unwrap()
-            ))
-        }).collect()
+        (0..ring_size)
+            .map(|i| {
+                let (pk, commit) = if i == real_idx {
+                    (
+                        real_secret.to_public(),
+                        PedersenCommitment::commit(1_000_000_000, &real_blinding),
+                    )
+                } else {
+                    let s = SecretScalar::random(&mut OsRng);
+                    let bf = BlindingFactor::random(&mut OsRng);
+                    (
+                        s.to_public(),
+                        PedersenCommitment::commit(1_000_000_000, &bf),
+                    )
+                };
+                ClsagRingMember::new(
+                    pk,
+                    EcCommitment::from_point(PublicPoint::from_bytes(commit.to_bytes()).unwrap()),
+                )
+            })
+            .collect()
     };
 
     let pseudo_bf1 = BlindingFactor::random(&mut OsRng);
@@ -172,12 +203,14 @@ fn attack_key_image_linkability_preserved() {
     let ring1 = make_ring(3);
     let ring2 = make_ring(7); // different ring, different position
 
-    let pseudo1 = EcCommitment::from_point(PublicPoint::from_bytes(
-        PedersenCommitment::commit(1_000_000_000, &pseudo_bf1).to_bytes()
-    ).unwrap());
-    let pseudo2 = EcCommitment::from_point(PublicPoint::from_bytes(
-        PedersenCommitment::commit(1_000_000_000, &pseudo_bf2).to_bytes()
-    ).unwrap());
+    let pseudo1 = EcCommitment::from_point(
+        PublicPoint::from_bytes(PedersenCommitment::commit(1_000_000_000, &pseudo_bf1).to_bytes())
+            .unwrap(),
+    );
+    let pseudo2 = EcCommitment::from_point(
+        PublicPoint::from_bytes(PedersenCommitment::commit(1_000_000_000, &pseudo_bf2).to_bytes())
+            .unwrap(),
+    );
 
     let bd1 = SecretScalar::from_bytes(real_blinding.sub(&pseudo_bf1).to_bytes());
     let bd2 = SecretScalar::from_bytes(real_blinding.sub(&pseudo_bf2).to_bytes());
@@ -212,9 +245,9 @@ fn attack_stealth_addresses_unlinkable() {
 
     // 200 payments to the same recipient (each uses output_idx 0)
     for _ in 0..200 {
-        let (stealth, _tx_secret) = generate_stealth_address_checked(
-            &spend_pub, &view_pub, 0, &mut OsRng,
-        ).expect("test fixtures pass valid curve points");
+        let (stealth, _tx_secret) =
+            generate_stealth_address_checked(&spend_pub, &view_pub, 0, &mut OsRng)
+                .expect("test fixtures pass valid curve points");
         let bytes = stealth.public_key.as_bytes().to_owned();
         assert!(
             stealth_set.insert(bytes),
@@ -237,9 +270,7 @@ fn attack_truncated_range_proof_rejected() {
     let bf = BlindingFactor::random(&mut rng);
     let commit = PedersenCommitment::commit(amount.as_atomic(), &bf);
 
-    let proof = create_aggregated_range_proof_for_height(
-        &[amount], &[bf], &mut rng, 0
-    ).unwrap();
+    let proof = create_aggregated_range_proof_for_height(&[amount], &[bf], &mut rng, 0).unwrap();
     let proof_bytes = proof.try_to_bytes().unwrap();
 
     // Try truncating at every 10% interval
@@ -274,27 +305,51 @@ fn attack_clsag_mismatched_response_count() {
     let real_blinding = BlindingFactor::random(&mut OsRng);
     let pseudo_blinding = BlindingFactor::random(&mut OsRng);
 
-    let ring: Vec<ClsagRingMember> = (0..ring_size).map(|i| {
-        let (pk, commit) = if i == 0 {
-            (real_secret.to_public(), PedersenCommitment::commit(1_000_000_000, &real_blinding))
-        } else {
-            let s = SecretScalar::random(&mut OsRng);
-            let bf = BlindingFactor::random(&mut OsRng);
-            (s.to_public(), PedersenCommitment::commit(1_000_000_000, &bf))
-        };
-        ClsagRingMember::new(pk, EcCommitment::from_point(
-            PublicPoint::from_bytes(commit.to_bytes()).unwrap()
-        ))
-    }).collect();
+    let ring: Vec<ClsagRingMember> = (0..ring_size)
+        .map(|i| {
+            let (pk, commit) = if i == 0 {
+                (
+                    real_secret.to_public(),
+                    PedersenCommitment::commit(1_000_000_000, &real_blinding),
+                )
+            } else {
+                let s = SecretScalar::random(&mut OsRng);
+                let bf = BlindingFactor::random(&mut OsRng);
+                (
+                    s.to_public(),
+                    PedersenCommitment::commit(1_000_000_000, &bf),
+                )
+            };
+            ClsagRingMember::new(
+                pk,
+                EcCommitment::from_point(PublicPoint::from_bytes(commit.to_bytes()).unwrap()),
+            )
+        })
+        .collect();
 
-    let pseudo_output = EcCommitment::from_point(PublicPoint::from_bytes(
-        PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes()
-    ).unwrap());
+    let pseudo_output = EcCommitment::from_point(
+        PublicPoint::from_bytes(
+            PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes(),
+        )
+        .unwrap(),
+    );
     let bd = SecretScalar::from_bytes(real_blinding.sub(&pseudo_blinding).to_bytes());
 
     // Get a valid signature
-    let mut sig = clsag_sign(b"test", &ring, 0, &real_secret, &bd, &pseudo_output, &mut OsRng).unwrap();
-    assert!(clsag_verify(b"test", &ring, &pseudo_output, &sig), "Valid sig must verify");
+    let mut sig = clsag_sign(
+        b"test",
+        &ring,
+        0,
+        &real_secret,
+        &bd,
+        &pseudo_output,
+        &mut OsRng,
+    )
+    .unwrap();
+    assert!(
+        clsag_verify(b"test", &ring, &pseudo_output, &sig),
+        "Valid sig must verify"
+    );
 
     // Remove one response (ring size mismatch)
     sig.responses.pop();

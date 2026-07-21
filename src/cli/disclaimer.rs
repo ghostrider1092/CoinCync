@@ -57,7 +57,9 @@ impl AcknowledgmentHistory {
     pub fn record(&mut self, version: u32) {
         self.acknowledgments.push(Acknowledgment {
             version,
-            timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string(),
         });
     }
 }
@@ -201,7 +203,12 @@ pub fn show_history(data_dir: &Path) {
     println!("|            DISCLAIMER ACKNOWLEDGMENT HISTORY                 |");
     println!("+------+----------+-------------------------------------------+");
     for (i, ack) in history.acknowledgments.iter().enumerate() {
-        println!("|  {:>2}  |    v{:<4} | {}  |", i + 1, ack.version, ack.timestamp);
+        println!(
+            "|  {:>2}  |    v{:<4} | {}  |",
+            i + 1,
+            ack.version,
+            ack.timestamp
+        );
     }
     println!("+------+----------+-------------------------------------------+");
     println!();

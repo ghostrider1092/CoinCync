@@ -15,13 +15,17 @@
 //! Relevance to CoinCync: Our amounts use u64 with checked arithmetic. This test
 //! verifies that output sums cannot overflow and bypass balance verification.
 
-use coincync::primitives::Amount;
-use coincync::transaction::{Transaction, TxType, TxOutput, TxInput, RingMemberRef, TransactionBuilder};
 use coincync::consensus::validate_transaction_basic;
-use coincync::mempool::Mempool;
-use coincync::crypto::{SecretScalar, BlindingFactor, PedersenCommitment, KeyImage as CKI, ClsagSignature};
-use coincync::primitives::{PublicKey, KeyImage};
 use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+use coincync::crypto::{
+    BlindingFactor, ClsagSignature, KeyImage as CKI, PedersenCommitment, SecretScalar,
+};
+use coincync::mempool::Mempool;
+use coincync::primitives::Amount;
+use coincync::primitives::{KeyImage, PublicKey};
+use coincync::transaction::{
+    RingMemberRef, Transaction, TransactionBuilder, TxInput, TxOutput, TxType,
+};
 use rand::rngs::OsRng;
 
 /// Test: u64::MAX/2 + u64::MAX/2 + 2 overflows. Both validation and builder must catch it.
@@ -35,9 +39,14 @@ fn bitcoin_2010_output_sum_overflow_u64() {
 
     let make_output = |amount: u64| -> TxOutput {
         TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(amount, &BlindingFactor::random(&mut OsRng)).to_bytes(),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(amount, &BlindingFactor::random(&mut OsRng))
+                .to_bytes(),
             encrypted_amount: vec![0u8; 8],
             view_tag: 0,
             lock_height: None,
@@ -45,12 +54,18 @@ fn bitcoin_2010_output_sum_overflow_u64() {
         }
     };
 
-    let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE).map(|_| {
-        RingMemberRef {
-            public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-        }
-    }).collect();
+    let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE)
+        .map(|_| RingMemberRef {
+            public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(
+                1_000_000_000,
+                &BlindingFactor::random(&mut OsRng),
+            )
+            .to_bytes(),
+        })
+        .collect();
 
     let tx = Transaction {
         version: 1,
@@ -96,13 +111,17 @@ fn bitcoin_2010_builder_rejects_overflow() {
         let mut rng = OsRng;
         let (_, _r_spend) = {
             let s = SecretScalar::random(&mut OsRng);
-            (coincync::primitives::SecretKey::from_bytes(s.to_bytes()),
-             PublicKey::from_bytes(s.to_public().to_bytes()))
+            (
+                coincync::primitives::SecretKey::from_bytes(s.to_bytes()),
+                PublicKey::from_bytes(s.to_public().to_bytes()),
+            )
         };
         let (_, _r_view) = {
             let s = SecretScalar::random(&mut OsRng);
-            (coincync::primitives::SecretKey::from_bytes(s.to_bytes()),
-             PublicKey::from_bytes(s.to_public().to_bytes()))
+            (
+                coincync::primitives::SecretKey::from_bytes(s.to_bytes()),
+                PublicKey::from_bytes(s.to_public().to_bytes()),
+            )
         };
 
         let mut builder = TransactionBuilder::transfer();

@@ -100,7 +100,10 @@ pub struct CicadaSchedule {
 impl CicadaSchedule {
     /// New schedule around `base_secs`, starting at step 0.
     pub fn new(base_secs: u64) -> Self {
-        Self { base_secs, counter: 0 }
+        Self {
+            base_secs,
+            counter: 0,
+        }
     }
 
     /// The delay the next [`advance`](Self::advance) will return, without
@@ -171,7 +174,10 @@ mod tests {
         let hi = base * CICADA_PRIMES.iter().copied().max().unwrap() / REFERENCE_PRIME;
         for c in 0..256u64 {
             let d = prime_interval_secs(base, c);
-            assert!(d >= lo && d <= hi, "delay {d} out of [{lo},{hi}] at step {c}");
+            assert!(
+                d >= lo && d <= hi,
+                "delay {d} out of [{lo},{hi}] at step {c}"
+            );
         }
     }
 
@@ -187,7 +193,10 @@ mod tests {
         }
         let expected: std::collections::BTreeSet<u64> =
             CICADA_PRIMES.iter().map(|p| p * 10).collect();
-        assert_eq!(seen, expected, "one cycle must visit every prime-derived interval");
+        assert_eq!(
+            seen, expected,
+            "one cycle must visit every prime-derived interval"
+        );
     }
 
     #[test]
@@ -214,7 +223,10 @@ mod tests {
             .collect();
         let mut sorted = seq.clone();
         sorted.sort_unstable();
-        assert_ne!(seq, sorted, "prime walk must not emerge as a monotonic ramp");
+        assert_ne!(
+            seq, sorted,
+            "prime walk must not emerge as a monotonic ramp"
+        );
     }
 
     #[test]
@@ -223,7 +235,10 @@ mod tests {
         assert_eq!(s.step(), 0);
         let peeked = s.peek();
         let advanced = s.advance();
-        assert_eq!(peeked, advanced, "peek must equal the value advance() returns");
+        assert_eq!(
+            peeked, advanced,
+            "peek must equal the value advance() returns"
+        );
         assert_eq!(s.step(), 1);
         // Second advance yields a different step's delay.
         let second = s.advance();
@@ -234,7 +249,10 @@ mod tests {
     #[test]
     fn counter_wraps_without_panic() {
         // Near u64::MAX the wrapping_mul/add must not panic in debug.
-        let mut s = CicadaSchedule { base_secs: 300, counter: u64::MAX - 2 };
+        let mut s = CicadaSchedule {
+            base_secs: 300,
+            counter: u64::MAX - 2,
+        };
         for _ in 0..8 {
             let _ = s.advance();
         }

@@ -68,9 +68,8 @@ pub use adapter::ChainAdapter;
 pub use rescue::{recovery_priority, RescueConfig, RescueTick};
 pub use tick::{TickBehavior, TickPhase};
 pub use types::{
-    AggregateFleetHealth, ChainTipState, DeploymentMode, FleetPeer,
-    HealthSnapshot, Severity, Snapshot, TickError, TickNotice, TickNoticeKind,
-    TickResult,
+    AggregateFleetHealth, ChainTipState, DeploymentMode, FleetPeer, HealthSnapshot, Severity,
+    Snapshot, TickError, TickNotice, TickNoticeKind, TickResult,
 };
 
 #[cfg(feature = "mock")]

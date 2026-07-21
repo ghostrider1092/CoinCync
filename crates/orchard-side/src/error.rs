@@ -67,7 +67,10 @@ mod tests {
     fn not_implemented_carries_stage_name() {
         let e = Error::not_implemented("action.prove");
         let msg = format!("{}", e);
-        assert!(msg.contains("action.prove"), "stage name must appear in Display");
+        assert!(
+            msg.contains("action.prove"),
+            "stage name must appear in Display"
+        );
     }
 
     #[test]

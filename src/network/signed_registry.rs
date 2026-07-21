@@ -181,14 +181,21 @@ impl std::fmt::Display for RegistryError {
                 write!(f, "network mismatch: expected {} got {}", expected, got)
             }
             Self::SchemaMismatch { expected, got } => {
-                write!(f, "schema version mismatch: expected {} got {}", expected, got)
+                write!(
+                    f,
+                    "schema version mismatch: expected {} got {}",
+                    expected, got
+                )
             }
             Self::ClockSkew { payload_ts, now_ts } => write!(
                 f,
                 "payload from the future: payload_ts={} now={}",
                 payload_ts, now_ts
             ),
-            Self::StalePayload { payload_ts, last_seen_ts } => write!(
+            Self::StalePayload {
+                payload_ts,
+                last_seen_ts,
+            } => write!(
                 f,
                 "payload {} not newer than last-seen {}",
                 payload_ts, last_seen_ts
@@ -257,16 +264,25 @@ where
         pointer.unix_ts, pointer.payload_cid, pointer.entry_count, pointer.source,
     );
 
-    let (payload_bytes, signature_bytes) =
-        fetch_from_gateways(&client, &pointer.payload_cid, &pointer.signature_cid, payload_max_bytes)
-            .await?;
+    let (payload_bytes, signature_bytes) = fetch_from_gateways(
+        &client,
+        &pointer.payload_cid,
+        &pointer.signature_cid,
+        payload_max_bytes,
+    )
+    .await?;
 
     verify_signature(pubkey, namespace, &payload_bytes, &signature_bytes)?;
 
     let payload: T = serde_json::from_slice(&payload_bytes)
         .map_err(|e| RegistryError::PayloadParseError(e.to_string()))?;
 
-    validate_payload_meta(&payload, expected_network, expected_schema_version, last_seen_ts)?;
+    validate_payload_meta(
+        &payload,
+        expected_network,
+        expected_schema_version,
+        last_seen_ts,
+    )?;
 
     Ok(payload)
 }
@@ -324,7 +340,9 @@ async fn fetch_from_gateways(
                 );
                 return Ok((payload, sig));
             }
-            (Err(ep), Err(es)) => attempts.push(format!("{} (payload: {}, sig: {})", gateway, ep, es)),
+            (Err(ep), Err(es)) => {
+                attempts.push(format!("{} (payload: {}, sig: {})", gateway, ep, es))
+            }
             (Err(e), _) | (_, Err(e)) => attempts.push(format!("{} ({})", gateway, e)),
         }
     }
@@ -353,9 +371,16 @@ async fn fetch_bounded(
         }
     }
 
-    let bytes = resp.bytes().await.map_err(|e| format!("read body: {}", e))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read body: {}", e))?;
     if bytes.len() > max_bytes {
-        return Err(format!("body {} bytes exceeds cap {}", bytes.len(), max_bytes));
+        return Err(format!(
+            "body {} bytes exceeds cap {}",
+            bytes.len(),
+            max_bytes
+        ));
     }
 
     Ok(bytes.to_vec())
@@ -377,8 +402,8 @@ fn verify_signature(
         .expect("length 64 confirmed above");
 
     let signature = Signature::from_bytes(&sig_bytes);
-    let verifying_key = VerifyingKey::from_bytes(pubkey)
-        .map_err(|_| RegistryError::SignatureVerifyFailed)?;
+    let verifying_key =
+        VerifyingKey::from_bytes(pubkey).map_err(|_| RegistryError::SignatureVerifyFailed)?;
 
     // Domain-separated: signature covers namespace || payload_bytes.
     // A signature from any other coincync signing context (peer
@@ -539,7 +564,10 @@ mod tests {
             .expect_err("must reject network mismatch");
         assert!(matches!(
             err,
-            RegistryError::NetworkMismatch { expected: _, got: _ }
+            RegistryError::NetworkMismatch {
+                expected: _,
+                got: _
+            }
         ));
     }
 
@@ -553,7 +581,13 @@ mod tests {
         };
         let err = validate_payload_meta(&payload, "testnet", 1, 0)
             .expect_err("must reject schema mismatch");
-        assert!(matches!(err, RegistryError::SchemaMismatch { expected: 1, got: 42 }));
+        assert!(matches!(
+            err,
+            RegistryError::SchemaMismatch {
+                expected: 1,
+                got: 42
+            }
+        ));
     }
 
     #[test]
@@ -565,8 +599,8 @@ mod tests {
             entries: vec![],
         };
         // last_seen_ts = 100 → payload must be > 100; equal is stale.
-        let err = validate_payload_meta(&payload, "testnet", 1, 100)
-            .expect_err("must reject replay");
+        let err =
+            validate_payload_meta(&payload, "testnet", 1, 100).expect_err("must reject replay");
         assert!(matches!(err, RegistryError::StalePayload { .. }));
     }
 
@@ -654,7 +688,8 @@ mod tests {
 
     #[test]
     fn registry_pointer_accepts_missing_optional_fields() {
-        let minimal = r#"{"schema_version":1,"unix_ts":100,"payload_cid":"cidX","signature_cid":"cidY"}"#;
+        let minimal =
+            r#"{"schema_version":1,"unix_ts":100,"payload_cid":"cidX","signature_cid":"cidY"}"#;
         let p: RegistryPointer = serde_json::from_str(minimal).expect("parse minimal");
         assert_eq!(p.schema_version, 1);
         assert!(p.source.is_none());

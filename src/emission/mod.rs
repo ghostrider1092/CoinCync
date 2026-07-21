@@ -16,8 +16,10 @@ pub mod supply;
 #[cfg(kani)]
 mod kani_proofs;
 
-pub use curve::{base_reward, base_reward_from_supply, block_reward, emission_phase, EmissionPhase};
-pub use supply::{SupplyStats, calculate_supply_commitment};
+pub use curve::{
+    base_reward, base_reward_from_supply, block_reward, emission_phase, EmissionPhase,
+};
+pub use supply::{calculate_supply_commitment, SupplyStats};
 
 use crate::primitives::Amount;
 

@@ -127,10 +127,7 @@ impl RateLimiter {
         Self {
             config,
             state: RwLock::new(HashMap::new()),
-            whitelist: vec![
-                "127.0.0.1".parse().unwrap(),
-                "::1".parse().unwrap(),
-            ],
+            whitelist: vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
         }
     }
 
@@ -186,7 +183,8 @@ impl RateLimiter {
             // If still at capacity, evict the single oldest inactive entry
             // (still skipping permanent blocks).
             if state.len() >= self.config.max_tracked_ips {
-                let oldest_inactive = state.iter()
+                let oldest_inactive = state
+                    .iter()
                     .filter(|(_, s)| {
                         let ban_expired = s.banned_until.map(|t| now >= t).unwrap_or(true);
                         let no_recent = !s.requests.iter().any(|&t| t > window_start);
@@ -204,7 +202,8 @@ impl RateLimiter {
                     // Reject new IP rather than evicting active tracking state.
                     tracing::warn!(
                         "Rate limiter at capacity ({}) - rejecting untracked IP {}",
-                        self.config.max_tracked_ips, ip
+                        self.config.max_tracked_ips,
+                        ip
                     );
                     return RateLimitResult::RateLimited {
                         retry_after: self.config.window.as_secs(),
@@ -294,7 +293,8 @@ impl RateLimiter {
                 is_banned || is_active || permanent_block
             });
             if state.len() > self.config.max_tracked_ips {
-                let oldest = state.iter()
+                let oldest = state
+                    .iter()
                     .filter(|(_, s)| {
                         let ban_expired = s.banned_until.map_or(true, |b| now >= b);
                         let not_permanent = s.ban_count < max_bans;
@@ -315,7 +315,9 @@ impl RateLimiter {
         if let Some(banned_until) = ip_state.banned_until {
             if now < banned_until {
                 let remaining = banned_until.duration_since(now).as_secs();
-                return RateLimitResult::Banned { retry_after: remaining };
+                return RateLimitResult::Banned {
+                    retry_after: remaining,
+                };
             }
             ip_state.banned_until = None;
         }
@@ -358,7 +360,8 @@ impl RateLimiter {
                     .requests
                     .iter()
                     .filter(|&&t| t > window_start)
-                    .count().min(u32::MAX as usize) as u32;
+                    .count()
+                    .min(u32::MAX as usize) as u32;
 
                 self.config.max_requests.saturating_sub(recent_requests)
             }

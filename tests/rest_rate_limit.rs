@@ -6,7 +6,10 @@ use coincync::chain::{Blockchain, SharedBlockchain};
 use coincync::mempool::SharedMempool;
 use coincync::rpc::{start_rpc_server, RpcConfig};
 
-async fn start_rpc_and_rest(rpc_port: u16, rest_port: u16) -> (coincync::rpc::RpcServer, tokio::task::JoinHandle<()>) {
+async fn start_rpc_and_rest(
+    rpc_port: u16,
+    rest_port: u16,
+) -> (coincync::rpc::RpcServer, tokio::task::JoinHandle<()>) {
     let shared_chain: SharedBlockchain = Arc::new(Blockchain::new());
     let shared_mempool = SharedMempool::new();
     let rpc_addr: SocketAddr = format!("127.0.0.1:{}", rpc_port).parse().unwrap();

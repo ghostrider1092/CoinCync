@@ -9,19 +9,18 @@
 //! NO MOCKS. Every component is real.
 
 use coincync::chain::Blockchain;
-use coincync::mempool::Mempool;
-use coincync::primitives::{Amount, PublicKey, SecretKey, Hash};
-use coincync::transaction::{
-    TransactionBuilder, SpendableInput, Recipient, DecoyOutput, Transaction,
-};
-use coincync::crypto::{
-    SecretScalar, BlindingFactor, PedersenCommitment,
-    KeyImage as CryptoKeyImage, create_aggregated_range_proof_for_height,
-    verify_range_proofs_dispatch,
-};
-use coincync::wallet::{WalletKeys};
 use coincync::consensus::validate_transaction_basic;
 use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+use coincync::crypto::{
+    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, BlindingFactor,
+    KeyImage as CryptoKeyImage, PedersenCommitment, SecretScalar,
+};
+use coincync::mempool::Mempool;
+use coincync::primitives::{Amount, Hash, PublicKey, SecretKey};
+use coincync::transaction::{
+    DecoyOutput, Recipient, SpendableInput, Transaction, TransactionBuilder,
+};
+use coincync::wallet::WalletKeys;
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -31,7 +30,10 @@ use rand::rngs::OsRng;
 fn generate_keypair() -> (SecretKey, PublicKey) {
     let secret = SecretScalar::random(&mut OsRng);
     let public = secret.to_public();
-    (SecretKey::from_bytes(secret.to_bytes()), PublicKey::from_bytes(public.to_bytes()))
+    (
+        SecretKey::from_bytes(secret.to_bytes()),
+        PublicKey::from_bytes(public.to_bytes()),
+    )
 }
 
 fn build_real_tx(input_amount: u64, output_amount: u64, fee: u64) -> Transaction {
@@ -50,25 +52,33 @@ fn build_real_tx(input_amount: u64, output_amount: u64, fee: u64) -> Transaction
         height: 1000,
     };
 
-    let decoys: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1).map(|_| {
-        let s = SecretScalar::random(&mut rng);
-        let bf = BlindingFactor::random(&mut rng);
-        DecoyOutput {
-            public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-            height: 500,
-        }
-    }).collect();
+    let decoys: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1)
+        .map(|_| {
+            let s = SecretScalar::random(&mut rng);
+            let bf = BlindingFactor::random(&mut rng);
+            DecoyOutput {
+                public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
+                commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
+                height: 500,
+            }
+        })
+        .collect();
 
     let real_idx = rand::random::<usize>() % BOOTSTRAP_MIN_RING_SIZE;
     let mut builder = TransactionBuilder::transfer().with_target_height(0);
     builder.add_input(input, decoys, real_idx).unwrap();
-    builder.add_output(&Recipient {
-        spend_public: r_spend,
-        view_public: r_view,
-        amount: Amount::from_atomic(output_amount),
-        lock_height: None,
-    }, 0, &mut rng).unwrap();
+    builder
+        .add_output(
+            &Recipient {
+                spend_public: r_spend,
+                view_public: r_view,
+                amount: Amount::from_atomic(output_amount),
+                lock_height: None,
+            },
+            0,
+            &mut rng,
+        )
+        .unwrap();
     builder.set_fee(Amount::from_atomic(fee));
     builder.build(&mut rng).unwrap()
 }
@@ -88,14 +98,25 @@ fn tier10_honest_wallet_to_mempool_full_pipeline() {
 
     // Structural validation passes
     let struct_result = validate_transaction_basic(&tx);
-    assert!(struct_result.is_ok(), "Structural validation failed: {:?}", struct_result.err());
+    assert!(
+        struct_result.is_ok(),
+        "Structural validation failed: {:?}",
+        struct_result.err()
+    );
 
     // Full mempool admission (real crypto)
     let result = pool.add(tx.clone());
-    assert!(result.is_ok(), "Full pipeline admission failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Full pipeline admission failed: {:?}",
+        result.err()
+    );
 
     // Verify it's actually in the mempool
-    assert!(pool.contains(&tx.hash()), "Transaction must be in mempool after admission");
+    assert!(
+        pool.contains(&tx.hash()),
+        "Transaction must be in mempool after admission"
+    );
     assert_eq!(pool.len(), 1);
 }
 
@@ -235,12 +256,12 @@ fn tier10_range_proof_not_portable() {
     let amount1 = Amount::from_atomic(1_000_000_000);
     let bf1 = BlindingFactor::random(&mut rng);
     let commitment1 = PedersenCommitment::commit(amount1.as_atomic(), &bf1);
-    let proof1 = create_aggregated_range_proof_for_height(
-        &[amount1], &[bf1.clone()], &mut rng, 0
-    ).unwrap();
+    let proof1 =
+        create_aggregated_range_proof_for_height(&[amount1], &[bf1.clone()], &mut rng, 0).unwrap();
 
     // Verify it works with original commitment
-    let proof_ref = coincync::crypto::RangeProof::from_bytes(&proof1.try_to_bytes().unwrap()).unwrap();
+    let proof_ref =
+        coincync::crypto::RangeProof::from_bytes(&proof1.try_to_bytes().unwrap()).unwrap();
     assert!(
         verify_range_proofs_dispatch(&[commitment1.clone()], &proof_ref, 0),
         "Original proof must verify"
@@ -272,13 +293,16 @@ fn tier10_different_wallets_different_key_images() {
 
     // Key images must be different (different secrets)
     assert_ne!(
-        tx1.inputs[0].key_image,
-        tx2.inputs[0].key_image,
+        tx1.inputs[0].key_image, tx2.inputs[0].key_image,
         "Different wallets must produce different key images"
     );
 
     // Transaction hashes must be different
-    assert_ne!(tx1.hash(), tx2.hash(), "Different transactions must have different hashes");
+    assert_ne!(
+        tx1.hash(),
+        tx2.hash(),
+        "Different transactions must have different hashes"
+    );
 }
 
 // =============================================================================
@@ -334,7 +358,10 @@ fn tier10_chain_mempool_consistency() {
     // Simulate tx1 being confirmed in a block
     pool.remove_confirmed(&[tx1.clone()]);
     assert_eq!(pool.len(), 1, "Confirmed tx must be removed");
-    assert!(!pool.contains(&tx1.hash()), "tx1 should no longer be in mempool");
+    assert!(
+        !pool.contains(&tx1.hash()),
+        "tx1 should no longer be in mempool"
+    );
     assert!(pool.contains(&tx2.hash()), "tx2 should remain in mempool");
 }
 
@@ -366,34 +393,41 @@ fn tier10_multi_input_all_verified() {
         height: 1000,
     };
 
-    let decoys1: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1).map(|_| {
-        let s = SecretScalar::random(&mut rng);
-        let bf = BlindingFactor::random(&mut rng);
-        DecoyOutput {
-            public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-            height: 500,
-        }
-    }).collect();
+    let decoys1: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1)
+        .map(|_| {
+            let s = SecretScalar::random(&mut rng);
+            let bf = BlindingFactor::random(&mut rng);
+            DecoyOutput {
+                public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
+                commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
+                height: 500,
+            }
+        })
+        .collect();
     let decoys2 = decoys1.clone();
 
     let mut builder = TransactionBuilder::transfer().with_target_height(0);
     builder.add_input(input1, decoys1, 0).unwrap();
     builder.add_input(input2, decoys2, 3).unwrap();
-    builder.add_output(&Recipient {
-        spend_public: r_spend,
-        view_public: r_view,
-        amount: Amount::from_atomic(1_950_000_000),
-        lock_height: None,
-    }, 0, &mut rng).unwrap();
+    builder
+        .add_output(
+            &Recipient {
+                spend_public: r_spend,
+                view_public: r_view,
+                amount: Amount::from_atomic(1_950_000_000),
+                lock_height: None,
+            },
+            0,
+            &mut rng,
+        )
+        .unwrap();
     builder.set_fee(Amount::from_atomic(50_000_000));
 
     let tx = builder.build(&mut rng).expect("multi-input build");
 
     // Verify both inputs have distinct key images
     assert_ne!(
-        tx.inputs[0].key_image,
-        tx.inputs[1].key_image,
+        tx.inputs[0].key_image, tx.inputs[1].key_image,
         "Multi-input tx must have distinct key images per input"
     );
 
@@ -437,25 +471,33 @@ fn tier10_complete_lifecycle_seed_to_mempool() {
     };
 
     // Step 4: Build decoy ring
-    let decoys: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1).map(|_| {
-        let s = SecretScalar::random(&mut rng);
-        let bf = BlindingFactor::random(&mut rng);
-        DecoyOutput {
-            public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(5_000_000_000, &bf).to_bytes(),
-            height: 1500,
-        }
-    }).collect();
+    let decoys: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1)
+        .map(|_| {
+            let s = SecretScalar::random(&mut rng);
+            let bf = BlindingFactor::random(&mut rng);
+            DecoyOutput {
+                public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
+                commitment: PedersenCommitment::commit(5_000_000_000, &bf).to_bytes(),
+                height: 1500,
+            }
+        })
+        .collect();
 
     // Step 5: Build transaction
     let mut builder = TransactionBuilder::transfer().with_target_height(0);
     builder.add_input(input, decoys, 5).unwrap();
-    builder.add_output(&Recipient {
-        spend_public: recipient_spend,
-        view_public: recipient_view,
-        amount: Amount::from_atomic(4_900_000_000),
-        lock_height: None,
-    }, 0, &mut rng).unwrap();
+    builder
+        .add_output(
+            &Recipient {
+                spend_public: recipient_spend,
+                view_public: recipient_view,
+                amount: Amount::from_atomic(4_900_000_000),
+                lock_height: None,
+            },
+            0,
+            &mut rng,
+        )
+        .unwrap();
     builder.set_fee(Amount::from_atomic(100_000_000));
 
     let tx = builder.build(&mut rng).expect("build from wallet keys");

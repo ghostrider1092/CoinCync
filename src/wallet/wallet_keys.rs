@@ -115,9 +115,7 @@ impl WalletKeys {
         // pool with plaintext view_secret bytes readable by the next
         // allocation that lands on the same slot. Now we build the
         // buffer explicitly and zeroize it before it goes out of scope.
-        let mut hash_input = Vec::with_capacity(
-            b"COINCYNC_WATCHONLY_PLACEHOLDER_v1".len() + 32,
-        );
+        let mut hash_input = Vec::with_capacity(b"COINCYNC_WATCHONLY_PLACEHOLDER_v1".len() + 32);
         hash_input.extend_from_slice(b"COINCYNC_WATCHONLY_PLACEHOLDER_v1");
         hash_input.extend_from_slice(view_secret.as_bytes());
         let placeholder_hash = blake3::hash(&hash_input);
@@ -175,8 +173,8 @@ impl WalletKeys {
         type HmacSha256 = Hmac<Sha256>;
 
         // Spend key
-        let mut spend_mac = HmacSha256::new_from_slice(&self.master_seed)
-            .expect("HMAC accepts any key size");
+        let mut spend_mac =
+            HmacSha256::new_from_slice(&self.master_seed).expect("HMAC accepts any key size");
         spend_mac.update(b"COINCYNC_SPEND_v2");
         spend_mac.update(&epoch.to_le_bytes());
         let mut spend_bytes = [0u8; 32];
@@ -185,8 +183,8 @@ impl WalletKeys {
         spend_bytes.zeroize();
 
         // View key
-        let mut view_mac = HmacSha256::new_from_slice(&self.master_seed)
-            .expect("HMAC accepts any key size");
+        let mut view_mac =
+            HmacSha256::new_from_slice(&self.master_seed).expect("HMAC accepts any key size");
         view_mac.update(b"COINCYNC_VIEW_v2");
         view_mac.update(&epoch.to_le_bytes());
         let mut view_bytes = [0u8; 32];

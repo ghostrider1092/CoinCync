@@ -1,8 +1,8 @@
 //! Network security tests: peer banning/reputation and Dandelion++ stem/fluff.
 
-use coincync::network::{PeerInfo, generate_peer_id, DandelionRouter};
-use coincync::transaction::{Transaction, TxType};
+use coincync::network::{generate_peer_id, DandelionRouter, PeerInfo};
 use coincync::primitives::Amount;
+use coincync::transaction::{Transaction, TxType};
 use std::net::SocketAddr;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -145,7 +145,10 @@ fn mixed_good_and_bad_behavior() {
 
     // 20 cycles × -5 net = -100 from start of 100 = 0 (approximately)
     // But clamping makes it complex — just verify it degraded
-    assert!(peer.reputation < 50, "reputation should degrade with net-negative behavior");
+    assert!(
+        peer.reputation < 50,
+        "reputation should degrade with net-negative behavior"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -165,7 +168,10 @@ fn local_tx_enters_stempool() {
 
     let stats = router.stats();
     if !stats.is_fluff_epoch {
-        assert!(stats.stempool_size > initial_size, "stem epoch: tx should be in stempool");
+        assert!(
+            stats.stempool_size > initial_size,
+            "stem epoch: tx should be in stempool"
+        );
     }
 }
 
@@ -181,7 +187,10 @@ fn duplicate_tx_not_double_counted() {
     let size_after_second = router.stats().stempool_size;
 
     assert_eq!(hash1, hash2, "same tx should produce same hash");
-    assert_eq!(size_after_first, size_after_second, "duplicate should not increase stempool");
+    assert_eq!(
+        size_after_first, size_after_second,
+        "duplicate should not increase stempool"
+    );
 }
 
 #[test]
@@ -251,8 +260,14 @@ fn epoch_rotation_changes_mode_statistically() {
     }
 
     // 80% stem, 20% fluff — in 50 epochs, extremely unlikely to not see both
-    assert!(saw_stem, "should see at least one stem epoch in 50 rotations");
-    assert!(saw_fluff, "should see at least one fluff epoch in 50 rotations");
+    assert!(
+        saw_stem,
+        "should see at least one stem epoch in 50 rotations"
+    );
+    assert!(
+        saw_fluff,
+        "should see at least one fluff epoch in 50 rotations"
+    );
 }
 
 #[test]

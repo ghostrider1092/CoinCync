@@ -11,8 +11,8 @@
 
 use tick::mock::{MockAdapter, MockBlockId};
 use tick::{
-    recovery_priority, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer,
-    RescueConfig, RescueTick, Severity, TickBehavior, TickNoticeKind, TickPhase,
+    recovery_priority, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer, RescueConfig,
+    RescueTick, Severity, TickBehavior, TickNoticeKind, TickPhase,
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -25,7 +25,13 @@ fn peer(name: &str, role: &str) -> FleetPeer {
     }
 }
 
-fn tip(height: u64, difficulty: u128, is_synced: bool, peer_count: u32, tip_age_secs: u64) -> ChainTipState<MockBlockId> {
+fn tip(
+    height: u64,
+    difficulty: u128,
+    is_synced: bool,
+    peer_count: u32,
+    tip_age_secs: u64,
+) -> ChainTipState<MockBlockId> {
     ChainTipState {
         height,
         difficulty,
@@ -79,7 +85,10 @@ fn no_divergence_no_quest_trigger() {
     let triggered = tick.quest(&adapter).unwrap();
     assert!(!triggered, "steady state must not trigger quest");
     assert_eq!(tick.current_phase(), TickPhase::Quest);
-    assert!(adapter.broadcast_log().is_empty(), "no notice on steady state");
+    assert!(
+        adapter.broadcast_log().is_empty(),
+        "no notice on steady state"
+    );
 }
 
 // ─── Quest — divergence below block threshold ────────────────────────────
@@ -93,7 +102,10 @@ fn divergence_below_threshold_does_not_trigger() {
 
     let tick = fast_testnet_tick();
     let triggered = tick.quest(&adapter).unwrap();
-    assert!(!triggered, "50-block gap must not trigger (threshold is 100)");
+    assert!(
+        !triggered,
+        "50-block gap must not trigger (threshold is 100)"
+    );
     assert_eq!(tick.current_phase(), TickPhase::Quest);
 }
 
@@ -106,7 +118,10 @@ fn divergence_below_difficulty_delta_does_not_trigger() {
     // fleet at diff=685M, randomx at diff=685M+3% = 705.55M
     adapter.add_fleet_peer(peer("seed1", "seed"), tip(9369, 685_000_000, true, 5, 12));
     adapter.add_fleet_peer(peer("seed2", "seed"), tip(9369, 685_000_000, true, 5, 12));
-    adapter.add_fleet_peer(peer("randomx", "miner"), tip(9569, 705_550_000, true, 5, 12));
+    adapter.add_fleet_peer(
+        peer("randomx", "miner"),
+        tip(9569, 705_550_000, true, 5, 12),
+    );
 
     // Register verify success in case the tick reaches that step
     adapter.set_peer_pow_verdict("randomx", Some(true));
@@ -127,14 +142,23 @@ fn verified_divergence_triggers_quest_and_hunt_notice() {
     // 200-block gap, ≥5% difficulty delta, PoW verifies — should trigger.
     adapter.add_fleet_peer(peer("seed1", "seed"), tip(9369, 685_000_000, true, 5, 1200));
     adapter.add_fleet_peer(peer("seed2", "seed"), tip(9369, 685_000_000, true, 5, 1200));
-    adapter.add_fleet_peer(peer("explorer", "explorer"), tip(9369, 685_000_000, true, 5, 1200));
-    adapter.add_fleet_peer(peer("randomx", "miner"), tip(9569, 720_000_000, true, 5, 12));
+    adapter.add_fleet_peer(
+        peer("explorer", "explorer"),
+        tip(9369, 685_000_000, true, 5, 1200),
+    );
+    adapter.add_fleet_peer(
+        peer("randomx", "miner"),
+        tip(9569, 720_000_000, true, 5, 12),
+    );
     // Canonical PoW verifies successfully.
     adapter.set_peer_pow_verdict("randomx", Some(true));
 
     let tick = fast_testnet_tick();
     let triggered = tick.quest(&adapter).unwrap();
-    assert!(triggered, "verified 200-block, 5% delta divergence must trigger");
+    assert!(
+        triggered,
+        "verified 200-block, 5% delta divergence must trigger"
+    );
     assert_eq!(tick.current_phase(), TickPhase::Latch);
 
     // One Hunt notice emitted, aggregate text.
@@ -143,9 +167,19 @@ fn verified_divergence_triggers_quest_and_hunt_notice() {
     assert_eq!(log[0].kind, TickNoticeKind::Hunt);
     assert_eq!(log[0].severity, Severity::Critical);
     // Text is aggregate — mentions "3 hosts" not host names.
-    assert!(log[0].text.contains("3 hosts"), "notice must aggregate; got: {}", log[0].text);
-    assert!(!log[0].text.contains("seed1"), "notice must NOT name individual hosts");
-    assert!(!log[0].text.contains("randomx"), "notice must NOT name individual hosts");
+    assert!(
+        log[0].text.contains("3 hosts"),
+        "notice must aggregate; got: {}",
+        log[0].text
+    );
+    assert!(
+        !log[0].text.contains("seed1"),
+        "notice must NOT name individual hosts"
+    );
+    assert!(
+        !log[0].text.contains("randomx"),
+        "notice must NOT name individual hosts"
+    );
 }
 
 // ─── Quest — spoofed peer (PoW verify FAILS) ─────────────────────────────
@@ -157,7 +191,10 @@ fn spoofed_peer_pow_verify_failure_aborts_and_alerts() {
     adapter.add_fleet_peer(peer("seed2", "seed"), tip(9369, 685_000_000, true, 5, 1200));
     // Spoofer claims 200 blocks ahead with heavy difficulty, but PoW
     // check will fail — a hostile peer lying about its chain.
-    adapter.add_fleet_peer(peer("spoofer", "miner"), tip(9569, 720_000_000, true, 5, 12));
+    adapter.add_fleet_peer(
+        peer("spoofer", "miner"),
+        tip(9569, 720_000_000, true, 5, 12),
+    );
     adapter.set_peer_pow_verdict("spoofer", Some(false));
 
     let tick = fast_testnet_tick();
@@ -170,7 +207,11 @@ fn spoofed_peer_pow_verify_failure_aborts_and_alerts() {
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].kind, TickNoticeKind::Alert);
     assert_eq!(log[0].severity, Severity::Critical);
-    assert!(log[0].text.contains("PoW"), "alert must mention PoW: {}", log[0].text);
+    assert!(
+        log[0].text.contains("PoW"),
+        "alert must mention PoW: {}",
+        log[0].text
+    );
     // Snapshot MUST NOT be called — no feed happens.
     assert_eq!(adapter.snapshot_calls(), 0);
 }
@@ -182,7 +223,10 @@ fn unable_to_verify_pow_aborts_with_warn_alert() {
     let adapter = fleet_mock();
     adapter.add_fleet_peer(peer("seed1", "seed"), tip(9369, 685_000_000, true, 5, 1200));
     adapter.add_fleet_peer(peer("seed2", "seed"), tip(9369, 685_000_000, true, 5, 1200));
-    adapter.add_fleet_peer(peer("randomx", "miner"), tip(9569, 720_000_000, true, 5, 12));
+    adapter.add_fleet_peer(
+        peer("randomx", "miner"),
+        tip(9569, 720_000_000, true, 5, 12),
+    );
     // No PoW verdict registered — verify_peer_header_pow returns Err.
     // (adapter can't check.)
 
@@ -227,7 +271,10 @@ fn mainnet_default_pauses_at_latch_pending_operator_ack() {
     let adapter = fleet_mock();
     adapter.add_fleet_peer(peer("seed1", "seed"), tip(9369, 685_000_000, true, 5, 1200));
     adapter.add_fleet_peer(peer("seed2", "seed"), tip(9369, 685_000_000, true, 5, 1200));
-    adapter.add_fleet_peer(peer("randomx", "miner"), tip(9569, 720_000_000, true, 5, 12));
+    adapter.add_fleet_peer(
+        peer("randomx", "miner"),
+        tip(9569, 720_000_000, true, 5, 12),
+    );
     adapter.set_peer_pow_verdict("randomx", Some(true));
 
     let cfg = RescueConfig {
@@ -246,7 +293,11 @@ fn mainnet_default_pauses_at_latch_pending_operator_ack() {
     // Two notices: initial Hunt from Quest + "paused at Latch" from Latch.
     let log = adapter.broadcast_log();
     assert_eq!(log.len(), 2);
-    assert!(log[1].text.contains("operator acknowledgment"), "got: {}", log[1].text);
+    assert!(
+        log[1].text.contains("operator acknowledgment"),
+        "got: {}",
+        log[1].text
+    );
 
     // Operator ack advances to Feed.
     assert!(tick.operator_ack());
@@ -316,13 +367,26 @@ fn full_cycle_emits_hunt_engaged_recovered_notices() {
     assert_eq!(kinds.last(), Some(&TickNoticeKind::Recovered));
 
     // Should contain Engaged notices (one per host fed).
-    let engaged_count = kinds.iter().filter(|k| **k == TickNoticeKind::Engaged).count();
+    let engaged_count = kinds
+        .iter()
+        .filter(|k| **k == TickNoticeKind::Engaged)
+        .count();
     assert_eq!(engaged_count, 2, "one Engaged per host fed (2 hosts)");
 
     // Aggregate-text check on Recovered notice.
-    let recovered = log.iter().find(|n| n.kind == TickNoticeKind::Recovered).unwrap();
-    assert!(recovered.text.contains("2 hosts"), "recovered text should mention count; got: {}", recovered.text);
-    assert!(!recovered.text.contains("seed1"), "recovered text must NOT name hosts");
+    let recovered = log
+        .iter()
+        .find(|n| n.kind == TickNoticeKind::Recovered)
+        .unwrap();
+    assert!(
+        recovered.text.contains("2 hosts"),
+        "recovered text should mention count; got: {}",
+        recovered.text
+    );
+    assert!(
+        !recovered.text.contains("seed1"),
+        "recovered text must NOT name hosts"
+    );
 }
 
 // ─── Privacy — Personal deployment silences all notices ─────────────────

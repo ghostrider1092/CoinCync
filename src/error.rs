@@ -17,7 +17,6 @@ pub enum Error {
     // ========================================================================
     // Primitive Errors
     // ========================================================================
-
     #[error("Invalid hash length: expected {expected}, got {got}")]
     InvalidHashLength { expected: usize, got: usize },
 
@@ -42,7 +41,6 @@ pub enum Error {
     // ========================================================================
     // Cryptographic Errors
     // ========================================================================
-
     #[error("Range proof verification failed")]
     RangeProofInvalid,
 
@@ -66,7 +64,11 @@ pub enum Error {
     InvalidAssetIssuance(String),
 
     #[error("Insufficient asset balance for {asset_id}: have {have}, need {need}")]
-    InsufficientAssetBalance { asset_id: String, have: u64, need: u64 },
+    InsufficientAssetBalance {
+        asset_id: String,
+        have: u64,
+        need: u64,
+    },
 
     // ── Phase 2: Multi-sig ─────────────────────────────────────
     #[error("Multisig threshold not met: have {have} signatures, need {need}")]
@@ -116,7 +118,6 @@ pub enum Error {
     // ========================================================================
     // Transaction Errors
     // ========================================================================
-
     #[error("Transaction too large: {size} bytes (max {max})")]
     TransactionTooLarge { size: usize, max: usize },
 
@@ -159,7 +160,6 @@ pub enum Error {
     // ========================================================================
     // Block / Chain Errors
     // ========================================================================
-
     #[error("PoW validation failed: {0}")]
     PowValidation(String),
 
@@ -169,7 +169,6 @@ pub enum Error {
     // ========================================================================
     // Wallet Errors
     // ========================================================================
-
     #[error("Wallet not found: {0}")]
     WalletNotFound(String),
 
@@ -244,7 +243,6 @@ pub enum Error {
     // ========================================================================
     // Network Errors
     // ========================================================================
-
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
@@ -279,7 +277,6 @@ pub enum Error {
     // ========================================================================
     // Storage Errors
     // ========================================================================
-
     #[error("Database error: {0}")]
     DatabaseError(String),
 
@@ -292,7 +289,6 @@ pub enum Error {
     // ========================================================================
     // Phase 2: Name Registry
     // ========================================================================
-
     #[error("Name already registered: {0}")]
     NameTaken(String),
 
@@ -317,7 +313,6 @@ pub enum Error {
     // ========================================================================
     // RPC / Config / General
     // ========================================================================
-
     #[error("RPC error: {0}")]
     RpcError(String),
 
@@ -374,40 +369,37 @@ impl From<std::io::Error> for Error {
 
 impl Error {
     pub fn is_validation_error(&self) -> bool {
-        matches!(self,
-            Error::InvalidHashLength { .. } |
-            Error::InvalidPublicKey(_) |
-            Error::InvalidSecretKey(_) |
-            Error::InvalidSignature(_) |
-            Error::InvalidAddress(_) |
-            Error::AmountOverflow |
-            Error::AmountUnderflow |
-            Error::RangeProofInvalid |
-            Error::TransactionTooLarge { .. } |
-            Error::TransactionTooSmall { .. } |
-            Error::InvalidInputCount { .. } |
-            Error::InvalidOutputCount { .. } |
-            Error::InvalidRingSize { .. } |
-            Error::DuplicateKeyImage(_) |
-            Error::FeeTooLow { .. } |
-            Error::OutputTooSmall { .. } |
-            Error::InvalidTxVersion(_) |
-            Error::InvalidParams(_)
+        matches!(
+            self,
+            Error::InvalidHashLength { .. }
+                | Error::InvalidPublicKey(_)
+                | Error::InvalidSecretKey(_)
+                | Error::InvalidSignature(_)
+                | Error::InvalidAddress(_)
+                | Error::AmountOverflow
+                | Error::AmountUnderflow
+                | Error::RangeProofInvalid
+                | Error::TransactionTooLarge { .. }
+                | Error::TransactionTooSmall { .. }
+                | Error::InvalidInputCount { .. }
+                | Error::InvalidOutputCount { .. }
+                | Error::InvalidRingSize { .. }
+                | Error::DuplicateKeyImage(_)
+                | Error::FeeTooLow { .. }
+                | Error::OutputTooSmall { .. }
+                | Error::InvalidTxVersion(_)
+                | Error::InvalidParams(_)
         )
     }
 
     pub fn is_network_error(&self) -> bool {
-        matches!(self,
-            Error::ConnectionFailed(_) |
-            Error::ProtocolError(_)
-        )
+        matches!(self, Error::ConnectionFailed(_) | Error::ProtocolError(_))
     }
 
     pub fn is_storage_error(&self) -> bool {
-        matches!(self,
-            Error::DatabaseError(_) |
-            Error::Corruption(_) |
-            Error::IoError { .. }
+        matches!(
+            self,
+            Error::DatabaseError(_) | Error::Corruption(_) | Error::IoError { .. }
         )
     }
 }

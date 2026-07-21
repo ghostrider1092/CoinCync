@@ -182,9 +182,7 @@ impl VerificationCache {
         }
         if cache.len() >= MAX_CACHE_SIZE {
             let to_remove = MAX_CACHE_SIZE / 10;
-            let mut entries: Vec<_> = cache.iter()
-                .map(|e| (*e.key(), *e.value()))
-                .collect();
+            let mut entries: Vec<_> = cache.iter().map(|e| (*e.key(), *e.value())).collect();
             entries.sort_by_key(|(_, time)| *time);
             for (key, _) in entries.into_iter().take(to_remove) {
                 cache.remove(&key);

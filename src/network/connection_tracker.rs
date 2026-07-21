@@ -26,8 +26,8 @@
 //!   at 10 000 to prevent unbounded growth under DoS.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 
@@ -166,7 +166,9 @@ impl ConnectionTracker {
     pub fn untrack_outbound_subnet(&self, addr: &SocketAddr) {
         let subnet = Self::subnet_key(&addr.ip());
         if let Some(mut entry) = self.outbound_per_subnet.get_mut(&subnet) {
-            if *entry > 0 { *entry -= 1; }
+            if *entry > 0 {
+                *entry -= 1;
+            }
             if *entry == 0 {
                 drop(entry);
                 self.outbound_per_subnet.remove(&subnet);
@@ -263,11 +265,7 @@ impl ConnectionTracker {
     #[allow(dead_code)]
     pub fn can_accept(&self, addr: &SocketAddr) -> bool {
         let ip = addr.ip();
-        let count = self
-            .connections_per_ip
-            .get(&ip)
-            .map(|c| *c)
-            .unwrap_or(0);
+        let count = self.connections_per_ip.get(&ip).map(|c| *c).unwrap_or(0);
         count < MAX_CONNECTIONS_PER_IP
     }
 
@@ -343,7 +341,8 @@ impl ConnectionTracker {
         // against a currently-connected peer.
         if self.connections_per_ip.len() > MAX_TRACKED_IPS {
             let active_set: std::collections::HashSet<&IpAddr> = active_peer_ips.iter().collect();
-            self.connections_per_ip.retain(|ip, _| active_set.contains(ip));
+            self.connections_per_ip
+                .retain(|ip, _| active_set.contains(ip));
         }
     }
 
@@ -403,10 +402,7 @@ impl ConnectionTracker {
 
     /// Current connection count for a specific IP (monitoring hook).
     pub fn connections_from(&self, ip: &IpAddr) -> usize {
-        self.connections_per_ip
-            .get(ip)
-            .map(|c| *c)
-            .unwrap_or(0)
+        self.connections_per_ip.get(ip).map(|c| *c).unwrap_or(0)
     }
 }
 
@@ -587,7 +583,8 @@ mod tests {
         for i in 0..MAX_OUTBOUND_PER_SUBNET {
             assert!(
                 t.try_track_outbound_subnet(&addr_in(10, 0, i as u8)),
-                "should admit slot {} (under cap)", i
+                "should admit slot {} (under cap)",
+                i
             );
         }
         // The next one must be rejected.
@@ -611,8 +608,9 @@ mod tests {
     #[test]
     fn untrack_outbound_subnet_releases_slot() {
         let t = ConnectionTracker::new(1024);
-        let peers: Vec<SocketAddr> =
-            (0..MAX_OUTBOUND_PER_SUBNET as u8).map(|i| addr_in(10, 0, i)).collect();
+        let peers: Vec<SocketAddr> = (0..MAX_OUTBOUND_PER_SUBNET as u8)
+            .map(|i| addr_in(10, 0, i))
+            .collect();
         for p in &peers {
             assert!(t.try_track_outbound_subnet(p));
         }
@@ -688,7 +686,8 @@ mod tests {
         let t = Arc::new(ConnectionTracker::new(1024));
         let a = addr_in(10, 0, 1);
         {
-            let _slot = t.try_track_outbound_subnet_owned(&a)
+            let _slot = t
+                .try_track_outbound_subnet_owned(&a)
                 .expect("under cap, must admit");
             // Inside scope: counter incremented.
             assert_eq!(t.outbound_subnet_snapshot(), vec![(0x0a00, 1)]);
@@ -702,12 +701,15 @@ mod tests {
         let t = Arc::new(ConnectionTracker::new(1024));
         let mut held = Vec::new();
         for i in 0..MAX_OUTBOUND_PER_SUBNET {
-            let s = t.try_track_outbound_subnet_owned(&addr_in(10, 0, i as u8))
+            let s = t
+                .try_track_outbound_subnet_owned(&addr_in(10, 0, i as u8))
                 .expect("under cap");
             held.push(s);
         }
         // Cap hit — next attempt returns None.
-        assert!(t.try_track_outbound_subnet_owned(&addr_in(10, 0, 99)).is_none());
+        assert!(t
+            .try_track_outbound_subnet_owned(&addr_in(10, 0, 99))
+            .is_none());
         // And the failed attempt did NOT increment.
         let snap = t.outbound_subnet_snapshot();
         assert_eq!(snap, vec![(0x0a00, MAX_OUTBOUND_PER_SUBNET)]);
@@ -722,8 +724,7 @@ mod tests {
         let a = addr_in(10, 0, 1);
         let t2 = t.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _slot = t2.try_track_outbound_subnet_owned(&a)
-                .expect("under cap");
+            let _slot = t2.try_track_outbound_subnet_owned(&a).expect("under cap");
             // counter is 1 at this point
             panic!("simulated task crash");
         }));
@@ -768,7 +769,9 @@ mod tests {
         // Yield until the spawn has had a chance to acquire the slot.
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            if !t.outbound_subnet_snapshot().is_empty() { break; }
+            if !t.outbound_subnet_snapshot().is_empty() {
+                break;
+            }
         }
         assert_eq!(
             t.outbound_subnet_snapshot(),
@@ -777,10 +780,12 @@ mod tests {
         );
         handle.abort();
         let _ = handle.await; // drains the JoinError
-        // Drop runs during unwind; give the runtime a moment to finalize.
+                              // Drop runs during unwind; give the runtime a moment to finalize.
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            if t.outbound_subnet_snapshot().is_empty() { break; }
+            if t.outbound_subnet_snapshot().is_empty() {
+                break;
+            }
         }
         assert!(
             t.outbound_subnet_snapshot().is_empty(),
@@ -795,7 +800,10 @@ mod tests {
         // and out-of-order drop without depending on the cap value.
         let t = Arc::new(ConnectionTracker::new(1024));
         let mut slots: Vec<OutboundSubnetSlot> = (0..MAX_OUTBOUND_PER_SUBNET as u8)
-            .map(|i| t.try_track_outbound_subnet_owned(&addr_in(10, 0, i)).unwrap())
+            .map(|i| {
+                t.try_track_outbound_subnet_owned(&addr_in(10, 0, i))
+                    .unwrap()
+            })
             .collect();
         assert_eq!(
             t.outbound_subnet_snapshot(),

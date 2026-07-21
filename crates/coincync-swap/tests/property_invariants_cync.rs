@@ -35,8 +35,8 @@
 use proptest::prelude::*;
 
 use coincync_swap::cync::{
-    compute_swap_lock_recipient, cync_adaptor_point_from_secret,
-    derive_swap_recipient_spend_pub, derive_swap_spender_secret, CyncTxid,
+    compute_swap_lock_recipient, cync_adaptor_point_from_secret, derive_swap_recipient_spend_pub,
+    derive_swap_spender_secret, CyncTxid,
 };
 
 // ─── Strategies ────────────────────────────────────────────────

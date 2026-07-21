@@ -3,12 +3,12 @@
 //! Verifies that the mempool correctly orders by fee, evicts lowest-fee
 //! transactions when full, and handles edge cases.
 
+use coincync::constants::MIN_FEE_PER_BYTE;
+use coincync::crypto::{ClsagSignature, KeyImage as CryptoKeyImage, SecretScalar};
 use coincync::mempool::Mempool;
 use coincync::primitives::{Amount, KeyImage, PublicKey};
-use coincync::transaction::{Transaction, TxType, TxInput, TxOutput, RingMemberRef};
-use coincync::crypto::{SecretScalar, KeyImage as CryptoKeyImage, ClsagSignature};
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use rand::rngs::OsRng;
-use coincync::constants::MIN_FEE_PER_BYTE;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -102,12 +102,20 @@ fn test_highest_fee_mined_first() {
     // Get 1 transaction — should be the highest fee
     let block_txs = pool.get_block_transactions(10_000_000, 1);
     assert_eq!(block_txs.len(), 1);
-    assert_eq!(block_txs[0].hash(), high_hash, "Highest fee tx should be selected first");
+    assert_eq!(
+        block_txs[0].hash(),
+        high_hash,
+        "Highest fee tx should be selected first"
+    );
 
     // Get all 3 — first should still be highest fee
     let all_txs = pool.get_block_transactions(10_000_000, 3);
     assert_eq!(all_txs.len(), 3);
-    assert_eq!(all_txs[0].hash(), high_hash, "First tx should be highest fee");
+    assert_eq!(
+        all_txs[0].hash(),
+        high_hash,
+        "First tx should be highest fee"
+    );
     assert_eq!(all_txs[2].hash(), low_hash, "Last tx should be lowest fee");
 }
 
@@ -137,8 +145,14 @@ fn test_eviction_at_capacity() {
     let high_hash = pool.add_skip_crypto(high).unwrap();
 
     // The high-fee tx should be in, and the lowest-fee one out
-    assert!(pool.contains(&high_hash), "High-fee tx should be in mempool");
-    assert!(!pool.contains(&low1_hash), "Lowest-fee tx should be evicted");
+    assert!(
+        pool.contains(&high_hash),
+        "High-fee tx should be in mempool"
+    );
+    assert!(
+        !pool.contains(&low1_hash),
+        "Lowest-fee tx should be evicted"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +171,10 @@ fn test_key_image_conflict_rejected() {
     let mut tx2 = make_tx(2, 100_000_000, 1);
     tx2.inputs[0].key_image = ki;
     let result = pool.add_skip_crypto(tx2);
-    assert!(result.is_err() || pool.len() == 1, "Conflicting tx should not coexist");
+    assert!(
+        result.is_err() || pool.len() == 1,
+        "Conflicting tx should not coexist"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -230,12 +247,18 @@ fn test_size_invariant() {
         pool.add_skip_crypto(tx).unwrap();
     }
 
-    assert!(pool.verify_size_invariant(), "Size invariant violated after adds");
+    assert!(
+        pool.verify_size_invariant(),
+        "Size invariant violated after adds"
+    );
 
     // Remove some
     pool.expire_old(0);
 
-    assert!(pool.verify_size_invariant(), "Size invariant violated after expiry");
+    assert!(
+        pool.verify_size_invariant(),
+        "Size invariant violated after expiry"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -21,12 +21,12 @@
 //!
 //! Network metadata is an "effect" — traffic analysis is a search.
 
+use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use rand::Rng;
 use tracing::{debug, trace};
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -356,7 +356,8 @@ impl TrafficShaper {
                 // tick's packet if its queue drains.
             }
             if sent_this_tick > 0 {
-                self.padding_sent.fetch_add(sent_this_tick, Ordering::Relaxed);
+                self.padding_sent
+                    .fetch_add(sent_this_tick, Ordering::Relaxed);
                 trace!(packets = sent_this_tick, "broadcast padding packets");
             }
         }
@@ -499,11 +500,7 @@ impl ConstantRatePacer {
     /// Run the pacing loop: emit exactly one packet per slot to `sender` until
     /// `shutdown`. This is the stream a network observer sees — flat and
     /// constant-rate whether the node is transacting or idle.
-    pub async fn run(
-        self: Arc<Self>,
-        sender: mpsc::Sender<Vec<u8>>,
-        shutdown: Arc<AtomicBool>,
-    ) {
+    pub async fn run(self: Arc<Self>, sender: mpsc::Sender<Vec<u8>>, shutdown: Arc<AtomicBool>) {
         debug!(
             slot_ms = self.slot.as_millis() as u64,
             "constant-rate origination pacer started"
@@ -547,7 +544,10 @@ mod tests {
         // Queue now empty → the slot is filled with a framed dummy instead.
         let (dummy, was_real2) = p.fill_slot();
         assert!(!was_real2);
-        assert!(!dummy.is_empty(), "dummy must be a real framed padding packet");
+        assert!(
+            !dummy.is_empty(),
+            "dummy must be a real framed padding packet"
+        );
     }
 
     #[test]
@@ -594,8 +594,7 @@ mod tests {
 
         // Must be one of the standard sizes
         assert!(
-            STANDARD_SIZES.contains(&normalized.len())
-                || normalized.len() % MAX_PADDED_SIZE == 0,
+            STANDARD_SIZES.contains(&normalized.len()) || normalized.len() % MAX_PADDED_SIZE == 0,
             "normalized size {} is not standard",
             normalized.len()
         );
@@ -630,7 +629,8 @@ mod tests {
             "packet must start with the supplied network magic",
         );
         assert_eq!(
-            packet[4], super::super::protocol::MessageType::Padding as u8,
+            packet[4],
+            super::super::protocol::MessageType::Padding as u8,
             "msg_type byte must be MessageType::Padding ({})",
             super::super::protocol::MessageType::Padding as u8,
         );
@@ -654,7 +654,10 @@ mod tests {
         // The size index is also random, so packets might differ in length.
         // If they're the same length, the bodies must differ.
         if body1.len() == body2.len() && body1.len() > 0 {
-            assert_ne!(body1, body2, "padding packet bodies must be random per call");
+            assert_ne!(
+                body1, body2,
+                "padding packet bodies must be random per call"
+            );
         }
     }
 
@@ -703,11 +706,13 @@ mod tests {
         let sd_clone = shutdown.clone();
         let txs_clone = txs.clone();
         let handle = tokio::spawn(async move {
-            s_clone.run_padding_loop_broadcast(
-                TEST_MAGIC,
-                move || txs_clone.clone().into_iter(),
-                sd_clone,
-            ).await;
+            s_clone
+                .run_padding_loop_broadcast(
+                    TEST_MAGIC,
+                    move || txs_clone.clone().into_iter(),
+                    sd_clone,
+                )
+                .await;
         });
 
         // Wait long enough for ~3 ticks to fire.
@@ -723,9 +728,21 @@ mod tests {
         let r0 = collect_until_empty(&mut rx0).await;
         let r1 = collect_until_empty(&mut rx1).await;
         let r2 = collect_until_empty(&mut rx2).await;
-        assert!(r0.len() >= 2, "peer 0 saw {} packets, expected >= 2", r0.len());
-        assert!(r1.len() >= 2, "peer 1 saw {} packets, expected >= 2", r1.len());
-        assert!(r2.len() >= 2, "peer 2 saw {} packets, expected >= 2", r2.len());
+        assert!(
+            r0.len() >= 2,
+            "peer 0 saw {} packets, expected >= 2",
+            r0.len()
+        );
+        assert!(
+            r1.len() >= 2,
+            "peer 1 saw {} packets, expected >= 2",
+            r1.len()
+        );
+        assert!(
+            r2.len() >= 2,
+            "peer 2 saw {} packets, expected >= 2",
+            r2.len()
+        );
 
         // padding_sent should equal sum of all peer deliveries
         // (the loop counts each successful try_send).
@@ -740,10 +757,14 @@ mod tests {
         // Every received packet must be properly framed: TEST_MAGIC
         // in the first 4 bytes, MessageType::Padding (99) at offset 4.
         for p in r0.iter().chain(r1.iter()).chain(r2.iter()) {
-            assert!(p.len() >= super::super::framing::HEADER_SIZE, "packet too short");
+            assert!(
+                p.len() >= super::super::framing::HEADER_SIZE,
+                "packet too short"
+            );
             assert_eq!(&p[..4], &TEST_MAGIC, "wrong magic prefix");
             assert_eq!(
-                p[4], super::super::protocol::MessageType::Padding as u8,
+                p[4],
+                super::super::protocol::MessageType::Padding as u8,
                 "msg_type byte must be Padding",
             );
         }
@@ -751,7 +772,10 @@ mod tests {
         // Per-peer packets must differ — otherwise colluding observers
         // could detect the shared payload.
         if !r0.is_empty() && !r1.is_empty() {
-            assert_ne!(r0[0], r1[0], "peers 0 and 1 received identical padding bytes");
+            assert_ne!(
+                r0[0], r1[0],
+                "peers 0 and 1 received identical padding bytes"
+            );
         }
     }
 
@@ -773,11 +797,13 @@ mod tests {
         let sd_clone = shutdown.clone();
         let txs_clone = txs.clone();
         let handle = tokio::spawn(async move {
-            s_clone.run_padding_loop_broadcast(
-                TEST_MAGIC,
-                move || txs_clone.clone().into_iter(),
-                sd_clone,
-            ).await;
+            s_clone
+                .run_padding_loop_broadcast(
+                    TEST_MAGIC,
+                    move || txs_clone.clone().into_iter(),
+                    sd_clone,
+                )
+                .await;
         });
 
         // Run ~2 ticks while ENABLED so the loop ramps up.
@@ -799,7 +825,11 @@ mod tests {
         // Run another 200ms — counter must NOT increase past warm.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let cold = shaper.stats().padding_sent;
-        assert_eq!(warm, cold, "disabled shaper still emitted packets ({} -> {})", warm, cold);
+        assert_eq!(
+            warm, cold,
+            "disabled shaper still emitted packets ({} -> {})",
+            warm, cold
+        );
 
         shutdown.store(true, Ordering::Relaxed);
         drop(txs);
@@ -827,11 +857,13 @@ mod tests {
         let sd_clone = shutdown.clone();
         let txs_clone = txs.clone();
         let handle = tokio::spawn(async move {
-            s_clone.run_padding_loop_broadcast(
-                TEST_MAGIC,
-                move || txs_clone.clone().into_iter(),
-                sd_clone,
-            ).await;
+            s_clone
+                .run_padding_loop_broadcast(
+                    TEST_MAGIC,
+                    move || txs_clone.clone().into_iter(),
+                    sd_clone,
+                )
+                .await;
         });
 
         // 10 ticks at 30ms = 300ms.

@@ -60,8 +60,8 @@ use proptest::prelude::*;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use coincync_swap::adaptor::{
-    cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor, cync_recover_secret,
-    cync_verify_pre_sig, create_pre_sig_bip340, decrypt_btc_adaptor, prove_cross_curve,
+    create_pre_sig_bip340, cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor,
+    cync_recover_secret, cync_verify_pre_sig, decrypt_btc_adaptor, prove_cross_curve,
     recover_secret_from_btc_sig, verify_cross_curve_proof, verify_pre_sig, AdaptorSecret,
 };
 
@@ -83,10 +83,10 @@ fn arb_secp_seckey() -> impl Strategy<Value = SecretKey> {
 /// `AdaptorSecret::from_ristretto_bytes`), so `prop_filter_map` retries
 /// transparently.
 fn arb_adaptor_secret() -> impl Strategy<Value = AdaptorSecret> {
-    any::<[u8; 32]>()
-        .prop_filter_map("Ristretto-canonical scalar (valid in both fields)", |bytes| {
-            AdaptorSecret::from_ristretto_bytes(bytes).ok()
-        })
+    any::<[u8; 32]>().prop_filter_map(
+        "Ristretto-canonical scalar (valid in both fields)",
+        |bytes| AdaptorSecret::from_ristretto_bytes(bytes).ok(),
+    )
 }
 
 /// Same shape as `arb_adaptor_secret` but exposes the raw bytes so

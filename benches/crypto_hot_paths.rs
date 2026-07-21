@@ -103,12 +103,15 @@ fn bench_randomx_hash(c: &mut Criterion) {
 fn bench_bulletproof_verify(c: &mut Criterion) {
     let amount = Amount::from_atomic(123_456_789);
     let (commitment, blinding) = commit(&mut OsRng, amount);
-    let proof = create_range_proof(amount, &blinding, &mut OsRng)
-        .expect("create_range_proof failed");
+    let proof =
+        create_range_proof(amount, &blinding, &mut OsRng).expect("create_range_proof failed");
 
     c.bench_function("bulletproof_plus_verify_64bit", |b| {
         b.iter(|| {
-            black_box(verify_range_proof(black_box(&commitment), black_box(&proof)));
+            black_box(verify_range_proof(
+                black_box(&commitment),
+                black_box(&proof),
+            ));
         });
     });
 }
@@ -132,15 +135,13 @@ fn bench_clsag_verify_ring16(c: &mut Criterion) {
     // Pseudo output with different blinding
     let z_pseudo = SecretScalar::random(&mut OsRng);
     let pseudo_output = Commitment::commit(value, &z_pseudo);
-    let blinding_diff =
-        SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+    let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
 
     // Build the ring: real signer at index 0, then 15 decoys
     let mut ring = vec![RingMember::new(public, real_commitment)];
     for _ in 1..RING_SIZE {
         let decoy_sk = SecretScalar::random(&mut OsRng);
-        let decoy_commitment =
-            Commitment::commit(value, &SecretScalar::random(&mut OsRng));
+        let decoy_commitment = Commitment::commit(value, &SecretScalar::random(&mut OsRng));
         ring.push(RingMember::new(decoy_sk.to_public(), decoy_commitment));
     }
 
@@ -203,7 +204,10 @@ fn bench_bulletproof_verify_aggregated_4(c: &mut Criterion) {
 
     c.bench_function("bulletproof_plus_verify_aggregated_4", |b| {
         b.iter(|| {
-            black_box(verify_range_proofs(black_box(&commitments), black_box(&proof)));
+            black_box(verify_range_proofs(
+                black_box(&commitments),
+                black_box(&proof),
+            ));
         });
     });
 }

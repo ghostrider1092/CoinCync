@@ -6,7 +6,7 @@
 //! so auditors can independently verify the chain's supply invariant.
 
 use crate::primitives::Amount;
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 #[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
 pub struct SupplyStats {
@@ -72,13 +72,14 @@ mod tests {
 /// Calculate Pedersen commitment to supply (for auditing)
 pub fn calculate_supply_commitment(stats: &SupplyStats) -> [u8; 32] {
     use crate::primitives::hash_concat;
-    
+
     let data = [
         stats.total_emitted.as_atomic().to_le_bytes(),
         stats.total_burned.as_atomic().to_le_bytes(),
         stats.circulating.as_atomic().to_le_bytes(),
         stats.emission_remaining.as_atomic().to_le_bytes(),
-    ].concat();
-    
+    ]
+    .concat();
+
     *hash_concat(&[&data, b"COINCYNC_SUPPLY_COMMITMENT"]).as_bytes()
 }

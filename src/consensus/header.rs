@@ -5,9 +5,9 @@
 //! the chain-convergence side and is no longer a header-level consensus
 //! input.
 
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use crate::primitives::{Hash, PublicKey, hash_concat};
+use crate::primitives::{hash_concat, Hash, PublicKey};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockHeader {

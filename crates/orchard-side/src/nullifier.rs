@@ -43,10 +43,7 @@
 use bridge::BridgeNullifier;
 use ff::PrimeField;
 use halo2_gadgets::poseidon::primitives::{ConstantLength, Hash as PoseidonHash, P128Pow5T3};
-use pasta_curves::{
-    arithmetic::CurveExt,
-    pallas,
-};
+use pasta_curves::{arithmetic::CurveExt, pallas};
 
 use crate::{commitment, Error, Result};
 
@@ -89,10 +86,7 @@ impl NullifierDerivingKey {
 /// - `DomainRule` if the final nullifier point is the identity
 ///   (no x-coordinate to extract — astronomically improbable;
 ///   collision-resistant under the discrete-log assumption).
-pub fn derive_nullifier(
-    note: &crate::note::Note,
-    nk: &NullifierDerivingKey,
-) -> Result<Nullifier> {
+pub fn derive_nullifier(note: &crate::note::Note, nk: &NullifierDerivingKey) -> Result<Nullifier> {
     // ── Parse note fields into Pallas base elements ──────────────
     //
     // nk was canonical-checked at construction; from_repr can't
@@ -100,8 +94,9 @@ pub fn derive_nullifier(
     // skeleton doesn't enforce Pallas-canonicality there) so we
     // validate during the nullifier derivation and surface a
     // clear error if a non-canonical value sneaks in.
-    let nk_base: pallas::Base = Option::from(pallas::Base::from_repr(nk.0))
-        .ok_or(Error::DomainRule("nk parse failed — should not happen post-validation"))?;
+    let nk_base: pallas::Base = Option::from(pallas::Base::from_repr(nk.0)).ok_or(
+        Error::DomainRule("nk parse failed — should not happen post-validation"),
+    )?;
     let rho_base: pallas::Base = Option::from(pallas::Base::from_repr(note.rho))
         .ok_or(Error::DomainRule("note.rho is not a canonical Pallas base"))?;
     // ψ now derives from rseed via PRF_expand — `note.psi()`
@@ -208,7 +203,11 @@ mod tests {
         let nk = test_nk(1);
         let nf1 = derive_nullifier(&note, &nk).expect("derive 1");
         let nf2 = derive_nullifier(&note, &nk).expect("derive 2");
-        assert_eq!(nf1.0.to_bytes(), nf2.0.to_bytes(), "same (note, nk) → same nullifier");
+        assert_eq!(
+            nf1.0.to_bytes(),
+            nf2.0.to_bytes(),
+            "same (note, nk) → same nullifier"
+        );
     }
 
     #[test]

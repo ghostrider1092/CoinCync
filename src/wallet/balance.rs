@@ -7,9 +7,9 @@
 //! were all single-asset against `AssetId::native()`, so they degenerate
 //! to the plain `total` / `spendable` / `available_utxos` helpers.
 
-use crate::primitives::{Hash, Amount, KeyImage, PublicKey};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Owned UTXO tracked by the wallet.
@@ -143,7 +143,9 @@ pub struct Balance {
 }
 
 impl Balance {
-    pub fn new() -> Self { Balance::default() }
+    pub fn new() -> Self {
+        Balance::default()
+    }
 
     /// Create a Balance from a list of UTXOs.
     pub fn from_utxos(utxos: Vec<UTXO>) -> Self {
@@ -249,7 +251,11 @@ impl Balance {
     /// in-flight reservations — a reserved UTXO still belongs to the wallet,
     /// it just isn't available for new tx-building).
     pub fn total(&self) -> Amount {
-        self.utxos.values().filter(|u| !u.spent).map(|u| u.amount).sum()
+        self.utxos
+            .values()
+            .filter(|u| !u.spent)
+            .map(|u| u.amount)
+            .sum()
     }
 
     /// Spendable balance: unspent, past `min_age`, past `lock_height`,
@@ -257,11 +263,14 @@ impl Balance {
     /// expiry honored — if a reservation is older than
     /// `RESERVATION_EXPIRY_BLOCKS`, the UTXO counts as spendable again).
     pub fn spendable(&self, current_height: u64, min_age: u64) -> Amount {
-        self.utxos.values()
-            .filter(|u| !u.spent
-                && current_height >= u.height.saturating_add(min_age)
-                && u.lock_height.map_or(true, |lh| current_height >= lh)
-                && !self.is_reserved(&(u.tx_hash, u.output_index), current_height))
+        self.utxos
+            .values()
+            .filter(|u| {
+                !u.spent
+                    && current_height >= u.height.saturating_add(min_age)
+                    && u.lock_height.map_or(true, |lh| current_height >= lh)
+                    && !self.is_reserved(&(u.tx_hash, u.output_index), current_height)
+            })
             .map(|u| u.amount)
             .sum()
     }
@@ -270,11 +279,14 @@ impl Balance {
     /// AND not held by an active in-flight reservation (expired reservations
     /// are ignored, see `is_reserved`).
     pub fn available_utxos(&self, current_height: u64, min_age: u64) -> Vec<&UTXO> {
-        self.utxos.values()
-            .filter(|u| !u.spent
-                && current_height >= u.height.saturating_add(min_age)
-                && u.lock_height.map_or(true, |lh| current_height >= lh)
-                && !self.is_reserved(&(u.tx_hash, u.output_index), current_height))
+        self.utxos
+            .values()
+            .filter(|u| {
+                !u.spent
+                    && current_height >= u.height.saturating_add(min_age)
+                    && u.lock_height.map_or(true, |lh| current_height >= lh)
+                    && !self.is_reserved(&(u.tx_hash, u.output_index), current_height)
+            })
             .collect()
     }
 
@@ -322,7 +334,13 @@ impl Balance {
         }
         // Second pass: insert.
         for k in keys {
-            self.reservations.insert(*k, Reservation { by_tx, height: current_height });
+            self.reservations.insert(
+                *k,
+                Reservation {
+                    by_tx,
+                    height: current_height,
+                },
+            );
         }
         Ok(())
     }
@@ -331,7 +349,9 @@ impl Balance {
     /// reservations actually released. Used when a submission is rejected
     /// and the caller wants to immediately re-select.
     pub fn release_reservations_by_tx(&mut self, by_tx: Hash) -> usize {
-        let to_remove: Vec<(Hash, u8)> = self.reservations.iter()
+        let to_remove: Vec<(Hash, u8)> = self
+            .reservations
+            .iter()
             .filter(|(_, r)| r.by_tx == by_tx)
             .map(|(k, _)| *k)
             .collect();
@@ -345,7 +365,9 @@ impl Balance {
     /// call periodically (e.g., every scan invocation) — typical wallets
     /// will have at most a handful of in-flight reservations.
     pub fn release_expired_reservations(&mut self, current_height: u64) -> usize {
-        let to_remove: Vec<(Hash, u8)> = self.reservations.iter()
+        let to_remove: Vec<(Hash, u8)> = self
+            .reservations
+            .iter()
             .filter(|(_, r)| current_height >= r.height.saturating_add(RESERVATION_EXPIRY_BLOCKS))
             .map(|(k, _)| *k)
             .collect();
@@ -357,7 +379,10 @@ impl Balance {
 
     /// Snapshot of all current reservations (for persistence sidecar).
     pub fn all_reservations(&self) -> Vec<((Hash, u8), Reservation)> {
-        self.reservations.iter().map(|(k, v)| (*k, v.clone())).collect()
+        self.reservations
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
     }
 
     /// Restore reservations from a persisted sidecar. Does NOT clear
@@ -388,14 +413,18 @@ impl Balance {
 
     /// UTXOs that are unspent but held back by `lock_height`.
     pub fn locked_utxos(&self, current_height: u64) -> Vec<&UTXO> {
-        self.utxos.values()
+        self.utxos
+            .values()
             .filter(|u| !u.spent && u.lock_height.map_or(false, |lh| current_height < lh))
             .collect()
     }
 
     /// Total balance tied up in time-locked outputs.
     pub fn locked_balance(&self, current_height: u64) -> Amount {
-        self.locked_utxos(current_height).iter().map(|u| u.amount).sum()
+        self.locked_utxos(current_height)
+            .iter()
+            .map(|u| u.amount)
+            .sum()
     }
 }
 
@@ -500,11 +529,9 @@ mod tests {
         assert_eq!(balance.spendable(100, 10), Amount::from_atomic(300));
 
         let tx_hash = Hash::from_bytes([99; 32]);
-        balance.reserve_utxos(
-            &[(Hash::from_bytes([1; 32]), 1)],
-            tx_hash,
-            100,
-        ).expect("reserve");
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx_hash, 100)
+            .expect("reserve");
         assert_eq!(balance.available_utxos(100, 10).len(), 1);
         assert_eq!(balance.spendable(100, 10), Amount::from_atomic(200));
     }
@@ -520,14 +547,21 @@ mod tests {
         balance.add_utxo(make_utxo_at_idx(200, 0, 2));
         let tx_a = Hash::from_bytes([0xAA; 32]);
         let tx_b = Hash::from_bytes([0xBB; 32]);
-        balance.reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx_a, 100).expect("first");
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx_a, 100)
+            .expect("first");
         // tx_b tries to reserve UTXO 1 (held by tx_a) AND UTXO 2 (free).
         // Atomic behavior: neither gets reserved, error returned.
-        let err = balance.reserve_utxos(
-            &[(Hash::from_bytes([1; 32]), 1), (Hash::from_bytes([2; 32]), 2)],
-            tx_b,
-            100,
-        ).expect_err("must fail");
+        let err = balance
+            .reserve_utxos(
+                &[
+                    (Hash::from_bytes([1; 32]), 1),
+                    (Hash::from_bytes([2; 32]), 2),
+                ],
+                tx_b,
+                100,
+            )
+            .expect_err("must fail");
         assert_eq!(err.utxo_key, (Hash::from_bytes([1; 32]), 1));
         // UTXO 2 must still be available since the conflict aborted before
         // any insertion.
@@ -543,8 +577,12 @@ mod tests {
         balance.add_utxo(make_utxo_at_idx(200, 0, 2));
         let tx_a = Hash::from_bytes([0xAA; 32]);
         let tx_b = Hash::from_bytes([0xBB; 32]);
-        balance.reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx_a, 100).unwrap();
-        balance.reserve_utxos(&[(Hash::from_bytes([2; 32]), 2)], tx_b, 100).unwrap();
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx_a, 100)
+            .unwrap();
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([2; 32]), 2)], tx_b, 100)
+            .unwrap();
         let released = balance.release_reservations_by_tx(tx_a);
         assert_eq!(released, 1);
         assert!(!balance.is_reserved(&(Hash::from_bytes([1; 32]), 1), 100));
@@ -559,7 +597,9 @@ mod tests {
         let mut balance = Balance::new();
         balance.add_utxo(make_utxo_at_idx(100, 0, 1));
         let tx = Hash::from_bytes([0xCC; 32]);
-        balance.reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx, 100).unwrap();
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx, 100)
+            .unwrap();
         assert!(balance.is_reserved(&(Hash::from_bytes([1; 32]), 1), 100));
         // Just before expiry: still reserved.
         assert!(balance.is_reserved(
@@ -581,7 +621,9 @@ mod tests {
         let mut balance = Balance::new();
         balance.add_utxo(make_utxo_at_idx(100, 0, 1));
         let tx = Hash::from_bytes([0xDD; 32]);
-        balance.reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx, 100).unwrap();
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx, 100)
+            .unwrap();
         balance.mark_spent(Hash::from_bytes([1; 32]), 1);
         assert!(!balance.is_reserved(&(Hash::from_bytes([1; 32]), 1), 100));
     }
@@ -595,11 +637,16 @@ mod tests {
         balance.add_utxo(make_utxo_at_idx(100, 0, 1));
         balance.add_utxo(make_utxo_at_idx(200, 0, 2));
         let tx = Hash::from_bytes([0xEE; 32]);
-        balance.reserve_utxos(
-            &[(Hash::from_bytes([1; 32]), 1), (Hash::from_bytes([2; 32]), 2)],
-            tx,
-            100,
-        ).unwrap();
+        balance
+            .reserve_utxos(
+                &[
+                    (Hash::from_bytes([1; 32]), 1),
+                    (Hash::from_bytes([2; 32]), 2),
+                ],
+                tx,
+                100,
+            )
+            .unwrap();
         assert_eq!(balance.all_reservations().len(), 2);
         let released = balance.release_expired_reservations(100 + RESERVATION_EXPIRY_BLOCKS);
         assert_eq!(released, 2);
@@ -691,7 +738,9 @@ mod tests {
         let mut balance = Balance::new();
         balance.add_utxo(make_utxo_at_idx(100, 0, 1));
         let tx = Hash::from_bytes([0xDE; 32]);
-        balance.reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx, 100).unwrap();
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx, 100)
+            .unwrap();
         assert_eq!(balance.all_reservations().len(), 1);
 
         balance.remove_outputs(&[(Hash::from_bytes([1; 32]), 1)]);
@@ -709,8 +758,20 @@ mod tests {
         let stale = (Hash::from_bytes([1; 32]), 1u8);
         let fresh = (Hash::from_bytes([2; 32]), 2u8);
         let entries = vec![
-            (stale, Reservation { by_tx: Hash::from_bytes([0; 32]), height: 0 }),
-            (fresh, Reservation { by_tx: Hash::from_bytes([0; 32]), height: 1000 }),
+            (
+                stale,
+                Reservation {
+                    by_tx: Hash::from_bytes([0; 32]),
+                    height: 0,
+                },
+            ),
+            (
+                fresh,
+                Reservation {
+                    by_tx: Hash::from_bytes([0; 32]),
+                    height: 1000,
+                },
+            ),
         ];
         balance.restore_reservations(entries, 1000 + 50); // stale is way past expiry, fresh is recent
         assert!(!balance.is_reserved(&stale, 1000 + 50));

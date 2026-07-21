@@ -6,10 +6,10 @@
 //! - Mining events
 //! - Wallet updates
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
 /// Maximum number of pending messages per subscription
@@ -168,7 +168,8 @@ impl SubscriptionManager {
             if current >= MAX_SUBSCRIPTIONS_PER_CLIENT {
                 tracing::warn!(
                     "Client {} exceeded subscription limit ({})",
-                    cid, MAX_SUBSCRIPTIONS_PER_CLIENT
+                    cid,
+                    MAX_SUBSCRIPTIONS_PER_CLIENT
                 );
                 return Err("Maximum subscriptions per client reached");
             }
@@ -303,7 +304,10 @@ mod tests {
         let manager = SubscriptionManager::new();
 
         // Subscribe to new blocks
-        let (id, mut receiver) = manager.subscribe(vec![EventType::NewBlock], Some("test-client")).await.unwrap();
+        let (id, mut receiver) = manager
+            .subscribe(vec![EventType::NewBlock], Some("test-client"))
+            .await
+            .unwrap();
 
         // Broadcast event
         let event = Event::new_block(100, "abc123", 5);
@@ -331,8 +335,14 @@ mod tests {
         let manager = SubscriptionManager::new();
 
         // Subscribe
-        let (id1, _rx1) = manager.subscribe(vec![EventType::NewBlock], None).await.unwrap();
-        let (id2, _rx2) = manager.subscribe(vec![EventType::NewTransaction], None).await.unwrap();
+        let (id1, _rx1) = manager
+            .subscribe(vec![EventType::NewBlock], None)
+            .await
+            .unwrap();
+        let (id2, _rx2) = manager
+            .subscribe(vec![EventType::NewTransaction], None)
+            .await
+            .unwrap();
         assert_ne!(id1, id2);
         assert_eq!(manager.subscription_count().await, 2);
 

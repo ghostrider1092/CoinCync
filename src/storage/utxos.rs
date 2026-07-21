@@ -1,9 +1,9 @@
 //! UTXO set storage with height indexing for fast decoy selection
 
+use crate::db::{Database, OutputIndexEntry};
 use crate::primitives::{Hash, KeyImage};
 use crate::transaction::TxOutput;
-use crate::db::{OutputIndexEntry, Database};
-use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reference to a transaction output
@@ -97,12 +97,25 @@ impl UtxoSet {
     }
 
     /// Add an output with coinbase flag (CRIT-5: needed for maturity tracking)
-    pub fn add_output_ext(&mut self, tx_hash: Hash, index: u8, output: TxOutput, height: u64, is_coinbase: bool) {
+    pub fn add_output_ext(
+        &mut self,
+        tx_hash: Hash,
+        index: u8,
+        output: TxOutput,
+        height: u64,
+        is_coinbase: bool,
+    ) {
         let key = (tx_hash, index);
         let stealth_addr = *output.stealth_address.as_bytes();
         let commitment = output.commitment;
         let lock_height = output.lock_height;
-        let output_ref = OutputRef { tx_hash, index, output, height, is_coinbase };
+        let output_ref = OutputRef {
+            tx_hash,
+            index,
+            output,
+            height,
+            is_coinbase,
+        };
 
         // Add to primary storage
         self.outputs.insert(key, output_ref);
@@ -121,19 +134,23 @@ impl UtxoSet {
 
         // Add to permanent output index (oldest wins, matching stealth_index)
         // This index persists across spends — entries are only removed during reorg.
-        self.output_index.entry(stealth_addr).or_insert(OutputIndexEntry {
-            commitment,
-            height,
-            is_coinbase,
-            lock_height,
-        });
+        self.output_index
+            .entry(stealth_addr)
+            .or_insert(OutputIndexEntry {
+                commitment,
+                height,
+                is_coinbase,
+                lock_height,
+            });
 
         self.total_outputs_ever += 1;
     }
 
     /// Spend an output (mark key image as spent and remove output)
     pub fn spend_output(&mut self, tx_hash: Hash, index: u8, key_image: KeyImage) -> bool {
-        if self.key_images.contains(&key_image) { return false; }
+        if self.key_images.contains(&key_image) {
+            return false;
+        }
         self.key_images.insert(key_image);
 
         let key = (tx_hash, index);
@@ -160,7 +177,9 @@ impl UtxoSet {
     /// For privacy coins with ring signatures, we don't know which output was spent.
     /// Returns false if already spent (double-spend attempt).
     pub fn mark_key_image_spent(&mut self, key_image: KeyImage) -> bool {
-        if self.key_images.contains(&key_image) { return false; }
+        if self.key_images.contains(&key_image) {
+            return false;
+        }
         self.key_images.insert(key_image);
         true
     }
@@ -180,7 +199,8 @@ impl UtxoSet {
     /// SECURITY (CRIT-5, HIGH-4): Used to validate ring members exist on-chain
     /// and to check coinbase maturity before allowing outputs in rings.
     pub fn get_output_by_stealth(&self, stealth_addr: &[u8; 32]) -> Option<&OutputRef> {
-        self.stealth_index.get(stealth_addr)
+        self.stealth_index
+            .get(stealth_addr)
             .and_then(|key| self.outputs.get(key))
     }
 
@@ -293,7 +313,6 @@ impl UtxoSet {
         self.key_images.remove(ki)
     }
 
-
     // ===== Fast decoy selection methods =====
 
     /// Get outputs in a height range for decoy selection
@@ -380,7 +399,8 @@ impl UtxoSet {
 
         // Get all eligible outputs (exclude time-locked outputs that haven't
         // unlocked). The eligible pool is what a uniform draw is over.
-        let mut eligible: Vec<&OutputRef> = self.outputs_in_range(0, max_height)
+        let mut eligible: Vec<&OutputRef> = self
+            .outputs_in_range(0, max_height)
             .into_iter()
             .filter(|o| o.output.lock_height.map_or(true, |lh| current_height >= lh))
             .collect();
@@ -418,14 +438,16 @@ impl UtxoSet {
         rng: &mut R,
     ) -> Vec<&OutputRef> {
         let max_height = current_height.saturating_sub(min_age);
-        let eligible: Vec<&OutputRef> = self.outputs_in_range(0, max_height)
+        let eligible: Vec<&OutputRef> = self
+            .outputs_in_range(0, max_height)
             .into_iter()
             .filter(|o| o.output.lock_height.map_or(true, |lh| current_height >= lh))
             .collect();
 
         // Filter out outputs from excluded transaction
         let filtered: Vec<&OutputRef> = if let Some(tx_hash) = exclude_tx {
-            eligible.into_iter()
+            eligible
+                .into_iter()
                 .filter(|o| &o.tx_hash != tx_hash)
                 .collect()
         } else {
@@ -621,8 +643,16 @@ impl UtxoBatch {
     }
 
     /// Add an output with coinbase flag to the batch
-    pub fn add_output_ext(&mut self, tx_hash: Hash, index: u8, output: TxOutput, height: u64, is_coinbase: bool) {
-        self.adds.push((tx_hash, index, output, height, is_coinbase));
+    pub fn add_output_ext(
+        &mut self,
+        tx_hash: Hash,
+        index: u8,
+        output: TxOutput,
+        height: u64,
+        is_coinbase: bool,
+    ) {
+        self.adds
+            .push((tx_hash, index, output, height, is_coinbase));
     }
 
     /// Mark a key image as spent
@@ -637,7 +667,10 @@ impl UtxoBatch {
 
     /// Check if batch is empty
     pub fn is_empty(&self) -> bool {
-        self.adds.is_empty() && self.key_images.is_empty() && self.removes.is_empty() && self.key_image_removals.is_empty()
+        self.adds.is_empty()
+            && self.key_images.is_empty()
+            && self.removes.is_empty()
+            && self.key_image_removals.is_empty()
     }
 
     /// Get total operation count
@@ -738,7 +771,13 @@ impl UtxoSet {
 
             // Add outputs (with coinbase flag for maturity tracking - CRIT-5)
             for (idx, output) in tx.outputs.iter().enumerate() {
-                batch.add_output_ext(tx_hash, idx as u8, output.clone(), block_height, is_coinbase);
+                batch.add_output_ext(
+                    tx_hash,
+                    idx as u8,
+                    output.clone(),
+                    block_height,
+                    is_coinbase,
+                );
             }
 
             // Mark key images as spent (for non-coinbase)
@@ -766,12 +805,14 @@ impl UtxoSet {
     /// `mark_key_image_spent()` only records the key image — it does NOT remove
     /// the output from the set (unlike `spend_output()` which is not used for
     /// ring-sig chains).
-    pub fn batch_disconnect_block(
-        transactions: &[crate::transaction::Transaction],
-    ) -> UtxoBatch {
+    pub fn batch_disconnect_block(transactions: &[crate::transaction::Transaction]) -> UtxoBatch {
         let mut batch = UtxoBatch::with_capacity(
             0,
-            transactions.iter().filter(|tx| !tx.is_coinbase()).map(|tx| tx.inputs.len()).sum(),
+            transactions
+                .iter()
+                .filter(|tx| !tx.is_coinbase())
+                .map(|tx| tx.inputs.len())
+                .sum(),
             transactions.iter().map(|tx| tx.outputs.len()).sum(),
         );
 

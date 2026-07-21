@@ -61,8 +61,8 @@
 use parking_lot::RwLock;
 
 use coincync_rolling_finality::{
-    codec, ApplyOutcome, Ed25519Verifier, FinalityError, FinalityStats, FinalityTracker,
-    WireError, WIRE_MAGIC,
+    codec, ApplyOutcome, Ed25519Verifier, FinalityError, FinalityStats, FinalityTracker, WireError,
+    WIRE_MAGIC,
 };
 
 /// Outcome of feeding one accepted block through the adapter.
@@ -292,7 +292,10 @@ mod tests {
     #[test]
     fn empty_extra_is_no_attestation() {
         let rf = RollingFinality::new_default();
-        assert_eq!(rf.on_accepted_block(1_000, &[]), OnBlockOutcome::NoAttestation);
+        assert_eq!(
+            rf.on_accepted_block(1_000, &[]),
+            OnBlockOutcome::NoAttestation
+        );
     }
 
     #[test]

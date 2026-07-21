@@ -5,11 +5,11 @@
 //!
 //! NO MOCKS. Uses real Blockchain + Block + Transaction types.
 
-use coincync::chain::{Blockchain, BlockStatus};
-use coincync::primitives::{Hash, Amount, KeyImage, PublicKey, merkle_root};
-use coincync::transaction::{Transaction, TxType, TxOutput};
-use coincync::crypto::{SecretScalar, BlindingFactor, PedersenCommitment};
+use coincync::chain::{BlockStatus, Blockchain};
 use coincync::consensus::{Block, BlockHeader};
+use coincync::crypto::{BlindingFactor, PedersenCommitment, SecretScalar};
+use coincync::primitives::{merkle_root, Amount, Hash, KeyImage, PublicKey};
+use coincync::transaction::{Transaction, TxOutput, TxType};
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -59,7 +59,9 @@ fn make_coinbase_output(seed: u8) -> TxOutput {
     let commitment = PedersenCommitment::commit(5_000_000_000, &bf);
     TxOutput {
         stealth_address: PublicKey::from_bytes(public.to_bytes()),
-        tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+        tx_public_key: PublicKey::from_bytes(
+            SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+        ),
         commitment: commitment.to_bytes(),
         encrypted_amount: vec![0u8; 8],
         view_tag: seed,
@@ -85,10 +87,17 @@ fn tier5_orphan_block_without_parent_not_added_to_main() {
     assert!(result.is_ok());
     match result.unwrap() {
         BlockStatus::Orphan => {} // correct
-        other => panic!("Block with unknown parent should be Orphan, got {:?}", other),
+        other => panic!(
+            "Block with unknown parent should be Orphan, got {:?}",
+            other
+        ),
     }
     // Chain height should not have changed
-    assert_eq!(chain.height(), 0, "Orphan block must not advance chain height");
+    assert_eq!(
+        chain.height(),
+        0,
+        "Orphan block must not advance chain height"
+    );
 }
 
 // =============================================================================
@@ -107,7 +116,11 @@ fn tier5_height_skip_rejected() {
     assert!(result.is_ok());
     match result.unwrap() {
         BlockStatus::Invalid(reason) => {
-            assert!(reason.contains("height"), "Rejection must mention height, got: {}", reason);
+            assert!(
+                reason.contains("height"),
+                "Rejection must mention height, got: {}",
+                reason
+            );
         }
         other => panic!("Height skip should be Invalid, got {:?}", other),
     }
@@ -133,7 +146,8 @@ fn tier5_invalid_block_correctly_rejected() {
     // Chain validation SHOULD catch this and reject it
     assert!(
         matches!(result, BlockStatus::Invalid(_)),
-        "Block without valid PoW/anchor must be rejected, got {:?}", result
+        "Block without valid PoW/anchor must be rejected, got {:?}",
+        result
     );
 }
 
@@ -219,7 +233,8 @@ fn tier5_invalid_blocks_never_advance_chain() {
         let _ = chain.add_block(b);
     }
     assert_eq!(
-        chain.height(), genesis_height,
+        chain.height(),
+        genesis_height,
         "Invalid blocks must never advance chain height"
     );
 }
@@ -273,12 +288,27 @@ fn tier5_future_height_returns_none() {
 
     // Genesis (height 0) exists
     assert!(chain.get_block_hash(0).is_some(), "Height 0 must exist");
-    assert!(chain.get_block_by_height(0).is_some(), "Genesis block must be retrievable");
+    assert!(
+        chain.get_block_by_height(0).is_some(),
+        "Genesis block must be retrievable"
+    );
 
     // Future heights must return None
-    assert_eq!(chain.get_block_hash(1), None, "Height 1 should not exist yet");
-    assert_eq!(chain.get_block_hash(100), None, "Height 100 should not exist");
-    assert_eq!(chain.get_block_hash(u64::MAX), None, "u64::MAX height should not exist");
+    assert_eq!(
+        chain.get_block_hash(1),
+        None,
+        "Height 1 should not exist yet"
+    );
+    assert_eq!(
+        chain.get_block_hash(100),
+        None,
+        "Height 100 should not exist"
+    );
+    assert_eq!(
+        chain.get_block_hash(u64::MAX),
+        None,
+        "u64::MAX height should not exist"
+    );
 }
 
 // =============================================================================
@@ -311,13 +341,20 @@ fn tier5_difficulty_never_zero() {
     let chain = Blockchain::new();
     chain.init_genesis().expect("genesis");
 
-    assert!(chain.difficulty() > 0, "Difficulty must never be zero (even at genesis)");
+    assert!(
+        chain.difficulty() > 0,
+        "Difficulty must never be zero (even at genesis)"
+    );
 
     let mut prev = chain.tip_hash();
     for i in 1..=5u64 {
         let b = make_block_at(i, prev, i as u8);
         prev = b.hash();
         chain.add_block(b).unwrap();
-        assert!(chain.difficulty() > 0, "Difficulty must never be zero at height {}", i);
+        assert!(
+            chain.difficulty() > 0,
+            "Difficulty must never be zero at height {}",
+            i
+        );
     }
 }

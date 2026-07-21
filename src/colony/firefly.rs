@@ -206,8 +206,10 @@ mod tests {
         }
         assert!(fired);
         let p = f.phase();
-        assert!(f.absorb_pulse() || f.phase() == p + COUPLING_NUDGE,
-            "after a fire the nudge budget must be refreshed");
+        assert!(
+            f.absorb_pulse() || f.phase() == p + COUPLING_NUDGE,
+            "after a fire the nudge budget must be refreshed"
+        );
     }
 
     #[test]

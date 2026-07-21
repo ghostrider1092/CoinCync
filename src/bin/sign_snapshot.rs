@@ -148,18 +148,13 @@ fn cmd_sign(args: &[String]) -> ExitCode {
                 match hex::decode(trimmed) {
                     Ok(bytes) => {
                         if bytes.is_empty() {
-                            eprintln!(
-                                "sign: COINCYNC_SIGN_NAMESPACE_HEX decoded to zero bytes"
-                            );
+                            eprintln!("sign: COINCYNC_SIGN_NAMESPACE_HEX decoded to zero bytes");
                             return ExitCode::from(2);
                         }
                         bytes
                     }
                     Err(e) => {
-                        eprintln!(
-                            "sign: COINCYNC_SIGN_NAMESPACE_HEX not valid hex: {}",
-                            e
-                        );
+                        eprintln!("sign: COINCYNC_SIGN_NAMESPACE_HEX not valid hex: {}", e);
                         return ExitCode::from(2);
                     }
                 }
@@ -250,8 +245,8 @@ fn parse_seed(hex_str: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     for (i, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
         let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
-        out[i] = u8::from_str_radix(s, 16)
-            .map_err(|e| format!("non-hex character in seed: {}", e))?;
+        out[i] =
+            u8::from_str_radix(s, 16).map_err(|e| format!("non-hex character in seed: {}", e))?;
     }
     Ok(out)
 }
@@ -321,8 +316,7 @@ mod tests {
         // uses. If either side drifts, deployment breaks.
         let seed = [42u8; 32];
         let snapshot = b"any-snapshot-body-bytes-doesnt-matter-for-this-test";
-        let mut signed_payload =
-            Vec::with_capacity(SIGNATURE_NAMESPACE.len() + snapshot.len());
+        let mut signed_payload = Vec::with_capacity(SIGNATURE_NAMESPACE.len() + snapshot.len());
         signed_payload.extend_from_slice(SIGNATURE_NAMESPACE);
         signed_payload.extend_from_slice(snapshot);
 
@@ -334,7 +328,9 @@ mod tests {
         let verifying_key = VerifyingKey::from_bytes(&signing_key.verifying_key().to_bytes())
             .expect("valid pubkey");
         let reconstructed_sig = Signature::from_bytes(&sig_bytes);
-        assert!(verifying_key.verify(&signed_payload, &reconstructed_sig).is_ok());
+        assert!(verifying_key
+            .verify(&signed_payload, &reconstructed_sig)
+            .is_ok());
     }
 
     #[test]

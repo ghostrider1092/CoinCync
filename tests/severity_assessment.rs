@@ -6,11 +6,13 @@
 //! For each finding: can the attack succeed END-TO-END through the
 //! full verification path, or does a downstream check catch it?
 
-use coincync::mempool::Mempool;
-use coincync::primitives::{Amount, PublicKey, KeyImage};
-use coincync::transaction::{Transaction, TxType, TxInput, TxOutput, RingMemberRef};
-use coincync::crypto::{SecretScalar, BlindingFactor, PedersenCommitment, KeyImage as CKI, ClsagSignature};
 use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+use coincync::crypto::{
+    BlindingFactor, ClsagSignature, KeyImage as CKI, PedersenCommitment, SecretScalar,
+};
+use coincync::mempool::Mempool;
+use coincync::primitives::{Amount, KeyImage, PublicKey};
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -27,15 +29,22 @@ fn severity_f3_zero_keyimage_through_full_crypto_path() {
     let ki = CKI::from_secret(&secret);
     let bf = BlindingFactor::random(&mut OsRng);
 
-    let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE).map(|_| {
-        RingMemberRef {
-            public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-        }
-    }).collect();
+    let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE)
+        .map(|_| RingMemberRef {
+            public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(
+                1_000_000_000,
+                &BlindingFactor::random(&mut OsRng),
+            )
+            .to_bytes(),
+        })
+        .collect();
 
     let tx = Transaction {
-        version: 1, tx_type: TxType::Transfer,
+        version: 1,
+        tx_type: TxType::Transfer,
         inputs: vec![TxInput {
             key_image: KeyImage::from_bytes([0u8; 32]), // ZERO KEY IMAGE
             ring_members,
@@ -48,13 +57,21 @@ fn severity_f3_zero_keyimage_through_full_crypto_path() {
             pseudo_output_commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-            encrypted_amount: vec![0u8; 8], view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(50_000_000),
-        range_proof: vec![0u8; 64], extra: vec![],
+        range_proof: vec![0u8; 64],
+        extra: vec![],
     };
 
     // The FULL crypto path (mempool.add) — does CLSAG verification catch it?
@@ -90,28 +107,48 @@ fn severity_f3_double_spend_via_zero_keyimage() {
         let secret = SecretScalar::random(&mut OsRng);
         let ki = CKI::from_secret(&secret);
         let bf = BlindingFactor::random(&mut OsRng);
-        let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE).map(|_| {
-            RingMemberRef {
-                public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-                commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-            }
-        }).collect();
+        let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE)
+            .map(|_| RingMemberRef {
+                public_key: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
+                commitment: PedersenCommitment::commit(
+                    1_000_000_000,
+                    &BlindingFactor::random(&mut OsRng),
+                )
+                .to_bytes(),
+            })
+            .collect();
         Transaction {
-            version: 1, tx_type: TxType::Transfer,
+            version: 1,
+            tx_type: TxType::Transfer,
             inputs: vec![TxInput {
                 key_image: KeyImage::from_bytes([0u8; 32]), // ZERO
                 ring_members,
-                signature: ClsagSignature { key_image: ki, commitment_image: secret.to_public(), c1: [seed; 32], responses: vec![[seed; 32]; BOOTSTRAP_MIN_RING_SIZE] },
+                signature: ClsagSignature {
+                    key_image: ki,
+                    commitment_image: secret.to_public(),
+                    c1: [seed; 32],
+                    responses: vec![[seed; 32]; BOOTSTRAP_MIN_RING_SIZE],
+                },
                 pseudo_output_commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
             }],
             outputs: vec![TxOutput {
-                stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-                tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+                stealth_address: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
+                tx_public_key: PublicKey::from_bytes(
+                    SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+                ),
                 commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-                encrypted_amount: vec![0u8; 8], view_tag: seed, lock_height: None, encrypted_memo: vec![],
+                encrypted_amount: vec![0u8; 8],
+                view_tag: seed,
+                lock_height: None,
+                encrypted_memo: vec![],
             }],
             fee: Amount::from_atomic(50_000_000),
-            range_proof: vec![0u8; 64], extra: vec![seed],
+            range_proof: vec![0u8; 64],
+            extra: vec![seed],
         }
     };
 
@@ -133,7 +170,9 @@ fn severity_f3_double_spend_via_zero_keyimage() {
     // The structural gap still exists (first tx shouldn't be accepted) but the
     // double-spend protection still functions.
     if r1.is_ok() && r2.is_err() {
-        println!("Finding F3: First zero-KI tx enters via skip_crypto, second is blocked by KI dedup.");
+        println!(
+            "Finding F3: First zero-KI tx enters via skip_crypto, second is blocked by KI dedup."
+        );
         println!("Severity: HIGH (gap exists but double-spend is still prevented by KI tracking).");
     }
 }
@@ -153,36 +192,56 @@ fn severity_f4_unspendable_output_enters_mempool() {
     let ki = CKI::from_secret(&secret);
     let bf = BlindingFactor::random(&mut OsRng);
 
-    let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE).map(|_| {
-        RingMemberRef {
-            public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-        }
-    }).collect();
+    let ring_members: Vec<RingMemberRef> = (0..BOOTSTRAP_MIN_RING_SIZE)
+        .map(|_| RingMemberRef {
+            public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(
+                1_000_000_000,
+                &BlindingFactor::random(&mut OsRng),
+            )
+            .to_bytes(),
+        })
+        .collect();
 
     let tx = Transaction {
-        version: 1, tx_type: TxType::Transfer,
+        version: 1,
+        tx_type: TxType::Transfer,
         inputs: vec![TxInput {
             key_image: KeyImage::from_bytes(ki.to_bytes()),
             ring_members,
-            signature: ClsagSignature { key_image: ki, commitment_image: secret.to_public(), c1: [0x42; 32], responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE] },
+            signature: ClsagSignature {
+                key_image: ki,
+                commitment_image: secret.to_public(),
+                c1: [0x42; 32],
+                responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE],
+            },
             pseudo_output_commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
         }],
         outputs: vec![TxOutput {
             stealth_address: PublicKey::from_bytes([0xFF; 32]), // INVALID POINT — unspendable
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-            encrypted_amount: vec![0u8; 8], view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(50_000_000),
-        range_proof: vec![0u8; 64], extra: vec![],
+        range_proof: vec![0u8; 64],
+        extra: vec![],
     };
 
     // Try skip_crypto path (structural only)
     let structural = pool.add_skip_crypto(tx.clone());
 
     if structural.is_ok() {
-        println!("CONFIRMED: Invalid Ristretto point stealth address passes structural validation.");
+        println!(
+            "CONFIRMED: Invalid Ristretto point stealth address passes structural validation."
+        );
         println!("Severity: HIGH. Attacker can burn funds by sending to unspendable addresses.");
         println!("The recipient wallet will show received funds that can never be spent.");
     }

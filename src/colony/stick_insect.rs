@@ -39,8 +39,7 @@ pub const CANONICAL_USER_AGENT: &str = "/coincync/";
 /// to the next rung so observed sizes cluster onto a handful of values
 /// instead of leaking exact lengths. Ascending, powers-of-two for cheap
 /// reasoning and wide coverage from tiny control frames to full blocks.
-pub const SIZE_BUCKETS: [usize; 9] =
-    [256, 512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536];
+pub const SIZE_BUCKETS: [usize; 9] = [256, 512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536];
 
 /// Normalize any advertised user-agent to the canonical one. Mimicry: the
 /// input is discarded — whatever a peer *claims*, we always present (and
@@ -93,7 +92,10 @@ mod tests {
 
     #[test]
     fn user_agent_is_always_canonicalized() {
-        assert_eq!(normalize_user_agent("/coincync:1.0.11/linux/"), CANONICAL_USER_AGENT);
+        assert_eq!(
+            normalize_user_agent("/coincync:1.0.11/linux/"),
+            CANONICAL_USER_AGENT
+        );
         assert_eq!(normalize_user_agent(""), CANONICAL_USER_AGENT);
         assert_eq!(normalize_user_agent("/some-fork:2/"), CANONICAL_USER_AGENT);
         assert!(is_canonical_user_agent(CANONICAL_USER_AGENT));
@@ -117,7 +119,10 @@ mod tests {
         assert_eq!(padded_len(257), 512);
         assert_eq!(padded_len(5_000), 8_192);
         for raw in [0usize, 1, 300, 1_000, 40_000, 70_000] {
-            assert!(padded_len(raw) >= raw, "padding must never shrink the payload");
+            assert!(
+                padded_len(raw) >= raw,
+                "padding must never shrink the payload"
+            );
         }
     }
 

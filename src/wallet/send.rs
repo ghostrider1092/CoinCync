@@ -6,26 +6,23 @@
 //! - Fee calculation
 //! - Ring member selection
 
-use crate::primitives::{Amount, Address, PublicKey};
-use crate::transaction::{
-    Transaction, TransactionBuilder, TxType,
-    SpendableInput, Recipient, DecoyOutput,
+use super::{Balance, KeyEpoch, UTXO};
+use crate::constants::{
+    effective_ring_size, min_output_age_at_height, ring_size_at_height, BOOTSTRAP_MIN_RING_SIZE,
+    MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT, STANDARD_INPUT_COUNT, STANDARD_OUTPUT_COUNT,
+    UNIFORM_TX_SHAPE_HEIGHT,
 };
 use crate::crypto::{
-    BlindingFactor,
-    StealthAddress, compute_one_time_secret,
-    RingSelector, RingSelectionConfig, RingSelectionPool,
-    OutputRef as RingOutputRef,
-};
-use crate::constants::{
-    BOOTSTRAP_MIN_RING_SIZE, ring_size_at_height, effective_ring_size,
-    min_output_age_at_height, MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT,
-    UNIFORM_TX_SHAPE_HEIGHT, STANDARD_INPUT_COUNT, STANDARD_OUTPUT_COUNT,
+    compute_one_time_secret, BlindingFactor, OutputRef as RingOutputRef, RingSelectionConfig,
+    RingSelectionPool, RingSelector, StealthAddress,
 };
 use crate::error::{Error, Result};
-use super::{Balance, UTXO, KeyEpoch};
+use crate::primitives::{Address, Amount, PublicKey};
+use crate::transaction::{
+    DecoyOutput, Recipient, SpendableInput, Transaction, TransactionBuilder, TxType,
+};
 
-use rand::{Rng, RngCore, CryptoRng, seq::SliceRandom};
+use rand::{seq::SliceRandom, CryptoRng, Rng, RngCore};
 
 /// AUDIT (R-105 note, 2026-07-03): `COINCYNC_WALLET_ALLOW_WEAK_PRIVACY`
 /// is an ENVIRONMENT VARIABLE that disables the strict-privacy policy
@@ -148,8 +145,10 @@ pub enum CoinSelection {
 /// fee calculation, and outputs, but without ring signatures or stealth
 /// address cryptography. For full privacy transactions, use
 /// [`create_privacy_transaction`] or [`SharedWallet::create_transfer`].
-#[deprecated(note = "Use create_privacy_transaction or SharedWallet::create_transfer instead — \
-    this builder produces outputs with placeholder commitments that fail consensus validation")]
+#[deprecated(
+    note = "Use create_privacy_transaction or SharedWallet::create_transfer instead — \
+    this builder produces outputs with placeholder commitments that fail consensus validation"
+)]
 #[allow(dead_code, deprecated)]
 pub fn create_transaction(
     balance: &Balance,
@@ -181,7 +180,12 @@ pub fn create_transaction(
     // SECURITY: UTXO selection ordering is a privacy signal — always OsRng,
     // even on the legacy convenience path. Defence in depth: if a test caller
     // ever promotes this helper to non-test use, the privacy boundary is safe.
-    let selected = select_utxos(&utxos, total_needed, CoinSelection::OldestFirst, &mut rand::rngs::OsRng)?;
+    let selected = select_utxos(
+        &utxos,
+        total_needed,
+        CoinSelection::OldestFirst,
+        &mut rand::rngs::OsRng,
+    )?;
 
     // Build transaction with selected inputs and recipient outputs
     let mut builder = crate::transaction::SimpleTransactionBuilder::new(TxType::Transfer);
@@ -200,7 +204,9 @@ pub fn create_transaction(
 
     // Add change output if needed
     let input_sum: Amount = selected.iter().map(|u| u.amount).sum();
-    let change = input_sum.as_atomic().saturating_sub(total_needed.as_atomic());
+    let change = input_sum
+        .as_atomic()
+        .saturating_sub(total_needed.as_atomic());
     if change >= MIN_OUTPUT_AMOUNT {
         builder.add_output(
             crate::primitives::PublicKey::from_bytes([0u8; 32]), // change stealth placeholder
@@ -224,7 +230,15 @@ pub fn create_privacy_transaction<R: RngCore + CryptoRng>(
     current_height: u64,
     rng: &mut R,
 ) -> Result<Transaction> {
-    create_privacy_transaction_with_fee(balance, recipients, keys, decoy_pool, current_height, 1.0, rng)
+    create_privacy_transaction_with_fee(
+        balance,
+        recipients,
+        keys,
+        decoy_pool,
+        current_height,
+        1.0,
+        rng,
+    )
 }
 
 /// Create a full privacy transaction with a fee multiplier for priority/RBF.
@@ -245,8 +259,15 @@ pub fn create_privacy_transaction_with_fee<R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> Result<Transaction> {
     create_privacy_transaction_with_options(
-        balance, recipients, keys, decoy_pool, current_height,
-        fee_multiplier, None, Vec::new(), rng,
+        balance,
+        recipients,
+        keys,
+        decoy_pool,
+        current_height,
+        fee_multiplier,
+        None,
+        Vec::new(),
+        rng,
     )
 }
 
@@ -298,8 +319,7 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     let drip_pair = uniform && recipients.len() == STANDARD_OUTPUT_COUNT && {
         // All entries point to the same (spend, view) destination.
         recipients.windows(2).all(|w| {
-            w[0].0.as_bytes() == w[1].0.as_bytes()
-                && w[0].1.as_bytes() == w[1].1.as_bytes()
+            w[0].0.as_bytes() == w[1].0.as_bytes() && w[0].1.as_bytes() == w[1].1.as_bytes()
         })
     };
     if uniform && recipients.len() > 1 && !drip_pair {
@@ -308,7 +328,8 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
              Multi-recipient must be split into separate txs. To send a drip-pair \
              (two outputs to the same address in one tx, used by the faucet for \
              first-time recipients), pass the recipient twice with amounts that \
-             together cover the desired drip total — change becomes fee.".into()
+             together cover the desired drip total — change becomes fee."
+                .into(),
         ));
     }
 
@@ -322,7 +343,11 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
 
     // Post-activation: fixed 2 inputs, 2 outputs. Pre-activation: variable.
     let input_count_est = if uniform { STANDARD_INPUT_COUNT } else { 1 };
-    let output_count = if uniform { STANDARD_OUTPUT_COUNT } else { recipients.len() + 3 };
+    let output_count = if uniform {
+        STANDARD_OUTPUT_COUNT
+    } else {
+        recipients.len() + 3
+    };
     let initial_size = estimate_tx_size(input_count_est, output_count, ring_size);
 
     // Integer-only fee calculation: scale multiplier to avoid float arithmetic.
@@ -354,7 +379,8 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     let initial_fee = Amount::from_atomic(
         (initial_size as u64)
             .saturating_mul(MIN_FEE_PER_BYTE)
-            .saturating_mul(multiplier_x100) / 100,
+            .saturating_mul(multiplier_x100)
+            / 100,
     );
 
     let initial_needed = total_send.saturating_add(initial_fee);
@@ -374,7 +400,8 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
             // user has to wait. (More precise would be "the youngest UTXO
             // whose maturation tips us over the threshold", but this
             // bound is correct and simple.)
-            let pending_utxos: Vec<&UTXO> = balance.unspent_utxos()
+            let pending_utxos: Vec<&UTXO> = balance
+                .unspent_utxos()
                 .into_iter()
                 .filter(|u| current_height < u.height.saturating_add(min_age))
                 .collect();
@@ -384,13 +411,15 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
             // blocks_to_wait = earliest_full_maturity - current_height.
             // (Subset coverage might mature earlier, but reporting the
             // pessimistic full-maturity bound never under-promises.)
-            let latest_pending_height = pending_utxos.iter()
+            let latest_pending_height = pending_utxos
+                .iter()
                 .map(|u| u.height)
                 .max()
                 .unwrap_or(current_height);
             let earliest_full_maturity = latest_pending_height.saturating_add(min_age);
             let blocks_to_wait = earliest_full_maturity.saturating_sub(current_height);
-            let seconds_to_wait = blocks_to_wait.saturating_mul(crate::constants::TARGET_BLOCK_TIME);
+            let seconds_to_wait =
+                blocks_to_wait.saturating_mul(crate::constants::TARGET_BLOCK_TIME);
             return Err(Error::BalancePendingMaturity {
                 spendable_atomic: available.as_atomic(),
                 pending_atomic,
@@ -427,7 +456,8 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     let estimated_fee = Amount::from_atomic(
         (actual_size as u64)
             .saturating_mul(MIN_FEE_PER_BYTE)
-            .saturating_mul(multiplier_x100) / 100,
+            .saturating_mul(multiplier_x100)
+            / 100,
     );
     let total_needed = total_send.saturating_add(estimated_fee);
 
@@ -442,7 +472,9 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
 
     // Calculate actual totals using safe arithmetic
     let input_sum: Amount = selected.iter().map(|u| u.amount).sum();
-    let output_total = total_send.as_atomic().saturating_add(estimated_fee.as_atomic());
+    let output_total = total_send
+        .as_atomic()
+        .saturating_add(estimated_fee.as_atomic());
 
     // Sanity check: input_sum should always be >= output_total due to earlier selection
     if input_sum.as_atomic() < output_total {
@@ -471,8 +503,7 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     }
 
     // Build the transaction (BP+ range proofs at/above activation height)
-    let mut builder = TransactionBuilder::transfer()
-        .with_target_height(current_height);
+    let mut builder = TransactionBuilder::transfer().with_target_height(current_height);
     if let Some(m) = memo {
         builder = builder.with_memo(m);
     }
@@ -487,7 +518,10 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
             tx_public_key: utxo.tx_public_key,
         };
         let one_time_secret = compute_one_time_secret(
-            &stealth, &keys.view_secret, &keys.spend_secret, utxo.output_index,
+            &stealth,
+            &keys.view_secret,
+            &keys.spend_secret,
+            utxo.output_index,
         )?;
         let real_pubkey = one_time_secret.public_key();
         let input = SpendableInput {
@@ -500,7 +534,12 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
         };
 
         let (decoys, real_position) = select_ring_decoys(
-            &real_pubkey, utxo.height, &ring_pool, ring_size, current_height, rng,
+            &real_pubkey,
+            utxo.height,
+            &ring_pool,
+            ring_size,
+            current_height,
+            rng,
         )?;
         builder.add_input(input, decoys, real_position)?;
     }
@@ -630,8 +669,7 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
         });
     }
 
-    let mut builder = TransactionBuilder::transfer()
-        .with_target_height(current_height);
+    let mut builder = TransactionBuilder::transfer().with_target_height(current_height);
 
     // Add inputs with ring signatures
     for utxo in &selected {
@@ -640,7 +678,10 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
             tx_public_key: utxo.tx_public_key,
         };
         let one_time_secret = compute_one_time_secret(
-            &stealth, &keys.view_secret, &keys.spend_secret, utxo.output_index,
+            &stealth,
+            &keys.view_secret,
+            &keys.spend_secret,
+            utxo.output_index,
         )?;
         let real_pubkey = one_time_secret.public_key();
         let input = SpendableInput {
@@ -652,7 +693,12 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
             height: utxo.height,
         };
         let (decoys, real_position) = select_ring_decoys(
-            &real_pubkey, utxo.height, &ring_pool, ring_size, current_height, rng,
+            &real_pubkey,
+            utxo.height,
+            &ring_pool,
+            ring_size,
+            current_height,
+            rng,
         )?;
         builder.add_input(input, decoys, real_position)?;
     }
@@ -669,8 +715,11 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
     // Add change output (no lock)
     let final_fee = if change_amount >= MIN_OUTPUT_AMOUNT {
         builder.add_change(
-            &keys.spend_public, &keys.view_public,
-            Amount::from_atomic(change_amount), 1, rng,
+            &keys.spend_public,
+            &keys.view_public,
+            Amount::from_atomic(change_amount),
+            1,
+            rng,
         )?;
         estimated_fee
     } else {
@@ -758,7 +807,10 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
 
     // Validate ring size
     if ring_size == 0 {
-        return Err(Error::InvalidRingSize { expected: 1, got: 0 });
+        return Err(Error::InvalidRingSize {
+            expected: 1,
+            got: 0,
+        });
     }
     if ring_pool.len() < ring_size - 1 {
         return Err(Error::InvalidRingSize {
@@ -767,8 +819,7 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
         });
     }
 
-    let mut builder = TransactionBuilder::new(TxType::Churn)
-        .with_target_height(current_height);
+    let mut builder = TransactionBuilder::new(TxType::Churn).with_target_height(current_height);
 
     // Add inputs with ring signatures
     for utxo in &selected {
@@ -777,7 +828,10 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
             tx_public_key: utxo.tx_public_key,
         };
         let one_time_secret = compute_one_time_secret(
-            &stealth, &keys.view_secret, &keys.spend_secret, utxo.output_index,
+            &stealth,
+            &keys.view_secret,
+            &keys.spend_secret,
+            utxo.output_index,
         )?;
         let real_pubkey = one_time_secret.public_key();
         let input = SpendableInput {
@@ -789,7 +843,12 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
             height: utxo.height,
         };
         let (decoys, real_position) = select_ring_decoys(
-            &real_pubkey, utxo.height, &ring_pool, ring_size, current_height, rng,
+            &real_pubkey,
+            utxo.height,
+            &ring_pool,
+            ring_size,
+            current_height,
+            rng,
         )?;
         builder.add_input(input, decoys, real_position)?;
     }
@@ -810,8 +869,11 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
         // Uniform 2-in/2-out: always exactly 2 outputs (self-send + change/dummy)
         if change >= MIN_OUTPUT_AMOUNT {
             builder.add_change(
-                &keys.spend_public, &keys.view_public,
-                Amount::from_atomic(change), 1, rng,
+                &keys.spend_public,
+                &keys.view_public,
+                Amount::from_atomic(change),
+                1,
+                rng,
             )?;
             fee
         } else {
@@ -822,8 +884,11 @@ pub fn create_churn_transaction<R: RngCore + CryptoRng>(
         // Pre-activation: variable outputs
         let f = if change >= MIN_OUTPUT_AMOUNT {
             builder.add_change(
-                &keys.spend_public, &keys.view_public,
-                Amount::from_atomic(change), 1, rng,
+                &keys.spend_public,
+                &keys.view_public,
+                Amount::from_atomic(change),
+                1,
+                rng,
             )?;
             fee
         } else {
@@ -958,12 +1023,19 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
     // Sort indices by amount descending. Sorted view enables both the candidate
     // sweep and the trivial "largest pair" calculation for diagnostics.
     let mut indices: Vec<usize> = (0..utxos.len()).collect();
-    indices.sort_by(|a, b| utxos[*b].amount.as_atomic().cmp(&utxos[*a].amount.as_atomic()));
+    indices.sort_by(|a, b| {
+        utxos[*b]
+            .amount
+            .as_atomic()
+            .cmp(&utxos[*a].amount.as_atomic())
+    });
 
     // Largest pair = top two UTXOs (sorted descending). Used for both the
     // "covers target?" early bailout and the diagnostic error if no pair
     // covers — the user can always fall back to "send <= largest_pair - fee".
-    let largest_pair_sum = utxos[indices[0]].amount.as_atomic()
+    let largest_pair_sum = utxos[indices[0]]
+        .amount
+        .as_atomic()
         .saturating_add(utxos[indices[1]].amount.as_atomic());
 
     if largest_pair_sum < target_val {
@@ -994,7 +1066,9 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
 
     for i in 0..indices.len() {
         for j in (i + 1)..indices.len() {
-            let sum = utxos[indices[i]].amount.as_atomic()
+            let sum = utxos[indices[i]]
+                .amount
+                .as_atomic()
                 .saturating_add(utxos[indices[j]].amount.as_atomic());
             if sum >= target_val {
                 let excess = sum - target_val;
@@ -1028,8 +1102,11 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
 
     // PRIVACY: randomly select among candidates within 20% of the best excess
     // to prevent deterministic fingerprinting of UTXO selection.
-    let threshold = best_excess.saturating_add(best_excess / 5).max(best_excess.saturating_add(1));
-    let good_candidates: Vec<_> = candidates.iter()
+    let threshold = best_excess
+        .saturating_add(best_excess / 5)
+        .max(best_excess.saturating_add(1));
+    let good_candidates: Vec<_> = candidates
+        .iter()
         .filter(|(_, _, e)| *e <= threshold)
         .collect();
 
@@ -1041,9 +1118,11 @@ fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
 }
 
 fn ring_selection_pool(decoy_pool: &[DecoyOutput]) -> RingSelectionPool<'_> {
-    RingSelectionPool::new(decoy_pool.iter().map(|decoy| {
-        RingOutputRef::new(decoy.height, &decoy.public_key, &decoy.commitment)
-    }))
+    RingSelectionPool::new(
+        decoy_pool
+            .iter()
+            .map(|decoy| RingOutputRef::new(decoy.height, &decoy.public_key, &decoy.commitment)),
+    )
 }
 
 /// Uses uniform sampling without replacement so every eligible output has
@@ -1181,7 +1260,12 @@ mod tests {
     #[test]
     fn test_coin_selection_empty() {
         let utxos: Vec<&UTXO> = vec![];
-        let result = select_utxos(&utxos, Amount::from_atomic(100), CoinSelection::OldestFirst, &mut rand::rngs::OsRng);
+        let result = select_utxos(
+            &utxos,
+            Amount::from_atomic(100),
+            CoinSelection::OldestFirst,
+            &mut rand::rngs::OsRng,
+        );
         assert!(result.is_err());
     }
 

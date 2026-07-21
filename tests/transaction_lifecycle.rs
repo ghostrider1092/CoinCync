@@ -15,13 +15,11 @@
 //! the admission pipeline from raw `Transaction` input through the
 //! real `Mempool` state transitions.
 
-use coincync::constants::{MIN_FEE_PER_BYTE, BOOTSTRAP_MIN_RING_SIZE};
+use coincync::constants::{BOOTSTRAP_MIN_RING_SIZE, MIN_FEE_PER_BYTE};
 use coincync::crypto::{ClsagSignature, KeyImage as CryptoKeyImage, SecretScalar};
 use coincync::mempool::Mempool;
 use coincync::primitives::{Amount, KeyImage, PublicKey};
-use coincync::transaction::{
-    RingMemberRef, Transaction, TxInput, TxOutput, TxType,
-};
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use rand::rngs::OsRng;
 
 // =============================================================================

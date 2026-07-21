@@ -39,7 +39,11 @@ pub struct BridgeCandidate {
 
 impl BridgeCandidate {
     pub fn new(id: impl Into<String>, netgroup: u16, last_seen_secs_ago: u32) -> Self {
-        Self { id: id.into(), netgroup, last_seen_secs_ago }
+        Self {
+            id: id.into(),
+            netgroup,
+            last_seen_secs_ago,
+        }
     }
 }
 
@@ -88,7 +92,11 @@ pub fn select_bridges(candidates: &[BridgeCandidate], max_bridges: usize) -> Vec
             .then_with(|| a.1.id.cmp(&b.1.id))
     });
 
-    annotated.into_iter().take(max_bridges).map(|(_, c)| c).collect()
+    annotated
+        .into_iter()
+        .take(max_bridges)
+        .map(|(_, c)| c)
+        .collect()
 }
 
 #[cfg(test)]
@@ -146,7 +154,10 @@ mod tests {
         assert_eq!(sel.len(), 3);
         let d_pos = sel.iter().position(|x| x.id == "d").unwrap();
         let b_pos = sel.iter().position(|x| x.id == "b").unwrap();
-        assert!(d_pos < b_pos, "diverse netgroup covered before a second same-group bridge");
+        assert!(
+            d_pos < b_pos,
+            "diverse netgroup covered before a second same-group bridge"
+        );
     }
 
     #[test]
@@ -154,7 +165,11 @@ mod tests {
         let cands = [c("z", 3, 10), c("a", 1, 10), c("m", 2, 10), c("b", 1, 5)];
         let first = select_bridges(&cands, 3);
         for _ in 0..20 {
-            assert_eq!(select_bridges(&cands, 3), first, "must be stable across runs");
+            assert_eq!(
+                select_bridges(&cands, 3),
+                first,
+                "must be stable across runs"
+            );
         }
         // group1 freshest is 'b' (age 5 < 10), then group2 'm', group3 'z'.
         assert_eq!(

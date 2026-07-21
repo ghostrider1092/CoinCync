@@ -125,7 +125,10 @@ fn read_bearer(path: &Path) -> Option<String> {
         Ok(s) => {
             let t = s.trim().to_string();
             if t.is_empty() {
-                warn!("RPC token file {} is empty — running without auth", path.display());
+                warn!(
+                    "RPC token file {} is empty — running without auth",
+                    path.display()
+                );
                 None
             } else {
                 Some(t)
@@ -204,7 +207,10 @@ fn colony_observe_report(
             info!("colony/forager (advise): no peer clears the advice threshold yet");
         } else {
             let peers: Vec<&str> = advice.prefer.iter().map(|p| p.0.as_str()).collect();
-            info!(?peers, "colony/forager (advise): WOULD advise node to prefer (not sent)");
+            info!(
+                ?peers,
+                "colony/forager (advise): WOULD advise node to prefer (not sent)"
+            );
         }
     }
 
@@ -214,10 +220,17 @@ fn colony_observe_report(
         match adapter.aggregate_fleet_health() {
             Ok(agg) => match classify(&agg) {
                 NetSignal::Healthy => {
-                    info!(hosts = agg.total_hosts, "colony/sensor (observe): network healthy")
+                    info!(
+                        hosts = agg.total_hosts,
+                        "colony/sensor (observe): network healthy"
+                    )
                 }
                 NetSignal::Degraded(reasons) => {
-                    warn!(hosts = agg.total_hosts, ?reasons, "colony/sensor (observe): degraded")
+                    warn!(
+                        hosts = agg.total_hosts,
+                        ?reasons,
+                        "colony/sensor (observe): degraded"
+                    )
                 }
                 NetSignal::PartitionSuspected(reasons) => warn!(
                     hosts = agg.total_hosts,
@@ -319,7 +332,10 @@ fn castes_observe_report(
 ) {
     // cicada — prime-varied housekeeping cadence (no external input).
     let next = cicada.advance();
-    info!(next_secs = next, "caste/cicada (observe): next prime-varied housekeeping interval");
+    info!(
+        next_secs = next,
+        "caste/cicada (observe): next prime-varied housekeeping interval"
+    );
 
     // stick-insect — the canonical wire fingerprint every node presents.
     info!(
@@ -331,7 +347,11 @@ fn castes_observe_report(
     // Gather real signals once per round.
     let health = adapter.health_snapshot().ok();
     let peers = adapter.fleet_peers();
-    let agg = if fleet { adapter.aggregate_fleet_health().ok() } else { None };
+    let agg = if fleet {
+        adapter.aggregate_fleet_health().ok()
+    } else {
+        None
+    };
 
     // spider — attack-signature detection (needs fleet aggregate + peers).
     let mut under_attack = false;
@@ -340,7 +360,10 @@ fn castes_observe_report(
         let sigs = spider::assess(&reading);
         under_attack = !sigs.is_empty();
         if sigs.is_empty() {
-            info!(hosts = a.total_hosts, "caste/spider (observe): web calm, no attack signature");
+            info!(
+                hosts = a.total_hosts,
+                "caste/spider (observe): web calm, no attack signature"
+            );
         } else {
             warn!(
                 ?sigs,
@@ -357,13 +380,20 @@ fn castes_observe_report(
             let cands: Vec<BridgeCandidate> = peers
                 .iter()
                 .map(|p| {
-                    let age = if adapter.probe_peer(p).is_ok() { 0 } else { 3_600 };
+                    let age = if adapter.probe_peer(p).is_ok() {
+                        0
+                    } else {
+                        3_600
+                    };
                     BridgeCandidate::new(p.name.clone(), netgroup_of(&p.rpc_url), age)
                 })
                 .collect();
             let bridges = army_ant::select_bridges(&cands, CASTE_MAX_LEGS);
             let names: Vec<&str> = bridges.iter().map(|b| b.id.as_str()).collect();
-            warn!(?names, "caste/army-ant (observe): WOULD bridge toward these to heal partition (not sent)");
+            warn!(
+                ?names,
+                "caste/army-ant (observe): WOULD bridge toward these to heal partition (not sent)"
+            );
         }
     } else {
         info!("caste/spider (observe): personal mode / no fleet aggregate — standing by");
@@ -373,15 +403,22 @@ fn castes_observe_report(
     if let Some(h) = &health {
         let density = h.ram_used_pct.max(h.cpu_used_pct);
         let mode = locust.update(density, under_attack);
-        info!(density_pct = density, under_attack, ?mode, "caste/locust (observe): relay-aggressiveness mode");
+        info!(
+            density_pct = density,
+            under_attack,
+            ?mode,
+            "caste/locust (observe): relay-aggressiveness mode"
+        );
     }
 
     // centipede — netgroup-diverse block-relay legs over the real peer set.
     if peers.is_empty() {
         info!("caste/centipede (observe): no fleet peers to select relay legs from");
     } else {
-        let legs: Vec<Leg> =
-            peers.iter().map(|p| Leg::new(p.name.clone(), netgroup_of(&p.rpc_url))).collect();
+        let legs: Vec<Leg> = peers
+            .iter()
+            .map(|p| Leg::new(p.name.clone(), netgroup_of(&p.rpc_url)))
+            .collect();
         let chosen = centipede::select_legs(&legs, CASTE_MAX_LEGS);
         let names: Vec<&str> = chosen.iter().map(|l| l.id.as_str()).collect();
         info!(
@@ -422,7 +459,11 @@ fn main() -> anyhow::Result<()> {
     let mut pheromone = PheromoneMap::new();
     let colony_active = cli.colony_observe || cli.colony_advise;
     if colony_active {
-        let m = if cli.colony_advise { "OBSERVE+ADVISE" } else { "OBSERVE" };
+        let m = if cli.colony_advise {
+            "OBSERVE+ADVISE"
+        } else {
+            "OBSERVE"
+        };
         info!("colony forager: {m} mode (read-only; recommendations logged, nothing sent)");
     }
 
@@ -485,16 +526,26 @@ mod tests {
     use super::*;
 
     fn peer(name: &str, url: &str) -> FleetPeer {
-        FleetPeer { name: name.into(), rpc_url: url.into(), role: "seed".into() }
+        FleetPeer {
+            name: name.into(),
+            rpc_url: url.into(),
+            role: "seed".into(),
+        }
     }
 
     #[test]
     fn netgroup_ipv4_uses_first_two_octets() {
         assert_eq!(netgroup_of("http://66.135.23.193:8332"), (66u16 << 8) | 135);
         // Same /16 -> same bucket regardless of the last two octets/port.
-        assert_eq!(netgroup_of("http://66.135.99.1:1"), netgroup_of("http://66.135.23.193:8332"));
+        assert_eq!(
+            netgroup_of("http://66.135.99.1:1"),
+            netgroup_of("http://66.135.23.193:8332")
+        );
         // Different /16 -> different bucket.
-        assert_ne!(netgroup_of("http://66.135.23.1:1"), netgroup_of("http://140.82.57.1:1"));
+        assert_ne!(
+            netgroup_of("http://66.135.23.1:1"),
+            netgroup_of("http://140.82.57.1:1")
+        );
     }
 
     #[test]
@@ -521,7 +572,11 @@ mod tests {
             peer("d", "http://10.0.0.1:1"),
         ];
         assert_eq!(largest_netgroup_pct(&peers), 75);
-        assert_eq!(largest_netgroup_pct(&[]), 0, "empty peer set is not concentrated");
+        assert_eq!(
+            largest_netgroup_pct(&[]),
+            0,
+            "empty peer set is not concentrated"
+        );
     }
 
     #[test]
@@ -535,10 +590,15 @@ mod tests {
             high_ram_count: 0,
             high_disk_count: 0,
         };
-        let peers =
-            vec![peer("a", "http://66.135.1.1:1"), peer("b", "http://66.135.2.2:1")];
+        let peers = vec![
+            peer("a", "http://66.135.1.1:1"),
+            peer("b", "http://66.135.2.2:1"),
+        ];
         let r = sentinel_reading(&agg, &peers);
-        assert_eq!(r.unreachable_sentinel_pct, 50, "2 of 4 hosts stalled -> 50%");
+        assert_eq!(
+            r.unreachable_sentinel_pct, 50,
+            "2 of 4 hosts stalled -> 50%"
+        );
         assert_eq!(r.largest_netgroup_pct, 100, "both peers share a /16");
         // Fields the read-only HealthTick can't see stay 0 (never false-trip).
         assert_eq!(r.inbound_new_per_min, 0);

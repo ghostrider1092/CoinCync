@@ -20,9 +20,7 @@
 //! Phase 1 #6 of the post-launch campaign.
 
 use once_cell::sync::Lazy;
-use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder,
-};
+use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 
 use crate::error::Result;
 
@@ -67,7 +65,9 @@ pub static BLOCK_RECEIVE_TO_TIP: Lazy<Histogram> = Lazy::new(|| {
     register_histogram(
         "coincync_block_receive_to_tip_seconds",
         "Time from BlockReceived event to chain tip update",
-        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+        vec![
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+        ],
     )
 });
 
@@ -77,7 +77,9 @@ pub static TX_ADMIT_TO_MEMPOOL: Lazy<Histogram> = Lazy::new(|| {
     register_histogram(
         "coincync_tx_admit_to_mempool_seconds",
         "Time to admit a tx into the mempool (full crypto verify)",
-        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
+        vec![
+            0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+        ],
     )
 });
 
@@ -142,15 +144,15 @@ pub async fn serve_metrics(bind_addr: std::net::SocketAddr) -> Result<()> {
         "/metrics",
         get(|| async {
             let body = render_metrics();
-            (
-                [("content-type", "text/plain; version=0.0.4")],
-                body,
-            )
+            ([("content-type", "text/plain; version=0.0.4")], body)
         }),
     );
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    tracing::info!("Metrics scrape endpoint listening on http://{}/metrics", bind_addr);
+    tracing::info!(
+        "Metrics scrape endpoint listening on http://{}/metrics",
+        bind_addr
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }

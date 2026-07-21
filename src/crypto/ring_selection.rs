@@ -65,7 +65,6 @@ impl<'a> RingSelectionPool<'a> {
     pub fn len(&self) -> usize {
         self.outputs.len()
     }
-
 }
 
 /// Configuration for ring/decoy selection.
@@ -222,12 +221,7 @@ impl RingSelector {
             .outputs
             .iter()
             .filter(|o| {
-                self.is_eligible_decoy(
-                    o,
-                    real_public_key,
-                    current_height,
-                    effective_min_age,
-                )
+                self.is_eligible_decoy(o, real_public_key, current_height, effective_min_age)
             })
             .collect();
 
@@ -491,9 +485,9 @@ mod tests {
         assert_eq!(decoys.len(), 10);
         assert!(real_position < 11);
         assert_eq!(stats.decoys_selected, 10);
-        assert!(decoys.iter().all(|output| {
-            output.public_key.as_bytes() != real_output.public_key.as_bytes()
-        }));
+        assert!(decoys
+            .iter()
+            .all(|output| { output.public_key.as_bytes() != real_output.public_key.as_bytes() }));
         let unique_public_keys = decoys
             .iter()
             .map(|output| *output.public_key.as_bytes())
@@ -553,8 +547,11 @@ mod tests {
         // Uniform: ~10% of decoys in the most recent 10% of range.
         // Allow 5-20% for randomness. Must NOT show gamma-style bias (>25%).
         let recent_ratio = recent as f64 / total_decoys as f64;
-        assert!(recent_ratio < 0.25,
-            "Uniform should NOT bias recent: got {:.2}%", recent_ratio * 100.0);
+        assert!(
+            recent_ratio < 0.25,
+            "Uniform should NOT bias recent: got {:.2}%",
+            recent_ratio * 100.0
+        );
     }
 
     #[test]

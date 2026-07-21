@@ -147,7 +147,13 @@ mod tests {
         assert!(json.contains("\"from_height\":100"), "json: {json}");
         assert!(json.contains("\"to_height\":200"), "json: {json}");
         // carries the spend/view publics + the (scoped) view secret
-        assert!(json.contains(&hex::encode([4u8; 32])), "view_public missing");
-        assert!(json.contains(&hex::encode([2u8; 32])), "spend_public missing");
+        assert!(
+            json.contains(&hex::encode([4u8; 32])),
+            "view_public missing"
+        );
+        assert!(
+            json.contains(&hex::encode([2u8; 32])),
+            "spend_public missing"
+        );
     }
 }

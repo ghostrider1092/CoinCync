@@ -26,9 +26,9 @@ use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::{
@@ -42,7 +42,9 @@ use ratatui::{
     style::{Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Sparkline, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Sparkline, Wrap,
+    },
     Frame, Terminal,
 };
 use tracing::field::Field;
@@ -77,7 +79,11 @@ impl<S> Layer<S> for TuiLogLayer
 where
     S: tracing::Subscriber,
 {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
         let mut visitor = StringVisitor::default();
         event.record(&mut visitor);
         let level = *event.metadata().level();
@@ -120,8 +126,7 @@ impl StringVisitor {
         if name == "message" {
             // Primary message slot — strip surrounding quotes that
             // record_debug adds for &str fields.
-            self.message
-                .push_str(value.trim_matches('"'));
+            self.message.push_str(value.trim_matches('"'));
         } else {
             if !self.message.is_empty() {
                 self.message.push(' ');
@@ -214,10 +219,7 @@ fn mark_rolodex_glyph(elapsed: Duration) -> char {
 /// Block on the dashboard render loop. Returns when the user presses q
 /// / Q / Esc; on return, the caller should exit the process — the
 /// orchestrator does not have a cancel hook.
-pub fn run_dashboard(
-    metrics: Arc<MetricsState>,
-    log_rx: Receiver<String>,
-) -> io::Result<()> {
+pub fn run_dashboard(metrics: Arc<MetricsState>, log_rx: Receiver<String>) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -246,9 +248,8 @@ pub fn run_dashboard(
         // Detect newly-accepted block → kick off celebration.
         let blocks_now = metrics.blocks_accepted_total.load(Ordering::Relaxed);
         if blocks_now > ui.last_blocks_accepted && ui.last_blocks_accepted != 0 {
-            ui.celebrate_until = Some(Instant::now() + Duration::from_millis(
-                (CELEBRATION_SECS * 1000.0) as u64,
-            ));
+            ui.celebrate_until =
+                Some(Instant::now() + Duration::from_millis((CELEBRATION_SECS * 1000.0) as u64));
         }
         ui.last_blocks_accepted = blocks_now;
 
@@ -317,28 +318,28 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
     if stale {
         constraints.push(Constraint::Length(3)); // stale-chain banner
     }
-    constraints.push(Constraint::Length(9));    // hero hashrate (5 rows + label + sparkline)
-    // Worker heatmap row — only renders if we actually have per-thread
-    // samples (the metric is empty until the first iteration completes).
+    constraints.push(Constraint::Length(9)); // hero hashrate (5 rows + label + sparkline)
+                                             // Worker heatmap row — only renders if we actually have per-thread
+                                             // samples (the metric is empty until the first iteration completes).
     let has_worker_samples = !metrics.per_thread_hashrate_samples().is_empty();
     if has_worker_samples {
         constraints.push(Constraint::Length(1));
     }
-    constraints.push(Constraint::Length(4));    // stat cards
-    constraints.push(Constraint::Length(3));    // ETA gauge
-    // Log pane: only push the constraint when the user has it
-    // visible. Previously this branch fell through to
-    // `Constraint::Min(0)` which DOES allocate non-zero space on
-    // terminals with extra rows (Min means "≥ N, flex to fill") --
-    // then nothing draws into the slot, so the terminal's previous
-    // buffer bleeds through as "random pixels behind the TUI."
-    // Reported by a community tester on Ubuntu 2026-05-30.
-    // Use the same conditional-push pattern as the `stale` banner.
+    constraints.push(Constraint::Length(4)); // stat cards
+    constraints.push(Constraint::Length(3)); // ETA gauge
+                                             // Log pane: only push the constraint when the user has it
+                                             // visible. Previously this branch fell through to
+                                             // `Constraint::Min(0)` which DOES allocate non-zero space on
+                                             // terminals with extra rows (Min means "≥ N, flex to fill") --
+                                             // then nothing draws into the slot, so the terminal's previous
+                                             // buffer bleeds through as "random pixels behind the TUI."
+                                             // Reported by a community tester on Ubuntu 2026-05-30.
+                                             // Use the same conditional-push pattern as the `stale` banner.
     if ui.show_log {
-        constraints.push(Constraint::Min(5));   // log
+        constraints.push(Constraint::Min(5)); // log
     }
-    constraints.push(Constraint::Length(2));    // ticker / blocks-timeline
-    constraints.push(Constraint::Length(1));    // footer
+    constraints.push(Constraint::Length(2)); // ticker / blocks-timeline
+    constraints.push(Constraint::Length(1)); // footer
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -346,21 +347,28 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
         .split(f.area());
 
     let mut idx = 0;
-    draw_header(f, chunks[idx], metrics, ui); idx += 1;
+    draw_header(f, chunks[idx], metrics, ui);
+    idx += 1;
     if stale {
-        draw_stale_banner(f, chunks[idx], metrics, theme); idx += 1;
+        draw_stale_banner(f, chunks[idx], metrics, theme);
+        idx += 1;
     }
-    draw_hero(f, chunks[idx], metrics, theme, ui); idx += 1;
+    draw_hero(f, chunks[idx], metrics, theme, ui);
+    idx += 1;
     if has_worker_samples {
-        draw_worker_heatmap(f, chunks[idx], metrics, theme); idx += 1;
+        draw_worker_heatmap(f, chunks[idx], metrics, theme);
+        idx += 1;
     }
-    draw_stat_cards(f, chunks[idx], metrics, theme); idx += 1;
-    draw_eta_gauge(f, chunks[idx], metrics, theme, ui); idx += 1;
+    draw_stat_cards(f, chunks[idx], metrics, theme);
+    idx += 1;
+    draw_eta_gauge(f, chunks[idx], metrics, theme, ui);
+    idx += 1;
     if ui.show_log {
         draw_logs(f, chunks[idx], logs, theme);
         idx += 1;
     }
-    draw_blocks_timeline_and_ticker(f, chunks[idx], metrics, theme, ui); idx += 1;
+    draw_blocks_timeline_and_ticker(f, chunks[idx], metrics, theme, ui);
+    idx += 1;
     draw_footer(f, chunks[idx], theme, metrics);
 
     if ui.show_help {
@@ -386,11 +394,23 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
         .map(|t| Instant::now() < t)
         .unwrap_or(false);
     let (pill_glyph, pill_text, pill_style) = if in_celebration {
-        ("◉", "BLOCK FOUND", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+        (
+            "◉",
+            "BLOCK FOUND",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
     } else if paused {
         ("○", "PAUSED", Style::default().fg(theme.muted))
     } else {
-        ("◉", "MINING", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+        (
+            "◉",
+            "MINING",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
     };
 
     // Connection-quality dot — green/yellow/red based on RPC latency.
@@ -410,10 +430,17 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
         Span::raw(" "),
         Span::styled(
             rolodex.to_string(),
-            Style::default().fg(theme.accent_dim).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent_dim)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled("COINCYNC", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "COINCYNC",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" rig", Style::default().fg(theme.muted)),
         Span::raw("    "),
         Span::styled(pill_glyph, pill_style),
@@ -424,14 +451,24 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
         Span::raw(" · "),
         Span::styled(format!("h{}", height), Style::default().fg(theme.body)),
         Span::raw(" · "),
-        Span::styled(format!("{} found", blocks_accepted), Style::default().fg(theme.body)),
+        Span::styled(
+            format!("{} found", blocks_accepted),
+            Style::default().fg(theme.body),
+        ),
         Span::raw(" · "),
-        Span::styled(format!("{} threads", threads), Style::default().fg(theme.body)),
+        Span::styled(
+            format!("{} threads", threads),
+            Style::default().fg(theme.body),
+        ),
         Span::raw("      "),
         Span::styled(rpc_dot.to_string(), rpc_style),
         Span::raw(" "),
         Span::styled(
-            if rpc_ms == 0 { "RPC —".to_string() } else { format!("RPC {}ms", rpc_ms) },
+            if rpc_ms == 0 {
+                "RPC —".to_string()
+            } else {
+                format!("RPC {}ms", rpc_ms)
+            },
             Style::default().fg(theme.muted),
         ),
     ]);
@@ -441,7 +478,9 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
         .map(|t| Instant::now() < t)
         .unwrap_or(false);
     let border_style = if in_celebration {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.border)
     };
@@ -460,11 +499,21 @@ fn draw_stale_banner(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &
     let age = metrics.tip_age_secs.load(Ordering::Relaxed);
     let mins = age / 60;
     let line = Line::from(vec![
-        Span::styled("  ⚠  ", Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)),
-        Span::styled("STALE TIP", Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  ⚠  ",
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "STALE TIP",
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled(
-            format!("connected node hasn't seen a block in {}m {}s — your work may be wasted", mins, age % 60),
+            format!(
+                "connected node hasn't seen a block in {}m {}s — your work may be wasted",
+                mins,
+                age % 60
+            ),
             Style::default().fg(theme.body),
         ),
     ]);
@@ -489,7 +538,9 @@ fn draw_hero(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme, u
     // a 1-line top pad.
     let mut lines: Vec<Line> = Vec::with_capacity(7);
     lines.push(Line::from(""));
-    let digit_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let digit_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
     for r in &big {
         lines.push(Line::from(Span::styled(format!("  {}", r), digit_style)));
     }
@@ -498,12 +549,18 @@ fn draw_hero(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme, u
     let net_hps = metrics.network_hashrate_hps.load(Ordering::Relaxed);
     let mut secondary: Vec<Span> = vec![
         Span::raw("  "),
-        Span::styled(unit, Style::default().fg(theme.body).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            unit,
+            Style::default().fg(theme.body).add_modifier(Modifier::BOLD),
+        ),
     ];
     if net_hps > 0 && hps > 0 {
         let pct = (hps as f64 / net_hps as f64) * 100.0;
         secondary.push(Span::raw("    "));
-        secondary.push(Span::styled("network share ", Style::default().fg(theme.muted)));
+        secondary.push(Span::styled(
+            "network share ",
+            Style::default().fg(theme.muted),
+        ));
         secondary.push(Span::styled(
             format!("{:.1}%", pct),
             Style::default().fg(theme.body).add_modifier(Modifier::BOLD),
@@ -532,7 +589,9 @@ fn draw_hero(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme, u
         .map(|t| Instant::now() < t)
         .unwrap_or(false);
     let border_style = if in_celebration {
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.border)
     };
@@ -543,7 +602,9 @@ fn draw_hero(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme, u
         .border_style(border_style)
         .title(Span::styled(
             " HASHRATE ",
-            Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
@@ -596,7 +657,11 @@ fn auto_tune_hint(metrics: &MetricsState) -> Option<String> {
     }
     // Suggest only if we're using less than half the available cores.
     if threads * 2 <= cores {
-        Some(format!("try `--threads {}` ({} cores idle)", cores, cores - threads))
+        Some(format!(
+            "try `--threads {}` ({} cores idle)",
+            cores,
+            cores - threads
+        ))
     } else {
         None
     }
@@ -725,7 +790,9 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Th
         f.render_widget(block, cols[i]);
         let p = Paragraph::new(Line::from(Span::styled(
             value.clone(),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )))
         .alignment(Alignment::Center);
         // Vertical center hack: render with an empty top line.
@@ -773,14 +840,17 @@ fn draw_worker_heatmap(f: &mut Frame, area: Rect, metrics: &MetricsState, theme:
         let ratio = hps as f64 / max_hps as f64;
         let intensity = (ratio * 4.0).round() as u8;
         let color = match intensity {
-            0 => theme.danger,    // throttled or stuck
-            1 => theme.warn,      // below average
-            2 => theme.muted,     // average
-            3 => theme.accent_dim,// above average
-            _ => theme.accent,    // full speed
+            0 => theme.danger,     // throttled or stuck
+            1 => theme.warn,       // below average
+            2 => theme.muted,      // average
+            3 => theme.accent_dim, // above average
+            _ => theme.accent,     // full speed
         };
         let cell: String = std::iter::repeat('▆').take(per_cell).collect();
-        spans.push(Span::styled(cell, Style::default().fg(color).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            cell,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" "));
     }
     let p = Paragraph::new(Line::from(spans));
@@ -816,7 +886,9 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
         .last()
         .copied()
         .unwrap_or(metrics.started_unix_seconds);
-    let elapsed = now.saturating_sub(last_find).min(expected.saturating_mul(4));
+    let elapsed = now
+        .saturating_sub(last_find)
+        .min(expected.saturating_mul(4));
     let pct = ((elapsed as u128 * 100 / expected as u128).min(100)) as u16;
     let phase = (ui.started.elapsed().as_millis() / 100) as usize % SPINNER.len();
     let spinner = SPINNER[phase];
@@ -841,7 +913,9 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
                 .border_style(Style::default().fg(theme.border))
                 .title(Span::styled(
                     " NEXT BLOCK ETA ",
-                    Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::BOLD),
                 )),
         )
         .gauge_style(Style::default().fg(theme.accent).bg(theme.accent_dim))
@@ -859,19 +933,20 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
         .border_style(Style::default().fg(theme.border))
         .title(Span::styled(
             " LUCK ",
-            Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
         ));
     let luck_inner = luck_block.inner(cols[1]);
     f.render_widget(luck_block, cols[1]);
     let luck_line = match luck_pct(metrics) {
         Some(pct) => Line::from(Span::styled(
             format!("{:.0}%", pct),
-            Style::default().fg(luck_color(pct, theme)).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(luck_color(pct, theme))
+                .add_modifier(Modifier::BOLD),
         )),
-        None => Line::from(Span::styled(
-            "gathering…",
-            Style::default().fg(theme.muted),
-        )),
+        None => Line::from(Span::styled("gathering…", Style::default().fg(theme.muted))),
     };
     f.render_widget(
         Paragraph::new(luck_line).alignment(Alignment::Center),
@@ -899,7 +974,10 @@ fn draw_logs(f: &mut Frame, area: Rect, logs: &VecDeque<String>, theme: &Theme) 
             };
             let rest = l.get(level.len()..).unwrap_or("").trim_start();
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", glyph), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" {} ", glyph),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(level.to_string(), Style::default().fg(color)),
                 Span::raw("  "),
                 Span::styled(rest.to_string(), Style::default().fg(theme.body)),
@@ -914,7 +992,9 @@ fn draw_logs(f: &mut Frame, area: Rect, logs: &VecDeque<String>, theme: &Theme) 
             .border_style(Style::default().fg(theme.border))
             .title(Span::styled(
                 " LOG ",
-                Style::default().fg(theme.muted).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::BOLD),
             )),
     );
     f.render_widget(list, area);
@@ -962,10 +1042,7 @@ fn draw_blocks_timeline_and_ticker(
             Span::styled(format!("{}", g), Style::default().fg(color))
         })
         .collect();
-    let mut row1 = vec![Span::styled(
-        " 24h ",
-        Style::default().fg(theme.muted),
-    )];
+    let mut row1 = vec![Span::styled(" 24h ", Style::default().fg(theme.muted))];
     row1.extend(bucket_glyphs);
     row1.push(Span::raw(" "));
     row1.push(Span::styled(
@@ -1000,11 +1077,7 @@ fn draw_blocks_timeline_and_ticker(
     let scroll = (ui.started.elapsed().as_millis() / 200) as usize % raw.chars().count().max(1);
     let visible_w = split[1].width as usize;
     let chars: Vec<char> = raw.chars().chain(raw.chars()).chain(raw.chars()).collect();
-    let view: String = chars
-        .into_iter()
-        .skip(scroll)
-        .take(visible_w)
-        .collect();
+    let view: String = chars.into_iter().skip(scroll).take(visible_w).collect();
     let p = Paragraph::new(Line::from(Span::styled(
         view,
         Style::default().fg(theme.muted),
@@ -1020,21 +1093,40 @@ fn fmt_hps(h: u64) -> String {
 // ─── Footer ──────────────────────────────────────────────────────────
 
 fn draw_footer(f: &mut Frame, area: Rect, theme: &Theme, metrics: &MetricsState) {
-    let key = |k: &str| Span::styled(k.to_string(), Style::default().fg(theme.accent).add_modifier(Modifier::BOLD));
+    let key = |k: &str| {
+        Span::styled(
+            k.to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
     let txt = |t: &str| Span::styled(t.to_string(), Style::default().fg(theme.muted));
-    let theme_name = THEMES.iter().enumerate()
+    let theme_name = THEMES
+        .iter()
+        .enumerate()
         .find(|(_, t)| std::ptr::eq(*t as *const _, theme as *const _))
         .map(|(_, t)| t.name)
         .unwrap_or("Brass");
-    let pause_label = if metrics.paused.load(Ordering::Relaxed) { "resume" } else { "pause" };
+    let pause_label = if metrics.paused.load(Ordering::Relaxed) {
+        "resume"
+    } else {
+        "pause"
+    };
     let line = Line::from(vec![
         Span::raw(" "),
-        key("q"), txt(" quit  "),
-        key("t"), txt(&format!(" theme · {}  ", theme_name)),
-        key("p"), txt(&format!(" {}  ", pause_label)),
-        key("l"), txt(" log  "),
-        key("?"), txt(" help  "),
-        key("c"), txt(" snapshot"),
+        key("q"),
+        txt(" quit  "),
+        key("t"),
+        txt(&format!(" theme · {}  ", theme_name)),
+        key("p"),
+        txt(&format!(" {}  ", pause_label)),
+        key("l"),
+        txt(" log  "),
+        key("?"),
+        txt(" help  "),
+        key("c"),
+        txt(" snapshot"),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -1070,7 +1162,9 @@ fn draw_splash(f: &mut Frame, ui: &UiState) {
 
     let mark = Paragraph::new(Line::from(Span::styled(
         format!("{}{}", revealed, pending),
-        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center);
     f.render_widget(mark, chunks[1]);
@@ -1098,7 +1192,12 @@ fn draw_help_modal(f: &mut Frame, theme: &Theme) {
     let h = 14.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
-    let modal = Rect { x, y, width: w, height: h };
+    let modal = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
     f.render_widget(Clear, modal);
 
@@ -1108,7 +1207,9 @@ fn draw_help_modal(f: &mut Frame, theme: &Theme) {
         .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
             " HELP ",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
@@ -1116,7 +1217,12 @@ fn draw_help_modal(f: &mut Frame, theme: &Theme) {
     let row = |k: &'static str, v: &'static str| {
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(k, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                k,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!("  {}", v)),
         ])
     };
@@ -1131,7 +1237,10 @@ fn draw_help_modal(f: &mut Frame, theme: &Theme) {
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("0% dev fee · no telemetry · home miner", Style::default().fg(theme.muted)),
+            Span::styled(
+                "0% dev fee · no telemetry · home miner",
+                Style::default().fg(theme.muted),
+            ),
         ]),
     ];
     f.render_widget(
@@ -1197,10 +1306,7 @@ fn snapshot_to_tmpfile(metrics: &MetricsState) {
 }
 
 fn write_snapshot_file(path: &Path, body: &str) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(body.as_bytes())
 }
 

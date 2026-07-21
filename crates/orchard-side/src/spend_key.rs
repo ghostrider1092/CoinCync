@@ -386,8 +386,8 @@ impl FullViewingKey {
             .chain(crate::commitment::bytes_to_255_le_bits(&self.nk));
 
         let domain = CommitDomain::new("z.cash:Orchard-CommitIvk");
-        let ivk_base: pallas::Base = Option::from(domain.short_commit(bits, &rivk))
-            .ok_or(Error::DomainRule(
+        let ivk_base: pallas::Base =
+            Option::from(domain.short_commit(bits, &rivk)).ok_or(Error::DomainRule(
                 "CommitIvk yielded identity — regenerate seed (rotate rivk via fresh sk)",
             ))?;
 
@@ -422,10 +422,9 @@ impl IncomingViewingKey {
         // ivk as a Pallas scalar. Per the spec, a small fraction
         // of CommitIvk outputs are ≥ q_S and must be rejected;
         // the wallet should rotate the seed and retry.
-        let ivk_scalar: pallas::Scalar = Option::from(pallas::Scalar::from_repr(self.0))
-            .ok_or(Error::DomainRule(
-                "ivk is not a canonical Pallas scalar — rotate sk and retry",
-            ))?;
+        let ivk_scalar: pallas::Scalar = Option::from(pallas::Scalar::from_repr(self.0)).ok_or(
+            Error::DomainRule("ivk is not a canonical Pallas scalar — rotate sk and retry"),
+        )?;
 
         // gd = DiversifyHash(d). Per Zcash NU5 §5.4.1.6, this is
         // the IETF Simplified-SWU **hash-to-curve** on Pallas with

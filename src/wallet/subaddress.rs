@@ -22,12 +22,12 @@
 //! - Only the wallet owner (with view key) can identify which subaddresses belong together
 //! - Spending requires the original spend_secret plus the derivation scalar m
 
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 
-use crate::primitives::{PublicKey, SecretKey, Address, Network, hash_domain};
-use crate::crypto::{SecretScalar, PublicPoint};
+use crate::crypto::{PublicPoint, SecretScalar};
+use crate::primitives::{hash_domain, Address, Network, PublicKey, SecretKey};
 
 /// Maximum number of subaddresses per account (to prevent DoS).
 ///
@@ -51,7 +51,18 @@ pub const MAX_SUBADDRESSES_PER_ACCOUNT: u32 = 10_000;
 pub const MAX_ACCOUNTS: u32 = 100;
 
 /// A subaddress index (account, index within account)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct SubaddressIndex {
     /// Account index (0 = main account)
     pub account: u32,
@@ -61,7 +72,10 @@ pub struct SubaddressIndex {
 
 impl SubaddressIndex {
     /// Main address (account 0, index 0)
-    pub const MAIN: SubaddressIndex = SubaddressIndex { account: 0, index: 0 };
+    pub const MAIN: SubaddressIndex = SubaddressIndex {
+        account: 0,
+        index: 0,
+    };
 
     /// Create a new subaddress index
     pub fn new(account: u32, index: u32) -> Self {
@@ -151,7 +165,8 @@ impl SubaddressManager {
             used: false,
         };
 
-        self.spend_to_index.insert(*self.spend_public.as_bytes(), SubaddressIndex::MAIN);
+        self.spend_to_index
+            .insert(*self.spend_public.as_bytes(), SubaddressIndex::MAIN);
         self.subaddresses.insert(SubaddressIndex::MAIN, main);
         self.highest_index.insert(0, 0);
     }
@@ -221,7 +236,8 @@ impl SubaddressManager {
         };
 
         // Store mapping for fast lookup
-        self.spend_to_index.insert(*subaddr_spend_public.as_bytes(), index);
+        self.spend_to_index
+            .insert(*subaddr_spend_public.as_bytes(), index);
 
         // Update highest index
         let highest = self.highest_index.entry(index.account).or_insert(0);
@@ -242,7 +258,11 @@ impl SubaddressManager {
         let next_index = self.highest_index.get(&account).copied().unwrap_or(0) + 1;
 
         // For account 0, index 0 is main, so start from 1
-        let next_index = if account == 0 && next_index == 0 { 1 } else { next_index };
+        let next_index = if account == 0 && next_index == 0 {
+            1
+        } else {
+            next_index
+        };
 
         self.generate_at(SubaddressIndex::new(account, next_index))
     }
@@ -264,7 +284,8 @@ impl SubaddressManager {
 
     /// Get all subaddresses for an account
     pub fn get_account(&self, account: u32) -> Vec<&Subaddress> {
-        self.subaddresses.values()
+        self.subaddresses
+            .values()
             .filter(|s| s.index.account == account)
             .collect()
     }
@@ -298,7 +319,8 @@ impl SubaddressManager {
 
     /// Get all spend public keys for scanning
     pub fn all_spend_public_keys(&self) -> Vec<(PublicKey, SubaddressIndex)> {
-        self.subaddresses.iter()
+        self.subaddresses
+            .iter()
             .map(|(idx, sub)| (sub.spend_public, *idx))
             .collect()
     }
@@ -306,7 +328,9 @@ impl SubaddressManager {
     /// Pregenerate subaddresses for lookahead scanning
     /// This generates subaddresses up to `lookahead` beyond the highest used index
     pub fn pregenerate_lookahead(&mut self, account: u32, lookahead: u32) {
-        let highest_used = self.subaddresses.values()
+        let highest_used = self
+            .subaddresses
+            .values()
             .filter(|s| s.index.account == account && s.used)
             .map(|s| s.index.index)
             .max()
@@ -323,7 +347,9 @@ impl SubaddressManager {
     /// Export subaddress data for persistence
     pub fn export(&self) -> SubaddressData {
         SubaddressData {
-            subaddresses: self.subaddresses.iter()
+            subaddresses: self
+                .subaddresses
+                .iter()
                 .map(|(idx, sub)| SubaddressRecord {
                     account: idx.account,
                     index: idx.index,
@@ -431,9 +457,15 @@ mod tests {
         manager.generate_at(SubaddressIndex::new(0, 1));
         manager.generate_at(SubaddressIndex::new(0, 2));
 
-        let sub1_spend = manager.get(SubaddressIndex::new(0, 1)).unwrap().spend_public;
+        let sub1_spend = manager
+            .get(SubaddressIndex::new(0, 1))
+            .unwrap()
+            .spend_public;
         let sub1_view = manager.get(SubaddressIndex::new(0, 1)).unwrap().view_public;
-        let sub2_spend = manager.get(SubaddressIndex::new(0, 2)).unwrap().spend_public;
+        let sub2_spend = manager
+            .get(SubaddressIndex::new(0, 2))
+            .unwrap()
+            .spend_public;
         let sub2_view = manager.get(SubaddressIndex::new(0, 2)).unwrap().view_public;
 
         // Subaddresses should have different spend keys
@@ -486,8 +518,7 @@ mod tests {
         let sub_spend_secret = compute_subaddress_spend_secret(&spend_secret, &view_secret, idx);
 
         // Verify: the public key from sub_spend_secret should match subaddress spend public
-        let derived_public = SecretScalar::from_bytes(*sub_spend_secret.as_bytes())
-            .to_public();
+        let derived_public = SecretScalar::from_bytes(*sub_spend_secret.as_bytes()).to_public();
 
         assert_eq!(
             derived_public.to_bytes(),
@@ -508,9 +539,8 @@ mod tests {
         assert_eq!(main.spend_public.as_bytes(), spend_public.as_bytes());
 
         // Main address spend secret should be unchanged
-        let main_spend_secret = compute_subaddress_spend_secret(
-            &spend_secret, &view_secret, SubaddressIndex::MAIN
-        );
+        let main_spend_secret =
+            compute_subaddress_spend_secret(&spend_secret, &view_secret, SubaddressIndex::MAIN);
         assert_eq!(main_spend_secret.as_bytes(), spend_secret.as_bytes());
     }
 

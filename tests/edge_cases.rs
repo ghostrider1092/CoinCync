@@ -3,9 +3,9 @@
 //! These tests verify behavior under adversarial or unusual conditions.
 //! All tests should pass before mainnet launch.
 
-use coincync::primitives::{Amount, PublicKey, SecretKey, hash_data};
-use coincync::wallet::{Wallet, SubaddressManager, SubaddressIndex};
 use coincync::crypto::SecretScalar;
+use coincync::primitives::{hash_data, Amount, PublicKey, SecretKey};
+use coincync::wallet::{SubaddressIndex, SubaddressManager, Wallet};
 use tempfile::tempdir;
 
 // =============================================================================
@@ -20,10 +20,10 @@ mod network_edge_cases {
     fn test_malformed_data_handling() {
         // Various invalid byte sequences
         let test_cases: Vec<&[u8]> = vec![
-            &[],                    // Empty
-            &[0xFF],                // Single byte
-            &[0u8; 16],             // Too short for hash
-            &[0xFF; 1000],          // Large garbage
+            &[],           // Empty
+            &[0xFF],       // Single byte
+            &[0u8; 16],    // Too short for hash
+            &[0xFF; 1000], // Large garbage
         ];
 
         for data in test_cases {
@@ -47,7 +47,11 @@ mod network_edge_cases {
 
         let memory_used = peer_data.len() * 64;
         assert!(memory_used <= max_connections * 64);
-        println!("Memory for {} connections: {} KB", max_connections, memory_used / 1024);
+        println!(
+            "Memory for {} connections: {} KB",
+            max_connections,
+            memory_used / 1024
+        );
     }
 
     /// Test: Out-of-order data processing
@@ -112,7 +116,10 @@ mod wallet_edge_cases {
                     assert!(unlock.is_ok(), "Should unlock with password '{}'", name);
                 }
                 Err(e) => {
-                    println!("Password '{}': creation failed (may be expected): {}", name, e);
+                    println!(
+                        "Password '{}': creation failed (may be expected): {}",
+                        name, e
+                    );
                 }
             }
         }
@@ -141,7 +148,11 @@ mod wallet_edge_cases {
         println!("Generated 10,000 subaddresses in {:?}", elapsed);
 
         // Should complete in reasonable time
-        assert!(elapsed.as_secs() < 10, "Subaddress generation too slow: {:?}", elapsed);
+        assert!(
+            elapsed.as_secs() < 10,
+            "Subaddress generation too slow: {:?}",
+            elapsed
+        );
 
         // Verify count
         assert_eq!(manager.count(), 10_000);
@@ -192,7 +203,8 @@ mod wallet_edge_cases {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wrong_pw_test.wallet");
 
-        let (wallet, _) = Wallet::create(path.clone(), Some("correct_password"), "testnet").unwrap();
+        let (wallet, _) =
+            Wallet::create(path.clone(), Some("correct_password"), "testnet").unwrap();
         drop(wallet);
 
         let mut wallet = Wallet::open(path).unwrap();
@@ -200,9 +212,9 @@ mod wallet_edge_cases {
         // Wrong passwords should fail
         let wrong_passwords = vec![
             "wrong_password",
-            "correct_passwor",  // Missing char
+            "correct_passwor",   // Missing char
             "correct_password ", // Extra space
-            "CORRECT_PASSWORD", // Case change
+            "CORRECT_PASSWORD",  // Case change
             "",
         ];
 
@@ -247,7 +259,10 @@ mod transaction_edge_cases {
 
         // Adding to max should be handled
         let result = max.as_atomic().checked_add(1);
-        assert!(result.is_none() || result.unwrap() == 0, "Should handle overflow");
+        assert!(
+            result.is_none() || result.unwrap() == 0,
+            "Should handle overflow"
+        );
 
         // Subtraction should work
         let sub = max.as_atomic().checked_sub(1);
@@ -264,15 +279,17 @@ mod transaction_edge_cases {
     fn test_fee_calculations() {
         let test_cases = vec![
             (1_000_000_000u64, 10_000_000u64, 990_000_000u64), // Normal
-            (10_000_000, 10_000_000, 0),                        // Exact fee
-            (10_000_001, 10_000_000, 1),                        // Tiny amount left
+            (10_000_000, 10_000_000, 0),                       // Exact fee
+            (10_000_001, 10_000_000, 1),                       // Tiny amount left
         ];
 
         for (balance, fee, expected_sendable) in test_cases {
             let sendable = balance.saturating_sub(fee);
-            assert_eq!(sendable, expected_sendable,
+            assert_eq!(
+                sendable, expected_sendable,
                 "balance={}, fee={}, expected={}, got={}",
-                balance, fee, expected_sendable, sendable);
+                balance, fee, expected_sendable, sendable
+            );
         }
     }
 
@@ -317,12 +334,12 @@ mod consensus_edge_cases {
         ];
 
         for (name, ts, expected_valid) in timestamps {
-            let is_valid = ts > 0
-                && ts <= current + max_future_drift
-                && ts < u64::MAX / 2;
+            let is_valid = ts > 0 && ts <= current + max_future_drift && ts < u64::MAX / 2;
 
-            println!("Timestamp '{}' ({}): valid={}, expected={}",
-                name, ts, is_valid, expected_valid);
+            println!(
+                "Timestamp '{}' ({}): valid={}, expected={}",
+                name, ts, is_valid, expected_valid
+            );
         }
     }
 
@@ -336,16 +353,18 @@ mod consensus_edge_cases {
             ("normal", 1.0),
             ("2x faster", 2.0),
             ("2x slower", 0.5),
-            ("10x faster", 10.0),  // Should be capped
-            ("10x slower", 0.1),   // Should be capped
+            ("10x faster", 10.0), // Should be capped
+            ("10x slower", 0.1),  // Should be capped
         ];
 
         for (name, multiplier) in scenarios {
             let clamped = multiplier.max(1.0 / max_adjustment).min(max_adjustment);
             let new_diff = (initial as f64 * clamped) as u64;
 
-            println!("Scenario '{}': mult={}, clamped={}, new_diff={}",
-                name, multiplier, clamped, new_diff);
+            println!(
+                "Scenario '{}': mult={}, clamped={}, new_diff={}",
+                name, multiplier, clamped, new_diff
+            );
 
             assert!(new_diff > 0, "Difficulty should never be zero");
             assert!(new_diff < u64::MAX / 2, "Difficulty should not overflow");
@@ -366,7 +385,10 @@ mod consensus_edge_cases {
         assert!(spent.insert(key_image_1));
 
         // Double spend detected
-        assert!(!spent.insert(key_image_1), "Double spend should be detected");
+        assert!(
+            !spent.insert(key_image_1),
+            "Double spend should be detected"
+        );
 
         // Different output succeeds
         assert!(spent.insert(key_image_2));
@@ -375,21 +397,18 @@ mod consensus_edge_cases {
     /// Test: Chain reorg detection
     #[test]
     fn test_reorg_detection() {
-        let main_chain: Vec<(u64, [u8; 32])> = vec![
-            (1, [1; 32]),
-            (2, [2; 32]),
-            (3, [3; 32]),
-        ];
+        let main_chain: Vec<(u64, [u8; 32])> = vec![(1, [1; 32]), (2, [2; 32]), (3, [3; 32])];
 
         let fork_chain: Vec<(u64, [u8; 32])> = vec![
-            (1, [1; 32]),   // Same
-            (2, [20; 32]),  // Fork point
+            (1, [1; 32]),  // Same
+            (2, [20; 32]), // Fork point
             (3, [30; 32]),
-            (4, [40; 32]),  // Longer
+            (4, [40; 32]), // Longer
         ];
 
         // Find fork point
-        let fork_height = main_chain.iter()
+        let fork_height = main_chain
+            .iter()
             .zip(fork_chain.iter())
             .take_while(|(a, b)| a.1 == b.1)
             .count() as u64;
@@ -410,9 +429,7 @@ mod consensus_edge_cases {
         let heights = vec![0u64, 1, 100, 10_000, 1_000_000];
 
         for height in heights {
-            let result = std::panic::catch_unwind(|| {
-                calculate_block_reward(height)
-            });
+            let result = std::panic::catch_unwind(|| calculate_block_reward(height));
 
             match result {
                 Ok(reward) => {
@@ -472,14 +489,16 @@ mod stress_tests {
         use std::sync::Arc;
 
         let counter = Arc::new(AtomicU64::new(0));
-        let threads: Vec<_> = (0..4).map(|_| {
-            let c = Arc::clone(&counter);
-            std::thread::spawn(move || {
-                for _ in 0..10_000 {
-                    c.fetch_add(1, Ordering::Relaxed);
-                }
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let c = Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        c.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         for t in threads {
             t.join().unwrap();

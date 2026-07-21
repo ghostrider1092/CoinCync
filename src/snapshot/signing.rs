@@ -106,12 +106,13 @@ pub fn verify_manifest_signature(
     let vk = VerifyingKey::from_bytes(&pubkey_bytes)
         .map_err(|e| Error::InvalidState(format!("snapshot signature: invalid pubkey: {}", e)))?;
     let signature = Signature::from_bytes(&sig_bytes);
-    vk.verify(&signed_payload(manifest_bytes), &signature).map_err(|_| {
-        Error::InvalidState(
+    vk.verify(&signed_payload(manifest_bytes), &signature)
+        .map_err(|_| {
+            Error::InvalidState(
             "snapshot signature verification FAILED — refusing (tampered manifest or wrong key)"
                 .into(),
         )
-    })
+        })
 }
 
 #[cfg(test)]
@@ -158,7 +159,9 @@ mod tests {
         // Same (trusted) signer, but the manifest bytes changed after signing.
         let tampered = br#"{"network":"testnet","height":999999}"#;
         let err = verify_manifest_signature(tampered, &sig, &trusted).unwrap_err();
-        assert!(format!("{:?}", err).to_lowercase().contains("verification failed"));
+        assert!(format!("{:?}", err)
+            .to_lowercase()
+            .contains("verification failed"));
     }
 
     #[test]

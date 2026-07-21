@@ -20,10 +20,10 @@
 
 #![cfg(kani)]
 
+use crate::consensus::difficulty::{max_target, target_to_difficulty};
 use crate::consensus::fee_market::{
     calculate_fee, congestion_multiplier, distribute_fee, is_congested,
 };
-use crate::consensus::difficulty::{max_target, target_to_difficulty};
 use crate::primitives::Amount;
 
 // ─── Fee market ────────────────────────────────────────────────────
@@ -106,8 +106,7 @@ fn proof_is_congested_threshold_match() {
     let congested = is_congested(pct);
     // Pull the constant via the public API at the threshold boundary.
     let at_threshold = is_congested(crate::constants::CONGESTION_THRESHOLD);
-    let below_threshold =
-        is_congested(crate::constants::CONGESTION_THRESHOLD.saturating_sub(1));
+    let below_threshold = is_congested(crate::constants::CONGESTION_THRESHOLD.saturating_sub(1));
     assert!(at_threshold);
     assert!(!below_threshold);
     // Above threshold => congested; below => not.

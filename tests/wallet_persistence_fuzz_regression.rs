@@ -44,7 +44,10 @@ const CRASHES: &[(&str, &str)] = &[
 
 #[test]
 fn known_crashes_return_err_not_panic() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wallet_persistence_crashes");
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/wallet_persistence_crashes"
+    );
     let mut failures = Vec::new();
 
     for (filename, description) in CRASHES {
@@ -52,7 +55,10 @@ fn known_crashes_return_err_not_panic() {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
-                failures.push(format!("FIXTURE-MISSING {}: {} ({})", filename, e, description));
+                failures.push(format!(
+                    "FIXTURE-MISSING {}: {} ({})",
+                    filename, e, description
+                ));
                 continue;
             }
         };
@@ -60,12 +66,9 @@ fn known_crashes_return_err_not_panic() {
         // Both password-less and password-attempted paths must surface
         // an Err for the same crash input — the fuzz target probes
         // both, so the regression test does too.
-        let none_result = std::panic::catch_unwind(|| {
-            load_wallet_from_bytes(&bytes, None)
-        });
-        let some_result = std::panic::catch_unwind(|| {
-            load_wallet_from_bytes(&bytes, Some("fuzz-passphrase"))
-        });
+        let none_result = std::panic::catch_unwind(|| load_wallet_from_bytes(&bytes, None));
+        let some_result =
+            std::panic::catch_unwind(|| load_wallet_from_bytes(&bytes, Some("fuzz-passphrase")));
 
         match none_result {
             Ok(Err(_)) => { /* expected */ }

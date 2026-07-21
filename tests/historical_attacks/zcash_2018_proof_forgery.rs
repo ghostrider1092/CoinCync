@@ -13,11 +13,11 @@
 //! Chain: Zcash
 //! Impact: Undetectable infinite inflation (patched before exploitation)
 
-use coincync::primitives::Amount;
 use coincync::crypto::{
-    BlindingFactor, PedersenCommitment,
-    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, RangeProof,
+    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, BlindingFactor,
+    PedersenCommitment, RangeProof,
 };
+use coincync::primitives::Amount;
 use rand::rngs::OsRng;
 
 /// Test: Range proof is commitment-bound (cannot transplant to different commitment)
@@ -32,8 +32,10 @@ fn zcash_2018_proof_not_transplantable() {
     let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
 
     // Correct commitment verifies
-    assert!(verify_range_proofs_dispatch(&[correct_commit], &proof_ref, 0),
-        "Proof must verify with correct commitment");
+    assert!(
+        verify_range_proofs_dispatch(&[correct_commit], &proof_ref, 0),
+        "Proof must verify with correct commitment"
+    );
 
     // 50 random wrong commitments must all fail
     for _ in 0..50 {
@@ -63,7 +65,10 @@ fn zcash_2018_different_blinding_different_commitment() {
     let proof = create_aggregated_range_proof_for_height(&[amount], &[bf1], &mut rng, 0).unwrap();
     let proof_ref = RangeProof::from_bytes(&proof.try_to_bytes().unwrap()).unwrap();
 
-    assert!(verify_range_proofs_dispatch(&[commit1], &proof_ref, 0), "Original must verify");
+    assert!(
+        verify_range_proofs_dispatch(&[commit1], &proof_ref, 0),
+        "Original must verify"
+    );
     assert!(
         !verify_range_proofs_dispatch(&[commit2], &proof_ref, 0),
         "ZCASH 2018: Same amount but different blinding accepted! \

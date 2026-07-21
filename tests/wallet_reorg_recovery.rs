@@ -155,10 +155,15 @@ fn wallet_rewind_unspends_orphaned_spend() {
     assert!(scanner.record_spend_for_last_block(received_ki));
 
     // Pre-reorg sanity.
-    assert_eq!(balance.total(), Amount::ZERO,
-        "marked-spent UTXO must not count in total");
-    assert!(balance.lookup_by_key_image(&received_ki).is_none(),
-        "lookup_by_key_image filters spent UTXOs");
+    assert_eq!(
+        balance.total(),
+        Amount::ZERO,
+        "marked-spent UTXO must not count in total"
+    );
+    assert!(
+        balance.lookup_by_key_image(&received_ki).is_none(),
+        "lookup_by_key_image filters spent UTXOs"
+    );
 
     // Reorg: block 3 is orphaned. Rewind down to height 2.
     let outcome = scanner.rewind_to_height(2).expect("rewind");
@@ -168,15 +173,22 @@ fn wallet_rewind_unspends_orphaned_spend() {
 
     // Apply unspend to balance.
     for ki in &outcome.key_images_to_unspend {
-        assert!(balance.unmark_spent_by_key_image(ki),
-            "unmark_spent_by_key_image should return true on a previously-spent UTXO");
+        assert!(
+            balance.unmark_spent_by_key_image(ki),
+            "unmark_spent_by_key_image should return true on a previously-spent UTXO"
+        );
     }
 
     // Post-reorg: the originally-received UTXO is spendable again.
-    assert_eq!(balance.total(), Amount::from_atomic(5_000),
-        "unspent UTXO must reappear in total");
-    assert!(balance.lookup_by_key_image(&received_ki).is_some(),
-        "unspent UTXO must resolve via key_image_index");
+    assert_eq!(
+        balance.total(),
+        Amount::from_atomic(5_000),
+        "unspent UTXO must reappear in total"
+    );
+    assert!(
+        balance.lookup_by_key_image(&received_ki).is_some(),
+        "unspent UTXO must resolve via key_image_index"
+    );
 }
 
 // ─── Test 3: outgoing-record height pass ────────────────────────────
@@ -301,19 +313,28 @@ fn wallet_rewind_then_reapply_yields_equivalent_state() {
     // the canonical seeds (0x83, 0x84, 0x85).
     for seed in 1u8..=2 {
         let ki = KeyImage::from_bytes([seed; 32]);
-        assert!(balance.lookup_by_key_image(&ki).is_some(),
-            "pre-fork UTXO seed={} should remain", seed);
+        assert!(
+            balance.lookup_by_key_image(&ki).is_some(),
+            "pre-fork UTXO seed={} should remain",
+            seed
+        );
     }
     for seed in [0x83u8, 0x84, 0x85] {
         let ki = KeyImage::from_bytes([seed; 32]);
-        assert!(balance.lookup_by_key_image(&ki).is_some(),
-            "post-reorg canonical UTXO seed={:#x} should be present", seed);
+        assert!(
+            balance.lookup_by_key_image(&ki).is_some(),
+            "post-reorg canonical UTXO seed={:#x} should be present",
+            seed
+        );
     }
     // The pre-rewind losing-chain UTXOs (3, 4, 5) must NOT resolve.
     for seed in 3u8..=5 {
         let ki = KeyImage::from_bytes([seed; 32]);
-        assert!(balance.lookup_by_key_image(&ki).is_none(),
-            "losing-chain UTXO seed={} should be gone", seed);
+        assert!(
+            balance.lookup_by_key_image(&ki).is_none(),
+            "losing-chain UTXO seed={} should be gone",
+            seed
+        );
     }
 
     // Journal tip is at canonical height 5 with the canonical seed.

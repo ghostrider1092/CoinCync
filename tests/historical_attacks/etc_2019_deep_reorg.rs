@@ -10,7 +10,7 @@
 //! Chain: Ethereum Classic, Bitcoin Gold, Horizen
 //! Impact: Multi-million dollar double-spends via deep reorg
 
-use coincync::chain::{Blockchain, max_reorg_depth, max_reorg_depth_for};
+use coincync::chain::{max_reorg_depth, max_reorg_depth_for, Blockchain};
 
 /// Test: Maximum reorg depth is defined, finite, and network-appropriate
 #[test]

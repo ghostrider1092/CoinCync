@@ -428,7 +428,8 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                     adapter,
                     TickNoticeKind::Alert,
                     Severity::Warn,
-                    "unable to verify canonical PoW; refusing to feed until adapter recovers".into(),
+                    "unable to verify canonical PoW; refusing to feed until adapter recovers"
+                        .into(),
                     1800,
                 );
                 return Ok(false);
@@ -495,10 +496,10 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                     )
                 })?
         };
-        let dest = self.config.snapshot_dir.join(format!(
-            "rescue-{}.tgz",
-            self.now_secs()
-        ));
+        let dest = self
+            .config
+            .snapshot_dir
+            .join(format!("rescue-{}.tgz", self.now_secs()));
         let snapshot = adapter.snapshot_chaindata(Some(&canonical_peer), &dest)?;
 
         {
@@ -573,9 +574,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
             // is_synced + peer_count >= min AND tip_age < max.
             let gate_start = Instant::now();
             loop {
-                if gate_start.elapsed().as_secs()
-                    >= self.config.safety_gate_max_wait_secs
-                {
+                if gate_start.elapsed().as_secs() >= self.config.safety_gate_max_wait_secs {
                     // Give up on this host; emit a warning notice but
                     // continue with the rest. A slow host isn't worth
                     // blocking the whole recovery.
@@ -592,10 +591,8 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                 match adapter.probe_peer(&host) {
                     Ok(tip) => {
                         if tip.is_synced
-                            && tip.peer_count
-                                >= self.config.safety_gate_min_peer_count
-                            && tip.tip_age_secs
-                                <= self.config.safety_gate_max_tip_age_secs
+                            && tip.peer_count >= self.config.safety_gate_min_peer_count
+                            && tip.tip_age_secs <= self.config.safety_gate_max_tip_age_secs
                         {
                             break;
                         }

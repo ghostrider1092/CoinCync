@@ -2,23 +2,23 @@
 //!
 //! P2P peer connection handling.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
-use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::mpsc;
-use crate::primitives::Hash;
 use crate::error::{Error, Result};
+use crate::primitives::Hash;
+use std::net::SocketAddr;
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 /// Peer identifier (32 bytes)
 pub type PeerId = [u8; 32];
 
 /// Generate random peer ID using cryptographically secure RNG
 pub fn generate_peer_id() -> PeerId {
-    use rand::RngCore;
     use rand::rngs::OsRng;
+    use rand::RngCore;
     let mut id = [0u8; 32];
     OsRng.fill_bytes(&mut id);
     id
@@ -217,7 +217,8 @@ impl Peer {
         id: PeerId,
         outbound: bool,
     ) -> Result<(Self, PeerConnection)> {
-        let addr = stream.peer_addr()
+        let addr = stream
+            .peer_addr()
             .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
         let info = PeerInfo::new(id, addr, outbound);
@@ -241,7 +242,9 @@ impl Peer {
 
     /// Send message to peer
     pub async fn send(&self, data: Vec<u8>) -> Result<()> {
-        self.tx.send(data).await
+        self.tx
+            .send(data)
+            .await
             .map_err(|_| Error::ConnectionFailed("peer disconnected".into()))
     }
 
@@ -285,7 +288,11 @@ impl PeerConnection {
     /// to `reader.read_exact(N)` for known frame-header sizes (12 bytes) would
     /// amortize the syscall storm; deferred until profiled, because the rate
     /// limits already cap the per-connection CPU cost.
-    pub async fn run(mut self, msg_tx: mpsc::Sender<(PeerId, Vec<u8>)>, peer_id: PeerId) -> Result<()> {
+    pub async fn run(
+        mut self,
+        msg_tx: mpsc::Sender<(PeerId, Vec<u8>)>,
+        peer_id: PeerId,
+    ) -> Result<()> {
         let (reader, writer) = self.stream.split();
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);

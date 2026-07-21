@@ -121,14 +121,14 @@ fn derive_vector_json(v: &Vector) -> String {
     // floor uses a different PRF tag and is asserted separately
     // below via the SHA-256.
     let fast_nonce = derive_fast_nonce_external(&seed);
-    let fast = prove_cross_curve(&secret, &t_btc, &t_cync, &fast_nonce)
-        .expect("vector fast-floor prove");
+    let fast =
+        prove_cross_curve(&secret, &t_btc, &t_cync, &fast_nonce).expect("vector fast-floor prove");
     let fast_bytes = fast.canonical_bytes();
 
     // Strict proof — derived from the same `seed` the production
     // entrypoint uses internally.
-    let strict = prove_cross_curve_strict(&secret, &t_btc, &t_cync, &seed)
-        .expect("vector strict prove");
+    let strict =
+        prove_cross_curve_strict(&secret, &t_btc, &t_cync, &seed).expect("vector strict prove");
     let strict_sha256 = strict.canonical_sha256();
 
     // Stable JSON layout. Hand-formatted (rather than serde) so the
@@ -202,8 +202,8 @@ fn build_vectors_json() -> String {
 /// Helper: compute the absolute path to the vectors file. The test
 /// runs from the crate root, so we resolve relative to `CARGO_MANIFEST_DIR`.
 fn vectors_path() -> PathBuf {
-    let crate_root = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR must be set by cargo test");
+    let crate_root =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo test");
     PathBuf::from(crate_root).join(STRICT_DLEQ_VECTORS_PATH)
 }
 
@@ -251,8 +251,8 @@ fn vectors_match_checked_in_file() {
 /// itself) but actually broken (the proof doesn't verify).
 #[test]
 fn each_vector_round_trips() {
-    use coincync_swap::strict_dleq::verify_cross_curve_strict;
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use coincync_swap::strict_dleq::verify_cross_curve_strict;
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
     use curve25519_dalek::scalar::Scalar;
 
@@ -275,7 +275,10 @@ fn each_vector_round_trips() {
             .unwrap_or_else(|e| panic!("vector {} fails verify: {:?}", v.name, e));
 
         // Canonical-len invariant.
-        assert_eq!(strict.canonical_bytes().len(), CrossCurveDlProofStrict::CANONICAL_LEN);
+        assert_eq!(
+            strict.canonical_bytes().len(),
+            CrossCurveDlProofStrict::CANONICAL_LEN
+        );
     }
 }
 

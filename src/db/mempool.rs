@@ -2,15 +2,15 @@
 //!
 //! Persistent storage for unconfirmed transactions (mempool).
 
-use crate::db::shim::{Db, Tree, transaction::Transactional};
-use crate::primitives::{Hash, KeyImage};
+use super::{deserialize, serialize};
+use crate::db::shim::{transaction::Transactional, Db, Tree};
+use crate::error::{Error, Result};
 #[cfg(test)]
 use crate::primitives::Amount;
+use crate::primitives::{Hash, KeyImage};
 use crate::transaction::Transaction;
-use crate::error::{Error, Result};
-use super::{serialize, deserialize};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Mempool transaction entry
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -61,9 +61,7 @@ impl MempoolEntry {
         };
 
         // Extract key images from inputs
-        let key_images: Vec<KeyImage> = tx.inputs.iter()
-            .map(|i| i.key_image)
-            .collect();
+        let key_images: Vec<KeyImage> = tx.inputs.iter().map(|i| i.key_image).collect();
 
         MempoolEntry {
             tx_hash,
@@ -97,11 +95,14 @@ pub struct MempoolDb {
 impl MempoolDb {
     /// Create new mempool database
     pub fn new(db: &Db) -> Result<Self> {
-        let transactions = db.open_tree("mempool_txs")
+        let transactions = db
+            .open_tree("mempool_txs")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let key_images = db.open_tree("mempool_key_images")
+        let key_images = db
+            .open_tree("mempool_key_images")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let fee_index = db.open_tree("mempool_fee_index")
+        let fee_index = db
+            .open_tree("mempool_fee_index")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         Ok(MempoolDb {
@@ -153,8 +154,11 @@ impl MempoolDb {
         // Phase 1 (fast-path pre-check, best-effort): if any
         // key_image is already committed, bail immediately.
         for ki in &entry.key_images {
-            if self.key_images.contains_key(ki.as_bytes())
-                .map_err(|e| Error::DatabaseError(e.to_string()))? {
+            if self
+                .key_images
+                .contains_key(ki.as_bytes())
+                .map_err(|e| Error::DatabaseError(e.to_string()))?
+            {
                 return Ok(false);
             }
         }
@@ -187,7 +191,8 @@ impl MempoolDb {
                         let _ = self.key_images.remove(k);
                     }
                     return Err(Error::DatabaseError(format!(
-                        "R-45: mempool key_image CAS failed: {}", e
+                        "R-45: mempool key_image CAS failed: {}",
+                        e
                     )));
                 }
             }
@@ -206,7 +211,8 @@ impl MempoolDb {
                 let _ = self.key_images.remove(k);
             }
             return Err(Error::DatabaseError(format!(
-                "R-45: mempool body/fee commit failed after key_image reservation: {:?}", e
+                "R-45: mempool body/fee commit failed after key_image reservation: {:?}",
+                e
             )));
         }
 
@@ -236,13 +242,15 @@ impl MempoolDb {
 
     /// Check if transaction is in mempool
     pub fn contains(&self, tx_hash: &Hash) -> Result<bool> {
-        self.transactions.contains_key(tx_hash.as_bytes())
+        self.transactions
+            .contains_key(tx_hash.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))
     }
 
     /// Check if key image is in mempool (double-spend check)
     pub fn has_key_image(&self, key_image: &KeyImage) -> Result<bool> {
-        self.key_images.contains_key(key_image.as_bytes())
+        self.key_images
+            .contains_key(key_image.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))
     }
 
@@ -268,23 +276,26 @@ impl MempoolDb {
             // Pre-compute keys before the atomic transaction
             let tx_hash_bytes = tx_hash.as_bytes().to_vec();
             let fee_key = self.make_fee_key(e.fee_per_byte, tx_hash);
-            let ki_keys: Vec<Vec<u8>> = e.key_images.iter()
+            let ki_keys: Vec<Vec<u8>> = e
+                .key_images
+                .iter()
                 .map(|ki| ki.as_bytes().to_vec())
                 .collect();
 
             // SECURITY (C13-FIX): Atomic transaction across all three trees
             let trees: &[&Tree] = &[&self.transactions, &self.key_images, &self.fee_index];
-            trees.transaction(|tx_trees| {
-                tx_trees[0].remove(tx_hash_bytes.as_slice())?;
-                for ki_key in &ki_keys {
-                    tx_trees[1].remove(ki_key.as_slice())?;
-                }
-                tx_trees[2].remove(fee_key.as_slice())?;
-                Ok(())
-            })
-            .map_err(|e: crate::db::shim::transaction::TransactionError| {
-                Error::DatabaseError(format!("Atomic mempool remove failed: {:?}", e))
-            })?;
+            trees
+                .transaction(|tx_trees| {
+                    tx_trees[0].remove(tx_hash_bytes.as_slice())?;
+                    for ki_key in &ki_keys {
+                        tx_trees[1].remove(ki_key.as_slice())?;
+                    }
+                    tx_trees[2].remove(fee_key.as_slice())?;
+                    Ok(())
+                })
+                .map_err(|e: crate::db::shim::transaction::TransactionError| {
+                    Error::DatabaseError(format!("Atomic mempool remove failed: {:?}", e))
+                })?;
         }
 
         Ok(entry)
@@ -324,7 +335,8 @@ impl MempoolDb {
 
     /// Remove expired transactions
     pub fn remove_expired(&self, current_time: u64, max_age: u64) -> Result<usize> {
-        let expired: Vec<Hash> = self.get_all()?
+        let expired: Vec<Hash> = self
+            .get_all()?
             .into_iter()
             .filter(|e| e.is_expired(current_time, max_age))
             .map(|e| e.tx_hash)
@@ -359,7 +371,8 @@ impl MempoolDb {
             entry.relay_count += 1;
 
             let data = serialize(&entry)?;
-            self.transactions.insert(tx_hash.as_bytes(), data)
+            self.transactions
+                .insert(tx_hash.as_bytes(), data)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             return Ok(true);
@@ -387,11 +400,14 @@ impl MempoolDb {
 
     /// Clear all transactions (for testing/reset)
     pub fn clear(&self) -> Result<()> {
-        self.transactions.clear()
+        self.transactions
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.key_images.clear()
+        self.key_images
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.fee_index.clear()
+        self.fee_index
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -400,10 +416,10 @@ impl MempoolDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-    use crate::transaction::{TxType, TxInput, TxOutput, RingMemberRef};
-    use crate::primitives::PublicKey;
     use crate::crypto::{ClsagSignature, SecretScalar};
+    use crate::primitives::PublicKey;
+    use crate::transaction::{RingMemberRef, TxInput, TxOutput, TxType};
+    use tempfile::tempdir;
 
     fn make_test_tx(nonce: u8) -> Transaction {
         // Generate valid curve points for mock CLSAG signature

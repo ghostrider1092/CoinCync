@@ -104,8 +104,8 @@ pub fn parse_meminfo_ram_pct(text: &str) -> Option<u8> {
     if mem_total == 0 {
         return None;
     }
-    let available = parse_kb_field(text, "MemAvailable")
-        .or_else(|| parse_kb_field(text, "MemFree"))?;
+    let available =
+        parse_kb_field(text, "MemAvailable").or_else(|| parse_kb_field(text, "MemFree"))?;
     let used = mem_total.saturating_sub(available);
     Some(((used.saturating_mul(100)) / mem_total).min(100) as u8)
 }

@@ -10,10 +10,10 @@
 //! T3.1 — Eclipse attack: subnet monopolization resistance
 //! T3.5 — Selfish mining profitability threshold estimation
 
-use coincync::network::connection_tracker::ConnectionTracker;
-use coincync::network::scoring::{PeerScorer, MisbehaviorType};
-use coincync::network::{MessageType, MAX_MESSAGE_SIZE};
 use coincync::consensus::Block;
+use coincync::network::connection_tracker::ConnectionTracker;
+use coincync::network::scoring::{MisbehaviorType, PeerScorer};
+use coincync::network::{MessageType, MAX_MESSAGE_SIZE};
 use coincync::transaction::Transaction;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -39,7 +39,8 @@ fn message_header_rejects_unknown_types() {
     for byte in 128u8..=255 {
         assert!(
             MessageType::try_from(byte).is_err(),
-            "byte {} must not be a valid MessageType", byte
+            "byte {} must not be a valid MessageType",
+            byte
         );
     }
 }
@@ -90,7 +91,11 @@ fn block_deserialize_garbage_no_panic() {
     for (i, garbage) in garbage_inputs.iter().enumerate() {
         // Must not panic — error is fine
         let result = borsh::from_slice::<Block>(garbage);
-        assert!(result.is_err(), "garbage input #{} should not deserialize as Block", i);
+        assert!(
+            result.is_err(),
+            "garbage input #{} should not deserialize as Block",
+            i
+        );
     }
 }
 
@@ -120,7 +125,11 @@ fn transaction_deserialize_garbage_no_panic() {
 
     for (i, garbage) in garbage_inputs.iter().enumerate() {
         let result = borsh::from_slice::<Transaction>(garbage);
-        assert!(result.is_err(), "garbage input #{} should not deserialize as Transaction", i);
+        assert!(
+            result.is_err(),
+            "garbage input #{} should not deserialize as Transaction",
+            i
+        );
     }
 }
 
@@ -168,7 +177,10 @@ fn peer_score_degrades_on_protocol_violations() {
     }
 
     let score = scorer.get(&bad_peer).unwrap();
-    assert!(score.should_ban(), "peer with 20 protocol violations should be flagged for ban");
+    assert!(
+        score.should_ban(),
+        "peer with 20 protocol violations should be flagged for ban"
+    );
 }
 
 #[test]
@@ -182,7 +194,10 @@ fn peer_score_degrades_on_invalid_transactions() {
     }
 
     let score = scorer.get(&bad_peer).unwrap();
-    assert!(score.should_ban(), "peer sending 50 invalid txs should be flagged for ban");
+    assert!(
+        score.should_ban(),
+        "peer sending 50 invalid txs should be flagged for ban"
+    );
 }
 
 #[test]
@@ -196,7 +211,10 @@ fn peer_score_degrades_on_block_failures() {
     }
 
     let score = scorer.get(&bad_peer).unwrap();
-    assert!(score.should_ban(), "peer with 30 block failures should be flagged for ban");
+    assert!(
+        score.should_ban(),
+        "peer with 30 block failures should be flagged for ban"
+    );
 }
 
 #[test]
@@ -215,12 +233,18 @@ fn good_peer_not_banned_after_occasional_failures() {
     }
 
     let score = scorer.get(&mixed_peer).unwrap();
-    assert!(!score.should_ban(), "mostly-good peer with 2 failures out of 102 should NOT be banned");
+    assert!(
+        !score.should_ban(),
+        "mostly-good peer with 2 failures out of 102 should NOT be banned"
+    );
     // H-15 FIX REGRESSION TEST: record_block_success now sets validated=true.
     // A peer that delivers 100 valid blocks MUST be considered "good."
-    assert!(score.is_good(),
+    assert!(
+        score.is_good(),
         "H-15 REGRESSION: Peer with 100 valid blocks is not is_good()! \
-         record_block_success must set validated=true. Score: {}", score.composite_score());
+         record_block_success must set validated=true. Score: {}",
+        score.composite_score()
+    );
 }
 
 #[test]
@@ -238,7 +262,10 @@ fn misbehavior_types_all_degrade_score() {
 
     // Score should have degraded from all those offenses
     let score = scorer.get(&peer).unwrap();
-    assert!(score.composite_score() < 1.0, "score should degrade after misbehavior");
+    assert!(
+        score.composite_score() < 1.0,
+        "score should degrade after misbehavior"
+    );
 }
 
 // =============================================================================
@@ -272,13 +299,18 @@ fn eclipse_attack_same_subnet_limited() {
         }
     }
 
-    println!("Eclipse test: attacker got {} of 200, honest got {} of 20",
-        attacker_accepted, honest_accepted);
+    println!(
+        "Eclipse test: attacker got {} of 200, honest got {} of 20",
+        attacker_accepted, honest_accepted
+    );
 
     // Attacker should NOT have gotten all 200 — subnet limit should cap them
     // Honest peers from diverse subnets should all connect
-    assert!(honest_accepted >= 15,
-        "honest peers from diverse subnets should mostly connect, got {}", honest_accepted);
+    assert!(
+        honest_accepted >= 15,
+        "honest peers from diverse subnets should mostly connect, got {}",
+        honest_accepted
+    );
 }
 
 #[test]
@@ -311,17 +343,38 @@ fn eclipse_attack_many_subnets_still_limited_by_total() {
 #[test]
 fn protocol_constants_are_defensive() {
     // These constants protect against DoS. Verify they're reasonable.
-    assert!(MAX_MESSAGE_SIZE >= 1024 * 1024, "max message must be >= 1MB for blocks");
-    assert!(MAX_MESSAGE_SIZE <= 64 * 1024 * 1024, "max message should be <= 64MB");
+    assert!(
+        MAX_MESSAGE_SIZE >= 1024 * 1024,
+        "max message must be >= 1MB for blocks"
+    );
+    assert!(
+        MAX_MESSAGE_SIZE <= 64 * 1024 * 1024,
+        "max message should be <= 64MB"
+    );
 
     assert!(MAX_LOCATOR_SIZE >= 10, "locator needs at least 10 entries");
-    assert!(MAX_LOCATOR_SIZE <= 128, "locator should be <= 128 to prevent DoS");
+    assert!(
+        MAX_LOCATOR_SIZE <= 128,
+        "locator should be <= 128 to prevent DoS"
+    );
 
-    assert!(MAX_HEADERS_RESPONSE >= 100, "headers response should allow >= 100");
-    assert!(MAX_HEADERS_RESPONSE <= 10_000, "headers response should be <= 10K");
+    assert!(
+        MAX_HEADERS_RESPONSE >= 100,
+        "headers response should allow >= 100"
+    );
+    assert!(
+        MAX_HEADERS_RESPONSE <= 10_000,
+        "headers response should be <= 10K"
+    );
 
-    assert!(MAX_BLOCK_HASHES >= 50, "block hash request should allow >= 50");
-    assert!(MAX_BLOCK_HASHES <= 5_000, "block hash request should be <= 5K");
+    assert!(
+        MAX_BLOCK_HASHES >= 50,
+        "block hash request should allow >= 50"
+    );
+    assert!(
+        MAX_BLOCK_HASHES <= 5_000,
+        "block hash request should be <= 5K"
+    );
 
     assert!(MAX_INV_SIZE >= 100, "inventory should allow >= 100 items");
     assert!(MAX_INV_SIZE <= 10_000, "inventory should be <= 10K");
@@ -350,7 +403,9 @@ fn selfish_mining_not_profitable_below_25_percent() {
 
     // Simple PRNG for simulation
     fn next_rng(state: &mut u64) -> f64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*state >> 33) as f64 / (1u64 << 31) as f64
     }
 
@@ -390,13 +445,21 @@ fn selfish_mining_not_profitable_below_25_percent() {
         }
     }
 
-    println!("Selfish mining at {}%: honest={}, selfish={}",
-        (attacker_hashrate * 100.0) as u32, honest_revenue, selfish_revenue);
+    println!(
+        "Selfish mining at {}%: honest={}, selfish={}",
+        (attacker_hashrate * 100.0) as u32,
+        honest_revenue,
+        selfish_revenue
+    );
 
     // At 20% hashrate, selfish mining should NOT be more profitable
-    assert!(selfish_revenue <= honest_revenue + (honest_revenue / 10),
+    assert!(
+        selfish_revenue <= honest_revenue + (honest_revenue / 10),
         "selfish mining at 20% hashrate should not be significantly more profitable \
-         than honest mining (honest={}, selfish={})", honest_revenue, selfish_revenue);
+         than honest mining (honest={}, selfish={})",
+        honest_revenue,
+        selfish_revenue
+    );
 }
 
 // =============================================================================
@@ -410,16 +473,28 @@ fn memory_budget_prevents_exhaustion() {
 
     let mut allocated_count = 0;
     for _ in 0..1000 {
-        if tracker.allocate(100) { // 100 bytes each
+        if tracker.allocate(100) {
+            // 100 bytes each
             allocated_count += 1;
         }
     }
 
     // Should have capped well below 1000
-    assert!(allocated_count <= 102, "should cap allocations at budget (got {})", allocated_count);
-    assert!(allocated_count >= 90, "should allow allocations up to budget (got {})", allocated_count);
+    assert!(
+        allocated_count <= 102,
+        "should cap allocations at budget (got {})",
+        allocated_count
+    );
+    assert!(
+        allocated_count >= 90,
+        "should allow allocations up to budget (got {})",
+        allocated_count
+    );
 
     // Memory usage should be at or near budget
     let usage = tracker.memory_usage();
-    assert!(usage <= 10 * 1024 + 100, "memory usage should not exceed budget + one allocation");
+    assert!(
+        usage <= 10 * 1024 + 100,
+        "memory usage should not exceed budget + one allocation"
+    );
 }

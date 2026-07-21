@@ -400,7 +400,11 @@ pub const SEQ_PAD_ITERATIONS: u32 = 1;
 pub const V2_TX_ACTIVATION_HEIGHT: u64 = 50_000; // ~69 days at 120s blocks
 
 pub fn block_version_at_height(height: u64) -> u8 {
-    if height >= V2_TX_ACTIVATION_HEIGHT { 2 } else { 1 }
+    if height >= V2_TX_ACTIVATION_HEIGHT {
+        2
+    } else {
+        1
+    }
 }
 
 // =============================================================================
@@ -830,9 +834,7 @@ fn activation_height(name: &str) -> Option<u64> {
         // Format: (activation_name, mainnet_height)
         // Empty as of 2026-05-08.
     ];
-    entries.iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, h)| *h)
+    entries.iter().find(|(n, _)| *n == name).map(|(_, h)| *h)
 }
 
 /// Returns true if the named activation is in effect at `height`.
@@ -899,20 +901,28 @@ pub const EMISSION_DIVISOR: u64 = 2_000_000;
 // build.rs — so constitutional drift cannot happen silently in a local hack.
 
 // ── Article I — Fixed Supply (100,000,000 CYNC asymptotic cap) ──────
-const _: () = assert!(TOTAL_SUPPLY_TARGET == 100_000_000,
-    "UNCONSTITUTIONAL: Article I — Supply cap must be exactly 100,000,000 CYNC");
-const _: () = assert!(MAX_SUPPLY == 100_000_000u128 * COIN as u128,
-    "UNCONSTITUTIONAL: Article I — MAX_SUPPLY atomic-unit value must match 100M cap");
-const _: () = assert!(TAIL_EMISSION == 600_000_000_000,
-    "Asymptotic curve: tail emission is 0.6 CYNC/block = 600_000_000_000 atomic");
+const _: () = assert!(
+    TOTAL_SUPPLY_TARGET == 100_000_000,
+    "UNCONSTITUTIONAL: Article I — Supply cap must be exactly 100,000,000 CYNC"
+);
+const _: () = assert!(
+    MAX_SUPPLY == 100_000_000u128 * COIN as u128,
+    "UNCONSTITUTIONAL: Article I — MAX_SUPPLY atomic-unit value must match 100M cap"
+);
+const _: () = assert!(
+    TAIL_EMISSION == 600_000_000_000,
+    "Asymptotic curve: tail emission is 0.6 CYNC/block = 600_000_000_000 atomic"
+);
 
 // ── Article II — No Pre-mine, No Developer Tax ──────────────────────
 /// Constitution Article II — no percentage-based fee or tax is ever routed
 /// to developers, a foundation treasury, or any other address. A non-zero
 /// value here is a constitutional violation.
 pub const DEV_TAX_PERCENT: u64 = 0;
-const _: () = assert!(DEV_TAX_PERCENT == 0,
-    "UNCONSTITUTIONAL: Article II — Dev tax must be zero. No fee extraction to developers.");
+const _: () = assert!(
+    DEV_TAX_PERCENT == 0,
+    "UNCONSTITUTIONAL: Article II — Dev tax must be zero. No fee extraction to developers."
+);
 
 // ── Article III — Mandatory Privacy ─────────────────────────────────
 //
@@ -925,30 +935,38 @@ const _: () = assert!(DEV_TAX_PERCENT == 0,
 /// Article III — ring size floor (11). Lower values have been shown to
 /// be statistically deanonymizable on Monero's historical ledger; 11 is
 /// the settled Monero-school floor as of 2024.
-const _: () = assert!(BOOTSTRAP_MIN_RING_SIZE >= 11,
-    "UNCONSTITUTIONAL: Article III — Minimum ring size must be >= 11 for mandatory privacy");
+const _: () = assert!(
+    BOOTSTRAP_MIN_RING_SIZE >= 11,
+    "UNCONSTITUTIONAL: Article III — Minimum ring size must be >= 11 for mandatory privacy"
+);
 
 /// Article III — hidden amounts. Every non-coinbase output must carry a
 /// non-zero Pedersen commitment. Enforced structurally in
 /// `consensus::privacy_policy::check_tx_privacy`.
 pub const MANDATORY_CONFIDENTIAL: bool = true;
-const _: () = assert!(MANDATORY_CONFIDENTIAL,
-    "UNCONSTITUTIONAL: Article III — all amounts must be hidden (Pedersen commitments)");
+const _: () = assert!(
+    MANDATORY_CONFIDENTIAL,
+    "UNCONSTITUTIONAL: Article III — all amounts must be hidden (Pedersen commitments)"
+);
 
 /// Article III — hidden recipients. Every output must use a stealth
 /// address or a Spark address (Phase 2). Raw public-key outputs are
 /// invalid at the consensus level.
 pub const MANDATORY_STEALTH: bool = true;
-const _: () = assert!(MANDATORY_STEALTH,
-    "UNCONSTITUTIONAL: Article III — all outputs must use stealth or Spark addresses");
+const _: () = assert!(
+    MANDATORY_STEALTH,
+    "UNCONSTITUTIONAL: Article III — all outputs must use stealth or Spark addresses"
+);
 
 /// Article III — no trusted setup. Halo2 (IPA) is the shielded-pool
 /// proving system; Groth16 and any other ceremony-dependent scheme are
 /// forbidden because they require destroying toxic-waste material that
 /// future participants must trust was actually destroyed.
 pub const NO_TRUSTED_SETUP: bool = true;
-const _: () = assert!(NO_TRUSTED_SETUP,
-    "UNCONSTITUTIONAL: Article III — no trusted setup (Halo2 IPA only, no Groth16)");
+const _: () = assert!(
+    NO_TRUSTED_SETUP,
+    "UNCONSTITUTIONAL: Article III — no trusted setup (Halo2 IPA only, no Groth16)"
+);
 
 // ── Article V — Open Mining (RandomX only) ──────────────────────────
 /// Constitution Article V — RandomX is the only proof-of-work algorithm.
@@ -957,8 +975,10 @@ const _: () = assert!(NO_TRUSTED_SETUP,
 /// rotation"). Flipping this flag requires a constitutional amendment,
 /// which Article X forbids.
 pub const RANDOMX_ONLY: bool = true;
-const _: () = assert!(RANDOMX_ONLY,
-    "UNCONSTITUTIONAL: Article V — CoinCync is RandomX-only, no algorithm rotation");
+const _: () = assert!(
+    RANDOMX_ONLY,
+    "UNCONSTITUTIONAL: Article V — CoinCync is RandomX-only, no algorithm rotation"
+);
 
 // ── Article IX — No Surveillance Infrastructure ─────────────────────
 //
@@ -970,8 +990,10 @@ const _: () = assert!(RANDOMX_ONLY,
 /// Article IX — no address blacklist. Also supports Bill of Rights IV
 /// (self-custody) and X (no censorship).
 pub const ADDRESS_BLACKLIST_ENABLED: bool = false;
-const _: () = assert!(!ADDRESS_BLACKLIST_ENABLED,
-    "UNCONSTITUTIONAL: Article IX / Bill of Rights IV & X — No address blacklisting");
+const _: () = assert!(
+    !ADDRESS_BLACKLIST_ENABLED,
+    "UNCONSTITUTIONAL: Article IX / Bill of Rights IV & X — No address blacklisting"
+);
 
 /// Article IX — no transaction censorship. Valid transactions must
 /// always be eligible for inclusion. Supports Bill of Rights X.
@@ -983,8 +1005,10 @@ const _: () = assert!(!TX_CENSORSHIP_ENABLED,
 /// metadata-leak fields, and reporting mechanisms that transmit user
 /// data to third parties are permanently forbidden.
 pub const SURVEILLANCE_HOOKS_ENABLED: bool = false;
-const _: () = assert!(!SURVEILLANCE_HOOKS_ENABLED,
-    "UNCONSTITUTIONAL: Article IX — Surveillance infrastructure is permanently prohibited");
+const _: () = assert!(
+    !SURVEILLANCE_HOOKS_ENABLED,
+    "UNCONSTITUTIONAL: Article IX — Surveillance infrastructure is permanently prohibited"
+);
 
 // ── Articles XI–XIV — Category-level tripwires ──────────────────────
 //
@@ -1236,8 +1260,10 @@ mod tests {
         // BELOW activation, regardless of which network we built for.
         assert_eq!(MIN_OUTPUT_AGE, 10);
         assert_eq!(MIN_OUTPUT_AGE_POST_FORK, 100);
-        assert!(MIN_OUTPUT_AGE_POST_FORK > MIN_OUTPUT_AGE,
-            "post-fork value must be strictly larger — the hard fork tightens, never loosens");
+        assert!(
+            MIN_OUTPUT_AGE_POST_FORK > MIN_OUTPUT_AGE,
+            "post-fork value must be strictly larger — the hard fork tightens, never loosens"
+        );
 
         // The boundary contract: `<` returns pre, `>=` returns post.
         // We only assert this when the activation height is finite
@@ -1276,7 +1302,9 @@ mod tests {
             let v = min_output_age_at_height(h);
             assert!(
                 v == MIN_OUTPUT_AGE || v == MIN_OUTPUT_AGE_POST_FORK,
-                "helper returned unexpected value {} at height {}", v, h
+                "helper returned unexpected value {} at height {}",
+                v,
+                h
             );
         }
     }
@@ -1382,7 +1410,8 @@ mod tests {
                 h_prev < h_next,
                 "CONSENSUS_CHECKPOINTS must be sorted ascending by height; \
                  found {} before {}",
-                h_prev, h_next
+                h_prev,
+                h_next
             );
         }
     }

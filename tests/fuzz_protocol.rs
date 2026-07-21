@@ -125,7 +125,7 @@ fn tx_parser_rejects_absurd_length_prefix() {
     // inputs-length of u32::MAX with no input bytes to follow.
     let mut bytes = vec![1u8, 1u8]; // version=1, TxType::Transfer=1
     bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // inputs.len = 2^32 - 1
-    // (no input data follows — parser must error, not panic)
+                                                      // (no input data follows — parser must error, not panic)
 
     let _ = Transaction::try_from_slice(&bytes); // must not panic
 }

@@ -2,14 +2,13 @@
 //!
 //! Provides non-blocking wallet sync with real-time progress updates.
 
+use crate::consensus::Block;
+use crate::error::Result;
+#[allow(unused_imports)]
+use crate::primitives::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
-#[allow(unused_imports)]
-use crate::primitives::Hash;
-use crate::consensus::Block;
-use crate::error::Result;
-
 
 /// Sync progress information
 #[derive(Clone, Debug)]
@@ -140,19 +139,25 @@ pub struct BackgroundSyncController {
 impl BackgroundSyncController {
     /// Start sync
     pub async fn start(&self) -> Result<()> {
-        self.command_tx.send(SyncCommand::Start).await
+        self.command_tx
+            .send(SyncCommand::Start)
+            .await
             .map_err(|_| crate::error::Error::InvalidState("Sync task not running".into()))
     }
 
     /// Pause sync
     pub async fn pause(&self) -> Result<()> {
-        self.command_tx.send(SyncCommand::Pause).await
+        self.command_tx
+            .send(SyncCommand::Pause)
+            .await
             .map_err(|_| crate::error::Error::InvalidState("Sync task not running".into()))
     }
 
     /// Stop sync
     pub async fn stop(&self) -> Result<()> {
-        self.command_tx.send(SyncCommand::Stop).await
+        self.command_tx
+            .send(SyncCommand::Stop)
+            .await
             .map_err(|_| crate::error::Error::InvalidState("Sync task not running".into()))
     }
 
@@ -449,10 +454,7 @@ impl BackgroundSyncManager {
 #[derive(Clone, Debug)]
 pub enum ScanBlockOutcome {
     /// Normal scan path. Same counts the legacy `scan_block` returned.
-    Scanned {
-        outputs: u64,
-        txs: u64,
-    },
+    Scanned { outputs: u64, txs: u64 },
     /// The wallet scanner detected a chain reorg while applying this
     /// block. Carries the wallet's most-recent canonical `(height, hash)`
     /// — the orchestrator passes this pair to `BlockFetcher::find_fork_point`
@@ -639,7 +641,9 @@ pub fn spawn_background_sync(
         // height 0 to compare anyway).
         let mut last_tip_check = std::time::Instant::now();
         let tip_check_interval = if config.tip_check_interval_secs > 0 {
-            Some(std::time::Duration::from_secs(config.tip_check_interval_secs))
+            Some(std::time::Duration::from_secs(
+                config.tip_check_interval_secs,
+            ))
         } else {
             None
         };
@@ -667,7 +671,9 @@ pub fn spawn_background_sync(
                                     known_hash,
                                     known_h,
                                     known_h,
-                                ).await {
+                                )
+                                .await
+                                {
                                     Ok(Some(stats)) => {
                                         tracing::info!(
                                             target: "wallet::reorg",
@@ -818,7 +824,9 @@ pub fn spawn_background_sync(
                                     known_hash,
                                     known_height,
                                     at_height,
-                                ).await {
+                                )
+                                .await
+                                {
                                     Ok(Some(stats)) => {
                                         tracing::info!(
                                             target: "wallet::reorg",
@@ -849,9 +857,8 @@ pub fn spawn_background_sync(
                                             target: "wallet::reorg",
                                             "Reorg recovery failed: {}", e,
                                         );
-                                        manager.record_error(format!(
-                                            "Reorg recovery failed: {}", e,
-                                        ));
+                                        manager
+                                            .record_error(format!("Reorg recovery failed: {}", e,));
                                         had_error = true;
                                     }
                                 }
@@ -927,7 +934,7 @@ pub fn spawn_background_sync(
             // Rate limiting
             if config.rate_limit > 0 && batch_count > 0 {
                 let delay = std::time::Duration::from_millis(
-                    (batch_count * 1000 / config.rate_limit.max(1)) as u64
+                    (batch_count * 1000 / config.rate_limit.max(1)) as u64,
                 );
                 tokio::time::sleep(delay).await;
             }
@@ -1027,7 +1034,6 @@ mod tests {
             Vec::new(),
         )
     }
-
 
     /// `rewind_to` pulls current_height back to the recovery target and
     /// re-arms the state machine to Syncing. The next batch_range will
@@ -1153,8 +1159,12 @@ mod tests {
     fn test_scan_block_v2_default_wraps_legacy_scan() {
         struct LegacyOnly;
         impl BlockScanner for LegacyOnly {
-            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) { (3, 7) }
-            fn persist_state(&mut self, _h: u64) -> Result<()> { Ok(()) }
+            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) {
+                (3, 7)
+            }
+            fn persist_state(&mut self, _h: u64) -> Result<()> {
+                Ok(())
+            }
         }
         let mut s = LegacyOnly;
         let dummy_block = empty_block();
@@ -1176,8 +1186,12 @@ mod tests {
     fn test_handle_reorg_recovery_default_is_err() {
         struct LegacyOnly;
         impl BlockScanner for LegacyOnly {
-            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) { (0, 0) }
-            fn persist_state(&mut self, _h: u64) -> Result<()> { Ok(()) }
+            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) {
+                (0, 0)
+            }
+            fn persist_state(&mut self, _h: u64) -> Result<()> {
+                Ok(())
+            }
         }
         let mut s = LegacyOnly;
         let res = s.handle_reorg_recovery(42);
@@ -1193,12 +1207,10 @@ mod tests {
         struct LegacyFetcher;
         #[async_trait::async_trait]
         impl BlockFetcher for LegacyFetcher {
-            async fn fetch_block(&self, _h: u64)
-                -> std::result::Result<Option<Block>, String> {
+            async fn fetch_block(&self, _h: u64) -> std::result::Result<Option<Block>, String> {
                 Ok(None)
             }
-            async fn get_chain_height(&self)
-                -> std::result::Result<u64, String> {
+            async fn get_chain_height(&self) -> std::result::Result<u64, String> {
                 Ok(0)
             }
         }
@@ -1215,8 +1227,12 @@ mod tests {
     fn test_current_position_default_is_zero() {
         struct LegacyOnly;
         impl BlockScanner for LegacyOnly {
-            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) { (0, 0) }
-            fn persist_state(&mut self, _h: u64) -> Result<()> { Ok(()) }
+            fn scan_block(&mut self, _b: &Block, _h: u64) -> (u64, u64) {
+                (0, 0)
+            }
+            fn persist_state(&mut self, _h: u64) -> Result<()> {
+                Ok(())
+            }
         }
         let s = LegacyOnly;
         assert_eq!(s.current_position(), (0, Hash::zero()));
@@ -1238,7 +1254,9 @@ mod tests {
                 Ok(10)
             }
             async fn find_fork_point(
-                &self, _kh: Hash, _kheight: u64,
+                &self,
+                _kh: Hash,
+                _kheight: u64,
             ) -> std::result::Result<Option<u64>, String> {
                 Ok(Some(4))
             }
@@ -1250,12 +1268,15 @@ mod tests {
             recovery_calls: 0,
         });
         let result = try_reorg_recovery(
-            &fetcher, &mut scanner,
+            &fetcher,
+            &mut scanner,
             Hash::from_bytes([0xAB; 32]),
             5, // known_height
             5, // at_height — the height the reorg was detected at
-        ).await;
-        let stats = result.expect("recovery should not error")
+        )
+        .await;
+        let stats = result
+            .expect("recovery should not error")
             .expect("fork point should resolve to Some");
         // Stub returns depth=1 + new_height=fork_height=4; helper
         // backfills reorg_at_height=at_height=5.
@@ -1276,9 +1297,13 @@ mod tests {
             async fn fetch_block(&self, _h: u64) -> std::result::Result<Option<Block>, String> {
                 Ok(None)
             }
-            async fn get_chain_height(&self) -> std::result::Result<u64, String> { Ok(0) }
+            async fn get_chain_height(&self) -> std::result::Result<u64, String> {
+                Ok(0)
+            }
             async fn find_fork_point(
-                &self, _kh: Hash, _kheight: u64,
+                &self,
+                _kh: Hash,
+                _kheight: u64,
             ) -> std::result::Result<Option<u64>, String> {
                 Ok(None)
             }

@@ -17,7 +17,8 @@ fn monero_2019_amount_saturating_add() {
     let one = Amount::from_atomic(1);
     let result = max.saturating_add(one);
     assert_eq!(
-        result.as_atomic(), u64::MAX,
+        result.as_atomic(),
+        u64::MAX,
         "CVE-2019-18936: Amount addition wraps around instead of saturating!"
     );
 }
@@ -28,7 +29,8 @@ fn monero_2019_double_max_saturates() {
     let max = Amount::from_atomic(u64::MAX);
     let result = max.saturating_add(max);
     assert_eq!(
-        result.as_atomic(), u64::MAX,
+        result.as_atomic(),
+        u64::MAX,
         "CVE-2019-18936: Adding u64::MAX + u64::MAX wraps to small number!"
     );
 }

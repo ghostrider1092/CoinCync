@@ -95,15 +95,23 @@ const MAX_CHECKPOINTS: usize = 1000;
 pub struct ShieldedHash(pub [u8; 32]);
 
 impl ShieldedHash {
-    pub const fn zero() -> Self { ShieldedHash([0u8; 32]) }
+    pub const fn zero() -> Self {
+        ShieldedHash([0u8; 32])
+    }
 
-    pub fn from_bytes(b: [u8; 32]) -> Self { ShieldedHash(b) }
+    pub fn from_bytes(b: [u8; 32]) -> Self {
+        ShieldedHash(b)
+    }
 
-    pub fn to_bytes(&self) -> [u8; 32] { self.0 }
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0
+    }
 }
 
 impl Hashable for ShieldedHash {
-    fn empty_leaf() -> Self { Self::zero() }
+    fn empty_leaf() -> Self {
+        Self::zero()
+    }
 
     fn combine(level: Level, a: &Self, b: &Self) -> Self {
         let mut hasher = blake3::Hasher::new();
@@ -198,11 +206,12 @@ impl ShieldedStore {
         // fresh BridgeTree.
         let mut loaded: Vec<(u64, NoteCommitmentEntry)> = Vec::new();
         for item in entries_tree.iter() {
-            let (key, value) = item
-                .map_err(|e| Error::DatabaseError(format!("shielded entries iter: {}", e)))?;
-            let key_bytes: [u8; 8] = key.as_ref().try_into().map_err(|_| {
-                Error::DatabaseError("shielded_entries key must be 8 bytes".into())
-            })?;
+            let (key, value) =
+                item.map_err(|e| Error::DatabaseError(format!("shielded entries iter: {}", e)))?;
+            let key_bytes: [u8; 8] = key
+                .as_ref()
+                .try_into()
+                .map_err(|_| Error::DatabaseError("shielded_entries key must be 8 bytes".into()))?;
             let position = u64::from_be_bytes(key_bytes);
             let entry: NoteCommitmentEntry = borsh::from_slice(value.as_ref())
                 .map_err(|e| Error::SerializationError(format!("shielded entry: {}", e)))?;
@@ -220,9 +229,8 @@ impl ShieldedStore {
 
         let mut nullifiers_map = HashMap::new();
         for item in nullifiers_tree.iter() {
-            let (key, value) = item.map_err(|e| {
-                Error::DatabaseError(format!("shielded nullifiers iter: {}", e))
-            })?;
+            let (key, value) =
+                item.map_err(|e| Error::DatabaseError(format!("shielded nullifiers iter: {}", e)))?;
             let nf: [u8; 32] = key.as_ref().try_into().map_err(|_| {
                 Error::DatabaseError("shielded_nullifiers key must be 32 bytes".into())
             })?;
@@ -364,7 +372,10 @@ impl ShieldedStore {
             return;
         }
 
-        cps.push(ShieldedCheckpoint { height, entries_len });
+        cps.push(ShieldedCheckpoint {
+            height,
+            entries_len,
+        });
         // Mirror the BridgeTree's bounded checkpoint retention so the
         // two stacks never desync at the old end either. Emit a debug
         // event when the cap is hit so an operator chasing a deep-reorg
@@ -375,7 +386,9 @@ impl ShieldedStore {
             tracing::debug!(
                 "ShieldedStore: evicted oldest checkpoint (height {}) — cap {} reached; \
                  deepest available rollback is now height {}",
-                dropped.height, MAX_CHECKPOINTS, cps.first().map_or(0, |c| c.height)
+                dropped.height,
+                MAX_CHECKPOINTS,
+                cps.first().map_or(0, |c| c.height)
             );
         }
     }
@@ -525,12 +538,10 @@ impl ShieldedStore {
     pub fn current_root(&self) -> [u8; 32] {
         let tree = self.tree.read();
         // BridgeTree::root(0) returns the current (latest) root.
-        tree.root(0)
-            .map(|h| h.0)
-            .unwrap_or_else(|| {
-                // Empty tree root at depth SHIELDED_TREE_DEPTH
-                ShieldedHash::empty_root(Level::from(SHIELDED_TREE_DEPTH)).0
-            })
+        tree.root(0).map(|h| h.0).unwrap_or_else(|| {
+            // Empty tree root at depth SHIELDED_TREE_DEPTH
+            ShieldedHash::empty_root(Level::from(SHIELDED_TREE_DEPTH)).0
+        })
     }
 
     /// Returns the commitment entry at a given leaf position, if known.
@@ -560,7 +571,9 @@ impl ShieldedStore {
 }
 
 impl Default for ShieldedStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -856,8 +869,16 @@ mod tests {
         // tables must land together on the post-block-5 boundary.
         apply_block(&store, 6, &[[0xB1; 32]], &[[0x66; 32]]);
         assert!(store.rewind());
-        assert_eq!(store.current_root(), root_after_5, "tree rewound to block 5");
-        assert_eq!(store.tree_size(), size_after_5, "entries rewound to block 5");
+        assert_eq!(
+            store.current_root(),
+            root_after_5,
+            "tree rewound to block 5"
+        );
+        assert_eq!(
+            store.tree_size(),
+            size_after_5,
+            "entries rewound to block 5"
+        );
         assert!(
             !store.is_nullifier_spent(&[0x66; 32]),
             "block-6 nullifier dropped — side tables tracked the tree"
@@ -890,10 +911,7 @@ mod tests {
                         store.checkpoint_at_height(height);
                     }
                     1 => {
-                        store.append_commitment(entry(
-                            [(height & 0xFF) as u8; 32],
-                            height.max(1),
-                        ));
+                        store.append_commitment(entry([(height & 0xFF) as u8; 32], height.max(1)));
                     }
                     _ => {
                         let _ = store.rewind();
@@ -963,7 +981,10 @@ mod tests {
             let sz = store.tree_size() as u64;
             assert_eq!(sz, size_before - rewinds, "tree size wrong mid deep-rewind");
             // Entries map stays dense — no orphan past the frontier.
-            assert!(store.entry_at(sz).is_none(), "orphan past frontier mid-rewind");
+            assert!(
+                store.entry_at(sz).is_none(),
+                "orphan past frontier mid-rewind"
+            );
         }
         assert_eq!(rewinds, MAX_CHECKPOINTS as u64);
         let size_after = store.tree_size() as u64;
@@ -1017,16 +1038,10 @@ mod tests {
                                 store.checkpoint_at_height(h);
                             }
                             1 => {
-                                store.append_commitment(entry(
-                                    [(s & 0xFF) as u8; 32],
-                                    h.max(1),
-                                ));
+                                store.append_commitment(entry([(s & 0xFF) as u8; 32], h.max(1)));
                             }
                             2 => {
-                                store.mark_nullifier_spent(
-                                    [(s & 0xFF) as u8; 32],
-                                    h.max(1),
-                                );
+                                store.mark_nullifier_spent([(s & 0xFF) as u8; 32], h.max(1));
                             }
                             _ => {
                                 store.rewind();
@@ -1056,8 +1071,10 @@ mod tests {
             thread::sleep(Duration::from_millis(600));
             stop.store(true, Ordering::Relaxed);
             writer.join().expect("writer thread panicked");
-            let total_reads: u64 =
-                readers.into_iter().map(|r| r.join().expect("reader panicked")).sum();
+            let total_reads: u64 = readers
+                .into_iter()
+                .map(|r| r.join().expect("reader panicked"))
+                .sum();
             assert!(total_reads > 0, "readers made no progress — possible stall");
             let r1 = store.current_root();
             assert_eq!(r1, store.current_root(), "root not stable while quiescent");
@@ -1084,16 +1101,10 @@ mod tests {
                                 store.checkpoint_at_height(h);
                             }
                             1 => {
-                                store.append_commitment(entry(
-                                    [(s & 0xFF) as u8; 32],
-                                    h.max(1),
-                                ));
+                                store.append_commitment(entry([(s & 0xFF) as u8; 32], h.max(1)));
                             }
                             2 => {
-                                store.mark_nullifier_spent(
-                                    [(s & 0xFF) as u8; 32],
-                                    h.max(1),
-                                );
+                                store.mark_nullifier_spent([(s & 0xFF) as u8; 32], h.max(1));
                             }
                             _ => {
                                 store.rewind();

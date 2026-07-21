@@ -14,10 +14,10 @@
 //! 8. Reorg handling
 //! 9. Amount overflow / underflow + structural validation
 
-use coincync::primitives::{Amount, Hash, PublicKey, KeyImage};
-use coincync::transaction::{Transaction, TxInput, TxOutput, TxType, RingMemberRef};
-use coincync::transaction::validate_transaction;
 use coincync::constants::*;
+use coincync::primitives::{Amount, Hash, KeyImage, PublicKey};
+use coincync::transaction::validate_transaction;
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 
 /// Build a dummy CLSAG signature with the right ring size.
 /// NOT cryptographically valid — only for structural validation tests.
@@ -37,23 +37,22 @@ fn dummy_clsag(ring_size: usize, key_image_bytes: [u8; 32]) -> coincync::crypto:
     for _ in 0..ring_size {
         data.extend_from_slice(&[0u8; 32]);
     }
-    coincync::crypto::ClsagSignature::from_bytes(&data)
-        .unwrap_or_else(|_| {
-            // If borsh parsing fails due to point validation, we need
-            // a valid compressed Ristretto point. The basepoint works.
-            use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
-            let bp = RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
-            let mut data2 = Vec::new();
-            data2.extend_from_slice(bp); // key_image
-            data2.extend_from_slice(bp); // commitment_image
-            data2.extend_from_slice(&[0u8; 32]); // c1
-            data2.extend_from_slice(&(ring_size as u32).to_le_bytes());
-            for _ in 0..ring_size {
-                data2.extend_from_slice(&[0u8; 32]);
-            }
-            coincync::crypto::ClsagSignature::from_bytes(&data2)
-                .expect("dummy CLSAG with basepoint should parse")
-        })
+    coincync::crypto::ClsagSignature::from_bytes(&data).unwrap_or_else(|_| {
+        // If borsh parsing fails due to point validation, we need
+        // a valid compressed Ristretto point. The basepoint works.
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
+        let bp = RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
+        let mut data2 = Vec::new();
+        data2.extend_from_slice(bp); // key_image
+        data2.extend_from_slice(bp); // commitment_image
+        data2.extend_from_slice(&[0u8; 32]); // c1
+        data2.extend_from_slice(&(ring_size as u32).to_le_bytes());
+        for _ in 0..ring_size {
+            data2.extend_from_slice(&[0u8; 32]);
+        }
+        coincync::crypto::ClsagSignature::from_bytes(&data2)
+            .expect("dummy CLSAG with basepoint should parse")
+    })
 }
 
 /// Helper: build a minimal valid coinbase transaction.
@@ -137,12 +136,11 @@ fn make_transfer(fee_atomic: u64, num_inputs: usize, num_outputs: usize) -> Tran
 // =============================================================================
 
 mod range_proof_soundness {
-    use coincync::primitives::Amount;
     use coincync::crypto::{
-        BlindingFactor, PedersenCommitment,
-        create_aggregated_range_proof_for_height,
-        verify_range_proofs_dispatch, RangeProof,
+        create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, BlindingFactor,
+        PedersenCommitment, RangeProof,
     };
+    use coincync::primitives::Amount;
 
     /// Range proofs must verify for valid amounts.
     #[test]
@@ -150,7 +148,10 @@ mod range_proof_soundness {
         let amounts = vec![Amount::from_atomic(1_000_000)];
         let blindings = vec![BlindingFactor::random(&mut rand::rngs::OsRng)];
         let proof = create_aggregated_range_proof_for_height(
-            &amounts, &blindings, &mut rand::rngs::OsRng, 0,
+            &amounts,
+            &blindings,
+            &mut rand::rngs::OsRng,
+            0,
         )
         .expect("proof creation should succeed for valid amount");
 
@@ -173,7 +174,10 @@ mod range_proof_soundness {
         let amounts = vec![Amount::ZERO];
         let blindings = vec![BlindingFactor::random(&mut rand::rngs::OsRng)];
         let proof = create_aggregated_range_proof_for_height(
-            &amounts, &blindings, &mut rand::rngs::OsRng, 0,
+            &amounts,
+            &blindings,
+            &mut rand::rngs::OsRng,
+            0,
         )
         .expect("proof creation should succeed for zero");
 
@@ -200,7 +204,10 @@ mod range_proof_soundness {
         let blinding = BlindingFactor::random(&mut rand::rngs::OsRng);
 
         let proof = create_aggregated_range_proof_for_height(
-            &[real_amount], &[blinding.clone()], &mut rand::rngs::OsRng, 0,
+            &[real_amount],
+            &[blinding.clone()],
+            &mut rand::rngs::OsRng,
+            0,
         )
         .expect("proof should succeed");
 
@@ -226,7 +233,10 @@ mod range_proof_soundness {
             .collect();
 
         let proof = create_aggregated_range_proof_for_height(
-            &amounts, &blindings, &mut rand::rngs::OsRng, 0,
+            &amounts,
+            &blindings,
+            &mut rand::rngs::OsRng,
+            0,
         )
         .expect("aggregated proof should succeed");
 
@@ -264,19 +274,28 @@ mod fee_edge_cases {
     #[test]
     fn zero_fee_rejected() {
         let tx = make_transfer(0, 2, 2);
-        assert!(validate_transaction(&tx, 1000).is_err(), "zero fee must be rejected");
+        assert!(
+            validate_transaction(&tx, 1000).is_err(),
+            "zero fee must be rejected"
+        );
     }
 
     #[test]
     fn coinbase_zero_fee_allowed() {
         let tx = make_coinbase();
-        assert!(validate_transaction(&tx, 100).is_ok(), "coinbase zero fee must pass");
+        assert!(
+            validate_transaction(&tx, 100).is_ok(),
+            "coinbase zero fee must pass"
+        );
     }
 
     #[test]
     fn fee_below_minimum_rejected() {
         let tx = make_transfer(1, 2, 2);
-        assert!(validate_transaction(&tx, 1000).is_err(), "fee of 1 atomic must be rejected");
+        assert!(
+            validate_transaction(&tx, 1000).is_err(),
+            "fee of 1 atomic must be rejected"
+        );
     }
 
     #[test]
@@ -286,8 +305,13 @@ mod fee_edge_cases {
         // ensures the structural validator accepts.
         let tx = make_transfer(100_000_000, 1, 1); // 100M atomic, 1 input, 1 output
         let min_required = tx.size() as u64 * MIN_FEE_PER_BYTE;
-        assert!(tx.fee.as_atomic() >= min_required,
-            "test fee {} must be >= min {} for size {}", tx.fee.as_atomic(), min_required, tx.size());
+        assert!(
+            tx.fee.as_atomic() >= min_required,
+            "test fee {} must be >= min {} for size {}",
+            tx.fee.as_atomic(),
+            min_required,
+            tx.size()
+        );
         // Note: make_transfer with 1 input uses all-same key images (basepoint),
         // so only test with single input to avoid duplicate-KI rejection.
     }
@@ -324,7 +348,10 @@ mod utxo_set_tests {
         let mut utxos = UtxoSet::new();
         let tx_hash = Hash::from_bytes([1u8; 32]);
         utxos.add_output(tx_hash, 0, make_output(), 100);
-        assert!(utxos.output_count() > 0, "UTXO set should have at least one output");
+        assert!(
+            utxos.output_count() > 0,
+            "UTXO set should have at least one output"
+        );
     }
 
     #[test]
@@ -348,8 +375,14 @@ mod utxo_set_tests {
         let count_before = utxos.output_count();
 
         assert!(utxos.spend_output(tx_hash, 0, ki), "spend should succeed");
-        assert!(utxos.output_count() < count_before, "output count should decrease");
-        assert!(utxos.contains_key_image(&ki), "key image should be marked spent");
+        assert!(
+            utxos.output_count() < count_before,
+            "output count should decrease"
+        );
+        assert!(
+            utxos.contains_key_image(&ki),
+            "key image should be marked spent"
+        );
     }
 
     #[test]
@@ -357,7 +390,10 @@ mod utxo_set_tests {
         let mut utxos = UtxoSet::new();
         let tx_hash = Hash::from_bytes([99u8; 32]);
         let ki = KeyImage::from_bytes([88u8; 32]);
-        assert!(!utxos.spend_output(tx_hash, 0, ki), "spending nonexistent output fails");
+        assert!(
+            !utxos.spend_output(tx_hash, 0, ki),
+            "spending nonexistent output fails"
+        );
     }
 }
 
@@ -410,8 +446,10 @@ mod double_spend_resistance {
             extra: vec![],
         };
 
-        assert!(validate_transaction(&tx, 1000).is_err(),
-            "CRITICAL: duplicate key images in same tx must be rejected");
+        assert!(
+            validate_transaction(&tx, 1000).is_err(),
+            "CRITICAL: duplicate key images in same tx must be rejected"
+        );
     }
 
     #[test]
@@ -426,8 +464,14 @@ mod double_spend_resistance {
         let ki2 = KeyImage::from_bytes([2u8; 32]);
 
         assert!(utxos.mark_key_image_spent(ki1), "first key image accepted");
-        assert!(utxos.mark_key_image_spent(ki2), "second distinct key image accepted");
-        assert!(!utxos.mark_key_image_spent(ki1), "duplicate of first rejected");
+        assert!(
+            utxos.mark_key_image_spent(ki2),
+            "second distinct key image accepted"
+        );
+        assert!(
+            !utxos.mark_key_image_spent(ki1),
+            "duplicate of first rejected"
+        );
     }
 
     #[test]
@@ -438,8 +482,10 @@ mod double_spend_resistance {
         let ki = KeyImage::from_bytes([77u8; 32]);
 
         assert!(utxos.mark_key_image_spent(ki), "first spend accepted");
-        assert!(!utxos.mark_key_image_spent(ki),
-            "CRITICAL: double spend must be rejected by UTXO set");
+        assert!(
+            !utxos.mark_key_image_spent(ki),
+            "CRITICAL: double spend must be rejected by UTXO set"
+        );
     }
 }
 
@@ -448,7 +494,7 @@ mod double_spend_resistance {
 // =============================================================================
 
 mod eae_attack_resistance {
-    
+
     // 2026-06-03 audit pass: see crypto_properties.rs for the rationale.
     use coincync::crypto::{generate_stealth_address_checked, StealthAddress};
     use coincync::wallet::WalletKeys;
@@ -462,12 +508,12 @@ mod eae_attack_resistance {
 
         let mut rng = rand::rngs::OsRng;
 
-        let (stealth1, _secret1) = generate_stealth_address_checked(
-            &alice.spend_public, &alice.view_public, 0, &mut rng,
-        ).expect("test fixtures pass valid curve points");
-        let (stealth2, _secret2) = generate_stealth_address_checked(
-            &alice.spend_public, &alice.view_public, 0, &mut rng,
-        ).expect("test fixtures pass valid curve points");
+        let (stealth1, _secret1) =
+            generate_stealth_address_checked(&alice.spend_public, &alice.view_public, 0, &mut rng)
+                .expect("test fixtures pass valid curve points");
+        let (stealth2, _secret2) =
+            generate_stealth_address_checked(&alice.spend_public, &alice.view_public, 0, &mut rng)
+                .expect("test fixtures pass valid curve points");
 
         assert_ne!(
             stealth1.public_key.as_bytes(),
@@ -491,16 +537,18 @@ mod eae_attack_resistance {
         let addresses: Vec<StealthAddress> = (0..10)
             .map(|_| {
                 let (stealth, _) = generate_stealth_address_checked(
-                    &alice.spend_public, &alice.view_public, 0, &mut rng,
-                ).expect("test fixtures pass valid curve points");
+                    &alice.spend_public,
+                    &alice.view_public,
+                    0,
+                    &mut rng,
+                )
+                .expect("test fixtures pass valid curve points");
                 stealth
             })
             .collect();
 
-        let unique: std::collections::HashSet<[u8; 32]> = addresses
-            .iter()
-            .map(|s| *s.public_key.as_bytes())
-            .collect();
+        let unique: std::collections::HashSet<[u8; 32]> =
+            addresses.iter().map(|s| *s.public_key.as_bytes()).collect();
 
         assert_eq!(unique.len(), 10, "all 10 stealth addresses must be unique");
     }
@@ -514,12 +562,12 @@ mod eae_attack_resistance {
         let bob = bob_keys.current().unwrap();
         let mut rng = rand::rngs::OsRng;
 
-        let (stealth_alice, _) = generate_stealth_address_checked(
-            &alice.spend_public, &alice.view_public, 0, &mut rng,
-        ).expect("test fixtures pass valid curve points");
-        let (stealth_bob, _) = generate_stealth_address_checked(
-            &bob.spend_public, &bob.view_public, 0, &mut rng,
-        ).expect("test fixtures pass valid curve points");
+        let (stealth_alice, _) =
+            generate_stealth_address_checked(&alice.spend_public, &alice.view_public, 0, &mut rng)
+                .expect("test fixtures pass valid curve points");
+        let (stealth_bob, _) =
+            generate_stealth_address_checked(&bob.spend_public, &bob.view_public, 0, &mut rng)
+                .expect("test fixtures pass valid curve points");
 
         assert_ne!(
             stealth_alice.public_key.as_bytes(),
@@ -539,29 +587,37 @@ mod dust_attack_resistance {
     #[test]
     fn min_output_amount_is_enforced() {
         assert!(MIN_OUTPUT_AMOUNT > 0, "MIN_OUTPUT_AMOUNT must be nonzero");
-        assert!(MIN_OUTPUT_AMOUNT >= 1_000_000,
-            "MIN_OUTPUT_AMOUNT should be >= 1M atomic units");
+        assert!(
+            MIN_OUTPUT_AMOUNT >= 1_000_000,
+            "MIN_OUTPUT_AMOUNT should be >= 1M atomic units"
+        );
     }
 
     #[test]
     fn zero_fee_transfer_rejected() {
         let tx = make_transfer(0, 2, 2);
-        assert!(validate_transaction(&tx, 1000).is_err(),
-            "zero-fee transfer must be rejected");
+        assert!(
+            validate_transaction(&tx, 1000).is_err(),
+            "zero-fee transfer must be rejected"
+        );
     }
 
     #[test]
     fn excessive_outputs_rejected() {
         let tx = make_transfer(100_000_000, 1, MAX_TX_OUTPUTS + 1);
-        assert!(validate_transaction(&tx, 1000).is_err(),
-            "tx with > MAX_TX_OUTPUTS must be rejected");
+        assert!(
+            validate_transaction(&tx, 1000).is_err(),
+            "tx with > MAX_TX_OUTPUTS must be rejected"
+        );
     }
 
     #[test]
     fn excessive_inputs_rejected() {
         let tx = make_transfer(100_000_000, MAX_TX_INPUTS + 1, 2);
-        assert!(validate_transaction(&tx, 1000).is_err(),
-            "tx with > MAX_TX_INPUTS must be rejected");
+        assert!(
+            validate_transaction(&tx, 1000).is_err(),
+            "tx with > MAX_TX_INPUTS must be rejected"
+        );
     }
 }
 
@@ -571,22 +627,26 @@ mod dust_attack_resistance {
 
 mod difficulty_adjustment {
     use coincync::consensus::difficulty::{
-        calculate_difficulty, DifficultyBlock, max_target, target_to_difficulty,
+        calculate_difficulty, max_target, target_to_difficulty, DifficultyBlock,
     };
-    use coincync::primitives::Hash;
     use coincync::constants::TARGET_BLOCK_TIME;
+    use coincync::primitives::Hash;
 
     fn make_block(height: u64, timestamp: u64) -> DifficultyBlock {
         let mut bytes = [0u8; 32];
         bytes[1] = 0x01; // realistic target, not saturated
-        DifficultyBlock { height, timestamp, target: Hash::from_bytes(bytes) }
+        DifficultyBlock {
+            height,
+            timestamp,
+            target: Hash::from_bytes(bytes),
+        }
     }
 
     fn target_to_u128(target: &Hash) -> u128 {
         let b = target.as_bytes();
         u128::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-            b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+            b[14], b[15],
         ])
     }
 
@@ -598,8 +658,12 @@ mod difficulty_adjustment {
         let new_target = calculate_difficulty(&blocks, 30);
         let old_diff = target_to_difficulty(&blocks.last().unwrap().target);
         let new_diff = target_to_difficulty(&new_target);
-        assert!(new_diff >= old_diff,
-            "faster blocks must increase difficulty: old={}, new={}", old_diff, new_diff);
+        assert!(
+            new_diff >= old_diff,
+            "faster blocks must increase difficulty: old={}, new={}",
+            old_diff,
+            new_diff
+        );
     }
 
     #[test]
@@ -610,16 +674,23 @@ mod difficulty_adjustment {
         let new_target = calculate_difficulty(&blocks, 30);
         let old_val = target_to_u128(&blocks.last().unwrap().target);
         let new_val = target_to_u128(&new_target);
-        assert!(new_val >= old_val,
-            "slower blocks must ease difficulty: old={}, new={}", old_val, new_val);
+        assert!(
+            new_val >= old_val,
+            "slower blocks must ease difficulty: old={}, new={}",
+            old_val,
+            new_val
+        );
     }
 
     #[test]
     fn oscillating_hashrate_converges() {
         let blocks: Vec<_> = (0..40)
             .map(|i| {
-                let t = if i % 2 == 0 { i * TARGET_BLOCK_TIME / 2 }
-                        else { i * TARGET_BLOCK_TIME * 3 / 2 };
+                let t = if i % 2 == 0 {
+                    i * TARGET_BLOCK_TIME / 2
+                } else {
+                    i * TARGET_BLOCK_TIME * 3 / 2
+                };
                 make_block(i, t)
             })
             .collect();
@@ -634,13 +705,20 @@ mod difficulty_adjustment {
             blocks.push(make_block(i, i * TARGET_BLOCK_TIME));
         }
         for i in 20..30 {
-            blocks.push(make_block(i, 20 * TARGET_BLOCK_TIME + (i - 20) * TARGET_BLOCK_TIME * 5));
+            blocks.push(make_block(
+                i,
+                20 * TARGET_BLOCK_TIME + (i - 20) * TARGET_BLOCK_TIME * 5,
+            ));
         }
         let new_target = calculate_difficulty(&blocks, 30);
         let old_val = target_to_u128(&blocks.last().unwrap().target);
         let new_val = target_to_u128(&new_target);
-        assert!(new_val >= old_val,
-            "sudden slowdown must ease difficulty: old={}, new={}", old_val, new_val);
+        assert!(
+            new_val >= old_val,
+            "sudden slowdown must ease difficulty: old={}, new={}",
+            old_val,
+            new_val
+        );
     }
 }
 
@@ -668,7 +746,10 @@ mod reorg_handling {
 
         // Reorg rollback
         spent.remove(&ki);
-        assert!(!spent.contains(&ki), "key image must be unspent after reorg");
+        assert!(
+            !spent.contains(&ki),
+            "key image must be unspent after reorg"
+        );
 
         // Re-spend in new block
         spent.insert(ki);
@@ -735,54 +816,72 @@ mod amount_and_structural {
     #[test]
     fn supply_cap_correct() {
         // 1 CYNC = 10^12 atomic units (COIN constant)
-        assert_eq!(MAX_SUPPLY, 100_000_000u128 * 1_000_000_000_000u128,
-            "supply cap must be exactly 100M CYNC in atomic units");
+        assert_eq!(
+            MAX_SUPPLY,
+            100_000_000u128 * 1_000_000_000_000u128,
+            "supply cap must be exactly 100M CYNC in atomic units"
+        );
     }
 
     #[test]
     fn genesis_reward_correct() {
         let reward = coincync::emission::calculate_block_reward(0);
         // Asymptotic: (100M - 0) / 2M = 50 CYNC * 10^12 atomic/CYNC
-        assert_eq!(reward.as_atomic(), 50 * 1_000_000_000_000u64,
-            "block 0 reward must be 50 CYNC");
+        assert_eq!(
+            reward.as_atomic(),
+            50 * 1_000_000_000_000u64,
+            "block 0 reward must be 50 CYNC"
+        );
     }
 
     #[test]
     fn invalid_version_rejected() {
         let mut tx = make_coinbase();
         tx.version = 99;
-        assert!(validate_transaction(&tx, 100).is_err(), "version 99 must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "version 99 must be rejected"
+        );
     }
 
     #[test]
     fn empty_outputs_rejected() {
         let mut tx = make_coinbase();
         tx.outputs.clear();
-        assert!(validate_transaction(&tx, 100).is_err(), "empty outputs must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "empty outputs must be rejected"
+        );
     }
 
     #[test]
     fn absurd_lock_height_rejected() {
         let mut tx = make_coinbase();
         tx.outputs[0].lock_height = Some(100 + 525_960 + 1);
-        assert!(validate_transaction(&tx, 100).is_err(),
-            "lock_height >2 years must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "lock_height >2 years must be rejected"
+        );
     }
 
     #[test]
     fn oversized_extra_rejected() {
         let mut tx = make_coinbase();
         tx.extra = vec![0xAB; 257];
-        assert!(validate_transaction(&tx, 100).is_err(),
-            "extra > 256 bytes must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "extra > 256 bytes must be rejected"
+        );
     }
 
     #[test]
     fn oversized_tx_rejected() {
         let mut tx = make_coinbase();
         tx.range_proof = vec![0u8; MAX_TX_SIZE + 1];
-        assert!(validate_transaction(&tx, 100).is_err(),
-            "tx > MAX_TX_SIZE must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "tx > MAX_TX_SIZE must be rejected"
+        );
     }
 
     #[test]
@@ -791,16 +890,22 @@ mod amount_and_structural {
         tx1.version = 1;
         let mut tx2 = make_coinbase();
         tx2.version = 2;
-        assert_ne!(tx1.signing_hash(), tx2.signing_hash(),
-            "version must be covered by signing hash");
+        assert_ne!(
+            tx1.signing_hash(),
+            tx2.signing_hash(),
+            "version must be covered by signing hash"
+        );
     }
 
     #[test]
     fn signing_hash_covers_fee() {
         let tx1 = make_transfer(1_000_000, 2, 2);
         let tx2 = make_transfer(2_000_000, 2, 2);
-        assert_ne!(tx1.signing_hash(), tx2.signing_hash(),
-            "fee must be covered by signing hash");
+        assert_ne!(
+            tx1.signing_hash(),
+            tx2.signing_hash(),
+            "fee must be covered by signing hash"
+        );
     }
 }
 
@@ -821,7 +926,10 @@ mod recovery_validation {
         };
         let mut tx = make_coinbase();
         tx.extra = meta.encode();
-        assert!(validate_transaction(&tx, 100).is_ok(), "valid recovery must pass");
+        assert!(
+            validate_transaction(&tx, 100).is_ok(),
+            "valid recovery must pass"
+        );
     }
 
     #[test]
@@ -833,8 +941,10 @@ mod recovery_validation {
         };
         let mut tx = make_coinbase();
         tx.extra = meta.encode();
-        assert!(validate_transaction(&tx, 100).is_err(),
-            "recovery with out-of-range index must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "recovery with out-of-range index must be rejected"
+        );
     }
 
     #[test]
@@ -846,8 +956,10 @@ mod recovery_validation {
         };
         let mut tx = make_coinbase();
         tx.extra = meta.encode();
-        assert!(validate_transaction(&tx, 100).is_err(),
-            "recovery timeout below minimum must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "recovery timeout below minimum must be rejected"
+        );
     }
 
     #[test]
@@ -859,7 +971,9 @@ mod recovery_validation {
         };
         let mut tx = make_coinbase();
         tx.extra = meta.encode();
-        assert!(validate_transaction(&tx, 100).is_err(),
-            "recovery with zero address must be rejected");
+        assert!(
+            validate_transaction(&tx, 100).is_err(),
+            "recovery with zero address must be rejected"
+        );
     }
 }

@@ -6,26 +6,26 @@
 // When >= SIGNAL_THRESHOLD% of blocks in a SIGNAL_WINDOW-block window signal
 // for a deployment, it "locks in" and activates the following window.
 
+use crate::constants::{SIGNAL_THRESHOLD, SIGNAL_WINDOW};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use crate::constants::{SIGNAL_WINDOW, SIGNAL_THRESHOLD};
 
 // ── Bit assignments ───────────────────────────────────────────
 // Each bit corresponds to one pending CoinCync Improvement Proposal.
 // Add new bits here as CIPs are accepted for signaling.
 pub mod bits {
     /// CIP-001: View tags for fast wallet scanning
-    pub const VIEW_TAGS:      u32 = 1 << 0;
+    pub const VIEW_TAGS: u32 = 1 << 0;
     /// CIP-002: Increase ring size to 16
-    pub const RING_SIZE_16:   u32 = 1 << 1;
+    pub const RING_SIZE_16: u32 = 1 << 1;
     /// CIP-003: Fee market improvements
-    pub const FEE_MARKET_V2:  u32 = 1 << 2;
+    pub const FEE_MARKET_V2: u32 = 1 << 2;
     /// CIP-004: Halo2 shielded pool activation (Zcash Orchard style)
     pub const HALO2_SHIELDED: u32 = 1 << 3;
     /// CIP-005: Lelantus Spark large-anonymity-set pool (Firo style)
     pub const LELANTUS_SPARK: u32 = 1 << 4;
     /// CIP-006: MimbleWimble cut-through (Grin style)
-    pub const MW_CUTTHROUGH:  u32 = 1 << 5;
+    pub const MW_CUTTHROUGH: u32 = 1 << 5;
     /// CIP-012: v1.0.12 hard-fork bundle.
     ///
     /// Composite bit signaling miner readiness for the v1.0.12 consensus
@@ -56,28 +56,45 @@ pub mod bits {
     pub const V1_0_12_BUNDLE: u32 = 1 << 6;
     // Bits 7–30: reserved for future CIPs
     /// Must always be set (identifies CoinCync 1.0 blocks)
-    pub const MUST_SET:       u32 = 1 << 31;
+    pub const MUST_SET: u32 = 1 << 31;
 }
 
 /// A 32-bit field embedded in every coinbase's extra_nonce area.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct SignalBits(pub u32);
 
 impl SignalBits {
-    pub fn new(raw: u32) -> Self { Self(raw | bits::MUST_SET) }
-    pub fn signals(&self, bit: u32) -> bool { self.0 & bit != 0 }
-    pub fn raw(&self) -> u32 { self.0 }
+    pub fn new(raw: u32) -> Self {
+        Self(raw | bits::MUST_SET)
+    }
+    pub fn signals(&self, bit: u32) -> bool {
+        self.0 & bit != 0
+    }
+    pub fn raw(&self) -> u32 {
+        self.0
+    }
 }
 
 /// Describes a single protocol upgrade deployment.
 #[derive(Debug, Clone)]
 pub struct Deployment {
-    pub name:                 &'static str,
-    pub bit:                  u32,
+    pub name: &'static str,
+    pub bit: u32,
     /// Height at which signaling window opens
-    pub start_height:         u64,
+    pub start_height: u64,
     /// Height at which deployment times out if not activated
-    pub timeout_height:       u64,
+    pub timeout_height: u64,
     /// Minimum height at which activation can occur
     pub min_activation_height: u64,
 }
@@ -85,32 +102,32 @@ pub struct Deployment {
 /// All registered protocol deployments.
 pub static DEPLOYMENTS: &[Deployment] = &[
     Deployment {
-        name:                 "view-tags",
-        bit:                  bits::VIEW_TAGS,
-        start_height:         0,
-        timeout_height:       1_000_000,
+        name: "view-tags",
+        bit: bits::VIEW_TAGS,
+        start_height: 0,
+        timeout_height: 1_000_000,
         min_activation_height: 2016,
     },
     // M-5 FIX: Phase 2 features disabled until external audit complete
     Deployment {
-        name:                 "halo2-shielded",
-        bit:                  bits::HALO2_SHIELDED,
-        start_height:         u64::MAX,
-        timeout_height:       u64::MAX,
+        name: "halo2-shielded",
+        bit: bits::HALO2_SHIELDED,
+        start_height: u64::MAX,
+        timeout_height: u64::MAX,
         min_activation_height: u64::MAX,
     },
     Deployment {
-        name:                 "lelantus-spark",
-        bit:                  bits::LELANTUS_SPARK,
-        start_height:         u64::MAX,
-        timeout_height:       u64::MAX,
+        name: "lelantus-spark",
+        bit: bits::LELANTUS_SPARK,
+        start_height: u64::MAX,
+        timeout_height: u64::MAX,
         min_activation_height: u64::MAX,
     },
     Deployment {
-        name:                 "mw-cutthrough",
-        bit:                  bits::MW_CUTTHROUGH,
-        start_height:         u64::MAX,
-        timeout_height:       u64::MAX,
+        name: "mw-cutthrough",
+        bit: bits::MW_CUTTHROUGH,
+        start_height: u64::MAX,
+        timeout_height: u64::MAX,
         min_activation_height: u64::MAX,
     },
     // v1.0.12 hard-fork bundle. Currently dormant (start_height = u64::MAX)
@@ -131,10 +148,10 @@ pub static DEPLOYMENTS: &[Deployment] = &[
     // (Those numbers are illustrative — actual values pending operator
     // release-schedule decision; see [[project_roadmap_v1_0_13_to_16]].)
     Deployment {
-        name:                  "v1.0.12-bundle",
-        bit:                   bits::V1_0_12_BUNDLE,
-        start_height:          u64::MAX,
-        timeout_height:        u64::MAX,
+        name: "v1.0.12-bundle",
+        bit: bits::V1_0_12_BUNDLE,
+        start_height: u64::MAX,
+        timeout_height: u64::MAX,
         min_activation_height: u64::MAX,
     },
 ];
@@ -259,7 +276,9 @@ pub struct ForkSignaler {
 
 impl ForkSignaler {
     pub fn new() -> Self {
-        Self { locked_in: Default::default() }
+        Self {
+            locked_in: Default::default(),
+        }
     }
 
     /// Query the state of a deployment at `current_height`. Read-only.
@@ -292,7 +311,7 @@ impl ForkSignaler {
         signal_count_fn: F,
     ) -> DeploymentState
     where
-        F: Fn(u64, u64, u32) -> u64,   // (window_start, window_end, bit) -> count
+        F: Fn(u64, u64, u32) -> u64, // (window_start, window_end, bit) -> count
     {
         if current_height < deployment.start_height {
             return DeploymentState::Defined;
@@ -309,7 +328,9 @@ impl ForkSignaler {
             if current_height >= activation.max(deployment.min_activation_height) {
                 return DeploymentState::Active;
             }
-            return DeploymentState::LockedIn { at_height: activation };
+            return DeploymentState::LockedIn {
+                at_height: activation,
+            };
         }
 
         // Count signaling in current window.
@@ -338,7 +359,9 @@ impl ForkSignaler {
         let pct = ((count * 100 / total) as u32).min(100);
 
         if count >= SIGNAL_THRESHOLD {
-            DeploymentState::LockedIn { at_height: self.next_window_start(current_height) }
+            DeploymentState::LockedIn {
+                at_height: self.next_window_start(current_height),
+            }
         } else {
             DeploymentState::Started { signaling_pct: pct }
         }
@@ -452,7 +475,8 @@ mod tests {
         let state = signaler.state(&d, 6_000, |_, _, _| SIGNAL_THRESHOLD);
         assert!(
             matches!(state, DeploymentState::LockedIn { .. }),
-            "expected LockedIn, got {:?}", state
+            "expected LockedIn, got {:?}",
+            state
         );
     }
 
@@ -464,7 +488,8 @@ mod tests {
         let state = signaler.state(&d, 6_000, |_, _, _| SIGNAL_THRESHOLD - 1);
         assert!(
             matches!(state, DeploymentState::Started { .. }),
-            "expected Started, got {:?}", state
+            "expected Started, got {:?}",
+            state
         );
     }
 
@@ -488,7 +513,8 @@ mod tests {
         let s2 = signaler.state(&d, 6_000 + SIGNAL_WINDOW, |_, _, _| 0);
         assert!(
             matches!(s2, DeploymentState::Started { .. }),
-            "read-only state() must not persist lock-in — actual: {:?}", s2
+            "read-only state() must not persist lock-in — actual: {:?}",
+            s2
         );
     }
 
@@ -507,8 +533,12 @@ mod tests {
         // because the persistence held.
         let s2 = signaler.state(&d, 6_000 + SIGNAL_WINDOW, |_, _, _| 0);
         assert!(
-            matches!(s2, DeploymentState::LockedIn { .. } | DeploymentState::Active),
-            "state_and_record must persist lock-in — actual: {:?}", s2
+            matches!(
+                s2,
+                DeploymentState::LockedIn { .. } | DeploymentState::Active
+            ),
+            "state_and_record must persist lock-in — actual: {:?}",
+            s2
         );
     }
 
@@ -531,14 +561,14 @@ mod tests {
         // which would corrupt the activation state machines for both
         // deployments. This test makes that mistake compile-fail-loud.
         let all_cips = [
-            ("VIEW_TAGS",      bits::VIEW_TAGS),
-            ("RING_SIZE_16",   bits::RING_SIZE_16),
-            ("FEE_MARKET_V2",  bits::FEE_MARKET_V2),
+            ("VIEW_TAGS", bits::VIEW_TAGS),
+            ("RING_SIZE_16", bits::RING_SIZE_16),
+            ("FEE_MARKET_V2", bits::FEE_MARKET_V2),
             ("HALO2_SHIELDED", bits::HALO2_SHIELDED),
             ("LELANTUS_SPARK", bits::LELANTUS_SPARK),
-            ("MW_CUTTHROUGH",  bits::MW_CUTTHROUGH),
+            ("MW_CUTTHROUGH", bits::MW_CUTTHROUGH),
             ("V1_0_12_BUNDLE", bits::V1_0_12_BUNDLE),
-            ("MUST_SET",       bits::MUST_SET),
+            ("MUST_SET", bits::MUST_SET),
         ];
         for (i, (name_a, bit_a)) in all_cips.iter().enumerate() {
             for (name_b, bit_b) in &all_cips[i + 1..] {
@@ -560,7 +590,7 @@ mod tests {
         // than its intended bit.
         let s = SignalBits::new(bits::V1_0_12_BUNDLE);
         assert!(s.signals(bits::V1_0_12_BUNDLE), "must signal own bit");
-        assert!(s.signals(bits::MUST_SET),       "MUST_SET always implicit");
+        assert!(s.signals(bits::MUST_SET), "MUST_SET always implicit");
         for other in [
             bits::VIEW_TAGS,
             bits::RING_SIZE_16,
@@ -571,7 +601,8 @@ mod tests {
         ] {
             assert!(
                 !s.signals(other),
-                "v1.0.12 signal leaked into other CIP bit 0x{:08x}", other,
+                "v1.0.12 signal leaked into other CIP bit 0x{:08x}",
+                other,
             );
         }
     }
@@ -618,11 +649,20 @@ mod tests {
         assert_eq!(decoded.raw(), 0, "pre-CIP-012 coinbase = no signal");
         // Verify it doesn't accidentally signal any CIP bit.
         for bit in [
-            bits::VIEW_TAGS, bits::RING_SIZE_16, bits::FEE_MARKET_V2,
-            bits::HALO2_SHIELDED, bits::LELANTUS_SPARK, bits::MW_CUTTHROUGH,
-            bits::V1_0_12_BUNDLE, bits::MUST_SET,
+            bits::VIEW_TAGS,
+            bits::RING_SIZE_16,
+            bits::FEE_MARKET_V2,
+            bits::HALO2_SHIELDED,
+            bits::LELANTUS_SPARK,
+            bits::MW_CUTTHROUGH,
+            bits::V1_0_12_BUNDLE,
+            bits::MUST_SET,
         ] {
-            assert!(!decoded.signals(bit), "legacy extra signaled bit 0x{:08x}", bit);
+            assert!(
+                !decoded.signals(bit),
+                "legacy extra signaled bit 0x{:08x}",
+                bit
+            );
         }
     }
 
@@ -645,7 +685,7 @@ mod tests {
         // fields after the signal bits. Decoder must read exactly
         // bytes 8..12 as signal and IGNORE anything after — not error.
         let mut extra = encode_coinbase_extra(42, SignalBits::new(bits::V1_0_12_BUNDLE));
-        extra.extend_from_slice(b"future-cip-data");   // trailing garbage
+        extra.extend_from_slice(b"future-cip-data"); // trailing garbage
         let decoded = decode_signal_bits(&extra);
         assert!(decoded.signals(bits::V1_0_12_BUNDLE));
     }

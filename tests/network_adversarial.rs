@@ -39,7 +39,10 @@ fn subnet_diversity_limits_connections_from_same_subnet() {
 
     // Some should be accepted but not all — subnet diversity limits
     // should prevent one /16 from taking all slots
-    assert!(accepted > 0, "at least one connection from the subnet should be accepted");
+    assert!(
+        accepted > 0,
+        "at least one connection from the subnet should be accepted"
+    );
     // The exact limit depends on MAX_OUTBOUND_PER_SUBNET constant
     // but should be well below 100
     println!("Accepted {} of 100 from same /16 subnet", accepted);
@@ -54,7 +57,11 @@ fn different_subnets_are_not_limited_by_each_other() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, subnet, 0, 1));
         let addr = SocketAddr::new(ip, 28080);
         let ok = tracker.try_track_connection(&addr);
-        assert!(ok, "first connection from subnet 10.{}.0.0/16 should be accepted", subnet);
+        assert!(
+            ok,
+            "first connection from subnet 10.{}.0.0/16 should be accepted",
+            subnet
+        );
     }
 }
 
@@ -69,7 +76,10 @@ fn banned_peer_is_rejected() {
     let mut scorer = PeerScorer::new();
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 28080);
 
-    assert!(!scorer.is_banned(&peer), "peer should not be banned initially");
+    assert!(
+        !scorer.is_banned(&peer),
+        "peer should not be banned initially"
+    );
 
     scorer.ban(peer);
     assert!(scorer.is_banned(&peer), "peer should be banned after ban()");
@@ -84,7 +94,10 @@ fn unbanned_peer_is_accepted() {
     assert!(scorer.is_banned(&peer));
 
     scorer.unban(&peer);
-    assert!(!scorer.is_banned(&peer), "peer should not be banned after unban()");
+    assert!(
+        !scorer.is_banned(&peer),
+        "peer should not be banned after unban()"
+    );
 }
 
 #[test]
@@ -127,7 +140,10 @@ fn memory_budget_enforced() {
     assert!(allocated, "first allocation within budget should succeed");
 
     let allocated2 = tracker.allocate(512);
-    assert!(allocated2, "second allocation exactly at budget should succeed");
+    assert!(
+        allocated2,
+        "second allocation exactly at budget should succeed"
+    );
 
     let allocated3 = tracker.allocate(1);
     assert!(!allocated3, "allocation exceeding budget should fail");
@@ -137,11 +153,17 @@ fn memory_budget_enforced() {
 fn memory_release_allows_new_allocation() {
     let tracker = ConnectionTracker::new(1024);
 
-    assert!(tracker.allocate(1024), "full budget allocation should succeed");
+    assert!(
+        tracker.allocate(1024),
+        "full budget allocation should succeed"
+    );
     assert!(!tracker.allocate(1), "over-budget should fail");
 
     tracker.deallocate(512);
-    assert!(tracker.allocate(512), "after release, new allocation should succeed");
+    assert!(
+        tracker.allocate(512),
+        "after release, new allocation should succeed"
+    );
 }
 
 // =============================================================================
@@ -154,29 +176,50 @@ fn memory_release_allows_new_allocation() {
 fn max_message_size_is_reasonable() {
     // MAX_MESSAGE_SIZE should be set to prevent DoS but allow large blocks
     assert!(MAX_MESSAGE_SIZE > 0, "MAX_MESSAGE_SIZE must be positive");
-    assert!(MAX_MESSAGE_SIZE <= 50 * 1024 * 1024, "MAX_MESSAGE_SIZE should not exceed 50MB");
-    println!("MAX_MESSAGE_SIZE = {} bytes ({} MB)", MAX_MESSAGE_SIZE, MAX_MESSAGE_SIZE / (1024 * 1024));
+    assert!(
+        MAX_MESSAGE_SIZE <= 50 * 1024 * 1024,
+        "MAX_MESSAGE_SIZE should not exceed 50MB"
+    );
+    println!(
+        "MAX_MESSAGE_SIZE = {} bytes ({} MB)",
+        MAX_MESSAGE_SIZE,
+        MAX_MESSAGE_SIZE / (1024 * 1024)
+    );
 }
 
 #[test]
 fn message_type_roundtrip() {
     // Every valid message type should roundtrip through u8 conversion
     let types = [
-        MessageType::Version, MessageType::Verack,
-        MessageType::Ping, MessageType::Pong,
-        MessageType::GetHeaders, MessageType::Headers,
-        MessageType::GetBlocks, MessageType::Blocks,
-        MessageType::GetData, MessageType::BlockData,
-        MessageType::GetTxs, MessageType::Txs,
-        MessageType::InvTx, MessageType::InvBlock,
-        MessageType::GetAddr, MessageType::Addr,
-        MessageType::Reject, MessageType::Alert,
+        MessageType::Version,
+        MessageType::Verack,
+        MessageType::Ping,
+        MessageType::Pong,
+        MessageType::GetHeaders,
+        MessageType::Headers,
+        MessageType::GetBlocks,
+        MessageType::Blocks,
+        MessageType::GetData,
+        MessageType::BlockData,
+        MessageType::GetTxs,
+        MessageType::Txs,
+        MessageType::InvTx,
+        MessageType::InvBlock,
+        MessageType::GetAddr,
+        MessageType::Addr,
+        MessageType::Reject,
+        MessageType::Alert,
     ];
 
     for mt in &types {
         let byte = *mt as u8;
         let recovered = MessageType::try_from(byte);
-        assert!(recovered.is_ok(), "MessageType {:?} (byte {}) should roundtrip", mt, byte);
+        assert!(
+            recovered.is_ok(),
+            "MessageType {:?} (byte {}) should roundtrip",
+            mt,
+            byte
+        );
         assert_eq!(recovered.unwrap() as u8, byte);
     }
 }
@@ -187,7 +230,11 @@ fn invalid_message_type_rejected() {
     let invalid_bytes: Vec<u8> = (200..=255).collect();
     for byte in invalid_bytes {
         let result = MessageType::try_from(byte);
-        assert!(result.is_err(), "byte {} should not be a valid MessageType", byte);
+        assert!(
+            result.is_err(),
+            "byte {} should not be a valid MessageType",
+            byte
+        );
     }
 }
 
@@ -233,7 +280,11 @@ fn peer_score_defaults_are_sensible() {
 
     let score = scorer.get_or_create(peer);
     // Default score should be neutral/positive, not negative
-    assert!(score.composite_score() >= 0.0, "default peer score should be non-negative, got {}", score.composite_score());
+    assert!(
+        score.composite_score() >= 0.0,
+        "default peer score should be non-negative, got {}",
+        score.composite_score()
+    );
 }
 
 #[test]
@@ -248,5 +299,8 @@ fn peer_score_survives_many_updates() {
     }
 
     let score = scorer.get(&peer).unwrap();
-    assert!(score.composite_score() > 0.0, "peer with 1000 valid blocks should have positive score");
+    assert!(
+        score.composite_score() > 0.0,
+        "peer with 1000 valid blocks should have positive score"
+    );
 }

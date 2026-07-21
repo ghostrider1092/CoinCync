@@ -2,11 +2,11 @@
 //!
 //! Proper mnemonic generation and seed derivation for CoinCync wallets.
 
-use bip39::{Language, Mnemonic};
-use rand::RngCore;
-use rand::rngs::OsRng;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::error::{Error, Result};
+use bip39::{Language, Mnemonic};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Number of words in the mnemonic
 pub const MNEMONIC_WORDS: usize = 24;
@@ -272,7 +272,7 @@ impl DerivationPath {
                 44 | 0x80000000,
                 888 | 0x80000000,
                 account | 0x80000000,
-                2 | 0x80000000,  // special: view key (hardened)
+                2 | 0x80000000, // special: view key (hardened)
                 0 | 0x80000000,
             ],
         }
@@ -298,8 +298,8 @@ impl DerivationPath {
                 44 | 0x80000000,
                 888 | 0x80000000,
                 account | 0x80000000,
-                3 | 0x80000000,  // special: spend key (hardened)
-                0 | 0x80000000,  // (hardened)
+                3 | 0x80000000, // special: spend key (hardened)
+                0 | 0x80000000, // (hardened)
             ],
         }
     }
@@ -317,20 +317,18 @@ impl DerivationPath {
                 continue;
             }
 
-            let (num_str, hardened) = if part.ends_with('\'') || part.ends_with('h') || part.ends_with('H') {
-                (&part[..part.len()-1], true)
-            } else {
-                (part, false)
-            };
+            let (num_str, hardened) =
+                if part.ends_with('\'') || part.ends_with('h') || part.ends_with('H') {
+                    (&part[..part.len() - 1], true)
+                } else {
+                    (part, false)
+                };
 
-            let num: u32 = num_str.parse()
+            let num: u32 = num_str
+                .parse()
                 .map_err(|_| Error::InvalidMnemonic(format!("Invalid path component: {}", part)))?;
 
-            let component = if hardened {
-                num | 0x80000000
-            } else {
-                num
-            };
+            let component = if hardened { num | 0x80000000 } else { num };
 
             components.push(component);
         }
@@ -374,15 +372,18 @@ impl std::fmt::Display for DerivationPath {
 /// zeroization. On stack-reuse the freed slot exposes the derived
 /// child key. Now we explicitly zeroize the intermediate buffer
 /// before returning.
-pub fn derive_child_key(parent_key: &[u8; 32], parent_chain: &[u8; 32], index: u32) -> ([u8; 32], [u8; 32]) {
+pub fn derive_child_key(
+    parent_key: &[u8; 32],
+    parent_chain: &[u8; 32],
+    index: u32,
+) -> ([u8; 32], [u8; 32]) {
     use hmac::{Hmac, Mac};
     use sha2::Sha512;
     use zeroize::Zeroize;
 
     type HmacSha512 = Hmac<Sha512>;
 
-    let mut mac = HmacSha512::new_from_slice(parent_chain)
-        .expect("HMAC can take key of any size");
+    let mut mac = HmacSha512::new_from_slice(parent_chain).expect("HMAC can take key of any size");
 
     // Privacy coins use hardened-only derivation to prevent key leakage
     // from public key exposure. Force hardened bit on all indices.

@@ -27,15 +27,13 @@
 //!  12. Empty range proof → REJECTED
 //!  13. Transaction with fee below minimum → REJECTED
 
-use coincync::primitives::{Amount, PublicKey, SecretKey, Hash, KeyImage};
-use coincync::crypto::{
-    SecretScalar, BlindingFactor, PedersenCommitment,
-};
-use coincync::transaction::{
-    TransactionBuilder, SpendableInput, Recipient, DecoyOutput, Transaction,
-};
-use coincync::mempool::Mempool;
 use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+use coincync::crypto::{BlindingFactor, PedersenCommitment, SecretScalar};
+use coincync::mempool::Mempool;
+use coincync::primitives::{Amount, Hash, KeyImage, PublicKey, SecretKey};
+use coincync::transaction::{
+    DecoyOutput, Recipient, SpendableInput, Transaction, TransactionBuilder,
+};
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -117,7 +115,9 @@ fn build_valid_transaction(input_amount: u64, output_amount: u64, fee: u64) -> T
         .expect("add_output must succeed");
     builder.set_fee(Amount::from_atomic(fee));
 
-    builder.build(&mut rng).expect("build must succeed — transaction is balanced and valid")
+    builder
+        .build(&mut rng)
+        .expect("build must succeed — transaction is balanced and valid")
 }
 
 /// Build a valid transaction with fee high enough for mempool admission
@@ -204,7 +204,7 @@ fn real_crypto_corrupted_range_proof_rejected() {
 
     // Corrupt the range proof by zeroing middle section
     let mid = tx.range_proof.len() / 2;
-    for i in mid..mid+32 {
+    for i in mid..mid + 32 {
         if i < tx.range_proof.len() {
             tx.range_proof[i] = 0x00;
         }
@@ -353,7 +353,10 @@ fn real_crypto_replay_returns_same_hash() {
     let h2 = pool.add(tx_clone).expect("replay must succeed (dedup)");
 
     assert_eq!(h1, expected_hash);
-    assert_eq!(h2, expected_hash, "Replay must return same hash without re-verification");
+    assert_eq!(
+        h2, expected_hash,
+        "Replay must return same hash without re-verification"
+    );
 }
 
 // =============================================================================
@@ -409,7 +412,10 @@ fn real_crypto_zero_stealth_address_rejected() {
     );
     let err = result.unwrap_err().to_string().to_lowercase();
     assert!(
-        err.contains("stealth") || err.contains("privacy") || err.contains("zero") || err.contains("address"),
+        err.contains("stealth")
+            || err.contains("privacy")
+            || err.contains("zero")
+            || err.contains("address"),
         "Error must mention stealth/privacy violation, got: {}",
         err
     );

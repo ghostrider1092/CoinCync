@@ -2,11 +2,11 @@
 //!
 //! Persistent storage for blocks.
 
-use crate::db::shim::{Db, Tree, transaction::Transactional};
-use crate::primitives::Hash;
+use super::{deserialize, serialize};
 use crate::consensus::Block;
+use crate::db::shim::{transaction::Transactional, Db, Tree};
 use crate::error::{Error, Result};
-use super::{serialize, deserialize};
+use crate::primitives::Hash;
 
 /// Block storage
 #[allow(dead_code)]
@@ -24,13 +24,17 @@ pub struct BlockDb {
 impl BlockDb {
     /// Create new block database
     pub fn new(db: &Db) -> Result<Self> {
-        let blocks = db.open_tree("blocks")
+        let blocks = db
+            .open_tree("blocks")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let height_index = db.open_tree("block_heights")
+        let height_index = db
+            .open_tree("block_heights")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let meta = db.open_tree("block_meta")
+        let meta = db
+            .open_tree("block_meta")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let pruned_headers = db.open_tree("pruned_blocks")
+        let pruned_headers = db
+            .open_tree("pruned_blocks")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         Ok(BlockDb {
@@ -77,7 +81,8 @@ impl BlockDb {
         let block_data = serialize(block)?;
 
         // Store block by hash only
-        self.blocks.insert(hash.as_bytes(), block_data)
+        self.blocks
+            .insert(hash.as_bytes(), block_data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         Ok(())
@@ -88,7 +93,8 @@ impl BlockDb {
     /// Uses big-endian encoding so sled's lexicographic ordering matches
     /// numeric height ordering (required for `last()` to return the true tip).
     pub fn set_height_hash(&self, height: u64, hash: &Hash) -> Result<()> {
-        self.height_index.insert(&height.to_be_bytes(), hash.as_bytes())
+        self.height_index
+            .insert(&height.to_be_bytes(), hash.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -98,7 +104,8 @@ impl BlockDb {
     /// Removes stale height entries above the new tip after a reorg,
     /// preventing `height()` from returning an incorrect tip height.
     pub fn remove_height_hash(&self, height: u64) -> Result<()> {
-        self.height_index.remove(&height.to_be_bytes())
+        self.height_index
+            .remove(&height.to_be_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -150,12 +157,17 @@ impl BlockDb {
         // Phase 2: delete each collected key. No iterator in flight.
         let mut removed = 0u64;
         for key in &keys_to_remove {
-            self.height_index.remove(key)
+            self.height_index
+                .remove(key)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
             removed += 1;
         }
         if removed > 0 {
-            tracing::info!("Cleaned {} stale height mappings above height {}", removed, max_valid_height);
+            tracing::info!(
+                "Cleaned {} stale height mappings above height {}",
+                removed,
+                max_valid_height
+            );
         }
         Ok(removed)
     }
@@ -198,7 +210,8 @@ impl BlockDb {
 
     /// Check if block exists
     pub fn contains(&self, hash: &Hash) -> Result<bool> {
-        self.blocks.contains_key(hash.as_bytes())
+        self.blocks
+            .contains_key(hash.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))
     }
 
@@ -250,25 +263,30 @@ impl BlockDb {
             let hash_bytes = hash.as_bytes().to_vec();
 
             // Check if height index points to this block
-            let should_remove_height = self.height_index.get(&height_key)
+            let should_remove_height = self
+                .height_index
+                .get(&height_key)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?
                 .map(|stored| stored.as_ref() == hash.as_bytes())
                 .unwrap_or(false);
 
             // SECURITY (C12-FIX): Atomic transaction: remove block + height index together
             let trees: &[&Tree] = &[&self.blocks, &self.height_index];
-            trees.transaction(|tx_trees| {
-                tx_trees[0].remove(hash_bytes.as_slice())?;
-                if should_remove_height {
-                    tx_trees[1].remove(height_key.as_slice())?;
-                }
-                Ok(())
-            }).map_err(|e: crate::db::shim::transaction::TransactionError| {
-                Error::DatabaseError(format!("Atomic block delete failed: {:?}", e))
-            })?;
+            trees
+                .transaction(|tx_trees| {
+                    tx_trees[0].remove(hash_bytes.as_slice())?;
+                    if should_remove_height {
+                        tx_trees[1].remove(height_key.as_slice())?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e: crate::db::shim::transaction::TransactionError| {
+                    Error::DatabaseError(format!("Atomic block delete failed: {:?}", e))
+                })?;
         } else {
             // Block not found by get(), still try to remove raw data
-            self.blocks.remove(hash.as_bytes())
+            self.blocks
+                .remove(hash.as_bytes())
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
         }
 
@@ -295,17 +313,16 @@ impl BlockDb {
 
     /// Iterate all blocks
     pub fn iter(&self) -> impl Iterator<Item = Result<Block>> + '_ {
-        self.blocks.iter().map(|result| {
-            match result {
-                Ok((_, data)) => deserialize(&data),
-                Err(e) => Err(Error::DatabaseError(e.to_string())),
-            }
+        self.blocks.iter().map(|result| match result {
+            Ok((_, data)) => deserialize(&data),
+            Err(e) => Err(Error::DatabaseError(e.to_string())),
         })
     }
 
     /// Store a pruned block header (compact data replacing the full block)
     pub fn store_pruned_header(&self, height: u64, data: &[u8]) -> Result<()> {
-        self.pruned_headers.insert(&height.to_be_bytes(), data)
+        self.pruned_headers
+            .insert(&height.to_be_bytes(), data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -316,10 +333,13 @@ impl BlockDb {
     /// block from the blocks tree. The height index entry is preserved so
     /// that `has_pruned_header` can still locate the pruned header.
     pub fn remove_by_height(&self, height: u64) -> Result<()> {
-        if let Some(hash_bytes) = self.height_index.get(&height.to_be_bytes())
+        if let Some(hash_bytes) = self
+            .height_index
+            .get(&height.to_be_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?
         {
-            self.blocks.remove(&hash_bytes)
+            self.blocks
+                .remove(&hash_bytes)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
         }
         Ok(())
@@ -382,7 +402,9 @@ impl BlockDb {
 
     /// Check if a pruned header exists for the given height
     pub fn has_pruned_header(&self, height: u64) -> bool {
-        self.pruned_headers.contains_key(&height.to_be_bytes()).unwrap_or(false)
+        self.pruned_headers
+            .contains_key(&height.to_be_bytes())
+            .unwrap_or(false)
     }
 
     /// Get a pruned header by height (raw bytes)
@@ -398,8 +420,8 @@ impl BlockDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::chain::create_genesis_block;
+    use tempfile::tempdir;
 
     #[test]
     fn test_block_storage() {

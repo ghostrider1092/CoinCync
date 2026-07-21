@@ -96,9 +96,8 @@ impl FleetConfig {
     /// (which surfaces as `TickError::Other("read fleet config: ...
     /// No such file or directory")`).
     pub fn from_json(bytes: &[u8]) -> TickResult<Self> {
-        serde_json::from_slice(bytes).map_err(|e| {
-            TickError::Other(format!("fleet-config.json parse error: {}", e))
-        })
+        serde_json::from_slice(bytes)
+            .map_err(|e| TickError::Other(format!("fleet-config.json parse error: {}", e)))
     }
 
     /// Read + parse from a filesystem path.
@@ -109,11 +108,7 @@ impl FleetConfig {
     /// legitimately has no fleet.
     pub fn from_path(path: &Path) -> TickResult<Self> {
         let bytes = std::fs::read(path).map_err(|e| {
-            TickError::Other(format!(
-                "read fleet config {}: {}",
-                path.display(),
-                e
-            ))
+            TickError::Other(format!("read fleet config {}: {}", path.display(), e))
         })?;
         Self::from_json(&bytes)
     }

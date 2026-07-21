@@ -119,7 +119,12 @@ pub fn run_worker(
     job_rx: std::sync::mpsc::Receiver<Job>,
     submit_tx: std::sync::mpsc::Sender<FoundShare>,
 ) {
-    info!(worker_id, range_start = range.start, range_end = range.end, "worker: starting");
+    info!(
+        worker_id,
+        range_start = range.start,
+        range_end = range.end,
+        "worker: starting"
+    );
     let mut current_job: Option<Job> = None;
 
     loop {
@@ -172,7 +177,11 @@ pub fn run_worker(
                 continue;
             }
         };
-        let input = HashInput { anchor, tx_root, height: job.height };
+        let input = HashInput {
+            anchor,
+            tx_root,
+            height: job.height,
+        };
         let target = job.target.clone();
 
         let mut nonce = range.start;

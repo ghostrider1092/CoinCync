@@ -3,11 +3,11 @@
 //! Block synchronization with peers.
 //! Bug 3 fix: stuck download detection and mark_block_failed recovery.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use crate::primitives::Hash;
 use crate::consensus::Block;
-use crate::network::peer::PeerId;
 use crate::error::Result;
+use crate::network::peer::PeerId;
+use crate::primitives::Hash;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Sync state
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +207,8 @@ pub const MAX_HEADERS_PER_PEER: usize = 5_000;
 impl ChainSync {
     pub fn new(local_height: u64, local_tip: Hash) -> Self {
         ChainSync {
-            local_height, local_tip,
+            local_height,
+            local_tip,
             best_known_height: local_height,
             state: SyncState::Idle,
             pending_requests: HashMap::new(),
@@ -239,12 +240,18 @@ impl ChainSync {
     }
 
     pub fn cleanup_expired_orphans(&mut self, current_time: u64) -> usize {
-        if current_time < self.last_orphan_cleanup { self.last_orphan_cleanup = current_time; }
-        if current_time < self.last_orphan_cleanup + ORPHAN_CLEANUP_INTERVAL { return 0; }
+        if current_time < self.last_orphan_cleanup {
+            self.last_orphan_cleanup = current_time;
+        }
+        if current_time < self.last_orphan_cleanup + ORPHAN_CLEANUP_INTERVAL {
+            return 0;
+        }
         self.last_orphan_cleanup = current_time;
 
         let cutoff = current_time.saturating_sub(ORPHAN_TTL_SECONDS);
-        let expired: Vec<(Hash, Hash)> = self.orphan_blocks.iter()
+        let expired: Vec<(Hash, Hash)> = self
+            .orphan_blocks
+            .iter()
             .filter(|(_, o)| o.received_at <= cutoff)
             .map(|(k, o)| (*k, o.block.header.prev_hash))
             .collect();
@@ -253,10 +260,14 @@ impl ChainSync {
             self.orphan_blocks.remove(bh);
             if let Some(children) = self.orphan_by_parent.get_mut(ph) {
                 children.retain(|h| h != bh);
-                if children.is_empty() { self.orphan_by_parent.remove(ph); }
+                if children.is_empty() {
+                    self.orphan_by_parent.remove(ph);
+                }
             }
         }
-        if !expired.is_empty() { tracing::debug!("Cleaned {} expired orphans", expired.len()); }
+        if !expired.is_empty() {
+            tracing::debug!("Cleaned {} expired orphans", expired.len());
+        }
         expired.len()
     }
 
@@ -280,7 +291,9 @@ impl ChainSync {
         // treated as a monotonic latch.
         self.refresh_best_known();
         if self.local_height >= self.best_known_height
-            && self.pending_headers.is_empty() && self.downloading.is_empty() {
+            && self.pending_headers.is_empty()
+            && self.downloading.is_empty()
+        {
             self.state = SyncState::Synced;
         }
     }
@@ -331,7 +344,12 @@ impl ChainSync {
         }
         self.peer_heights.insert(peer_id, height);
         self.refresh_best_known();
-        if height > self.local_height && matches!(self.state, SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced) {
+        if height > self.local_height
+            && matches!(
+                self.state,
+                SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced
+            )
+        {
             self.state = SyncState::Headers;
             self.headers_request_time = None;
             self.headers_received_this_cycle = false;
@@ -349,7 +367,9 @@ impl ChainSync {
         // I2 enforcement: best_known must not drop below local. Use
         // recompute path so the field can be reduced if this anonymous
         // update was the only thing holding it above the peer-set max.
-        if height > self.best_known_height { self.best_known_height = height; }
+        if height > self.best_known_height {
+            self.best_known_height = height;
+        }
         if self.best_known_height < self.local_height {
             self.best_known_height = self.local_height;
         }
@@ -366,7 +386,11 @@ impl ChainSync {
         // floor for the bootstrap case. This is the difficulty analogue
         // of the height +10_000 reject in `update_peer_height_for`.
         const BOGUS_FACTOR: u128 = 2;
-        let observed_max = self.peer_difficulties.values().copied().max()
+        let observed_max = self
+            .peer_difficulties
+            .values()
+            .copied()
+            .max()
             .unwrap_or(self.best_known_difficulty);
         let cap = observed_max.saturating_mul(BOGUS_FACTOR).max(1u128 << 60);
         if total_difficulty > cap {
@@ -424,10 +448,15 @@ impl ChainSync {
     /// Best peer by cumulative work — call this once Phase 2b is live;
     /// today's IBD loop still uses height-based selection.
     pub fn best_peer_by_difficulty(&self) -> Option<(PeerId, u128)> {
-        self.peer_difficulties.iter().max_by_key(|(_, d)| *d).map(|(p, d)| (*p, *d))
+        self.peer_difficulties
+            .iter()
+            .max_by_key(|(_, d)| *d)
+            .map(|(p, d)| (*p, *d))
     }
 
-    pub fn best_known_difficulty(&self) -> u128 { self.best_known_difficulty }
+    pub fn best_known_difficulty(&self) -> u128 {
+        self.best_known_difficulty
+    }
 
     /// Re-derive `best_known_difficulty` as
     /// `max(local_total_difficulty, max(peer_difficulties))`.
@@ -493,7 +522,8 @@ impl ChainSync {
     }
 
     pub fn true_best_height(&self) -> u64 {
-        self.best_known_height.max(self.peer_heights.values().copied().max().unwrap_or(0))
+        self.best_known_height
+            .max(self.peer_heights.values().copied().max().unwrap_or(0))
     }
 
     pub fn remove_peer_height(&mut self, peer_id: &PeerId) {
@@ -526,7 +556,8 @@ impl ChainSync {
         let before = self.peer_heights.len();
         self.peer_heights.retain(|p, _| connected.contains(p));
         self.peer_difficulties.retain(|p, _| connected.contains(p));
-        self.peer_difficulty_seen_at.retain(|p, _| connected.contains(p));
+        self.peer_difficulty_seen_at
+            .retain(|p, _| connected.contains(p));
         let pruned = before.saturating_sub(self.peer_heights.len());
         if pruned > 0 || !self.peer_difficulties.is_empty() {
             self.refresh_best_known();
@@ -562,21 +593,39 @@ impl ChainSync {
     }
 
     pub fn peers_above_height(&self, min: u64) -> Vec<PeerId> {
-        self.peer_heights.iter().filter(|(_, &h)| h >= min).map(|(&id, _)| id).collect()
+        self.peer_heights
+            .iter()
+            .filter(|(_, &h)| h >= min)
+            .map(|(&id, _)| id)
+            .collect()
     }
 
-    pub fn is_synced(&self) -> bool { self.local_height >= self.true_best_height() }
-    pub fn blocks_behind(&self) -> u64 { self.best_known_height.saturating_sub(self.local_height) }
-    pub fn set_local_height(&mut self, h: u64) { self.local_height = h; }
-    pub fn state(&self) -> SyncState { self.state }
+    pub fn is_synced(&self) -> bool {
+        self.local_height >= self.true_best_height()
+    }
+    pub fn blocks_behind(&self) -> u64 {
+        self.best_known_height.saturating_sub(self.local_height)
+    }
+    pub fn set_local_height(&mut self, h: u64) {
+        self.local_height = h;
+    }
+    pub fn state(&self) -> SyncState {
+        self.state
+    }
 
     pub fn set_state(&mut self, state: SyncState) {
-        if state != SyncState::Blocks { self.blocks_entered_at = None; }
+        if state != SyncState::Blocks {
+            self.blocks_entered_at = None;
+        }
         self.state = state;
     }
 
     pub fn progress(&self) -> f64 {
-        if self.best_known_height == 0 { 1.0 } else { self.local_height as f64 / self.best_known_height as f64 }
+        if self.best_known_height == 0 {
+            1.0
+        } else {
+            self.local_height as f64 / self.best_known_height as f64
+        }
     }
 
     /// Legacy entry point for self-attributed header queueing (no
@@ -620,9 +669,13 @@ impl ChainSync {
         });
         let mut added_for_peer = 0usize;
         for hash in headers {
-            if self.pending_headers.len() >= MAX_PH { break; }
+            if self.pending_headers.len() >= MAX_PH {
+                break;
+            }
             if let Some(cap) = peer_cap_room {
-                if added_for_peer >= cap { break; }
+                if added_for_peer >= cap {
+                    break;
+                }
             }
             if !self.downloading.contains(&hash)
                 && !self.orphan_blocks.contains_key(&hash)
@@ -642,7 +695,9 @@ impl ChainSync {
         }
         if !self.pending_headers.is_empty() {
             self.state = SyncState::Blocks;
-            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+            if self.blocks_entered_at.is_none() {
+                self.blocks_entered_at = Some(unix_now());
+            }
         }
     }
 
@@ -653,7 +708,9 @@ impl ChainSync {
         if let Some(peer) = self.pending_header_peer.remove(hash) {
             match self.headers_per_peer.get_mut(&peer) {
                 Some(count) if *count > 1 => *count -= 1,
-                Some(_) => { self.headers_per_peer.remove(&peer); }
+                Some(_) => {
+                    self.headers_per_peer.remove(&peer);
+                }
                 None => {} // shouldn't happen given the insert invariant
             }
         }
@@ -672,9 +729,12 @@ impl ChainSync {
                 if !self.downloading.contains(&h) {
                     out.push(h);
                     self.downloading.insert(h);
-                    self.download_timestamps.insert(h, DownloadEntry { entered_at: now });
+                    self.download_timestamps
+                        .insert(h, DownloadEntry { entered_at: now });
                 }
-            } else { break; }
+            } else {
+                break;
+            }
         }
         out
     }
@@ -697,7 +757,12 @@ impl ChainSync {
         if self.pending_requests.len() >= MAX_PENDING_REQUESTS
             && !self.pending_requests.contains_key(&hash)
         {
-            if let Some(k) = self.pending_requests.iter().min_by_key(|(_, r)| r.requested_at).map(|(h, _)| *h) {
+            if let Some(k) = self
+                .pending_requests
+                .iter()
+                .min_by_key(|(_, r)| r.requested_at)
+                .map(|(h, _)| *h)
+            {
                 self.pending_requests.remove(&k);
                 // Evicted from pending_requests but the in-flight set must
                 // shed it too — else `downloading`/`download_timestamps`
@@ -708,8 +773,17 @@ impl ChainSync {
         }
         // I8 enforcement: ensure all three collections contain `hash`.
         self.downloading.insert(hash);
-        self.download_timestamps.entry(hash).or_insert(DownloadEntry { entered_at: ts });
-        self.pending_requests.insert(hash, BlockRequest { hash, requested_from: peer, requested_at: ts });
+        self.download_timestamps
+            .entry(hash)
+            .or_insert(DownloadEntry { entered_at: ts });
+        self.pending_requests.insert(
+            hash,
+            BlockRequest {
+                hash,
+                requested_from: peer,
+                requested_at: ts,
+            },
+        );
         // Intentional carve-out from I10's strict reading:
         //
         //   We do NOT drop Synced→Blocks here.
@@ -733,22 +807,34 @@ impl ChainSync {
         self.orphans_per_peer.get(pid).copied().unwrap_or(0) >= MAX_ORPHANS_PER_PEER
     }
 
-    pub fn on_block_received(&mut self, block: Block) -> Result<Vec<Block>> { self.on_block_received_from(block, None) }
+    pub fn on_block_received(&mut self, block: Block) -> Result<Vec<Block>> {
+        self.on_block_received_from(block, None)
+    }
 
-    pub fn on_block_received_from(&mut self, block: Block, from: Option<PeerId>) -> Result<Vec<Block>> {
+    pub fn on_block_received_from(
+        &mut self,
+        block: Block,
+        from: Option<PeerId>,
+    ) -> Result<Vec<Block>> {
         let hash = block.hash();
         let height = block.height();
         if height > self.local_height.saturating_add(10_000) {
-            if let Some(p) = from { *self.peer_failures.entry(p).or_insert(0) += 1; }
+            if let Some(p) = from {
+                *self.peer_failures.entry(p).or_insert(0) += 1;
+            }
             return Ok(vec![]);
         }
         let tb = block.header.target.as_bytes();
         if tb.iter().all(|&b| b == 0xFF) || tb.iter().all(|&b| b == 0) {
-            if let Some(p) = from { *self.peer_failures.entry(p).or_insert(0) += 1; }
+            if let Some(p) = from {
+                *self.peer_failures.entry(p).or_insert(0) += 1;
+            }
             return Ok(vec![]);
         }
         if !hash.meets_difficulty(&block.header.target) {
-            if let Some(p) = from { *self.peer_failures.entry(p).or_insert(0) += 1; }
+            if let Some(p) = from {
+                *self.peer_failures.entry(p).or_insert(0) += 1;
+            }
             return Ok(vec![]);
         }
 
@@ -810,27 +896,50 @@ impl ChainSync {
         }
 
         while self.orphan_blocks.len() >= MAX_ORPHAN_BLOCKS {
-            if let Some(k) = self.orphan_blocks.iter().min_by_key(|(_, e)| e.received_at).map(|(k, _)| *k) {
+            if let Some(k) = self
+                .orphan_blocks
+                .iter()
+                .min_by_key(|(_, e)| e.received_at)
+                .map(|(k, _)| *k)
+            {
                 if let Some(o) = self.orphan_blocks.remove(&k) {
                     let p = o.block.header.prev_hash;
-                    if let Some(c) = self.orphan_by_parent.get_mut(&p) { c.retain(|h| h != &k); if c.is_empty() { self.orphan_by_parent.remove(&p); } }
+                    if let Some(c) = self.orphan_by_parent.get_mut(&p) {
+                        c.retain(|h| h != &k);
+                        if c.is_empty() {
+                            self.orphan_by_parent.remove(&p);
+                        }
+                    }
                 }
-            } else { break; }
+            } else {
+                break;
+            }
         }
         if let Some(pid) = from {
             let c = self.orphans_per_peer.entry(pid).or_insert(0);
-            if *c >= MAX_ORPHANS_PER_PEER { return Ok(vec![]); }
+            if *c >= MAX_ORPHANS_PER_PEER {
+                return Ok(vec![]);
+            }
             *c += 1;
         }
         let bh = block.hash();
         let ph = block.header.prev_hash;
         self.orphan_by_parent.entry(ph).or_default().push(bh);
-        self.orphan_blocks.insert(bh, OrphanBlock { block, received_at: now, from });
+        self.orphan_blocks.insert(
+            bh,
+            OrphanBlock {
+                block,
+                received_at: now,
+                from,
+            },
+        );
         Ok(vec![])
     }
 
     pub fn mark_block_received(&mut self, hash: &Hash) {
-        if let Some(req) = self.pending_requests.remove(hash) { self.on_block_success(&req.requested_from); }
+        if let Some(req) = self.pending_requests.remove(hash) {
+            self.on_block_success(&req.requested_from);
+        }
         self.downloading.remove(hash);
         self.download_timestamps.remove(hash);
     }
@@ -841,7 +950,10 @@ impl ChainSync {
         self.downloading.remove(hash);
         self.download_timestamps.remove(hash);
         self.pending_headers.push_front(*hash);
-        tracing::debug!("Block {} failed — re-queued for retry", &hash.to_hex()[..16]);
+        tracing::debug!(
+            "Block {} failed — re-queued for retry",
+            &hash.to_hex()[..16]
+        );
     }
 
     /// IBD orphan-recovery (fixes the "wedge at one height" bug 2026-05-02
@@ -930,9 +1042,18 @@ impl ChainSync {
             };
             if admit {
                 let ph = block.header.prev_hash;
-                self.orphan_by_parent.entry(ph).or_default().push(orphan_hash);
-                self.orphan_blocks
-                    .insert(orphan_hash, OrphanBlock { block, received_at: now, from });
+                self.orphan_by_parent
+                    .entry(ph)
+                    .or_default()
+                    .push(orphan_hash);
+                self.orphan_blocks.insert(
+                    orphan_hash,
+                    OrphanBlock {
+                        block,
+                        received_at: now,
+                        from,
+                    },
+                );
             }
         }
 
@@ -951,7 +1072,10 @@ impl ChainSync {
         const MAX_PH: usize = 50_000;
         if self.pending_headers.len() < MAX_PH {
             self.pending_headers.push_front(*parent_hash);
-            if matches!(self.state, SyncState::Synced | SyncState::ConfirmingSynced | SyncState::Idle) {
+            if matches!(
+                self.state,
+                SyncState::Synced | SyncState::ConfirmingSynced | SyncState::Idle
+            ) {
                 self.state = SyncState::Blocks;
             }
         }
@@ -982,7 +1106,10 @@ impl ChainSync {
                 self.headers_received_this_cycle = false;
                 return;
             }
-            if height == 0 && !self.peer_heights.is_empty() && !self.peer_heights.values().any(|&h| h > 0) {
+            if height == 0
+                && !self.peer_heights.is_empty()
+                && !self.peer_heights.values().any(|&h| h > 0)
+            {
                 self.state = SyncState::Headers;
                 self.headers_received_this_cycle = false;
                 return;
@@ -993,9 +1120,11 @@ impl ChainSync {
     }
 
     pub fn get_timed_out(&self, now: u64) -> Vec<(Hash, PeerId)> {
-        self.pending_requests.iter()
+        self.pending_requests
+            .iter()
             .filter(|(_, r)| now > r.requested_at + self.request_timeout)
-            .map(|(h, r)| (*h, r.requested_from)).collect()
+            .map(|(h, r)| (*h, r.requested_from))
+            .collect()
     }
 
     pub fn on_timeout(&mut self, hash: &Hash) {
@@ -1037,15 +1166,22 @@ impl ChainSync {
     }
 
     pub fn is_sync_banned(&self, pid: &PeerId, now: u64) -> bool {
-        self.sync_banned_peers.get(pid).map(|&t| now < t).unwrap_or(false)
+        self.sync_banned_peers
+            .get(pid)
+            .map(|&t| now < t)
+            .unwrap_or(false)
     }
 
     pub fn cleanup_sync_bans(&mut self, now: u64) {
         self.sync_banned_peers.retain(|_, t| now >= *t);
     }
 
-    pub fn set_last_sync_peer(&mut self, pid: PeerId) { self.last_sync_peer = Some(pid); }
-    pub fn last_sync_peer(&self) -> Option<PeerId> { self.last_sync_peer }
+    pub fn set_last_sync_peer(&mut self, pid: PeerId) {
+        self.last_sync_peer = Some(pid);
+    }
+    pub fn last_sync_peer(&self) -> Option<PeerId> {
+        self.last_sync_peer
+    }
 
     pub fn allocate_header_nonce(&mut self) -> u64 {
         let n = self.next_header_nonce;
@@ -1063,11 +1199,15 @@ impl ChainSync {
     }
 
     pub fn mark_headers_requested(&mut self, now: u64) {
-        if self.headers_request_time.is_none() { self.headers_request_time = Some(now); }
+        if self.headers_request_time.is_none() {
+            self.headers_request_time = Some(now);
+        }
     }
 
     pub fn headers_timed_out(&self, now: u64) -> bool {
-        self.headers_request_time.map(|t| now > t + 60).unwrap_or(false)
+        self.headers_request_time
+            .map(|t| now > t + 60)
+            .unwrap_or(false)
     }
 
     /// Whether a headers request is currently outstanding.
@@ -1098,24 +1238,31 @@ impl ChainSync {
         self.headers_request_time = None;
         self.pending_header_nonces.clear();
     }
-    pub fn request_timeout(&self) -> u64 { self.request_timeout }
+    pub fn request_timeout(&self) -> u64 {
+        self.request_timeout
+    }
 
     /// Bitcoin-style scaled request timeout: `max(adaptive, base + per_peer * (peers-1))`.
     /// Call this from the sync tick with the current live peer count.
     pub fn request_timeout_scaled(&self, peer_count: usize) -> u64 {
-        let per_peer_bonus = BLOCK_DOWNLOAD_TIMEOUT_PER_PEER
-            * (peer_count as u64).saturating_sub(1);
+        let per_peer_bonus =
+            BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * (peer_count as u64).saturating_sub(1);
         let bitcoin_style = BLOCK_DOWNLOAD_TIMEOUT_BASE.saturating_add(per_peer_bonus);
         self.request_timeout.max(bitcoin_style)
     }
 
-    pub fn best_known_height(&self) -> u64 { self.best_known_height }
+    pub fn best_known_height(&self) -> u64 {
+        self.best_known_height
+    }
 
     pub fn stats(&self) -> SyncStats {
         SyncStats {
-            local_height: self.local_height, best_known_height: self.best_known_height,
-            pending_headers: self.pending_headers.len(), downloading: self.downloading.len(),
-            orphans: self.orphan_blocks.len(), state: self.state,
+            local_height: self.local_height,
+            best_known_height: self.best_known_height,
+            pending_headers: self.pending_headers.len(),
+            downloading: self.downloading.len(),
+            orphans: self.orphan_blocks.len(),
+            state: self.state,
             local_total_difficulty: self.local_total_difficulty,
             best_known_difficulty: self.best_known_difficulty,
         }
@@ -1138,7 +1285,9 @@ impl ChainSync {
         // longer synced — drop to Blocks.
         if any && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
-            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+            if self.blocks_entered_at.is_none() {
+                self.blocks_entered_at = Some(unix_now());
+            }
         }
     }
 
@@ -1170,20 +1319,32 @@ impl ChainSync {
 
     /// Check if sync is stalled. Also detects stuck downloads (Bug 3 fix).
     pub fn is_stalled(&self, now: u64, timeout: u64) -> bool {
-        if matches!(self.state, SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced) { return false; }
+        if matches!(
+            self.state,
+            SyncState::Synced | SyncState::Idle | SyncState::ConfirmingSynced
+        ) {
+            return false;
+        }
         let all_to = !self.pending_requests.is_empty()
-            && self.pending_requests.values().all(|r| now > r.requested_at + timeout);
+            && self
+                .pending_requests
+                .values()
+                .all(|r| now > r.requested_at + timeout);
         let stuck = self.download_timestamps.iter().any(|(h, e)| {
-            !self.pending_requests.contains_key(h) && now > e.entered_at + STUCK_DOWNLOAD_TIMEOUT_SECS
+            !self.pending_requests.contains_key(h)
+                && now > e.entered_at + STUCK_DOWNLOAD_TIMEOUT_SECS
         });
         all_to || stuck
     }
 
     /// Get blocks to retry. Also recovers stuck downloads (Bug 3 fix).
     pub fn get_blocks_to_retry(&mut self, now: u64) -> Vec<Hash> {
-        let to: Vec<Hash> = self.pending_requests.iter()
+        let to: Vec<Hash> = self
+            .pending_requests
+            .iter()
             .filter(|(_, r)| now > r.requested_at + self.request_timeout)
-            .map(|(h, _)| *h).collect();
+            .map(|(h, _)| *h)
+            .collect();
         for h in &to {
             self.pending_requests.remove(h);
             self.downloading.remove(h);
@@ -1191,9 +1352,15 @@ impl ChainSync {
             self.pending_headers.push_front(*h);
         }
 
-        let stuck: Vec<Hash> = self.download_timestamps.iter()
-            .filter(|(h, e)| !self.pending_requests.contains_key(*h) && now > e.entered_at + STUCK_DOWNLOAD_TIMEOUT_SECS)
-            .map(|(h, _)| *h).collect();
+        let stuck: Vec<Hash> = self
+            .download_timestamps
+            .iter()
+            .filter(|(h, e)| {
+                !self.pending_requests.contains_key(*h)
+                    && now > e.entered_at + STUCK_DOWNLOAD_TIMEOUT_SECS
+            })
+            .map(|(h, _)| *h)
+            .collect();
         let sc = stuck.len();
         for h in &stuck {
             self.downloading.remove(h);
@@ -1206,7 +1373,9 @@ impl ChainSync {
         // loop will re-issue them.
         if (!to.is_empty() || !stuck.is_empty()) && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
-            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+            if self.blocks_entered_at.is_none() {
+                self.blocks_entered_at = Some(unix_now());
+            }
         }
         if sc > 0 {
             tracing::warn!("[SYNC] Recovered {} stuck downloads", sc);
@@ -1221,20 +1390,34 @@ impl ChainSync {
                 self.headers_per_peer.clear();
             }
         }
-        let mut all = to; all.extend(stuck); all
+        let mut all = to;
+        all.extend(stuck);
+        all
     }
 
-    pub fn pending_count(&self) -> usize { self.pending_headers.len() + self.downloading.len() }
+    pub fn pending_count(&self) -> usize {
+        self.pending_headers.len() + self.downloading.len()
+    }
 
     pub fn recover_stuck_downloads(&mut self) -> usize {
-        let s: Vec<Hash> = self.downloading.iter()
-            .filter(|h| !self.pending_requests.contains_key(h)).copied().collect();
+        let s: Vec<Hash> = self
+            .downloading
+            .iter()
+            .filter(|h| !self.pending_requests.contains_key(h))
+            .copied()
+            .collect();
         let c = s.len();
-        for h in s { self.downloading.remove(&h); self.download_timestamps.remove(&h); self.pending_headers.push_front(h); }
+        for h in s {
+            self.downloading.remove(&h);
+            self.download_timestamps.remove(&h);
+            self.pending_headers.push_front(h);
+        }
         // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
         if c > 0 && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
-            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+            if self.blocks_entered_at.is_none() {
+                self.blocks_entered_at = Some(unix_now());
+            }
         }
         c
     }
@@ -1253,8 +1436,12 @@ impl ChainSync {
         // claim and best_known would otherwise be pinned above local).
         self.refresh_best_known();
         self.recompute_best_difficulty();
-        let rq: Vec<Hash> = self.pending_requests.iter()
-            .filter(|(_, r)| &r.requested_from == peer).map(|(h, _)| *h).collect();
+        let rq: Vec<Hash> = self
+            .pending_requests
+            .iter()
+            .filter(|(_, r)| &r.requested_from == peer)
+            .map(|(h, _)| *h)
+            .collect();
         for h in &rq {
             self.pending_requests.remove(h);
             self.downloading.remove(h);
@@ -1264,9 +1451,17 @@ impl ChainSync {
         // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
         if !rq.is_empty() && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
-            if self.blocks_entered_at.is_none() { self.blocks_entered_at = Some(unix_now()); }
+            if self.blocks_entered_at.is_none() {
+                self.blocks_entered_at = Some(unix_now());
+            }
         }
-        if !rq.is_empty() { tracing::info!("Peer {:?} disconnected, re-queued {} requests", peer, rq.len()); }
+        if !rq.is_empty() {
+            tracing::info!(
+                "Peer {:?} disconnected, re-queued {} requests",
+                peer,
+                rq.len()
+            );
+        }
     }
 
     pub fn trigger_resync(&mut self) -> bool {
@@ -1307,9 +1502,16 @@ impl ChainSync {
     }
 
     pub fn blocks_state_stuck(&self, now: u64) -> bool {
-        if self.state != SyncState::Blocks { return false; }
-        let e = match self.blocks_entered_at { Some(t) => t, None => return false };
-        let empty = self.pending_headers.is_empty() && self.downloading.is_empty() && self.pending_requests.is_empty();
+        if self.state != SyncState::Blocks {
+            return false;
+        }
+        let e = match self.blocks_entered_at {
+            Some(t) => t,
+            None => return false,
+        };
+        let empty = self.pending_headers.is_empty()
+            && self.downloading.is_empty()
+            && self.pending_requests.is_empty();
         empty && self.local_height < self.true_best_height() && now > e + BLOCKS_STUCK_TIMEOUT
     }
 
@@ -1319,7 +1521,10 @@ impl ChainSync {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Debug)]
@@ -1342,12 +1547,22 @@ pub fn build_locator(tip: u64, get_hash: impl Fn(u64) -> Option<Hash>) -> Vec<Ha
     let mut step = 1u64;
     let mut h = tip;
     while h > 0 {
-        if let Some(hash) = get_hash(h) { loc.push(hash); }
-        if loc.len() >= 10 { step *= 2; }
-        if h < step { break; }
+        if let Some(hash) = get_hash(h) {
+            loc.push(hash);
+        }
+        if loc.len() >= 10 {
+            step *= 2;
+        }
+        if h < step {
+            break;
+        }
         h -= step;
     }
-    if let Some(g) = get_hash(0) { if loc.last() != Some(&g) { loc.push(g); } }
+    if let Some(g) = get_hash(0) {
+        if loc.last() != Some(&g) {
+            loc.push(g);
+        }
+    }
     loc
 }
 
@@ -1390,7 +1605,8 @@ mod tests {
         sync.update_peer_height_for(peer, 100);
         let hash = Hash::from_bytes([5u8; 32]);
         sync.downloading.insert(hash);
-        sync.download_timestamps.insert(hash, DownloadEntry { entered_at: 1000 });
+        sync.download_timestamps
+            .insert(hash, DownloadEntry { entered_at: 1000 });
         assert!(!sync.is_stalled(1005, 60));
         assert!(sync.is_stalled(1000 + STUCK_DOWNLOAD_TIMEOUT_SECS + 1, 60));
     }
@@ -1558,7 +1774,11 @@ mod tests {
         // header-only, so empty transactions are fine and the nonce loop
         // varies the header.
         let mine = |height: u64, prev: Hash, seed: u8| -> Block {
-            let easy = { let mut b = [0xFFu8; 32]; b[31] = 0xFE; Hash::from_bytes(b) };
+            let easy = {
+                let mut b = [0xFFu8; 32];
+                b[31] = 0xFE;
+                Hash::from_bytes(b)
+            };
             let mut blk = Block {
                 header: BlockHeader {
                     network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
@@ -1566,7 +1786,11 @@ mod tests {
                     height,
                     timestamp: 1_000 + height,
                     prev_hash: prev,
-                    tx_root: { let mut b = [0u8; 32]; b[0] = seed; Hash::from_bytes(b) },
+                    tx_root: {
+                        let mut b = [0u8; 32];
+                        b[0] = seed;
+                        Hash::from_bytes(b)
+                    },
                     anchor: Hash::zero(),
                     algorithm: 0,
                     nonce: 0,
@@ -1589,8 +1813,16 @@ mod tests {
         };
 
         // Common ancestor J @ 99; our node sits on a MINORITY fork tip F @ 100.
-        let j = { let mut b = [0u8; 32]; b[0] = 0xAA; Hash::from_bytes(b) };
-        let fork_tip = { let mut b = [0u8; 32]; b[0] = 0xFF; Hash::from_bytes(b) };
+        let j = {
+            let mut b = [0u8; 32];
+            b[0] = 0xAA;
+            Hash::from_bytes(b)
+        };
+        let fork_tip = {
+            let mut b = [0u8; 32];
+            b[0] = 0xFF;
+            Hash::from_bytes(b)
+        };
         let mut sync = ChainSync::new(100, fork_tip);
 
         // Canonical N (=100): child of J, a side block (prev = J != our tip).
@@ -1603,7 +1835,10 @@ mod tests {
         // 1) N+1 arrives first → stored as an orphan (parent unknown), nothing delivered.
         let out_c = sync.on_block_received(c).expect("orphan store ok");
         assert!(out_c.is_empty(), "orphaned N+1 must deliver nothing");
-        assert!(sync.orphan_blocks.contains_key(&c_hash), "N+1 must be in the orphan pool");
+        assert!(
+            sync.orphan_blocks.contains_key(&c_hash),
+            "N+1 must be in the orphan pool"
+        );
 
         // 2) We fetch canonical N (requested → was_req path); prev = J != our tip.
         sync.downloading.insert(k_hash);
@@ -1618,8 +1853,15 @@ mod tests {
              its orphan descendant N+1 so the chain layer can reorg — pre-fix \
              this returned only [N] and the node wedged forever."
         );
-        assert_eq!(hashes.first(), Some(&k_hash), "parent N must precede child N+1");
-        assert!(!sync.orphan_blocks.contains_key(&c_hash), "orphan pool must be drained once reconnected");
+        assert_eq!(
+            hashes.first(),
+            Some(&k_hash),
+            "parent N must precede child N+1"
+        );
+        assert!(
+            !sync.orphan_blocks.contains_key(&c_hash),
+            "orphan pool must be drained once reconnected"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1648,11 +1890,13 @@ mod tests {
     /// so the test generates collisions and re-asserts on the same peer
     /// (which is how the V2 bug manifests in production).
     fn peer_pool() -> Vec<PeerId> {
-        (0..5u8).map(|i| {
-            let mut bytes = [0u8; 32];
-            bytes[0] = i;
-            bytes
-        }).collect()
+        (0..5u8)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i;
+                bytes
+            })
+            .collect()
     }
 
     // ── Firework Phase 2 (V3 closure): work-triggered sync ──────────────
@@ -1669,8 +1913,11 @@ mod tests {
         sync.set_local_total_difficulty(1_000);
         sync.set_state(SyncState::Synced);
         sync.update_peer_difficulty_for(peers[0], 5_000); // heavier than us
-        assert_eq!(sync.state(), SyncState::Headers,
-            "a heavier-work peer must trigger a header sync");
+        assert_eq!(
+            sync.state(),
+            SyncState::Headers,
+            "a heavier-work peer must trigger a header sync"
+        );
         assert_eq!(sync.best_known_difficulty(), 5_000);
     }
 
@@ -1683,10 +1930,16 @@ mod tests {
         sync.set_local_total_difficulty(5_000);
         sync.set_state(SyncState::Synced);
         sync.update_peer_difficulty_for(peers[0], 4_000); // lighter than us
-        assert_eq!(sync.state(), SyncState::Synced,
-            "a lighter-work peer must not trigger a sync");
-        assert_eq!(sync.best_peer_by_difficulty(), None,
-            "a lighter-work claim must be dropped, not tracked");
+        assert_eq!(
+            sync.state(),
+            SyncState::Synced,
+            "a lighter-work peer must not trigger a sync"
+        );
+        assert_eq!(
+            sync.best_peer_by_difficulty(),
+            None,
+            "a lighter-work claim must be dropped, not tracked"
+        );
     }
 
     /// Anti-wedge: `best_known_difficulty` is a TRUE recompute. A heavy
@@ -1702,9 +1955,12 @@ mod tests {
         sync.update_peer_difficulty_for(peers[0], 9_000);
         assert_eq!(sync.best_known_difficulty(), 9_000);
         sync.remove_peer_height(&peers[0]); // peer disconnects
-        assert_eq!(sync.best_known_difficulty(), 1_000,
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_000,
             "best_known_difficulty must shrink to local work when the sole \
-             heavy-claim peer disconnects (no ratchet)");
+             heavy-claim peer disconnects (no ratchet)"
+        );
     }
 
     /// CIP-019 prompt near-tip catch-up. `arm_near_tip_catchup` re-arms a header
@@ -1720,11 +1976,21 @@ mod tests {
         // (1) Behind + idle + mid-cycle (Blocks) → re-arms to Headers.
         let mut sync = ChainSync::new(100, Hash::zero());
         sync.update_peer_height_for(peers[0], 103); // tip 3 ahead → is_synced=false
-        sync.set_state(SyncState::Blocks);          // mid-cycle
+        sync.set_state(SyncState::Blocks); // mid-cycle
         assert!(!sync.is_synced(), "node 3 behind must not be synced");
-        assert!(!sync.trigger_resync(), "trigger_resync must be a no-op mid-cycle");
-        assert!(sync.arm_near_tip_catchup(), "must re-arm a stuck near-tip node");
-        assert_eq!(sync.state(), SyncState::Headers, "re-arm must return to Headers");
+        assert!(
+            !sync.trigger_resync(),
+            "trigger_resync must be a no-op mid-cycle"
+        );
+        assert!(
+            sync.arm_near_tip_catchup(),
+            "must re-arm a stuck near-tip node"
+        );
+        assert_eq!(
+            sync.state(),
+            SyncState::Headers,
+            "re-arm must return to Headers"
+        );
 
         // (2) Synced → no-op (never churn a caught-up node).
         let mut sync = ChainSync::new(100, Hash::zero());
@@ -1739,7 +2005,10 @@ mod tests {
         sync.set_state(SyncState::Blocks);
         sync.queue_headers(vec![Hash::from_bytes([7u8; 32])]); // non-idle: pending_headers set
         assert!(!sync.is_synced());
-        assert!(!sync.arm_near_tip_catchup(), "must not re-arm while a fetch is in flight");
+        assert!(
+            !sync.arm_near_tip_catchup(),
+            "must not re-arm while a fetch is in flight"
+        );
     }
 
     /// Advancing our own work past a peer's claim prunes that claim.
@@ -1751,10 +2020,16 @@ mod tests {
         sync.update_peer_difficulty_for(peers[0], 3_000);
         assert!(sync.best_peer_by_difficulty().is_some());
         sync.set_local_total_difficulty(4_000); // we overtake the peer
-        assert_eq!(sync.best_peer_by_difficulty(), None,
-            "peer claims at-or-below our new work must be pruned");
-        assert_eq!(sync.best_known_difficulty(), 4_000,
-            "best_known_difficulty tracks our own work when no peer is heavier");
+        assert_eq!(
+            sync.best_peer_by_difficulty(),
+            None,
+            "peer claims at-or-below our new work must be pruned"
+        );
+        assert_eq!(
+            sync.best_known_difficulty(),
+            4_000,
+            "best_known_difficulty tracks our own work when no peer is heavier"
+        );
     }
 
     /// Anti-wedge (substantiation timeout): a work-claim not refreshed
@@ -1773,8 +2048,11 @@ mod tests {
             sync.expire_stale_work_claims(t0 + WORK_CLAIM_TTL_SECS + 100, WORK_CLAIM_TTL_SECS);
         assert_eq!(dropped, 1);
         assert_eq!(sync.best_peer_by_difficulty(), None);
-        assert_eq!(sync.best_known_difficulty(), 1_000,
-            "best_known must recompute to local once the stale claim expires");
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_000,
+            "best_known must recompute to local once the stale claim expires"
+        );
     }
 
     /// A freshly-received claim must survive an expiry pass — an honest
@@ -1801,14 +2079,21 @@ mod tests {
         let peers = peer_pool();
         let mut sync = ChainSync::new(10_042, Hash::zero());
         sync.update_peer_height_for(peers[0], 10_551); // high tip from a soon-departed peer
-        assert_eq!(sync.true_best_height(), 10_551, "stale high target pins best-known");
+        assert_eq!(
+            sync.true_best_height(),
+            10_551,
+            "stale high target pins best-known"
+        );
         assert!(!sync.is_synced(), "node reports behind the peer");
         // Maintenance tick: peer[0] is no longer connected.
         let connected: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
         let pruned = sync.retain_connected_peers(&connected);
         assert_eq!(pruned, 1);
-        assert_eq!(sync.true_best_height(), 10_042,
-            "best-known recomputes to local once the departed peer is pruned");
+        assert_eq!(
+            sync.true_best_height(),
+            10_042,
+            "best-known recomputes to local once the departed peer is pruned"
+        );
         assert!(sync.is_synced(), "frozen node self-heals to synced");
     }
 
@@ -1818,11 +2103,14 @@ mod tests {
         let peers = peer_pool();
         let mut sync = ChainSync::new(10_042, Hash::zero());
         sync.update_peer_height_for(peers[0], 10_600);
-        let connected: std::collections::HashSet<PeerId> =
-            [peers[0]].into_iter().collect();
+        let connected: std::collections::HashSet<PeerId> = [peers[0]].into_iter().collect();
         let pruned = sync.retain_connected_peers(&connected);
         assert_eq!(pruned, 0);
-        assert_eq!(sync.true_best_height(), 10_600, "connected peer's height is retained");
+        assert_eq!(
+            sync.true_best_height(),
+            10_600,
+            "connected peer's height is retained"
+        );
     }
 
     /// Externally-observable triggers from §3 of the doc. Each variant
@@ -1912,12 +2200,14 @@ mod tests {
             }
             SyncEvent::QueueHeaders { count } => {
                 let local_byte = (sync.local_height & 0xFF) as u8;
-                let headers: Vec<Hash> = (0..*count).map(|i| {
-                    let mut b = [0u8; 32];
-                    b[0] = i;
-                    b[1] = local_byte;
-                    Hash::from_bytes(b)
-                }).collect();
+                let headers: Vec<Hash> = (0..*count)
+                    .map(|i| {
+                        let mut b = [0u8; 32];
+                        b[0] = i;
+                        b[1] = local_byte;
+                        Hash::from_bytes(b)
+                    })
+                    .collect();
                 let _ = sync.queue_headers(headers);
             }
             SyncEvent::PeerDisconnect { peer_idx } => {
@@ -1929,13 +2219,19 @@ mod tests {
             SyncEvent::GetBlocksToRequest { max } => {
                 let _ = sync.get_blocks_to_request(*max as usize);
             }
-            SyncEvent::RecordRequest { hash_seed, peer_idx } => {
+            SyncEvent::RecordRequest {
+                hash_seed,
+                peer_idx,
+            } => {
                 sync.record_request(hash_from_seed(*hash_seed), peers[*peer_idx], 1000);
             }
             SyncEvent::RequeueFailed { hash_seed } => {
                 sync.requeue_failed(vec![hash_from_seed(*hash_seed)]);
             }
-            SyncEvent::TrackDirectRequest { hash_seed, peer_idx } => {
+            SyncEvent::TrackDirectRequest {
+                hash_seed,
+                peer_idx,
+            } => {
                 sync.track_direct_request(hash_from_seed(*hash_seed), peers[*peer_idx], 1000);
             }
             SyncEvent::GetBlocksToRetry { time_advance } => {
@@ -1957,7 +2253,9 @@ mod tests {
                 "I2 VIOLATED: best_known_height={} < local_height={}",
                 sync.best_known_height, sync.local_height,
             ))
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     /// I3: best_known_height == max(peer_heights.values()).max(local_height).
@@ -1967,17 +2265,24 @@ mod tests {
     /// EXCEED the computed value (e.g., if it was set higher earlier and
     /// never decreased), but flags the inverse — being LOWER than computed.
     fn check_i3(sync: &ChainSync) -> std::result::Result<(), String> {
-        let computed = sync.peer_heights.values().copied().max()
+        let computed = sync
+            .peer_heights
+            .values()
+            .copied()
+            .max()
             .unwrap_or(0)
             .max(sync.local_height);
         if sync.best_known_height < computed {
             Err(format!(
                 "I3 VIOLATED: best_known_height={} < computed max={} (peer heights={:?}, local={})",
-                sync.best_known_height, computed,
+                sync.best_known_height,
+                computed,
                 sync.peer_heights.values().copied().collect::<Vec<_>>(),
                 sync.local_height,
             ))
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     /// I8 (corrected from initial doc draft):
@@ -2001,14 +2306,17 @@ mod tests {
             return Err(format!(
                 "I8a VIOLATED: downloading.keys() ≠ download_timestamps.keys() \
                  (downloading={}, timestamps={}, sym_diff={})",
-                dl.len(), ts.len(), dl.symmetric_difference(&ts).count(),
+                dl.len(),
+                ts.len(),
+                dl.symmetric_difference(&ts).count(),
             ));
         }
         if !pr.is_subset(&dl) {
             let leak: Vec<_> = pr.difference(&dl).collect();
             return Err(format!(
                 "I8b VIOLATED: pending_requests has {} hashes not in downloading: {:?}",
-                leak.len(), leak.iter().take(3).collect::<Vec<_>>(),
+                leak.len(),
+                leak.iter().take(3).collect::<Vec<_>>(),
             ));
         }
         Ok(())
@@ -2030,7 +2338,9 @@ mod tests {
     /// IBD-style multi-block discovery path, not tip catch-up.
     const INV_CATCHUP_DOWNLOAD_TOLERANCE: usize = 16;
     fn check_i10(sync: &ChainSync) -> std::result::Result<(), String> {
-        if sync.state != SyncState::Synced { return Ok(()); }
+        if sync.state != SyncState::Synced {
+            return Ok(());
+        }
         if !sync.pending_headers.is_empty() {
             return Err(format!(
                 "I10 VIOLATED: state=Synced but pending_headers={}",
@@ -2040,7 +2350,8 @@ mod tests {
         if sync.downloading.len() > INV_CATCHUP_DOWNLOAD_TOLERANCE {
             return Err(format!(
                 "I10 VIOLATED: state=Synced but downloading={} > tolerance={}",
-                sync.downloading.len(), INV_CATCHUP_DOWNLOAD_TOLERANCE,
+                sync.downloading.len(),
+                INV_CATCHUP_DOWNLOAD_TOLERANCE,
             ));
         }
         Ok(())
@@ -2048,23 +2359,39 @@ mod tests {
 
     /// Bonus: bounded growth of `peer_heights`.
     /// Should never exceed peer pool size (5) — only one entry per peer.
-    fn check_peer_heights_bounded(sync: &ChainSync, max_peers: usize) -> std::result::Result<(), String> {
+    fn check_peer_heights_bounded(
+        sync: &ChainSync,
+        max_peers: usize,
+    ) -> std::result::Result<(), String> {
         if sync.peer_heights.len() > max_peers {
             Err(format!(
                 "peer_heights.len()={} > max_peers={} (unbounded growth!)",
-                sync.peer_heights.len(), max_peers,
+                sync.peer_heights.len(),
+                max_peers,
             ))
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     /// Run all invariants. Returns Vec of (invariant_id, error) for any failures.
     fn check_all_invariants(sync: &ChainSync) -> Vec<(&'static str, String)> {
         let mut failures = Vec::new();
-        if let Err(e) = check_i2(sync) { failures.push(("I2", e)); }
-        if let Err(e) = check_i3(sync) { failures.push(("I3", e)); }
-        if let Err(e) = check_i8(sync) { failures.push(("I8", e)); }
-        if let Err(e) = check_i10(sync) { failures.push(("I10", e)); }
-        if let Err(e) = check_peer_heights_bounded(sync, 5) { failures.push(("peer-pool-bound", e)); }
+        if let Err(e) = check_i2(sync) {
+            failures.push(("I2", e));
+        }
+        if let Err(e) = check_i3(sync) {
+            failures.push(("I3", e));
+        }
+        if let Err(e) = check_i8(sync) {
+            failures.push(("I8", e));
+        }
+        if let Err(e) = check_i10(sync) {
+            failures.push(("I10", e));
+        }
+        if let Err(e) = check_peer_heights_bounded(sync, 5) {
+            failures.push(("peer-pool-bound", e));
+        }
         failures
     }
 
@@ -2258,21 +2585,27 @@ mod tests {
         // Bogus peer "announces" h=7292 (the InvBlock-for-phantom-hash
         // scenario from node.rs:3312). best_known bumps.
         sync.update_peer_height_for(p_bogus, 7_292);
-        assert_eq!(sync.best_known_height, 7_292,
-            "speculative bump must take effect when bumped");
+        assert_eq!(
+            sync.best_known_height, 7_292,
+            "speculative bump must take effect when bumped"
+        );
 
         // Bogus peer disconnects (TCP drop / timeout / whatever).
         // best_known MUST recompute back down to the actual max.
         sync.on_peer_disconnected(&p_bogus);
-        assert_eq!(sync.best_known_height, 7_291,
+        assert_eq!(
+            sync.best_known_height, 7_291,
             "after the bogus peer disconnects, best_known_height MUST \
              drop back to the actual max(local, max(remaining peers)). \
              The pre-fix ratchet behavior was the production bug \
              that wedged the chain 2026-06-27 — even with the bad \
              peer gone, best_known stayed at 7_292 forever, is_synced \
-             stayed false, and rigs refused to mine.");
-        assert!(sync.is_synced(),
-            "with local=7291 and no peer ahead, is_synced must be true");
+             stayed false, and rigs refused to mine."
+        );
+        assert!(
+            sync.is_synced(),
+            "with local=7291 and no peer ahead, is_synced must be true"
+        );
     }
 
     /// best_known_height MUST drop when ALL peers disconnect, falling
@@ -2287,11 +2620,15 @@ mod tests {
         assert_eq!(sync.best_known_height, 7_300);
 
         sync.on_peer_disconnected(&p1);
-        assert_eq!(sync.best_known_height, 7_300,
-            "removing the non-highest peer doesn't drop best_known");
+        assert_eq!(
+            sync.best_known_height, 7_300,
+            "removing the non-highest peer doesn't drop best_known"
+        );
         sync.on_peer_disconnected(&p2);
-        assert_eq!(sync.best_known_height, 7_291,
-            "with no peers left, best_known floors at local_height");
+        assert_eq!(
+            sync.best_known_height, 7_291,
+            "with no peers left, best_known floors at local_height"
+        );
         assert!(sync.is_synced());
     }
 
@@ -2307,10 +2644,12 @@ mod tests {
 
         // Local advances past the peer's tracked height.
         sync.on_block_processed(Hash::zero(), 7_300);
-        assert_eq!(sync.best_known_height, 7_300,
+        assert_eq!(
+            sync.best_known_height, 7_300,
             "advancing local past stale peer entries must raise best_known. \
              Without on_block_processed → refresh_best_known, best_known \
-             would lag at 7_295 even though we've passed it locally.");
+             would lag at 7_295 even though we've passed it locally."
+        );
         assert!(sync.is_synced());
     }
 

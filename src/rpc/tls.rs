@@ -15,10 +15,7 @@ use crate::error::{Error, Result};
 /// - `{data_dir}/rpc_key.pem` — private key in PEM format (restrictive permissions)
 ///
 /// SANs include: `localhost`, `127.0.0.1`, `::1`, and the provided `common_name`.
-pub fn generate_self_signed_cert(
-    data_dir: &Path,
-    common_name: &str,
-) -> Result<(PathBuf, PathBuf)> {
+pub fn generate_self_signed_cert(data_dir: &Path, common_name: &str) -> Result<(PathBuf, PathBuf)> {
     let cert_path = data_dir.join("rpc_cert.pem");
     let key_path = data_dir.join("rpc_key.pem");
 
@@ -34,17 +31,20 @@ pub fn generate_self_signed_cert(
         .map_err(|e| Error::TlsError(format!("create data dir: {}", e)))?;
 
     // Build certificate parameters with DNS + IP SANs
-    let mut params = rcgen::CertificateParams::new(vec![
-        common_name.to_string(),
-        "localhost".to_string(),
-    ]).map_err(|e| Error::TlsError(format!("cert params: {}", e)))?;
+    let mut params =
+        rcgen::CertificateParams::new(vec![common_name.to_string(), "localhost".to_string()])
+            .map_err(|e| Error::TlsError(format!("cert params: {}", e)))?;
 
-    params.subject_alt_names.push(
-        rcgen::SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-    );
-    params.subject_alt_names.push(
-        rcgen::SanType::IpAddress(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
-    );
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::LOCALHOST,
+        )));
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V6(
+            std::net::Ipv6Addr::LOCALHOST,
+        )));
 
     // 2026-06-03 bug fix: the previous date calculation used
     //
@@ -88,7 +88,8 @@ pub fn generate_self_signed_cert(
     let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
         .map_err(|e| Error::TlsError(format!("generate keypair: {}", e)))?;
 
-    let cert = params.self_signed(&key_pair)
+    let cert = params
+        .self_signed(&key_pair)
         .map_err(|e| Error::TlsError(format!("self-sign: {}", e)))?;
 
     std::fs::write(&cert_path, cert.pem())
@@ -109,7 +110,8 @@ pub fn generate_self_signed_cert(
         use std::os::unix::fs::OpenOptionsExt;
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true).mode(0o600);
-        let mut f = opts.open(&key_path)
+        let mut f = opts
+            .open(&key_path)
             .map_err(|e| Error::TlsError(format!("open key: {}", e)))?;
         f.write_all(key_pem.as_bytes())
             .map_err(|e| Error::TlsError(format!("write key: {}", e)))?;
@@ -150,9 +152,12 @@ fn set_restrictive_permissions(path: &Path) -> Result<()> {
 fn load_pem_cert_and_key(
     cert_path: &Path,
     key_path: &Path,
-) -> Result<(Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>)> {
-    let cert_data = std::fs::read(cert_path)
-        .map_err(|e| Error::TlsError(format!("read cert: {}", e)))?;
+) -> Result<(
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+)> {
+    let cert_data =
+        std::fs::read(cert_path).map_err(|e| Error::TlsError(format!("read cert: {}", e)))?;
     let certs: Vec<_> = pem::parse_many(&cert_data)
         .map_err(|e| Error::TlsError(format!("parse cert PEM: {}", e)))?
         .into_iter()
@@ -163,8 +168,8 @@ fn load_pem_cert_and_key(
         return Err(Error::TlsError("no certificates found in PEM file".into()));
     }
 
-    let key_data = std::fs::read(key_path)
-        .map_err(|e| Error::TlsError(format!("read key: {}", e)))?;
+    let key_data =
+        std::fs::read(key_path).map_err(|e| Error::TlsError(format!("read key: {}", e)))?;
     let key = pem::parse_many(&key_data)
         .map_err(|e| Error::TlsError(format!("parse key PEM: {}", e)))?
         .into_iter()
@@ -205,9 +210,7 @@ pub fn load_server_tls_config(
 ///   BLAKE3 fingerprint matches exactly (recommended for self-signed nodes).
 /// - If `None`, accepts any self-signed certificate (insecure but functional
 ///   for initial setup / local connections).
-pub fn load_client_tls_config(
-    pinned_fingerprint: Option<&str>,
-) -> Result<rustls::ClientConfig> {
+pub fn load_client_tls_config(pinned_fingerprint: Option<&str>) -> Result<rustls::ClientConfig> {
     let expected = match pinned_fingerprint {
         Some(fp) => {
             let bytes = hex::decode(fp)
@@ -240,8 +243,8 @@ pub fn load_client_tls_config(
 
 /// Compute the BLAKE3 fingerprint of the first certificate in a PEM file.
 pub fn cert_fingerprint(cert_path: &Path) -> Result<String> {
-    let data = std::fs::read(cert_path)
-        .map_err(|e| Error::TlsError(format!("read cert: {}", e)))?;
+    let data =
+        std::fs::read(cert_path).map_err(|e| Error::TlsError(format!("read cert: {}", e)))?;
     let cert = pem::parse_many(&data)
         .map_err(|e| Error::TlsError(format!("parse cert PEM: {}", e)))?
         .into_iter()
@@ -293,7 +296,9 @@ impl rustls::client::danger::ServerCertVerifier for Blake3CertVerifier {
         dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls12_signature(
-            message, cert, dss,
+            message,
+            cert,
+            dss,
             &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
         )
     }
@@ -305,7 +310,9 @@ impl rustls::client::danger::ServerCertVerifier for Blake3CertVerifier {
         dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(
-            message, cert, dss,
+            message,
+            cert,
+            dss,
             &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
         )
     }
@@ -392,7 +399,8 @@ mod tests {
         let dir = std::env::temp_dir().join("coincync_test_tls_expiry");
         let _ = std::fs::remove_dir_all(&dir);
 
-        let (cert_path, key_path) = generate_self_signed_cert(&dir, "coincync-expiry-test").unwrap();
+        let (cert_path, key_path) =
+            generate_self_signed_cert(&dir, "coincync-expiry-test").unwrap();
         assert!(load_server_tls_config(&cert_path, &key_path, None).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);

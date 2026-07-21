@@ -6,13 +6,11 @@
 use crate::primitives::Amount;
 // L-1 FIX: Removed dead imports FEE_PROTOCOL_*_PERCENT (protocol fee is always 0).
 use crate::constants::{
-    MIN_FEE_PER_BYTE, MAX_BLOCK_SIZE,
-    FEE_MINER_NORMAL_PERCENT, FEE_BURN_NORMAL_PERCENT,
-    FEE_MINER_CONGESTED_PERCENT, FEE_BURN_CONGESTED_PERCENT,
-    CONGESTION_THRESHOLD,
+    CONGESTION_THRESHOLD, FEE_BURN_CONGESTED_PERCENT, FEE_BURN_NORMAL_PERCENT,
+    FEE_MINER_CONGESTED_PERCENT, FEE_MINER_NORMAL_PERCENT, MAX_BLOCK_SIZE, MIN_FEE_PER_BYTE,
 };
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 // =============================================================================
 // CORE FEE CALCULATION
@@ -53,13 +51,13 @@ pub fn calculate_priority_fee(tx_size: usize, congestion_pct: u64, priority: f64
 /// validator decisions.
 pub fn congestion_multiplier(congestion_pct: u64) -> u64 {
     if congestion_pct < 50 {
-        100  // ×1.0 — normal
+        100 // ×1.0 — normal
     } else if congestion_pct < 75 {
-        150  // ×1.5 — moderate
+        150 // ×1.5 — moderate
     } else if congestion_pct < 90 {
-        200  // ×2.0 — high
+        200 // ×2.0 — high
     } else {
-        300  // ×3.0 — severe
+        300 // ×3.0 — severe
     }
 }
 
@@ -188,7 +186,10 @@ pub fn block_fee_stats(
     congested: bool,
 ) -> BlockFeeStats {
     if tx_fees.is_empty() {
-        return BlockFeeStats { height, ..Default::default() };
+        return BlockFeeStats {
+            height,
+            ..Default::default()
+        };
     }
 
     let total: u64 = tx_fees
@@ -198,7 +199,11 @@ pub fn block_fee_stats(
         .iter()
         .fold(0u64, |acc, (_, s)| acc.saturating_add(*s as u64));
 
-    let burn_pct = if congested { FEE_BURN_CONGESTED_PERCENT } else { FEE_BURN_NORMAL_PERCENT };
+    let burn_pct = if congested {
+        FEE_BURN_CONGESTED_PERCENT
+    } else {
+        FEE_BURN_NORMAL_PERCENT
+    };
 
     // Phase A7-2 (audit fix): same u128 promotion as distribute_fee. The
     // saturating_add for `total` above means total can be u64::MAX, and
@@ -211,7 +216,11 @@ pub fn block_fee_stats(
         tx_count: tx_fees.len(),
         total_fees: Amount::from_atomic(total),
         total_burned: Amount::from_atomic(total_burned),
-        avg_fee_per_byte: if total_size > 0 { total / total_size } else { 0 },
+        avg_fee_per_byte: if total_size > 0 {
+            total / total_size
+        } else {
+            0
+        },
         was_congested: congested,
     }
 }
@@ -268,7 +277,9 @@ pub struct FeeCalculator {
 
 impl FeeCalculator {
     pub fn new(context: FeeContext) -> Self {
-        FeeCalculator { congestion_pct: context.congestion_pct }
+        FeeCalculator {
+            congestion_pct: context.congestion_pct,
+        }
     }
 
     pub fn estimate(&self, tx_size: usize, tier: FeeTier) -> FeeEstimate {
@@ -301,13 +312,13 @@ mod tests {
 
     #[test]
     fn test_congestion_multiplier() {
-        assert_eq!(congestion_multiplier(0),   100); // ×1.0
-        assert_eq!(congestion_multiplier(49),  100); // still ×1.0 (below 50)
-        assert_eq!(congestion_multiplier(50),  150); // ×1.5
-        assert_eq!(congestion_multiplier(74),  150); // still ×1.5
-        assert_eq!(congestion_multiplier(75),  200); // ×2.0
-        assert_eq!(congestion_multiplier(89),  200); // still ×2.0
-        assert_eq!(congestion_multiplier(90),  300); // ×3.0 (congested)
+        assert_eq!(congestion_multiplier(0), 100); // ×1.0
+        assert_eq!(congestion_multiplier(49), 100); // still ×1.0 (below 50)
+        assert_eq!(congestion_multiplier(50), 150); // ×1.5
+        assert_eq!(congestion_multiplier(74), 150); // still ×1.5
+        assert_eq!(congestion_multiplier(75), 200); // ×2.0
+        assert_eq!(congestion_multiplier(89), 200); // still ×2.0
+        assert_eq!(congestion_multiplier(90), 300); // ×3.0 (congested)
         assert_eq!(congestion_multiplier(100), 300); // ×3.0
     }
 
@@ -358,8 +369,19 @@ mod tests {
     fn distribution_sum_exact() {
         // Edge cases: 0, 1, 2, 3, small primes, large values, u64::MAX-ish
         let test_values: Vec<u64> = vec![
-            0, 1, 2, 3, 7, 99, 100, 101, 999, 1_000_000, 1_000_000_001,
-            u64::MAX / 100, u64::MAX / 2,
+            0,
+            1,
+            2,
+            3,
+            7,
+            99,
+            100,
+            101,
+            999,
+            1_000_000,
+            1_000_000_001,
+            u64::MAX / 100,
+            u64::MAX / 2,
         ];
 
         for &val in &test_values {
@@ -368,11 +390,18 @@ mod tests {
                 assert!(
                     dist.is_valid(),
                     "distribution_sum_exact failed for val={}, congested={}",
-                    val, congested
+                    val,
+                    congested
                 );
                 // Also verify the raw arithmetic matches exactly
-                let sum = dist.to_miner.as_atomic() + dist.burned.as_atomic() + dist.to_protocol.as_atomic();
-                assert_eq!(sum, val, "raw sum mismatch for val={}, congested={}", val, congested);
+                let sum = dist.to_miner.as_atomic()
+                    + dist.burned.as_atomic()
+                    + dist.to_protocol.as_atomic();
+                assert_eq!(
+                    sum, val,
+                    "raw sum mismatch for val={}, congested={}",
+                    val, congested
+                );
             }
         }
     }

@@ -197,18 +197,39 @@ impl std::fmt::Display for SnapshotError {
             }
             Self::SnapshotParseError(e) => write!(f, "snapshot JSON parse failed: {}", e),
             Self::SignatureInvalidLength { actual } => {
-                write!(f, "signature file must be 64 raw Ed25519 bytes, got {}", actual)
+                write!(
+                    f,
+                    "signature file must be 64 raw Ed25519 bytes, got {}",
+                    actual
+                )
             }
             Self::SignatureVerifyFailed => {
-                write!(f, "signature verification failed against maintainer public key")
+                write!(
+                    f,
+                    "signature verification failed against maintainer public key"
+                )
             }
             Self::NetworkMismatch { expected, got } => {
-                write!(f, "snapshot network mismatch: expected {}, got {}", expected, got)
+                write!(
+                    f,
+                    "snapshot network mismatch: expected {}, got {}",
+                    expected, got
+                )
             }
-            Self::ClockSkew { snapshot_ts, now_ts } => {
-                write!(f, "snapshot timestamp {} is in the future (now = {})", snapshot_ts, now_ts)
+            Self::ClockSkew {
+                snapshot_ts,
+                now_ts,
+            } => {
+                write!(
+                    f,
+                    "snapshot timestamp {} is in the future (now = {})",
+                    snapshot_ts, now_ts
+                )
             }
-            Self::StaleSnapshot { snapshot_ts, last_seen_ts } => {
+            Self::StaleSnapshot {
+                snapshot_ts,
+                last_seen_ts,
+            } => {
                 write!(
                     f,
                     "snapshot ts {} is not newer than last-accepted ts {} (replay defence)",
@@ -260,12 +281,8 @@ pub async fn fetch_verified_peers(
         pointer.unix_ts, pointer.snapshot_cid, pointer.peer_count,
     );
 
-    let (snapshot_bytes, signature_bytes) = fetch_from_gateways(
-        &client,
-        &pointer.snapshot_cid,
-        &pointer.signature_cid,
-    )
-    .await?;
+    let (snapshot_bytes, signature_bytes) =
+        fetch_from_gateways(&client, &pointer.snapshot_cid, &pointer.signature_cid).await?;
 
     verify_signature_with(maintainer_pubkey, &snapshot_bytes, &signature_bytes)?;
 
@@ -378,9 +395,16 @@ async fn fetch_bounded(
         }
     }
 
-    let bytes = resp.bytes().await.map_err(|e| format!("read body: {}", e))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read body: {}", e))?;
     if bytes.len() > max_bytes {
-        return Err(format!("body {} bytes exceeds cap {}", bytes.len(), max_bytes));
+        return Err(format!(
+            "body {} bytes exceeds cap {}",
+            bytes.len(),
+            max_bytes
+        ));
     }
 
     Ok(bytes.to_vec())
@@ -419,8 +443,8 @@ fn verify_signature_with(
         .expect("length 64 confirmed above");
 
     let signature = Signature::from_bytes(&sig_bytes);
-    let verifying_key = VerifyingKey::from_bytes(pubkey)
-        .map_err(|_| SnapshotError::SignatureVerifyFailed)?;
+    let verifying_key =
+        VerifyingKey::from_bytes(pubkey).map_err(|_| SnapshotError::SignatureVerifyFailed)?;
 
     // Domain-separated: sig covers namespace || snapshot_bytes so a
     // signature from any other coincync signing context (release tag,
@@ -655,10 +679,7 @@ mod tests {
             peers: vec![],
         };
         let result = validate_snapshot(&snap, "testnet", 0);
-        assert!(matches!(
-            result,
-            Err(SnapshotError::NetworkMismatch { .. })
-        ));
+        assert!(matches!(result, Err(SnapshotError::NetworkMismatch { .. })));
     }
 
     #[test]
@@ -673,10 +694,7 @@ mod tests {
         };
         // last_seen is newer than snapshot.unix_ts → replay
         let result = validate_snapshot(&snap, "testnet", 2000);
-        assert!(matches!(
-            result,
-            Err(SnapshotError::StaleSnapshot { .. })
-        ));
+        assert!(matches!(result, Err(SnapshotError::StaleSnapshot { .. })));
     }
 
     #[test]

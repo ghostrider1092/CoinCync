@@ -3,10 +3,10 @@
 //! Reduces bandwidth by sending only transaction hashes instead of full transactions.
 //! Receivers reconstruct blocks from their mempool.
 
+use crate::consensus::Block;
 use crate::primitives::Hash;
 use crate::transaction::Transaction;
-use crate::consensus::Block;
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::HashMap;
 
 /// Short transaction ID (6 bytes) for compact blocks
@@ -16,7 +16,7 @@ pub struct ShortTxId([u8; 6]);
 impl ShortTxId {
     /// Create from full transaction hash and nonce
     pub fn from_tx_hash(tx_hash: &Hash, nonce: u64) -> Self {
-        use sha3::{Sha3_256, Digest};
+        use sha3::{Digest, Sha3_256};
 
         let mut hasher = Sha3_256::new();
         hasher.update(tx_hash.as_bytes());
@@ -194,9 +194,8 @@ impl BlockReconstructor {
         // ProcessMessage<BlockTxn>"; that specific handler location
         // was not re-traced this session and the internal validation
         // shape is stated qualitatively rather than as a receipt.
-        let mut prefilled_indices = std::collections::HashSet::with_capacity(
-            compact.prefilled_txs.len()
-        );
+        let mut prefilled_indices =
+            std::collections::HashSet::with_capacity(compact.prefilled_txs.len());
         for prefilled in &compact.prefilled_txs {
             let idx = prefilled.index as usize;
             if idx >= total_txs {
@@ -320,13 +319,17 @@ impl CompactBlockState {
 mod tests {
     use super::*;
     use crate::consensus::BlockHeader;
-    use crate::transaction::{TxType, TxOutput};
-    use crate::primitives::{PublicKey, Amount};
+    use crate::primitives::{Amount, PublicKey};
+    use crate::transaction::{TxOutput, TxType};
 
     fn make_test_tx(id: u8) -> Transaction {
         Transaction {
             version: 1,
-            tx_type: if id == 0 { TxType::Coinbase } else { TxType::Transfer },
+            tx_type: if id == 0 {
+                TxType::Coinbase
+            } else {
+                TxType::Transfer
+            },
             inputs: Vec::new(),
             outputs: vec![TxOutput {
                 stealth_address: PublicKey::from_bytes([id; 32]),
@@ -461,15 +464,23 @@ mod tests {
         // the index would land back in range. Use u16::MAX as a clearly
         // out-of-bounds slot that no plausible tx_count() can reach.
         let bad_tx = block.transactions[0].clone();
-        compact.prefilled_txs.push(PrefilledTx { index: u16::MAX, tx: bad_tx });
+        compact.prefilled_txs.push(PrefilledTx {
+            index: u16::MAX,
+            tx: bad_tx,
+        });
 
         let mempool_txs: Vec<_> = block.transactions[1..].to_vec();
         let reconstructor = BlockReconstructor::new(&mempool_txs, compact.nonce);
         let result = reconstructor.reconstruct(&compact);
 
-        assert!(result.is_err(), "out-of-bounds prefilled index must abort reconstruction");
-        assert!(result.unwrap_err().is_empty(),
-                "rejection must signal 'unrecoverable compact block' (empty missing-list)");
+        assert!(
+            result.is_err(),
+            "out-of-bounds prefilled index must abort reconstruction"
+        );
+        assert!(
+            result.unwrap_err().is_empty(),
+            "rejection must signal 'unrecoverable compact block' (empty missing-list)"
+        );
     }
 
     /// Two prefilled entries targeting the same index must be rejected.
@@ -484,14 +495,22 @@ mod tests {
         // Push a second prefilled entry at index 0 (where the real
         // coinbase already lives in compact.prefilled_txs).
         let dup_tx = block.transactions[1].clone();
-        compact.prefilled_txs.push(PrefilledTx { index: 0, tx: dup_tx });
+        compact.prefilled_txs.push(PrefilledTx {
+            index: 0,
+            tx: dup_tx,
+        });
 
         let mempool_txs: Vec<_> = block.transactions[1..].to_vec();
         let reconstructor = BlockReconstructor::new(&mempool_txs, compact.nonce);
         let result = reconstructor.reconstruct(&compact);
 
-        assert!(result.is_err(), "duplicate prefilled index must abort reconstruction");
-        assert!(result.unwrap_err().is_empty(),
-                "rejection must signal 'unrecoverable compact block' (empty missing-list)");
+        assert!(
+            result.is_err(),
+            "duplicate prefilled index must abort reconstruction"
+        );
+        assert!(
+            result.unwrap_err().is_empty(),
+            "rejection must signal 'unrecoverable compact block' (empty missing-list)"
+        );
     }
 }

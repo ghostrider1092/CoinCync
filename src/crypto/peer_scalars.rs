@@ -183,9 +183,7 @@ impl PeerPoint {
             .decompress()
             .map(PeerPoint)
             .ok_or_else(|| {
-                Error::CryptoError(
-                    "peer-supplied point is not a valid Ristretto encoding".into(),
-                )
+                Error::CryptoError("peer-supplied point is not a valid Ristretto encoding".into())
             })
     }
 

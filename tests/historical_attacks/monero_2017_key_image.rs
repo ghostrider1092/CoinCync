@@ -9,19 +9,29 @@
 //! Chain: Monero (and all CryptoNote forks)
 //! Impact: Double-spend (patched before known exploitation)
 
-use coincync::mempool::Mempool;
-use coincync::primitives::{Amount, PublicKey, KeyImage};
-use coincync::transaction::{Transaction, TxType, TxInput, TxOutput, RingMemberRef};
 use coincync::consensus::validate_transaction_basic;
-use coincync::crypto::{SecretScalar, BlindingFactor, PedersenCommitment, KeyImage as CKI, ClsagSignature};
 use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+use coincync::crypto::{
+    BlindingFactor, ClsagSignature, KeyImage as CKI, PedersenCommitment, SecretScalar,
+};
+use coincync::mempool::Mempool;
+use coincync::primitives::{Amount, KeyImage, PublicKey};
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use rand::rngs::OsRng;
 
 fn make_ring() -> Vec<RingMemberRef> {
-    (0..BOOTSTRAP_MIN_RING_SIZE).map(|_| RingMemberRef {
-        public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-        commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-    }).collect()
+    (0..BOOTSTRAP_MIN_RING_SIZE)
+        .map(|_| RingMemberRef {
+            public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(
+                1_000_000_000,
+                &BlindingFactor::random(&mut OsRng),
+            )
+            .to_bytes(),
+        })
+        .collect()
 }
 
 /// Attack: All-zero key image (identity point)
@@ -32,25 +42,35 @@ fn monero_2017_zero_key_image_rejected() {
     let bf = BlindingFactor::random(&mut OsRng);
 
     let tx = Transaction {
-        version: 1, tx_type: TxType::Transfer,
+        version: 1,
+        tx_type: TxType::Transfer,
         inputs: vec![TxInput {
             key_image: KeyImage::from_bytes([0u8; 32]), // ALL ZEROS
             ring_members: make_ring(),
             signature: ClsagSignature {
                 key_image: CKI::from_secret(&secret),
                 commitment_image: secret.to_public(),
-                c1: [0x42; 32], responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE],
+                c1: [0x42; 32],
+                responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE],
             },
             pseudo_output_commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-            encrypted_amount: vec![0u8; 8], view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(50_000_000),
-        range_proof: vec![0u8; 64], extra: vec![],
+        range_proof: vec![0u8; 64],
+        extra: vec![],
     };
 
     let basic = validate_transaction_basic(&tx);
@@ -73,25 +93,35 @@ fn monero_2017_random_point_key_image() {
     let bf = BlindingFactor::random(&mut OsRng);
 
     let tx = Transaction {
-        version: 1, tx_type: TxType::Transfer,
+        version: 1,
+        tx_type: TxType::Transfer,
         inputs: vec![TxInput {
             key_image: KeyImage::from_bytes(fake_ki_point.to_bytes()),
             ring_members: make_ring(),
             signature: ClsagSignature {
                 key_image: CKI::from_secret(&secret), // real KI in sig
                 commitment_image: secret.to_public(),
-                c1: [0x42; 32], responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE],
+                c1: [0x42; 32],
+                responses: vec![[0x13; 32]; BOOTSTRAP_MIN_RING_SIZE],
             },
             pseudo_output_commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-            encrypted_amount: vec![0u8; 8], view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(50_000_000),
-        range_proof: vec![0u8; 64], extra: vec![],
+        range_proof: vec![0u8; 64],
+        extra: vec![],
     };
 
     // Full verification MUST catch key image mismatch

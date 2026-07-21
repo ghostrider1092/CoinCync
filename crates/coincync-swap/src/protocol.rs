@@ -490,8 +490,8 @@ mod tests {
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".into(),
             bob_btc_address: "bob".into(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         }
     }
 
@@ -767,8 +767,8 @@ btc_network: "regtest".to_string(),
                 btc_timeout_blocks: btc_blocks,
                 alice_cync_address: "a".into(),
                 bob_btc_address: "b".into(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+                cync_network: "regtest".to_string(),
+                btc_network: "regtest".to_string(),
             };
             assert!(
                 !p.is_timeout_safe(),

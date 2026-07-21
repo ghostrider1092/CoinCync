@@ -43,7 +43,7 @@
 //! the timeout is publicly verifiable, and the recovery key was set by
 //! the owner themselves.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Tag byte marking recovery metadata in the transaction extra field.
 pub const RECOVERY_TAG: u8 = 0xDE;
@@ -95,8 +95,7 @@ impl RecoveryMeta {
         let mut recovery_address = [0u8; 32];
         recovery_address.copy_from_slice(&data[2..34]);
         let timeout_blocks = u64::from_le_bytes([
-            data[34], data[35], data[36], data[37],
-            data[38], data[39], data[40], data[41],
+            data[34], data[35], data[36], data[37], data[38], data[39], data[40], data[41],
         ]);
         Some(Self {
             output_index,

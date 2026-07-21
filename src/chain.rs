@@ -2,18 +2,18 @@
 //!
 //! Core blockchain state management.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
-use crate::primitives::{Hash, KeyImage};
-use crate::transaction::{DecoyOutput, Transaction};
-use crate::consensus::{Block, calculate_difficulty, DifficultyBlock, max_target};
+use crate::config::NetworkType;
+use crate::consensus::{calculate_difficulty, max_target, Block, DifficultyBlock};
+use crate::db::{ChainStateData, Database, OutputIndexEntry};
 use crate::emission::calculate_block_reward;
 use crate::error::{Error, Result};
-use crate::db::{Database, ChainStateData, OutputIndexEntry};
+use crate::primitives::{Hash, KeyImage};
 use crate::storage::UtxoSet;
-use crate::config::NetworkType;
+use crate::transaction::{DecoyOutput, Transaction};
 
 /// Auto-checkpoint interval: record a checkpoint every N blocks
 /// Checkpoint interval: every 5 blocks (~10 minutes at 120s block time).
@@ -324,7 +324,9 @@ impl BlockchainInner {
             return;
         }
 
-        let mut entries: Vec<(u64, Hash)> = self.height_to_hash.iter()
+        let mut entries: Vec<(u64, Hash)> = self
+            .height_to_hash
+            .iter()
             .map(|(&h, &hash)| (h, hash))
             .collect();
         entries.sort_by_key(|(h, _)| *h);
@@ -349,7 +351,8 @@ impl BlockchainInner {
         if evicted > 0 {
             tracing::debug!(
                 "Block cache eviction: removed {} blocks, cache size now {}",
-                evicted, self.blocks.len()
+                evicted,
+                self.blocks.len()
             );
         }
     }
@@ -385,7 +388,8 @@ pub struct Blockchain {
     pub spark_store: Option<Arc<crate::storage::SparkStore>>,
     pub shielded_store: Option<Arc<crate::storage::ShieldedStore>>,
     pub kernel_store: Option<Arc<crate::storage::KernelStore>>,
-    pub cut_through: Option<Arc<parking_lot::Mutex<crate::crypto::mw_cutthrough::CutThroughEngine>>>,
+    pub cut_through:
+        Option<Arc<parking_lot::Mutex<crate::crypto::mw_cutthrough::CutThroughEngine>>>,
 
     /// CIP-009.D rolling soft-finality adapter — see
     /// `src/consensus/rolling_finality.rs`. `None` (or feature off)
@@ -394,8 +398,7 @@ pub struct Blockchain {
     /// activates the rule live. Field is feature-gated so default
     /// builds are byte-identical to a build without it.
     #[cfg(feature = "rolling-finality")]
-    pub rolling_finality:
-        Option<Arc<crate::consensus::rolling_finality::RollingFinality>>,
+    pub rolling_finality: Option<Arc<crate::consensus::rolling_finality::RollingFinality>>,
 }
 
 /// Extract stats snapshot for structured logging without holding lock in tracing macro.
@@ -403,7 +406,10 @@ fn inner_stats_for_log(inner: &RwLock<BlockchainInner>) -> (u128, String) {
     let guard = inner.read();
     // Decimal text preserves the full accumulator while remaining accepted by
     // tracing subscribers that do not implement a native u128 value.
-    (guard.stats.total_difficulty, guard.stats.total_supply.to_string())
+    (
+        guard.stats.total_difficulty,
+        guard.stats.total_supply.to_string(),
+    )
 }
 
 impl Blockchain {
@@ -511,15 +517,24 @@ impl Blockchain {
     // Returns [0u8; 32] when Phase 2 stores are not initialized (None).
 
     pub fn shielded_root(&self) -> [u8; 32] {
-        self.shielded_store.as_ref().map(|s| s.current_root()).unwrap_or([0u8; 32])
+        self.shielded_store
+            .as_ref()
+            .map(|s| s.current_root())
+            .unwrap_or([0u8; 32])
     }
 
     pub fn spark_root(&self) -> [u8; 32] {
-        self.spark_store.as_ref().map(|s| s.current_root()).unwrap_or([0u8; 32])
+        self.spark_store
+            .as_ref()
+            .map(|s| s.current_root())
+            .unwrap_or([0u8; 32])
     }
 
     pub fn mw_kernel_root(&self) -> [u8; 32] {
-        self.kernel_store.as_ref().map(|s| s.current_root()).unwrap_or([0u8; 32])
+        self.kernel_store
+            .as_ref()
+            .map(|s| s.current_root())
+            .unwrap_or([0u8; 32])
     }
 
     // ── Phase 2 privacy store reorg checkpoint/rewind helpers ───────
@@ -581,8 +596,11 @@ impl Blockchain {
         if let (Some(sh), Some(sp), Some(kr)) =
             (&self.shielded_store, &self.spark_store, &self.kernel_store)
         {
-            let (n_sh, n_sp, n_kr) =
-                (sh.checkpoint_count(), sp.checkpoint_count(), kr.checkpoint_count());
+            let (n_sh, n_sp, n_kr) = (
+                sh.checkpoint_count(),
+                sp.checkpoint_count(),
+                kr.checkpoint_count(),
+            );
             if !(n_sh == n_sp && n_sp == n_kr) {
                 debug_assert_eq!(
                     (n_sh, n_sp, n_kr),
@@ -593,7 +611,10 @@ impl Blockchain {
                      BridgeTree-declined checkpoint or a code path that bypassed \
                      checkpoint_phase2_stores). A reorg from this state would unwind \
                      the stores unevenly.",
-                    height, n_sh, n_sp, n_kr
+                    height,
+                    n_sh,
+                    n_sp,
+                    n_kr
                 );
             }
         }
@@ -631,12 +652,19 @@ impl Blockchain {
         kernel: crate::crypto::mw_cutthrough::MwKernel,
     ) {
         if let Some(ref ct) = self.cut_through {
-            ct.lock().register_spend(spent_commitment, input_commitment, created_at, spent_at, kernel);
+            ct.lock().register_spend(
+                spent_commitment,
+                input_commitment,
+                created_at,
+                spent_at,
+                kernel,
+            );
         }
     }
 
     pub fn cut_through_stats(&self) -> crate::crypto::mw_cutthrough::CutThroughStats {
-        self.cut_through.as_ref()
+        self.cut_through
+            .as_ref()
             .map(|ct| ct.lock().stats())
             .unwrap_or_default()
     }
@@ -653,7 +681,8 @@ impl Blockchain {
             return Err(Error::InvalidState(format!(
                 "Genesis hash mismatch! Computed {} but expected {}. \
                  The genesis block definition may have been altered.",
-                hash.to_hex(), expected.to_hex()
+                hash.to_hex(),
+                expected.to_hex()
             )));
         }
 
@@ -801,7 +830,11 @@ impl Blockchain {
                         // testnet api box 2026-06-01 after the fleet upgrade.
                         inner.stats.difficulty = difficulty;
                     }
-                    tracing::info!("Loaded chain state: height={}, tip={}", state.height, state.tip_hash.to_hex());
+                    tracing::info!(
+                        "Loaded chain state: height={}, tip={}",
+                        state.height,
+                        state.tip_hash.to_hex()
+                    );
 
                     // Self-heal total_difficulty from the active chain.
                     //
@@ -844,7 +877,9 @@ impl Blockchain {
                             for h in 0..=state.height {
                                 if let Some(block) = self.get_block_by_height(h) {
                                     for (idx, tx) in block.transactions.iter().enumerate() {
-                                        if let Err(e) = db.index_tx(tx.hash().as_bytes(), h, idx as u32) {
+                                        if let Err(e) =
+                                            db.index_tx(tx.hash().as_bytes(), h, idx as u32)
+                                        {
                                             failed += 1;
                                             // Log per-failure at DEBUG to avoid log
                                             // spam during a corrupt-DB rebuild, but
@@ -865,10 +900,16 @@ impl Blockchain {
                                 tracing::warn!(
                                     "Tx index rebuild: {} indexed, {} FAILED in {:.2}s. \
                                      Failed lookups will return None until next rebuild.",
-                                    indexed, failed, start.elapsed().as_secs_f64()
+                                    indexed,
+                                    failed,
+                                    start.elapsed().as_secs_f64()
                                 );
                             } else {
-                                tracing::info!("Tx index built: {} txs in {:.2}s", indexed, start.elapsed().as_secs_f64());
+                                tracing::info!(
+                                    "Tx index built: {} txs in {:.2}s",
+                                    indexed,
+                                    start.elapsed().as_secs_f64()
+                                );
                             }
                         }
                     }
@@ -1016,7 +1057,11 @@ impl Blockchain {
                     }
 
                     if height > 0 && height % 10000 == 0 {
-                        tracing::info!("  UTXO rebuild: {}/{} blocks processed", height, tip_height);
+                        tracing::info!(
+                            "  UTXO rebuild: {}/{} blocks processed",
+                            height,
+                            tip_height
+                        );
                     }
                 }
                 Ok(None) => {
@@ -1185,19 +1230,25 @@ impl Blockchain {
             return false;
         }
         let flag = self.synced.load(std::sync::atomic::Ordering::Relaxed);
-        if flag { return true; }
+        if flag {
+            return true;
+        }
         let h = self.height();
-        if h == 0 { return false; }
-        let target = self.peer_target_height.load(std::sync::atomic::Ordering::Relaxed);
-        if h >= target { return true; }
+        if h == 0 {
+            return false;
+        }
+        let target = self
+            .peer_target_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if h >= target {
+            return true;
+        }
         // Tolerance for in-flight peer advertisements: ≤2 blocks behind
         // the peer-advertised target, AND tip is fresh enough that the
         // chain is clearly producing blocks (not actually stalled).
         if target.saturating_sub(h) <= 2 {
             let tip_timestamp = self.inner.read().tip.timestamp;
-            if let Ok(d) = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-            {
+            if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                 let now_secs = d.as_secs();
                 let age = now_secs.saturating_sub(tip_timestamp);
                 // 3× testnet target block time. Same threshold is fine
@@ -1341,10 +1392,10 @@ impl Blockchain {
         let mut count: u64 = 0;
         for h in window_start..window_end {
             let Some(block) = self.get_block_by_height(h) else {
-                continue;   // gap; contributes 0
+                continue; // gap; contributes 0
             };
             let Some(coinbase) = block.coinbase() else {
-                continue;   // structurally impossible; defensive
+                continue; // structurally impossible; defensive
             };
             if decode_signal_bits(&coinbase.extra).signals(bit) {
                 count = count.saturating_add(1);
@@ -1398,7 +1449,9 @@ impl Blockchain {
         let depth = current_height - target_height;
         tracing::warn!(
             "Rolling back chain from height {} to {} (depth: {})",
-            current_height, target_height, depth
+            current_height,
+            target_height,
+            depth
         );
 
         let mut all_orphaned_txs = Vec::new();
@@ -1409,8 +1462,7 @@ impl Blockchain {
             for h in (target_height + 1..=current_height).rev() {
                 let orphan_hash = inner.height_to_hash.get(&h).copied();
                 if let Some(oh) = orphan_hash {
-                    let orphan_txs = inner.blocks.get(&oh)
-                        .map(|b| b.transactions.clone());
+                    let orphan_txs = inner.blocks.get(&oh).map(|b| b.transactions.clone());
                     if let Some(txs) = orphan_txs {
                         let disconnect_batch = UtxoSet::batch_disconnect_block(&txs);
                         inner.utxos.apply_batch(disconnect_batch);
@@ -1444,16 +1496,21 @@ impl Blockchain {
                         // audit block for the full rationale + prior art citations
                         // (specific upstream identifiers UNVERIFIED this session
                         // — see the updated block above).
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
-    .unwrap_or_else(|| panic!(
-        "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
+                        inner.stats.total_supply = inner
+                            .stats
+                            .total_supply
+                            .checked_sub(emission.as_atomic() as u128)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at height being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
          (SIGTERM handler will flush RocksDB cleanly). Restart the node — the persisted \
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
-        emission, inner.stats.total_supply
-    ));
+                                    emission, inner.stats.total_supply
+                                )
+                            });
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -1479,7 +1536,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
             // together in every branch.
             let cached_hash = inner.height_to_hash.get(&target_height).copied();
             let db_hash = cached_hash.or_else(|| {
-                self.db.as_ref()
+                self.db
+                    .as_ref()
                     .and_then(|db| db.blocks.get_hash_by_height(target_height).ok().flatten())
             });
             if let Some(new_tip_hash) = db_hash {
@@ -1488,7 +1546,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                 // alone, difficulty/timestamp recompute on next block).
                 let cached_block = inner.blocks.get(&new_tip_hash).cloned();
                 let db_block = cached_block.or_else(|| {
-                    self.db.as_ref()
+                    self.db
+                        .as_ref()
                         .and_then(|db| db.blocks.get(&new_tip_hash).ok().flatten())
                 });
                 if let Some(tip_block) = db_block {
@@ -1566,14 +1625,21 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
 
         tracing::info!(
             "Rollback complete: chain at height {}, {} orphaned txs returned",
-            target_height, all_orphaned_txs.len()
+            target_height,
+            all_orphaned_txs.len()
         );
 
         Ok(all_orphaned_txs)
     }
 
     /// Record a chain event in the ring buffer (bounded, lock-free for readers).
-    fn record_event(&self, event_type: ChainEventType, height: u64, hash: &Hash, details: serde_json::Value) {
+    fn record_event(
+        &self,
+        event_type: ChainEventType,
+        height: u64,
+        hash: &Hash,
+        details: serde_json::Value,
+    ) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1626,7 +1692,12 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
         let parent = self.get_block(&parent_hash);
 
         if parent.is_none() && block.header.height > 0 {
-            self.record_event(ChainEventType::OrphanReceived, block.header.height, &hash, serde_json::json!({}));
+            self.record_event(
+                ChainEventType::OrphanReceived,
+                block.header.height,
+                &hash,
+                serde_json::json!({}),
+            );
             return Ok(BlockStatus::Orphan);
         }
 
@@ -1701,21 +1772,35 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
             // During IBD, skip expensive VDF verification for blocks below
             // the last checkpoint (Bitcoin-style "assume-valid"). This makes
             // initial sync 10-100x faster.
-            let cp = self.db.as_ref()
+            let cp = self
+                .db
+                .as_ref()
                 .and_then(|db| db.state.get_state().ok().flatten())
-                .and_then(|s| if s.last_checkpoint > 0 { Some(s.last_checkpoint) } else { None });
+                .and_then(|s| {
+                    if s.last_checkpoint > 0 {
+                        Some(s.last_checkpoint)
+                    } else {
+                        None
+                    }
+                });
             let validation = crate::consensus::validate_block_with_checkpoint_for_network(
                 &block,
                 parent.as_ref(),
                 &inner.utxos,
                 cp,
                 self.network,
-            ).map_err(|e| Error::InvalidState(format!("Block validation error: {}", e)))?;
+            )
+            .map_err(|e| Error::InvalidState(format!("Block validation error: {}", e)))?;
             if !validation.valid {
                 let errors = validation.errors.join("; ");
                 tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], errors);
                 drop(inner);
-                self.record_event(ChainEventType::BlockRejected, block.header.height, &hash, serde_json::json!({"reason": &errors}));
+                self.record_event(
+                    ChainEventType::BlockRejected,
+                    block.header.height,
+                    &hash,
+                    serde_json::json!({"reason": &errors}),
+                );
                 return Ok(BlockStatus::Invalid(errors));
             }
         }
@@ -1897,15 +1982,20 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     // returns u64::MAX until the process is bounced. Panicking on
                     // overflow surfaces the corruption exactly once, at the site.
                     // Prior art matches the SEV-A rollback fix comment above.
-                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission.as_atomic() as u128)
-                        .unwrap_or_else(|| panic!(
-                            "CONSENSUS CORRUPTION: supply overflow on block connect — \
+                    inner.stats.total_supply = inner
+                        .stats
+                        .total_supply
+                        .checked_add(emission.as_atomic() as u128)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "CONSENSUS CORRUPTION: supply overflow on block connect — \
                              tried to add emission={} to total_supply={}. Emission is \
                              deterministic from height and cannot be attacker-controlled; \
                              this indicates a bug in calculate_block_reward or on-disk \
                              corruption. Halting for RocksDB flush + operator triage.",
-                            emission, inner.stats.total_supply
-                        ));
+                                emission, inner.stats.total_supply
+                            )
+                        });
 
                     // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
                     // CIP-009.D Interp-B contract: checkpoint each Phase-2
@@ -1960,7 +2050,9 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                 // than perpetuate a mis-named identifier.
                 if let Some(ref db) = self.db {
                     for (idx, tx) in block.transactions.iter().enumerate() {
-                        if let Err(e) = db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32) {
+                        if let Err(e) =
+                            db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32)
+                        {
                             tracing::warn!(
                                 target: "chain::tx_index",
                                 "tx_index insert failed for tx {} at height {}: {} \
@@ -1977,9 +2069,15 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
 
                     // Auto-record checkpoint every CHECKPOINT_INTERVAL blocks
                     let mut last_checkpoint_height = 0u64;
-                    if block.header.height > 0 && block.header.height % crate::constants::CHECKPOINT_INTERVAL == 0 {
+                    if block.header.height > 0
+                        && block.header.height % crate::constants::CHECKPOINT_INTERVAL == 0
+                    {
                         if let Err(e) = db.state.add_checkpoint(block.header.height, &hash) {
-                            tracing::error!("Failed to record checkpoint at height {}: {}", block.header.height, e);
+                            tracing::error!(
+                                "Failed to record checkpoint at height {}: {}",
+                                block.header.height,
+                                e
+                            );
                         } else {
                             last_checkpoint_height = block.header.height;
                             tracing::info!(
@@ -1987,7 +2085,12 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                                 block.header.height,
                                 hash.to_hex()[..16].to_string()
                             );
-                            self.record_event(ChainEventType::CheckpointRecorded, block.header.height, &hash, serde_json::json!({}));
+                            self.record_event(
+                                ChainEventType::CheckpointRecorded,
+                                block.header.height,
+                                &hash,
+                                serde_json::json!({}),
+                            );
                         }
                     }
 
@@ -2079,10 +2182,15 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     "BLOCK_COMMIT"
                 );
 
-                self.record_event(ChainEventType::BlockAccepted, block.header.height, &hash, serde_json::json!({
-                    "tx_count": block.transactions.len(),
-                    "difficulty": difficulty,
-                }));
+                self.record_event(
+                    ChainEventType::BlockAccepted,
+                    block.header.height,
+                    &hash,
+                    serde_json::json!({
+                        "tx_count": block.transactions.len(),
+                        "difficulty": difficulty,
+                    }),
+                );
 
                 return Ok(BlockStatus::Accepted);
             }
@@ -2161,13 +2269,13 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                 // partition context that motivated this change.
                 let net_max = self.max_reorg_depth();
                 if let Err(reason) = evaluate_reorg_acceptability(
-                    reorg_depth, fork_cumulative, current_total_difficulty, self.height(),
+                    reorg_depth,
+                    fork_cumulative,
+                    current_total_difficulty,
+                    self.height(),
                     net_max,
                 ) {
-                    tracing::error!(
-                        "Rejecting reorg at depth {}: {}",
-                        reorg_depth, reason
-                    );
+                    tracing::error!("Rejecting reorg at depth {}: {}", reorg_depth, reason);
                     return Err(Error::ReorgTooDeep {
                         depth: reorg_depth,
                         max: net_max,
@@ -2189,7 +2297,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         let soft_final = rf.current_soft_final_height().unwrap_or(0);
                         tracing::error!(
                             "Rejecting reorg: fork point {} <= soft-final tip {} (CIP-009.D)",
-                            fork_point, soft_final
+                            fork_point,
+                            soft_final
                         );
                         // The implied "shallowest acceptable reorg" is one
                         // whose fork point is strictly above the soft-final
@@ -2198,7 +2307,11 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         // variant; the log line carries the precise reason.
                         return Err(Error::ReorgTooDeep {
                             depth: reorg_depth,
-                            max: block.header.height.saturating_sub(soft_final).saturating_sub(1),
+                            max: block
+                                .header
+                                .height
+                                .saturating_sub(soft_final)
+                                .saturating_sub(1),
                         });
                     }
                 }
@@ -2207,7 +2320,9 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                 // checkpoint. This prevents long-range reorganization attacks where
                 // an attacker builds a hidden chain from far in the past.
                 if let Some(ref db) = self.db {
-                    let last_cp = db.state.get_state()
+                    let last_cp = db
+                        .state
+                        .get_state()
                         .ok()
                         .flatten()
                         .map(|s| s.last_checkpoint)
@@ -2215,7 +2330,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     if last_cp > 0 && fork_point < last_cp {
                         tracing::error!(
                             "Rejecting reorg: fork point {} is before last checkpoint at height {}",
-                            fork_point, last_cp
+                            fork_point,
+                            last_cp
                         );
                         return Ok(BlockStatus::Invalid(format!(
                             "Reorg rejected: fork point {} is before checkpoint at height {}",
@@ -2226,7 +2342,10 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
 
                 tracing::warn!(
                     "Fork at height {} has more work ({} > {}), performing reorg (depth: {})",
-                    block.header.height, fork_cumulative, current_total_difficulty, reorg_depth
+                    block.header.height,
+                    fork_cumulative,
+                    current_total_difficulty,
+                    reorg_depth
                 );
 
                 // Save pre-reorg state for rollback on fork validation failure
@@ -2239,7 +2358,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                 // SECURITY (CC-002): Rewind main chain UTXO state to the fork point
                 let mut disconnected_blocks: u64 = 0;
                 let mut disconnected_txs: u64 = 0;
-                let mut disconnected_tx_lists: Vec<Vec<crate::transaction::Transaction>> = Vec::new();
+                let mut disconnected_tx_lists: Vec<Vec<crate::transaction::Transaction>> =
+                    Vec::new();
                 let mut disconnected_heights: Vec<(u64, Hash)> = Vec::new();
                 {
                     let mut inner = self.inner.write();
@@ -2250,8 +2370,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         let orphan_hash = inner.height_to_hash.get(&h).copied();
                         if let Some(oh) = orphan_hash {
                             // Clone transactions to avoid borrow conflict with utxos
-                            let orphan_txs = inner.blocks.get(&oh)
-                                .map(|b| b.transactions.clone());
+                            let orphan_txs = inner.blocks.get(&oh).map(|b| b.transactions.clone());
                             if let Some(txs) = orphan_txs {
                                 disconnected_blocks += 1;
                                 disconnected_txs += txs.len() as u64;
@@ -2301,8 +2420,12 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                                 // handlers on this node flush RocksDB cleanly on shutdown
                                 // (the tokio signal handler installed for the 2026-06 zombie-
                                 // state fix). See operator rule `no self-defeating gates`.
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
-    .unwrap_or_else(|| panic!(
+                                inner.stats.total_supply = inner
+                                    .stats
+                                    .total_supply
+                                    .checked_sub(emission.as_atomic() as u128)
+                                    .unwrap_or_else(|| {
+                                        panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at height being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
@@ -2310,7 +2433,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
         emission, inner.stats.total_supply
-    ));
+    )
+                                    });
                             }
                         }
                         if let Some(removed_hash) = inner.height_to_hash.remove(&h) {
@@ -2345,22 +2469,28 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     for (fork_idx, fork_block) in fork_blocks.iter().enumerate() {
                         // Validate fork block against current UTXO state
                         let parent = inner.blocks.get(&fork_block.header.prev_hash).cloned();
-                        let validation = match crate::consensus::validate_block_with_checkpoint_for_network(
-                            fork_block,
-                            parent.as_ref(),
-                            &inner.utxos,
-                            None,
-                            self.network,
-                        ) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                reorg_error = Some(format!("Fork block validation error: {}", e));
-                                break;
-                            }
-                        };
+                        let validation =
+                            match crate::consensus::validate_block_with_checkpoint_for_network(
+                                fork_block,
+                                parent.as_ref(),
+                                &inner.utxos,
+                                None,
+                                self.network,
+                            ) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    reorg_error =
+                                        Some(format!("Fork block validation error: {}", e));
+                                    break;
+                                }
+                            };
                         if !validation.valid {
                             let errors = validation.errors.join("; ");
-                            tracing::warn!("Fork block {} rejected during reorg: {}", fork_block.hash().to_hex(), errors);
+                            tracing::warn!(
+                                "Fork block {} rejected during reorg: {}",
+                                fork_block.hash().to_hex(),
+                                errors
+                            );
                             reorg_error = Some(format!("Invalid fork block: {}", errors));
                             break;
                         }
@@ -2401,11 +2531,13 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                             }
 
                             if diff_blocks.len() >= 2 {
-                                let expected_target = calculate_difficulty(&diff_blocks, fork_block.header.height);
+                                let expected_target =
+                                    calculate_difficulty(&diff_blocks, fork_block.header.height);
                                 if fork_block.header.target != expected_target {
                                     tracing::warn!(
                                         "Fork block {} at height {} has wrong difficulty target",
-                                        fork_block.hash().to_hex(), fork_block.header.height
+                                        fork_block.hash().to_hex(),
+                                        fork_block.header.height
                                     );
                                     reorg_error = Some(format!(
                                         "Fork block difficulty mismatch at height {}: expected {}, got {}",
@@ -2419,7 +2551,9 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         }
 
                         let fork_hash = fork_block.hash();
-                        inner.height_to_hash.insert(fork_block.header.height, fork_hash);
+                        inner
+                            .height_to_hash
+                            .insert(fork_block.header.height, fork_hash);
 
                         // Phase 2 store reorg checkpoint (site 4: reorg
                         // connect of fork blocks). Checkpoint each store
@@ -2445,7 +2579,10 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         self.checkpoint_phase2_stores(fork_block.header.height);
 
                         if let Some(ref db) = self.db {
-                            if let Err(e) = db.blocks.set_height_hash(fork_block.header.height, &fork_hash) {
+                            if let Err(e) = db
+                                .blocks
+                                .set_height_hash(fork_block.header.height, &fork_hash)
+                            {
                                 tracing::error!("CRITICAL: Failed to persist reorg height mapping at height {}: {}", fork_block.header.height, e);
                                 reorg_error = Some(format!("DB error during reorg: {}", e));
                                 break;
@@ -2453,28 +2590,36 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         }
 
                         // Apply fork block's UTXO mutations
-                        let batch = UtxoSet::batch_from_block(fork_block.header.height, &fork_block.transactions);
+                        let batch = UtxoSet::batch_from_block(
+                            fork_block.header.height,
+                            &fork_block.transactions,
+                        );
                         inner.utxos.apply_batch(batch);
 
                         // Add this fork block's emission to supply
                         let emission = calculate_block_reward(fork_block.header.height);
                         // AUDIT (2026-07-01): checked_add + panic for symmetry with the
-                    // reorg-rollback path's checked_sub + panic (fixed same day).
-                    // saturating_add silently clamps at u64::MAX; if emission ever
-                    // returns a corrupt large value (bug in calculate_block_reward),
-                    // the silent clamp hides it and every subsequent supply query
-                    // returns u64::MAX until the process is bounced. Panicking on
-                    // overflow surfaces the corruption exactly once, at the site.
-                    // Prior art matches the SEV-A rollback fix comment above.
-                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission.as_atomic() as u128)
-                        .unwrap_or_else(|| panic!(
-                            "CONSENSUS CORRUPTION: supply overflow on block connect — \
+                        // reorg-rollback path's checked_sub + panic (fixed same day).
+                        // saturating_add silently clamps at u64::MAX; if emission ever
+                        // returns a corrupt large value (bug in calculate_block_reward),
+                        // the silent clamp hides it and every subsequent supply query
+                        // returns u64::MAX until the process is bounced. Panicking on
+                        // overflow surfaces the corruption exactly once, at the site.
+                        // Prior art matches the SEV-A rollback fix comment above.
+                        inner.stats.total_supply = inner
+                            .stats
+                            .total_supply
+                            .checked_add(emission.as_atomic() as u128)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "CONSENSUS CORRUPTION: supply overflow on block connect — \
                              tried to add emission={} to total_supply={}. Emission is \
                              deterministic from height and cannot be attacker-controlled; \
                              this indicates a bug in calculate_block_reward or on-disk \
                              corruption. Halting for RocksDB flush + operator triage.",
-                            emission, inner.stats.total_supply
-                        ));
+                                    emission, inner.stats.total_supply
+                                )
+                            });
                     }
 
                     // SECURITY (BUG-2/BUG-4): If fork validation failed, rollback to pre-reorg state.
@@ -2491,10 +2636,13 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         // Previously only height mappings were removed, leaving fork outputs
                         // and key images in the UTXO set, corrupting state.
                         for fork_block in fork_blocks.iter().rev() {
-                            if inner.height_to_hash.get(&fork_block.header.height)
+                            if inner
+                                .height_to_hash
+                                .get(&fork_block.header.height)
                                 .map_or(false, |h| *h == fork_block.hash())
                             {
-                                let disconnect = UtxoSet::batch_disconnect_block(&fork_block.transactions);
+                                let disconnect =
+                                    UtxoSet::batch_disconnect_block(&fork_block.transactions);
                                 inner.utxos.apply_batch(disconnect);
                                 // Phase 2 store rewind (site 5: failed-reorg
                                 // rollback, undoing partially-applied fork
@@ -2532,8 +2680,12 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                                 // handlers on this node flush RocksDB cleanly on shutdown
                                 // (the tokio signal handler installed for the 2026-06 zombie-
                                 // state fix). See operator rule `no self-defeating gates`.
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
-    .unwrap_or_else(|| panic!(
+                                inner.stats.total_supply = inner
+                                    .stats
+                                    .total_supply
+                                    .checked_sub(emission.as_atomic() as u128)
+                                    .unwrap_or_else(|| {
+                                        panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at height being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
@@ -2541,12 +2693,14 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
         emission, inner.stats.total_supply
-    ));
+    )
+                                    });
                             }
                         }
 
                         // Remove fork block height mappings above fork point
-                        for h in (fork_point + 1..=inner.tip.height.max(pre_reorg_tip.height)).rev() {
+                        for h in (fork_point + 1..=inner.tip.height.max(pre_reorg_tip.height)).rev()
+                        {
                             inner.height_to_hash.remove(&h);
                         }
 
@@ -2563,7 +2717,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                                 // restored pre-reorg chain). Inert while
                                 // stores are None.
                                 self.checkpoint_phase2_stores(*h);
-                                let batch = UtxoSet::batch_from_block(*h, &orphan_block.transactions);
+                                let batch =
+                                    UtxoSet::batch_from_block(*h, &orphan_block.transactions);
                                 inner.utxos.apply_batch(batch);
                             }
                         }
@@ -2575,7 +2730,9 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         // Restore DB height mappings and remove stale fork entries
                         if let Some(ref db) = self.db {
                             // Remove stale height entries above pre-reorg tip
-                            for h in (pre_reorg_tip.height + 1)..=(inner.tip.height.max(pre_reorg_tip.height) + 1) {
+                            for h in (pre_reorg_tip.height + 1)
+                                ..=(inner.tip.height.max(pre_reorg_tip.height) + 1)
+                            {
                                 let _ = db.blocks.remove_height_hash(h);
                             }
                             // Re-set the main chain height mappings
@@ -2618,7 +2775,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                             }
 
                             if diff_blocks.len() >= 2 {
-                                let expected_target = calculate_difficulty(&diff_blocks, block.header.height);
+                                let expected_target =
+                                    calculate_difficulty(&diff_blocks, block.header.height);
                                 if block.header.target != expected_target {
                                     tracing::warn!(
                                         "Reorg tip block {} at height {} has wrong difficulty target",
@@ -2645,7 +2803,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
 
                         // SECURITY (BUG-2): Undo ALL applied fork blocks' UTXO mutations
                         for fork_block in fork_blocks.iter().rev() {
-                            let disconnect = UtxoSet::batch_disconnect_block(&fork_block.transactions);
+                            let disconnect =
+                                UtxoSet::batch_disconnect_block(&fork_block.transactions);
                             inner.utxos.apply_batch(disconnect);
                             // Phase 2 store rewind (site 5b: failed-reorg
                             // rollback path B — triggering-block validation
@@ -2665,8 +2824,12 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                             // ~L2228). Doc-vs-code drift audit picked this up on the
                             // second pass. Same rationale + prior art as the fixed
                             // sites' audit blocks.
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
-    .unwrap_or_else(|| panic!(
+                            inner.stats.total_supply = inner
+                                .stats
+                                .total_supply
+                                .checked_sub(emission.as_atomic() as u128)
+                                .unwrap_or_else(|| {
+                                    panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at fork block being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
@@ -2674,11 +2837,14 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
         emission, inner.stats.total_supply
-    ));
+    )
+                                });
                         }
 
                         // Remove fork block height mappings
-                        for h in (fork_point + 1..=pre_reorg_tip.height.max(block.header.height)).rev() {
+                        for h in
+                            (fork_point + 1..=pre_reorg_tip.height.max(block.header.height)).rev()
+                        {
                             inner.height_to_hash.remove(&h);
                         }
 
@@ -2692,7 +2858,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                                 // site 6a but for the triggering-block-failed
                                 // rollback path). Inert while stores are None.
                                 self.checkpoint_phase2_stores(*h);
-                                let batch = UtxoSet::batch_from_block(*h, &orphan_block.transactions);
+                                let batch =
+                                    UtxoSet::batch_from_block(*h, &orphan_block.transactions);
                                 inner.utxos.apply_batch(batch);
                             }
                         }
@@ -2715,7 +2882,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
 
                     if reorg_error.is_none() {
                         // Apply the new tip block (the triggering block)
-                        let tip_batch = UtxoSet::batch_from_block(block.header.height, &block.transactions);
+                        let tip_batch =
+                            UtxoSet::batch_from_block(block.header.height, &block.transactions);
                         inner.utxos.apply_batch(tip_batch);
 
                         // Add triggering block's emission to supply.
@@ -2733,15 +2901,20 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         // are now uniform. Grep-verified: 0 remaining
                         // `total_supply.saturating_add` in this file.
                         let tip_emission = calculate_block_reward(block.header.height);
-                        inner.stats.total_supply = inner.stats.total_supply.checked_add(tip_emission.as_atomic() as u128)
-                            .unwrap_or_else(|| panic!(
-                                "CONSENSUS CORRUPTION: supply overflow on reorg tip apply — \
+                        inner.stats.total_supply = inner
+                            .stats
+                            .total_supply
+                            .checked_add(tip_emission.as_atomic() as u128)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "CONSENSUS CORRUPTION: supply overflow on reorg tip apply — \
                                  tried to add tip_emission={} to total_supply={}. Emission is \
                                  deterministic from height and cannot be attacker-controlled; \
                                  this indicates a bug in calculate_block_reward or on-disk \
                                  corruption. Halting for RocksDB flush + operator triage.",
-                                tip_emission, inner.stats.total_supply
-                            ));
+                                    tip_emission, inner.stats.total_supply
+                                )
+                            });
 
                         // Update tip to the new fork head
                         inner.tip = ChainTip {
@@ -2798,46 +2971,46 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         //     than halt" pattern below is retained on its
                         //     own reasoning.
                         let reconnected_blocks = fork_blocks.len() as u64 + 1; // +1 for triggering block
-                        let reconnected_txs: u64 = fork_blocks.iter()
+                        let reconnected_txs: u64 = fork_blocks
+                            .iter()
                             .map(|b| b.transactions.len() as u64)
-                            .sum::<u64>() + block.transactions.len() as u64;
-                        inner.stats.total_blocks = match inner.stats.total_blocks
-                            .checked_sub(disconnected_blocks)
-                        {
-                            Some(v) => v.saturating_add(reconnected_blocks),
-                            None => {
-                                tracing::error!(
-                                    target: "chain::stats_invariant",
-                                    "STATS INVARIANT VIOLATION: disconnected_blocks={} > \
-                                     stats.total_blocks={} on reorg accounting. This means \
-                                     the counter was already corrupt (a prior reorg silently \
-                                     saturated). Recomputing floor as reconnected_blocks={} \
-                                     so this reorg's addition is preserved. RPC \
-                                     `get_info` `total_blocks` will be wrong until a full \
-                                     rebuild. See T1F1 audit note in chain.rs for detail.",
-                                    disconnected_blocks,
-                                    inner.stats.total_blocks,
-                                    reconnected_blocks,
-                                );
-                                reconnected_blocks
-                            }
-                        };
-                        inner.stats.total_transactions = match inner.stats.total_transactions
-                            .checked_sub(disconnected_txs)
-                        {
-                            Some(v) => v.saturating_add(reconnected_txs),
-                            None => {
-                                tracing::error!(
-                                    target: "chain::stats_invariant",
-                                    "STATS INVARIANT VIOLATION: disconnected_txs={} > \
-                                     stats.total_transactions={} on reorg accounting. Same \
-                                     pattern as T1F1. Recomputing floor.",
-                                    disconnected_txs,
-                                    inner.stats.total_transactions,
-                                );
-                                reconnected_txs
-                            }
-                        };
+                            .sum::<u64>()
+                            + block.transactions.len() as u64;
+                        inner.stats.total_blocks =
+                            match inner.stats.total_blocks.checked_sub(disconnected_blocks) {
+                                Some(v) => v.saturating_add(reconnected_blocks),
+                                None => {
+                                    tracing::error!(
+                                        target: "chain::stats_invariant",
+                                        "STATS INVARIANT VIOLATION: disconnected_blocks={} > \
+                                         stats.total_blocks={} on reorg accounting. This means \
+                                         the counter was already corrupt (a prior reorg silently \
+                                         saturated). Recomputing floor as reconnected_blocks={} \
+                                         so this reorg's addition is preserved. RPC \
+                                         `get_info` `total_blocks` will be wrong until a full \
+                                         rebuild. See T1F1 audit note in chain.rs for detail.",
+                                        disconnected_blocks,
+                                        inner.stats.total_blocks,
+                                        reconnected_blocks,
+                                    );
+                                    reconnected_blocks
+                                }
+                            };
+                        inner.stats.total_transactions =
+                            match inner.stats.total_transactions.checked_sub(disconnected_txs) {
+                                Some(v) => v.saturating_add(reconnected_txs),
+                                None => {
+                                    tracing::error!(
+                                        target: "chain::stats_invariant",
+                                        "STATS INVARIANT VIOLATION: disconnected_txs={} > \
+                                         stats.total_transactions={} on reorg accounting. Same \
+                                         pattern as T1F1. Recomputing floor.",
+                                        disconnected_txs,
+                                        inner.stats.total_transactions,
+                                    );
+                                    reconnected_txs
+                                }
+                            };
 
                         inner.height_to_hash.insert(block.header.height, hash);
 
@@ -2845,7 +3018,10 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                         // clean up stale height entries above new tip.
                         if let Some(ref db) = self.db {
                             if let Err(e) = db.blocks.set_height_hash(block.header.height, &hash) {
-                                tracing::error!("Failed to persist reorg tip height mapping: {}", e);
+                                tracing::error!(
+                                    "Failed to persist reorg tip height mapping: {}",
+                                    e
+                                );
                             }
                             // Remove ALL stale DB height entries above new tip.
                             // After a reorg to a shorter chain, old heights remain
@@ -2888,100 +3064,116 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                 // non-re-entrant RwLock).
                 {
                     let _reorg_commit_guard = self.inner.write();
-                if let Some(ref db) = self.db {
-                    // 1. Collect output_index removals (disconnected blocks)
-                    let mut oi_removals: Vec<[u8; 32]> = Vec::new();
-                    let mut ti_removes: Vec<[u8; 32]> = Vec::new();
-                    for txs in &disconnected_tx_lists {
-                        for tx in txs {
-                            for output in &tx.outputs {
-                                oi_removals.push(*output.stealth_address.as_bytes());
-                            }
-                            ti_removes.push(*tx.hash().as_bytes());
-                        }
-                    }
-
-                    // 2. Collect output_index additions (fork blocks + tip)
-                    let mut oi_additions: Vec<([u8; 32], Vec<u8>)> = Vec::new();
-                    let mut height_sets: Vec<(u64, [u8; 32])> = Vec::new();
-                    let mut ti_adds: Vec<([u8; 32], u64, u32)> = Vec::new();
-
-                    let collect_block_outputs = |b: &crate::consensus::Block,
-                                                  oi: &mut Vec<([u8; 32], Vec<u8>)>,
-                                                  hs: &mut Vec<(u64, [u8; 32])>,
-                                                  ti: &mut Vec<([u8; 32], u64, u32)>| {
-                        let h = b.header.height;
-                        hs.push((h, *b.hash().as_bytes()));
-                        for (idx, tx) in b.transactions.iter().enumerate() {
-                            let is_coinbase = tx.is_coinbase();
-                            for output in &tx.outputs {
-                                let entry = crate::db::OutputIndexEntry {
-                                    commitment: output.commitment,
-                                    height: h,
-                                    is_coinbase,
-                                    lock_height: output.lock_height,
-                                };
-                                if let Ok(data) = crate::db::serialize(&entry) {
-                                    oi.push((*output.stealth_address.as_bytes(), data));
+                    if let Some(ref db) = self.db {
+                        // 1. Collect output_index removals (disconnected blocks)
+                        let mut oi_removals: Vec<[u8; 32]> = Vec::new();
+                        let mut ti_removes: Vec<[u8; 32]> = Vec::new();
+                        for txs in &disconnected_tx_lists {
+                            for tx in txs {
+                                for output in &tx.outputs {
+                                    oi_removals.push(*output.stealth_address.as_bytes());
                                 }
+                                ti_removes.push(*tx.hash().as_bytes());
                             }
-                            ti.push((*tx.hash().as_bytes(), h, idx as u32));
                         }
-                    };
 
-                    for fork_block in &fork_blocks {
-                        collect_block_outputs(fork_block, &mut oi_additions, &mut height_sets, &mut ti_adds);
+                        // 2. Collect output_index additions (fork blocks + tip)
+                        let mut oi_additions: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+                        let mut height_sets: Vec<(u64, [u8; 32])> = Vec::new();
+                        let mut ti_adds: Vec<([u8; 32], u64, u32)> = Vec::new();
+
+                        let collect_block_outputs =
+                            |b: &crate::consensus::Block,
+                             oi: &mut Vec<([u8; 32], Vec<u8>)>,
+                             hs: &mut Vec<(u64, [u8; 32])>,
+                             ti: &mut Vec<([u8; 32], u64, u32)>| {
+                                let h = b.header.height;
+                                hs.push((h, *b.hash().as_bytes()));
+                                for (idx, tx) in b.transactions.iter().enumerate() {
+                                    let is_coinbase = tx.is_coinbase();
+                                    for output in &tx.outputs {
+                                        let entry = crate::db::OutputIndexEntry {
+                                            commitment: output.commitment,
+                                            height: h,
+                                            is_coinbase,
+                                            lock_height: output.lock_height,
+                                        };
+                                        if let Ok(data) = crate::db::serialize(&entry) {
+                                            oi.push((*output.stealth_address.as_bytes(), data));
+                                        }
+                                    }
+                                    ti.push((*tx.hash().as_bytes(), h, idx as u32));
+                                }
+                            };
+
+                        for fork_block in &fork_blocks {
+                            collect_block_outputs(
+                                fork_block,
+                                &mut oi_additions,
+                                &mut height_sets,
+                                &mut ti_adds,
+                            );
+                        }
+                        collect_block_outputs(
+                            &block,
+                            &mut oi_additions,
+                            &mut height_sets,
+                            &mut ti_adds,
+                        );
+
+                        // 3. Compute stale heights to remove (above new tip)
+                        let new_tip_height = block.header.height;
+                        let height_removals: Vec<u64> =
+                            (new_tip_height + 1..=new_tip_height + 100).collect(); // Clean up to 100 stale entries
+
+                        // 4. Serialize new chain state
+                        let last_checkpoint = db
+                            .state
+                            .get_state()
+                            .ok()
+                            .flatten()
+                            .map(|s| s.last_checkpoint)
+                            .unwrap_or(0);
+                        let new_state = ChainStateData {
+                            tip_hash: hash,
+                            height: new_tip_height,
+                            total_difficulty: fork_cumulative,
+                            total_supply: self.stats().total_supply,
+                            total_burned: 0,
+                            last_checkpoint,
+                        };
+                        let state_bytes = crate::db::serialize(&new_state)?;
+
+                        // 5. Apply everything atomically
+                        db.apply_reorg_atomic(
+                            &oi_removals,
+                            &oi_additions,
+                            &height_sets,
+                            &height_removals,
+                            &state_bytes,
+                            &ti_adds,
+                            &ti_removes,
+                        )?;
+
+                        tracing::info!(
+                            "Reorg atomic commit: {} outputs removed, {} added, {} heights set",
+                            oi_removals.len(),
+                            oi_additions.len(),
+                            height_sets.len()
+                        );
+                    } else {
+                        // No DB — in-memory only mode (tests). Still do the non-atomic path.
+                        for txs in &disconnected_tx_lists {
+                            self.remove_output_index(txs);
+                        }
+                        for fork_block in &fork_blocks {
+                            self.persist_output_index(
+                                &fork_block.transactions,
+                                fork_block.header.height,
+                            );
+                        }
+                        self.persist_output_index(&block.transactions, block.header.height);
                     }
-                    collect_block_outputs(&block, &mut oi_additions, &mut height_sets, &mut ti_adds);
-
-                    // 3. Compute stale heights to remove (above new tip)
-                    let new_tip_height = block.header.height;
-                    let height_removals: Vec<u64> = (new_tip_height + 1..=new_tip_height + 100)
-                        .collect(); // Clean up to 100 stale entries
-
-                    // 4. Serialize new chain state
-                    let last_checkpoint = db
-                        .state
-                        .get_state()
-                        .ok()
-                        .flatten()
-                        .map(|s| s.last_checkpoint)
-                        .unwrap_or(0);
-                    let new_state = ChainStateData {
-                        tip_hash: hash,
-                        height: new_tip_height,
-                        total_difficulty: fork_cumulative,
-                        total_supply: self.stats().total_supply,
-                        total_burned: 0,
-                        last_checkpoint,
-                    };
-                    let state_bytes = crate::db::serialize(&new_state)?;
-
-                    // 5. Apply everything atomically
-                    db.apply_reorg_atomic(
-                        &oi_removals,
-                        &oi_additions,
-                        &height_sets,
-                        &height_removals,
-                        &state_bytes,
-                        &ti_adds,
-                        &ti_removes,
-                    )?;
-
-                    tracing::info!(
-                        "Reorg atomic commit: {} outputs removed, {} added, {} heights set",
-                        oi_removals.len(), oi_additions.len(), height_sets.len()
-                    );
-                } else {
-                    // No DB — in-memory only mode (tests). Still do the non-atomic path.
-                    for txs in &disconnected_tx_lists {
-                        self.remove_output_index(txs);
-                    }
-                    for fork_block in &fork_blocks {
-                        self.persist_output_index(&fork_block.transactions, fork_block.header.height);
-                    }
-                    self.persist_output_index(&block.transactions, block.header.height);
-                }
                 } // R-34: close the write-guard scope so
                   // inner_stats_for_log below can take a read lock.
 
@@ -3007,10 +3199,15 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     .filter(|tx| !tx.is_coinbase())
                     .collect();
 
-                self.record_event(ChainEventType::Reorg, block.header.height, &hash, serde_json::json!({
-                    "reorg_depth": reorg_depth,
-                    "fork_point": fork_point,
-                }));
+                self.record_event(
+                    ChainEventType::Reorg,
+                    block.header.height,
+                    &hash,
+                    serde_json::json!({
+                        "reorg_depth": reorg_depth,
+                        "fork_point": fork_point,
+                    }),
+                );
 
                 Ok(BlockStatus::AcceptedReorg { orphaned_txs })
             } else {
@@ -3022,9 +3219,14 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     fork_cumulative,
                     current_total_difficulty
                 );
-                self.record_event(ChainEventType::ForkDetected, block.header.height, &hash, serde_json::json!({
-                    "fork_difficulty": fork_cumulative,
-                }));
+                self.record_event(
+                    ChainEventType::ForkDetected,
+                    block.header.height,
+                    &hash,
+                    serde_json::json!({
+                        "fork_difficulty": fork_cumulative,
+                    }),
+                );
                 Ok(BlockStatus::AcceptedFork)
             }
         }
@@ -3093,7 +3295,9 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
         // SECURITY: ring decoy selection — OsRng, not thread_rng. See the
         // matching comment in db::utxos::select_decoys.
         let mut rng = rand::rngs::OsRng;
-        inner.utxos.select_decoys(current_height, min_age, count, &mut rng)
+        inner
+            .utxos
+            .select_decoys(current_height, min_age, count, &mut rng)
             .into_iter()
             .map(|oref| DecoyOutput {
                 public_key: oref.output.stealth_address,
@@ -3105,8 +3309,14 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
 
     /// Get target height (for sync progress, updated by P2P layer)
     pub fn target_height(&self) -> u64 {
-        let peer_target = self.peer_target_height.load(std::sync::atomic::Ordering::Relaxed);
-        if peer_target > 0 { peer_target } else { self.height() }
+        let peer_target = self
+            .peer_target_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if peer_target > 0 {
+            peer_target
+        } else {
+            self.height()
+        }
     }
 
     /// Raw peer-advertised target height (0 = no peer height info yet).
@@ -3119,13 +3329,16 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
     /// ahead of every peer's advertised height means our blocks aren't
     /// being adopted — we're mining a worthless private fork.
     pub fn peer_advertised_height(&self) -> u64 {
-        self.peer_target_height.load(std::sync::atomic::Ordering::Relaxed)
+        self.peer_target_height
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Update sync info from P2P layer
     pub fn set_sync_info(&self, synced: bool, target_height: u64) {
-        self.synced.store(synced, std::sync::atomic::Ordering::Relaxed);
-        self.peer_target_height.store(target_height, std::sync::atomic::Ordering::Relaxed);
+        self.synced
+            .store(synced, std::sync::atomic::Ordering::Relaxed);
+        self.peer_target_height
+            .store(target_height, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Firework Phase 2 (I6): update the "a heavier chain exists" veto (see
@@ -3133,7 +3346,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
     /// claims or our own cumulative work change, so `is_synced()` reflects
     /// cumulative work and not just block height.
     pub fn set_work_behind(&self, behind: bool) {
-        self.work_behind.store(behind, std::sync::atomic::Ordering::Relaxed);
+        self.work_behind
+            .store(behind, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record that a block was accepted from the P2P layer right now.
@@ -3157,9 +3371,12 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
     /// timestamp. Returns `None` if we've never received a block from a peer
     /// since startup (in which case the caller should use its own clock).
     pub fn secs_since_last_block(&self) -> Option<u64> {
-        let last = self.last_block_received_at
+        let last = self
+            .last_block_received_at
             .load(std::sync::atomic::Ordering::Relaxed);
-        if last == 0 { return None; }
+        if last == 0 {
+            return None;
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3258,7 +3475,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     "calculate_fork_cumulative_work walked {} steps from block height {} \
                      without reaching genesis — possible prev_hash cycle in DB. Returning \
                      partial work; caller's IronConsensus classifier will reject the fork.",
-                    steps, block.header.height
+                    steps,
+                    block.header.height
                 );
                 break;
             }
@@ -3283,9 +3501,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
                     break; // Reached genesis
                 }
                 let prev_work = total_work;
-                total_work = total_work.saturating_add(
-                    calculate_difficulty_from_target(&parent.header.target)
-                );
+                total_work = total_work
+                    .saturating_add(calculate_difficulty_from_target(&parent.header.target));
                 // SECURITY (H-7): Detect u128 saturation during deep reorgs.
                 // saturating_add silently caps at u128::MAX, which could cause
                 // incorrect chain selection if both forks saturate.
@@ -3333,9 +3550,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
         let mut total: u128 = 1; // genesis base (matches genesis init + fork walk)
         for h in 1..=height {
             let block = self.get_block_by_height(h)?;
-            total = total.saturating_add(
-                calculate_difficulty_from_target(&block.header.target),
-            );
+            total = total.saturating_add(calculate_difficulty_from_target(&block.header.target));
         }
         Some(total)
     }
@@ -3406,7 +3621,10 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atom
         // SECURITY: Track visited hashes to detect cycles and prevent infinite loops.
         loop {
             if !visited.insert(current_hash) {
-                tracing::error!("Cycle detected in fork chain at hash {}", current_hash.to_hex());
+                tracing::error!(
+                    "Cycle detected in fork chain at hash {}",
+                    current_hash.to_hex()
+                );
                 break;
             }
             if let Some(block) = self.get_block(&current_hash) {
@@ -3453,7 +3671,9 @@ impl Blockchain {
     pub async fn add_block_async(self: Arc<Self>, block: Block) -> Result<BlockStatus> {
         tokio::task::spawn_blocking(move || self.add_block(block))
             .await
-            .map_err(|e| Error::Internal(format!("spawn_blocking join error in add_block: {}", e)))?
+            .map_err(|e| {
+                Error::Internal(format!("spawn_blocking join error in add_block: {}", e))
+            })?
     }
 
     /// Async wrapper around [`Blockchain::process_block`]. Equivalent to
@@ -3461,7 +3681,9 @@ impl Blockchain {
     pub async fn process_block_async(self: Arc<Self>, block: Block) -> Result<BlockStatus> {
         tokio::task::spawn_blocking(move || self.process_block(block))
             .await
-            .map_err(|e| Error::Internal(format!("spawn_blocking join error in process_block: {}", e)))?
+            .map_err(|e| {
+                Error::Internal(format!("spawn_blocking join error in process_block: {}", e))
+            })?
     }
 
     /// Async wrapper around [`Blockchain::get_block`]. Hash-keyed DB read.
@@ -3483,9 +3705,12 @@ impl Blockchain {
     pub async fn validate_transaction_async(self: Arc<Self>, tx: Transaction) -> Result<()> {
         tokio::task::spawn_blocking(move || self.validate_transaction(&tx))
             .await
-            .map_err(|e| Error::Internal(format!(
-                "spawn_blocking join error in validate_transaction: {}", e
-            )))?
+            .map_err(|e| {
+                Error::Internal(format!(
+                    "spawn_blocking join error in validate_transaction: {}",
+                    e
+                ))
+            })?
     }
 
     /// Async wrapper around [`Blockchain::is_spent`]. Key-image lookup.
@@ -3579,7 +3804,10 @@ mod tests {
             .total_supply
             .checked_add(emission)
             .expect("u128 accumulator must not overflow crossing the u64 ceiling");
-        assert!(stats.total_supply > u64::MAX as u128, "crossed the u64 ceiling");
+        assert!(
+            stats.total_supply > u64::MAX as u128,
+            "crossed the u64 ceiling"
+        );
         // Proof the pre-fix u64 path would have overflowed at exactly this point:
         assert!(
             (u64::MAX - 5).checked_add(emission as u64).is_none(),
@@ -3638,7 +3866,11 @@ mod tests {
 
         let chain = Blockchain::with_database(db, NetworkType::Testnet);
         let error = chain.load_from_database().unwrap_err().to_string();
-        assert!(error.contains("without chain state"), "unexpected error: {}", error);
+        assert!(
+            error.contains("without chain state"),
+            "unexpected error: {}",
+            error
+        );
     }
 
     #[test]
@@ -3659,7 +3891,11 @@ mod tests {
 
         let chain = Blockchain::with_database(db, NetworkType::Testnet);
         let error = chain.load_from_database().unwrap_err().to_string();
-        assert!(error.contains("missing tip block"), "unexpected error: {}", error);
+        assert!(
+            error.contains("missing tip block"),
+            "unexpected error: {}",
+            error
+        );
     }
 
     #[test]
@@ -3674,7 +3910,11 @@ mod tests {
 
         let chain = Blockchain::with_database(db, NetworkType::Testnet);
         let error = chain.load_from_database().unwrap_err().to_string();
-        assert!(error.contains("does not match"), "unexpected error: {}", error);
+        assert!(
+            error.contains("does not match"),
+            "unexpected error: {}",
+            error
+        );
     }
 
     #[test]
@@ -3720,7 +3960,11 @@ mod tests {
         let recomputed = chain
             .recompute_total_difficulty(3)
             .expect("all blocks present");
-        assert_eq!(recomputed, 1 + 3 * d, "recompute must be 1 + Σ dft(1..=height)");
+        assert_eq!(
+            recomputed,
+            1 + 3 * d,
+            "recompute must be 1 + Σ dft(1..=height)"
+        );
 
         // The from-scratch fork walk MUST agree with the recompute. Before the
         // fix this differed by exactly `d - 1` (dft(genesis) vs base 1).
@@ -3768,16 +4012,32 @@ mod tests {
         assert_eq!(mainnet_max, 100, "mainnet hard-finality cap must be 100");
 
         let err_testnet = evaluate_reorg_acceptability(
-            testnet_max + 1, u128::MAX, 1, BOOTSTRAP_MESS_HEIGHT + 1, testnet_max,
-        ).unwrap_err();
+            testnet_max + 1,
+            u128::MAX,
+            1,
+            BOOTSTRAP_MESS_HEIGHT + 1,
+            testnet_max,
+        )
+        .unwrap_err();
         assert!(err_testnet.contains("exceeds absolute maximum"));
-        assert!(err_testnet.contains("1000"), "testnet error must cite testnet cap");
+        assert!(
+            err_testnet.contains("1000"),
+            "testnet error must cite testnet cap"
+        );
 
         let err_mainnet = evaluate_reorg_acceptability(
-            mainnet_max + 1, u128::MAX, 1, BOOTSTRAP_MESS_HEIGHT + 1, mainnet_max,
-        ).unwrap_err();
+            mainnet_max + 1,
+            u128::MAX,
+            1,
+            BOOTSTRAP_MESS_HEIGHT + 1,
+            mainnet_max,
+        )
+        .unwrap_err();
         assert!(err_mainnet.contains("exceeds absolute maximum"));
-        assert!(err_mainnet.contains("100"), "mainnet error must cite mainnet cap");
+        assert!(
+            err_mainnet.contains("100"),
+            "mainnet error must cite mainnet cap"
+        );
     }
 
     #[test]
@@ -3888,11 +4148,15 @@ mod tests {
                     tx_index: 0,
                     position: 0,
                 });
-            chain.spark_store.as_ref().unwrap().add_coin(SparkCoinEntry {
-                coin_id: height,
-                commitment: [byte; 32],
-                height,
-            });
+            chain
+                .spark_store
+                .as_ref()
+                .unwrap()
+                .add_coin(SparkCoinEntry {
+                    coin_id: height,
+                    commitment: [byte; 32],
+                    height,
+                });
             chain.kernel_store.as_ref().unwrap().append(MwKernel {
                 excess: [byte; 32],
                 signature: vec![0u8; 64],
@@ -3976,7 +4240,9 @@ mod tests {
         let chain = Blockchain::new();
         chain.init_genesis().unwrap();
         let count = chain.count_signaling_blocks_in_window(
-            10, 10, crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
+            10,
+            10,
+            crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
         );
         assert_eq!(count, 0);
     }
@@ -3993,7 +4259,9 @@ mod tests {
         // Chain is at height 0 (genesis only). Query window 1000..2000 —
         // none of those blocks exist; method must return 0, not panic.
         let count = chain.count_signaling_blocks_in_window(
-            1000, 2000, crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
+            1000,
+            2000,
+            crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
         );
         assert_eq!(count, 0);
     }
@@ -4007,7 +4275,9 @@ mod tests {
         let chain = Blockchain::new();
         chain.init_genesis().unwrap();
         let count = chain.count_signaling_blocks_in_window(
-            2000, 1000, crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
+            2000,
+            1000,
+            crate::consensus::fork_signal::bits::V1_0_12_BUNDLE,
         );
         assert_eq!(count, 0);
     }
@@ -4024,8 +4294,10 @@ mod tests {
         chain.set_sync_info(true, 0); // height-synced
         assert!(chain.is_synced(), "baseline: height-synced reports synced");
         chain.set_work_behind(true); // a heavier chain is discovered
-        assert!(!chain.is_synced(),
-            "work-behind must veto synced even though the height flag is true");
+        assert!(
+            !chain.is_synced(),
+            "work-behind must veto synced even though the height flag is true"
+        );
         chain.set_work_behind(false); // anti-wedge clears the claim
         assert!(chain.is_synced(), "clearing the veto restores synced");
     }
@@ -4049,7 +4321,8 @@ mod tests {
             let count = chain.count_signaling_blocks_in_window(0, 1, bit);
             assert_eq!(
                 count, 0,
-                "genesis coinbase unexpectedly signaled bit 0x{:08x}", bit
+                "genesis coinbase unexpectedly signaled bit 0x{:08x}",
+                bit
             );
         }
     }
