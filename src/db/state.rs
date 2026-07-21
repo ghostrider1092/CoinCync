@@ -23,12 +23,50 @@ pub struct ChainStateData {
     pub height: u64,
     /// Total difficulty
     pub total_difficulty: u128,
-    /// Total supply
-    pub total_supply: u64,
+    /// Total (cumulative) emitted supply, in atomic units.
+    ///
+    /// `u128`, not `u64`: MAX_SUPPLY = 100M CYNC × 10^12 atomic/CYNC = 10^20,
+    /// which exceeds `u64::MAX` (~1.84×10^19 ≈ 18.4M CYNC). The prior `u64`
+    /// aggregate overflowed and panicked the `checked_add` on block connect at
+    /// ~18.4M CYNC of cumulative emission (height ~408k). Individual `Amount`s
+    /// stay `u64` — only this running total widened. See `ChainStateDataLegacyV1`
+    /// for the on-disk migration.
+    pub total_supply: u128,
     /// Total burned
     pub total_burned: u64,
     /// Last checkpoint height
     pub last_checkpoint: u64,
+}
+
+/// Pre-widening on-disk layout of [`ChainStateData`] (`total_supply` was `u64`).
+///
+/// Kept only for the explicit schema-v1 to schema-v2 migration. Normal state
+/// reads never try this layout: the schema stamp, not deserialization success,
+/// determines which record format is valid.
+///
+/// Field order MUST match the original `ChainStateData` exactly because borsh
+/// is positional.
+#[derive(BorshDeserialize)]
+struct ChainStateDataLegacyV1 {
+    tip_hash: Hash,
+    height: u64,
+    total_difficulty: u128,
+    total_supply: u64,
+    total_burned: u64,
+    last_checkpoint: u64,
+}
+
+impl From<ChainStateDataLegacyV1> for ChainStateData {
+    fn from(v: ChainStateDataLegacyV1) -> Self {
+        ChainStateData {
+            tip_hash: v.tip_hash,
+            height: v.height,
+            total_difficulty: v.total_difficulty,
+            total_supply: v.total_supply as u128,
+            total_burned: v.total_burned,
+            last_checkpoint: v.last_checkpoint,
+        }
+    }
 }
 
 /// State database
@@ -43,7 +81,7 @@ pub struct StateDb {
 
 impl StateDb {
     /// State key constants
-    const KEY_CHAIN_STATE: &'static [u8] = b"chain_state";
+    pub(super) const KEY_CHAIN_STATE: &'static [u8] = b"chain_state";
     const KEY_GENESIS_HASH: &'static [u8] = b"genesis_hash";
 
     /// Create new state database
@@ -65,9 +103,27 @@ impl StateDb {
     /// Get chain state
     pub fn get_state(&self) -> Result<Option<ChainStateData>> {
         match self.state.get(Self::KEY_CHAIN_STATE) {
+            Ok(Some(data)) => Ok(Some(deserialize(&data)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(Error::DatabaseError(e.to_string())),
+        }
+    }
+
+    /// Decode the schema-v1 chain-state record for the registered v1→v2
+    /// migration. Keeping this separate from `get_state` prevents a malformed
+    /// or mis-stamped database from selecting its layout by trial decoding.
+    pub(super) fn read_schema_v1_state_for_migration(
+        &self,
+    ) -> Result<Option<ChainStateData>> {
+        match self.state.get(Self::KEY_CHAIN_STATE) {
             Ok(Some(data)) => {
-                let state: ChainStateData = deserialize(&data)?;
-                Ok(Some(state))
+                let legacy: ChainStateDataLegacyV1 = deserialize(&data).map_err(|e| {
+                    Error::DatabaseError(format!(
+                        "schema-v1 chain_state does not match the registered layout: {}",
+                        e
+                    ))
+                })?;
+                Ok(Some(legacy.into()))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(Error::DatabaseError(e.to_string())),
@@ -282,6 +338,41 @@ mod tests {
         let loaded = state_db.get_state().unwrap().unwrap();
         assert_eq!(loaded.height, 100);
         assert_eq!(loaded.total_supply, 1_000_000_000);
+    }
+
+    #[test]
+    fn get_state_rejects_schema_v1_layout_without_open_time_migration() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        // Mirror of the ORIGINAL on-disk field order, so borsh reproduces the
+        // exact legacy byte layout (total_supply as u64).
+        #[derive(BorshSerialize)]
+        struct LegacyWrite {
+            tip_hash: Hash,
+            height: u64,
+            total_difficulty: u128,
+            total_supply: u64,
+            total_burned: u64,
+            last_checkpoint: u64,
+        }
+        // A supply near the old u64 ceiling — exactly the regime that panicked.
+        let legacy = LegacyWrite {
+            tip_hash: Hash::from_bytes([7u8; 32]),
+            height: 407_838,
+            total_difficulty: 999,
+            total_supply: 18_446_744_073_000_000_000, // ~1.8446e19, just under u64::MAX
+            total_burned: 42,
+            last_checkpoint: 400_000,
+        };
+        let bytes = borsh::to_vec(&legacy).unwrap();
+        state_db.state.insert(StateDb::KEY_CHAIN_STATE, bytes).unwrap();
+
+        assert!(
+            state_db.get_state().is_err(),
+            "legacy records must only be decoded by the schema-v1 migration"
+        );
     }
 
     #[test]

@@ -234,7 +234,7 @@ async function loadBurnStats(){
   if(s('burn-split-normal'))s('burn-split-normal').textContent='Miner '+d.miner_pct_normal+'% / Burn '+d.burn_pct_normal+'%';
   if(s('burn-split-congested'))s('burn-split-congested').textContent='Miner '+d.miner_pct_congested+'% / Burn '+d.burn_pct_congested+'%';
   if(s('burn-congestion-thresh'))s('burn-congestion-thresh').textContent=d.congestion_threshold_pct+'% block fullness';
-  if(s('burn-supply'))s('burn-supply').textContent=num(Math.round((d.circulating_supply||0)/1e12))+' CYNC';
+  if(s('burn-supply'))s('burn-supply').textContent=num(Math.round(atomicToCyncDisplayNumber(d.circulating_supply)))+' CYNC';
   if(s('burn-max-supply'))s('burn-max-supply').textContent='100,000,000 CYNC';
   if(s('burn-deflation-thresh'))s('burn-deflation-thresh').innerHTML=num(Math.round((d.deflation_threshold_fee_per_block||0)/1e12))+' CYNC/block <span style="color:var(--t3);font-size:10px">— fees above this = deflation</span>';
 }

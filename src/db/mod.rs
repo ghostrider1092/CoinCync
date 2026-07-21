@@ -288,10 +288,8 @@ pub struct Database {
 //     `kVersionNumberFromDb > kCurrentVersion` check as the analogous
 //     shape; those specific identifier names were not located in
 //     current upstream this session and are dropped.)
-//   - Existing DB with stored < expected → future PR will run
-//     registered migration closures here. Today the migration table
-//     is empty, so this branch returns an explicit "no migration
-//     registered" error — better than a silent skip.
+//   - Existing DB with stored < expected → run the registered migration
+//     for that exact version pair, or fail if no path is registered.
 //
 // ## Prior art
 //
@@ -338,7 +336,8 @@ pub struct Database {
 /// | None           | YES         | Stamp EXPECTED, proceed                   |
 /// | None           | NO          | ERROR: legacy v0 DB needs migration       |
 /// | Some(v == EXP) | (either)    | Proceed                                   |
-/// | Some(v <  EXP) | (either)    | ERROR: no migration registered (today)    |
+/// | Some(v == 1)   | (either)    | Atomically migrate state to v2 and stamp  |
+/// | Some(v <  EXP) | (either)    | ERROR if no migration is registered       |
 /// | Some(v >  EXP) | (either)    | ERROR: future DB, downgrade binary        |
 ///
 /// Fresh-DB detection uses `BlockDb::is_empty()` (no blocks accepted
@@ -354,6 +353,7 @@ pub struct Database {
 fn verify_or_stamp_schema_version(
     metadata: &shim::Tree,
     blocks: &BlockDb,
+    state: &StateDb,
 ) -> Result<()> {
     let stored = metadata.get(SCHEMA_VERSION_KEY)
         .map_err(|e| Error::DatabaseError(format!(
@@ -370,6 +370,10 @@ fn verify_or_stamp_schema_version(
                 metadata.insert(SCHEMA_VERSION_KEY, &version_bytes)
                     .map_err(|e| Error::DatabaseError(format!(
                         "failed to stamp initial schema_version: {}", e
+                    )))?;
+                metadata.flush()
+                    .map_err(|e| Error::DatabaseError(format!(
+                        "failed to flush initial schema_version: {}", e
                     )))?;
                 tracing::info!(
                     "Fresh database initialized with schema_version = {}",
@@ -418,37 +422,89 @@ fn verify_or_stamp_schema_version(
                     Ok(())
                 }
                 std::cmp::Ordering::Greater => {
-                    // Stored > expected: DB created by a future binary,
-                    // operator downgraded. We refuse to start because we
-                    // can't safely read a layout newer than we know.
-                    Err(Error::DatabaseError(format!(
-                        "DB schema_version is {} but this binary expects {}. \
-                         The database was created by a newer binary; either \
-                         upgrade this binary to a release that knows version {}, \
-                         or wipe the data dir and resync.",
-                        stored_version, EXPECTED_DB_SCHEMA_VERSION, stored_version,
-                    )))
+                    reject_newer_schema(stored_version, EXPECTED_DB_SCHEMA_VERSION)
                 }
                 std::cmp::Ordering::Less => {
-                    // Stored < expected: an upgrade path is needed. In v1.0
-                    // there are no migrations (we're at v1). When v1.1
-                    // bumps EXPECTED to 2, this branch will dispatch into
-                    // a registered migration table (see future commit).
-                    Err(Error::DatabaseError(format!(
-                        "DB schema_version is {} but this binary expects {}. \
-                         No migration is registered for {} → {} yet. This is a \
-                         placeholder error — when v1.1 ships, this branch will \
-                         run the registered migration. For now: wipe the data dir \
-                         and resync from genesis, OR downgrade to a binary that \
-                         expects schema_version {}.",
-                        stored_version, EXPECTED_DB_SCHEMA_VERSION,
-                        stored_version, EXPECTED_DB_SCHEMA_VERSION,
-                        stored_version,
-                    )))
+                    migrate_schema(metadata, blocks, state, stored_version)
                 }
             }
         }
     }
+}
+
+fn reject_newer_schema(stored_version: u32, expected_version: u32) -> Result<()> {
+    if stored_version <= expected_version {
+        return Ok(());
+    }
+    Err(Error::DatabaseError(format!(
+        "DB schema_version is {} but this binary expects {}. The database was \
+         created by a newer binary; upgrade this binary to a release that knows \
+         version {}, or wipe the data dir and resync.",
+        stored_version, expected_version, stored_version,
+    )))
+}
+
+fn migrate_schema(
+    metadata: &shim::Tree,
+    blocks: &BlockDb,
+    state: &StateDb,
+    stored_version: u32,
+) -> Result<()> {
+    match (stored_version, EXPECTED_DB_SCHEMA_VERSION) {
+        (1, 2) => migrate_schema_v1_to_v2(metadata, blocks, state),
+        _ => Err(Error::DatabaseError(format!(
+            "DB schema_version is {} but this binary expects {}. No migration \
+             is registered for {} → {}. Wipe the data dir and resync, or use \
+             a binary that supports the stored schema.",
+            stored_version,
+            EXPECTED_DB_SCHEMA_VERSION,
+            stored_version,
+            EXPECTED_DB_SCHEMA_VERSION,
+        ))),
+    }
+}
+
+/// Widen the persisted cumulative supply from u64 to u128.
+///
+/// The state rewrite and schema stamp share one synchronous RocksDB batch.
+/// A failed migration therefore leaves both the schema-v1 record and stamp
+/// unchanged; a successful migration is already at v2 when it becomes visible.
+fn migrate_schema_v1_to_v2(
+    metadata: &shim::Tree,
+    blocks: &BlockDb,
+    state: &StateDb,
+) -> Result<()> {
+    use shim::transaction::Transactional;
+
+    let migrated_state = state.read_schema_v1_state_for_migration()?;
+    if migrated_state.is_none() && !blocks.is_empty() {
+        return Err(Error::DatabaseError(
+            "schema-v1 database contains blocks but no chain_state record; \
+             refusing to stamp schema v2 over incomplete state"
+                .into(),
+        ));
+    }
+    let migrated_bytes = migrated_state.as_ref().map(serialize).transpose()?;
+    let version_bytes = EXPECTED_DB_SCHEMA_VERSION.to_le_bytes();
+    let trees: &[&shim::Tree] = &[&state.state, metadata];
+
+    trees
+        .transaction(|tx_trees| {
+            if let Some(bytes) = &migrated_bytes {
+                tx_trees[0].insert(StateDb::KEY_CHAIN_STATE, bytes)?;
+            }
+            tx_trees[1].insert(SCHEMA_VERSION_KEY, version_bytes)?;
+            Ok(())
+        })
+        .map_err(|e| {
+            Error::DatabaseError(format!("schema v1 → v2 migration failed: {}", e))
+        })?;
+
+    tracing::info!(
+        "Database migrated atomically from schema_version 1 to {}",
+        EXPECTED_DB_SCHEMA_VERSION
+    );
+    Ok(())
 }
 
 /// Outcome of a [`migrate_legacy_db_to_v1`] call.
@@ -503,17 +559,12 @@ pub enum MigrationOutcome {
 ///
 /// - Empty DB (no block at height 0) — use normal [`Database::open`]
 ///   to initialize a fresh DB; this helper is only for legacy migration
-/// - DB stamped at a non-v1 version (would need a real migration table,
-///   not just a stamp)
+/// - DB stamped at a version other than legacy v1 or the current version
 /// - Genesis-hash mismatch (DB belongs to a different network/chain)
 /// - Any RocksDB I/O error during read/write
 ///
-/// ## Future
-///
-/// When v1 → v2 migration ships, the `Less` branch of
-/// [`verify_or_stamp_schema_version`] will dispatch into a registered
-/// migration table. This helper stays in place as the legacy-only
-/// entry point for v0 → v1.
+/// This helper remains the explicit legacy-only entry point for v0 → v1.
+/// Normal open then applies any registered migration from v1 onward.
 pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
     path: P,
     config: DbConfig,
@@ -551,9 +602,11 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
             let mut buf = [0u8; 4];
             buf.copy_from_slice(&bytes);
             let v = u32::from_le_bytes(buf);
-            if v == EXPECTED_DB_SCHEMA_VERSION {
+            if v == LEGACY_STAMPED_SCHEMA_VERSION
+                || v == EXPECTED_DB_SCHEMA_VERSION
+            {
                 tracing::info!(
-                    "DB already stamped at schema_version = {}. Nothing to do.",
+                    "DB already has schema_version = {}. Legacy stamping is complete.",
                     v,
                 );
                 return Ok(MigrationOutcome::AlreadyStamped);
@@ -609,7 +662,7 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
     }
 
     // Step 4: stamp.
-    let version_bytes = EXPECTED_DB_SCHEMA_VERSION.to_le_bytes();
+    let version_bytes = LEGACY_STAMPED_SCHEMA_VERSION.to_le_bytes();
     metadata.insert(SCHEMA_VERSION_KEY, &version_bytes)
         .map_err(|e| Error::DatabaseError(format!(
             "failed to write schema_version stamp: {}", e
@@ -626,7 +679,7 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
 
     tracing::info!(
         "Legacy DB migrated: schema_version stamped as {} (genesis verified: {})",
-        EXPECTED_DB_SCHEMA_VERSION,
+        LEGACY_STAMPED_SCHEMA_VERSION,
         actual_genesis,
     );
     Ok(MigrationOutcome::Stamped { genesis_hash: actual_genesis })
@@ -639,7 +692,9 @@ pub fn migrate_legacy_db_to_v1<P: AsRef<Path>>(
 ///   v1: initial mainnet-candidate (Oct 2026). Establishes the
 ///       versioning invariant — every subsequent layout change MUST
 ///       bump this AND ship a registered migration from v1 → vN.
-pub const EXPECTED_DB_SCHEMA_VERSION: u32 = 1;
+///   v2: `ChainStateData.total_supply` widened from u64 to u128.
+pub const EXPECTED_DB_SCHEMA_VERSION: u32 = 2;
+const LEGACY_STAMPED_SCHEMA_VERSION: u32 = 1;
 
 /// Reserved metadata tree name. Underscored name avoids accidental
 /// collision with consensus-layer tree names (which are unprefixed,
@@ -698,7 +753,7 @@ impl Database {
         // to start is the SAFE behavior. A node that silently mutates
         // a misversioned DB is the failure mode that produces "the
         // testnet DB got bricked by the v1.1 upgrade" stories.
-        verify_or_stamp_schema_version(&metadata, &blocks)?;
+        verify_or_stamp_schema_version(&metadata, &blocks, &state)?;
 
         tracing::info!("Database opened successfully");
 
@@ -1043,6 +1098,40 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[derive(borsh::BorshSerialize)]
+    struct SchemaV1ChainState {
+        tip_hash: Hash,
+        height: u64,
+        total_difficulty: u128,
+        total_supply: u64,
+        total_burned: u64,
+        last_checkpoint: u64,
+    }
+
+    fn write_schema_v1_state(path: &std::path::Path, total_supply: u64) {
+        let db = shim::Config::new().path(path).open().unwrap();
+        let state = db.open_tree("chain_state").unwrap();
+        let metadata = db.open_tree(METADATA_TREE_NAME).unwrap();
+        let legacy = SchemaV1ChainState {
+            tip_hash: Hash::from_bytes([0x71; 32]),
+            height: 407_838,
+            total_difficulty: 999,
+            total_supply,
+            total_burned: 42,
+            last_checkpoint: 400_000,
+        };
+        state
+            .insert(StateDb::KEY_CHAIN_STATE, borsh::to_vec(&legacy).unwrap())
+            .unwrap();
+        metadata
+            .insert(
+                SCHEMA_VERSION_KEY,
+                LEGACY_STAMPED_SCHEMA_VERSION.to_le_bytes(),
+            )
+            .unwrap();
+        db.flush().unwrap();
+    }
+
     #[test]
     fn test_database_open() {
         let dir = tempdir().unwrap();
@@ -1118,23 +1207,13 @@ mod tests {
         );
     }
 
-    /// DB stamped with an OLDER version (e.g., the operator upgraded
-    /// from v1.0 to a hypothetical v1.1) requires a registered migration.
-    /// Today the migration table is empty so this errors with a
-    /// migration-required message. When v1.1 ships with a v1→v2 migration
-    /// registered, that test will need updating.
+    /// A stamped version without a registered path still refuses to open.
     #[test]
     fn schema_version_older_version_requires_migration() {
-        // Skip if there's no "older" version (EXPECTED is at v1, lowest).
-        // When EXPECTED bumps to 2 in a future PR, this test starts
-        // running and asserts the migration-required error path.
-        if EXPECTED_DB_SCHEMA_VERSION <= 1 {
-            return;
-        }
         let dir = tempdir().unwrap();
         {
             let db = Database::open(dir.path()).unwrap();
-            let older_version: u32 = EXPECTED_DB_SCHEMA_VERSION - 1;
+            let older_version: u32 = 0;
             db.metadata
                 .insert(SCHEMA_VERSION_KEY, &older_version.to_le_bytes())
                 .unwrap();
@@ -1146,6 +1225,83 @@ mod tests {
         assert!(
             msg.contains("No migration is registered"),
             "error should request a migration; got: {}", msg,
+        );
+    }
+
+    #[test]
+    fn schema_v1_supply_migrates_reopens_and_rejects_v1_downgrade() {
+        let dir = tempdir().unwrap();
+        let legacy_supply = 18_446_744_073_000_000_000u64;
+        write_schema_v1_state(dir.path(), legacy_supply);
+
+        {
+            let db = Database::open(dir.path()).expect("v1 database should migrate");
+            assert_eq!(db.schema_version().unwrap(), 2);
+            let state = db.state.get_state().unwrap().unwrap();
+            assert_eq!(state.total_supply, legacy_supply as u128);
+
+            let mut beyond_u64 = state;
+            beyond_u64.total_supply = (u64::MAX as u128) + 1_000;
+            db.state.save_state(&beyond_u64).unwrap();
+            db.flush().unwrap();
+        }
+
+        let reopened = Database::open(dir.path()).expect("v2 database should reopen");
+        assert_eq!(reopened.schema_version().unwrap(), 2);
+        assert_eq!(
+            reopened.state.get_state().unwrap().unwrap().total_supply,
+            (u64::MAX as u128) + 1_000
+        );
+        assert!(
+            reject_newer_schema(reopened.schema_version().unwrap(), 1).is_err(),
+            "a schema-v1 binary must reject the migrated schema-v2 database"
+        );
+    }
+
+    #[test]
+    fn schema_v1_empty_database_advances_without_inventing_chain_state() {
+        let dir = tempdir().unwrap();
+        {
+            let db = Database::open(dir.path()).unwrap();
+            db.metadata
+                .insert(
+                    SCHEMA_VERSION_KEY,
+                    LEGACY_STAMPED_SCHEMA_VERSION.to_le_bytes(),
+                )
+                .unwrap();
+            db.flush().unwrap();
+        }
+
+        let migrated = Database::open(dir.path()).expect("empty v1 database should migrate");
+        assert_eq!(migrated.schema_version().unwrap(), EXPECTED_DB_SCHEMA_VERSION);
+        assert!(migrated.state.get_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_v1_supply_migration_does_not_advance_schema_stamp() {
+        let dir = tempdir().unwrap();
+        {
+            let db = shim::Config::new().path(dir.path()).open().unwrap();
+            let state = db.open_tree("chain_state").unwrap();
+            let metadata = db.open_tree(METADATA_TREE_NAME).unwrap();
+            state.insert(StateDb::KEY_CHAIN_STATE, b"not-borsh").unwrap();
+            metadata
+                .insert(
+                    SCHEMA_VERSION_KEY,
+                    LEGACY_STAMPED_SCHEMA_VERSION.to_le_bytes(),
+                )
+                .unwrap();
+            db.flush().unwrap();
+        }
+
+        assert!(Database::open(dir.path()).is_err());
+
+        let db = shim::Config::new().path(dir.path()).open().unwrap();
+        let metadata = db.open_tree(METADATA_TREE_NAME).unwrap();
+        let stamp = metadata.get(SCHEMA_VERSION_KEY).unwrap().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(stamp.as_ref().try_into().unwrap()),
+            LEGACY_STAMPED_SCHEMA_VERSION
         );
     }
 
@@ -1228,13 +1384,28 @@ mod tests {
         db.blocks.height_index
             .insert(&0u64.to_be_bytes(), genesis.as_bytes())
             .unwrap();
+        let legacy_state = SchemaV1ChainState {
+            tip_hash: genesis,
+            height: 0,
+            total_difficulty: 1,
+            total_supply: 0,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+        db.state
+            .state
+            .insert(
+                StateDb::KEY_CHAIN_STATE,
+                borsh::to_vec(&legacy_state).unwrap(),
+            )
+            .unwrap();
         // Strip the schema_version stamp — this is what makes it "legacy".
         db.metadata.remove(SCHEMA_VERSION_KEY).unwrap();
         db.flush().unwrap();
     }
 
     /// Happy path: legacy DB with matching genesis hash gets stamped.
-    /// After migration, `Database::open` succeeds and reports v1.
+    /// Normal open then applies the registered v1→v2 migration.
     #[test]
     fn migrate_legacy_db_to_v1_stamps_matching_genesis() {
         let dir = tempdir().unwrap();

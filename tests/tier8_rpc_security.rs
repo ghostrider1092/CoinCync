@@ -217,7 +217,7 @@ fn tier8_chain_stats_no_overflow() {
     let stats = chain.stats();
 
     assert!(stats.height == 0);
-    assert!(stats.total_supply.as_atomic() < u64::MAX);
+    assert!(stats.total_supply < u64::MAX as u128);
 }
 
 // =============================================================================

@@ -73,6 +73,20 @@ mod tests {
             .any(|source| source.contains(needle))
     }
 
+    fn app_source(path: &str) -> &'static str {
+        EXPLORER_APP_ASSETS
+            .iter()
+            .find_map(|(asset_path, source)| (*asset_path == path).then_some(*source))
+            .unwrap_or_else(|| panic!("missing embedded explorer asset: {path}"))
+    }
+
+    fn app_asset_index(path: &str) -> usize {
+        EXPLORER_APP_ASSETS
+            .iter()
+            .position(|(asset_path, _)| *asset_path == path)
+            .unwrap_or_else(|| panic!("missing embedded explorer asset: {path}"))
+    }
+
     /// Sanity check: the embedded asset set is non-trivial and the HTML
     /// shell references every extracted first-party asset.
     #[test]
@@ -110,6 +124,23 @@ mod tests {
         assert!(EXPLORER_CSS.contains(":root,[data-theme=\"paper\"]"));
         assert!(EXPLORER_THEME_JS.contains("localStorage.getItem('cync-theme')"));
         assert!(source_contains("function _computeApiBase()"));
+    }
+
+    #[test]
+    fn explorer_supply_display_uses_bigint_for_aggregate_values() {
+        let core = app_source("app/01-core.js");
+        let chain = app_source("app/02-chain.js");
+        let operator_tools = app_source("app/15-operator-tools.js");
+
+        assert!(core.contains("function atomicToCyncDisplayNumber(value)"));
+        assert!(core.contains("BigInt(value??0)"));
+        assert!(chain.contains("atomicToCyncDisplayNumber(supInfo.total_emitted)"));
+        assert!(chain.contains("const emittedAtomic=BigInt(supInfo.total_emitted??0)"));
+        assert!(operator_tools.contains("atomicToCyncDisplayNumber(d.circulating_supply)"));
+        assert!(!chain.contains("supInfo.total_emitted/1e12"));
+        assert!(!operator_tools.contains("(d.circulating_supply||0)/1e12"));
+        assert!(app_asset_index("app/01-core.js") < app_asset_index("app/02-chain.js"));
+        assert!(app_asset_index("app/01-core.js") < app_asset_index("app/15-operator-tools.js"));
     }
 
     /// Lock the JS-side ↔ server-side RPC surface together. Every

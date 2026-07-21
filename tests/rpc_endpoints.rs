@@ -260,6 +260,11 @@ async fn rpc_get_blockchain_info_returns_result() {
     let (url, _server) = start_test_server(19101).await;
     let resp = rpc_call(&url, "get_blockchain_info", json!([])).await;
     assert!(resp.get("result").is_some(), "get_blockchain_info must return result: {}", resp);
+    assert!(
+        resp["result"]["total_supply"].is_string(),
+        "aggregate atomic supply must use an exact decimal string: {}",
+        resp
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -568,15 +573,24 @@ async fn rpc_get_supply_info_has_fields() {
     let (url, _server) = start_test_server(19141).await;
     let resp = rpc_call(&url, "get_supply_info", json!([])).await;
     let r = &resp["result"];
-    // Verify at least one supply-related field exists (field names vary)
     assert!(
-        r.get("circulating").is_some()
-            || r.get("circulating_supply").is_some()
-            || r.get("total_supply").is_some()
-            || r.get("supply").is_some()
-            || r.get("height").is_some(),
-        "supply_info must have at least one supply field: {}", r
+        r.get("total_emitted").is_some_and(Value::is_string),
+        "total_emitted must be an exact decimal string: {}",
+        r
     );
+
+    let burn = rpc_call(&url, "get_burn_stats", json!([])).await;
+    assert!(burn["result"]["circulating_supply"].is_string());
+    assert_eq!(
+        burn["result"]["max_supply"],
+        coincync::constants::MAX_SUPPLY.to_string()
+    );
+
+    let metrics = rpc_call(&url, "get_metrics", json!([])).await;
+    assert!(metrics["result"]["chain_supply_atomic"].is_string());
+
+    let snapshot = rpc_call(&url, "get_state_snapshot", json!([])).await;
+    assert!(snapshot["result"]["total_supply"].is_string());
 }
 
 #[tokio::test(flavor = "multi_thread")]

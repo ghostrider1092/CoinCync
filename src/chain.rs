@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
-use crate::primitives::{Hash, Amount, KeyImage};
+use crate::primitives::{Hash, KeyImage};
 use crate::transaction::{DecoyOutput, Transaction};
 use crate::consensus::{Block, calculate_difficulty, DifficultyBlock, max_target};
 use crate::emission::calculate_block_reward;
@@ -233,13 +233,26 @@ pub struct ChainTip {
     pub timestamp: u64,
 }
 
+/// Prevents startup callers from treating a load failure as a fresh database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainLoadOutcome {
+    Fresh,
+    Loaded,
+}
+
 /// Chain statistics
 #[derive(Debug, Clone, Default)]
 pub struct ChainStats {
     pub height: u64,
     pub total_blocks: u64,
     pub total_transactions: u64,
-    pub total_supply: Amount,
+    /// Cumulative emitted supply, in atomic units.
+    ///
+    /// `u128`, not `Amount` (`u64`): MAX_SUPPLY = 100M CYNC × 10^12 = 10^20 >
+    /// `u64::MAX` (~18.4M CYNC). A `u64` aggregate overflowed and panicked the
+    /// `checked_add` on block connect at ~18.4M CYNC cumulative (height ~408k).
+    /// Individual `Amount`s stay `u64`; only this running total widened.
+    pub total_supply: u128,
     pub difficulty: u128,
     pub tip_hash: Hash,
     pub total_difficulty: u128,
@@ -386,9 +399,11 @@ pub struct Blockchain {
 }
 
 /// Extract stats snapshot for structured logging without holding lock in tracing macro.
-fn inner_stats_for_log(inner: &RwLock<BlockchainInner>) -> (u128, u64) {
+fn inner_stats_for_log(inner: &RwLock<BlockchainInner>) -> (u128, String) {
     let guard = inner.read();
-    (guard.stats.total_difficulty, guard.stats.total_supply.as_atomic())
+    // Decimal text preserves the full accumulator while remaining accepted by
+    // tracing subscribers that do not implement a native u128 value.
+    (guard.stats.total_difficulty, guard.stats.total_supply.to_string())
 }
 
 impl Blockchain {
@@ -633,10 +648,7 @@ impl Blockchain {
 
         // SECURITY: Verify genesis hash matches the hardcoded constant.
         // This catches accidental genesis block changes that would cause chain forks.
-        let expected = match self.network {
-            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
-            NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
-        };
+        let expected = self.expected_genesis_hash();
         if hash != expected {
             return Err(Error::InvalidState(format!(
                 "Genesis hash mismatch! Computed {} but expected {}. \
@@ -662,7 +674,7 @@ impl Blockchain {
             inner.stats.total_blocks = 1;
             inner.stats.total_transactions = genesis.transactions.len() as u64;
             inner.stats.tip_hash = hash;
-            inner.stats.total_supply = calculate_block_reward(0);
+            inner.stats.total_supply = calculate_block_reward(0).as_atomic() as u128;
 
             // SECURITY (CC-001): Apply genesis block transactions to UTXO set
             let batch = UtxoSet::batch_from_block(0, &genesis.transactions);
@@ -681,7 +693,7 @@ impl Blockchain {
                 tip_hash: hash,
                 height: 0,
                 total_difficulty: 1,
-                total_supply: calculate_block_reward(0).as_atomic(),
+                total_supply: calculate_block_reward(0).as_atomic() as u128,
                 total_burned: 0,
                 last_checkpoint: 0,
             };
@@ -693,6 +705,13 @@ impl Blockchain {
 
         tracing::info!("Genesis block initialized: {}", hash.to_hex());
         Ok(hash)
+    }
+
+    fn expected_genesis_hash(&self) -> Hash {
+        match self.network {
+            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
+            NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
+        }
     }
 
     /// Verify chain tip integrity after recovering from a poisoned lock.
@@ -721,10 +740,44 @@ impl Blockchain {
 
     /// Load chain state from database
     pub fn load_from_database(&self) -> Result<()> {
+        self.load_from_database_with_outcome().map(|_| ())
+    }
+
+    /// Genesis initialization requires an explicit fresh-database result.
+    pub fn load_from_database_with_outcome(&self) -> Result<ChainLoadOutcome> {
         if let Some(ref db) = self.db {
-            if let Some(state) = db.state.get_state()? {
-                // Load tip block
-                if let Some(tip_block) = db.blocks.get(&state.tip_hash)? {
+            let state = match db.state.get_state()? {
+                Some(state) => state,
+                None if !db.blocks.has_any_chain_data() => return Ok(ChainLoadOutcome::Fresh),
+                None => {
+                    return Err(Error::DatabaseError(
+                        "persisted block data exists without chain state; refusing to initialize genesis"
+                            .into(),
+                    ));
+                }
+            };
+
+            let actual_genesis = db.blocks.get_hash_by_height(0)?.ok_or_else(|| {
+                Error::DatabaseError(
+                    "chain state exists but the block height index has no genesis entry".into(),
+                )
+            })?;
+            let expected_genesis = self.expected_genesis_hash();
+            if actual_genesis != expected_genesis {
+                return Err(Error::DatabaseError(format!(
+                    "database genesis {} does not match the expected {} genesis {}",
+                    actual_genesis, self.network, expected_genesis,
+                )));
+            }
+
+            return match db.blocks.get(&state.tip_hash)? {
+                Some(tip_block) => {
+                    if tip_block.header.height != state.height {
+                        return Err(Error::DatabaseError(format!(
+                            "chain state height {} does not match tip block height {}",
+                            state.height, tip_block.header.height,
+                        )));
+                    }
                     let difficulty = calculate_difficulty_from_target(&tip_block.header.target);
                     {
                         let mut inner = self.inner.write();
@@ -735,7 +788,7 @@ impl Blockchain {
                             timestamp: tip_block.header.timestamp,
                         };
                         inner.stats.height = state.height;
-                        inner.stats.total_supply = Amount::from_atomic(state.total_supply);
+                        inner.stats.total_supply = state.total_supply;
                         inner.stats.tip_hash = state.tip_hash;
                         inner.stats.total_difficulty = state.total_difficulty;
                         // Sync stats.difficulty with the loaded tip. Without this,
@@ -823,11 +876,15 @@ impl Blockchain {
                     // Verify tip integrity after loading (catches poisoned lock corruption)
                     self.verify_tip_integrity()?;
 
-                    return Ok(());
+                    Ok(ChainLoadOutcome::Loaded)
                 }
-            }
+                None => Err(Error::DatabaseError(format!(
+                    "chain state references missing tip block {} at height {}",
+                    state.tip_hash, state.height,
+                ))),
+            };
         }
-        Ok(())
+        Ok(ChainLoadOutcome::Fresh)
     }
 
     /// Rebuild in-memory UTXO set by replaying all blocks from the database.
@@ -913,7 +970,7 @@ impl Blockchain {
                             tip_hash: inner.stats.tip_hash,
                             height: good_height,
                             total_difficulty: inner.stats.total_difficulty,
-                            total_supply: inner.stats.total_supply.as_atomic(),
+                            total_supply: inner.stats.total_supply,
                             total_burned: 0,
                             last_checkpoint,
                         };
@@ -1387,8 +1444,8 @@ impl Blockchain {
                         // audit block for the full rationale + prior art citations
                         // (specific upstream identifiers UNVERIFIED this session
                         // — see the updated block above).
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
-    .unwrap_or_else(|_| panic!(
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
+    .unwrap_or_else(|| panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at height being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
@@ -1487,7 +1544,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                 height: inner.stats.height,
                 tip_hash: inner.stats.tip_hash,
                 total_difficulty: inner.stats.total_difficulty,
-                total_supply: inner.stats.total_supply.as_atomic(),
+                total_supply: inner.stats.total_supply,
                 total_burned: 0,
                 last_checkpoint,
             };
@@ -1840,8 +1897,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                     // returns u64::MAX until the process is bounced. Panicking on
                     // overflow surfaces the corruption exactly once, at the site.
                     // Prior art matches the SEV-A rollback fix comment above.
-                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission)
-                        .unwrap_or_else(|_| panic!(
+                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission.as_atomic() as u128)
+                        .unwrap_or_else(|| panic!(
                             "CONSENSUS CORRUPTION: supply overflow on block connect — \
                              tried to add emission={} to total_supply={}. Emission is \
                              deterministic from height and cannot be attacker-controlled; \
@@ -1946,7 +2003,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                         tip_hash: hash,
                         height: block.header.height,
                         total_difficulty: stats.total_difficulty,
-                        total_supply: stats.total_supply.as_atomic(),
+                        total_supply: stats.total_supply,
                         total_burned: 0,
                         last_checkpoint: last_checkpoint_height,
                     };
@@ -2018,7 +2075,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                     difficulty = difficulty,
                     total_difficulty = stats_snapshot.0,
                     tip = %hash.to_hex(),
-                    supply_atomic = stats_snapshot.1,
+                    supply_atomic = %stats_snapshot.1,
                     "BLOCK_COMMIT"
                 );
 
@@ -2244,8 +2301,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                                 // handlers on this node flush RocksDB cleanly on shutdown
                                 // (the tokio signal handler installed for the 2026-06 zombie-
                                 // state fix). See operator rule `no self-defeating gates`.
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
-    .unwrap_or_else(|_| panic!(
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
+    .unwrap_or_else(|| panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at height being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
@@ -2409,8 +2466,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                     // returns u64::MAX until the process is bounced. Panicking on
                     // overflow surfaces the corruption exactly once, at the site.
                     // Prior art matches the SEV-A rollback fix comment above.
-                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission)
-                        .unwrap_or_else(|_| panic!(
+                    inner.stats.total_supply = inner.stats.total_supply.checked_add(emission.as_atomic() as u128)
+                        .unwrap_or_else(|| panic!(
                             "CONSENSUS CORRUPTION: supply overflow on block connect — \
                              tried to add emission={} to total_supply={}. Emission is \
                              deterministic from height and cannot be attacker-controlled; \
@@ -2475,8 +2532,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                                 // handlers on this node flush RocksDB cleanly on shutdown
                                 // (the tokio signal handler installed for the 2026-06 zombie-
                                 // state fix). See operator rule `no self-defeating gates`.
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
-    .unwrap_or_else(|_| panic!(
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
+    .unwrap_or_else(|| panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at height being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
@@ -2608,8 +2665,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                             // ~L2228). Doc-vs-code drift audit picked this up on the
                             // second pass. Same rationale + prior art as the fixed
                             // sites' audit blocks.
-inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
-    .unwrap_or_else(|_| panic!(
+inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission.as_atomic() as u128)
+    .unwrap_or_else(|| panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
          tried to subtract emission={} from total_supply={} at fork block being disconnected. \
          In-memory supply state is unrecoverable; halting to preserve on-disk state \
@@ -2676,8 +2733,8 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                         // are now uniform. Grep-verified: 0 remaining
                         // `total_supply.saturating_add` in this file.
                         let tip_emission = calculate_block_reward(block.header.height);
-                        inner.stats.total_supply = inner.stats.total_supply.checked_add(tip_emission)
-                            .unwrap_or_else(|_| panic!(
+                        inner.stats.total_supply = inner.stats.total_supply.checked_add(tip_emission.as_atomic() as u128)
+                            .unwrap_or_else(|| panic!(
                                 "CONSENSUS CORRUPTION: supply overflow on reorg tip apply — \
                                  tried to add tip_emission={} to total_supply={}. Emission is \
                                  deterministic from height and cannot be attacker-controlled; \
@@ -2894,7 +2951,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                         tip_hash: hash,
                         height: new_tip_height,
                         total_difficulty: fork_cumulative,
-                        total_supply: self.stats().total_supply.as_atomic(),
+                        total_supply: self.stats().total_supply,
                         total_burned: 0,
                         last_checkpoint,
                     };
@@ -2937,7 +2994,7 @@ inner.stats.total_supply = inner.stats.total_supply.checked_sub(emission)
                     reorg_depth = block.header.height.saturating_sub(fork_point),
                     total_difficulty = stats_snapshot.0,
                     tip = %hash.to_hex(),
-                    supply_atomic = stats_snapshot.1,
+                    supply_atomic = %stats_snapshot.1,
                     "REORG_COMMIT"
                 );
 
@@ -3494,6 +3551,47 @@ pub fn create_genesis_block() -> Block {
 mod tests {
     use super::*;
 
+    fn state_for_genesis(block: &Block) -> ChainStateData {
+        ChainStateData {
+            tip_hash: block.hash(),
+            height: block.header.height,
+            total_difficulty: 1,
+            total_supply: u128::from(calculate_block_reward(block.header.height).as_atomic()),
+            total_burned: 0,
+            last_checkpoint: 0,
+        }
+    }
+
+    #[test]
+    fn total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling() {
+        // Regression for the aggregate-supply overflow (junbyjun's finding):
+        // the running supply total crossed u64::MAX (~1.84e19 atomic ≈ 18.4M
+        // CYNC) at height ~407,828 and panicked the `checked_add` on block
+        // connect. The accumulator is now u128, so the same addition is well
+        // within range. Individual Amounts stay u64 — only this total widened.
+        let mut stats = ChainStats::default();
+        // Park it just below the old u64 ceiling…
+        stats.total_supply = u64::MAX as u128 - 5;
+        // …then apply the exact block reward junbyjun observed at height 407,838
+        // (~40.77 CYNC). On a u64 accumulator this addition overflowed.
+        let emission: u128 = 40_774_342_596_145;
+        stats.total_supply = stats
+            .total_supply
+            .checked_add(emission)
+            .expect("u128 accumulator must not overflow crossing the u64 ceiling");
+        assert!(stats.total_supply > u64::MAX as u128, "crossed the u64 ceiling");
+        // Proof the pre-fix u64 path would have overflowed at exactly this point:
+        assert!(
+            (u64::MAX - 5).checked_add(emission as u64).is_none(),
+            "the old u64 accumulator overflowed here — this is the bug"
+        );
+        assert_eq!(
+            stats.total_supply.to_string(),
+            "18446784848052147755",
+            "the exact post-ceiling aggregate remains available to API layers"
+        );
+    }
+
     #[test]
     fn test_genesis_block() {
         let genesis = create_genesis_block();
@@ -3508,6 +3606,75 @@ mod tests {
         let genesis_hash = chain.init_genesis().unwrap();
         assert_eq!(chain.height(), 0);
         assert_eq!(chain.tip().hash, genesis_hash);
+    }
+
+    #[test]
+    fn load_from_database_distinguishes_fresh_and_loaded_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+
+        assert_eq!(
+            chain.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Fresh
+        );
+        chain.init_genesis().unwrap();
+
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        assert_eq!(
+            reloaded.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Loaded
+        );
+    }
+
+    #[test]
+    fn load_from_database_rejects_blocks_without_chain_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(error.contains("without chain state"), "unexpected error: {}", error);
+    }
+
+    #[test]
+    fn load_from_database_rejects_missing_tip_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes([0x42; 32]),
+            height: 10,
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(error.contains("missing tip block"), "unexpected error: {}", error);
+    }
+
+    #[test]
+    fn load_from_database_rejects_wrong_network_genesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::mainnet::mainnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+        db.state.save_state(&state_for_genesis(&genesis)).unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(error.contains("does not match"), "unexpected error: {}", error);
     }
 
     #[test]

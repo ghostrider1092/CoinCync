@@ -194,6 +194,11 @@ const NODES=[
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
+function atomicToCyncDisplayNumber(value){
+  // Keep six display decimals using integer arithmetic before converting to
+  // Number; aggregate RPC fields are decimal strings because they exceed u64.
+  return Number(BigInt(value??0)/1000000n)/1000000;
+}
 const age=ts=>{const s=Math.max(0,Math.floor(Date.now()/1000)-ts);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':s<86400?Math.floor(s/3600)+'h':Math.floor(s/86400)+'d';};
 const fmtTs=ts=>new Date(ts*1000).toUTCString();
 const fmtSize=b=>b>1024?(b/1024).toFixed(1)+' kB':b+' B';

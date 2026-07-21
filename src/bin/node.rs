@@ -10,7 +10,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
-use coincync::chain::Blockchain;
+use coincync::chain::{Blockchain, ChainLoadOutcome};
 use coincync::config::Network;
 use coincync::db::Database;
 use coincync::mempool::SharedMempool;
@@ -324,7 +324,20 @@ async fn main() {
                     }
                 };
                 let chain = Blockchain::with_database(Arc::new(db), network);
-                let _ = chain.load_from_database();
+                match chain.load_from_database_with_outcome() {
+                    Ok(ChainLoadOutcome::Loaded) => {}
+                    Ok(ChainLoadOutcome::Fresh) => {
+                        error!(
+                            "Cannot export a snapshot from an uninitialized database at {}",
+                            chaindata_path.display()
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        error!("Cannot load chaindata for snapshot export: {}", e);
+                        std::process::exit(1);
+                    }
+                }
                 let tip = chain.tip();
                 let genesis = match network {
                     Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
@@ -684,7 +697,19 @@ async fn show_status(network: Network, data_dir: &PathBuf) {
     match Database::open(&db_path) {
         Ok(db) => {
             let chain = Blockchain::with_database(Arc::new(db), network);
-            let _ = chain.load_from_database();
+            match chain.load_from_database_with_outcome() {
+                Ok(ChainLoadOutcome::Loaded) => {}
+                Ok(ChainLoadOutcome::Fresh) => {
+                    println!("Network:   {:?}", network);
+                    println!("Data dir:  {:?}", db_path);
+                    println!("Chain:     not initialized");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("Failed to load database at {:?}: {}", db_path, e);
+                    std::process::exit(1);
+                }
+            }
             let tip = chain.tip();
             println!("Network:   {:?}", network);
             println!("Data dir:  {:?}", db_path);
@@ -746,15 +771,45 @@ async fn start_node(
         p2p_config.listen_addr = ([0, 0, 0, 0], network.default_p2p_port()).into();
     }
     // Parse --addnode entries up-front so any syntax errors fail before
-    // we open the database. Accept either "ip:port" or "[ipv6]:port"; the
-    // std `SocketAddr::from_str` handles both.
+    // we open the database. Accept a numeric "ip:port" / "[ipv6]:port"
+    // (std `SocketAddr::from_str`), OR a "host:port" hostname which we
+    // resolve via DNS — so operators can pass a stable DDNS seed name
+    // (e.g. seed1.coincync.network:28080) instead of an IP that rotates.
     let mut extra_peers: Vec<std::net::SocketAddr> = Vec::new();
+    // A clearnet DNS lookup here would leak the hostname under --proxy/--tor
+    // (the very leak DNS-seed resolution routes through SOCKS5 to avoid), so
+    // in proxied mode we require a numeric IP:port instead of resolving.
+    let addnode_proxied = proxy_arg.is_some() || tor_shortcut || onion_only;
     for raw in &addnodes {
-        match raw.parse::<std::net::SocketAddr>() {
-            Ok(addr) => extra_peers.push(addr),
-            Err(e) => {
-                warn!("Ignoring bad --addnode {:?}: {}", raw, e);
+        // Fast path: already a numeric socket address.
+        if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
+            extra_peers.push(addr);
+            continue;
+        }
+        if addnode_proxied {
+            warn!(
+                "--addnode {:?}: hostname resolution is disabled under --proxy/--tor \
+                 to avoid a DNS leak — pass a numeric IP:port instead",
+                raw
+            );
+            continue;
+        }
+        // Resolve "host:port" through the OS resolver, same as clearnet DNS
+        // seeds (see src/network/dns_seeds.rs).
+        match tokio::net::lookup_host(raw.as_str()).await {
+            Ok(resolved) => {
+                let addrs: Vec<std::net::SocketAddr> = resolved.collect();
+                if addrs.is_empty() {
+                    warn!("Ignoring --addnode {:?}: hostname resolved to no addresses", raw);
+                } else {
+                    info!("--addnode {:?}: resolved to {} address(es)", raw, addrs.len());
+                    extra_peers.extend(addrs);
+                }
             }
+            Err(e) => warn!(
+                "Ignoring bad --addnode {:?}: not an IP:port and DNS resolution failed: {}",
+                raw, e
+            ),
         }
     }
 
@@ -932,16 +987,19 @@ async fn start_node(
         coincync::crypto::mw_cutthrough::CutThroughEngine::new(),
     )));
 
-    if let Err(e) = chain.load_from_database() {
-        warn!("load_from_database: {} (will init genesis)", e);
-        let _ = chain.init_genesis();
-    } else if chain.tip().hash.is_zero() && chain.height() == 0 {
-        // Fresh DB: load_from_database returned Ok(()) with nothing
-        // to load (no saved tip state), so genesis was never inserted.
-        // Without this, every submitted block becomes an orphan because
-        // its parent (genesis) doesn't exist in the chain.
-        info!("Fresh database: initializing genesis block");
-        let _ = chain.init_genesis();
+    match chain.load_from_database_with_outcome() {
+        Ok(ChainLoadOutcome::Loaded) => {}
+        Ok(ChainLoadOutcome::Fresh) => {
+            info!("Fresh database: initializing genesis block");
+            if let Err(e) = chain.init_genesis() {
+                error!("Failed to initialize genesis: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            error!("Failed to load chain database: {}", e);
+            std::process::exit(1);
+        }
     }
 
     let tip = chain.tip();
@@ -967,7 +1025,7 @@ async fn start_node(
     // height. Without this, the initial handshake advertises 0 until a
     // new block is processed, which can take minutes on a quiet chain
     // and breaks block relay in the meantime.
-    p2p.set_chain_state(p2p.next_chain_seq(), tip.height, tip.hash).await;
+    p2p.set_chain_state(p2p.next_chain_update()).await;
 
     // Feed any --addnode peers into the address book so the peer-
     // discovery loop dials them on the next tick. This runs AFTER
@@ -1004,7 +1062,6 @@ async fn start_node(
                     // continue/loop-back.
                     let _block_timer = coincync::metrics::BLOCK_RECEIVE_TO_TIP.start_timer();
                     let hash = block.hash();
-                    let block_height = block.header.height;
                     let prev_hash = block.header.prev_hash;
                     let block_txs = block.transactions.clone();
                     let block_for_relay = block.clone();
@@ -1078,19 +1135,16 @@ async fn start_node(
                             // initial value (was a real bug: peers saw us as
                             // start_height=0 forever, broke block relay).
                             let p2p2 = event_p2p.clone();
-                            let new_height = event_chain.height();
-                            let new_tip = event_chain.tip_hash();
-                            // Capture the accept-order sequence BEFORE the
+                            // Capture the publication sequence BEFORE the
                             // detached spawn. These tasks are not serialized,
-                            // so an older one can complete after a newer one;
-                            // the seq lets set_chain_state drop the stale
-                            // write instead of regressing the P2P shadow
-                            // (issue #249).
-                            let chain_seq = event_p2p.next_chain_seq();
+                            // so an older one can complete after a newer one.
+                            // The ordered publication path reads the coherent
+                            // active-chain snapshot itself and drops stale
+                            // side effects (issue #249).
+                            let chain_update = event_p2p.next_chain_update();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_processed(hash, block_height).await;
-                                p2p2.set_chain_state(chain_seq, new_height, new_tip).await;
+                                p2p2.notify_block_processed(chain_update).await;
                                 let _ = p2p2.broadcast_block(&block_for_relay).await;
                             });
                         }

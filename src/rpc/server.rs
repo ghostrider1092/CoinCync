@@ -125,6 +125,13 @@ struct RpcState {
     stratum_transport_hardened: bool,
 }
 
+/// JSON numbers cannot portably carry all u128 values. Aggregate atomic supply
+/// values therefore use canonical base-10 strings at every RPC boundary.
+#[inline]
+fn supply_atomic_decimal(value: u128) -> String {
+    value.to_string()
+}
+
 fn serialize_peer_info(peer: &crate::network::peer::PeerInfo, minimize_metadata: bool) -> Value {
     if minimize_metadata {
         // P7-R1 SURGICAL FIX (2026-07-03): also redact peer_id in
@@ -867,7 +874,7 @@ pub async fn start_rpc_server(
             "timestamp":       tip.timestamp,
             "difficulty":      stats.difficulty.to_string(),
             "total_difficulty": stats.total_difficulty.to_string(),
-            "total_supply":    stats.total_supply.as_atomic(),
+            "total_supply":    supply_atomic_decimal(stats.total_supply),
             "mempool_size":    state.mempool.len(),
             "is_synced":       state.chain.is_synced(),
             "rpc_auth_enabled": state.auth_enabled,
@@ -934,7 +941,7 @@ pub async fn start_rpc_server(
         Ok::<_, ErrorObjectOwned>(json!({
             "height":             height,
             "current_reward":     reward.as_atomic(),
-            "total_emitted":      stats.total_supply.as_atomic(),
+            "total_emitted":      supply_atomic_decimal(stats.total_supply),
             "emission_phase":     phase.name(),
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
@@ -1186,14 +1193,12 @@ pub async fn start_rpc_server(
                 // instead and would otherwise leave handshake state stale.
                 if let Some(p2p) = state.p2p.as_ref() {
                     let p2p = p2p.clone();
-                    let new_height = state.chain.height();
-                    let new_tip = state.chain.tip_hash();
-                    // Capture the accept-order sequence BEFORE the detached
+                    // Capture the publication sequence BEFORE the detached
                     // spawn so an out-of-order completion can't regress the
                     // P2P shadow to a stale tip (issue #249).
-                    let seq = p2p.next_chain_seq();
+                    let update = p2p.next_chain_update();
                     tokio::spawn(async move {
-                        p2p.set_chain_state(seq, new_height, new_tip).await;
+                        p2p.set_chain_state(update).await;
                         if let Err(e) = p2p.broadcast_block(&block_for_broadcast).await {
                             warn!("Block broadcast failed: {}", e);
                         }
@@ -1356,7 +1361,7 @@ pub async fn start_rpc_server(
         let burn_pct = crate::constants::FEE_BURN_NORMAL_PERCENT;
         let miner_pct = crate::constants::FEE_MINER_NORMAL_PERCENT;
 
-        let supply = stats.total_supply.as_atomic();
+        let supply = supply_atomic_decimal(stats.total_supply);
         let max_supply = crate::constants::MAX_SUPPLY;
         let reward = crate::emission::calculate_block_reward(height).as_atomic();
         // Fees per block needed to make chain deflationary:
@@ -1377,7 +1382,7 @@ pub async fn start_rpc_server(
             "protocol_pct": 0,
             "block_reward": reward,
             "circulating_supply": supply,
-            "max_supply": max_supply as u64,
+            "max_supply": supply_atomic_decimal(max_supply),
             "deflation_threshold_fee_per_block": deflation_threshold as u64,
             "congestion_threshold_pct": crate::constants::CONGESTION_THRESHOLD,
         }))
@@ -1974,7 +1979,7 @@ pub async fn start_rpc_server(
             "chain_total_difficulty": stats.total_difficulty.to_string(),
             "chain_total_blocks": stats.total_blocks,
             "chain_total_transactions": stats.total_transactions,
-            "chain_supply_atomic": stats.total_supply.as_atomic(),
+            "chain_supply_atomic": supply_atomic_decimal(stats.total_supply),
 
             // Mempool metrics
             "mempool_size": mp_stats.tx_count,
@@ -2027,7 +2032,7 @@ pub async fn start_rpc_server(
             "height": stats.height,
             "tip_hash": tip.to_hex(),
             "total_difficulty": stats.total_difficulty.to_string(),
-            "total_supply": stats.total_supply.as_atomic(),
+            "total_supply": supply_atomic_decimal(stats.total_supply),
             "total_transactions": stats.total_transactions,
             "checkpoints": crate::testnet::testnet_checkpoints().iter()
                 .map(|cp| json!({"height": cp.height, "hash": cp.hash.to_hex()}))
@@ -2404,6 +2409,18 @@ pub async fn start_rpc_server(
 mod tests {
     use super::*;
     use http::Request;
+
+    #[test]
+    fn aggregate_supply_decimal_preserves_values_above_u64() {
+        assert_eq!(
+            supply_atomic_decimal((u64::MAX as u128) + 1),
+            "18446744073709551616"
+        );
+        assert_eq!(
+            supply_atomic_decimal(crate::constants::MAX_SUPPLY),
+            "100000000000000000000"
+        );
+    }
 
     #[test]
     fn peer_serialization_redacts_sensitive_fields_when_minimized() {

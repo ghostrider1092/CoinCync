@@ -72,6 +72,7 @@ Hardening posture fields in `get_info` / `get_blockchain_info`:
 ### `get_blockchain_info`  *(public)*
 
 Same idea as `get_info` but with extra accounting fields (`total_supply`, `total_difficulty`).
+Both aggregates are decimal strings so clients can preserve their full u128 values.
 
 ### `get_network_info`  *(public)*
 

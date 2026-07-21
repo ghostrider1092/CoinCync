@@ -106,7 +106,7 @@ pub fn verify_installed_db(
     manifest: &SnapshotManifest,
     checkpoints: &[(u64, Hash)],
 ) -> Result<()> {
-    use crate::chain::Blockchain;
+    use crate::chain::{Blockchain, ChainLoadOutcome};
     use crate::db::Database;
 
     let db = Database::open(chaindata_dir).map_err(|e| {
@@ -117,7 +117,11 @@ pub fn verify_installed_db(
         ))
     })?;
     let chain = Blockchain::with_database(Arc::new(db), network);
-    chain.load_from_database()?;
+    if chain.load_from_database_with_outcome()? == ChainLoadOutcome::Fresh {
+        return Err(Error::InvalidState(
+            "snapshot verify: installed database has no chain state".into(),
+        ));
+    }
     let tip = chain.tip();
     verify_chain_binding(manifest, tip.height, &tip.hash, checkpoints, |h| {
         chain.get_block_hash(h)

@@ -20,19 +20,9 @@
 //! - Multi-tree transactions collapse into a single RocksDB `WriteBatch`
 //!   (atomic across CFs). The transaction closure must be a pure write
 //!   path; no read-your-writes and no retry on conflict.
-//! - AUDIT (R-56 note, 2026-07-03): The `WriteBatch` commit in
-//!   `Transactional::transaction` uses default `WriteOptions`, which
-//!   in the `rocksdb` crate default constructor has `sync = false`.
-//!   That means committed multi-tree transactions are atomic AT THE
-//!   MEMTABLE LEVEL but NOT durable-on-return — a power loss between
-//!   commit and the next automatic WAL sync can lose the batch.
-//!   For consensus-critical batches (apply_reorg_atomic, mempool add,
-//!   wallet mark_spent), the caller MUST call `db.flush()` after the
-//!   transaction returns to guarantee durability. Documented so no
-//!   future caller assumes commit-implies-durable. A per-batch
-//!   WriteOptions::set_sync(true) would fix this at the shim level,
-//!   at the cost of an fsync per commit (~5-15 ms on SSD). Deferred
-//!   pending measurement on real hardware to decide the perf tradeoff.
+//! - Multi-tree transactions commit with `WriteOptions::set_sync(true)`.
+//!   The batch is atomic across column families and its WAL record is durable
+//!   before return, which is required by chain-state and schema migrations.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

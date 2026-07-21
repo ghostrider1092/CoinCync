@@ -72,7 +72,7 @@ async function poll(){
   $('tk-peers').textContent=info.peer_count;$('tk-pool').textContent=info.tx_pool_size+' txs';
   // Fetch real supply from get_supply_info (atomic units / 1e12 = CYNC)
   const supInfo=await rpc('get_supply_info');
-  const supCync=supInfo?(supInfo.total_emitted/1e12):0;
+  const supCync=supInfo?atomicToCyncDisplayNumber(supInfo.total_emitted):0;
   const rewCync=supInfo?(supInfo.current_reward/1e12):0;
   $('tk-supply').textContent=num(Math.round(supCync))+' CYNC';
   $('s-height').textContent=num(info.height);
@@ -87,8 +87,10 @@ async function poll(){
     try{
       const burnStats=await rpc('get_burn_stats');
       if(burnStats && supInfo){
-        const burnedAtomic=Math.max(0,(supInfo.total_emitted||0)-(burnStats.circulating_supply||0));
-        const burnedCync=burnedAtomic/1e12;
+        const emittedAtomic=BigInt(supInfo.total_emitted??0);
+        const circulatingAtomic=BigInt(burnStats.circulating_supply??0);
+        const burnedAtomic=emittedAtomic>circulatingAtomic?emittedAtomic-circulatingAtomic:0n;
+        const burnedCync=atomicToCyncDisplayNumber(burnedAtomic);
         // Render with 2 decimals if < 100 CYNC, else integer with commas.
         bv.textContent=burnedCync<100?burnedCync.toFixed(2):num(Math.round(burnedCync));
         const bs=$('burn-sub');

@@ -9,83 +9,53 @@ use crate::constants::{FEE_BURN_NORMAL_PERCENT, FEE_BURN_CONGESTED_PERCENT};
 use serde::{Serialize, Deserialize};
 use borsh::{BorshSerialize, BorshDeserialize};
 
+/// Aggregate totals use `u128` because the protocol supply can reach 10^20 atomic units.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SupplyState {
     pub height: u64,
-    pub total_minted: u64,
-    pub total_burned: u64,
+    pub total_minted: u128,
+    pub total_burned: u128,
     pub supply_commitment: [u8; 32],
 }
 
 impl SupplyState {
     pub fn genesis() -> Self { SupplyState::default() }
 
-    pub fn circulating(&self) -> u64 {
+    pub fn circulating(&self) -> u128 {
         self.total_minted.saturating_sub(self.total_burned)
     }
 
     /// Apply a block's emission and burn.
-    ///
-    /// AUDIT (R-32 fix site 1/3, 2026-07-02): saturating arithmetic
-    /// on supply totals is a silent-catastrophe risk — if either
-    /// total_minted or total_burned saturates at u64::MAX, subsequent
-    /// blocks become invisible to the audit chain. At CoinCync's
-    /// max emission per block, saturation would take
-    /// (u64::MAX / max_block_emission) blocks ≈ billions of years,
-    /// so the reachability is via bug / attack rather than natural
-    /// growth. We now detect a would-saturate condition via
-    /// `checked_add` first and emit a LOUD ERROR log if it fires.
-    /// The state is left at the saturation value (the same as
-    /// before) so the caller doesn't crash; but ops can now see the
-    /// event in structured logs and page immediately.
     pub fn apply_block(&mut self, emission: u64, burned: u64, height: u64) {
+        let total_minted = self
+            .total_minted
+            .checked_add(u128::from(emission))
+            .expect("valid protocol supply fits in u128");
+        let total_burned = self
+            .total_burned
+            .checked_add(u128::from(burned))
+            .expect("valid protocol burn total fits in u128");
+
         self.height = height;
-        match self.total_minted.checked_add(emission) {
-            Some(v) => self.total_minted = v,
-            None => {
-                tracing::error!(
-                    target: "audit_supply",
-                    event = "total_minted_saturated",
-                    total_minted = self.total_minted,
-                    emission = emission,
-                    height = height,
-                    "SUPPLY AUDIT: total_minted would overflow u64 at height {} \
-                     (current {}, +emission {}). Clamping at u64::MAX; every future \
-                     emission from this height forward will silently vanish from the \
-                     audit. This is either a chain bug or an attack — investigate NOW.",
-                    height, self.total_minted, emission,
-                );
-                self.total_minted = u64::MAX;
-            }
-        }
-        match self.total_burned.checked_add(burned) {
-            Some(v) => self.total_burned = v,
-            None => {
-                tracing::error!(
-                    target: "audit_supply",
-                    event = "total_burned_saturated",
-                    total_burned = self.total_burned,
-                    burned = burned,
-                    height = height,
-                    "SUPPLY AUDIT: total_burned would overflow u64 at height {} \
-                     (current {}, +burned {}). Clamping at u64::MAX.",
-                    height, self.total_burned, burned,
-                );
-                self.total_burned = u64::MAX;
-            }
-        }
+        self.total_minted = total_minted;
+        self.total_burned = total_burned;
         self.update_commitment();
     }
 
-    pub fn verify(&self, expected_supply: u64) -> bool {
+    pub fn verify(&self, expected_supply: u128) -> bool {
         self.circulating() == expected_supply
     }
 
     fn update_commitment(&mut self) {
         self.supply_commitment = *hash_domain(
             b"supply_commitment",
-            &[self.total_minted.to_le_bytes().as_slice(), self.total_burned.to_le_bytes().as_slice()].concat(),
-        ).as_bytes();
+            &[
+                self.total_minted.to_le_bytes().as_slice(),
+                self.total_burned.to_le_bytes().as_slice(),
+            ]
+            .concat(),
+        )
+        .as_bytes();
     }
 }
 
@@ -123,20 +93,11 @@ pub fn audit_block(
     if !fee_distribution_valid { issues.push("Fee distribution invalid".into()); }
 
     let burn_pct = if congested { FEE_BURN_CONGESTED_PERCENT } else { FEE_BURN_NORMAL_PERCENT };
-    // R-32 site 2/3: use u128 intermediate to keep `total_fees * burn_pct`
-    // representable up to u64::MAX * 100; then narrow back. `burn_pct` is
-    // 0..=100 by construction of the constant, so the u128 result is
-    // <= total_fees.as_atomic() and always fits in u64.
-    let approximate_burn = ((total_fees.as_atomic() as u128) * (burn_pct as u128) / 100) as u64;
-    // R-32 site 2/3 (continued): saturating arithmetic on the expected
-    // circulating supply matches SupplyState's saturating semantics —
-    // if the underlying arithmetic saturates in apply_block, the audit
-    // math here must match, otherwise supply_valid would false-flag.
-    // The `apply_block` fix emits a loud log on saturation; the audit
-    // path here inherits that visibility because a supply mismatch at
-    // saturation triggers the "Supply mismatch" issue below.
-    let expected_circulating = supply_before.circulating()
-        .saturating_add(emission.as_atomic())
+    let approximate_burn = u128::from(total_fees.as_atomic()) * u128::from(burn_pct) / 100;
+    let expected_circulating = supply_before
+        .circulating()
+        .checked_add(u128::from(emission.as_atomic()))
+        .expect("valid protocol supply fits in u128")
         .saturating_sub(approximate_burn);
 
     if supply_after.height != height {
@@ -168,7 +129,7 @@ pub fn audit_block(
 /// deferred until a consumer needs it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SupplySnapshot {
-    pub height: u64, pub circulating: u64, pub total_minted: u64, pub total_burned: u64, pub proof_hash: Hash,
+    pub height: u64, pub circulating: u128, pub total_minted: u128, pub total_burned: u128, pub proof_hash: Hash,
 }
 
 /// Deprecated: the type was never an authenticated proof. See
@@ -299,6 +260,60 @@ mod tests {
         state.apply_block(2_000_000, 100_000, 2);
         assert_eq!(state.total_minted, 3_000_000);
         assert_eq!(state.circulating(), 2_900_000);
+    }
+
+    #[test]
+    fn test_supply_state_preserves_values_above_u64_max() {
+        let mut state = SupplyState {
+            total_minted: u128::from(u64::MAX) - 5,
+            total_burned: u128::from(u64::MAX) - 100,
+            ..SupplyState::genesis()
+        };
+
+        state.apply_block(200, 150, 1);
+
+        assert_eq!(state.total_minted, u128::from(u64::MAX) + 195);
+        assert_eq!(state.total_burned, u128::from(u64::MAX) + 50);
+        assert_eq!(state.circulating(), 145);
+
+        let encoded = borsh::to_vec(&state).expect("serialize supply state");
+        let decoded: SupplyState = borsh::from_slice(&encoded).expect("deserialize supply state");
+        assert_eq!(decoded.total_minted, state.total_minted);
+        assert_eq!(decoded.total_burned, state.total_burned);
+
+        let snapshot = SupplySnapshot::from_state(&state);
+        let json = serde_json::to_string(&snapshot).expect("serialize supply snapshot");
+        let decoded: SupplySnapshot =
+            serde_json::from_str(&json).expect("deserialize supply snapshot");
+        assert_eq!(decoded.total_minted, snapshot.total_minted);
+        assert_eq!(decoded.total_burned, snapshot.total_burned);
+        assert!(decoded.verify());
+    }
+
+    #[test]
+    fn test_block_audit_accepts_circulating_supply_above_u64_max() {
+        let total_fees = 1_000u64;
+        let burned = total_fees * FEE_BURN_NORMAL_PERCENT / 100;
+        let before = SupplyState {
+            total_minted: u128::from(u64::MAX) - 100,
+            ..SupplyState::genesis()
+        };
+        let mut after = before.clone();
+        after.apply_block(1_000, burned, 1);
+
+        let audit = audit_block(
+            1,
+            Amount::from_atomic(total_fees),
+            Amount::from_atomic(1_000),
+            Amount::from_atomic(1_000),
+            true,
+            false,
+            &before,
+            &after,
+        );
+
+        assert!(after.circulating() > u128::from(u64::MAX));
+        assert!(audit.is_valid(), "{}", audit.summary());
     }
 
     #[test]

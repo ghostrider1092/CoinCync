@@ -121,9 +121,8 @@ Returns something like:
 {
   "height":         12345,
   "current_reward": 143000000000000,
-  "total_emitted":  1765035000000000000,
-  "emission_phase": "Launch",
-  "max_supply":     250000000000000000000
+  "total_emitted":  "1765035000000000000",
+  "emission_phase": "Launch"
 }
 ```
 

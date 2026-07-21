@@ -680,23 +680,33 @@ async fn get_supply(State(st): State<RestState>) -> Result<Json<Value>, (StatusC
 /// (6 fractional digits, matching the conventional display precision).
 ///
 /// Uses integer arithmetic — the f64 cast that appeared in earlier
-/// drafts loses precision above 2^53, and atomic supply (u64 * COIN
-/// = up to 10^20) sits well above that range.
+/// drafts loses precision above 2^53, and the u128 atomic-supply
+/// accumulator sits well above that range.
 async fn get_supply_circulating(
     State(st): State<RestState>,
 ) -> Result<String, (StatusCode, String)> {
     let info = jsonrpc_call(&st, "get_supply_info", Value::Array(vec![]))
         .await
         .map_err(|(code, body)| (code, body.0.to_string()))?;
-    let atomic = info
-        .get("total_emitted")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let coin: u64 = crate::constants::COIN;
-    let micro_per_coin: u64 = coin / 1_000_000; // 12 - 6 = 6 decimal trim
+    let atomic = parse_total_emitted_atomic(&info)
+        .map_err(|message| (StatusCode::BAD_GATEWAY, message.to_string()))?;
+    Ok(format_atomic_supply_micro(atomic))
+}
+
+fn parse_total_emitted_atomic(info: &Value) -> Result<u128, &'static str> {
+    info.get("total_emitted")
+        .and_then(Value::as_str)
+        .ok_or("get_supply_info returned no decimal-string total_emitted")?
+        .parse::<u128>()
+        .map_err(|_| "get_supply_info returned an invalid total_emitted value")
+}
+
+fn format_atomic_supply_micro(atomic: u128) -> String {
+    let coin = crate::constants::COIN as u128;
+    let micro_per_coin = coin / 1_000_000; // 12 atomic decimals → 6 display decimals
     let whole = atomic / coin;
     let frac_micro = (atomic % coin) / micro_per_coin;
-    Ok(format!("{}.{:06}", whole, frac_micro))
+    format!("{}.{:06}", whole, frac_micro)
 }
 
 /// GET /api/v1/supply/max — supply target in CYNC, plain text.
@@ -1217,9 +1227,9 @@ async fn get_emission(
         "step": step,
         "points": points,
         "current_height": chain_height,
-        "current_supply": supply.get("circulating"),
-        "max_supply_cync": 250_000_000u64,
-        "units_per_cync": 1_000_000_000_000u64,
+        "current_supply": supply.get("total_emitted"),
+        "max_supply_cync": crate::constants::TOTAL_SUPPLY_TARGET,
+        "units_per_cync": crate::constants::COIN,
     })))
 }
 
@@ -1670,6 +1680,38 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn circulating_formatter_preserves_supply_above_u64() {
+        let response = serde_json::json!({
+            "total_emitted": ((u64::MAX as u128) + 1).to_string()
+        });
+        assert_eq!(
+            parse_total_emitted_atomic(&response).unwrap(),
+            (u64::MAX as u128) + 1
+        );
+        assert_eq!(
+            format_atomic_supply_micro((u64::MAX as u128) + 1),
+            "18446744.073709"
+        );
+        assert_eq!(
+            format_atomic_supply_micro(crate::constants::MAX_SUPPLY),
+            "100000000.000000"
+        );
+    }
+
+    #[test]
+    fn circulating_parser_rejects_lossy_or_invalid_rpc_values() {
+        assert!(parse_total_emitted_atomic(&serde_json::json!({
+            "total_emitted": u64::MAX
+        }))
+        .is_err());
+        assert!(parse_total_emitted_atomic(&serde_json::json!({
+            "total_emitted": "not-a-number"
+        }))
+        .is_err());
+        assert!(parse_total_emitted_atomic(&serde_json::json!({})).is_err());
+    }
 
     fn make_test_router() -> Router {
         let state = RestState {

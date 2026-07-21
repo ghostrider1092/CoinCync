@@ -221,11 +221,20 @@ mod tests {
     use crate::primitives::Hash;
     use std::time::Duration;
 
+    const TEST_CLOCK_HEADROOM: Duration = Duration::from_secs(24 * 60 * 60);
+
+    fn test_now() -> Instant {
+        Instant::now() + TEST_CLOCK_HEADROOM
+    }
+
     fn mk(id_byte: u8, ip: &str, age_secs: u64, rep: i32, encrypted: bool, outbound: bool) -> PeerInfo {
         let mut id = [0u8; 32];
         id[0] = id_byte;
         let addr: SocketAddr = format!("{}:28080", ip).parse().unwrap();
-        let now = Instant::now();
+        // Use a synthetic clock with enough headroom for every seeded age.
+        // This keeps the fixture portable on hosts whose monotonic clock
+        // started less than two hours ago.
+        let now = test_now();
         PeerInfo {
             id,
             addr,
@@ -244,13 +253,14 @@ mod tests {
             remote_static_key: None,
             capabilities: 0,
             consecutive_full: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            connection_token: std::sync::Arc::new(()),
             eclipse_slot: None,
         }
     }
 
     #[test]
     fn no_candidates_returns_none() {
-        assert!(select_inbound_to_evict(std::iter::empty(), Instant::now(), &RelayScoreMap::new()).is_none());
+        assert!(select_inbound_to_evict(std::iter::empty(), test_now(), &RelayScoreMap::new()).is_none());
     }
 
     #[test]
@@ -260,7 +270,7 @@ mod tests {
             mk(2, "1.2.3.5", 3600, 50, true, true /*outbound*/),
         ];
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
+        assert!(select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new()).is_none(),
             "outbound peers must never be evicted");
     }
 
@@ -271,7 +281,7 @@ mod tests {
             mk(2, "1.2.3.5", 10, 50, true, false), // 10s old, still too young
         ];
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
+        assert!(select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new()).is_none(),
             "peers younger than MIN_AGE_BEFORE_EVICT must be protected");
     }
 
@@ -281,7 +291,7 @@ mod tests {
             .map(|i| mk(i, &format!("1.2.3.{}", i + 10), 3600, 100, false, false))
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        assert!(select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new()).is_none(),
+        assert!(select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new()).is_none(),
             "all-high-reputation peer pool must yield no eviction candidate");
     }
 
@@ -302,7 +312,7 @@ mod tests {
         peers.push(mk(23, "198.51.100.1", 7200, 90, true, false));
 
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        let evictee = select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new())
+        let evictee = select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new())
             .expect("with 16 candidates, eviction must succeed");
 
         // The evictee MUST come from the 10.0.x.y attacker /16.
@@ -326,7 +336,7 @@ mod tests {
             .map(|i| mk(i, &format!("10.0.0.{}", i + 1), 3600 + (i as u64) * 60, 50, false, false))
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
-        let evictee = select_inbound_to_evict(refs, Instant::now(), &RelayScoreMap::new())
+        let evictee = select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new())
             .expect("eviction must succeed");
 
         // Protection axes (with all-equal rep and last_seen, the
@@ -351,7 +361,7 @@ mod tests {
         // is unchanged, so the flooded /16 stays the most-concentrated group
         // and STILL loses a peer. Protecting good relayers must never become
         // an eclipse assist — this test fails loudly if it ever does.
-        let now = Instant::now();
+        let now = test_now();
         // 20 flood peers, all in 1.2.0.0/16, candidates (old enough, low rep).
         let flood: Vec<PeerInfo> = (0..20u8)
             .map(|i| mk(100 + i, &format!("1.2.{}.1", i), 300 + i as u64, 0, false, false))
@@ -389,7 +399,7 @@ mod tests {
         // Positive case: with no netgroup concentration to exploit, a peer
         // that has earned relay score is protected over one that hasn't.
         // Two diverse /16s, both single-peer; the relayer must survive.
-        let now = Instant::now();
+        let now = test_now();
         let relayer = mk(1, "9.9.9.9", 300, 0, false, false);
         let idle = mk(2, "8.8.8.8", 300, 0, false, false);
         let mut relay = RelayScoreMap::new();
