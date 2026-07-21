@@ -50,7 +50,7 @@ HTML is patched to use it.
 git add static/vendor checksums.txt
 git status                            # confirm what's being added
 
-# 3. Flip the HTML to use vendored paths
+# 3. Flip the frontend sources to use vendored paths
 ./patch-vendor.sh
 
 # 4. Update the test in src/rpc/explorer.rs that enumerates external
@@ -60,8 +60,8 @@ git status                            # confirm what's being added
 # 5. Verify
 cargo test --lib -p coincync explorer
 
-# 6. Commit the patched HTML + the test update
-git add ../../src/explorer/index.html ../../src/rpc/explorer.rs
+# 6. Commit the patched sources + the test update
+git add ../../src/explorer/fragments/00-shell.html ../../src/explorer/app ../../src/rpc/explorer.rs
 git commit -m "explorer: vendor chart.js, d3, topojson, globe.gl, world-atlas"
 ```
 
@@ -79,7 +79,7 @@ git commit -m "explorer: vendor chart.js, d3, topojson, globe.gl, world-atlas"
 `./fetch-vendor.sh --verify` skips downloading entirely — useful in
 CI to confirm a checked-in vendor directory hasn't been tampered with.
 
-`./patch-vendor.sh` is intentionally NOT idempotent on the HTML side
+`./patch-vendor.sh` is intentionally NOT idempotent on the source side
 (it's a one-way string substitution), but it bails cleanly with
 "already patched" warnings if the find-strings aren't present, so
 running it twice is harmless.
@@ -109,6 +109,6 @@ a pinned set.
 4. Run `./patch-vendor.sh`.
 5. Update `src/rpc/explorer.rs::tests::explorer_html_lists_external_cdns`
    to reflect the new state.
-6. Commit the file, `checksums.txt`, the patched HTML, and the test
+6. Commit the file, `checksums.txt`, the patched sources, and the test
    update — all in one commit so a future bisect lands on a
    self-consistent state.

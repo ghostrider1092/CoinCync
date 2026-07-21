@@ -1,0 +1,63 @@
+<!-- Beginner modal (#13) -->
+<div id="beginner-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:500;align-items:center;justify-content:center" onclick="this.style.display='none';localStorage.setItem('cync-seen','1')">
+  <div style="background:var(--surface);border:1px solid var(--b);border-radius:16px;padding:28px;max-width:500px;width:90%;max-height:80vh;overflow-y:auto" onclick="event.stopPropagation()">
+    <div style="font-family:var(--serif);font-size:22px;margin-bottom:4px">What is Coin<em style="color:var(--ac2);font-style:italic">Cync</em>?</div>
+    <div style="font-size:12px;color:var(--t3);margin-bottom:16px">A 2-minute intro for newcomers</div>
+    <div style="font-family:var(--mono);font-size:12px;color:var(--t2);line-height:1.8">
+      <p><strong style="color:var(--ac2)">CoinCync is a privacy cryptocurrency.</strong> Every transaction hides the sender, receiver, and amount by default — no opt-in required.</p>
+      <p style="margin-top:12px"><strong>How is that possible?</strong></p>
+      <ul style="margin:8px 0;padding-left:20px">
+        <li><strong>CLSAG ring signatures</strong> — your real identity hides among 10 decoys</li>
+        <li><strong>Stealth addresses</strong> — every payment goes to a unique one-time address</li>
+        <li><strong>Pedersen commitments</strong> — amounts are hidden but provably balanced</li>
+        <li><strong>Bulletproofs+</strong> — proves amounts are valid without revealing them</li>
+      </ul>
+      <p style="margin-top:12px"><strong>Key facts:</strong></p>
+      <ul style="margin:8px 0;padding-left:20px">
+        <li>100 million CYNC max supply — no inflation</li>
+        <li>CPU mining only (RandomX) — no ASICs, no GPUs</li>
+        <li>0% dev tax, 0% premine — all coins are mined fairly</li>
+        <li>Mainnet launches October 1, 2026</li>
+      </ul>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="this.closest('[id]').style.display='none';localStorage.setItem('cync-seen','1')">Got it — explore</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast notification container -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- Keyboard shortcuts overlay -->
+<div class="kbd-overlay" id="kbd-overlay" onclick="this.classList.remove('show')">
+  <div class="kbd-box" onclick="event.stopPropagation()">
+    <div style="font-family:var(--mono);font-size:14px;font-weight:600;margin-bottom:16px;color:var(--ac2)">Keyboard Shortcuts</div>
+    <div class="kbd-row"><span>Home</span><span class="kbd-key">H</span></div>
+    <div class="kbd-row"><span>Blocks</span><span class="kbd-key">B</span></div>
+    <div class="kbd-row"><span>Network</span><span class="kbd-key">N</span></div>
+    <div class="kbd-row"><span>Mempool</span><span class="kbd-key">M</span></div>
+    <div class="kbd-row"><span>Supply</span><span class="kbd-key">S</span></div>
+    <div class="kbd-row"><span>Search</span><span class="kbd-key">/</span></div>
+    <div class="kbd-row"><span>Toggle dark mode</span><span class="kbd-key">D</span></div>
+    <div class="kbd-row"><span>This overlay</span><span class="kbd-key">?</span></div>
+    <div style="margin-top:12px;text-align:center;font-size:11px;color:var(--t3)">Press Esc or click outside to close</div>
+  </div>
+</div>
+
+<!-- Transaction detail page (dynamically populated by viewTx()) -->
+<div class="page" id="page-tx">
+  <div class="content">
+    <div id="tx-detail">
+      <div class="loading">Select a transaction to view details</div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer moved to just before </body> 2026-05-23 to fix the
+     "footer renders above content on later pages" bug. When the footer
+     sat here, pages later in source order (page-hashrate onwards, plus
+     all newly-added privacy-stat pages) rendered with the footer ABOVE
+     them in the visible viewport, because inactive pages used display:
+     none and the footer fell wherever its document-order position landed.
+     The block has been hoisted to the end of <body> below. -->

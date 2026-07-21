@@ -1,0 +1,29 @@
+<footer>
+  <div class="footer-inner">
+    <div>
+      <div class="footer-brand">
+        <svg viewBox="0 0 200 200" width="24" height="24" aria-label="CoinCync logo" role="img"><circle cx="100" cy="100" r="78" fill="none" stroke="var(--logo-stroke, var(--ac2))" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/><circle cx="132" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/></svg>
+        <span class="logo-text">Coin<em>Cync</em></span>
+      </div>
+      <div class="footer-tagline">Privacy money that requires no permission.</div>
+    </div>
+    <div class="footer-links">
+      <span onclick="go('home')">Home</span>
+      <span onclick="go('blocks')">Blocks</span>
+      <span onclick="go('mempool')">Mempool</span>
+      <span onclick="go('network')">Network</span>
+      <span onclick="go('health')">Node Health</span>
+      <span onclick="go('supply')">Supply</span>
+    </div>
+    <div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
+        <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('✉','Subscribed',e.value,3000);e.value=''}else{showToast('⚠','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
+      </div>
+      <div class="footer-credit">Developed by Cync Lab · v1.0.12 stable · hard fork activates at h=13,000 · <span class="badge">✓ Auditable</span></div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

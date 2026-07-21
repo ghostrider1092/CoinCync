@@ -3,7 +3,7 @@
 
 **Status:** ready to push *after* the two cleanup items below are addressed. This document is the authoritative list of what lands on GitHub when the public repo is created.
 
-**Total tracked files:** 611
+**Total tracked files:** 657
 **Tag to push:** `v1.0.2-testnet`
 **Suggested repo name:** `coincync` (canonical) or `coincync-1.0`
 
@@ -31,30 +31,31 @@ The "Roll a new node binary across all 5 boxes" snippet inlines the actual fleet
 
 | Dir / file | Files | What it is |
 | --- | ---: | --- |
-| `src/` | 243 | Rust source — node, consensus, crypto, RPC, network, wallet, explorer page |
+| `src/` | 284 | Rust source — node, consensus, crypto, RPC, network, wallet, explorer page |
 | `coincync-wallet/` | 87 | Tauri wallet (React + Rust, sidecars excluded) |
 | `website/` | 58 | Marketing site (HTML + assets + wallpapers) |
 | `tests/` | 53 | Integration + adversarial test suites (14 tiers) |
 | `deploy/` | 52 | Caddy / nginx configs for explorer + landing + API |
 | `docs/` | 38 | Bill of Rights, Commentary, COMMANDS, DEVELOPER, CIPs, mdbook source |
 | `crates/` | 22 | `bridge`, `coincync-rig` (miner), `coincync-swap` (skeleton) |
-| `scripts/` | 21 | Public ops scripts (smoke-test, soak, fleet-check, faucet) |
+| `scripts/` | 24 | Public ops scripts (smoke-test, soak, fleet-check, faucet) |
+| `build/` | 1 | Explorer build-time assembly and embedded-asset generation |
 | `fuzz/` | 7 | Fuzz harness (cargo-fuzz targets) |
 | `.github/` | 7 | CI workflows (release, integration-tests, critical-lock, hardening, etc.) |
 | `tools/` | 5 | RPC client lib, vanity-gen, paper-wallet generator |
 | `release/` | 3 | Sample config + systemd unit + README (binaries ship via Releases) |
 | Top-level | 13 | `CONSTITUTION.md`, `LICENSE`, `README.md`, `Cargo.toml`, etc. |
 
-**Total: 611 files.**
+**Total: 657 files.**
 
 ---
 
 ## Detail by directory
 
-### `src/` — 243 files
+### `src/` — 284 files
 
 ```text
-  94  src/explorer/        # static HTML/JS/CSS for the embedded explorer
+ 135  src/explorer/        # assembled HTML sources, JS/CSS, and explorer assets
   30  src/network/         # P2P, Dandelion++, framing, sync, peer mgmt
   18  src/crypto/          # CLSAG, stealth, Pedersen, Bulletproofs+, view keys
   16  src/wallet/          # wallet logic (shared by CLI + Tauri)
@@ -100,7 +101,7 @@ The "Roll a new node binary across all 5 boxes" snippet inlines the actual fleet
                              # P2POOL_INTEGRATION.md, book.toml, build.sh
 ```
 
-### `scripts/` — 21 files (curated; ops-internal scripts gitignored)
+### `scripts/` — 24 files (curated; ops-internal scripts gitignored)
 
 ```text
   smoke-test-tx.ps1                Windows smoke test runner (end-to-end tx)
@@ -285,7 +286,7 @@ The `.gitignore` is comprehensive (156 lines). High-confidence exclusions:
 
 These are NOT secrets, but they map operational topology. Flagged for awareness, not for redaction:
 
-### Fleet IPs in `src/testnet.rs` and `src/explorer/index.html`
+### Fleet IPs in `src/testnet.rs` and `src/explorer/app/08-globe-network.js`
 
 ```
   66.135.23.193     seed1   (New Jersey)

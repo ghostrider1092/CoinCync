@@ -1,0 +1,483 @@
+<div class="page" id="removed-page-privacydoc">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Privacy Features</div>
+    <div class="doc-page"><h2>CoinCync Privacy Features</h2>
+<div style="height:8px"></div>
+<p>This document explains how privacy works in CoinCync.</p>
+<div style="height:8px"></div>
+<h3>Overview</h3>
+<div style="height:8px"></div>
+<p>CoinCync provides comprehensive transaction privacy through multiple layers:</p>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Layer</th><th>Technology</th><th>Protects</th></tr></thead><tbody>
+<tr><td>Sender</td><td>Ring Signatures (CLSAG)</td><td>Who sent the transaction</td></tr>
+<tr><td>Receiver</td><td>Stealth Addresses</td><td>Who received the transaction</td></tr>
+<tr><td>Amount</td><td>Pedersen Commitments</td><td>How much was transferred</td></tr>
+<tr><td>Validity</td><td>Bulletproofs</td><td>Amount is valid (no negative)</td></tr>
+<tr><td>Network</td><td>Dandelion++</td><td>IP address of sender</td></tr>
+<tr><td>P2P Transport</td><td>Noise Protocol</td><td>Traffic content and metadata</td></tr>
+<tr><td>RPC</td><td>TLS</td><td>Wallet-node communication</td></tr>
+<tr><td>Addresses</td><td>Subaddresses</td><td>Linking payments to a wallet</td></tr>
+<tr><td>Routing</td><td>Tor/SOCKS5 Proxy</td><td>Node IP address</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h3>Ring Signatures</h3>
+<div style="height:8px"></div>
+<h4>How They Work</h4>
+<div style="height:8px"></div>
+<p>When you send CYNC, your transaction input is mixed with decoys:</p>
+<div style="height:8px"></div>
+<p>1. Your real input is selected</p>
+<p>2. 10 additional decoy inputs are selected from the blockchain</p>
+<p>3. A ring signature proves one of the 11 is real, without revealing which</p>
+<p>4. An observer cannot determine which input is yours</p>
+<div style="height:8px"></div>
+<h4>Ring Size</h4>
+<div style="height:8px"></div>
+<p>Ring size increases over time for better privacy:</p>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Period</th><th>Ring Size</th><th>Anonymity Set</th></tr></thead><tbody>
+<tr><td>Year 0-2</td><td>11</td><td>1 in 11</td></tr>
+<tr><td>Year 2-5</td><td>16</td><td>1 in 16</td></tr>
+<tr><td>Year 5+</td><td>21</td><td>1 in 21</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<p>On young testnet chains (height &lt; 10,000), a minimum ring size of 2 is allowed to bootstrap the network. Privacy improves as more outputs become available.</p>
+<div style="height:8px"></div>
+<h4>Key Images</h4>
+<div style="height:8px"></div>
+<p>Each output can only be spent once. Key images ensure this:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Generated from the output and your secret key</li>
+<li>Unique to each output</li>
+<li>Reveals nothing about the output itself</li>
+<li>Stored on blockchain to prevent double-spending</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Decoy Selection</h4>
+<div style="height:8px"></div>
+<p>CoinCync uses intelligent decoy selection:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Based on realistic spending patterns</li>
+<li>Age-weighted distribution (gamma distribution)</li>
+<li>Minimum and maximum age limits</li>
+<li>Deduplication by public key before ring construction</li>
+<li>Prevents statistical analysis attacks</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Stealth Addresses</h3>
+<div style="height:8px"></div>
+<h4>One-Time Address Derivation</h4>
+<div style="height:8px"></div>
+<p>Every transaction output goes to a unique one-time address:</p>
+<div style="height:8px"></div>
+<p>1. Sender generates a random transaction secret</p>
+<p>2. Sender computes shared secret with recipient view key</p>
+<p>3. One-time address is derived from shared secret</p>
+<p>4. Only recipient can recognize and spend the output</p>
+<div style="height:8px"></div>
+<h4>Benefits</h4>
+<div style="height:8px"></div>
+<ul>
+<li>No address reuse</li>
+<li>Cannot link transactions to an address</li>
+<li>Recipient address never appears on blockchain</li>
+<li>Even sender cannot identify recipient later</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Coinbase Stealth Addresses</h4>
+<div style="height:8px"></div>
+<p>Mining rewards use ECDH-derived stealth addresses that are unique per block, preventing stealth index collisions on the UTXO set.</p>
+<div style="height:8px"></div>
+<h4>View Tags</h4>
+<div style="height:8px"></div>
+<p>For efficiency, each output includes a 1-byte view tag:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Wallet can quickly filter outputs</li>
+<li>255/256 non-matching outputs rejected instantly</li>
+<li>Full computation only for potential matches</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Subaddresses</h3>
+<div style="height:8px"></div>
+<h4>Subaddress Derivation</h4>
+<div style="height:8px"></div>
+<p>Subaddresses are unlinkable receive addresses derived from a single wallet:</p>
+<div style="height:8px"></div>
+<p>1. Derivation: <code>m = H(view_secret || account || index)</code></p>
+<p>2. Subaddress spend key: <code>m*G + spend_public</code></p>
+<p>3. Each subaddress has its own view key component</p>
+<div style="height:8px"></div>
+<h4>Privacy Benefits</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Cannot be linked to your primary address by outside observers</li>
+<li>Cannot be linked to each other without your private keys</li>
+<li>Give each sender a unique address for payment tracking</li>
+<li>Separate business and personal payments</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Management</h4>
+<div style="height:8px"></div>
+<pre><code>cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet subaddress new
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet subaddress list
+cync-wallet --wallet mywallet --password &lt;pass&gt; --network testnet subaddress label 0 "Donations"</code></pre>
+<div style="height:8px"></div>
+<h3>Pedersen Commitments</h3>
+<div style="height:8px"></div>
+<h4>Commitment Scheme</h4>
+<div style="height:8px"></div>
+<p>Transaction amounts are hidden using commitments:</p>
+<div style="height:8px"></div>
+<ul>
+<li><code>Commitment = amount * G + blinding * H</code></li>
+<li>G and H are generator points</li>
+<li>Blinding factor is random</li>
+<li>Amount is hidden but committed</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Homomorphic Property</h4>
+<div style="height:8px"></div>
+<p>Commitments can be added and subtracted:</p>
+<div style="height:8px"></div>
+<ul>
+<li>sum(input_commitments) = sum(output_commitments) + fee_commitment</li>
+<li>Verifiers check equation without knowing amounts</li>
+<li>Proves no coins created from nothing</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Auditable Supply</h4>
+<div style="height:8px"></div>
+<p>This is what makes CoinCync unique:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Every transaction proves balance</li>
+<li>Chain of commitments proves total supply</li>
+<li>Anyone can verify no inflation occurred</li>
+<li>Privacy maintained for individual amounts</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Bulletproofs</h3>
+<div style="height:8px"></div>
+<h4>What They Prove</h4>
+<div style="height:8px"></div>
+<p>Range proofs ensure amounts are valid:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Amount is between 0 and 2^64 - 1</li>
+<li>No negative amounts (no coin creation)</li>
+<li>No overflow attacks</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Efficiency</h4>
+<div style="height:8px"></div>
+<p>Bulletproofs are logarithmic in size:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Single output: ~672 bytes</li>
+<li>Multiple outputs: Aggregated, sublinear growth</li>
+<li>Padded to power-of-2 aggregation count for batch verification</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Zero-Knowledge</h4>
+<div style="height:8px"></div>
+<p>Proofs reveal nothing except:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Amount is in valid range</li>
+<li>Same blinding factor as commitment</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Dandelion++</h3>
+<div style="height:8px"></div>
+<h4>Network Privacy</h4>
+<div style="height:8px"></div>
+<p>Transaction propagation protects your IP:</p>
+<div style="height:8px"></div>
+<p>1. <strong>Stem Phase</strong>: Transaction sent to single peer</p>
+<p>2. Each peer either:</p>
+<ul>
+<li>Continues stem (90% chance)</li>
+<li>Fluffs to network (10% chance)</li>
+</ul>
+<p>3. After 2-7 hops or timeout, broadcast begins</p>
+<p>4. <strong>Fluff Phase</strong>: Normal broadcast to all peers</p>
+<div style="height:8px"></div>
+<h4>Privacy Guarantees</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Observers cannot determine transaction origin</li>
+<li>Even network-level adversaries face uncertainty</li>
+<li>Probabilistic protection against timing analysis</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Parameters</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>
+<tr><td>Minimum stem hops</td><td>2</td></tr>
+<tr><td>Maximum stem hops</td><td>7</td></tr>
+<tr><td>Fluff probability</td><td>10%</td></tr>
+<tr><td>Stem timeout</td><td>60 seconds</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h3>Noise Protocol (Encrypted P2P)</h3>
+<div style="height:8px"></div>
+<h4>How It Works</h4>
+<div style="height:8px"></div>
+<p>All node-to-node communication is encrypted using the Noise_XX handshake pattern:</p>
+<div style="height:8px"></div>
+<p>1. Initiator sends ephemeral X25519 public key</p>
+<p>2. Responder sends ephemeral + static keys (encrypted)</p>
+<p>3. Initiator sends static key (encrypted)</p>
+<p>4. All subsequent traffic uses ChaCha20-Poly1305 AEAD</p>
+<div style="height:8px"></div>
+<h4>Noise Privacy Benefits</h4>
+<div style="height:8px"></div>
+<ul>
+<li><strong>Traffic analysis resistance</strong>: P2P messages are encrypted and indistinguishable</li>
+<li><strong>Forward secrecy</strong>: Ephemeral keys per session; past traffic safe even if static key leaks</li>
+<li><strong>Mutual authentication</strong>: Both peers prove identity via static keys</li>
+<li><strong>ISP blindness</strong>: Network observers cannot identify CoinCync protocol traffic</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Node Identity</h4>
+<div style="height:8px"></div>
+<p>Each node has a persistent X25519 keypair stored at <code>{data_dir}/node_key</code>:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Generated automatically on first run</li>
+<li>Used for authentication during Noise handshake</li>
+<li>Public key serves as a stable node identifier</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Noise Configuration</h4>
+<div style="height:8px"></div>
+<pre><code># Require all peers to use encryption (reject plaintext)
+coincync-node --require-encryption --data-dir ./data --network testnet
+
+# Default: prefer encryption, fall back to plaintext if peer doesn't support it</code></pre>
+<div style="height:8px"></div>
+<h3>Tor Support (SOCKS5 Proxy)</h3>
+<div style="height:8px"></div>
+<h4>Proxy Routing</h4>
+<div style="height:8px"></div>
+<p>CoinCync can route all P2P traffic through a SOCKS5 proxy (typically Tor):</p>
+<div style="height:8px"></div>
+<ul>
+<li>Hides your node's real IP address from peers</li>
+<li>Supports .onion hidden service connections</li>
+<li>Tor is NOT bundled — install separately</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Tor Configuration</h4>
+<div style="height:8px"></div>
+<pre><code># Route through Tor
+coincync-node --proxy --proxy-address 127.0.0.1 --proxy-port 9050 \
+  --data-dir ./data --network testnet
+
+# Only connect to .onion peers
+coincync-node --proxy --onion-only --data-dir ./data --network testnet</code></pre>
+<div style="height:8px"></div>
+<h4>Combined with Noise</h4>
+<div style="height:8px"></div>
+<p>Noise encryption runs on top of the proxied TCP connection. The proxy sees only encrypted traffic, adding defense in depth even if the proxy is compromised.</p>
+<div style="height:8px"></div>
+<h3>TLS for RPC</h3>
+<div style="height:8px"></div>
+<h4>RPC Encryption</h4>
+<div style="height:8px"></div>
+<p>The JSON-RPC server uses TLS by default:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Auto-generated self-signed ECDSA P-256 certificate</li>
+<li>Protects wallet commands and credentials in transit</li>
+<li>Certificate fingerprint logged at startup for pinning</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Wallet Connection</h4>
+<div style="height:8px"></div>
+<pre><code># Default: TLS enabled (accepts self-signed certs)
+cync-wallet --wallet mywallet --password &lt;pass&gt; --daemon 127.0.0.1:28081 sync
+
+# Disable TLS for local development
+cync-wallet --wallet mywallet --password &lt;pass&gt; --no-tls --daemon 127.0.0.1:28081 sync
+
+# Pin server certificate
+cync-wallet --wallet mywallet --password &lt;pass&gt; \
+  --tls-fingerprint &lt;sha256hex&gt; --daemon 127.0.0.1:28081 sync</code></pre>
+<div style="height:8px"></div>
+<h3>Forward-Secret View Keys</h3>
+<div style="height:8px"></div>
+<h4>Key Epochs</h4>
+<div style="height:8px"></div>
+<p>View keys change every 50,000 blocks (approximately 3.5 days):</p>
+<div style="height:8px"></div>
+<ul>
+<li>Current epoch key sees current transactions</li>
+<li>Old keys cannot see new transactions</li>
+<li>Limits exposure if view key is shared</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Privacy Benefit</h4>
+<div style="height:8px"></div>
+<p>If your view key is compromised:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Attacker sees only that epoch's transactions</li>
+<li>Future transactions remain private</li>
+<li>Past epochs may also be protected</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Grace Period</h4>
+<div style="height:8px"></div>
+<p>Two-epoch grace period for:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Wallet synchronization</li>
+<li>Incoming transactions during transition</li>
+<li>Smooth key rotation</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Transaction Privacy Best Practices</h3>
+<div style="height:8px"></div>
+<h4>Do</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Wait for confirmations before spending received funds</li>
+<li>Use subaddresses for each sender/payment purpose</li>
+<li>Keep wallet software updated</li>
+<li>Use Tor or VPN for additional network privacy</li>
+<li>Enable Noise encryption (default)</li>
+<li>Use TLS when connecting to remote nodes</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Avoid</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Spending immediately after receiving</li>
+<li>Reusing addresses</li>
+<li>Sharing view keys unnecessarily</li>
+<li>Connecting to untrusted nodes</li>
+<li>Disabling encryption without good reason</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Privacy Limitations</h3>
+<div style="height:8px"></div>
+<h4>Known Limitations</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Limitation</th><th>Mitigation</th></tr></thead><tbody>
+<tr><td>Ring size finite</td><td>Increases over time</td></tr>
+<tr><td>Timing correlation</td><td>Random delays in wallet</td></tr>
+<tr><td>Amount patterns</td><td>Transaction splitting</td></tr>
+<tr><td>IP address</td><td>Dandelion++, Noise, Tor</td></tr>
+<tr><td>Traffic analysis</td><td>Noise encryption</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h4>What Ring Signatures Do Not Hide</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Transaction occurred</li>
+<li>Approximate transaction time</li>
+<li>Number of inputs and outputs</li>
+<li>That one ring member is real</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Metadata</h4>
+<div style="height:8px"></div>
+<p>CoinCync protects transaction contents but:</p>
+<div style="height:8px"></div>
+<ul>
+<li>Blockchain is public</li>
+<li>Block timestamps are public</li>
+<li>Transaction size is visible</li>
+<li>Network monitoring may reveal IP without Tor</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Comparison to Other Privacy Coins</h3>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Feature</th><th>Monero</th><th>Zcash</th><th>CoinCync</th></tr></thead><tbody>
+<tr><td>Privacy mandatory</td><td>Yes</td><td>No</td><td>Yes</td></tr>
+<tr><td>Ring signatures</td><td>Yes</td><td>No</td><td>Yes</td></tr>
+<tr><td>Stealth addresses</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Confidential amounts</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Auditable supply</td><td>No</td><td>Partial</td><td>Yes</td></tr>
+<tr><td>Forward secrecy</td><td>No</td><td>No</td><td>Yes</td></tr>
+<tr><td>View keys</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Encrypted P2P</td><td>No</td><td>No</td><td>Yes (Noise)</td></tr>
+<tr><td>Subaddresses</td><td>Yes</td><td>No</td><td>Yes</td></tr>
+<tr><td>Confidential assets</td><td>No</td><td>No</td><td>Yes</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h3>View Keys and Selective Disclosure</h3>
+<div style="height:8px"></div>
+<h4>When to Use View Keys</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Tax reporting requirements</li>
+<li>Exchange compliance (KYC)</li>
+<li>Legal requests</li>
+<li>Business auditing</li>
+<li>Proving payment receipt</li>
+</ul>
+<div style="height:8px"></div>
+<h4>What View Keys Reveal</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Reveals</th><th>Does Not Reveal</th></tr></thead><tbody>
+<tr><td>Incoming amounts</td><td>Outgoing transactions</td></tr>
+<tr><td>Sender stealth data</td><td>Your total balance</td></tr>
+<tr><td>Transaction times</td><td>Other addresses you own</td></tr>
+<tr><td>Block heights</td><td>Ring signature decoys</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h4>Best Practices</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Only share view keys when required</li>
+<li>Use epoch-limited exports when possible</li>
+<li>Document why and when shared</li>
+<li>Understand disclosure scope</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Technical Details</h3>
+<div style="height:8px"></div>
+<h4>Cryptographic Foundations</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Curve: Curve25519 (Ristretto)</li>
+<li>Ring Signature: CLSAG</li>
+<li>Commitment: Pedersen</li>
+<li>Range Proof: Bulletproofs</li>
+<li>Hash: BLAKE3, SHA3-256</li>
+<li>P2P Encryption: Noise_XX (X25519 + ChaCha20-Poly1305)</li>
+<li>RPC Encryption: TLS 1.3 (ECDSA P-256)</li>
+</ul>
+<div style="height:8px"></div>
+<h4>Security Assumptions</h4>
+<div style="height:8px"></div>
+<ul>
+<li>Discrete logarithm problem is hard</li>
+<li>Hash functions are collision-resistant</li>
+<li>Random number generation is secure</li>
+<li>Implementation is correct</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Resources</h3>
+<div style="height:8px"></div>
+<ul>
+<li>[Protocol Specification](protocol.md)</li>
+<li>[Compliance Guide](compliance.md)</li>
+<li>[Wallet Guide](wallet.md)</li>
+<li>[Testnet Guide](testnet-guide.md)</li>
+</ul>
+<div style="height:8px"></div></div>
+  </div>
+</div>

@@ -1,0 +1,127 @@
+<div class="page" id="page-network">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Network</div>
+    <div class="page-title" style="margin-bottom:20px">Network status</div>
+    <div class="three-col" style="margin-bottom:20px">
+      <div class="panel">
+        <div class="panel-head">Live peers</div>
+        <div id="peers-list"><div class="loading">Loading...</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Chain info</div>
+        <div class="detail-grid">
+          <div class="dl">Height</div><div class="dv" id="net-h" style="color:var(--ac2);font-weight:600">—</div>
+          <div class="dl">Top hash</div><div class="dv" id="net-hash" style="font-size:10px">—</div>
+          <div class="dl">Difficulty</div><div class="dv" id="net-d">—</div>
+          <div class="dl" title="Network hashrate implied by current difficulty (= difficulty / 120s). Tracks ~10-20 min behind sudden hashrate changes because ASERT difficulty adjustment caps at 2× per block. If you just joined with a much higher hashrate than the network had before, your miner's reported H/s will be larger than this value until difficulty catches up.">Hashrate <span style="color:var(--t3);font-size:10px">(diff-implied, ASERT-lagged)</span></div><div class="dv" id="net-hr" style="color:var(--ac2)">—</div>
+          <div class="dl">Synced</div><div class="dv" id="net-s">—</div>
+          <div class="dl">Mempool</div><div class="dv" id="net-m">—</div>
+          <div class="dl">Outputs</div><div class="dv" id="net-o">—</div>
+          <div class="dl">Network</div><div class="dv"><span class="badge badge-amber">Testnet</span></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Data source</div>
+        <div style="padding:16px 20px;display:flex;flex-direction:column;gap:8px;font-family:var(--mono);font-size:11px">
+          <div><span style="color:var(--t3)">RPC route:</span> <span id="net-source" style="color:var(--ac2)">/api/testnet</span></div>
+          <div><span style="color:var(--t3)">Freshness:</span> <span id="net-freshness">—</span></div>
+          <div><span style="color:var(--t3)">Fleet probe:</span> <span>see <a onclick="go('health')" style="cursor:pointer;color:var(--ac2)">Node Health</a></span></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">Network parameters</div>
+      <table><thead><tr><th>Parameter</th><th>Value</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">consensus</td><td><span class="badge badge-amber">PoW</span></td><td style="color:var(--t2)">VDF-anchored Proof of Work</td></tr>
+        <tr><td class="mono">algorithms</td><td><span class="badge badge-purple">RandomX (CPU-only)</span></td><td style="color:var(--t2)">RandomX — CPU-only, ASIC-resistant</td></tr>
+        <tr><td class="mono">block_time</td><td style="color:var(--ac2);font-family:var(--mono)">~120 seconds</td><td style="color:var(--t2)">Target time between blocks</td></tr>
+        <tr><td class="mono">ring_size</td><td style="color:var(--ac2);font-family:var(--mono)">×16</td><td style="color:var(--t2)">Decoy inputs per transaction</td></tr>
+        <tr><td class="mono">signature</td><td><span class="badge">CLSAG</span></td><td style="color:var(--t2)">Compact Linkable Spontaneous Anonymous Group</td></tr>
+        <tr><td class="mono">propagation</td><td><span class="badge">Dandelion++</span></td><td style="color:var(--t2)">Privacy-preserving transaction broadcast</td></tr>
+        <tr><td class="mono">supply_cap</td><td style="font-family:var(--mono)">100,000,000 CYNC</td><td style="color:var(--t2)">Compile-time enforced — Article I</td></tr>
+        <tr><td class="mono">dev_tax</td><td style="color:var(--ac2);font-family:var(--mono)">0%</td><td style="color:var(--t2)">Constitutional requirement — Article II</td></tr>
+        <tr><td class="mono">curve</td><td style="font-family:var(--mono)">Ristretto255</td><td style="color:var(--t2)">Prime-order group over Curve25519</td></tr>
+        <tr><td class="mono">hash</td><td style="font-family:var(--mono)">BLAKE3 + SHA3-512</td><td style="color:var(--t2)">Checksums + key derivation</td></tr>
+      </tbody></table>
+    </div>
+    <!-- Hashrate History (#23) -->
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">Network Hashrate (live session)</div>
+      <div class="chart-wrap" style="height:200px"><canvas id="hr-history-canvas"></canvas></div>
+      <div style="padding:8px 16px;font-size:10px;color:var(--t3);text-align:center;font-family:var(--mono)">Estimated from difficulty / 120s block target · updates every 10s</div>
+    </div>
+  </div>
+</div>
+
+<!--  GLOBE  -->
+<div class="page" id="page-globe">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Globe</div>
+    <div class="page-title" style="margin-bottom:6px">Network globe</div>
+    <div class="page-sub" style="margin-bottom:12px">3D peer map in dedicated view</div>
+    <div class="panel">
+      <div class="panel-head">
+        Node map
+        <span style="font-size:11px;color:var(--t3);font-weight:400;text-transform:none;letter-spacing:0">— drag to rotate · scroll to zoom</span>
+        <span style="display:flex;gap:6px;margin-left:auto">
+          <button onclick="toggleGlobeMode()" id="globe-mode-btn" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--t2);font-size:10px;cursor:pointer;font-family:var(--mono)"> Pause</button>
+          <button onclick="toggleGlobeFullscreen()" id="globe-fs-btn" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--t2);font-size:10px;cursor:pointer;font-family:var(--mono)">⛶ Fullscreen</button>
+          <button onclick="globeResetView()" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--ac2);font-size:10px;cursor:pointer;font-family:var(--mono)">⌖ Reset</button>
+        </span>
+      </div>
+      <div id="globe-wrap" style="position:relative;width:100%;background:#000;border-radius:0 0 12px 12px;overflow:hidden;display:block;transition:all .3s">
+        <div id="globe-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;background:var(--s2);z-index:5">
+          <div style="font-family:var(--mono);font-size:12px;color:var(--t3)">Loading 3D globe...</div>
+          <div style="width:120px;height:3px;background:var(--s3);border-radius:2px;overflow:hidden"><div style="height:100%;background:var(--ac2);border-radius:2px;animation:loadbar 1.5s ease-in-out infinite"></div></div>
+        </div>
+        <div id="globe-el" style="width:100%;height:560px"></div>
+        <div id="globe-tt" style="display:none;position:absolute;background:var(--surface);border:1px solid var(--b);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:11px;color:var(--t);pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:20;min-width:180px"></div>
+        <div style="position:absolute;bottom:14px;right:14px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 12px;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.7);display:flex;flex-direction:column;gap:5px">
+          <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#D4A059;box-shadow:0 0 6px #D4A059;display:inline-block;flex-shrink:0"></span>Active node</div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:1px;background:rgba(212,160,89,.6);display:inline-block;flex-shrink:0"></span>P2P connection</div>
+          <div style="margin-top:2px;color:#D4A059;cursor:pointer" onclick="go('health')">Health dashboard →</div>
+        </div>
+      </div>
+      <div style="padding:10px 20px;background:var(--s2);border-top:1px solid var(--b);display:flex;gap:20px;align-items:center;font-size:11px;font-family:var(--mono);color:var(--t3);flex-wrap:wrap">
+        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#7EB87C;margin-right:5px;box-shadow:0 0 4px #7EB87C"></span>Live fleet map</span>
+        <span style="margin-left:auto">Drag to rotate · Scroll to zoom · Click node for details</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+
+<!--  NODE HEALTH  -->
+<div class="page" id="page-health">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Node Health</div>
+    <div class="page-title" style="margin-bottom:4px">Node health dashboard</div>
+    <div class="page-sub" style="margin-bottom:20px">Live status of the active 8-host CoinCync public testnet fleet (3 seeds + explorer + miner + 2 relays + api-nginx)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:-8px 0 12px 0">
+      <span class="badge">source: <span id="health-source">/health/*</span></span>
+      <span class="badge">freshness: <span id="health-freshness">—</span></span>
+    </div>
+    <div id="health-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin:-6px 0 14px 0">
+      <span class="badge">Online: —</span>
+      <span class="badge badge-amber">RPC Protected: —</span>
+      <span class="badge badge-red">Offline: —</span>
+    </div>
+    <div id="health-probe-meta" class="age" style="margin:-4px 0 12px 0">Last probe: — · refresh in —s</div>
+    <div class="health-grid" id="health-grid">
+      <!-- filled by JS -->
+      <div class="health-card"><div class="health-status"><div class="health-dot checking"></div><div><div class="health-ip">Checking nodes...</div></div></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">Node comparison</div>
+      <table>
+        <thead><tr><th>Node</th><th>Location</th><th>Role</th><th>Height</th><th>Peers</th><th>Mempool</th><th>Synced</th><th>Status</th></tr></thead>
+        <tbody id="health-table"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!--  SUPPLY  -->

@@ -145,7 +145,7 @@ $versionFiles = @(
   @{ Path = "Cargo.toml";                                Pattern = '(?m)^version\s*=\s*"([\d.]+)"';        Label = "Cargo.toml (root)" }
   @{ Path = "coincync-wallet-v2\src-tauri\Cargo.toml";   Pattern = '(?m)^version\s*=\s*"([\d.]+)"';        Label = "wallet-v2/src-tauri" }
   @{ Path = "coincync-wallet-v2\package.json";           Pattern = '"version":\s*"([\d.]+)"';              Label = "wallet-v2/package.json" }
-  @{ Path = "src\explorer\index.html";                   Pattern = 'v([\d.]+)';                            Label = "explorer (first match)" }
+  @{ Path = "src\explorer\fragments\00-shell.html";      Pattern = 'v([\d.]+)';                            Label = "explorer (first match)" }
 )
 $allConsistent = $true
 foreach ($vf in $versionFiles) {

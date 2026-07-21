@@ -8,7 +8,7 @@ This deployment path is intentionally **nginx-only**. Caddy artifacts were remov
 
 - `install-nginx-explorer.sh` — installs/updates nginx vhost for explorer, enables `/api/testnet`, `/api/mainnet`, and `/health/*` routes with bearer auth forwarding, validates config, reloads nginx.
 - `fetch-vendor.sh` — downloads/pins third-party frontend assets into `static/vendor`.
-- `patch-vendor.sh` — rewrites explorer HTML CDN URLs to `/static/vendor/...` paths.
+- `patch-vendor.sh` — rewrites explorer HTML/JavaScript CDN URLs to `/static/vendor/...` paths.
 - `static/vendor/` — vendored JS/fonts/textures used by the explorer frontend.
 
 ## Production deploy
@@ -74,7 +74,13 @@ If `/health/*` returns 502, check upstream node RPC reachability and auth key co
 
 ## Updating explorer frontend
 
-`src/explorer/index.html` is the source of truth. After pulling latest code on the host, nginx serves updated content immediately from `/var/www/explorer` path configured in the installer output.
+`src/explorer/` is the source of truth. `index.parts` orders the HTML shell and
+responsibility-scoped `fragments/`; deployment assembles them into the public
+`index.html`. The other first-party entry assets are `explorer.css`,
+`theme-init.js`, and the ordered scripts under `app/`; `assets/` and `static/`
+hold their supporting files. Use `deploy-explorer.sh` or the full installer so
+the complete entry bundle moves together. Source files under
+`src/explorer/fragments/` are not deployable documents.
 
 ## Vendored assets workflow
 

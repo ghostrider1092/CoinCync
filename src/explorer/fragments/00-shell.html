@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en" id="html-root">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>CoinCync Explorer — The private blockchain</title>
+<meta property="og:title" content="CoinCync Explorer — The private blockchain"/>
+<meta property="og:description" content="Live blockchain explorer for CoinCync. 100% private transactions. 0% dev tax. No premine. CLSAG ring signatures, stealth addresses, Bulletproofs+."/>
+<meta property="og:url" content="https://explorer.coincync.network"/>
+<meta property="og:type" content="website"/>
+<meta property="og:site_name" content="CoinCync Explorer"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta property="og:image" content="assets/wallpapers/wallpaper-01-mark-portrait.svg"/>
+<meta name="twitter:image" content="assets/wallpapers/wallpaper-01-mark-portrait.svg"/>
+<meta name="twitter:title" content="CoinCync Explorer — The private blockchain"/>
+<meta name="twitter:description" content="Live blockchain explorer. 100% private transactions. 0% dev tax. No premine. Ring signatures + stealth addresses + Bulletproofs+."/>
+<meta name="description" content="CoinCync blockchain explorer — live blocks, network stats, mining analytics, and documentation."/>
+<meta name="keywords" content="CoinCync, CYNC, privacy coin, blockchain explorer, ring signatures, stealth addresses, Bulletproofs, Dandelion++, testnet"/>
+<meta name="theme-color" content="#0A0A09"/>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='200' height='200' rx='40' fill='%230a0a09'/%3E%3Ccircle cx='100' cy='100' r='68' fill='none' stroke='%23d4a059' stroke-width='14'/%3E%3Cpath d='M 158 100 A 58 58 0 1 0 100 158' fill='none' stroke='%230a0a09' stroke-width='22'/%3E%3Cline x1='152' y1='100' x2='168' y2='100' stroke='%230a0a09' stroke-width='22'/%3E%3Ccircle cx='72' cy='100' r='10' fill='%23d4a059'/%3E%3Ccircle cx='128' cy='100' r='10' fill='%23d4a059'/%3E%3C/svg%3E">
+<!-- Old JPEG favicon removed -->
+
+<link rel="stylesheet" href="/assets/fonts/fonts/fonts.css">
+<script defer src="/static/vendor/chart.js/4.4.0/chart.umd.min.js"></script>
+<link rel="stylesheet" href="explorer.css">
+<script src="theme-init.js"></script>
+</head>
+<body>
+
+
+<div id="decay-clock" title="Time since last block">
+  <span class="dc-dot"></span>
+  <span class="dc-label">LAST BLOCK</span>
+  <span class="dc-val" id="dc-val">—</span>
+</div>
+
+
+<div class="top"><strong>TESTNET</strong> CoinCync is a privacy tool, not an investment — No central authority — 0% dev tax — Fully decentralized — Orchard/Spark/Kernel phase-2 stores dormant (reorg-rewind machinery wired, trees not yet appended to)</div>
+
+<div id="block-pulse-bar" style="position:fixed;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--ac2),transparent);z-index:999;transform-origin:left;transform:scaleX(0);opacity:0"></div>
+<nav>
+  <button class="hbg" onclick="toggleMobile()" aria-label="Menu">
+    <span></span><span></span><span></span>
+  </button>
+  <span class="logo" onclick="go('home')">
+    <svg viewBox="0 0 200 200" width="30" height="30" style="vertical-align:middle;margin-right:10px"><circle cx="100" cy="100" r="78" fill="none" stroke="var(--logo-stroke, var(--ac2))" stroke-width="14"/><path d="M 168 100 A 68 68 0 1 0 100 168" fill="none" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><line x1="162" y1="100" x2="178" y2="100" stroke="var(--logo-bg, var(--bg))" stroke-width="22"/><circle cx="68" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/><circle cx="132" cy="100" r="8" fill="var(--logo-dot, var(--ac2))"/></svg>
+    <!-- Old JPEG logo removed, replaced with SVG mark -->
+    <!-- Old JPEG logo removed -->
+    Coin<em>Cync</em>
+  </span>
+  <div class="nav-links">
+    <button class="nav-btn active" id="nb-home" onclick="go('home')">Home</button>
+    <button class="nav-btn" id="nb-blocks" onclick="go('blocks')">Blocks</button>
+    <button class="nav-btn" id="nb-mempool" onclick="go('mempool')">Mempool</button>
+    <button class="nav-btn" id="nb-network" onclick="go('network')">Network</button>
+    <button class="nav-btn" id="nb-globe" onclick="go('globe')">Globe</button>
+    <button class="nav-btn" id="nb-health" onclick="go('health')">Node Health</button>
+    <button class="nav-btn" id="nb-supply" onclick="go('supply')">Supply</button>
+    <button class="nav-btn" id="nb-anonset" onclick="go('anonset')">Anonymity</button>
+    <button class="nav-btn" id="nb-reorghistory" onclick="go('reorghistory')">Reorgs</button>
+    <button class="nav-btn" id="nb-feemarket" onclick="go('feemarket')">Fees</button>
+    <button class="nav-btn" id="nb-mininglive" onclick="go('mininglive')">Mining</button>
+    <button class="nav-btn" id="nb-compare" onclick="go('compare')">Features</button>
+    <button class="nav-btn" id="nb-privacypools" onclick="go('privacypools')">Pools</button>
+    <button class="nav-btn" id="nb-block" style="display:none">Block</button>
+    <button class="nav-btn" id="nb-search" style="display:none">Search</button>
+  </div>
+  <div class="nav-search">
+    <input id="nav-q" placeholder="Height or hash..." onkeydown="if(event.key==='Enter')doSearch()"/>
+    <button onclick="doSearch()">Go</button>
+  </div>
+  <!--
+    Network selector — testnet / mainnet toggle.
+    Persists choice in localStorage('cync-net'). The active selection
+    drives the value of the JS `RPC` variable (see setNetwork() below)
+    so all rpc() calls hit the right backend pool. Mainnet is greyed
+    out and shows a launch-countdown banner until 2026-10-01 00:00:00 UTC,
+    matching `mainnet_genesis()` in src/mainnet.rs.
+  -->
+  <div class="net-toggle" id="net-toggle" title="Switch between testnet and mainnet">
+    <button class="net-btn active" id="net-btn-testnet" onclick="setNetwork('testnet')">Testnet</button>
+    <button class="net-btn" id="net-btn-mainnet" onclick="setNetwork('mainnet')">Mainnet</button>
+  </div>
+  <div class="theme-picker" id="theme-picker">
+    <button class="theme-btn" onclick="if(window.innerWidth<=600){openAppearance()}else{document.getElementById('theme-picker').classList.toggle('open')}" title="Theme (t)">
+      <span class="theme-thumb" id="theme-thumb" aria-hidden="true"></span>
+      <span class="theme-label" id="theme-label">Paper</span>
+    </button>
+    <div class="theme-menu" id="theme-menu">
+      <button class="theme-opt active" data-theme="paper" onclick="setTheme('paper')">
+        <span class="t-swatch" style="background:#F5F3EE"><span class="t-dot" style="background:#D4A059"></span></span>Paper
+      </button>
+      <button class="theme-opt" data-theme="dark" onclick="setTheme('dark')">
+        <span class="t-swatch" style="background:#0A0A09"><span class="t-dot" style="background:#D4A059"></span></span>Dark
+      </button>
+      <button class="theme-opt" data-theme="brass" onclick="setTheme('brass')">
+        <span class="t-swatch" style="background:#D4A059"><span class="t-dot" style="background:#3A3328"></span></span>Brass
+      </button>
+      <button class="theme-opt" data-theme="cream" onclick="setTheme('cream')">
+        <span class="t-swatch" style="background:#F5F0E6"><span class="t-dot" style="background:#3A3328"></span></span>Cream
+      </button>
+      <button class="theme-opt" data-theme="midnight" onclick="setTheme('midnight')">
+        <span class="t-swatch" style="background:#08090E"><span class="t-dot" style="background:#D4A059"></span></span>Midnight
+      </button>
+      <button class="theme-opt" data-theme="forge" onclick="setTheme('forge')">
+        <span class="t-swatch" style="background:#121010"><span class="t-dot" style="background:#E07840"></span></span>Forge
+      </button>
+      <button class="theme-opt" data-theme="vault" onclick="setTheme('vault')">
+        <span class="t-swatch" style="background:#0A0C0A"><span class="t-dot" style="background:#A0B060"></span></span>Vault
+      </button>
+      <button class="theme-opt" data-theme="mono" onclick="setTheme('mono')">
+        <span class="t-swatch" style="background:#0A0A09"><span class="t-dot" style="background:#F5F0E8"></span></span>Mono
+      </button>
+      <button class="theme-opt" data-theme="contrast" onclick="setTheme('contrast')">
+        <span class="t-swatch" style="background:#000000"><span class="t-dot" style="background:#FFB840"></span></span>Contrast
+      </button>
+      <div style="height:1px;background:var(--b);margin:6px 0"></div>
+      <div style="padding:4px 12px 2px;font-size:9px;font-weight:600;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">Wallpaper</div>
+      <div class="wp-grid" id="wp-grid">
+        <button class="wp-thumb active" data-wp="none" onclick="setWallpaper('none',true)" title="None"><div class="wp-off">OFF</div></button>
+        <button class="wp-thumb" data-wp="01-field" onclick="setWallpaper('01-field',true)" title="Commitment Field"><img src="assets/wallpapers/wallpaper-01-commitment-field-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="01-mark" onclick="setWallpaper('01-mark',true)" title="Mark"><img src="assets/wallpapers/wallpaper-01-mark-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="02-proof" onclick="setWallpaper('02-proof',true)" title="The Proof"><img src="assets/wallpapers/wallpaper-02-proof-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="02-lockup" onclick="setWallpaper('02-lockup',true)" title="Lockup"><img src="assets/wallpapers/wallpaper-02-lockup-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="03-veil" onclick="setWallpaper('03-veil',true)" title="The Veil"><img src="assets/wallpapers/wallpaper-03-veil-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="03-reversed" onclick="setWallpaper('03-reversed',true)" title="Reversed"><img src="assets/wallpapers/wallpaper-03-reversed-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="04-formula" onclick="setWallpaper('04-formula',true)" title="The Formula"><img src="assets/wallpapers/wallpaper-04-formula-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="04-mono" onclick="setWallpaper('04-mono',true)" title="Mono Pair"><img src="assets/wallpapers/wallpaper-04-mono-pair-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="05-library" onclick="setWallpaper('05-library',true)" title="The Library"><img src="assets/wallpapers/wallpaper-05-library-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="05-specimen" onclick="setWallpaper('05-specimen',true)" title="Specimen"><img src="assets/wallpapers/wallpaper-05-specimen-sheet-landscape.svg" alt="" loading="lazy"></button>
+        <button class="wp-thumb" data-wp="06-construct" onclick="setWallpaper('06-construct',true)" title="Construction"><img src="assets/wallpapers/wallpaper-06-construction-landscape.svg" alt="" loading="lazy"></button>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<!-- APPEARANCE PANEL — full-screen on mobile, accessible from nav + mobile menu -->
+<div class="appear-overlay" id="appear-overlay" onclick="if(event.target===this)closeAppearance()">
+  <div class="appear-panel">
+    <div class="ap-header">
+      <span class="ap-title">Appearance</span>
+      <button class="ap-close" onclick="closeAppearance()">&times;</button>
+    </div>
+    <div class="ap-section">Theme</div>
+    <div class="ap-themes" id="ap-themes">
+      <button class="ap-theme active" data-theme="paper" onclick="setTheme('paper',true);markApTheme('paper')"><span class="ap-swatch" style="background:#F5F3EE"><span class="ap-dot" style="background:#D4A059"></span></span><span class="ap-name">Paper</span></button>
+      <button class="ap-theme" data-theme="dark" onclick="setTheme('dark',true);markApTheme('dark')"><span class="ap-swatch" style="background:#0A0A09"><span class="ap-dot" style="background:#D4A059"></span></span><span class="ap-name">Dark</span></button>
+      <button class="ap-theme" data-theme="brass" onclick="setTheme('brass',true);markApTheme('brass')"><span class="ap-swatch" style="background:#D4A059"><span class="ap-dot" style="background:#3A3328"></span></span><span class="ap-name">Brass</span></button>
+      <button class="ap-theme" data-theme="cream" onclick="setTheme('cream',true);markApTheme('cream')"><span class="ap-swatch" style="background:#F5F0E6"><span class="ap-dot" style="background:#3A3328"></span></span><span class="ap-name">Cream</span></button>
+      <button class="ap-theme" data-theme="midnight" onclick="setTheme('midnight',true);markApTheme('midnight')"><span class="ap-swatch" style="background:#08090E"><span class="ap-dot" style="background:#D4A059"></span></span><span class="ap-name">Midnight</span></button>
+      <button class="ap-theme" data-theme="forge" onclick="setTheme('forge',true);markApTheme('forge')"><span class="ap-swatch" style="background:#121010"><span class="ap-dot" style="background:#E07840"></span></span><span class="ap-name">Forge</span></button>
+      <button class="ap-theme" data-theme="vault" onclick="setTheme('vault',true);markApTheme('vault')"><span class="ap-swatch" style="background:#0A0C0A"><span class="ap-dot" style="background:#A0B060"></span></span><span class="ap-name">Vault</span></button>
+      <button class="ap-theme" data-theme="mono" onclick="setTheme('mono',true);markApTheme('mono')"><span class="ap-swatch" style="background:#0A0A09"><span class="ap-dot" style="background:#F5F0E8"></span></span><span class="ap-name">Mono</span></button>
+      <button class="ap-theme" data-theme="contrast" onclick="setTheme('contrast',true);markApTheme('contrast')"><span class="ap-swatch" style="background:#000000"><span class="ap-dot" style="background:#FFB840"></span></span><span class="ap-name">Contrast</span></button>
+    </div>
+    <div class="ap-section">Wallpaper</div>
+    <div class="ap-walls" id="ap-walls">
+      <button class="ap-wall active" data-wp="none" onclick="setWallpaper('none',true);markApWall('none')"><div class="ap-wall-off">OFF</div></button>
+      <button class="ap-wall" data-wp="01-field" onclick="setWallpaper('01-field',true);markApWall('01-field')"><img src="assets/wallpapers/wallpaper-01-commitment-field-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="01-mark" onclick="setWallpaper('01-mark',true);markApWall('01-mark')"><img src="assets/wallpapers/wallpaper-01-mark-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="02-proof" onclick="setWallpaper('02-proof',true);markApWall('02-proof')"><img src="assets/wallpapers/wallpaper-02-proof-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="02-lockup" onclick="setWallpaper('02-lockup',true);markApWall('02-lockup')"><img src="assets/wallpapers/wallpaper-02-lockup-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="03-veil" onclick="setWallpaper('03-veil',true);markApWall('03-veil')"><img src="assets/wallpapers/wallpaper-03-veil-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="03-reversed" onclick="setWallpaper('03-reversed',true);markApWall('03-reversed')"><img src="assets/wallpapers/wallpaper-03-reversed-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="04-formula" onclick="setWallpaper('04-formula',true);markApWall('04-formula')"><img src="assets/wallpapers/wallpaper-04-formula-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="04-mono" onclick="setWallpaper('04-mono',true);markApWall('04-mono')"><img src="assets/wallpapers/wallpaper-04-mono-pair-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="05-library" onclick="setWallpaper('05-library',true);markApWall('05-library')"><img src="assets/wallpapers/wallpaper-05-library-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="05-specimen" onclick="setWallpaper('05-specimen',true);markApWall('05-specimen')"><img src="assets/wallpapers/wallpaper-05-specimen-sheet-landscape.svg" alt="" loading="lazy"></button>
+      <button class="ap-wall" data-wp="06-construct" onclick="setWallpaper('06-construct',true);markApWall('06-construct')"><img src="assets/wallpapers/wallpaper-06-construction-landscape.svg" alt="" loading="lazy"></button>
+    </div>
+  </div>
+</div>
+
+<!--
+  Mainnet launch countdown banner — full-width, only visible when
+  the user has selected mainnet AND we're before the launch timestamp.
+  Hidden by default; shown by setNetwork() when relevant. Updates
+  every second via the countdown ticker in app/04-navigation.js.
+-->
+<div id="mainnet-countdown-banner" style="display:none;position:sticky;top:0;z-index:40;background:linear-gradient(90deg,#1a1a1a,#2a2a2a);color:#e5e5e5;padding:14px 24px;border-bottom:2px solid #f0c040;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+  <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#f0c040;font-weight:600">CoinCync Mainnet — Pre-Launch</div>
+  <div style="margin-top:4px;font-size:18px;font-weight:600">Launches in <span id="mainnet-countdown-value">—</span></div>
+  <div style="margin-top:2px;font-size:11px;color:#888">Genesis: October 1, 2026 00:00:00 UTC · Until then, only testnet data is queryable</div>
+</div>
+
+<!-- MOBILE MENU -->
+<div class="mobile-menu" id="mobile-menu">
+  <div style="display:flex;gap:6px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--b)">
+    <input id="mob-q" placeholder="Height or hash..." style="flex:1;padding:10px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--s2);color:var(--t);font-family:var(--mono)"/>
+    <button onclick="doSearch();closeMobile()" style="padding:10px 14px;border-radius:8px;background:var(--ac);color:#fff;border:none;font-size:13px;font-weight:600">Go</button>
+  </div>
+  <button class="mob-btn active" id="mob-home" onclick="go('home');closeMobile()">Home</button>
+  <button class="mob-btn" id="mob-blocks" onclick="go('blocks');closeMobile()">Blocks</button>
+  <button class="mob-btn" id="mob-mempool" onclick="go('mempool');closeMobile()">Mempool</button>
+  <button class="mob-btn" id="mob-network" onclick="go('network');closeMobile()">Network</button>
+  <button class="mob-btn" id="mob-globe" onclick="go('globe');closeMobile()">Globe</button>
+  <button class="mob-btn" id="mob-health" onclick="go('health');closeMobile()">Node Health</button>
+  <button class="mob-btn" id="mob-supply" onclick="go('supply');closeMobile()">Supply</button>
+  <div style="height:1px;background:var(--b);margin:8px 0"></div>
+  <div style="padding:6px 14px 4px;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">Privacy stats</div>
+  <button class="mob-btn" id="mob-anonset" onclick="go('anonset');closeMobile()">Anonymity-set viewer</button>
+  <button class="mob-btn" id="mob-reorghistory" onclick="go('reorghistory');closeMobile()">Reorg history</button>
+  <button class="mob-btn" id="mob-feemarket" onclick="go('feemarket');closeMobile()">Fee estimator</button>
+  <button class="mob-btn" id="mob-mininglive" onclick="go('mininglive');closeMobile()">Live mining</button>
+  <button class="mob-btn" id="mob-compare" onclick="go('compare');closeMobile()">Privacy features</button>
+  <button class="mob-btn" id="mob-privacypools" onclick="go('privacypools');closeMobile()">Privacy pools (Phase 2)</button>
+  <div style="height:1px;background:var(--b);margin:8px 0"></div>
+  <button class="mob-btn" onclick="closeMobile();openAppearance()" style="color:var(--ac2)">Appearance</button>
+  <div style="border-top:1px solid var(--b);margin-top:8px;padding-top:8px"></div>
+  <div style="padding:16px;margin-top:8px;border-top:1px solid var(--b)">
+    <input style="width:100%;padding:10px 14px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--s2);color:var(--t);outline:none;font-family:var(--mono)" placeholder="Search height or hash..." onkeydown="if(event.key==='Enter'){doSearch();closeMobile()}" id="mob-q2"/>
+  </div>
+</div>
+
+<div class="ticker">
+  <div><span class="live-dot" id="live-dot"></span><span class="label">Live</span><span class="val up" id="status">Connecting...</span><span id="net-heartbeat" title="Network heartbeat — pulses on every successful poll"></span></div>
+  <div><span class="label">Height</span><span class="val" id="tk-height">—</span></div>
+  <div><span class="label">Difficulty</span><span class="val" id="tk-diff">—</span></div>
+  <div title="Network hashrate implied by current difficulty (= difficulty / 120s block time). This is the chain's running average -- ASERT difficulty adjustment caps at 2x per block, so when a fast miner joins, this value tracks 10-20 minutes behind their actual reported rate. If your local miner says 'X KH/s' and this says 'Y H/s', that's expected during the catch-up window."><span class="label">Network HR</span><span class="val up" id="tk-hr">—</span><span style="color:var(--t3);font-size:9px;margin-left:3px;cursor:help" title="Hover the label for an explanation of why this can differ from your miner's reported hashrate.">&#9432;</span></div>
+  <div><span class="label">Peers</span><span class="val" id="tk-peers">—</span></div>
+  <div><span class="label">Mempool</span><span class="val" id="tk-pool">—</span></div>
+  <div><span class="label">Ring Size</span><span class="val">16</span></div>
+  <div><span class="label">Supply</span><span class="val" id="tk-supply">—</span></div>
+  <div><span class="label">Version</span><span class="val">v1.0.12</span></div>
+</div>
+
+<div class="priv-bar">
+  <span><span class="priv-dot"></span><strong>100% Private</strong> — all transactions shielded</span>
+  <span class="priv-div"></span>
+  <span><span class="priv-dot"></span>CLSAG ring signatures</span>
+  <span class="priv-div"></span>
+  <span><span class="priv-dot"></span>Dandelion++ propagation</span>
+  <span class="priv-div"></span>
+  <span><span class="priv-dot"></span><strong id="priv-blocks">0</strong> blocks · <strong>0</strong> violations</span>
+</div>
+<div class="dev-mode-banner" id="dev-mode-banner">
+  <strong>DEV MODE ACTIVE:</strong> non-core explorer pages are exposed on this local session (`?dev_explorer=1`).
+</div>
+
+<!-- HOME -->

@@ -11,6 +11,7 @@ Open: http://localhost:8080/
 """
 import http.server
 import os
+import sys
 import urllib.request
 import json
 
@@ -19,6 +20,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXPLORER = os.path.join(ROOT, "src", "explorer")
 WEBSITE = os.path.join(ROOT, "website")
 PROXY_HOST = "https://explorer.coincync.network"
+sys.path.insert(0, EXPLORER)
+from assemble import assemble_index
 
 
 class DevHandler(http.server.SimpleHTTPRequestHandler):
@@ -61,6 +64,18 @@ class DevHandler(http.server.SimpleHTTPRequestHandler):
             return
         self.send_response(405)
         self.end_headers()
+
+    def do_GET(self):
+        clean = self.path.split("?")[0].split("#")[0]
+        if clean in ("", "/", "/index.html"):
+            body = assemble_index()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
 
     def do_OPTIONS(self):
         self.send_response(204)

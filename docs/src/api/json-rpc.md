@@ -11,7 +11,7 @@ This page covers the protocol envelope, transports, and the read-only / write sp
 | `http://127.0.0.1:28081` (local node) | Raw JSON-RPC 2.0 | Local development, scripts running on the same host |
 | `https://api.coincync.network/rpc` | JSON-RPC 2.0 (testnet, default) | Wallets, SDKs, tooling — anywhere on the public internet |
 | `https://api.coincync.network/rpc/mainnet` | JSON-RPC 2.0 (mainnet, post-launch) | Same, but explicitly targeting mainnet |
-| `https://explorer.coincync.network/api/testnet` | JSON-RPC 2.0 (testnet) | The explorer's inline JS uses this; you can too |
+| `https://explorer.coincync.network/api/testnet` | JSON-RPC 2.0 (testnet) | The explorer application uses this; you can too |
 | `https://explorer.coincync.network/api/mainnet` | JSON-RPC 2.0 (mainnet, post-launch) | Same, mainnet |
 
 The local-node endpoint exposes the **full** RPC surface (including write methods like `submit_block` and `send_raw_transaction`). The public proxies enforce a read-only allowlist (see [REST endpoints](./rest.md) and `src/rpc/rest.rs::RPC_ALLOWED_METHODS`).
@@ -115,7 +115,7 @@ Even with unauthenticated public read endpoints, the allowlist and rate limits r
 | Build a wallet that submits transactions | A local node at `http://127.0.0.1:28081` (run your own) |
 | Build a read-only block explorer | `https://api.coincync.network/rpc` — public, rate-limited, free |
 | Build a chain analyzer / indexer | A local node — the public proxies will rate-limit you and the bandwidth bill on your end is significant anyway |
-| Embed live chain data in a web page | The explorer's inline JS already does this from `https://explorer.coincync.network/api/testnet` |
+| Embed live chain data in a web page | The explorer application already does this from `https://explorer.coincync.network/api/testnet` |
 | Run a faucet | A local node next to the faucet binary, with the wallet RPC speaking to localhost |
 
 ## See also

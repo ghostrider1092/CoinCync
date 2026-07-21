@@ -1,0 +1,415 @@
+<div class="page active" id="page-home">
+  <div class="hero"><div class="hero-inner">
+    <h1 style="font-weight:300;letter-spacing:-.03em;line-height:1.0;font-variation-settings:'opsz' 144">Verify the chain.<br>Trust the <em>math</em>.</h1>
+    <div onclick="go('4thamendment')" style="font-family:var(--serif);font-size:clamp(16px,2.2vw,20px);font-weight:300;font-style:italic;letter-spacing:0;color:var(--ac2);margin:20px 0 10px;cursor:pointer;line-height:1.5">Privacy money that requires no permission.</div>
+    <div onclick="go('4thamendment')" style="max-width:620px;margin:0 auto 20px;padding:18px 24px;background:rgba(212,160,89,.04);border-left:2px solid var(--ac2);text-align:left;cursor:pointer">
+      <div id="manifesto-text" style="font-family:var(--serif);font-size:14px;font-style:italic;font-weight:300;color:var(--t2);line-height:1.7;overflow:hidden">"We built CoinCync on one principle: your money is yours. Not visible to surveillance. Not subject to seizure. Not dependent on permission. Enforced by proofs, not promises."</div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-top:10px;text-align:right;letter-spacing:.1em">— THE COINCYNC MANIFESTO</div>
+    </div>
+
+    <div style="max-width:620px;margin:0 auto 28px;padding:18px 24px;background:rgba(212,160,89,.04);border-right:2px solid var(--ac2);text-align:right">
+      <div style="font-family:var(--serif);font-size:14px;font-style:italic;font-weight:300;color:var(--t2);line-height:1.7">"Privacy money that doesn't depend on permission to participate. CYNC&harr;BTC atomic swaps are a constitutional mainnet-launch commitment, not a roadmap item to be deferred. Whether this combination works is what testnet and mainnet are for."</div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-top:10px;text-align:left;letter-spacing:.1em">— THE COINCYNC THESIS</div>
+    </div>
+
+    <!--  CONSTITUTIONAL STATUS PANEL  -->
+    <!-- Every flag below is a compile-time tripwire in src/constants.rs.
+         The binary running this fleet either passed all of them or it
+         didn't compile. If you're seeing this page rendered, the chain
+         is constitutionally compliant by mathematical proof, not by our
+         word. Click any row to read the corresponding article. -->
+    <div style="max-width:720px;margin:0 auto 28px" onclick="go('4thamendment')">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);letter-spacing:.18em;text-transform:uppercase;margin-bottom:10px;text-align:center">Constitutional status &middot; <span style="color:var(--ac2)">verified at compile time</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--b);border:1px solid var(--b);cursor:pointer">
+        <!-- Each row: green dot, article ref, plain-language commitment -->
+        <!-- Article I — supply -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article I</div><div class="cs-rule">Supply cap 100M CYNC</div></div></div>
+        <!-- Article II — no dev tax -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article II</div><div class="cs-rule">Zero dev tax</div></div></div>
+        <!-- Article III — mandatory privacy -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article III</div><div class="cs-rule">Mandatory privacy on every tx</div></div></div>
+        <!-- Article V — RandomX only -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article V</div><div class="cs-rule">RandomX-only PoW</div></div></div>
+        <!-- Article IX — no surveillance -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article IX</div><div class="cs-rule">No blacklists, no censorship</div></div></div>
+        <!-- Article XI — no algorithmic capture -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XI</div><div class="cs-rule">No algorithmic capture</div></div></div>
+        <!-- Article XII — no admin authority -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XII</div><div class="cs-rule">No admin keys, no pause</div></div></div>
+        <!-- Article XIII — no external trust -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XIII</div><div class="cs-rule">No external chain trust</div></div></div>
+        <!-- Article XIV — no surveillance layer -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XIV</div><div class="cs-rule">All CYNC fungible, no NFTs</div></div></div>
+        <!-- Article XVI — fee burn floor -->
+        <div class="cs-row" style="background:var(--surface);padding:10px 14px;display:flex;align-items:center;gap:10px"><span class="cs-dot"></span><div><div class="cs-art">Article XVI</div><div class="cs-rule">30% fee burn (floor)</div></div></div>
+      </div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.12em;text-transform:uppercase;margin-top:8px;text-align:center">Click any row &rarr; read the article</div>
+    </div>
+
+    <!-- Why CoinCync — 3 pillars -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--b);border:1px solid var(--b);margin-bottom:28px;max-width:720px;margin-left:auto;margin-right:auto">
+      <div style="background:var(--surface);padding:24px 20px;text-align:center">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px">§ 01</div>
+        <div style="font-family:var(--serif);font-size:17px;font-weight:400;margin-bottom:8px">Private by default</div>
+        <div style="font-size:12px;color:var(--t3);line-height:1.5;font-weight:300">Every transaction is shielded. No opt-out. No transparent mode. CLSAG ring-11, Bulletproofs+, stealth addresses.</div>
+      </div>
+      <div style="background:var(--surface);padding:24px 20px;text-align:center">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px">§ 02</div>
+        <div style="font-family:var(--serif);font-size:17px;font-weight:400;margin-bottom:8px">Auditable by anyone</div>
+        <div style="font-size:12px;color:var(--t3);line-height:1.5;font-weight:300">Supply is cryptographically verifiable. Pedersen commitments balance without revealing amounts. No trusted setup.</div>
+      </div>
+      <div style="background:var(--surface);padding:24px 20px;text-align:center">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px">§ 03</div>
+        <div style="font-family:var(--serif);font-size:17px;font-weight:400;margin-bottom:8px">No permission needed</div>
+        <div style="font-size:12px;color:var(--t3);line-height:1.5;font-weight:300">CPU-only RandomX mining. 0% dev tax. No premine. No founder allocation. Constitution enforces it permanently.</div>
+      </div>
+    </div>
+
+    <p style="font-weight:300;color:var(--t3)">Every CYNC transaction is 100% private by default. Explore blocks and network health in real time.</p>
+    <div class="stats">
+      <div class="stat" onclick="go('blocks')" style="cursor:pointer"><div class="label">Height</div><div class="val" id="s-height">—</div><div class="sub">blocks mined</div></div>
+      <div class="stat"><div class="label">Reward</div><div class="val" id="s-reward">—</div><div class="sub">CYNC/block</div></div>
+      <div class="stat" onclick="go('supply')" style="cursor:pointer"><div class="label">Supply</div><div class="val" id="s-supply">—</div><div class="sub">of 100M CYNC</div></div>
+      <div class="stat" onclick="go('network')" style="cursor:pointer"><div class="label">Peers</div><div class="val" id="s-peers">—</div><div class="sub">connected</div></div>
+      <div class="stat"><div class="label">Ring Size</div><div class="val">16</div><div class="sub">CLSAG decoys</div></div>
+      <div class="stat"><div class="label">Block Time</div><div class="val">120s</div><div class="sub">target</div></div>
+    </div>
+    <!-- MAINNET COUNTDOWN TEASER (#6) -->
+    <div id="mainnet-teaser" style="margin:12px 0;padding:10px 16px;background:linear-gradient(90deg,rgba(240,192,64,.08),rgba(240,192,64,.02));border:1px solid rgba(240,192,64,.2);border-radius:10px;display:flex;align-items:center;justify-content:center;gap:12px;font-family:var(--mono);font-size:11px">
+      <span style="color:#F0C040;font-weight:600">MAINNET</span>
+      <span style="color:var(--t3)" id="mainnet-teaser-countdown">—</span>
+      <span style="color:var(--t3);font-size:9px">Oct 1, 2026</span>
+    </div>
+
+    <!-- ANONYMITY SET COUNTER — the headline metric for a privacy coin -->
+    <div class="aset-card" title="Total unspent outputs — every output is a potential decoy. Bigger = more privacy for everyone.">
+      <div>
+        <div class="aset-label">YOUR ANONYMITY SET</div>
+        <div class="aset-value" id="aset-value">—</div>
+        <div class="aset-sub"><span id="aset-sub">outputs · grows every block</span></div>
+      </div>
+      <div class="aset-icon">⊞</div>
+    </div>
+
+    <!-- LIVE FEE BURN COUNTER — Article XVI narrative.
+         Shows total CYNC permanently destroyed via the 30% fee burn.
+         Pairs visually with the anonymity-set card; same component, different metric.
+         The number ticks up as blocks land. -->
+    <div class="aset-card" title="Total CYNC permanently destroyed via the 30% fee burn floor. Captured by no one. Article XVI of the Constitution." style="margin-top:14px">
+      <div>
+        <div class="aset-label">TOTAL BURNED</div>
+        <div class="aset-value" id="burn-value">—</div>
+        <div class="aset-sub"><span id="burn-sub">CYNC permanently destroyed &middot; 30% of every fee</span></div>
+      </div>
+      <div class="aset-icon">⌬</div>
+    </div>
+  </div></div>
+  <div class="content">
+    <!--  v1.0.10 NETWORK STATUS PANEL  -->
+    <!-- Five live tiles driven by get_finality_info / get_shielded_anchor /
+         get_spark_anchor / get_health / get_metrics. Plus an expandable
+         "What's new in 1.0.8" callout. Auto-refreshes every 15s while
+         the home page is active. Added 2026-05-15. -->
+    <div class="panel" style="margin-bottom:24px;border:1px solid var(--b);background:var(--surface)">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b);background:linear-gradient(180deg,rgba(212,160,89,.06),transparent)">
+        <div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.16em;text-transform:uppercase">Release</div>
+          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.0.12-rc3 &middot; Hard Fork Release Candidate</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span id="v108-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--t3);transition:background .3s"></span>
+          <span id="v108-status-text" style="font-family:var(--mono);font-size:11px;color:var(--t3)">probing&hellip;</span>
+          <button onclick="document.getElementById('v108-whatsnew').classList.toggle('hidden')" style="font-family:var(--mono);font-size:10px;padding:5px 10px;border:1px solid var(--b);border-radius:4px;background:transparent;color:var(--t2);cursor:pointer">What's new &#9662;</button>
+        </div>
+      </div>
+
+      <!-- What's new in v1.0.12-rc3, collapsed by default -->
+      <div id="v108-whatsnew" class="hidden" style="padding:14px 18px;border-bottom:1px solid var(--b);background:rgba(212,160,89,.02)">
+        <div style="font-size:12px;color:var(--t2);line-height:1.7">
+          <strong style="color:var(--ac2)">Testnet hard fork.</strong> Activates at testnet height <strong>13,000</strong> (~2026-07-05). CIP-007 Mode A &mdash; static-height flag day, no signaling window. All five rules are <em>tightening</em>: honest miners producing well-formed blocks pre-activation continue to produce valid blocks post-activation. Please upgrade all nodes to <a href="https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12-rc3" style="color:var(--ac2)">v1.0.12-rc3</a> by <strong>2026-07-03</strong>.
+        </div>
+        <ul style="margin:8px 0 4px;padding-left:20px;font-size:11px;color:var(--t3);line-height:1.7">
+          <li><strong style="color:var(--t2)">encrypted_amount tightened</strong> to exactly 8 bytes (no over/under-size acceptance).</li>
+          <li><strong style="color:var(--t2)">Per-output size caps</strong> enforced at block validation, not just mempool admission.</li>
+          <li><strong style="color:var(--t2)">Duplicate stealth addresses rejected within a tx</strong> &mdash; closes the same-output-twice class of malleability.</li>
+          <li><strong style="color:var(--t2)">Cross-tx stealth-address dedup within a block</strong> &mdash; prevents two txs in the same block from colliding on a stealth output.</li>
+          <li><strong style="color:var(--t2)">Ring-size enforcement</strong> via monotonic <code>total_outputs_ever()</code>, so ring decoys cannot reference future outputs.</li>
+        </ul>
+        <div style="margin-top:8px;font-size:10px;color:var(--t3)">
+          Shipping in rc3: PR #112 peer-aging (purges dead IPs from <code>AddressManager</code> after 5 failed dials), PR #117 legacy-DB migration (existing v1.0.11.x operators upgrade without wiping chaindata &mdash; run <code>coincync-node --network testnet migrate-legacy-db</code> once before starting on rc3), 12-PR audit-prep marathon (#90-101, Bitcoin-Core-equivalent defense-in-depth), 2 new gossip-resilience relay nodes, second miner randomx2 (closes single-miner SPOF), miner-stall watchdog. Binary SHA-256: <code>6fcf9d91c46&hellip;</code>. Full ledger: <a href="https://github.com/ghostrider1092/Coincync-Testnet-/blob/main/docs/operations/CHANGES-2026-06-26.md" style="color:var(--ac2)">CHANGES-2026-06-26.md</a>.
+        </div>
+      </div>
+
+      <!-- 4-tile grid: finality / phase-2 / health / metrics -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--b)">
+        <!-- Tile 1: Checkpoint finality (Path B) + CIP-011 activation distance -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Finality</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px"><span id="v108-tip">&mdash;</span> &middot; tip</div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t2);margin-bottom:8px"><span id="v108-checkpoint">&mdash;</span> &middot; last checkpoint</div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            Max reorg: <span id="v108-maxreorg">&mdash;</span><br>
+            CIP-011 enable in <span id="v108-cip011-enable" style="color:var(--ac2)">&mdash;</span> blocks
+          </div>
+        </div>
+
+        <!-- Tile 2: Phase-2 storage readiness -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Phase-2 storage</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px">Shielded: <span id="v108-shielded-size">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:8px">Spark: <span id="v108-spark-size">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            <span id="v108-phase2-status" style="display:inline-block;padding:2px 6px;border-radius:3px;background:rgba(127,184,121,.15);color:#7FB879;border:1px solid rgba(127,184,121,.3);font-size:9px;letter-spacing:.05em">REWIND READY</span><br>
+            <span style="color:var(--t3)">Trees dormant &middot; activation deferred to post-v1.1</span>
+          </div>
+        </div>
+
+        <!-- Tile 3: Node health -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Health</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px"><span id="v108-health-status" style="color:var(--t3)">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t2);margin-bottom:8px">Peers: <span id="v108-peers">&mdash;</span></div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            Synced: <span id="v108-synced">&mdash;</span><br>
+            <a href="#" onclick="event.preventDefault();go('health')" style="color:var(--ac2);text-decoration:none;border-bottom:1px solid var(--ac-dim)">fleet view &rarr;</a>
+          </div>
+        </div>
+
+        <!-- Tile 4: Metrics snapshot -->
+        <div style="background:var(--surface);padding:14px 18px">
+          <div style="font-family:var(--mono);font-size:9px;color:var(--t3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px">Operations</div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--t);margin-bottom:2px">Mempool: <span id="v108-mempool">&mdash;</span> tx</div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t2);margin-bottom:8px"><span id="v108-tx-total">&mdash;</span> total txs</div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--t3);line-height:1.5">
+            Blocks: <span id="v108-blocks-total">&mdash;</span><br>
+            <span style="color:var(--t3)">Updated <span id="v108-updated-ago">never</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!--  NETWORK CONSTELLATION  -->
+    <!-- 3D particle ring rendered with three.js (lazy-loaded by
+         ensureNetworkVizDeps). Inner ring + outer ring of glowing dots,
+         slow rotation. The user's chosen wallpaper SVG is textured onto
+         a backdrop plane inside the same scene, so the wallpaper
+         appears as part of the 3D depth (camera moves and the plane
+         parallaxes naturally). Both particle colour and backdrop swap
+         live when the user picks a new theme/wallpaper. -->
+    <div class="constellation-panel" id="constellation-panel">
+      <canvas id="constellation-canvas"></canvas>
+      <button class="constellation-btn constellation-expand" id="constellation-expand" type="button" title="Expand (drag to rotate, scroll to zoom)" aria-label="Expand constellation">&#9974;</button>
+      <button class="constellation-btn constellation-close" id="constellation-close" type="button" title="Close (Esc)" aria-label="Close fullscreen">&times;</button>
+      <div class="constellation-label" id="constellation-label">Live anonymity set</div>
+      <div class="constellation-hint">Drag to rotate &middot; scroll to zoom &middot; Esc to close</div>
+    </div>
+    <!--  LIVE BLOCK FEED  -->
+    <div class="live-feed">
+      <div class="live-feed-head">
+        <span class="title">Live Block Feed</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:11px;color:var(--t3);font-family:var(--mono)" id="feed-status">connecting...</span>
+          <div class="pulse"></div>
+        </div>
+      </div>
+      <div class="live-feed-list" id="live-feed-list">
+        <div style="padding:20px;text-align:center;color:var(--t3);font-size:12px;font-family:var(--mono)">Waiting for blocks...</div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">Latest Blocks <span class="panel-action" onclick="go('blocks')">View all →</span></div>
+        <table><thead><tr><th>Block</th><th>Age</th><th>Txns</th><th>Algorithm</th><th>Privacy Score</th></tr></thead>
+        <tbody id="home-blocks"><tr><td colspan="5" class="loading">Loading...</td></tr></tbody></table>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Network Info <span class="panel-action" onclick="go('network')">Details →</span></div>
+        <table><thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td>Consensus</td><td>Proof of Work</td></tr>
+          <tr><td>Algorithm</td><td>RandomX (CPU-only)</td></tr>
+          <tr><td>Signatures</td><td>CLSAG ring signatures</td></tr>
+          <tr><td>Propagation</td><td>Dandelion++</td></tr>
+          <tr><td>Dev Tax</td><td style="color:var(--ac2);font-weight:600">0%</td></tr>
+          <tr><td>Network</td><td><span class="badge badge-amber">Testnet</span></td></tr>
+          <tr><td>Synced</td><td id="n-synced">—</td></tr>
+          <tr><td>Difficulty</td><td id="n-diff">—</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">Difficulty (last 50 blocks)</div>
+        <div class="chart-wrap" style="height:180px"><canvas id="home-diff-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Block Time vs 120s target (#2)</div>
+        <div class="chart-wrap" style="height:180px"><canvas id="home-bt-chart"></canvas></div>
+      </div>
+    </div>
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">Block Size (last 50 blocks) (#11)</div>
+        <div class="chart-wrap" style="height:180px"><canvas id="home-size-chart"></canvas></div>
+      </div>
+
+      <!-- Network Stats Dashboard (#7) -->
+      <div class="panel">
+        <div class="panel-head">Network Dashboard (#7)</div>
+        <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px;font-family:var(--mono);font-size:11px">
+          <div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center">
+            <div style="color:var(--t3);font-size:9px;margin-bottom:4px">UPTIME</div>
+            <div style="color:var(--ac2);font-size:16px;font-weight:700" id="nd-uptime">—</div>
+          </div>
+          <div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center">
+            <div style="color:var(--t3);font-size:9px;margin-bottom:4px">TOTAL BLOCKS</div>
+            <div style="color:var(--t);font-size:16px;font-weight:700" id="nd-total">—</div>
+          </div>
+          <div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center">
+            <div style="color:var(--t3);font-size:9px;margin-bottom:4px">AVG BLOCK TIME</div>
+            <div style="color:var(--t);font-size:16px;font-weight:700" id="nd-avg-bt">—</div>
+          </div>
+          <div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center">
+            <div style="color:var(--t3);font-size:9px;margin-bottom:4px">NETWORK HASH</div>
+            <div style="color:var(--t);font-size:16px;font-weight:700" id="nd-hash">—</div>
+          </div>
+          <!-- Difficulty prediction (#18) -->
+          <div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center">
+            <div style="color:var(--t3);font-size:9px;margin-bottom:4px">DIFF FORECAST</div>
+            <div style="font-size:14px"><span id="diff-predict-dir" style="color:var(--ac2)">→</span> <span id="diff-predict-val" style="color:var(--t);font-weight:700">—</span></div>
+            <div style="font-size:8px;color:var(--t3);margin-top:2px">+10 blocks</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!--  SUPPLY RING + TX FLOW  -->
+    <div class="two-col" style="margin-bottom:20px">
+      <!-- Supply progress ring (#4) -->
+      <div class="panel">
+        <div class="panel-head">Supply Progress</div>
+        <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:24px;flex-wrap:wrap">
+          <div class="supply-ring">
+            <svg viewBox="0 0 120 120">
+              <circle class="ring-bg" cx="60" cy="60" r="52"/>
+              <circle class="ring-fill" cx="60" cy="60" r="52" stroke-dasharray="326.73" id="supply-ring-fill" stroke-dashoffset="326.73"/>
+            </svg>
+            <div class="ring-label">
+              <div style="font-size:14px;font-weight:700;color:var(--ac2)" id="supply-ring-pct">0%</div>
+              <div style="font-size:8px;color:var(--t3)">mined</div>
+            </div>
+          </div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t2)">
+            <div style="margin-bottom:6px"><span style="color:var(--t3)">Mined:</span> <span id="supply-ring-mined" style="color:var(--ac2);font-weight:600">—</span></div>
+            <div style="margin-bottom:6px"><span style="color:var(--t3)">Cap:</span> <span style="font-weight:600">100,000,000</span></div>
+            <div style="margin-bottom:6px"><span style="color:var(--t3)">Reward:</span> <span id="supply-ring-reward" style="color:var(--ac2)">— CYNC</span></div>
+            <div><span style="color:var(--t3)">Phase:</span> <span class="badge" style="font-size:9px">Launch</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Animated transaction flow (#14) -->
+      <div class="panel">
+        <div class="panel-head">How a Private Transaction Works</div>
+        <div style="padding:16px;display:flex;justify-content:center">
+          <svg viewBox="0 0 340 140" style="width:100%;max-width:340px;height:140px">
+            <defs><filter id="tfg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Sender -->
+            <circle cx="30" cy="70" r="16" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#tfg)"/>
+            <text x="30" y="66" text-anchor="middle" font-family="monospace" font-size="10" fill="#D4A059">👤</text>
+            <text x="30" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#D4A059">Send</text>
+            <text x="30" y="100" text-anchor="middle" font-family="monospace" font-size="6" fill="#666">hidden</text>
+            <!-- Arrow 1: CLSAG -->
+            <line x1="48" y1="70" x2="88" y2="70" stroke="#D4A059" stroke-width="0.8" stroke-opacity="0.3"/>
+            <circle r="3" fill="#D4A059" filter="url(#tfg)"><animateMotion dur="4s" repeatCount="indefinite" path="M48,70 L88,70"/></circle>
+            <!-- Ring -->
+            <circle cx="110" cy="70" r="20" fill="none" stroke="#A855F7" stroke-width="1" stroke-dasharray="2,3"/>
+            <circle cx="110" cy="50" r="4" fill="rgba(168,85,247,.2)" stroke="#A855F7" stroke-width="0.8"/>
+            <circle cx="95" cy="62" r="4" fill="rgba(168,85,247,.2)" stroke="#A855F7" stroke-width="0.8"/>
+            <circle cx="95" cy="78" r="4" fill="rgba(168,85,247,.2)" stroke="#A855F7" stroke-width="0.8"/>
+            <circle cx="110" cy="90" r="4" fill="rgba(168,85,247,.2)" stroke="#A855F7" stroke-width="0.8"/>
+            <circle cx="125" cy="78" r="4" fill="rgba(168,85,247,.2)" stroke="#A855F7" stroke-width="0.8"/>
+            <circle cx="125" cy="62" r="4" fill="rgba(212,160,89,.3)" stroke="#D4A059" stroke-width="1.2" filter="url(#tfg)"><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/></circle>
+            <text x="110" y="73" text-anchor="middle" font-family="monospace" font-size="6" fill="#A855F7">CLSAG</text>
+            <text x="110" y="115" text-anchor="middle" font-family="monospace" font-size="6" fill="#666">11 decoys</text>
+            <!-- Arrow 2: Commitment -->
+            <line x1="132" y1="70" x2="172" y2="70" stroke="#A855F7" stroke-width="0.8" stroke-opacity="0.3"/>
+            <circle r="3" fill="#A855F7" filter="url(#tfg)"><animateMotion dur="4s" begin="1s" repeatCount="indefinite" path="M132,70 L172,70"/></circle>
+            <!-- Bulletproof lock -->
+            <rect x="175" y="55" width="40" height="30" rx="6" fill="rgba(245,158,11,.08)" stroke="#F59E0B" stroke-width="1"/>
+            <text x="195" y="67" text-anchor="middle" font-size="10">🔒</text>
+            <text x="195" y="78" text-anchor="middle" font-family="monospace" font-size="5" fill="#F59E0B">BP+</text>
+            <text x="195" y="100" text-anchor="middle" font-family="monospace" font-size="6" fill="#666">amount hidden</text>
+            <!-- Arrow 3: Stealth -->
+            <line x1="217" y1="70" x2="257" y2="70" stroke="#F59E0B" stroke-width="0.8" stroke-opacity="0.3"/>
+            <circle r="3" fill="#F59E0B" filter="url(#tfg)"><animateMotion dur="4s" begin="2s" repeatCount="indefinite" path="M217,70 L257,70"/></circle>
+            <!-- Stealth address -->
+            <rect x="260" y="55" width="50" height="30" rx="6" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1"><animate attributeName="stroke-opacity" values="0.3;1;0.3" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="285" y="67" text-anchor="middle" font-family="monospace" font-size="6" fill="#D4A059">stealth</text>
+            <text x="285" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#D4A059">addr</text>
+            <text x="285" y="100" text-anchor="middle" font-family="monospace" font-size="6" fill="#666">receiver hidden</text>
+            <!-- Arrow to receiver -->
+            <line x1="312" y1="70" x2="330" y2="70" stroke="#D4A059" stroke-width="0.8" stroke-opacity="0.3"/>
+            <!-- Receiver -->
+            <text x="335" y="73" font-family="monospace" font-size="10" fill="#A855F7">👤</text>
+            <!-- Bottom label -->
+            <text x="170" y="135" text-anchor="middle" font-family="monospace" font-size="7" fill="#D4A059">sender hidden · amount hidden · receiver hidden</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <!--  BLOCK FORGE WHEEL  Phase 3 -->
+    <!-- Shows the PoW algorithm: RandomX (CPU-only) -->
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">Block Forge — RandomX PoW</div>
+      <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:32px;flex-wrap:wrap">
+        <svg id="forge-wheel" viewBox="-110 -110 220 220" style="width:200px;height:200px"></svg>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--t2);max-width:320px;line-height:1.7">
+          CoinCync uses RandomX — the same CPU-friendly, ASIC-resistant
+          proof-of-work algorithm used by Monero. Mining is accessible to
+          anyone with a standard CPU.
+          <div style="margin-top:10px;color:var(--t3)">The ring pulses with each new block.</div>
+          <div style="margin-top:10px;font-size:10px">
+            <span style="color:#9E7A3E"></span> RandomX (memory-hard, 256MB light / 2GB full)<br>
+            <span style="color:#A855F7"></span> CPU-only — no ASIC or GPU advantage<br>
+            <span style="color:#F59E0B"></span> ASERT difficulty adjustment (120s target)
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!--  CONVERGENCE TIMELINE  Phase 3 -->
+    <!-- Horizontal scroll of last 200 blocks with reorg / fork marks -->
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">Convergence Timeline <span class="panel-action">last 200 blocks</span></div>
+      <div id="conv-timeline" style="padding:16px 20px;overflow-x:auto;white-space:nowrap;background:var(--surface);border-bottom:1px solid var(--b)">
+        <div style="display:inline-flex;gap:1px;align-items:flex-end;height:60px" id="conv-bars"></div>
+      </div>
+      <div style="padding:10px 20px;font-size:10px;color:var(--t3);font-family:var(--mono);display:flex;gap:16px;flex-wrap:wrap">
+        <span><span style="display:inline-block;width:8px;height:8px;background:#9E7A3E;margin-right:4px;vertical-align:middle"></span>normal block</span>
+        <span><span style="display:inline-block;width:8px;height:8px;background:#F59E0B;margin-right:4px;vertical-align:middle"></span>orphan</span>
+        <span><span style="display:inline-block;width:8px;height:8px;background:#EF4444;margin-right:4px;vertical-align:middle"></span>reorg</span>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">Explorer focus</div>
+      <div style="padding:16px 20px;font-size:12px;color:var(--t2);line-height:1.7">
+        This explorer prioritizes live chain observability: blocks, transactions, mempool, and node health.
+        Protocol comparisons and long-form explainers remain available in the docs/privacy sections.
+      </div>
+    </div>
+
+    <!-- Cync Lab credit -->
+    <div style="text-align:center;padding:40px 0 20px">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);letter-spacing:.15em;text-transform:uppercase;opacity:.5">Developed by</div>
+      <div style="font-family:var(--sans);font-size:14px;color:var(--t3);font-weight:500;margin-top:4px;opacity:.6">Cync Lab</div>
+      <div style="font-family:var(--serif);font-style:italic;font-size:11px;color:var(--t3);margin-top:3px;opacity:.4">Applied cryptography for financial privacy</div>
+    </div>
+
+  </div></div><!-- /hero-inner /hero -->
+</div><!-- /page-home -->
+
+<!--  BLOCKS  -->

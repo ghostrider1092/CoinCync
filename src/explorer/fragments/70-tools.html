@@ -1,0 +1,463 @@
+<div class="page" id="page-hashrate">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Hashrate</div>
+    <div class="page-title" style="margin-bottom:4px">Network hashrate</div>
+    <div class="page-sub" style="margin-bottom:20px">Estimated from difficulty · last 100 blocks</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:20px">
+      <div class="stat"><div class="label">Current</div><div class="val up" id="hr-current">—</div><div class="sub">network H/s</div></div>
+      <div class="stat"><div class="label">Peak (100 blk)</div><div class="val" id="hr-peak">—</div><div class="sub">highest seen</div></div>
+      <div class="stat"><div class="label">Average</div><div class="val" id="hr-avg">—</div><div class="sub">100 block avg</div></div>
+      <div class="stat"><div class="label">Trend</div><div class="val" id="hr-trend">—</div><div class="sub">vs 50 blk ago</div></div>
+    </div>
+    <div class="panel"><div class="panel-head">Hashrate (last 100 blocks)</div><div class="chart-wrap"><canvas id="hashrate-chart"></canvas></div></div>
+    <div class="panel"><div class="panel-head">Block time vs 120s target (last 100 blocks)</div><div class="chart-wrap"><canvas id="blocktime-chart"></canvas></div></div>
+  </div>
+</div>
+
+<!--  DIFFICULTY PREDICTOR  -->
+<div class="page" id="page-diffpredict">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Difficulty</div>
+    <div class="page-title" style="margin-bottom:4px">Difficulty adjustment predictor</div>
+    <div class="page-sub" style="margin-bottom:20px">ASERT dual-anchor algorithm · short window 20 blocks · long window 500 blocks</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:20px">
+      <div class="stat"><div class="label">Current diff</div><div class="val" id="dp-diff">—</div><div class="sub">network target</div></div>
+      <div class="stat"><div class="label">Avg block time</div><div class="val" id="dp-avg">—</div><div class="sub">last 20 blocks</div></div>
+      <div class="stat"><div class="label">Expected change</div><div class="val" id="dp-change" style="color:var(--ac2)">—</div><div class="sub">next adjustment</div></div>
+      <div class="stat"><div class="label">Blocks to adj.</div><div class="val" id="dp-blocks">—</div><div class="sub">ASERT is continuous</div></div>
+    </div>
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">Difficulty history</div>
+        <div class="chart-wrap"><canvas id="diff-history-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Block time distribution</div>
+        <div class="chart-wrap"><canvas id="diff-dist-chart"></canvas></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">How ASERT works</div>
+      <div style="padding:20px;display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div><div class="sec-label" style="margin-top:0">Short window (70% weight)</div><p style="font-size:13px;color:var(--t2);line-height:1.6">20-block window responds quickly to sudden hashrate changes. Prevents large swings from manipulation.</p></div>
+        <div><div class="sec-label" style="margin-top:0">Long window (30% weight)</div><p style="font-size:13px;color:var(--t2);line-height:1.6">500-block window provides stability over time. Smooths out variance and temporary hashrate spikes.</p></div>
+        <div><div class="sec-label" style="margin-top:0">Half-life: 60 seconds</div><p style="font-size:13px;color:var(--t2);line-height:1.6">Adjustments decay exponentially. A block that is too fast has diminishing influence over time.</p></div>
+        <div><div class="sec-label" style="margin-top:0">Continuous adjustment</div><p style="font-size:13px;color:var(--t2);line-height:1.6">Unlike Bitcoin-style 2016-block windows, ASERT adjusts every single block. No cliff effects.</p></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  ADDRESS VALIDATOR  -->
+<div class="page" id="page-addrval">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Address Validator</div>
+    <div class="page-title" style="margin-bottom:4px">Address validator</div>
+    <div class="page-sub" style="margin-bottom:20px">Validate any CoinCync address — checks checksum, decodes keys, verifies format</div>
+    <div class="panel">
+      <div class="panel-head">Validate address</div>
+      <div style="padding:20px">
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <input id="av-input" class="form-input" placeholder="Enter a tCYNC or CYNC address..." style="flex:1;font-size:13px" oninput="validateAddress()"/>
+          <button onclick="validateAddress()" class="btn btn-primary">Validate</button>
+        </div>
+        <div id="av-result" style="display:none">
+          <div id="av-status" style="padding:14px 18px;border-radius:10px;margin-bottom:16px;font-weight:600;font-size:14px"></div>
+          <div class="detail-grid" id="av-grid" style="border:1px solid var(--b);border-radius:10px;overflow:hidden"></div>
+        </div>
+        <div id="av-placeholder" style="text-align:center;padding:32px;color:var(--t3);font-family:var(--mono);font-size:12px">
+          Enter an address above to validate it
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">Address format reference</div>
+      <table><thead><tr><th>Type</th><th>Prefix</th><th>Network byte</th><th>Type byte</th><th>Total size</th></tr></thead>
+      <tbody>
+        <tr><td>Standard (mainnet)</td><td class="hash">CYNC</td><td class="mono">0x00</td><td class="mono">0x00</td><td class="mono">70 bytes</td></tr>
+        <tr><td>Standard (testnet)</td><td class="hash">tCYNC</td><td class="mono">0x01</td><td class="mono">0x00</td><td class="mono">70 bytes</td></tr>
+        <tr><td>Subaddress (mainnet)</td><td class="hash">CYNC</td><td class="mono">0x00</td><td class="mono">0x01</td><td class="mono">70 bytes</td></tr>
+        <tr><td>Integrated (mainnet)</td><td class="hash">CYNC</td><td class="mono">0x00</td><td class="mono">0x02</td><td class="mono">78 bytes</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</div>
+
+<!--  EMISSION CALCULATOR  -->
+<div class="page" id="page-emissioncalc">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Emission Calculator</div>
+    <div class="page-title" style="margin-bottom:4px">Emission calculator</div>
+    <div class="page-sub" style="margin-bottom:20px">Calculate total supply at any future block height</div>
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">Calculate</div>
+        <div style="padding:20px">
+          <div class="form-row">
+            <label class="form-label">Block height</label>
+            <input id="ec-height" class="form-input" type="number" value="1050000" min="1" oninput="calcEmission()"/>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Or select era</label>
+            <select class="form-select" onchange="document.getElementById('ec-height').value=this.value;calcEmission()">
+              <option value="262800">Year 1 (block 262,800)</option>
+              <option value="1314000">Year 5 (block 1,314,000)</option>
+              <option value="2628000">Year 10 (block 2,628,000)</option>
+              <option value="4204800">Year 16 (block 4,204,800)</option>
+              <option value="6000000">Year 23 (block 6,000,000)</option>
+            </select>
+          </div>
+          <div id="ec-result" style="margin-top:8px"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Emission schedule</div>
+        <table><thead><tr><th>Era</th><th>Block range</th><th>Reward</th><th>Era supply</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge">Active</span></td><td class="mono">Genesis (0 mined)</td><td class="mono" style="color:var(--ac2)">50 CYNC</td><td class="mono">Smooth decay</td></tr>
+          <tr><td>Mid</td><td class="mono">50M mined</td><td class="mono">25 CYNC</td><td class="mono">Smooth decay</td></tr>
+          <tr><td>Late</td><td class="mono">75M mined</td><td class="mono">12.5 CYNC</td><td class="mono">Smooth decay</td></tr>
+          <tr><td>Tail</td><td class="mono">~99M+ mined</td><td class="mono">0.6 CYNC</td><td class="mono">perpetual</td></tr>
+        </tbody></table>
+        <div style="padding:16px 20px">
+          <div class="chart-wrap" style="height:200px"><canvas id="emission-chart"></canvas></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  PEER EXPLORER  -->
+<div class="page" id="page-peerexp">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Peer Explorer</div>
+    <div class="page-title" style="margin-bottom:4px">Peer explorer</div>
+    <div class="page-sub" style="margin-bottom:20px">Detailed view of all connected peers</div>
+    <div id="peer-exp-body"><div class="loading">Loading peers...</div></div>
+  </div>
+</div>
+
+<!--  MAINNET COUNTDOWN  -->
+<div class="page" id="page-countdown">
+  <div class="content" style="padding-top:0">
+    <!-- Hero countdown -->
+    <div style="background:linear-gradient(135deg,var(--ac) 0%,#065C38 100%);padding:60px 24px;text-align:center;margin:-28px -24px 28px;border-radius:0 0 24px 24px">
+      <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;color:rgba(255,255,255,.6);text-transform:uppercase;margin-bottom:12px">CoinCync Mainnet Launch</div>
+      <div style="font-family:var(--serif);font-size:42px;color:#fff;font-weight:400;margin-bottom:6px;letter-spacing:-.5px">October 1, 2026</div>
+      <div style="font-family:var(--mono);font-size:13px;color:rgba(255,255,255,.7);margin-bottom:32px">The private blockchain goes live</div>
+      <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-bottom:40px" id="countdown-boxes">
+        <div style="background:rgba(0,0,0,.3);border-radius:12px;padding:20px 28px;min-width:100px">
+          <div style="font-family:var(--serif);font-size:48px;color:#fff;line-height:1" id="cd-days">—</div>
+          <div style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.5);margin-top:4px;text-transform:uppercase;letter-spacing:1px">Days</div>
+        </div>
+        <div style="background:rgba(0,0,0,.3);border-radius:12px;padding:20px 28px;min-width:100px">
+          <div style="font-family:var(--serif);font-size:48px;color:#fff;line-height:1" id="cd-hours">—</div>
+          <div style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.5);margin-top:4px;text-transform:uppercase;letter-spacing:1px">Hours</div>
+        </div>
+        <div style="background:rgba(0,0,0,.3);border-radius:12px;padding:20px 28px;min-width:100px">
+          <div style="font-family:var(--serif);font-size:48px;color:#fff;line-height:1" id="cd-mins">—</div>
+          <div style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.5);margin-top:4px;text-transform:uppercase;letter-spacing:1px">Minutes</div>
+        </div>
+        <div style="background:rgba(0,0,0,.3);border-radius:12px;padding:20px 28px;min-width:100px">
+          <div style="font-family:var(--serif);font-size:48px;color:#fff;line-height:1" id="cd-secs">—</div>
+          <div style="font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.5);margin-top:4px;text-transform:uppercase;letter-spacing:1px">Seconds</div>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:center;gap:16px;font-family:var(--mono);font-size:12px;color:rgba(255,255,255,.7);flex-wrap:wrap">
+        <span>🧪 Testnet live now</span>
+        <span>·</span>
+        <span> Mining active</span>
+        <span>·</span>
+        <span> 100% private</span>
+        <span>·</span>
+        <span>0% dev tax</span>
+      </div>
+    </div>
+    <!-- Live testnet stats under countdown -->
+    <div class="sec-label">Live testnet stats</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:24px">
+      <div class="stat"><div class="label">Testnet height</div><div class="val up" id="cd-height">—</div><div class="sub">blocks mined</div></div>
+      <div class="stat"><div class="label">Supply</div><div class="val" id="cd-supply">—</div><div class="sub">CYNC emitted</div></div>
+      <div class="stat"><div class="label">Difficulty</div><div class="val" id="cd-diff">—</div><div class="sub">current target</div></div>
+      <div class="stat"><div class="label">Peers</div><div class="val" id="cd-peers">—</div><div class="sub">connected</div></div>
+    </div>
+    <!-- What to expect -->
+    <div class="sec-label">What happens on October 1</div>
+    <div class="feat-grid">
+      <div class="feat"><h3> Genesis block</h3><p>The mainnet genesis block is mined at exactly 00:00:00 UTC on October 1, 2026. Zero premine. The first CYNC ever mined goes to whoever mines block 1.</p></div>
+      <div class="feat"><h3> Open mining</h3><p>Mining is open to everyone from block 1. No whitelists, no pre-registration, no hardware requirements beyond a CPU. Bring your own hardware.</p></div>
+      <div class="feat"><h3>💼 Wallet ready</h3><p>The cync-wallet CLI will be production-ready. Create a mainnet wallet, receive CYNC from mining or others, and send with full privacy.</p></div>
+      <div class="feat"><h3> Public nodes</h3><p>All 5 current testnet nodes migrate to mainnet. Additional community seed nodes will be announced before launch.</p></div>
+      <div class="feat"><h3>🔑 Full privacy</h3><p>Every mainnet transaction is private from block 1. CLSAG ring signatures, stealth addresses, and Bulletproofs+ are all active from genesis.</p></div>
+      <div class="feat"><h3>📜 Constitutional</h3><p>The Constitution and Bill of Rights take effect at mainnet genesis. 0% dev tax and 100M supply cap are compile-time enforced from the first block.</p></div>
+    </div>
+  </div>
+</div>
+
+<!--  CHAIN HEALTH  -->
+<div class="page" id="page-chainhealth">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Chain Health</div>
+    <div class="page-title" style="margin-bottom:4px">Chain health score</div>
+    <div class="page-sub" style="margin-bottom:20px">Composite score based on 6 real-time metrics</div>
+    <div style="text-align:center;padding:32px 0;margin-bottom:24px">
+      <div style="font-size:80px;font-weight:700;font-family:var(--serif);color:var(--ac2);line-height:1" id="chain-score">—</div>
+      <div style="font-size:14px;font-family:var(--mono);color:var(--t3);margin-top:8px" id="chain-grade">Calculating...</div>
+      <div style="width:200px;height:8px;background:var(--s3);border-radius:4px;margin:12px auto 0;overflow:hidden"><div id="chain-bar" style="height:100%;border-radius:4px;background:var(--ac2);transition:width 1s ease;width:0%"></div></div>
+    </div>
+    <div class="three-col" style="margin-bottom:20px" id="chain-metrics"></div>
+    <div class="panel">
+      <div class="panel-head">How the score is calculated</div>
+      <table><thead><tr><th>Metric</th><th>Weight</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Block time variance</td><td class="mono">25%</td><td style="color:var(--t2)">How close actual block times are to the 30s target</td></tr>
+        <tr><td>Peer count</td><td class="mono">20%</td><td style="color:var(--t2)">Number of connected peers (more = healthier)</td></tr>
+        <tr><td>Difficulty stability</td><td class="mono">20%</td><td style="color:var(--t2)">How stable difficulty is over the last 20 blocks</td></tr>
+        <tr><td>Sync status</td><td class="mono">20%</td><td style="color:var(--t2)">Whether the node is fully synced</td></tr>
+        <tr><td>Mempool health</td><td class="mono">10%</td><td style="color:var(--t2)">Mempool not overloaded (0 txs = perfect)</td></tr>
+        <tr><td>Ring size compliance</td><td class="mono">100%</td><td style="color:var(--t2)">All transactions use required ring size of 16</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</div>
+
+<!--  RAW BLOCK VIEWER  -->
+<div class="page" id="page-rawblock">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('blocks')">Blocks</a><span>›</span>Raw data</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <div class="page-title" id="rb-title">Raw block data</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:16px">
+      <input id="rb-input" class="form-input" type="number" placeholder="Block height..." style="width:200px" onkeydown="if(event.key===&#39;Enter&#39;)loadRawBlock()"/>
+      <button onclick="loadRawBlock()" class="btn btn-primary">Load</button>
+      <button id="rb-prev" onclick="loadRawBlock(parseInt(document.getElementById(&#39;rb-input&#39;).value)-1)" class="btn btn-outline" style="font-size:11px">‹ Prev</button>
+      <button id="rb-next" onclick="loadRawBlock(parseInt(document.getElementById(&#39;rb-input&#39;).value)+1)" class="btn btn-outline" style="font-size:11px">Next ›</button>
+    </div>
+    <div class="panel">
+      <div class="panel-head">JSON response <span id="rb-copy" onclick="copyRawBlock()" class="panel-action" style="cursor:pointer">Copy JSON</span></div>
+      <div id="rb-body" style="padding:16px 20px">
+        <div class="loading">Enter a block height to view raw data</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  GITHUB ACTIVITY  -->
+<!--  API DOCUMENTATION  -->
+<div class="page" id="page-api">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>API</div>
+    <div class="page-title" style="margin-bottom:4px">Public API</div>
+    <div class="page-sub" style="margin-bottom:20px">JSON-RPC endpoints exposed on this fleet. Full reference in <code>docs/API.md</code>.</div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Endpoints</div>
+      <table>
+        <thead><tr><th>URL</th><th>Purpose</th><th>Client auth required</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">https://api.coincync.network/rpc/testnet</td><td>Public testnet RPC. Cloudflare-fronted; nginx terminates bearer auth.</td><td>No (nginx adds bearer; coincync-node bearer-checks every request)</td></tr>
+          <tr><td class="mono">https://explorer.coincync.network/api/testnet</td><td>Same daemon, fronted by the explorer's nginx.</td><td>No (nginx adds bearer)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Security model &middot; what's exposed and why</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.7">
+        <strong style="color:var(--t)">"Client auth: No" does NOT mean "anyone can do anything to the node."</strong>
+        It means clients (browsers, mobile wallets, integrators) don't need to manage a bearer token — nginx adds it
+        for them on the way in. The bearer is required at the daemon layer; nginx is the only thing that knows the
+        token. The daemon rejects any request that arrives without it.
+        <ul style="margin:10px 0 0;padding-left:20px;font-size:12px;color:var(--t3);line-height:1.7">
+          <li><strong style="color:var(--t2)">Read methods</strong> (<code>get_info</code>, <code>get_block_range</code>,
+              <code>get_supply_info</code>, etc.) are intentionally public — the explorer, mobile wallets, and integrators
+              all rely on them. Same posture as <code>bitcoin-cli getblockchaininfo</code> over a public RPC.</li>
+          <li><strong style="color:var(--t2)">Write methods that mutate consensus state</strong> (<code>submit_block</code>,
+              <code>send_raw_transaction</code>) are public by design — that's how mining submissions and transaction
+              broadcasts work on any permissionless chain. Validity is enforced at consensus time, not at RPC admission.</li>
+          <li><strong style="color:var(--t2)">Administrative methods that would let anyone harm a node</strong>
+              (<code>stop_node</code>, <code>ban_peer</code>, <code>clear_mempool</code>, etc.) are <strong>not implemented</strong>
+              in coincync-node at all. There's no RPC surface that would let a third party reach into the daemon's
+              process or peer-management state.</li>
+        </ul>
+        <div style="margin-top:10px;font-size:11px;color:var(--t3)">
+          For full RPC access without any auth boundary (heavy integrators, dev work), run your own node and point at
+          <code>http://127.0.0.1:28081</code>. See <code>docs/DEVELOPER.md</code>.
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Most-used methods</div>
+      <table>
+        <thead><tr><th>Method</th><th>Purpose</th><th>Returns</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">get_info</td><td>Chain tip + sync state + peer count</td><td>height, top_hash, tip_age_secs, peer_count, difficulty, is_synced</td></tr>
+          <tr><td class="mono">get_supply_info</td><td>Total emitted, current reward</td><td>total_emitted, current_reward (atomic units)</td></tr>
+          <tr><td class="mono">get_burn_stats</td><td>Article XVI fee-burn state</td><td>active, burn_pct_normal, circulating_supply, deflation_threshold</td></tr>
+          <tr><td class="mono">get_privacy_stats</td><td>Spark + shielded pool sizes</td><td>spark_accumulator_size, shielded_tree_size</td></tr>
+          <tr><td class="mono">get_block_template</td><td>Mining template (used by coincync-rig)</td><td>block_template (hex), height, target</td></tr>
+          <tr><td class="mono">submit_block</td><td>Submit a found block</td><td>accepted (bool)</td></tr>
+          <tr><td class="mono">send_raw_transaction</td><td>Broadcast a signed tx hex</td><td>txid (on accept)</td></tr>
+          <tr><td class="mono">get_mempool_info</td><td>Pending tx count + fees</td><td>size, bytes, total_fees</td></tr>
+          <tr><td class="mono">get_peers</td><td>Live peer list (IP-redacted)</td><td>peers[]</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Try it &middot; copy-paste</div>
+      <div style="padding:14px 16px;font-family:var(--mono);font-size:11px;color:var(--t2);line-height:1.7;background:var(--s2);border-radius:var(--r-sm);overflow-x:auto;white-space:pre">curl -sf -X POST https://api.coincync.network/rpc/testnet \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}'</div>
+    </div>
+
+    <div style="font-size:12px;color:var(--t3);line-height:1.6">
+      <strong style="color:var(--t2)">Rate limits</strong> &middot; The public RPC is fronted by Cloudflare with a per-IP rate limit. Heavy integrators should run their own node (see <code>docs/DEVELOPER.md</code>) and point at <code>http://127.0.0.1:28081</code> for unlimited access.
+    </div>
+  </div>
+</div>
+
+<!--  SOAK STATUS  -->
+<div class="page" id="page-soak">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Soak status</div>
+    <div class="page-title" style="margin-bottom:4px">Operational soak status</div>
+    <div class="page-sub" style="margin-bottom:20px">72-hour pre-launch and ongoing reliability sampling across the fleet. Numbers update on page poll.</div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">What this measures</div>
+      <div style="padding:14px 16px;font-size:13px;color:var(--t2);line-height:1.6">
+        Every fleet node samples its own RPC every ~2 minutes and writes a JSONL record:
+        chain tip, peer count, mempool size, partial-broadcast events, stalls. The aggregate
+        across all 5 boxes is the network's operational track record. <strong>Zero errors and
+        zero partial broadcasts</strong> for a 72h window is the bar for a clean verdict; recovered
+        incidents (peer wedges fixed by restart, deploys mid-soak) are documented in commit
+        history rather than hidden.
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Per-box snapshot</div>
+      <table>
+        <thead><tr><th>Box</th><th>Height</th><th>Peers</th><th>Tip age</th><th>Synced</th><th>Status</th></tr></thead>
+        <tbody id="soak-rows">
+          <tr><td colspan="6" class="loading">Polling fleet…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;margin-top:14px">
+      The full soak JSONL logs live on each fleet box at <code>/var/lib/coincync/soak/*.jsonl</code>.
+      Operators can pull them via the <code>scripts/check-soak-status.sh</code> helper. Public summary
+      is the table above; raw data stays with the operators.
+    </div>
+  </div>
+</div>
+
+<!--  TRANSACTION BROADCASTING  -->
+<div class="page" id="page-broadcast">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Broadcast</div>
+    <div class="page-title" style="margin-bottom:4px">Broadcast a raw transaction</div>
+    <div class="page-sub" style="margin-bottom:20px">Paste a signed transaction hex; this page submits it to the public mempool. Useful for offline-signed flows, hardware wallets, and air-gapped signing.</div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-head">Submit</div>
+      <div style="padding:16px 20px">
+        <textarea id="bc-hex" class="form-input" rows="6" placeholder="Paste signed transaction hex (no 0x prefix). Sample format: starts with the 4-byte version, then the input list, then outputs, then the CLSAG ring signature..." style="width:100%;font-family:var(--mono);font-size:11px;line-height:1.5;resize:vertical;padding:10px 12px"></textarea>
+        <div style="display:flex;gap:10px;margin-top:14px">
+          <button class="btn-primary" onclick="bcSubmit()">Broadcast</button>
+          <button class="btn-ghost" onclick="$('bc-hex').value='';$('bc-result').innerHTML=''">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="bc-result-panel" style="display:none">
+      <div class="panel-head">Result</div>
+      <div id="bc-result" style="padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.6"></div>
+    </div>
+
+    <div style="font-size:12px;color:var(--t3);line-height:1.6;margin-top:14px">
+      <strong style="color:var(--t2)">Privacy note &middot;</strong> Transactions broadcast here travel
+      Dandelion++-style through the network; the originating IP is anonymized at the network
+      layer regardless of where you submit. The explorer box itself sees your client IP via the
+      browser request, which is standard HTTP. For maximum anonymity, submit through your own
+      node over Tor.
+    </div>
+  </div>
+</div>
+
+<!--  PUBLIC SEED-NODE LEADERBOARD  -->
+<div class="page" id="page-leaderboard">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Seed nodes</div>
+    <div class="page-title" style="margin-bottom:4px">Public seed-node leaderboard</div>
+    <div class="page-sub" style="margin-bottom:20px">The five fleet boxes that bootstrap the public testnet. Anyone running a node can use these as initial peers; once peer discovery kicks in, your node will find others on its own.</div>
+
+    <div class="panel">
+      <div class="panel-head">Fleet</div>
+      <table>
+        <thead><tr><th>Node</th><th>Region</th><th>Role</th><th>Height</th><th>Tip age</th><th>Peers</th><th>Status</th></tr></thead>
+        <tbody id="lb-rows">
+          <tr><td colspan="7" class="loading">Polling…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div style="font-size:12px;color:var(--t3);line-height:1.6;margin-top:14px">
+      <strong style="color:var(--t2)">For node operators &middot;</strong> Add any of these as
+      a startup peer with <code>--addnode &lt;ip&gt;:&lt;port&gt;</code>. Default testnet P2P port
+      is 28080. The fleet runs the same software you would; we don't get special treatment in
+      the network.
+    </div>
+  </div>
+</div>
+
+<!--  PRIVACY METRICS (DECOY RING + OUTPUT AGE)  -->
+<div class="page" id="page-privacymetrics">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Privacy metrics</div>
+    <div class="page-title" style="margin-bottom:4px">Privacy metrics</div>
+    <div class="page-sub" style="margin-bottom:20px">Quantitative measures of how anonymous CYNC transactions actually are. Pulled from recent block data.</div>
+
+    <div class="two-col" style="grid-template-columns:1fr 1fr">
+      <div class="panel">
+        <div class="panel-head">Decoy ring distribution</div>
+        <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:8px">
+          CLSAG ring size = <strong style="color:var(--ac2)" id="pm-ring-size">16</strong> per Article III.
+          Each input picks 10 decoys plus 1 real. Below: distribution of decoy ages
+          across the most recent 100 ring-signature inputs. Even spread = harder to
+          single out the real spend.
+        </div>
+        <div style="padding:0 16px 16px"><canvas id="pm-decoy-chart" width="400" height="200"></canvas></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">Output age distribution</div>
+        <div style="padding:14px 16px;font-size:12px;color:var(--t2);line-height:1.6;margin-bottom:8px">
+          Total spendable outputs by age bucket. A wide, deep distribution means
+          many candidates exist for any given decoy slot &mdash; the protocol is
+          "thicker" against chain analysis. Tail emission keeps young outputs
+          replenishing forever.
+        </div>
+        <div style="padding:0 16px 16px"><canvas id="pm-age-chart" width="400" height="200"></canvas></div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);line-height:1.6;margin-top:14px">
+      Charts compute client-side from the most recent <span id="pm-block-count">100</span> blocks pulled
+      via <code>get_block_by_height</code>. No identity data leaves the browser; this is purely
+      aggregate-level statistical analysis of the public chain.
+    </div>
+  </div>
+</div>
+
+<!--  COINCYNC IMPROVEMENT PROPOSALS (CIPs)
+     Public list of every CIP in the repo's docs/cip/ directory. Status,
+     summary, link to the full doc on GitHub. Read-only — discussion happens
+     on the linked Matrix/Discord/GitHub channels, not here. The Constitution's
+     Article XVIII is explicit: interpretation belongs to node operators via
+     fork-acceptance, not to a centralized vote tally on this page. So this
+     page shows transparency, not authority. -->

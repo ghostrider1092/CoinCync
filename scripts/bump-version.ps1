@@ -1,20 +1,21 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Bump CoinCync version across all four version-bearing files atomically.
+  Bump CoinCync version across all version-bearing components atomically.
 
 .DESCRIPTION
-  At tag-cut time, the version string lives in 4 separate files. Editing
+  At tag-cut time, the version string lives in several source files. Editing
   them by hand has historically produced mismatches (wallet showed
   v1.0.9 while the node logged v1.0.10 because the wallet bump was
-  forgotten). This script does all four at once with a single source of
+  forgotten). This script updates them together from a single source of
   truth.
 
   Files updated:
     1. Cargo.toml                                -- workspace root
     2. coincync-wallet-v2/src-tauri/Cargo.toml   -- desktop wallet (Rust)
     3. coincync-wallet-v2/package.json           -- desktop wallet (JS)
-    4. src/explorer/index.html                   -- explorer footer + ticker
+    4. src/explorer/fragments/00-shell.html      -- explorer ticker
+    5. src/explorer/fragments/99-footer.html     -- explorer footer
 
 .PARAMETER NewVersion
   Target version string, e.g. "1.0.10" (no leading "v"). Must match the
@@ -60,9 +61,14 @@ $targets = @(
     Replace  = """version"": ""$NewVersion"""
   }
   @{
-    Path     = Join-Path $repoRoot "src\explorer\index.html"
-    Label    = "explorer ticker/footer"
-    # Matches: v1.0.9, v1.0.10, etc. across multiple sites -- footer + ticker
+    Path     = Join-Path $repoRoot "src\explorer\fragments\00-shell.html"
+    Label    = "explorer ticker"
+    Pattern  = 'v\d+\.\d+\.\d+'
+    Replace  = "v$NewVersion"
+  }
+  @{
+    Path     = Join-Path $repoRoot "src\explorer\fragments\99-footer.html"
+    Label    = "explorer footer"
     Pattern  = 'v\d+\.\d+\.\d+'
     Replace  = "v$NewVersion"
   }
@@ -159,7 +165,7 @@ foreach ($t in $targets) {
     exit 1
   }
 
-  $currentValues = $currentMatchTexts | Sort-Object -Unique
+  $currentValues = @($currentMatchTexts | Sort-Object -Unique)
   if ($currentValues.Count -gt 1) {
     Write-Host "ERROR: $($t.Label) contains multiple distinct CURRENT version strings (forward refs are exempt):" -ForegroundColor Red
     $currentValues | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
@@ -215,12 +221,13 @@ foreach ($r in $results) {
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Verify the diff:"
-Write-Host "       git diff Cargo.toml coincync-wallet-v2 src/explorer/index.html"
+Write-Host "       git diff Cargo.toml coincync-wallet-v2 src/explorer/fragments/00-shell.html src/explorer/fragments/99-footer.html"
 Write-Host ""
 Write-Host "  2. Confirm the workspace still builds:"
 Write-Host "       cargo check --lib"
 Write-Host ""
 Write-Host "  3. Commit alongside the tag-cut PR:"
 Write-Host "       git add Cargo.toml coincync-wallet-v2/src-tauri/Cargo.toml \\"
-Write-Host "               coincync-wallet-v2/package.json src/explorer/index.html"
+Write-Host "               coincync-wallet-v2/package.json src/explorer/fragments/00-shell.html \"
+Write-Host "               src/explorer/fragments/99-footer.html"
 Write-Host "       git commit -m ""release: bump to v$NewVersion"""

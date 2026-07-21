@@ -1,0 +1,348 @@
+<template id="removed-doc-pages">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Documentation</div>
+    <div class="page-title" style="margin-bottom:4px">Documentation</div>
+    <div class="page-sub" style="margin-bottom:24px">Everything you need to run, build, and use CoinCync</div>
+    <div class="docs-grid">
+      <div class="doc-card" onclick="go('nodesetup')">
+        <div class="doc-card-icon">🖥</div>
+        <div class="doc-card-title">Node Setup</div>
+        <div class="doc-card-desc">How to install, configure, and run a CoinCync node. Systemd setup, mining, firewall, Tor support.</div>
+      </div>
+      <div class="doc-card" onclick="go('walletdoc')">
+        <div class="doc-card-icon">💼</div>
+        <div class="doc-card-title">Wallet Guide</div>
+        <div class="doc-card-desc">Create wallets, send/receive CYNC, subaddresses, confidential assets, view keys, and more.</div>
+      </div>
+      <div class="doc-card" onclick="go('testnetdoc')">
+        <div class="doc-card-icon">🧪</div>
+        <div class="doc-card-title">Testnet Guide</div>
+        <div class="doc-card-desc">Get started on the testnet. Build from source, mine, use the faucet, test privacy features.</div>
+      </div>
+      <div class="doc-card" onclick="go('privacydoc')">
+        <div class="doc-card-icon"></div>
+        <div class="doc-card-title">Privacy Features</div>
+        <div class="doc-card-desc">Deep dive into ring signatures, stealth addresses, Bulletproofs, Dandelion++, and Noise protocol.</div>
+      </div>
+      <div class="doc-card" onclick="go('protocoldoc')">
+        <div class="doc-card-icon"></div>
+        <div class="doc-card-title">Protocol Specification</div>
+        <div class="doc-card-desc">Block structure, transaction format, cryptographic primitives, VDF PoW, emission schedule.</div>
+      </div>
+      <div class="doc-card" onclick="go('api')">
+        <div class="doc-card-icon">⚡</div>
+        <div class="doc-card-title">JSON-RPC API</div>
+        <div class="doc-card-desc">Complete JSON-RPC method reference for building on CoinCync. All 15+ methods documented.</div>
+      </div>
+      <div class="doc-card" onclick="go('apifull')">
+        <div class="doc-card-icon"></div>
+        <div class="doc-card-title">REST API</div>
+        <div class="doc-card-desc">REST endpoints for blocks, transactions, mempool, supply, and assets. Port 28082.</div>
+      </div>
+      <div class="doc-card" onclick="go('constitution')">
+        <div class="doc-card-icon">📜</div>
+        <div class="doc-card-title">Constitution</div>
+        <div class="doc-card-desc">The four articles that govern CoinCync. Supply cap, no premine, mandatory privacy, permissionless mining.</div>
+      </div>
+      <div class="doc-card" onclick="go('billofrights')">
+        <div class="doc-card-icon">⚖</div>
+        <div class="doc-card-title">Bill of Rights</div>
+        <div class="doc-card-desc">The ten guaranteed rights of every CoinCync user. Ratified at Block 0. Permanent and irrevocable.</div>
+      </div>
+      <div class="doc-card" onclick="go('disclaimer')">
+        <div class="doc-card-icon">⚠</div>
+        <div class="doc-card-title">Disclaimer</div>
+        <div class="doc-card-desc">Limitations, prohibited uses, user responsibilities, and regulatory status. Read before using.</div>
+      </div>
+      <div class="doc-card" onclick="go('privacy')">
+        <div class="doc-card-icon">🛡</div>
+        <div class="doc-card-title">Privacy Overview</div>
+        <div class="doc-card-desc">Quick visual overview of CoinCync's privacy stack with comparison tables.</div>
+      </div>
+      <div class="doc-card" onclick="go('changelog')">
+        <div class="doc-card-icon">📋</div>
+        <div class="doc-card-title">Changelog</div>
+        <div class="doc-card-desc">Version history, what changed across the v1.0.x testnet series, and upcoming mainnet features.</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">Quick links</div>
+      <div style="padding:16px 20px;display:flex;gap:12px;flex-wrap:wrap">
+        <a href="https://git.coincync.network/coincync/cync-protocol" target="_blank" class="btn btn-outline" style="font-size:12px;padding:6px 14px;text-decoration:none">Source &rarr;</a>
+        <a href="https://coincync.network/faucet" target="_blank" class="btn btn-outline" style="font-size:12px;padding:6px 14px;text-decoration:none">Testnet Faucet &rarr;</a>
+        <span onclick="go('walletdoc')" class="btn btn-outline" style="font-size:12px;padding:6px 14px;cursor:pointer">Wallet Guide →</span>
+        <span onclick="go('faucet')" class="btn btn-outline" style="font-size:12px;padding:6px 14px;cursor:pointer">Faucet Guide →</span>
+        <span onclick="go('mining')" class="btn btn-outline" style="font-size:12px;padding:6px 14px;cursor:pointer">Mining Calculator →</span>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="page" id="removed-page-nodesetup">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('docs')">Docs</a><span>›</span>Node Setup</div>
+    <div class="doc-page"><h2>CoinCync Node Setup Guide</h2>
+<div style="height:8px"></div>
+<p>Run your own CoinCync node to support the network, mine CYNC, or verify transactions independently.</p>
+<div style="height:8px"></div>
+<h3>Requirements</h3>
+<div style="height:8px"></div>
+<ul>
+<li><strong>OS</strong>: Linux (recommended), macOS, or Windows</li>
+<li><strong>RAM</strong>: 2 GB minimum, 4 GB recommended</li>
+<li><strong>Disk</strong>: 10 GB free (grows with blockchain)</li>
+<li><strong>Network</strong>: Stable internet, port 28080 open for inbound (optional but helps the network)</li>
+<li><strong>CPU</strong>: Any modern x64 processor. ARM64 supported.</li>
+</ul>
+<div style="height:8px"></div>
+<h3>Installation</h3>
+<div style="height:8px"></div>
+<h4>Option 1: Download Binary (Recommended)</h4>
+<div style="height:8px"></div>
+<p>Download the latest release from GitHub:</p>
+<p>https://git.coincync.network/coincync/cync-protocol/releases</p>
+<div style="height:8px"></div>
+<pre><code># Linux x64
+wget https://git.coincync.network/coincync/cync-protocol/releases/latest/download/coincync-node-linux-x64
+chmod +x coincync-node-linux-x64
+sudo mv coincync-node-linux-x64 /usr/local/bin/coincync-node
+
+# Verify
+coincync-node --version</code></pre>
+<div style="height:8px"></div>
+<h4>Option 2: Build from Source</h4>
+<div style="height:8px"></div>
+<pre><code># Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# Clone and build
+git clone https://git.coincync.network/coincync/cync-protocol.git
+cd Cync-Protocol
+
+# Testnet build (recommended for now)
+cargo build --release --features "testnet randomx randomx-rs" -j 1
+
+# Mainnet build (after Oct 1, 2026 launch)
+cargo build --release --features "mainnet randomx randomx-rs" -j 1
+
+# Install
+sudo cp target/release/coincync-node /usr/local/bin/
+sudo cp target/release/cync-wallet /usr/local/bin/
+sudo cp target/release/cync-miner /usr/local/bin/</code></pre>
+<div style="height:8px"></div>
+<h3>Quick Start</h3>
+<div style="height:8px"></div>
+<h4>Start a Node</h4>
+<div style="height:8px"></div>
+<pre><code># Public testnet (recommended/default public network)
+coincync-node --network testnet
+
+# Mainnet (reserved for launch window)
+coincync-node --network mainnet</code></pre>
+<div style="height:8px"></div>
+<p>That's it. The node will:</p>
+<p>1. Show the disclaimer (accept once)</p>
+<p>2. Connect to seed nodes</p>
+<p>3. Download the blockchain (IBD)</p>
+<p>4. Start serving blocks to other peers</p>
+<div style="height:8px"></div>
+<h4>Start a Node with Mining</h4>
+<div style="height:8px"></div>
+<pre><code># First, create a wallet to receive mining rewards
+cync-wallet create --wallet miner
+
+# Note the address shown, then start mining
+coincync-miner --address tCYNC3your_address_here --threads 1 --node 127.0.0.1:28081</code></pre>
+<div style="height:8px"></div>
+<h3>Configuration</h3>
+<div style="height:8px"></div>
+<h4>Data Directory</h4>
+<div style="height:8px"></div>
+<p>Default: <code>~/.coincync</code></p>
+<div style="height:8px"></div>
+<p>Override: <code>coincync-node --data-dir /path/to/data</code></p>
+<div style="height:8px"></div>
+<p>Contents:</p>
+<pre><code>~/.coincync/
+  db/           # Blockchain database
+  node_key      # P2P identity key
+  seeds.txt     # Extra seed nodes (optional)</code></pre>
+<div style="height:8px"></div>
+<h4>Ports</h4>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Port</th><th>Purpose</th><th>Default (Mainnet)</th><th>Default (Testnet)</th></tr></thead><tbody>
+<tr><td>P2P</td><td>Peer connections</td><td>28080</td><td>28080</td></tr>
+<tr><td>RPC</td><td>JSON-RPC API</td><td>19081</td><td>28081</td></tr>
+<tr><td>Explorer</td><td>Block explorer</td><td>19082</td><td>28082</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<p>Override:</p>
+<pre><code>coincync-node --p2p-port 28080 --rpc-port 19081</code></pre>
+<div style="height:8px"></div>
+<h4>Firewall</h4>
+<div style="height:8px"></div>
+<p>Open the P2P port so other nodes can connect to you:</p>
+<div style="height:8px"></div>
+<pre><code># Linux (ufw)
+sudo ufw allow 28080/tcp
+
+# Linux (firewalld)
+sudo firewall-cmd --permanent --add-port=28080/tcp
+sudo firewall-cmd --reload</code></pre>
+<div style="height:8px"></div>
+<h4>Adding Peers</h4>
+<div style="height:8px"></div>
+<pre><code># Connect to a specific peer
+coincync-node --peer 1.2.3.4:28080
+
+# Override seed nodes entirely
+coincync-node --seed-node 1.2.3.4:28080 --seed-node 5.6.7.8:28080
+
+# Add persistent seeds via file
+echo "1.2.3.4:28080" &gt;&gt; ~/.coincync/seeds.txt</code></pre>
+<div style="height:8px"></div>
+<h3>Running as a Service (Linux)</h3>
+<div style="height:8px"></div>
+<p>Create <code>/etc/systemd/system/coincync.service</code>:</p>
+<div style="height:8px"></div>
+<pre><code>[Unit]
+Description=CoinCync Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coincync
+Group=coincync
+ExecStart=/usr/local/bin/coincync-node --data-dir /var/lib/coincync
+Restart=always
+RestartSec=10
+LimitNOFILE=65535
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/coincync
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+<div style="height:8px"></div>
+<pre><code># Create user and data directory
+sudo useradd -r -s /usr/sbin/nologin coincync
+sudo mkdir -p /var/lib/coincync
+sudo chown coincync:coincync /var/lib/coincync
+
+# Enable and start
+sudo systemctl enable coincync
+sudo systemctl start coincync
+
+# Check status
+sudo systemctl status coincync
+sudo journalctl -u coincync -f</code></pre>
+<div style="height:8px"></div>
+<h3>Security</h3>
+<div style="height:8px"></div>
+<h4>RPC Access</h4>
+<div style="height:8px"></div>
+<p>By default, RPC binds to <code>127.0.0.1</code> (localhost only). This is safe.</p>
+<div style="height:8px"></div>
+<p>If you need remote access:</p>
+<div style="height:8px"></div>
+<pre><code># With TLS (auto-generated certificate)
+coincync-node --rpc-bind 0.0.0.0
+
+# With your own TLS certificate
+coincync-node --rpc-bind 0.0.0.0 --rpc-tls-cert /path/to/cert.pem --rpc-tls-key /path/to/key.pem
+
+# Disable TLS (only for localhost!)
+coincync-node --rpc-bind 127.0.0.1 --no-rpc-tls</code></pre>
+<div style="height:8px"></div>
+<h4>Tor Support</h4>
+<div style="height:8px"></div>
+<p>Route all P2P traffic through Tor:</p>
+<div style="height:8px"></div>
+<pre><code># Install Tor (the service, not the browser)
+sudo apt install tor
+sudo systemctl start tor
+
+# Run node through Tor
+coincync-node --proxy --proxy-port 9050
+
+# Only connect to .onion peers
+coincync-node --proxy --proxy-port 9050 --onion-only</code></pre>
+<div style="height:8px"></div>
+<h4>P2P Encryption</h4>
+<div style="height:8px"></div>
+<p>All P2P connections use Noise protocol encryption by default.</p>
+<div style="height:8px"></div>
+<pre><code># Require encryption (reject plaintext peers)
+coincync-node --require-encryption</code></pre>
+<div style="height:8px"></div>
+<h3>Monitoring</h3>
+<div style="height:8px"></div>
+<h4>Check Node Status</h4>
+<div style="height:8px"></div>
+<pre><code># Via RPC
+curl -s http://127.0.0.1:19081 -d '{"jsonrpc":"2.0","id":1,"method":"get_info","params":[]}' | jq
+
+# Block explorer
+open http://localhost:19082</code></pre>
+<div style="height:8px"></div>
+<h4>Log Levels</h4>
+<div style="height:8px"></div>
+<pre><code>coincync-node --log-level debug    # Verbose
+coincync-node --log-level info     # Normal (default)
+coincync-node --log-level warn     # Quiet</code></pre>
+<div style="height:8px"></div>
+<h3>Pruning</h3>
+<div style="height:8px"></div>
+<p>Reduce disk usage by pruning old block data:</p>
+<div style="height:8px"></div>
+<pre><code># Keep only recent blocks (last 5000)
+coincync-node --prune-mode recent --prune-keep-blocks 5000
+
+# Keep only UTXO set (minimal disk)
+coincync-node --prune-mode unspent</code></pre>
+<div style="height:8px"></div>
+<h3>Troubleshooting</h3>
+<div style="height:8px"></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Problem</th><th>Solution</th></tr></thead><tbody>
+<tr><td>"Another node may be running"</td><td>Kill existing process: `pkill coincync-node`</td></tr>
+<tr><td>Not finding peers</td><td>Check firewall, try `--peer &lt;ip:port&gt;`</td></tr>
+<tr><td>Sync stuck</td><td>Check logs (`--log-level debug`), restart node</td></tr>
+<tr><td>High memory usage</td><td>Use pruning: `--prune-mode recent`</td></tr>
+<tr><td>"Genesis hash mismatch"</td><td>Wrong build (testnet binary on mainnet or vice versa)</td></tr>
+<tr><td>Slow sync</td><td>Normal for first sync; ~1 hour for full chain</td></tr>
+</tbody></table></div>
+<div style="height:8px"></div>
+<h3>Full CLI Reference</h3>
+<div style="height:8px"></div>
+<pre><code>coincync-node [OPTIONS] [COMMAND]
+
+Options:
+  --data-dir &lt;PATH&gt;          Data directory (default: ~/.coincync)
+  --p2p-port &lt;PORT&gt;          P2P listen port
+  --p2p-bind &lt;ADDR&gt;          P2P bind address (default: 0.0.0.0)
+  --rpc-port &lt;PORT&gt;          RPC listen port
+  --rpc-bind &lt;ADDR&gt;          RPC bind address (default: 127.0.0.1)
+  --mine                     Enable mining
+  --mining-address &lt;ADDR&gt;    Address for mining rewards
+  --mining-threads &lt;N&gt;       Mining threads (0 = auto)
+  --max-peers &lt;N&gt;            Maximum peer connections (default: 125)
+  --peer &lt;ADDR:PORT&gt;         Connect to specific peer
+  --seed-node &lt;ADDR:PORT&gt;    Override seed nodes
+  --proxy                    Enable SOCKS5 proxy (Tor)
+  --proxy-port &lt;PORT&gt;        SOCKS5 port (default: 9050)
+  --onion-only               Only connect to .onion peers
+  --require-encryption       Reject plaintext P2P
+  --no-rpc-tls               Disable RPC TLS
+  --prune-mode &lt;MODE&gt;        Pruning: archive, recent, unspent
+  --log-level &lt;LEVEL&gt;        Log level: trace, debug, info, warn, error
+  --version                  Show version
+  --help                     Show help</code></pre>
+<div style="height:8px"></div></div>
+  </div>
+</div>

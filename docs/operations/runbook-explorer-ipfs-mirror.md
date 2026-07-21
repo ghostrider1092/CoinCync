@@ -2,7 +2,7 @@
 
 **Scope**: publish an IPFS pin of the coincync explorer so users can browse the chain even if `explorer.coincync.network` becomes unreachable. Community members visit any IPFS gateway URL and get a functioning explorer that talks to `api.coincync.network` (or their own node).
 
-**Prerequisite**: the frontend at `src/explorer/index.html` must contain `_computeApiBase()` (Fort-Knox Item 4 code). Publishing to IPFS without this fix produces a broken mirror that 404s on every RPC call.
+**Prerequisite**: the frontend at `src/explorer/app/01-core.js` must contain `_computeApiBase()` (Fort-Knox Item 4 code). Publishing to IPFS without this fix produces a broken mirror that 404s on every RPC call.
 
 ## Threat model this closes
 
@@ -91,7 +91,7 @@ curl -sI -H "Origin: https://ipfs.io" -X OPTIONS \
   https://api.coincync.network/api/testnet | grep -i access-control-allow-origin
 
 # Fort-Knox 4 code still in the frontend
-grep -c "_computeApiBase" /c/dev/coincync/src/explorer/index.html
+grep -c "_computeApiBase" /c/dev/coincync/src/explorer/app/01-core.js
 # Must be >= 1
 
 # IPFS reachable
@@ -110,7 +110,8 @@ bash scripts/publish-explorer-ipfs.sh --dry-run
 ```
 
 Inspect the `out/explorer-static/` output. Verify:
-- `index.html` is present
+- `index.html`, `explorer.css`, `theme-init.js`, and the ordered `app/*.js` files are present
+- `index.html` is the assembled document; source-only `index.parts`, `fragments/`, and `assemble.py` are absent
 - `assets/`, `static/` present with expected content
 - No `serve.py` or `__pycache__` (excluded by the script)
 - `BUILD_INFO.txt` records the current commit
@@ -216,7 +217,7 @@ Every explorer update needs a new publish. The pointer URL always resolves to th
 
 ## Cross-references
 
-- [`src/explorer/index.html`](../../src/explorer/index.html) — `_computeApiBase()` at ~line 2170
+- [`src/explorer/app/01-core.js`](../../src/explorer/app/01-core.js) — `_computeApiBase()`
 - [`scripts/publish-explorer-ipfs.sh`](../../scripts/publish-explorer-ipfs.sh) — the publish script
 - [`docs/operations/signed-peer-snapshots.md`](signed-peer-snapshots.md) — Fort-Knox Item 6 (similar IPFS-based bootstrap pattern)
 - [Reproducible Builds — Explorer](REPRODUCIBLE_BUILDS.md) — future work: byte-identical explorer builds

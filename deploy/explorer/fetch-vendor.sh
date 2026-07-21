@@ -84,7 +84,7 @@ ASSETS=(
   # ── chart.js ────────────────────────────────────────────────────
   # Used by the iron-consensus dashboard panel for the difficulty
   # and hashrate sparklines. UMD build is the global-friendly one
-  # the explorer's inline JS expects.
+  # the explorer application expects.
   "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js|chart.js/4.4.0/chart.umd.min.js"
 
   # ── d3 (full bundle) ────────────────────────────────────────────
@@ -107,8 +107,8 @@ ASSETS=(
   "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json|world-atlas/2/countries-110m.json"
 
   # ── three-globe textures ────────────────────────────────────────
-  # The 3D globe widget loads day/night/topology textures via inline
-  # JS. Two URL forms appear in index.html: `npm/three-globe/example/img/`
+  # The 3D globe widget loads day/night/topology textures from app/*.js.
+  # Two URL forms appear there: `npm/three-globe/example/img/`
   # and `gh/vasturiano/three-globe/example/img/`. Both resolve to the
   # same upstream files; we vendor under `three-globe/textures/` and
   # patch both URL forms in patch-vendor.sh. These are several hundred
@@ -128,7 +128,7 @@ ASSETS=(
 # whole font set is self-contained under static/vendor/fonts/.
 #
 # The exact Google Fonts CSS URL the explorer requests is hardcoded
-# in the embedded HTML (line ~21 of src/explorer/index.html):
+# in the explorer HTML shell (`src/explorer/fragments/00-shell.html`):
 #   https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&display=swap
 
 GOOGLE_FONTS_CSS_URL='https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&display=swap'

@@ -1007,7 +1007,7 @@ pub async fn start_rpc_server(
     // ── get_block (by hash) ───────────────────────────────────
     //
     // Hash-based block lookup. The embedded explorer's search
-    // bar (line ~2455 of `src/explorer/index.html`) calls this
+    // bar in `src/explorer/app/11-router.js` calls this
     // with a 64-char hex string; we accept that and fall back to
     // a 32-byte raw form if the input isn't hex.
     module.register_method("get_block", |params, state, _ext| {
@@ -1654,7 +1654,7 @@ pub async fn start_rpc_server(
     // ── get_peers ─────────────────────────────────────────────
     //
     // Returns the live peer table. Used by the embedded
-    // explorer's "Peers" tab (line ~2238 of `index.html`) to
+    // explorer's "Peers" tab in `app/03-network.js` to
     // render a per-peer card with addr / height / version /
     // user-agent and an inbound/outbound badge. Each entry
     // includes the per-direction byte counts so monitoring can
@@ -1685,8 +1685,8 @@ pub async fn start_rpc_server(
     // Lookup a transaction by hash. Currently NOT IMPLEMENTED —
     // the chain does not maintain a txid → (block_height, index)
     // index, so we cannot satisfy this query without scanning
-    // every block. The embedded explorer's search bar (line
-    // ~3696 of `index.html`) calls this; it will display a
+    // every block. The embedded explorer's search bar in
+    // `app/11-router.js` calls this; it will display a
     // labelled "not yet wired" error rather than silently
     // returning empty results, so the missing index is visible
     // and tracked.
@@ -1813,8 +1813,8 @@ pub async fn start_rpc_server(
     // Lookup an issued-asset descriptor by id. CoinCync 1.0
     // STRIPPED the confidential-asset layer in the 2.0 → 1.0
     // trim, so this endpoint is permanently NOT IMPLEMENTED —
-    // the embedded explorer's search bar (line ~3773 of
-    // `index.html`) calls it on free-text input that doesn't
+    // the embedded explorer's search bar in `app/11-router.js` calls it
+    // on free-text input that doesn't
     // match a block hash or txid. Returning an explicit error
     // makes the missing surface obvious instead of silently
     // returning empty results.

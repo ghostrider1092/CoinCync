@@ -1,0 +1,557 @@
+<div class="page" id="page-blocks">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Blocks</div>
+    <div class="page-title">All blocks</div>
+    <div class="page-sub" id="blocks-sub" style="margin-bottom:10px">Loading...</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px" id="blocks-meta">
+      <span class="badge">source: <span id="blocks-source">/api/testnet</span></span>
+      <span class="badge">freshness: <span id="blocks-freshness">—</span></span>
+      <span class="badge">tip: <span id="blocks-tip">—</span></span>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;border:1px solid var(--b);background:var(--surface);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-family:var(--mono);font-size:11px">
+      <span id="ops-fresh-dot" style="width:8px;height:8px;border-radius:50%;background:#6b7280;display:inline-block"></span>
+      <span>height: <span id="ops-height">—</span></span>
+      <span>tip age: <span id="ops-tip-age">—</span></span>
+      <span>peers: <span id="ops-peers">—</span></span>
+      <span>rpc: <span id="ops-rpc-source">/api/testnet</span></span>
+      <span style="margin-left:auto">api: <span id="ops-api-health">checking...</span></span>
+    </div>
+    <div style="border:1px solid var(--b);background:var(--surface);border-radius:8px;padding:8px 10px;margin-bottom:12px">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">Recent chain alerts</div>
+      <div id="ops-alert-feed" style="display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:11px;color:var(--t2)">
+        <div>no alerts yet</div>
+      </div>
+    </div>
+    <div class="info-box green"> All transactions are 100% private. Amounts and addresses are cryptographically hidden.</div>
+    <div class="panel">
+      <div class="panel-head">Blocks</div>
+      <table><thead><tr><th>Height</th><th>Age</th><th>Hash</th><th>Algorithm</th><th>Txns</th><th>Size</th><th>Privacy</th></tr></thead>
+      <tbody id="all-blocks"><tr><td colspan="7" class="loading">Loading blocks...</td></tr></tbody></table>
+      <div style="padding:12px 20px;border-top:1px solid var(--b);background:var(--s2);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button onclick="jumpNewestBlocks()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Newest</button>
+        <button onclick="loadMore()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Older 100</button>
+        <input id="blocks-jump-height" type="number" min="0" placeholder="height" style="width:90px;padding:5px 8px;border:1px solid var(--b);border-radius:6px;background:var(--bg);color:var(--t);font-family:var(--mono);font-size:11px"/>
+        <button onclick="jumpToBlockHeight()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Go</button>
+        <input id="blocks-direct-lookup" type="text" placeholder="block/tx hash or height" style="width:180px;padding:5px 8px;border:1px solid var(--b);border-radius:6px;background:var(--bg);color:var(--t);font-family:var(--mono);font-size:11px"/>
+        <button onclick="blocksDirectLookup()" class="btn btn-outline" style="font-size:11px;padding:5px 12px">Lookup</button>
+        <span style="font-size:11px;color:var(--t3);font-family:var(--mono);margin-left:auto"><span id="blocks-load-status"></span>Showing <span id="blocks-shown">0</span> blocks</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!--  BLOCK DETAIL  -->
+<div class="page" id="page-block">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span><a onclick="go('blocks')">Blocks</a><span>›</span><span id="bd-bc">—</span></div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+      <div class="page-title" id="bd-title">Block</div>
+      <span class="badge"> shielded</span>
+    </div>
+    <div class="page-sub" id="bd-sub" style="margin-bottom:16px">—</div>
+    <div style="display:flex;gap:8px;margin-bottom:20px">
+      <button id="bd-prev" class="btn btn-outline" style="font-size:11px;padding:6px 14px">‹ Previous</button>
+      <button id="bd-next" class="btn btn-outline" style="font-size:11px;padding:6px 14px">Next ›</button>
+      <button id="bd-share" class="btn btn-outline" style="font-size:11px;padding:6px 14px" onclick="shareBlock(chainHeight)"> Share</button>
+    </div>
+    <div class="two-col" style="margin-bottom:20px">
+      <div class="panel">
+        <div class="panel-head">Block overview</div>
+        <div class="detail-grid">
+          <div class="dl">Height</div><div class="dv" id="bd-height" style="font-weight:600;color:var(--ac2)">—</div>
+          <div class="dl">Timestamp</div><div class="dv" id="bd-ts">—</div>
+          <div class="dl">Age</div><div class="dv" id="bd-age" style="color:var(--t3)">—</div>
+          <div class="dl">Algorithm</div><div class="dv" id="bd-algo">—</div>
+          <div class="dl">Transactions</div><div class="dv" id="bd-txs">—</div>
+          <div class="dl">Block size</div><div class="dv" id="bd-size">—</div>
+          <div class="dl">Block reward</div><div class="dv" style="color:var(--ac2);font-weight:600" id="blk-reward-val">— CYNC</div>
+          <div class="dl">Privacy</div><div class="dv"><span class="badge"> 100% shielded</span></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Hashes</div>
+        <div class="detail-grid">
+          <div class="dl">Block hash</div><div class="dv" id="bd-hash" style="color:var(--ac2);font-size:11px">—</div>
+          <div class="dl">Prev hash</div><div class="dv" id="bd-prev-hash" style="font-size:11px">—</div>
+        </div>
+        <div style="padding:16px 20px">
+          <div class="sec-label" style="margin-top:0">Privacy verification</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Sender hidden</span><span class="badge">✓ verified</span></div>
+            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Amount hidden</span><span class="badge">✓ verified</span></div>
+            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:var(--acb);border-radius:6px"><span style="font-size:12px;color:var(--ac2)">Receiver hidden</span><span class="badge">✓ verified</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!--  RING SIGNATURE VISUALIZER  Phase 3 -->
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head">CLSAG ring signature <span class="panel-action" onclick="document.getElementById('ring-explainer').style.display = document.getElementById('ring-explainer').style.display==='none'?'block':'none'">What is this?</span></div>
+      <div id="ring-explainer" style="display:none;padding:14px 20px;background:var(--acb);border-bottom:1px solid var(--b);font-size:12px;color:var(--t2);line-height:1.6">
+        Every CYNC transaction signs with a <strong>ring of 11 public keys</strong>. One is the real signer.
+        The other 10 are decoys pulled from the chain. Even the network operators cannot tell which one
+        spent. The ring signature mathematically proves <em>one of these</em> signed the transaction —
+        without revealing <em>which</em>.
+      </div>
+      <div id="ring-viz" style="padding:24px;display:flex;align-items:center;justify-content:center;min-height:340px;position:relative">
+        <svg id="ring-svg" viewBox="-160 -160 320 320" style="width:320px;height:320px"></svg>
+      </div>
+      <div style="padding:12px 20px;border-top:1px solid var(--b);text-align:center;font-size:11px;color:var(--t3);font-family:var(--mono)">
+        <span style="color:#D4A059"></span> Ring member · <span style="color:var(--t3)">?</span> Real signer hidden — anyone of these
+      </div>
+    </div>
+
+    <!--  PRIVACY FEATURES LIVE  -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-top:20px">
+
+      <!-- Stealth Addresses -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">🗨</span> Stealth Addresses
+          <span class="badge" style="margin-left:auto">LIVE</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="sg"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Sender -->
+            <circle cx="40" cy="50" r="14" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#sg)"/>
+            <text x="40" y="53" text-anchor="middle" font-family="monospace" font-size="8" fill="#D4A059" font-weight="700">S</text>
+            <text x="40" y="78" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">Sender</text>
+            <!-- Receiver -->
+            <circle cx="240" cy="50" r="14" fill="rgba(168,85,247,.1)" stroke="#A855F7" stroke-width="1.5" filter="url(#sg)"/>
+            <text x="240" y="53" text-anchor="middle" font-family="monospace" font-size="8" fill="#A855F7" font-weight="700">R</text>
+            <text x="240" y="78" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">Receiver</text>
+            <!-- ECDH key exchange arc -->
+            <path d="M58,50 Q140,0 222,50" fill="none" stroke="#D4A059" stroke-width="1" stroke-dasharray="3,3" opacity="0.4"/>
+            <!-- Animated key traveling the path -->
+            <circle r="4" fill="#D4A059" filter="url(#sg)"><animateMotion dur="3s" repeatCount="indefinite" path="M58,50 Q140,0 222,50"/></circle>
+            <circle r="4" fill="#A855F7" filter="url(#sg)"><animateMotion dur="3s" repeatCount="indefinite" path="M222,50 Q140,100 58,50"/></circle>
+            <!-- Stealth address output -->
+            <rect x="90" y="100" width="100" height="28" rx="6" fill="rgba(168,85,247,.08)" stroke="#A855F7" stroke-width="1" opacity="0.8"><animate attributeName="opacity" values="0.4;1;0.4" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="110" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">one-time address</text>
+            <text x="140" y="122" text-anchor="middle" font-family="monospace" font-size="7" fill="#A855F7" font-weight="600" id="stealth-otk">tCYNC3...</text>
+            <!-- Label -->
+            <text x="140" y="150" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">ECDH → unlinkable output</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Sender derives a fresh one-time output address from the receiver's view+spend keys via ECDH. Two payments to the same recipient share <em>no</em> on-chain link — the receiver scans for outputs only their view key recognizes.</div>
+        </div>
+      </div>
+
+      <!-- Pedersen Commitments -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">⚖</span> Pedersen Commitments
+          <span class="badge" style="margin-left:auto">LIVE</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="pg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Input commitment -->
+            <circle cx="50" cy="50" r="22" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.5" filter="url(#pg)"><animate attributeName="r" values="20;24;20" dur="4s" repeatCount="indefinite"/></circle>
+            <text x="50" y="45" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">INPUT</text>
+            <text x="50" y="56" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">C(██)</text>
+            <!-- Equals -->
+            <text x="105" y="53" text-anchor="middle" font-family="monospace" font-size="16" fill="#555">=</text>
+            <!-- Output commitment -->
+            <circle cx="160" cy="50" r="22" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="1.5" filter="url(#pg)"><animate attributeName="r" values="20;24;20" dur="4s" begin="1s" repeatCount="indefinite"/></circle>
+            <text x="160" y="45" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">OUTPUT</text>
+            <text x="160" y="56" text-anchor="middle" font-family="monospace" font-size="9" fill="#A855F7" font-weight="700">C(██)</text>
+            <!-- Plus -->
+            <text x="207" y="53" text-anchor="middle" font-family="monospace" font-size="16" fill="#555">+</text>
+            <!-- Fee -->
+            <circle cx="245" cy="50" r="16" fill="rgba(245,158,11,.06)" stroke="#F59E0B" stroke-width="1.5" filter="url(#pg)"><animate attributeName="r" values="14;18;14" dur="4s" begin="2s" repeatCount="indefinite"/></circle>
+            <text x="245" y="45" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">FEE</text>
+            <text x="245" y="56" text-anchor="middle" font-family="monospace" font-size="9" fill="#F59E0B" font-weight="700">C(█)</text>
+            <!-- Verification pulse -->
+            <rect x="60" y="95" width="160" height="24" rx="12" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1"><animate attributeName="stroke-opacity" values="0.3;1;0.3" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="110" text-anchor="middle" font-family="monospace" font-size="8" fill="#D4A059" font-weight="600">✓ BALANCE VERIFIED</text>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">zero knowledge — no amounts revealed</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Each amount is encoded as <code>C = aG + rH</code> with a random blinding factor <code>r</code>. The chain verifies inputs sum equals outputs sum without ever seeing the values — perfect hiding, computationally binding.</div>
+        </div>
+      </div>
+
+      <!-- Bulletproofs+ -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">🛡</span> Bulletproofs+
+          <span class="badge" style="margin-left:auto">LIVE</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="bg2"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            <linearGradient id="rangeGrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#D4A059"/><stop offset="100%" stop-color="#A855F7"/></linearGradient></defs>
+            <!-- Range bar background -->
+            <rect x="30" y="40" width="220" height="12" rx="6" fill="rgba(255,255,255,.03)" stroke="#333" stroke-width="0.5"/>
+            <!-- Range bar fill (animated) -->
+            <rect x="30" y="40" width="0" height="12" rx="6" fill="url(#rangeGrad)" opacity="0.8"><animate attributeName="width" values="0;170;170;0" dur="5s" repeatCount="indefinite"/></rect>
+            <!-- Glow on fill -->
+            <rect x="30" y="40" width="0" height="12" rx="6" fill="url(#rangeGrad)" filter="url(#bg2)" opacity="0.4"><animate attributeName="width" values="0;170;170;0" dur="5s" repeatCount="indefinite"/></rect>
+            <!-- Labels -->
+            <text x="25" y="38" font-family="monospace" font-size="7" fill="#D4A059" text-anchor="end">0</text>
+            <text x="255" y="38" font-family="monospace" font-size="7" fill="#A855F7">2</text>
+            <!-- Hidden amount indicator -->
+            <rect x="95" y="36" width="50" height="20" rx="4" fill="none" stroke="#F59E0B" stroke-width="1" stroke-dasharray="2,2"><animate attributeName="stroke-opacity" values="0.3;1;0.3" dur="2s" repeatCount="indefinite"/></rect>
+            <text x="120" y="49" text-anchor="middle" font-family="monospace" font-size="8" fill="#F59E0B" font-weight="700">██.██</text>
+            <text x="120" y="62" text-anchor="middle" font-family="monospace" font-size="6" fill="#F59E0B">hidden amount</text>
+            <!-- Lock icon -->
+            <circle cx="140" cy="95" r="16" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.5" filter="url(#bg2)"><animate attributeName="r" values="14;18;14" dur="3s" repeatCount="indefinite"/></circle>
+            <text x="140" y="99" text-anchor="middle" font-size="14">🔒</text>
+            <!-- Proof text -->
+            <text x="140" y="125" text-anchor="middle" font-family="monospace" font-size="8" fill="#D4A059" font-weight="600">RANGE PROOF VALID</text>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">~672 bytes · logarithmic scaling</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Logarithmic-size range proof showing the hidden amount lies in <code>[0, 2)</code> without revealing it. Stops a sender from forging coins via integer overflow. ~672 bytes per output, verifies in single-digit milliseconds.</div>
+        </div>
+      </div>
+
+      <!-- Dandelion++ -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">🌿</span> Dandelion++
+          <span class="badge" style="margin-left:auto">LIVE</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="dg"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Stem phase nodes -->
+            <circle cx="30" cy="50" r="10" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#dg)"/>
+            <text x="30" y="53" text-anchor="middle" font-family="monospace" font-size="7" fill="#D4A059" font-weight="700">Y</text>
+            <text x="30" y="70" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">You</text>
+            <line x1="42" y1="50" x2="78" y2="50" stroke="#D4A059" stroke-width="0.8" stroke-opacity="0.3"/>
+            <circle cx="90" cy="50" r="8" fill="rgba(255,255,255,.03)" stroke="#555" stroke-width="1"/>
+            <text x="90" y="53" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">A</text>
+            <line x1="100" y1="50" x2="138" y2="50" stroke="#D4A059" stroke-width="0.8" stroke-opacity="0.3"/>
+            <circle cx="150" cy="50" r="8" fill="rgba(255,255,255,.03)" stroke="#555" stroke-width="1"/>
+            <text x="150" y="53" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">B</text>
+            <line x1="160" y1="50" x2="198" y2="50" stroke="#F59E0B" stroke-width="0.8" stroke-opacity="0.3"/>
+            <circle cx="210" cy="50" r="10" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="1.5" filter="url(#dg)"/>
+            <text x="210" y="53" text-anchor="middle" font-family="monospace" font-size="7" fill="#F59E0B" font-weight="700">C</text>
+            <!-- Animated packet along stem -->
+            <circle r="3" fill="#D4A059" filter="url(#dg)"><animateMotion dur="2s" repeatCount="indefinite" path="M30,50 L90,50 L150,50 L210,50"/></circle>
+            <!-- Stem label -->
+            <text x="120" y="35" text-anchor="middle" font-family="monospace" font-size="7" fill="#D4A059">stem phase →</text>
+            <!-- Fluff explosion from C -->
+            <line x1="210" y1="50" x2="250" y2="20" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.3"/>
+            <line x1="210" y1="50" x2="260" y2="45" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.3"/>
+            <line x1="210" y1="50" x2="255" y2="70" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.3"/>
+            <line x1="210" y1="50" x2="240" y2="85" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.3"/>
+            <circle cx="250" cy="20" r="4" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.5s" repeatCount="indefinite"/></circle>
+            <circle cx="260" cy="45" r="4" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.7s" repeatCount="indefinite"/></circle>
+            <circle cx="255" cy="70" r="4" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.9s" repeatCount="indefinite"/></circle>
+            <circle cx="240" cy="85" r="4" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="2.1s" repeatCount="indefinite"/></circle>
+            <!-- Fluff label -->
+            <text x="250" y="105" text-anchor="middle" font-family="monospace" font-size="6" fill="#F59E0B">fluff ⚡</text>
+            <!-- Bottom label -->
+            <rect x="50" y="115" width="180" height="22" rx="11" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="130" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#D4A059">origin IP hidden from observers</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Each transaction relays through a randomized stem of 1–3 peers before flooding the rest of the network (the "fluff" phase). An adversary watching gossip sees the broadcast but cannot trace the IP origin.</div>
+        </div>
+      </div>
+
+      <!-- Spark Protocol -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">⚡</span> Spark Protocol
+          <span class="badge badge-grey" style="margin-left:auto" title="Phase-2 module — disabled on testnet">DISABLED</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="spg"><feGaussianBlur stdDeviation="4"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Central accumulator -->
+            <circle cx="140" cy="60" r="30" fill="rgba(168,85,247,.05)" stroke="#A855F7" stroke-width="1" filter="url(#spg)"><animate attributeName="r" values="28;34;28" dur="4s" repeatCount="indefinite"/></circle>
+            <circle cx="140" cy="60" r="20" fill="rgba(168,85,247,.08)" stroke="#A855F7" stroke-width="0.8"/>
+            <text x="140" y="56" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">accumulator</text>
+            <text x="140" y="67" text-anchor="middle" font-family="monospace" font-size="10" fill="#A855F7" font-weight="700" id="spark-size">—</text>
+            <!-- Orbiting coins -->
+            <circle r="4" fill="#A855F7" filter="url(#spg)" opacity="0.7"><animateMotion dur="6s" repeatCount="indefinite" path="M140,60 m-40,0 a40,40 0 1,1 80,0 a40,40 0 1,1 -80,0"/></circle>
+            <circle r="3" fill="#D4A059" filter="url(#spg)" opacity="0.5"><animateMotion dur="4s" repeatCount="indefinite" path="M140,60 m-25,0 a25,25 0 1,0 50,0 a25,25 0 1,0 -50,0"/></circle>
+            <!-- Serial spent check -->
+            <rect x="50" y="110" width="180" height="22" rx="11" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="124" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#D4A059">✓ serial double-spend check via RPC</text>
+            <text x="140" y="150" text-anchor="middle" font-family="monospace" font-size="7" fill="#666">Lelantus Spark — full sender+receiver privacy</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Lelantus Spark accumulator provides full sender + receiver + amount privacy with no ring decoys. Spent serial numbers prevent double-spends. Phase-2 module — disabled on testnet, scheduled for mainnet activation.</div>
+        </div>
+      </div>
+
+      <!-- Orchard/Halo2 Shielded Pool -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">🌳</span> Shielded Pool (Orchard/Halo2)
+          <span class="badge badge-grey" style="margin-left:auto" title="Phase-2 module — disabled on testnet">DISABLED</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="hg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Merkle tree -->
+            <!-- Root -->
+            <circle cx="140" cy="20" r="8" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#hg)"><animate attributeName="r" values="7;10;7" dur="3s" repeatCount="indefinite"/></circle>
+            <text x="140" y="23" text-anchor="middle" font-family="monospace" font-size="6" fill="#D4A059" font-weight="700">R</text>
+            <!-- Level 1 -->
+            <line x1="140" y1="28" x2="80" y2="52" stroke="#D4A059" stroke-width="0.5" stroke-opacity="0.3"/>
+            <line x1="140" y1="28" x2="200" y2="52" stroke="#D4A059" stroke-width="0.5" stroke-opacity="0.3"/>
+            <circle cx="80" cy="55" r="6" fill="rgba(168,85,247,.08)" stroke="#A855F7" stroke-width="1"/>
+            <circle cx="200" cy="55" r="6" fill="rgba(168,85,247,.08)" stroke="#A855F7" stroke-width="1"/>
+            <!-- Level 2 -->
+            <line x1="80" y1="61" x2="50" y2="82" stroke="#A855F7" stroke-width="0.4" stroke-opacity="0.3"/>
+            <line x1="80" y1="61" x2="110" y2="82" stroke="#A855F7" stroke-width="0.4" stroke-opacity="0.3"/>
+            <line x1="200" y1="61" x2="170" y2="82" stroke="#A855F7" stroke-width="0.4" stroke-opacity="0.3"/>
+            <line x1="200" y1="61" x2="230" y2="82" stroke="#A855F7" stroke-width="0.4" stroke-opacity="0.3"/>
+            <circle cx="50" cy="85" r="5" fill="rgba(255,255,255,.03)" stroke="#555" stroke-width="0.8"/>
+            <circle cx="110" cy="85" r="5" fill="rgba(255,255,255,.03)" stroke="#555" stroke-width="0.8"/>
+            <circle cx="170" cy="85" r="5" fill="rgba(255,255,255,.03)" stroke="#555" stroke-width="0.8"/>
+            <!-- New leaf being added (animated) -->
+            <circle cx="230" cy="85" r="5" fill="rgba(212,160,89,.15)" stroke="#D4A059" stroke-width="1.2" filter="url(#hg)"><animate attributeName="r" values="4;7;4" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/></circle>
+            <text x="230" y="87" text-anchor="middle" font-family="monospace" font-size="5" fill="#D4A059">+</text>
+            <!-- Stats -->
+            <text x="140" y="112" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">tree: <tspan fill="#D4A059" id="shielded-size">—</tspan> notes · root: <tspan fill="#A855F7" font-size="6" id="shielded-root">—</tspan></text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.6;0.2" dur="4s" repeatCount="indefinite"/></rect>
+            <text x="140" y="139" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#A855F7">Halo2 ZK proofs · no trusted setup</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Zcash Orchard shielded pool with recursive Halo2 zk-SNARKs — <em>no trusted setup ceremony</em> needed. Phase-2 module — disabled on testnet, optional opt-in pool for mainnet.</div>
+        </div>
+      </div>
+
+      <!-- FROST M-of-N Multi-sig (CIP-008) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px"></span> FROST M-of-N Multi-sig
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="fg"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- 3 participants -->
+            <circle cx="40" cy="40" r="14" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#fg)"/>
+            <text x="40" y="44" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">A</text>
+            <circle cx="140" cy="20" r="14" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#fg)"/>
+            <text x="140" y="24" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">B</text>
+            <circle cx="240" cy="40" r="14" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#fg)"/>
+            <text x="240" y="44" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">C</text>
+            <!-- Coordinator (centered) -->
+            <rect x="100" y="68" width="80" height="22" rx="11" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="1" filter="url(#fg)"><animate attributeName="stroke-opacity" values="0.4;1;0.4" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="82" text-anchor="middle" font-family="monospace" font-size="7" fill="#A855F7" font-weight="600">coord (untrusted)</text>
+            <!-- Lines from participants to coord -->
+            <line x1="50" y1="50" x2="105" y2="74" stroke="#D4A059" stroke-width="0.6" stroke-opacity="0.4"/>
+            <line x1="140" y1="34" x2="140" y2="68" stroke="#D4A059" stroke-width="0.6" stroke-opacity="0.4"/>
+            <line x1="230" y1="50" x2="175" y2="74" stroke="#D4A059" stroke-width="0.6" stroke-opacity="0.4"/>
+            <!-- Animated round-1 commitments traveling to coord -->
+            <circle r="3" fill="#D4A059" filter="url(#fg)"><animateMotion dur="2.5s" repeatCount="indefinite" path="M50,50 L140,79"/></circle>
+            <circle r="3" fill="#D4A059" filter="url(#fg)"><animateMotion dur="2.5s" begin="0.4s" repeatCount="indefinite" path="M140,34 L140,79"/></circle>
+            <circle r="3" fill="#D4A059" filter="url(#fg)"><animateMotion dur="2.5s" begin="0.8s" repeatCount="indefinite" path="M230,50 L140,79"/></circle>
+            <!-- Aggregate signature out -->
+            <text x="140" y="115" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">2-of-3 · single-sig indistinguishable</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#D4A059">CIP-008 · zero key material at coord</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Threshold Schnorr signatures (RFC 9591). M-of-N participants each hold one secret share; the coordinator routes round-1 commitments and round-2 signature shares but <em>never holds a key</em>. The aggregate output is indistinguishable from a single-sig — observers can't tell on-chain that this was multi-sig.</div>
+        </div>
+      </div>
+
+      <!-- Atomic Swap (CIP-001) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">⚛</span> CYNC↔BTC Atomic Swap
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="ag"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- CYNC chain (left) -->
+            <rect x="20" y="35" width="80" height="50" rx="6" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1" filter="url(#ag)"/>
+            <text x="60" y="52" text-anchor="middle" font-family="monospace" font-size="9" fill="#D4A059" font-weight="700">CYNC</text>
+            <text x="60" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">CLSAG ring sig</text>
+            <text x="60" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">stealth output</text>
+            <!-- BTC chain (right) -->
+            <rect x="180" y="35" width="80" height="50" rx="6" fill="rgba(245,158,11,.06)" stroke="#F59E0B" stroke-width="1" filter="url(#ag)"/>
+            <text x="220" y="52" text-anchor="middle" font-family="monospace" font-size="9" fill="#F59E0B" font-weight="700">BTC</text>
+            <text x="220" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">Schnorr sig</text>
+            <text x="220" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">P2WPKH</text>
+            <!-- Adaptor binding (center) -->
+            <line x1="100" y1="60" x2="180" y2="60" stroke="#A855F7" stroke-width="1" stroke-dasharray="4,3"><animate attributeName="stroke-dashoffset" values="0;-7" dur="1s" repeatCount="indefinite"/></line>
+            <!-- Adaptor secret (animated) -->
+            <circle r="4" fill="#A855F7" filter="url(#ag)"><animateMotion dur="3s" repeatCount="indefinite" path="M100,60 L180,60 L180,60 L100,60"/></circle>
+            <text x="140" y="50" text-anchor="middle" font-family="monospace" font-size="6" fill="#A855F7">adaptor secret</text>
+            <text x="140" y="76" text-anchor="middle" font-family="monospace" font-size="5" fill="#888">cross-curve DL proof</text>
+            <!-- "Invisible on chain" -->
+            <text x="140" y="105" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">looks like a normal CYNC tx</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#A855F7">CIP-001 · trustless · either-party refund</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Trustless CYNC↔BTC trade via adaptor signatures. Both chains' spend transactions commit to the <em>same</em> secret; redeeming one chain reveals the secret, letting the counterparty redeem the other. Either party times out and refunds if the counterparty stalls. No exchange, no escrow, no listing required.</div>
+        </div>
+      </div>
+
+      <!-- Light-wallet SPV (lightsync) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">📡</span> Light-wallet SPV
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="lg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Wallet (left) -->
+            <rect x="20" y="40" width="60" height="40" rx="6" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.2" filter="url(#lg)"/>
+            <text x="50" y="56" text-anchor="middle" font-family="monospace" font-size="8" fill="#D4A059" font-weight="700">wallet</text>
+            <text x="50" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">view key local</text>
+            <!-- Server (right) -->
+            <rect x="200" y="40" width="60" height="40" rx="6" fill="rgba(168,85,247,.06)" stroke="#A855F7" stroke-width="1.2" filter="url(#lg)"/>
+            <text x="230" y="56" text-anchor="middle" font-family="monospace" font-size="8" fill="#A855F7" font-weight="700">server</text>
+            <text x="230" y="68" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">blind to addrs</text>
+            <!-- Request: just height range -->
+            <line x1="80" y1="55" x2="200" y2="55" stroke="#D4A059" stroke-width="0.8" stroke-opacity="0.4"/>
+            <text x="140" y="48" text-anchor="middle" font-family="monospace" font-size="6" fill="#D4A059">"blocks N..M"</text>
+            <circle r="3" fill="#D4A059" filter="url(#lg)"><animateMotion dur="2.5s" repeatCount="indefinite" path="M80,55 L200,55"/></circle>
+            <!-- Response: digests -->
+            <line x1="200" y1="65" x2="80" y2="65" stroke="#A855F7" stroke-width="0.8" stroke-opacity="0.4"/>
+            <text x="140" y="78" text-anchor="middle" font-family="monospace" font-size="6" fill="#A855F7">digests (~138 B/output)</text>
+            <circle r="3" fill="#A855F7" filter="url(#lg)"><animateMotion dur="2.5s" begin="1.2s" repeatCount="indefinite" path="M200,65 L80,65"/></circle>
+            <!-- Local scan label -->
+            <text x="140" y="105" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">view-tag scan local · server learns 0 addrs</text>
+            <!-- Bottom label -->
+            <rect x="40" y="125" width="200" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">stronger privacy than BIP-157</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Mobile-friendly SPV. Server returns per-block view-tag digests (~138 B per output); the wallet scans locally with its view key. The server never learns which addresses you watch — strictly stronger privacy than Bitcoin's BIP-157 compact filters.</div>
+        </div>
+      </div>
+
+      <!-- Rolling soft-finality (CIP-009.D) -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">⛓</span> Rolling Soft-Finality
+          <span class="badge badge-grey" style="margin-left:auto" title="CIP-009.D library shipped, validate_block integration queued for activation">QUEUED</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="rg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Chain of blocks -->
+            <rect x="20"  y="50" width="36" height="36" rx="4" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="62"  y="50" width="36" height="36" rx="4" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="104" y="50" width="36" height="36" rx="4" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="146" y="50" width="36" height="36" rx="4" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="188" y="50" width="36" height="36" rx="4" fill="rgba(212,160,89,.06)" stroke="#D4A059" stroke-width="1.2" filter="url(#rg)"/>
+            <rect x="230" y="50" width="32" height="36" rx="4" fill="rgba(212,160,89,.04)" stroke="#D4A059" stroke-width="0.8" stroke-dasharray="3,2"><animate attributeName="stroke-dashoffset" values="0;-5" dur="1s" repeatCount="indefinite"/></rect>
+            <!-- Lock icons on finalized -->
+            <text x="38"  y="74" text-anchor="middle" font-family="monospace" font-size="13" fill="#7FB879">🔒</text>
+            <text x="80"  y="74" text-anchor="middle" font-family="monospace" font-size="13" fill="#7FB879">🔒</text>
+            <text x="122" y="74" text-anchor="middle" font-family="monospace" font-size="13" fill="#7FB879">🔒</text>
+            <!-- Soft-final boundary line -->
+            <line x1="142" y1="36" x2="142" y2="100" stroke="#7FB879" stroke-width="0.6" stroke-dasharray="2,2"/>
+            <text x="142" y="32" text-anchor="middle" font-family="monospace" font-size="6" fill="#7FB879">soft-final</text>
+            <!-- 2/3 attestation badge -->
+            <text x="200" y="45" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">tip-LAG</text>
+            <text x="245" y="45" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">tip</text>
+            <!-- Stats -->
+            <text x="140" y="110" text-anchor="middle" font-family="monospace" font-size="7" fill="#888">⌈2/3⌉ active miners attest · ed25519</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">CIP-009.D · time-warp immune</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Active miners (those who mined in the last ~10 000 blocks) attest to recent <code>tip-LAG</code> blocks with ed25519 signatures. ⌈2/3⌉ attestations soft-finalize that height. Window measured in <em>blocks-not-time</em> so the protocol is immune to time-warp manipulation. Library shipped; <code>validate_block</code> hook activates next phase.</div>
+        </div>
+      </div>
+
+      <!-- Multi-node Dandelion++ Verification -->
+      <div class="panel">
+        <div class="panel-head" style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">🧪</span> Dandelion++ Graph Verification
+          <span class="badge" style="margin-left:auto">NEW</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;align-items:center">
+          <svg viewBox="0 0 280 160" style="width:100%;max-width:280px;height:160px">
+            <defs><filter id="vg"><feGaussianBlur stdDeviation="2.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <!-- Origin -->
+            <circle cx="30" cy="80" r="11" fill="rgba(212,160,89,.1)" stroke="#D4A059" stroke-width="1.5" filter="url(#vg)"/>
+            <text x="30" y="84" text-anchor="middle" font-family="monospace" font-size="7" fill="#D4A059" font-weight="700">Y</text>
+            <!-- Two outbound peers (graph: stem fan-out exactly 1) -->
+            <circle cx="100" cy="40" r="9" fill="rgba(255,255,255,.04)" stroke="#555" stroke-width="1"/>
+            <text x="100" y="43" text-anchor="middle" font-family="monospace" font-size="6" fill="#888">P1</text>
+            <circle cx="100" cy="120" r="9" fill="rgba(127,184,121,.10)" stroke="#7FB879" stroke-width="1.2" filter="url(#vg)"/>
+            <text x="100" y="123" text-anchor="middle" font-family="monospace" font-size="6" fill="#7FB879">P2</text>
+            <!-- Stem chosen: only ONE relay per epoch -->
+            <line x1="40" y1="80" x2="93" y2="42" stroke="#444" stroke-width="0.5" stroke-dasharray="1,2" stroke-opacity="0.3"/>
+            <line x1="40" y1="80" x2="93" y2="118" stroke="#7FB879" stroke-width="1.2" stroke-opacity="0.7"/>
+            <!-- Animated packet on stem path -->
+            <circle r="3" fill="#7FB879" filter="url(#vg)"><animateMotion dur="2s" repeatCount="indefinite" path="M40,80 L93,118"/></circle>
+            <!-- Fluff phase from P2 -->
+            <line x1="109" y1="120" x2="160" y2="80" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.4"/>
+            <line x1="109" y1="120" x2="180" y2="120" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.4"/>
+            <line x1="109" y1="120" x2="170" y2="140" stroke="#F59E0B" stroke-width="0.5" stroke-opacity="0.4"/>
+            <circle cx="160" cy="80" r="5" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.4s" repeatCount="indefinite"/></circle>
+            <circle cx="180" cy="120" r="5" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.6s" repeatCount="indefinite"/></circle>
+            <circle cx="170" cy="140" r="5" fill="rgba(245,158,11,.1)" stroke="#F59E0B" stroke-width="0.8"><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.8s" repeatCount="indefinite"/></circle>
+            <!-- Verified badge -->
+            <text x="220" y="85" text-anchor="middle" font-family="monospace" font-size="20" fill="#7FB879">✓</text>
+            <text x="220" y="100" text-anchor="middle" font-family="monospace" font-size="6" fill="#7FB879">stem fan-out = 1</text>
+            <!-- Bottom label -->
+            <rect x="50" y="125" width="180" height="22" rx="11" fill="rgba(127,184,121,.06)" stroke="#7FB879" stroke-width="0.8"><animate attributeName="stroke-opacity" values="0.2;0.8;0.2" dur="3s" repeatCount="indefinite"/></rect>
+            <text x="140" y="140" text-anchor="middle" font-family="monospace" font-size="7.5" fill="#7FB879">multi-node test verifies the privacy invariant</text>
+          </svg>
+          <div style="margin-top:12px;padding:10px 14px;background:var(--acb);border-radius:6px;font-size:11px;color:var(--t2);line-height:1.55"><strong style="color:var(--ac2)">What it's for:</strong> Continuous-integration harness that spins up multi-node test graphs and asserts the privacy invariant: each origin chooses <em>exactly one</em> stem peer per epoch. Catches regressions where a code change would accidentally fan out at the stem stage and leak the origin IP.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!--  MEMPOOL  -->
+<div class="page" id="page-mempool">
+  <div class="content">
+    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Mempool</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:6px">
+      <div>
+        <div class="page-title" style="margin-bottom:2px">Transaction pool</div>
+        <div class="page-sub" id="mp-sub">Loading...</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-family:var(--mono);font-size:11px;color:var(--t3)" id="mp-last-sync">—</span>
+        <button onclick="loadMempool()" id="mp-sync-btn" style="display:flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;border:1px solid var(--ac2);background:var(--acb);color:var(--ac2);font-family:var(--mono);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s" onmouseenter="this.style.background='var(--ac2)';this.style.color='#fff'" onmouseleave="this.style.background='var(--acb)';this.style.color='var(--ac2)'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+          Sync
+        </button>
+        <label style="display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;color:var(--t3);cursor:pointer">
+          <input type="checkbox" id="mp-auto-sync" onchange="toggleMempoolAuto(this.checked)" style="accent-color:var(--ac2)">
+          Auto (10s)
+        </label>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="badge">source: <span id="mp-source">/api/testnet</span></span>
+      <span class="badge">freshness: <span id="mp-freshness">—</span></span>
+      <span class="badge">pending: <span id="mp-pending-badge">—</span></span>
+    </div>
+
+    <!-- Stats row -->
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:16px">
+      <div class="stat"><div class="label">Pending</div><div class="val" id="mp-stat-count" style="color:var(--ac2)">—</div><div class="sub">transactions</div></div>
+      <div class="stat"><div class="label">Pool Size</div><div class="val" id="mp-stat-bytes">—</div><div class="sub">bytes</div></div>
+      <div class="stat"><div class="label">Total Fees</div><div class="val" id="mp-stat-fees">—</div><div class="sub">CYNC burned (30%)</div></div>
+      <div class="stat"><div class="label">Avg Size</div><div class="val" id="mp-stat-avg">—</div><div class="sub">bytes/tx</div></div>
+      <div class="stat"><div class="label">Queue Risk</div><div class="val" id="mp-stat-risk">—</div><div class="sub">age estimate</div></div>
+    </div>
+
+    <div class="info-box green">Every transaction in the mempool is fully private: CLSAG ring-11 signatures, Bulletproofs+ range proofs, stealth one-time addresses, Pedersen commitments, uniform 2-in/2-out shape, Dandelion++ propagation.</div>
+    <!-- Fee histogram: pending tx count by fee-rate bucket. Lights up when
+         mempool has activity; otherwise stays empty. Helps wallet builders
+         decide what fee multiplier to use for given confirmation latency. -->
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">Fee distribution <span style="font-size:10px;color:var(--t3);margin-left:8px;font-weight:300">pending txs by fee rate (atomic units / byte)</span></div>
+      <div style="padding:14px 16px"><canvas id="mp-fee-histogram" width="800" height="160"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">Pending transactions <span id="mp-count" class="badge" style="margin-left:8px">0</span></div>
+      <div id="mp-body"><div class="loading">Loading mempool...</div></div>
+    </div>
+  </div>
+</div>
+
+<!--  NETWORK  -->
