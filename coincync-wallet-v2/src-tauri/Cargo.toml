@@ -26,7 +26,7 @@ keyring = "4"
 # `RngCore::fill_bytes`). A prior bump to "0.10" pulled a crate whose
 # API has no root `thread_rng`/`RngCore`, breaking the RPC-key generator.
 # 0.8's ThreadRng is a CSPRNG — correct for a bearer-key generator.
-rand = "0.8"
+rand = "0.10"
 # QR code rendering for the Receive page. SVG output keeps the bundle
 # small and scales cleanly. Same version as the workspace-wide pin in
 # the root Cargo.toml.
