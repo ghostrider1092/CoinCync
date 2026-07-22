@@ -161,7 +161,7 @@ impl BitcoinCoreRpc {
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(60))
             .build()
-            .map_err(|e| Error::Rpc(format!("reqwest client build: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("reqwest client build: {e}")))?;
         Ok(Self {
             config,
             http,
@@ -202,13 +202,13 @@ impl BitcoinCoreRpc {
         let resp = req
             .send()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC HTTP: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC HTTP: {e}")))?;
 
         let status = resp.status();
         let body: JsonRpcResponse<T> = resp
             .json()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {e}")))?;
 
         if let Some(err) = body.error {
             return Err(Error::Rpc(format!(
@@ -218,8 +218,7 @@ impl BitcoinCoreRpc {
         }
         body.result.ok_or_else(|| {
             Error::Rpc(format!(
-                "bitcoind {} returned no result (status {})",
-                method, status
+                "bitcoind {method} returned no result (status {status})"
             ))
         })
     }
@@ -786,7 +785,7 @@ pub fn build_claim_tx(
 
     // BIP-341 key-path spend: witness is a single 64-byte signature.
     let mut witness = bitcoin::Witness::new();
-    witness.push(signature.to_vec());
+    witness.push(signature);
     tx.input[0].witness = witness;
 
     Ok(bitcoin::consensus::encode::serialize(&tx))
@@ -1165,7 +1164,7 @@ pub fn build_refund_tx(
         .ok_or(Error::Verification("control block lookup failed"))?;
 
     let mut witness = bitcoin::Witness::new();
-    witness.push(signature.to_vec());
+    witness.push(signature);
     witness.push(script.as_bytes());
     witness.push(control_block.serialize());
     tx.input[0].witness = witness;
@@ -1275,7 +1274,7 @@ pub fn wait_for_confirmations(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = BitcoinCoreRpc::new(config.clone())?;
     let txid = Txid::from_hex(txid)?;
     rt.block_on(chain.wait_for_confirmations(
@@ -1291,7 +1290,7 @@ pub fn broadcast(config: &BtcConfig, tx_bytes: &[u8]) -> Result<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = BitcoinCoreRpc::new(config.clone())?;
     let tx_hex = hex::encode(tx_bytes);
     let txid = rt.block_on(chain.broadcast(&tx_hex))?;
@@ -1408,10 +1407,8 @@ mod tests {
         // Threshold 100ms gives generous headroom for scheduling jitter.
         assert!(
             elapsed >= Duration::from_millis(100),
-            "wait_for_confirmations returned in {:?} \u{2014} expected ~{:?}. \
-             The deadline arithmetic or `>=` check appears mutated.",
-            elapsed,
-            timeout
+            "wait_for_confirmations returned in {elapsed:?} \u{2014} expected ~{timeout:?}. \
+             The deadline arithmetic or `>=` check appears mutated."
         );
     }
 
@@ -1450,8 +1447,7 @@ mod tests {
         match r {
             Err(_) => { /* expected */ }
             Ok(s) => panic!(
-                "broadcast returned Ok({:?}) on unreachable RPC URL \u{2014} function body appears mutated",
-                s
+                "broadcast returned Ok({s:?}) on unreachable RPC URL \u{2014} function body appears mutated"
             ),
         }
     }
@@ -1544,9 +1540,7 @@ mod tests {
         assert!(matches!(r, Err(Error::Timeout { .. })));
         assert!(
             elapsed >= Duration::from_millis(100),
-            "rpc wait_for_confirmations returned in {:?} \u{2014} expected ~{:?}",
-            elapsed,
-            timeout
+            "rpc wait_for_confirmations returned in {elapsed:?} \u{2014} expected ~{timeout:?}"
         );
     }
 
@@ -1847,29 +1841,24 @@ mod tests {
             match (net, result) {
                 ("regtest", Ok(_)) => { /* regtest network + regtest addr: full success */ }
                 ("regtest", Err(e)) => {
-                    panic!("build_lock_tx unexpectedly failed for regtest: {:?}", e)
+                    panic!("build_lock_tx unexpectedly failed for regtest: {e:?}")
                 }
                 (_, Ok(_)) => panic!(
-                    "build_lock_tx unexpectedly succeeded with {} network + regtest address",
-                    net
+                    "build_lock_tx unexpectedly succeeded with {net} network + regtest address"
                 ),
                 (_, Err(Error::Verification(msg))) => {
                     assert!(
                         !msg.contains("BtcConfig.network must be"),
-                        "build_lock_tx errored at network match for '{}' \u{2014} arm appears to be missing. \
-                         Got: {}",
-                        net,
-                        msg
+                        "build_lock_tx errored at network match for '{net}' \u{2014} arm appears to be missing. \
+                         Got: {msg}"
                     );
                     // Should be the require_network error, not the match error.
                     assert!(
                         msg.contains("change_address") || msg.contains("network mismatch"),
-                        "expected require_network error for '{}', got: {}",
-                        net,
-                        msg
+                        "expected require_network error for '{net}', got: {msg}"
                     );
                 }
-                (_, Err(e)) => panic!("unexpected error variant for '{}': {:?}", net, e),
+                (_, Err(e)) => panic!("unexpected error variant for '{net}': {e:?}"),
             }
         }
     }
@@ -2028,7 +2017,7 @@ mod tests {
 
         // Witness has one element = the 64-byte signature.
         assert_eq!(parsed.input[0].witness.len(), 1);
-        let wit_bytes: &[u8] = &parsed.input[0].witness.iter().next().unwrap();
+        let wit_bytes: &[u8] = parsed.input[0].witness.iter().next().unwrap();
         assert_eq!(wit_bytes, &sig[..]);
     }
 
@@ -2201,12 +2190,11 @@ mod tests {
                 assert!(
                     !msg.contains("dust threshold"),
                     "build_claim_tx erroneously rejected claim_value == DUST_THRESHOLD_SATS \
-                     (the `<` check at btc.rs:825 must NOT trigger at equality). Error: {}",
-                    msg
+                     (the `<` check at btc.rs:825 must NOT trigger at equality). Error: {msg}"
                 );
                 // We expect signature verification to fail downstream.
             }
-            Err(e) => panic!("unexpected error variant: {:?}", e),
+            Err(e) => panic!("unexpected error variant: {e:?}"),
             Ok(_) => {
                 panic!("bogus sig should have failed verification, but build_claim_tx returned Ok")
             }
@@ -2241,15 +2229,12 @@ mod tests {
                     Err(Error::Verification(msg)) => {
                         assert!(
                             !msg.contains("BtcConfig.network must be"),
-                            "build_claim_tx errored at network match for '{}' \u{2014} arm appears to be missing. Got: {}",
-                            net,
-                            msg
+                            "build_claim_tx errored at network match for '{net}' \u{2014} arm appears to be missing. Got: {msg}"
                         );
                     }
-                    Err(e) => panic!("unexpected error variant for '{}': {:?}", net, e),
+                    Err(e) => panic!("unexpected error variant for '{net}': {e:?}"),
                     Ok(_) => panic!(
-                        "build_claim_tx unexpectedly succeeded with {} network + regtest dest_address",
-                        net
+                        "build_claim_tx unexpectedly succeeded with {net} network + regtest dest_address"
                     ),
                 }
             }
@@ -2589,11 +2574,10 @@ mod tests {
                 assert!(
                     !msg.contains("dust threshold"),
                     "build_refund_tx erroneously rejected refund_value == DUST_THRESHOLD_SATS \
-                     (the `<` check at btc.rs:1154 must NOT trigger at equality). Error: {}",
-                    msg
+                     (the `<` check at btc.rs:1154 must NOT trigger at equality). Error: {msg}"
                 );
             }
-            Err(e) => panic!("unexpected error variant: {:?}", e),
+            Err(e) => panic!("unexpected error variant: {e:?}"),
             Ok(_) => {
                 panic!("bogus sig should have failed verification, but build_refund_tx returned Ok")
             }
@@ -2676,15 +2660,12 @@ mod tests {
                     Err(Error::Verification(msg)) => {
                         assert!(
                             !msg.contains("BtcConfig.network must be"),
-                            "build_refund_tx errored at network match for '{}' \u{2014} arm appears to be missing. Got: {}",
-                            net,
-                            msg
+                            "build_refund_tx errored at network match for '{net}' \u{2014} arm appears to be missing. Got: {msg}"
                         );
                     }
-                    Err(e) => panic!("unexpected error variant for '{}': {:?}", net, e),
+                    Err(e) => panic!("unexpected error variant for '{net}': {e:?}"),
                     Ok(_) => panic!(
-                        "build_refund_tx unexpectedly succeeded with {} network + regtest dest_address",
-                        net
+                        "build_refund_tx unexpectedly succeeded with {net} network + regtest dest_address"
                     ),
                 }
             }

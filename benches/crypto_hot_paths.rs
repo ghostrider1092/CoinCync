@@ -46,7 +46,8 @@
 //! when comparing against changes — criterion auto-detects regressions
 //! versus the last run.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 use rand::rngs::OsRng;
 
 use coincync::consensus::pow::{compute_pow_hash, PowAlgorithm};

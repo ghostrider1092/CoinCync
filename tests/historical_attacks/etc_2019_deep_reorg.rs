@@ -10,14 +10,14 @@
 //! Chain: Ethereum Classic, Bitcoin Gold, Horizen
 //! Impact: Multi-million dollar double-spends via deep reorg
 
-use coincync::chain::{max_reorg_depth, max_reorg_depth_for, Blockchain};
+use coincync::chain::{max_reorg_depth_for, Blockchain};
 
 /// Test: Maximum reorg depth is defined, finite, and network-appropriate
 #[test]
 fn etc_2019_max_reorg_depth_exists() {
     use coincync::config::NetworkType;
 
-    let max_depth = max_reorg_depth();
+    let max_depth = max_reorg_depth_for(coincync::config::NetworkType::Mainnet);
     assert!(
         max_depth > 0,
         "ETC 2019 ATTACK: No maximum reorg depth defined!"
@@ -48,7 +48,7 @@ fn etc_2019_checkpoint_prevents_deep_reorg() {
 
     // Verify the chain has finality mechanisms
     // Testnet allows 1000 (permissive for testing), mainnet enforces 100
-    let max = max_reorg_depth();
+    let max = max_reorg_depth_for(coincync::config::NetworkType::Mainnet);
     let mainnet_max = max_reorg_depth_for(coincync::config::NetworkType::Mainnet);
     assert!(max > 0, "Reorg depth must be > 0");
     assert!(
@@ -61,7 +61,7 @@ fn etc_2019_checkpoint_prevents_deep_reorg() {
 /// Test: The reorg depth constant is documented and constitutional
 #[test]
 fn etc_2019_reorg_depth_reasonable_for_exchange_safety() {
-    let depth = max_reorg_depth();
+    let depth = max_reorg_depth_for(coincync::config::NetworkType::Mainnet);
 
     // For exchange safety: confirmations should be achievable in reasonable time
     // At 2-minute blocks: 100 blocks = 200 minutes (~3.3 hours)

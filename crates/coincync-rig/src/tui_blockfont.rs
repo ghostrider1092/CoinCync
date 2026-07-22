@@ -57,8 +57,8 @@ pub fn render(text: &str) -> [String; HEIGHT] {
     for (i, c) in text.chars().enumerate() {
         let g = glyph(c);
         if i > 0 {
-            for r in 0..HEIGHT {
-                rows[r].push(' ');
+            for row in rows.iter_mut() {
+                row.push(' ');
             }
         }
         for r in 0..HEIGHT {
@@ -102,7 +102,7 @@ const GSPACE: [&str; HEIGHT] = ["  ", "  ", "  ", "  ", "  "];
 /// unit at a smaller scale beside the hero digits.
 pub fn format_hashrate(hps: u64) -> (String, &'static str) {
     if hps < 10_000 {
-        (format!("{}", hps), "H/s")
+        (format!("{hps}"), "H/s")
     } else if hps < 10_000_000 {
         (format!("{:.1}", hps as f64 / 1_000.0), "KH/s")
     } else if hps < 10_000_000_000 {

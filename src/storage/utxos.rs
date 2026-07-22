@@ -346,9 +346,11 @@ impl UtxoSet {
     /// That prior version's own
     /// docstring even said the quiet part out loud:
     ///
-    ///     Real spends are heavily biased toward recent outputs. If decoys
-    ///     were uniformly random, attackers could identify the real spend
-    ///     by its age.
+    /// ```text
+    /// Real spends are heavily biased toward recent outputs. If decoys
+    /// were uniformly random, attackers could identify the real spend
+    /// by its age.
+    /// ```
     ///
     /// The premise of that argument is exactly the attack the Möser paper
     /// weaponizes — an observer measures the age-distribution of every

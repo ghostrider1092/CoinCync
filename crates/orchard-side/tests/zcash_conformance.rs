@@ -36,7 +36,7 @@
 //! exactly where we don't yet validate against the oracle.
 
 mod zcash_test_vectors_keys_upstream;
-use zcash_test_vectors_keys_upstream::{test_vectors, TestVector};
+use zcash_test_vectors_keys_upstream::test_vectors;
 
 use orchard_side::commitment::NoteCommitment;
 use orchard_side::note::Note;

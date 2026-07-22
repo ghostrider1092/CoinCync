@@ -41,12 +41,12 @@ pub enum TickError {
 impl fmt::Display for TickError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TickError::Unreachable(s) => write!(f, "unreachable: {}", s),
-            TickError::InconsistentState(s) => write!(f, "inconsistent state: {}", s),
-            TickError::PrivacyViolation(s) => write!(f, "privacy violation: {}", s),
-            TickError::Snapshot(s) => write!(f, "snapshot error: {}", s),
+            TickError::Unreachable(s) => write!(f, "unreachable: {s}"),
+            TickError::InconsistentState(s) => write!(f, "inconsistent state: {s}"),
+            TickError::PrivacyViolation(s) => write!(f, "privacy violation: {s}"),
+            TickError::Snapshot(s) => write!(f, "snapshot error: {s}"),
             TickError::BadSignature => write!(f, "bad signature on tick notice"),
-            TickError::Other(s) => write!(f, "{}", s),
+            TickError::Other(s) => write!(f, "{s}"),
         }
     }
 }

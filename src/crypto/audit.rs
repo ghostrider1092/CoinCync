@@ -277,7 +277,7 @@ pub type SupplyAuditResult = BlockAudit;
 #[deprecated(
     note = "renamed to SupplySnapshot: self-consistent checksum, not an authenticated proof (issue #252)"
 )]
-#[allow(deprecated)]
+#[allow(deprecated, dead_code)] // kept as a deprecated compat alias; unused internally
 pub type SupplyAuditProof = SupplySnapshot;
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]

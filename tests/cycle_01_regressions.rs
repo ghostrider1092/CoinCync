@@ -171,12 +171,14 @@ fn regression_finding_03_headers_pending_state_machine() {
 fn regression_finding_03_ibd_loop_gates_on_pending() {
     // The flood bug was: the tick loop sent GetHeaders unconditionally.
     // The fix inserts a `if … headers_request_pending() { continue; }`
-    // guard before the send.
-    let node_rs = include_str!("../src/network/node.rs");
+    // guard before the send. The IBD loop was later extracted from the
+    // src/network/node.rs monolith into the node/ module; it now lives in
+    // src/network/node/sync_driver.rs, where the gate is still enforced.
+    let sync_driver = include_str!("../src/network/node/sync_driver.rs");
     assert!(
-        node_rs.contains("headers_request_pending()"),
-        "Finding #3 regression: the IBD tick loop in \
-         src/network/node.rs must check headers_request_pending() \
+        sync_driver.contains("headers_request_pending()"),
+        "Finding #3 regression: the IBD loop in \
+         src/network/node/sync_driver.rs must check headers_request_pending() \
          before issuing GetHeaders. Without this, the loop regresses \
          to a 4 Hz hammer that eats CPU and eventually kills the \
          node on a stuck-peer fork. See \

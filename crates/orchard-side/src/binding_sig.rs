@@ -219,7 +219,7 @@ impl BindingSignature {
         let r_bytes: <pallas::Point as GroupEncoding>::Repr = {
             let mut buf = [0u8; 32];
             buf.copy_from_slice(&bytes[0..32]);
-            buf.into()
+            buf
         };
         let r_point: pallas::Point = Option::from(pallas::Point::from_bytes(&r_bytes))
             .ok_or(Error::MalformedWireFormat("R is not a valid Pallas point"))?;

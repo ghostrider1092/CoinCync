@@ -644,8 +644,7 @@ mod tests {
             let result = s.apply(t);
             assert!(
                 matches!(result, Err(Error::InvalidState(_))),
-                "transition {:?} must be rejected from Aborted",
-                t
+                "transition {t:?} must be rejected from Aborted"
             );
         }
         assert_eq!(s.state, State::Aborted);
@@ -772,16 +771,12 @@ mod tests {
             };
             assert!(
                 !p.is_timeout_safe(),
-                "btc={} cync={} should be UNsafe",
-                btc_blocks,
-                cync_blocks_just_under
+                "btc={btc_blocks} cync={cync_blocks_just_under} should be UNsafe"
             );
             p.cync_timeout_blocks = cync_blocks_just_over;
             assert!(
                 p.is_timeout_safe(),
-                "btc={} cync={} should be SAFE",
-                btc_blocks,
-                cync_blocks_just_over
+                "btc={btc_blocks} cync={cync_blocks_just_over} should be SAFE"
             );
         }
     }
@@ -821,15 +816,13 @@ mod tests {
                     if result.is_err() {
                         assert_eq!(
                             s.state, pre,
-                            "rejected ({:?},{:?},{:?}) must leave state unchanged",
-                            role, start, t
+                            "rejected ({role:?},{start:?},{t:?}) must leave state unchanged"
                         );
                     } else {
                         // Successful transition: state advanced.
                         assert_ne!(
                             s.state, pre,
-                            "accepted ({:?},{:?},{:?}) must advance state",
-                            role, start, t
+                            "accepted ({role:?},{start:?},{t:?}) must advance state"
                         );
                     }
                 }

@@ -293,10 +293,10 @@ pub fn decompose_to_bits(secret: &AdaptorSecret) -> Result<[bool; STRICT_BIT_COU
     // bit_index goes 0..STRICT_BIT_COUNT (=252). For each, find
     // (byte_index, bit_in_byte) and read.
     let mut out = [false; STRICT_BIT_COUNT];
-    for bit_index in 0..STRICT_BIT_COUNT {
+    for (bit_index, out_bit) in out.iter_mut().enumerate() {
         let byte_index = bit_index / 8;
         let bit_in_byte = bit_index % 8;
-        out[bit_index] = (bytes[byte_index] >> bit_in_byte) & 1 == 1;
+        *out_bit = (bytes[byte_index] >> bit_in_byte) & 1 == 1;
     }
 
     // Check the high tail (bits STRICT_BIT_COUNT..256) is zero —
@@ -1619,9 +1619,9 @@ mod tests {
         bytes[0] = 1;
         let s = AdaptorSecret::from_ristretto_bytes(bytes).unwrap();
         let bits = decompose_to_bits(&s).unwrap();
-        assert_eq!(bits[0], true);
+        assert!(bits[0]);
         for (i, &b) in bits.iter().enumerate().skip(1) {
-            assert_eq!(b, false, "bit {} should be 0 for secret=1", i);
+            assert!(!b, "bit {i} should be 0 for secret=1");
         }
     }
 
@@ -1691,8 +1691,8 @@ mod tests {
         let bits = [true; STRICT_BIT_COUNT];
         let le = recompose_from_bits_cync(&bits);
         // bits[0..252] all set → bytes[0..31] all 0xFF, bytes[31] = 0x0F (bits 248..251).
-        for i in 0..31 {
-            assert_eq!(le[i], 0xFF, "byte {} should be 0xFF", i);
+        for (i, &byte) in le.iter().enumerate().take(31) {
+            assert_eq!(byte, 0xFF, "byte {i} should be 0xFF");
         }
         assert_eq!(
             le[31], 0x0F,
@@ -1767,8 +1767,7 @@ mod tests {
         let r = verify_bit_btc(&c, &p);
         assert!(
             matches!(r, Err(Error::Verification(_))),
-            "flipped e_0 must reject; got {:?}",
-            r
+            "flipped e_0 must reject; got {r:?}"
         );
     }
 
@@ -1970,6 +1969,7 @@ mod tests {
     /// per-curve commitments + the expected (T, R_sum) for each
     /// curve. Used as the "honest prover output" fixture for
     /// verifier round-trip tests.
+    #[allow(clippy::type_complexity)] // one-off test-fixture return; a named alias would obscure it
     fn honest_linear_combo_fixture() -> (
         [[u8; 33]; STRICT_BIT_COUNT],
         [[u8; 32]; STRICT_BIT_COUNT],
@@ -2221,11 +2221,10 @@ mod tests {
                 assert!(
                     msg.contains("bit 0"),
                     "expected error message to identify 'bit 0' specifically \u{2014} \
-                     the match arm at strict_dleq.rs:1416 appears deleted. Got: {}",
-                    msg
+                     the match arm at strict_dleq.rs:1416 appears deleted. Got: {msg}"
                 );
             }
-            other => panic!("expected Verification error, got {:?}", other),
+            other => panic!("expected Verification error, got {other:?}"),
         }
     }
 

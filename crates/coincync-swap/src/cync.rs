@@ -146,7 +146,7 @@ impl CyncNodeRpc {
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(60))
             .build()
-            .map_err(|e| Error::Rpc(format!("reqwest client build: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("reqwest client build: {e}")))?;
         Ok(Self {
             config,
             http,
@@ -181,12 +181,12 @@ impl CyncNodeRpc {
         let resp = req
             .send()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC HTTP: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC HTTP: {e}")))?;
         let status = resp.status();
         let body: JsonRpcResponse<T> = resp
             .json()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {e}")))?;
 
         if let Some(err) = body.error {
             return Err(Error::Rpc(format!(
@@ -196,8 +196,7 @@ impl CyncNodeRpc {
         }
         body.result.ok_or_else(|| {
             Error::Rpc(format!(
-                "coincync-node {} returned no result (status {})",
-                method, status
+                "coincync-node {method} returned no result (status {status})"
             ))
         })
     }
@@ -656,7 +655,7 @@ pub fn wait_for_confirmations(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = CyncNodeRpc::new(config.clone())?;
     let txid = CyncTxid::from_hex(txid)?;
     rt.block_on(chain.wait_for_confirmations(
@@ -671,7 +670,7 @@ pub fn broadcast(config: &CyncConfig, tx_bytes: &[u8]) -> Result<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = CyncNodeRpc::new(config.clone())?;
     let tx_hex = hex::encode(tx_bytes);
     let txid = rt.block_on(chain.broadcast(&tx_hex))?;
@@ -813,10 +812,8 @@ mod tests {
         assert!(matches!(r, Err(Error::Timeout { .. })));
         assert!(
             elapsed >= Duration::from_millis(100),
-            "wait_for_confirmations returned in {:?} \u{2014} expected ~{:?}. \
-             The deadline arithmetic or `>=` check appears mutated.",
-            elapsed,
-            timeout
+            "wait_for_confirmations returned in {elapsed:?} \u{2014} expected ~{timeout:?}. \
+             The deadline arithmetic or `>=` check appears mutated."
         );
     }
 
@@ -850,11 +847,10 @@ mod tests {
             .await;
         assert!(
             matches!(r, Err(Error::Timeout { .. })),
-            "depth arithmetic appears mutated \u{2014} got {:?} when expecting Timeout. \
+            "depth arithmetic appears mutated \u{2014} got {r:?} when expecting Timeout. \
              With real arithmetic depth=1 (< 2 confirmations), but `-` flipped to `+` \
              gives depth=11 and `-` flipped to `/` gives depth=2, both of which \
-             would erroneously return Ok.",
-            r
+             would erroneously return Ok."
         );
     }
 
@@ -888,8 +884,7 @@ mod tests {
         match r {
             Err(_) => { /* expected */ }
             Ok(s) => panic!(
-                "broadcast returned Ok({:?}) on unreachable RPC URL \u{2014} function body appears mutated",
-                s
+                "broadcast returned Ok({s:?}) on unreachable RPC URL \u{2014} function body appears mutated"
             ),
         }
     }
@@ -1077,9 +1072,7 @@ mod tests {
         assert!(matches!(r, Err(Error::Timeout { .. })));
         assert!(
             elapsed >= Duration::from_millis(100),
-            "cync rpc wait returned in {:?} \u{2014} expected ~{:?}",
-            elapsed,
-            timeout
+            "cync rpc wait returned in {elapsed:?} \u{2014} expected ~{timeout:?}"
         );
     }
 
@@ -1160,8 +1153,7 @@ mod tests {
             .await;
         assert!(
             matches!(r, Err(Error::Timeout { .. })),
-            "depth arithmetic at cync.rs:260 appears mutated \u{2014} got {:?} when expecting Timeout",
-            r
+            "depth arithmetic at cync.rs:260 appears mutated \u{2014} got {r:?} when expecting Timeout"
         );
     }
 

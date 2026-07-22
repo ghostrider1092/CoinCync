@@ -1,0 +1,71 @@
+name: CI
+
+# Verification gate (PATCH_PRIORITIES.md) enforced on Codeberg via Forgejo
+# Actions. Pinned to Rust 1.88.0. Runs on pushes to main and on all PRs.
+#
+# NOTE: `runs-on` uses the `docker` label; adjust to whatever label the
+# repository's registered Forgejo runner advertises.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: docker
+    container:
+      image: rust:1.88.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain + components
+        run: |
+          rustup component add rustfmt clippy
+          rustc --version && cargo --version
+
+      # ── Formatting ────────────────────────────────────────────────────
+      - name: rustfmt --check
+        run: cargo fmt --all -- --check
+
+      # ── Clippy (split by lint-policy scope) ───────────────────────────
+      # The root `coincync` crate carries the intentional [lints] pedantic
+      # policy (cast_*/print_stdout/unwrap_in_result set to `warn` for the
+      # documented gradual cleanup), so its gate allows exactly those six and
+      # nothing more. Every OTHER workspace crate is held to the strict default
+      # set with NO allowances — they do not carry that legacy debt.
+      - name: Clippy — root crate (repository lint policy)
+        run: |
+          cargo clippy -p coincync --all-targets --all-features -- -D warnings \
+            -A clippy::cast_lossless -A clippy::cast_possible_truncation \
+            -A clippy::cast_sign_loss -A clippy::print_stdout \
+            -A clippy::unwrap_in_result -A clippy::dbg_macro
+
+      # --no-deps is REQUIRED: the sub-crates path-depend on `coincync`, and
+      # without it clippy re-lints coincync here too (surfacing the policy lints
+      # the root-crate step already owns). --no-deps checks only these crates.
+      - name: Clippy — rest of workspace (strict, no allowances)
+        run: cargo clippy --workspace --exclude coincync --no-deps --all-targets --all-features -- -D warnings
+
+      # ── Dependency audit (advisories) ─────────────────────────────────
+      # cargo-audit owns advisory scanning; cargo-deny below covers only
+      # licenses/bans/sources (its advisory-db parser currently chokes on a
+      # CVSS-4.0 entry). The fuzz lockfile carries known fuzz-only advisories
+      # that are not shipped, so it is informational (does not fail the gate).
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+          cargo audit --file fuzz/Cargo.lock || echo "fuzz-only advisories (not shipped) — informational"
+
+      # ── License / bans / sources policy ───────────────────────────────
+      - name: cargo deny (licenses, bans, sources)
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check licenses bans sources
+
+      # ── Tests ─────────────────────────────────────────────────────────
+      # build.rs enforces critical_files.lock on every cargo invocation above,
+      # so the consensus integrity gate is covered implicitly.
+      - name: Test suite
+        run: cargo test --workspace --no-fail-fast

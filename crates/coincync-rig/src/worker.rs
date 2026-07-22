@@ -131,24 +131,18 @@ pub fn run_worker(
         // Always check for a new job. If we have no current job, block
         // until one arrives. If we have one, drain any pending updates
         // first (a `clean=true` job means drop in-flight work).
-        loop {
-            match if current_job.is_none() {
-                job_rx.recv().ok()
+        while let Some(new_job) = if current_job.is_none() {
+            job_rx.recv().ok()
+        } else {
+            job_rx.try_recv().ok()
+        } {
+            if new_job.clean || current_job.is_none() {
+                debug!(worker_id, job = %new_job.job_id, "worker: pivoting to new job");
+                current_job = Some(new_job);
             } else {
-                job_rx.try_recv().ok()
-            } {
-                Some(new_job) => {
-                    if new_job.clean || current_job.is_none() {
-                        debug!(worker_id, job = %new_job.job_id, "worker: pivoting to new job");
-                        current_job = Some(new_job);
-                    } else {
-                        // Additive job — keep the current one, queue
-                        // the new one for after. For Phase 3 we
-                        // simplify: take whatever's freshest.
-                        current_job = Some(new_job);
-                    }
-                }
-                None => break,
+                // Additive job — keep the current one, queue the new one for
+                // after. For Phase 3 we simplify: take whatever's freshest.
+                current_job = Some(new_job);
             }
         }
 
@@ -182,7 +176,7 @@ pub fn run_worker(
             tx_root,
             height: job.height,
         };
-        let target = job.target.clone();
+        let target = job.target;
 
         let mut nonce = range.start;
         let started = Instant::now();

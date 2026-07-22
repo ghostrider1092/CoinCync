@@ -117,7 +117,7 @@ impl tracing::field::Visit for StringVisitor {
         self.append(field.name(), &value.to_string());
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.append(field.name(), &format!("{:?}", value));
+        self.append(field.name(), &format!("{value:?}"));
     }
 }
 
@@ -449,15 +449,15 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
         Span::raw("      "),
         Span::styled("testnet", Style::default().fg(theme.muted)),
         Span::raw(" · "),
-        Span::styled(format!("h{}", height), Style::default().fg(theme.body)),
+        Span::styled(format!("h{height}"), Style::default().fg(theme.body)),
         Span::raw(" · "),
         Span::styled(
-            format!("{} found", blocks_accepted),
+            format!("{blocks_accepted} found"),
             Style::default().fg(theme.body),
         ),
         Span::raw(" · "),
         Span::styled(
-            format!("{} threads", threads),
+            format!("{threads} threads"),
             Style::default().fg(theme.body),
         ),
         Span::raw("      "),
@@ -467,7 +467,7 @@ fn draw_header(f: &mut Frame, area: Rect, metrics: &MetricsState, ui: &UiState) 
             if rpc_ms == 0 {
                 "RPC —".to_string()
             } else {
-                format!("RPC {}ms", rpc_ms)
+                format!("RPC {rpc_ms}ms")
             },
             Style::default().fg(theme.muted),
         ),
@@ -542,7 +542,7 @@ fn draw_hero(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme, u
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
     for r in &big {
-        lines.push(Line::from(Span::styled(format!("  {}", r), digit_style)));
+        lines.push(Line::from(Span::styled(format!("  {r}"), digit_style)));
     }
     // Unit + secondary stats line: unit suffix, then network share %
     // if known, then 1m-trend.
@@ -562,7 +562,7 @@ fn draw_hero(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme, u
             Style::default().fg(theme.muted),
         ));
         secondary.push(Span::styled(
-            format!("{:.1}%", pct),
+            format!("{pct:.1}%"),
             Style::default().fg(theme.body).add_modifier(Modifier::BOLD),
         ));
     }
@@ -759,10 +759,10 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Th
     let uptime = uptime_seconds(metrics);
 
     let cells = [
-        ("HEIGHT", format!("{}", height)),
-        ("FOUND", format!("{}", found)),
-        ("ACCEPT", format!("{:.1}%", accept_pct)),
-        ("EARNED", format!("{:.0} CYNC", earned_cync)),
+        ("HEIGHT", format!("{height}")),
+        ("FOUND", format!("{found}")),
+        ("ACCEPT", format!("{accept_pct:.1}%")),
+        ("EARNED", format!("{earned_cync:.0} CYNC")),
         ("UPTIME", format_duration(uptime)),
     ];
 
@@ -783,7 +783,7 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Th
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border))
             .title(Span::styled(
-                format!(" {} ", label),
+                format!(" {label} "),
                 Style::default().fg(theme.muted),
             ));
         let inner = block.inner(cols[i]);
@@ -824,7 +824,7 @@ fn draw_worker_heatmap(f: &mut Frame, area: Rect, metrics: &MetricsState, theme:
     // colored by relative hashrate. The label "WORKERS" sits left of
     // the strip for visual anchoring.
     let n_threads = samples.len();
-    let label_text = format!(" WORKERS×{} ", n_threads);
+    let label_text = format!(" WORKERS×{n_threads} ");
 
     // Approximate cell width: divide the remaining row width by the
     // thread count, floored at 2 chars and capped at 4.
@@ -846,7 +846,7 @@ fn draw_worker_heatmap(f: &mut Frame, area: Rect, metrics: &MetricsState, theme:
             3 => theme.accent_dim, // above average
             _ => theme.accent,     // full speed
         };
-        let cell: String = std::iter::repeat('▆').take(per_cell).collect();
+        let cell: String = "▆".repeat(per_cell);
         spans.push(Span::styled(
             cell,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -898,12 +898,12 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
     let eta_word = if share_based {
         format!("solo E[t] ~{}", format_duration(expected))
     } else {
-        format!("~{}s target", expected)
+        format!("~{expected}s target")
     };
     let label = if elapsed >= expected {
-        format!("{} overdue · {} · {}% ", spinner, eta_word, pct)
+        format!("{spinner} overdue · {eta_word} · {pct}% ")
     } else {
-        format!("{} searching · {} · {}% ", spinner, eta_word, pct)
+        format!("{spinner} searching · {eta_word} · {pct}% ")
     };
     let gauge = Gauge::default()
         .block(
@@ -941,7 +941,7 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
     f.render_widget(luck_block, cols[1]);
     let luck_line = match luck_pct(metrics) {
         Some(pct) => Line::from(Span::styled(
-            format!("{:.0}%", pct),
+            format!("{pct:.0}%"),
             Style::default()
                 .fg(luck_color(pct, theme))
                 .add_modifier(Modifier::BOLD),
@@ -975,7 +975,7 @@ fn draw_logs(f: &mut Frame, area: Rect, logs: &VecDeque<String>, theme: &Theme) 
             let rest = l.get(level.len()..).unwrap_or("").trim_start();
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!(" {} ", glyph),
+                    format!(" {glyph} "),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(level.to_string(), Style::default().fg(color)),
@@ -1039,7 +1039,7 @@ fn draw_blocks_timeline_and_ticker(
                 _ => '▇',
             };
             let color = if n == 0 { theme.muted } else { theme.accent };
-            Span::styled(format!("{}", g), Style::default().fg(color))
+            Span::styled(format!("{g}"), Style::default().fg(color))
         })
         .collect();
     let mut row1 = vec![Span::styled(" 24h ", Style::default().fg(theme.muted))];
@@ -1087,7 +1087,7 @@ fn draw_blocks_timeline_and_ticker(
 
 fn fmt_hps(h: u64) -> String {
     let (n, u) = bf::format_hashrate(h);
-    format!("{} {}", n, u)
+    format!("{n} {u}")
 }
 
 // ─── Footer ──────────────────────────────────────────────────────────
@@ -1118,9 +1118,9 @@ fn draw_footer(f: &mut Frame, area: Rect, theme: &Theme, metrics: &MetricsState)
         key("q"),
         txt(" quit  "),
         key("t"),
-        txt(&format!(" theme · {}  ", theme_name)),
+        txt(&format!(" theme · {theme_name}  ")),
         key("p"),
-        txt(&format!(" {}  ", pause_label)),
+        txt(&format!(" {pause_label}  ")),
         key("l"),
         txt(" log  "),
         key("?"),
@@ -1161,7 +1161,7 @@ fn draw_splash(f: &mut Frame, ui: &UiState) {
         .split(area);
 
     let mark = Paragraph::new(Line::from(Span::styled(
-        format!("{}{}", revealed, pending),
+        format!("{revealed}{pending}"),
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -1223,7 +1223,7 @@ fn draw_help_modal(f: &mut Frame, theme: &Theme) {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("  {}", v)),
+            Span::raw(format!("  {v}")),
         ])
     };
     let lines = vec![
@@ -1268,7 +1268,7 @@ fn snapshot_to_tmpfile(metrics: &MetricsState) {
         .map(|s| format!("~{} solo", format_duration(s)))
         .unwrap_or_else(|| "—".to_string());
     let luck = luck_pct(metrics)
-        .map(|p| format!("{:.0}%", p))
+        .map(|p| format!("{p:.0}%"))
         .unwrap_or_else(|| "—".to_string());
     let body = format!(
         "coincync-rig snapshot @ {}\n\
@@ -1327,12 +1327,12 @@ fn print_session_summary(metrics: &MetricsState) {
     eprintln!("─── coincync-rig session summary ─────────────────────");
     eprintln!("  mined for     {}", format_duration(uptime));
     eprintln!("  avg hashrate  {}", fmt_hps(avg_hps));
-    eprintln!("  lifetime work {} hashes", lifetime);
-    eprintln!("  blocks found  {}", found);
+    eprintln!("  lifetime work {lifetime} hashes");
+    eprintln!("  blocks found  {found}");
     if let Some(pct) = luck_pct(metrics) {
-        eprintln!("  luck          {:.0}% of expectation", pct);
+        eprintln!("  luck          {pct:.0}% of expectation");
     }
-    eprintln!("  earned        ~{:.0} CYNC", earned);
+    eprintln!("  earned        ~{earned:.0} CYNC");
     eprintln!("  status        no telemetry · 0% dev fee · come back soon");
     eprintln!();
 }
@@ -1350,9 +1350,9 @@ fn format_duration(secs: u64) -> String {
     let m = (secs % 3600) / 60;
     let s = secs % 60;
     if h > 0 {
-        format!("{:02}:{:02}:{:02}", h, m, s)
+        format!("{h:02}:{m:02}:{s:02}")
     } else {
-        format!("{:02}:{:02}", m, s)
+        format!("{m:02}:{s:02}")
     }
 }
 

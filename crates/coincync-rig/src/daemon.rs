@@ -160,7 +160,7 @@ impl DaemonClient {
         let body_text = resp
             .text()
             .await
-            .with_context(|| format!("reading response body for {method} (http {})", status))?;
+            .with_context(|| format!("reading response body for {method} (http {status})"))?;
 
         let envelope: JsonRpcEnvelope = serde_json::from_str(&body_text).with_context(|| {
             let preview = if body_text.len() > 512 {
@@ -169,8 +169,7 @@ impl DaemonClient {
                 body_text.clone()
             };
             format!(
-                "parsing JSON-RPC response for {method} (http {}); body: {}",
-                status, preview
+                "parsing JSON-RPC response for {method} (http {status}); body: {preview}"
             )
         })?;
 
@@ -182,7 +181,7 @@ impl DaemonClient {
             ));
         }
         if !status.is_success() {
-            return Err(anyhow!("{method} returned HTTP {}", status));
+            return Err(anyhow!("{method} returned HTTP {status}"));
         }
         Ok(envelope.result)
     }

@@ -887,9 +887,7 @@ impl NoiseTransport {
     /// Transition `handshake` into transport mode + snapshot the
     /// remote static key. Shared post-handshake setup for both roles.
     fn finalize(stream: TcpStream, handshake: snow::HandshakeState) -> Result<Self> {
-        let remote_static_slice = handshake.get_remote_static().ok_or(Error::Rpc(format!(
-            "Noise XX handshake completed without remote static key"
-        )))?;
+        let remote_static_slice = handshake.get_remote_static().ok_or(Error::Rpc("Noise XX handshake completed without remote static key".to_string()))?;
         if remote_static_slice.len() != 32 {
             return Err(Error::Rpc(format!(
                 "Noise XX remote static key has unexpected length {}",
@@ -1822,7 +1820,7 @@ fn validate_hello_plain(
         .handle_inbound(hello)
         .map_err(|e| format!("Hello validation: {e}"))?;
     match action {
-        HandshakeAction::WaitForCaller { next_call } if next_call == "respond_with_hello_ack" => {
+        HandshakeAction::WaitForCaller { next_call: "respond_with_hello_ack" } => {
             Ok(session)
         }
         HandshakeAction::Aborted { reason } => {
@@ -1848,7 +1846,7 @@ fn validate_hello_noise(
         .handle_inbound(hello)
         .map_err(|e| format!("Hello validation: {e}"))?;
     match action {
-        HandshakeAction::WaitForCaller { next_call } if next_call == "respond_with_hello_ack" => {
+        HandshakeAction::WaitForCaller { next_call: "respond_with_hello_ack" } => {
             Ok(session)
         }
         HandshakeAction::Aborted { reason } => {
@@ -2032,7 +2030,7 @@ mod tests {
             HandshakeAction::WaitForCaller { next_call } => {
                 assert_eq!(next_call, "respond_with_hello_ack")
             }
-            other => panic!("expected WaitForCaller, got {:?}", other),
+            other => panic!("expected WaitForCaller, got {other:?}"),
         }
 
         // 2. Bob receives HelloAck -> needs accept_or_send_abort
@@ -2047,14 +2045,14 @@ mod tests {
             HandshakeAction::WaitForCaller { next_call } => {
                 assert_eq!(next_call, "accept_or_send_abort")
             }
-            other => panic!("expected WaitForCaller, got {:?}", other),
+            other => panic!("expected WaitForCaller, got {other:?}"),
         }
 
         // 3. Alice receives Accept -> needs send_adaptors
         let accept = bob.accept().unwrap();
         match alice2.handle_inbound(accept).unwrap() {
             HandshakeAction::WaitForCaller { next_call } => assert_eq!(next_call, "send_adaptors"),
-            other => panic!("expected WaitForCaller, got {:?}", other),
+            other => panic!("expected WaitForCaller, got {other:?}"),
         }
     }
 

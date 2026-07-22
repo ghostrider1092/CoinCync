@@ -157,7 +157,7 @@ impl SpendingKey {
     /// see signed against.
     ///
     /// Per orchard 0.12 `src/keys.rs::SpendAuthorizingKey::from`
-    /// + NU5 §4.2.3. Catching this is the difference between
+    /// and NU5 §4.2.3. Catching this is the difference between
     /// "ak.x matches orchard byte-for-byte" (always true even
     /// without the negation) and "ask bytes match orchard"
     /// (only true with the negation). Affects spend-auth signing
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn spending_key_debug_redacts() {
         let sk = SpendingKey::from_bytes([7u8; 32]).unwrap();
-        let dbg = format!("{:?}", sk);
+        let dbg = format!("{sk:?}");
         assert!(dbg.contains("redacted"));
         assert!(!dbg.contains("07"), "must not leak raw bytes");
     }
@@ -702,8 +702,8 @@ mod tests {
         use group::GroupEncoding;
         let (_, ivk) = canonical_ivk_fixture(170).expect("find canonical ivk");
         let (gd_bytes, pkd_bytes) = ivk.address_at([5u8; 11]).unwrap();
-        let gd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = gd_bytes.into();
-        let pkd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = pkd_bytes.into();
+        let gd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = gd_bytes;
+        let pkd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = pkd_bytes;
         assert!(
             bool::from(pallas::Point::from_bytes(&gd_bytes_arr).is_some()),
             "gd bytes must roundtrip through GroupEncoding"

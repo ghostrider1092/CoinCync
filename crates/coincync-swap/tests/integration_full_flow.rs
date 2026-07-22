@@ -310,7 +310,7 @@ fn completed_swap_rejects_all_transitions_after_reload() {
     ];
     for t in attempts {
         let result = reloaded.apply(t);
-        assert!(result.is_err(), "Completed swap must reject {:?}", t);
+        assert!(result.is_err(), "Completed swap must reject {t:?}");
         assert_eq!(reloaded.state, State::Completed, "state must not change");
     }
 }

@@ -185,3 +185,13 @@ strict-dleq = []
 [lints.rust]
 unsafe_code  = "forbid"
 missing_docs = "allow"
+
+# coincync-swap is the SKELETON / CyncSwap-v1.1 crate (Later-Releases track).
+# Only the two COSMETIC doc-rendering lints are deferred here — the crate's doc
+# comments use aligned list continuations that rustdoc flags but that read fine
+# in source; polishing them is deferred to the v1.1 doc pass. Every MAINTAINABILITY
+# lint (needless_range_loop, redundant_guards, type_complexity) is FIXED, not
+# allowed. Per Jun's review: narrow, named, cosmetic-only — not a blanket sweep.
+[lints.clippy]
+doc_overindented_list_items = "allow"
+doc_lazy_continuation       = "allow"

@@ -106,8 +106,7 @@ fn full_composition_finalizes_at_threshold_with_real_crypto() {
     let active = tracker.active_set().active_count(TARGET_HEIGHT);
     assert!(
         active >= 5,
-        "test fixture wants >= 5 active miners, got {}",
-        active
+        "test fixture wants >= 5 active miners, got {active}"
     );
     // Threshold = ceil(2/3 * active). For 5: 4. For 6: 4.
     let threshold = (active * 2).div_ceil(3);
@@ -140,10 +139,7 @@ fn full_composition_finalizes_at_threshold_with_real_crypto() {
         if n_signers < threshold {
             assert!(
                 matches!(outcome, ApplyOutcome::Accepted),
-                "below threshold ({}/{}): expected Accepted, got {:?}",
-                n_signers,
-                threshold,
-                outcome
+                "below threshold ({n_signers}/{threshold}): expected Accepted, got {outcome:?}"
             );
         } else if n_signers == threshold {
             match outcome {
@@ -152,8 +148,7 @@ fn full_composition_finalizes_at_threshold_with_real_crypto() {
                     assert_eq!(hash, TARGET_HASH_A);
                 }
                 other => panic!(
-                    "at threshold ({}/{}): expected NewlyFinalized, got {:?}",
-                    n_signers, threshold, other
+                    "at threshold ({n_signers}/{threshold}): expected NewlyFinalized, got {other:?}"
                 ),
             }
         }

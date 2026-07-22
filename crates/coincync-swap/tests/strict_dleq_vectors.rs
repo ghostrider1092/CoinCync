@@ -240,8 +240,7 @@ fn vectors_match_checked_in_file() {
     assert_eq!(
         on_disk,
         derived,
-        "checked-in {} drifted from re-derived output. Either the strict-DLEQ wire format changed (intentional — re-baseline by deleting the file + re-running this test + committing the new file) or a regression slipped through. Diff before committing.",
-        STRICT_DLEQ_VECTORS_PATH
+        "checked-in {STRICT_DLEQ_VECTORS_PATH} drifted from re-derived output. Either the strict-DLEQ wire format changed (intentional — re-baseline by deleting the file + re-running this test + committing the new file) or a regression slipped through. Diff before committing."
     );
 }
 
