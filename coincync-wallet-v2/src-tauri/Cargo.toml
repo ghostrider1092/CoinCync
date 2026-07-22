@@ -8,7 +8,7 @@ edition = "2021"
 # Must track the Tauri v1 line to match `tauri = "1.6"` below. A v2
 # tauri-build (2.x) parses tauri.conf.json as the v2 schema and rejects
 # v1 keys like `devPath`/`distDir`, breaking the build. Keep both on v1.
-tauri-build = { version = "1.5", features = [] }
+tauri-build = { version = "2.6", features = [] }
 [dependencies]
 tauri     = { version = "1.6", features = [ "process-relaunch", "notification-all", "shell-open"] }
 serde     = { version = "1.0", features = ["derive"] }
