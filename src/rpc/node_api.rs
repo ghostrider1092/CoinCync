@@ -2,15 +2,15 @@
 //!
 //! RPC methods for node operations.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
+use super::types::*;
 use crate::chain::SharedBlockchain;
-use crate::mempool::SharedMempool;
 use crate::emission::calculate_block_reward;
 use crate::error::Result;
-use super::types::*;
+use crate::mempool::SharedMempool;
 
 /// Count cyncd processes by scanning /proc/*/comm.
 ///
@@ -76,7 +76,12 @@ impl NodeRpc {
         mempool: SharedMempool,
         peer_count: Arc<AtomicUsize>,
     ) -> Self {
-        NodeRpc { chain, mempool, peer_count, network_name: "testnet".to_string() }
+        NodeRpc {
+            chain,
+            mempool,
+            peer_count,
+            network_name: "testnet".to_string(),
+        }
     }
 
     /// Set network name for RPC responses

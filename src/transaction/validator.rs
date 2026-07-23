@@ -21,21 +21,36 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
     // Check size
     let size = tx.size();
     if size > MAX_TX_SIZE {
-        return Err(Error::TransactionTooLarge { size, max: MAX_TX_SIZE });
+        return Err(Error::TransactionTooLarge {
+            size,
+            max: MAX_TX_SIZE,
+        });
     }
     if size < MIN_TX_SIZE && !tx.is_coinbase() {
-        return Err(Error::TransactionTooSmall { size, min: MIN_TX_SIZE });
+        return Err(Error::TransactionTooSmall {
+            size,
+            min: MIN_TX_SIZE,
+        });
     }
 
     // Check input/output counts
     if tx.inputs.len() > MAX_TX_INPUTS {
-        return Err(Error::InvalidInputCount { count: tx.inputs.len(), max: MAX_TX_INPUTS });
+        return Err(Error::InvalidInputCount {
+            count: tx.inputs.len(),
+            max: MAX_TX_INPUTS,
+        });
     }
     if tx.outputs.len() > MAX_TX_OUTPUTS {
-        return Err(Error::InvalidOutputCount { count: tx.outputs.len(), max: MAX_TX_OUTPUTS });
+        return Err(Error::InvalidOutputCount {
+            count: tx.outputs.len(),
+            max: MAX_TX_OUTPUTS,
+        });
     }
     if tx.outputs.is_empty() {
-        return Err(Error::InvalidOutputCount { count: 0, max: MAX_TX_OUTPUTS });
+        return Err(Error::InvalidOutputCount {
+            count: 0,
+            max: MAX_TX_OUTPUTS,
+        });
     }
 
     // Validate lock_height is reasonable (not absurdly far in the future)
@@ -43,9 +58,10 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
         if let Some(lh) = output.lock_height {
             // ~2 years at 120-second blocks
             if lh > height + 525_960 {
-                return Err(Error::InvalidTransaction(
-                    format!("lock_height {} is too far in the future (current: {})", lh, height)
-                ));
+                return Err(Error::InvalidTransaction(format!(
+                    "lock_height {} is too far in the future (current: {})",
+                    lh, height
+                )));
             }
         }
     }
@@ -56,7 +72,9 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
     for input in &tx.inputs {
         if !seen_key_images.insert(input.key_image) {
             // SECURITY (M-18): Generic message to avoid revealing which key image
-            return Err(Error::DuplicateKeyImage("duplicate key image detected".into()));
+            return Err(Error::DuplicateKeyImage(
+                "duplicate key image detected".into(),
+            ));
         }
     }
 
@@ -89,7 +107,9 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
         if input.signature.ring_size() != actual {
             return Err(Error::InvalidSignature(format!(
                 "ring signature size mismatch in input {}: expected {}, got {}",
-                i, actual, input.signature.ring_size()
+                i,
+                actual,
+                input.signature.ring_size()
             )));
         }
 
@@ -97,7 +117,8 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
         // Compare via bytes since ClsagSignature uses curve::KeyImage while TxInput uses primitives::KeyImage
         if input.signature.key_image.to_bytes() != *input.key_image.as_bytes() {
             return Err(Error::InvalidSignature(format!(
-                "key image mismatch in input {}", i
+                "key image mismatch in input {}",
+                i
             )));
         }
     }
@@ -105,7 +126,10 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
     // Check fee
     let min_fee = (size as u64) * MIN_FEE_PER_BYTE;
     if tx.fee.as_atomic() < min_fee && !tx.is_coinbase() {
-        return Err(Error::FeeTooLow { fee: tx.fee.as_atomic(), min: min_fee });
+        return Err(Error::FeeTooLow {
+            fee: tx.fee.as_atomic(),
+            min: min_fee,
+        });
     }
 
     // SECURITY: Validate range proof size is reasonable
@@ -121,7 +145,10 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
     // Validate dead man's switch recovery metadata (if present in extra).
     if !tx.extra.is_empty() {
         if let Err(e) = super::recovery::validate_recovery_extra(&tx.extra, tx.outputs.len()) {
-            return Err(Error::InvalidTransaction(format!("invalid recovery metadata: {}", e)));
+            return Err(Error::InvalidTransaction(format!(
+                "invalid recovery metadata: {}",
+                e
+            )));
         }
     }
 
@@ -137,8 +164,8 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{Transaction, TxType, TxOutput};
     use crate::primitives::{Amount, PublicKey};
+    use crate::transaction::{Transaction, TxOutput, TxType};
 
     fn make_coinbase_tx() -> Transaction {
         Transaction {

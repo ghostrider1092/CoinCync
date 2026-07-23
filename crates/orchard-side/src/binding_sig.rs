@@ -57,7 +57,9 @@ use ff::{Field, PrimeField};
 use group::{Group, GroupEncoding};
 use pasta_curves::{group::ff::FromUniformBytes, pallas};
 
-use crate::value_commit::{binding_generator, value_generator_pub, TrapdoorRandomness, ValueCommitment};
+use crate::value_commit::{
+    binding_generator, value_generator_pub, TrapdoorRandomness, ValueCommitment,
+};
 use crate::{Error, Result};
 
 const REDPALLAS_CHALLENGE_PERSONALIZATION: &[u8; 16] = b"Zcash_RedPallasH";
@@ -73,7 +75,10 @@ impl BindingSigningKey {
     /// Construct from the per-input and per-output trapdoor
     /// randomness. Computes the difference modulo the Pallas
     /// scalar field order.
-    pub fn from_rcvs(input_rcvs: &[TrapdoorRandomness], output_rcvs: &[TrapdoorRandomness]) -> Self {
+    pub fn from_rcvs(
+        input_rcvs: &[TrapdoorRandomness],
+        output_rcvs: &[TrapdoorRandomness],
+    ) -> Self {
         let mut bsk = pallas::Scalar::ZERO;
         for r in input_rcvs {
             bsk += r.scalar();
@@ -105,8 +110,9 @@ impl BindingSigningKey {
     /// `DomainRule` if `nonce_bytes` is not a canonical Pallas
     /// scalar (≥ q_S).
     pub fn sign(&self, msg: &[u8; 32], nonce_bytes: [u8; 32]) -> Result<BindingSignature> {
-        let r: pallas::Scalar = Option::from(pallas::Scalar::from_repr(nonce_bytes))
-            .ok_or(Error::DomainRule("signing nonce is not a canonical Pallas scalar"))?;
+        let r: pallas::Scalar = Option::from(pallas::Scalar::from_repr(nonce_bytes)).ok_or(
+            Error::DomainRule("signing nonce is not a canonical Pallas scalar"),
+        )?;
 
         // R = r · G_binding
         let r_point = binding_generator() * r;
@@ -122,10 +128,7 @@ impl BindingSigningKey {
         // s = r + c · bsk
         let s = r + (c * self.0);
 
-        Ok(BindingSignature {
-            r_point,
-            s,
-        })
+        Ok(BindingSignature { r_point, s })
     }
 }
 
@@ -216,15 +219,16 @@ impl BindingSignature {
         let r_bytes: <pallas::Point as GroupEncoding>::Repr = {
             let mut buf = [0u8; 32];
             buf.copy_from_slice(&bytes[0..32]);
-            buf.into()
+            buf
         };
         let r_point: pallas::Point = Option::from(pallas::Point::from_bytes(&r_bytes))
             .ok_or(Error::MalformedWireFormat("R is not a valid Pallas point"))?;
 
         let mut s_bytes = [0u8; 32];
         s_bytes.copy_from_slice(&bytes[32..64]);
-        let s: pallas::Scalar = Option::from(pallas::Scalar::from_repr(s_bytes))
-            .ok_or(Error::MalformedWireFormat("s is not a canonical Pallas scalar"))?;
+        let s: pallas::Scalar = Option::from(pallas::Scalar::from_repr(s_bytes)).ok_or(
+            Error::MalformedWireFormat("s is not a canonical Pallas scalar"),
+        )?;
 
         Ok(Self { r_point, s })
     }
@@ -279,7 +283,8 @@ mod tests {
         let sig = bsk.sign(&msg, nonce).unwrap();
 
         let vk = bsk.verifying_key();
-        sig.verify(&vk, &msg).expect("freshly-signed sig must verify");
+        sig.verify(&vk, &msg)
+            .expect("freshly-signed sig must verify");
     }
 
     #[test]
@@ -301,10 +306,7 @@ mod tests {
         // a fixed K (the geometric pattern of `[seed; 32]`), so
         // any equal-difference seed pair produces the same bsk.
         let bsk = BindingSigningKey::from_rcvs(&[test_rcv(5)], &[test_rcv(6)]);
-        let other = BindingSigningKey::from_rcvs(
-            &[test_rcv(5), test_rcv(7)],
-            &[test_rcv(6)],
-        );
+        let other = BindingSigningKey::from_rcvs(&[test_rcv(5), test_rcv(7)], &[test_rcv(6)]);
         // Sanity: the two bvks really are different.
         assert_ne!(
             bsk.verifying_key().to_bytes(),
@@ -361,10 +363,7 @@ mod tests {
         let cv_out_a = ValueCommitment::commit(900, &rcv_out_a).unwrap();
         let cv_out_b = ValueCommitment::commit(100, &rcv_out_b).unwrap();
 
-        let bsk = BindingSigningKey::from_rcvs(
-            &[rcv_in_a, rcv_in_b],
-            &[rcv_out_a, rcv_out_b],
-        );
+        let bsk = BindingSigningKey::from_rcvs(&[rcv_in_a, rcv_in_b], &[rcv_out_a, rcv_out_b]);
         let msg = test_msg(10);
         let sig = bsk.sign(&msg, pallas_canonical(24)).unwrap();
 
@@ -395,10 +394,7 @@ mod tests {
         let cv_out_a = ValueCommitment::commit(800, &rcv_out_a).unwrap();
         let cv_out_b = ValueCommitment::commit(400, &rcv_out_b).unwrap();
 
-        let bsk = BindingSigningKey::from_rcvs(
-            &[rcv_in_a, rcv_in_b],
-            &[rcv_out_a, rcv_out_b],
-        );
+        let bsk = BindingSigningKey::from_rcvs(&[rcv_in_a, rcv_in_b], &[rcv_out_a, rcv_out_b]);
         let msg = test_msg(11);
         let sig = bsk.sign(&msg, pallas_canonical(25)).unwrap();
 
@@ -429,13 +425,7 @@ mod tests {
         // difference, but the bvk the verifier derives includes
         // a `[1] · V` term (the value mismatch) that the
         // signature didn't account for — must reject.
-        let r = ValueCommitment::verify_balance(
-            &[cv_in],
-            &[cv_out],
-            0,
-            &msg,
-            &sig,
-        );
+        let r = ValueCommitment::verify_balance(&[cv_in], &[cv_out], 0, &msg, &sig);
         assert!(
             matches!(r, Err(Error::InvalidProof(_))),
             "unbalanced tx must be rejected"
@@ -456,13 +446,7 @@ mod tests {
         let sig = bsk.sign(&msg, pallas_canonical(27)).unwrap();
 
         // Prover thinks value_balance = 0; verifier passes 50.
-        let r = ValueCommitment::verify_balance(
-            &[cv_in],
-            &[cv_out],
-            50,
-            &msg,
-            &sig,
-        );
+        let r = ValueCommitment::verify_balance(&[cv_in], &[cv_out], 50, &msg, &sig);
         assert!(matches!(r, Err(Error::InvalidProof(_))));
     }
 
@@ -487,8 +471,7 @@ mod tests {
 
         let bsk = BindingSigningKey::from_rcvs(&[rcv_in], &[rcv_out]);
         let vk_from_bsk = bsk.verifying_key();
-        let vk_from_cvs =
-            BindingVerifyingKey::from_commitments(&[cv_in], &[cv_out], 0).unwrap();
+        let vk_from_cvs = BindingVerifyingKey::from_commitments(&[cv_in], &[cv_out], 0).unwrap();
 
         assert_eq!(
             vk_from_bsk.to_bytes(),

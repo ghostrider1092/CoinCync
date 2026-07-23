@@ -307,7 +307,7 @@ fn mint_invitation(
     let json = serde_json::to_string_pretty(&token).map_err(|e| format!("encode token: {e}"))?;
     println!("{json}");
     eprintln!();
-    eprintln!("# Invitation token for participant {}", participant_hex);
+    eprintln!("# Invitation token for participant {participant_hex}");
     eprintln!("# Expires at unix time {expires_at} (~{expires_in_hours}h from now).");
     eprintln!("# Deliver to the participant out-of-band.");
     Ok(())
@@ -347,7 +347,7 @@ fn inspect_session(state_path: PathBuf, session_hex: &str) -> Result<(), String>
     let session = sessions
         .iter()
         .find(|s| s.id == target_id)
-        .ok_or_else(|| format!("session {} not found", session_hex))?;
+        .ok_or_else(|| format!("session {session_hex} not found"))?;
 
     let now = unix_now();
     println!("Session details:");
@@ -416,7 +416,7 @@ fn force_abort(
     let session = sessions
         .iter_mut()
         .find(|s| s.id == target_id)
-        .ok_or_else(|| format!("session {} not found", session_hex))?;
+        .ok_or_else(|| format!("session {session_hex} not found"))?;
     let now = unix_now();
     let prior_state = state_name(&session.state).to_string();
     session
@@ -431,7 +431,7 @@ fn force_abort(
     store.save(&sessions).map_err(|e| format!("save: {e}"))?;
 
     eprintln!("Force-abort applied (operator-initiated).");
-    eprintln!("  session:      {}", session_hex);
+    eprintln!("  session:      {session_hex}");
     eprintln!("  prior state:  {prior_state}");
     eprintln!("  new state:    {new_state}");
     eprintln!("  participant:  {participant_hex}");
@@ -554,8 +554,7 @@ fn read_random(buf: &mut [u8]) -> std::io::Result<()> {
     // who knew approximate process-start time and PID range
     // could brute-force the secret in seconds and forge attach
     // tokens. Replaced with getrandom — no fallback, fail-fast.
-    getrandom::getrandom(buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    getrandom::getrandom(buf).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 // ──────────────────────────────────────────────────────────────────

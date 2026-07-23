@@ -27,16 +27,15 @@
 //! - Paper: "Dandelion++: Lightweight Cryptocurrency Networking with Formal
 //!   Anonymity Guarantees" (ACM SIGMETRICS 2018)
 
-use std::collections::HashMap;
+use crate::constants::{
+    DANDELION_EMBARGO_MAX_SECS, DANDELION_EMBARGO_MEAN_SECS, DANDELION_EPOCH_BASE_SECS,
+    DANDELION_EPOCH_JITTER_SECS, DANDELION_FLUFF_PROBABILITY, DANDELION_STEMS,
+};
+use crate::network::peer::PeerId;
 use crate::primitives::Hash;
 use crate::transaction::Transaction;
-use crate::network::peer::PeerId;
-use crate::constants::{
-    DANDELION_FLUFF_PROBABILITY, DANDELION_EPOCH_BASE_SECS,
-    DANDELION_EPOCH_JITTER_SECS, DANDELION_EMBARGO_MEAN_SECS,
-    DANDELION_EMBARGO_MAX_SECS, DANDELION_STEMS,
-};
 use rand::Rng;
+use std::collections::HashMap;
 
 /// Maximum pending transactions in the stempool
 const MAX_STEMPOOL: usize = 10_000;
@@ -222,11 +221,19 @@ impl DandelionRouter {
         let own_relay_idx = rng.gen_range(0..DANDELION_STEMS);
 
         let mode_str = if is_fluff { "FLUFF" } else { "STEM" };
-        let r0 = relay_peers[0].map(|p| hex::encode(&p[..4])).unwrap_or_else(|| "none".into());
-        let r1 = relay_peers[1].map(|p| hex::encode(&p[..4])).unwrap_or_else(|| "none".into());
+        let r0 = relay_peers[0]
+            .map(|p| hex::encode(&p[..4]))
+            .unwrap_or_else(|| "none".into());
+        let r1 = relay_peers[1]
+            .map(|p| hex::encode(&p[..4]))
+            .unwrap_or_else(|| "none".into());
         tracing::debug!(
             "Dandelion++ epoch {} started: mode={}, relays=[{}, {}], duration={}s",
-            self.epoch_number, mode_str, r0, r1, duration
+            self.epoch_number,
+            mode_str,
+            r0,
+            r1,
+            duration
         );
 
         self.epoch = EpochState {
@@ -279,14 +286,17 @@ impl DandelionRouter {
             embargo.saturating_sub(now)
         );
 
-        self.stempool.insert(hash, StemEntry {
-            tx,
-            added_at: now,
-            embargo_deadline: embargo,
-            source: None,
-            forwarded: false,
-            forward_after: self.random_forward_time(now),
-        });
+        self.stempool.insert(
+            hash,
+            StemEntry {
+                tx,
+                added_at: now,
+                embargo_deadline: embargo,
+                source: None,
+                forwarded: false,
+                forward_after: self.random_forward_time(now),
+            },
+        );
 
         hash
     }
@@ -294,12 +304,7 @@ impl DandelionRouter {
     /// Add a transaction received from a peer via stem relay.
     ///
     /// Returns the action the caller should take.
-    pub fn add_received_tx(
-        &mut self,
-        tx: Transaction,
-        source: PeerId,
-        now: u64,
-    ) -> StemAction {
+    pub fn add_received_tx(&mut self, tx: Transaction, source: PeerId, now: u64) -> StemAction {
         let hash = tx.hash();
 
         // Already fluffed by us → ignore
@@ -345,14 +350,17 @@ impl DandelionRouter {
             embargo.saturating_sub(now)
         );
 
-        self.stempool.insert(hash, StemEntry {
-            tx,
-            added_at: now,
-            embargo_deadline: embargo,
-            source: Some(source),
-            forwarded: false,
-            forward_after: self.random_forward_time(now),
-        });
+        self.stempool.insert(
+            hash,
+            StemEntry {
+                tx,
+                added_at: now,
+                embargo_deadline: embargo,
+                source: Some(source),
+                forwarded: false,
+                forward_after: self.random_forward_time(now),
+            },
+        );
 
         StemAction::Stem
     }
@@ -371,10 +379,11 @@ impl DandelionRouter {
         let hashes: Vec<Hash> = self.stempool.keys().cloned().collect();
         for hash in hashes {
             // Extract fields we need before any mutable borrows
-            let (forwarded, embargo_deadline, source, forward_after) = match self.stempool.get(&hash) {
-                Some(e) => (e.forwarded, e.embargo_deadline, e.source, e.forward_after),
-                None => continue,
-            };
+            let (forwarded, embargo_deadline, source, forward_after) =
+                match self.stempool.get(&hash) {
+                    Some(e) => (e.forwarded, e.embargo_deadline, e.source, e.forward_after),
+                    None => continue,
+                };
 
             // Skip if already forwarded in stem
             if forwarded {
@@ -509,18 +518,25 @@ impl DandelionRouter {
     fn enforce_stempool_limit(&mut self) {
         while self.stempool.len() >= MAX_STEMPOOL {
             // Prefer evicting a peer-sourced entry.
-            let victim = self.stempool.iter()
+            let victim = self
+                .stempool
+                .iter()
                 .filter(|(_, e)| e.source.is_some())
                 .min_by_key(|(_, e)| e.added_at)
                 .map(|(h, _)| *h)
                 // Fall back to local entries only if the stempool
                 // is entirely local (unusual — means only our own
                 // txs are in flight).
-                .or_else(|| self.stempool.iter()
-                    .min_by_key(|(_, e)| e.added_at)
-                    .map(|(h, _)| *h));
+                .or_else(|| {
+                    self.stempool
+                        .iter()
+                        .min_by_key(|(_, e)| e.added_at)
+                        .map(|(h, _)| *h)
+                });
             match victim {
-                Some(h) => { self.stempool.remove(&h); }
+                Some(h) => {
+                    self.stempool.remove(&h);
+                }
                 None => break,
             }
         }
@@ -601,8 +617,8 @@ pub struct DandelionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::TxType;
     use crate::primitives::Amount;
+    use crate::transaction::TxType;
 
     fn make_test_tx(extra: u8) -> Transaction {
         Transaction {
@@ -691,14 +707,17 @@ mod tests {
         // struct gained as part of the H16-FIX (random forward jitter). The
         // test had grown stale. forward_after=0 means "no delay" — irrelevant
         // for this test which is about embargo expiry, not forward timing.
-        router.stempool.insert(hash, StemEntry {
-            tx: tx.clone(),
-            added_at: 100,
-            embargo_deadline: 105, // expires at t=105
-            source: None,
-            forwarded: true, // already forwarded
-            forward_after: 0,
-        });
+        router.stempool.insert(
+            hash,
+            StemEntry {
+                tx: tx.clone(),
+                added_at: 100,
+                embargo_deadline: 105, // expires at t=105
+                source: None,
+                forwarded: true, // already forwarded
+                forward_after: 0,
+            },
+        );
 
         // Tick at t=110 → embargo expired → fluff
         let actions = router.tick(110);
@@ -744,7 +763,8 @@ mod tests {
         assert_eq!(router.epoch_number, epoch1);
 
         // Force expiry
-        router.maybe_rotate_epoch(100 + DANDELION_EPOCH_BASE_SECS + DANDELION_EPOCH_JITTER_SECS + 1);
+        router
+            .maybe_rotate_epoch(100 + DANDELION_EPOCH_BASE_SECS + DANDELION_EPOCH_JITTER_SECS + 1);
         assert!(router.epoch_number > epoch1);
     }
 
@@ -798,16 +818,19 @@ mod tests {
                 range_proof: vec![],
                 extra: (i as u32).to_le_bytes().to_vec(),
             };
-            router.stempool.insert(tx.hash(), StemEntry {
-                tx,
-                added_at: 100 + i as u64,
-                embargo_deadline: 200 + i as u64,
-                source: None,
-                forwarded: false,
-                // Phase A4 (audit fix): see matching note above. forward_after=0
-                // is irrelevant to this loop test (it's about pool capacity).
-                forward_after: 0,
-            });
+            router.stempool.insert(
+                tx.hash(),
+                StemEntry {
+                    tx,
+                    added_at: 100 + i as u64,
+                    embargo_deadline: 200 + i as u64,
+                    source: None,
+                    forwarded: false,
+                    // Phase A4 (audit fix): see matching note above. forward_after=0
+                    // is irrelevant to this loop test (it's about pool capacity).
+                    forward_after: 0,
+                },
+            );
         }
         assert_eq!(router.stempool.len(), limit);
 

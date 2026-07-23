@@ -49,8 +49,8 @@ fn safe_params() -> SwapParameters {
         btc_timeout_blocks: 100,
         alice_cync_address: "alice-stealth".into(),
         bob_btc_address: "bob-p2wpkh".into(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+        cync_network: "regtest".to_string(),
+        btc_network: "regtest".to_string(),
     }
 }
 
@@ -310,7 +310,7 @@ fn completed_swap_rejects_all_transitions_after_reload() {
     ];
     for t in attempts {
         let result = reloaded.apply(t);
-        assert!(result.is_err(), "Completed swap must reject {:?}", t);
+        assert!(result.is_err(), "Completed swap must reject {t:?}");
         assert_eq!(reloaded.state, State::Completed, "state must not change");
     }
 }

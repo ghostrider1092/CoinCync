@@ -1,8 +1,8 @@
 // src/network/mod.rs
 pub mod bootstrap;
 pub mod dns_seeds;
-pub mod socks_dns;
 pub mod peer_snapshot;
+pub mod socks_dns;
 // Generic maintainer-signed registry — infrastructure for Fort-Knox
 // items 2 (faucet decentralization), 3 (FROST-coord decentralization),
 // and future decentralized-service consumers. Follows the same trust
@@ -14,18 +14,18 @@ pub mod signed_registry;
 pub mod faucet_registry;
 
 // Ported from CoinCync (copy as-is):
-pub mod dandelion;
-pub mod framing;
-pub mod compact_blocks;
-pub mod orphan;
-pub mod proxy;
-pub mod peer;
-pub mod firework;
 pub mod block_filter;
+pub mod compact_blocks;
+pub mod dandelion;
+pub mod eviction;
+pub mod firework;
+pub mod framing;
+pub mod orphan;
+pub mod peer;
+pub mod proxy;
+pub mod relay_score;
 pub mod scoring;
 pub mod sync;
-pub mod eviction;
-pub mod relay_score;
 
 /// Shared serialization lock for tests that mutate the process-global
 /// `MAINTAINER_PUBKEY_ENV` (`COINCYNC_PEER_SNAPSHOT_PUBKEY`). Both
@@ -37,9 +37,9 @@ pub mod relay_score;
 #[cfg(test)]
 pub(crate) static MAINTAINER_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub mod dht;
+pub mod node;
 pub mod noise;
 pub mod protocol;
-pub mod node;
 // First concrete step in splitting the monolithic `node.rs` — this
 // holds only the per-IP / memory-budget tracking logic. Additional
 // extractions (handshake, framer, dispatch, peer manager) will land
@@ -55,10 +55,10 @@ pub mod hardening;
 pub mod block_aggregation;
 
 pub use bootstrap::initial_peers;
+pub use dandelion::DandelionRouter;
 pub use dns_seeds::{resolve_seeds, resolve_seeds_with_proxy};
 pub use node::P2PNode;
-pub use peer::{PeerId, PeerInfo, generate_peer_id};
-pub use dandelion::DandelionRouter;
-pub use scoring::PeerMessageRateTracker;
+pub use peer::{generate_peer_id, PeerId, PeerInfo};
 pub use protocol::{MessageHeader, MessageType, MAX_MESSAGE_SIZE};
+pub use scoring::PeerMessageRateTracker;
 pub use traffic_shaping::{TrafficShaper, TrafficShaperConfig, TrafficShapingStats};

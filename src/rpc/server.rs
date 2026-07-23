@@ -32,9 +32,9 @@ use tower_http::validate_request::{ValidateRequest, ValidateRequestHeaderLayer};
 use tracing::{info, warn};
 
 use crate::chain::SharedBlockchain;
+use crate::error::{Error, Result};
 use crate::mempool::SharedMempool;
 use crate::network::P2PNode;
-use crate::error::{Error, Result};
 
 /// RPC server configuration.
 #[derive(Clone)]
@@ -90,7 +90,7 @@ impl Default for RpcConfig {
                 "http://127.0.0.1".to_string(),
             ],
             network_name: "testnet".to_string(),
-            tls_enabled: false,  // P0: plaintext by default, TLS comes back in P1
+            tls_enabled: false, // P0: plaintext by default, TLS comes back in P1
             data_dir: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -189,7 +189,10 @@ fn rpc_env_bool(name: &str) -> Option<bool> {
     })
 }
 
-fn rpc_clamp_audit_range(start: u64, end: u64) -> std::result::Result<(u64, u64), ErrorObjectOwned> {
+fn rpc_clamp_audit_range(
+    start: u64,
+    end: u64,
+) -> std::result::Result<(u64, u64), ErrorObjectOwned> {
     if start > end {
         return Err(ErrorObjectOwned::owned(
             -32602,
@@ -265,11 +268,17 @@ impl RpcBearerValidator {
 
     fn from_plaintexts(plaintexts: &[&str]) -> Self {
         let hashes = plaintexts.iter().map(|p| Self::hash_token(p)).collect();
-        Self { token_hashes: hashes, rate_limiter: None }
+        Self {
+            token_hashes: hashes,
+            rate_limiter: None,
+        }
     }
 
     fn unauthenticated() -> Self {
-        Self { token_hashes: Vec::new(), rate_limiter: None }
+        Self {
+            token_hashes: Vec::new(),
+            rate_limiter: None,
+        }
     }
 
     fn hash_token(plaintext: &str) -> Arc<[u8; 32]> {
@@ -308,7 +317,11 @@ impl RpcBearerValidator {
 fn client_ip_from_request<B>(req: &Request<B>) -> std::net::IpAddr {
     let xff_trusted = rpc_env_bool("COINCYNC_RPC_XFF_PROXY_ACK").unwrap_or(false);
     if xff_trusted {
-        if let Some(xff) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(xff) = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+        {
             // RFC 7239 §5.2: first comma-separated entry is the original
             // client; proxies APPEND their own IPs to the right.
             if let Some(first) = xff.split(',').next() {
@@ -441,7 +454,10 @@ fn validate_bearer_header<B>(
 fn rpc_http_unauthorized() -> Response<HttpBody> {
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header(http::header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .header(
+            http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )
         .body(HttpBody::from(
             r#"{"jsonrpc":"2.0","error":{"code":401,"message":"Unauthorized"},"id":null}"#,
         ))
@@ -598,7 +614,8 @@ pub async fn start_rpc_server(
         // Privacy hardening: default metadata minimization on public listeners.
         minimize_metadata: rpc_env_bool("COINCYNC_RPC_MINIMIZE_METADATA")
             .unwrap_or(!listen_loopback),
-        stratum_public_bind_requested: rpc_env_bool("COINCYNC_STRATUM_PUBLIC_BIND").unwrap_or(false),
+        stratum_public_bind_requested: rpc_env_bool("COINCYNC_STRATUM_PUBLIC_BIND")
+            .unwrap_or(false),
         stratum_public_bind_ack: rpc_env_bool("COINCYNC_STRATUM_PUBLIC_BIND_ACK").unwrap_or(false),
         stratum_native_tls_enabled: rpc_env_bool("COINCYNC_STRATUM_TLS_ENABLED").unwrap_or(false),
         stratum_tls_proxy_ack: rpc_env_bool("COINCYNC_STRATUM_TLS_PROXY_ACK").unwrap_or(false),
@@ -642,116 +659,117 @@ pub async fn start_rpc_server(
     // See src/bin/node.rs:120 BUMP 4 → 8 comment for full context.
     // 2026-06-03 fix for the silent RPC-hang pathology observed
     // three times on coincync-lon under sustained IBD activity.
-    module.register_blocking_method("get_info", |_params, state, _ext| {
-        let tip = state.chain.tip();
-        let stats = state.chain.stats();
-        let height = tip.height;
-        let synced = state.chain.is_synced();
-        let target_height = state.chain.target_height();
-        let peer_count = state
-            .p2p
-            .as_ref()
-            .map(|p| p.network_stats().peer_count)
-            .unwrap_or(0);
-        // anonymity_set + effective_ring_size are emitted in get_info.
-        // The 2026-05-07 review proposed removing them as a chain-analyst
-        // correlator (every public scrape recording "anonymity_set was M
-        // at time T" gives an attacker an intersection on rings built
-        // around T). The UX cost — the explorer's "anonymity set" tile
-        // showing 00, every user seeing a broken stat — proved larger
-        // than the marginal correlator gain (an attacker who wants this
-        // data can poll get_decoys directly anyway). Field is back.
-        let anonymity_set = state.chain.available_output_count();
-        let effective_ring_size =
-            crate::constants::effective_ring_size(height, anonymity_set);
+    module
+        .register_blocking_method("get_info", |_params, state, _ext| {
+            let tip = state.chain.tip();
+            let stats = state.chain.stats();
+            let height = tip.height;
+            let synced = state.chain.is_synced();
+            let target_height = state.chain.target_height();
+            let peer_count = state
+                .p2p
+                .as_ref()
+                .map(|p| p.network_stats().peer_count)
+                .unwrap_or(0);
+            // anonymity_set + effective_ring_size are emitted in get_info.
+            // The 2026-05-07 review proposed removing them as a chain-analyst
+            // correlator (every public scrape recording "anonymity_set was M
+            // at time T" gives an attacker an intersection on rings built
+            // around T). The UX cost — the explorer's "anonymity set" tile
+            // showing 00, every user seeing a broken stat — proved larger
+            // than the marginal correlator gain (an attacker who wants this
+            // data can poll get_decoys directly anyway). Field is back.
+            let anonymity_set = state.chain.available_output_count();
+            let effective_ring_size = crate::constants::effective_ring_size(height, anonymity_set);
 
-        // Wall-clock read can fail if the system clock is set before
-        // UNIX_EPOCH. On failure we report `tip_age_secs = null` + a
-        // `clock_available = false` flag so a monitoring dashboard
-        // can distinguish "tip is brand new" from "we have no idea
-        // how stale the tip is".
-        let (tip_age_secs, clock_available): (Value, bool) =
-            match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                Ok(d) => {
-                    let now = d.as_secs();
-                    (json!(now.saturating_sub(tip.timestamp)), true)
+            // Wall-clock read can fail if the system clock is set before
+            // UNIX_EPOCH. On failure we report `tip_age_secs = null` + a
+            // `clock_available = false` flag so a monitoring dashboard
+            // can distinguish "tip is brand new" from "we have no idea
+            // how stale the tip is".
+            let (tip_age_secs, clock_available): (Value, bool) =
+                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => {
+                        let now = d.as_secs();
+                        (json!(now.saturating_sub(tip.timestamp)), true)
+                    }
+                    Err(_) => (Value::Null, false),
+                };
+
+            // Derive a simple health score and status label from the
+            // observable signals. The score is a float in [0.0, 1.0];
+            // 1.0 = everything nominal, 0.0 = disconnected / stalled.
+            // This mirrors the health-band rendering in the TUI status
+            // bar so the node, not the TUI, is the source of truth.
+            let (status, health_score) = if !synced {
+                ("syncing".to_string(), 0.5_f64)
+            } else if peer_count == 0 {
+                ("no-peers".to_string(), 0.2_f64)
+            } else {
+                let age = tip_age_secs.as_u64().unwrap_or(u64::MAX);
+                if age > 300 {
+                    ("stalled".to_string(), 0.3_f64)
+                } else if peer_count < 2 {
+                    ("low-peers".to_string(), 0.7_f64)
+                } else {
+                    ("healthy".to_string(), 1.0_f64)
                 }
-                Err(_) => (Value::Null, false),
             };
 
-        // Derive a simple health score and status label from the
-        // observable signals. The score is a float in [0.0, 1.0];
-        // 1.0 = everything nominal, 0.0 = disconnected / stalled.
-        // This mirrors the health-band rendering in the TUI status
-        // bar so the node, not the TUI, is the source of truth.
-        let (status, health_score) = if !synced {
-            ("syncing".to_string(), 0.5_f64)
-        } else if peer_count == 0 {
-            ("no-peers".to_string(), 0.2_f64)
-        } else {
-            let age = tip_age_secs.as_u64().unwrap_or(u64::MAX);
-            if age > 300 {
-                ("stalled".to_string(), 0.3_f64)
-            } else if peer_count < 2 {
-                ("low-peers".to_string(), 0.7_f64)
-            } else {
-                ("healthy".to_string(), 1.0_f64)
-            }
-        };
-
-        Ok::<_, ErrorObjectOwned>(json!({
-            // Identity
-            "version":                 env!("CARGO_PKG_VERSION"),
-            "build_commit":            crate::build_info::git_commit(),
-            "build_dirty":             crate::build_info::git_dirty(),
-            "build_profile":           crate::build_info::build_profile(),
-            "network":                 state.network_name,
-            // Chain tip
-            "height":                  height,
-            "target_height":           target_height,
-            "top_hash":                hex::encode(tip.hash.as_bytes()),
-            // Back-compat alias: some older clients look for `tip_hash`.
-            "tip_hash":                hex::encode(tip.hash.as_bytes()),
-            "tip_timestamp":           tip.timestamp,
-            "tip_age_secs":            tip_age_secs,
-            "clock_available":         clock_available,
-            "difficulty":              stats.difficulty.to_string(),
-            "total_difficulty":        stats.total_difficulty.to_string(),
-            // Sync + P2P
-            "synced":                  synced,
-            "is_synced":               synced, // back-compat alias
-            "peer_count":              peer_count,
-            // Mempool
-            "tx_pool_size":            state.mempool.len(),
-            "mempool_size":            state.mempool.len(), // back-compat alias
-            // Privacy metrics. Reflect the chain-wide decoy pool size +
-            // the ring size every wallet uses. Public on-chain data —
-            // any caller that wants this can poll get_decoys to recover
-            // the same number, so withholding it from get_info gives
-            // negligible privacy gain at the cost of breaking every UI
-            // that surfaces the anonymity-set stat.
-            "anonymity_set":           anonymity_set,
-            "available_outputs":       anonymity_set, // back-compat alias
-            "effective_ring_size":     effective_ring_size,
-            // Health / monitoring
-            "status":                  status,
-            "health_score":            health_score,
-            // Per-process zombie detection (see rpc::node_api::count_cyncd_processes
-            // for the availability flag rationale).
-            "process_count":           1u32,
-            "process_count_available": false,
-            "has_zombies":             false,
-            // Surface hardening posture to operators/TUIs so they can assert
-            // expected runtime policy (auth/privacy) without shell access.
-            "rpc_auth_enabled":        state.auth_enabled,
-            "metadata_minimized":      state.minimize_metadata,
-            "stratum_public_bind_requested": state.stratum_public_bind_requested,
-            "stratum_public_bind_ack": state.stratum_public_bind_ack,
-            "stratum_native_tls_enabled": state.stratum_native_tls_enabled,
-            "stratum_tls_proxy_ack": state.stratum_tls_proxy_ack,
-            "stratum_transport_hardened": state.stratum_transport_hardened,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                // Identity
+                "version":                 env!("CARGO_PKG_VERSION"),
+                "build_commit":            crate::build_info::git_commit(),
+                "build_dirty":             crate::build_info::git_dirty(),
+                "build_profile":           crate::build_info::build_profile(),
+                "network":                 state.network_name,
+                // Chain tip
+                "height":                  height,
+                "target_height":           target_height,
+                "top_hash":                hex::encode(tip.hash.as_bytes()),
+                // Back-compat alias: some older clients look for `tip_hash`.
+                "tip_hash":                hex::encode(tip.hash.as_bytes()),
+                "tip_timestamp":           tip.timestamp,
+                "tip_age_secs":            tip_age_secs,
+                "clock_available":         clock_available,
+                "difficulty":              stats.difficulty.to_string(),
+                "total_difficulty":        stats.total_difficulty.to_string(),
+                // Sync + P2P
+                "synced":                  synced,
+                "is_synced":               synced, // back-compat alias
+                "peer_count":              peer_count,
+                // Mempool
+                "tx_pool_size":            state.mempool.len(),
+                "mempool_size":            state.mempool.len(), // back-compat alias
+                // Privacy metrics. Reflect the chain-wide decoy pool size +
+                // the ring size every wallet uses. Public on-chain data —
+                // any caller that wants this can poll get_decoys to recover
+                // the same number, so withholding it from get_info gives
+                // negligible privacy gain at the cost of breaking every UI
+                // that surfaces the anonymity-set stat.
+                "anonymity_set":           anonymity_set,
+                "available_outputs":       anonymity_set, // back-compat alias
+                "effective_ring_size":     effective_ring_size,
+                // Health / monitoring
+                "status":                  status,
+                "health_score":            health_score,
+                // Per-process zombie detection (see rpc::node_api::count_cyncd_processes
+                // for the availability flag rationale).
+                "process_count":           1u32,
+                "process_count_available": false,
+                "has_zombies":             false,
+                // Surface hardening posture to operators/TUIs so they can assert
+                // expected runtime policy (auth/privacy) without shell access.
+                "rpc_auth_enabled":        state.auth_enabled,
+                "metadata_minimized":      state.minimize_metadata,
+                "stratum_public_bind_requested": state.stratum_public_bind_requested,
+                "stratum_public_bind_ack": state.stratum_public_bind_ack,
+                "stratum_native_tls_enabled": state.stratum_native_tls_enabled,
+                "stratum_tls_proxy_ack": state.stratum_tls_proxy_ack,
+                "stratum_transport_hardened": state.stratum_transport_hardened,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_peer_info ──────────────────────────────────────────
     // Returns each currently-connected peer with the chain tip they
@@ -766,185 +784,198 @@ pub async fn start_rpc_server(
     // register_blocking_method — same rationale as get_info above.
     // Also touches parking_lot state (peer DashMap iteration + chain
     // tip read), should not run on tokio workers.
-    module.register_blocking_method("get_peer_info", |_params, state, _ext| {
-        // P7-R2 SURGICAL FIX (2026-07-03): honor minimize_metadata
-        // on public listeners. Pre-fix code built its own peer JSON
-        // that always exposed addr, user_agent, peer_id_prefix
-        // regardless of the flag. Now redact them consistently.
-        let minimize = state.minimize_metadata;
-        let now = std::time::Instant::now();
-        let peers: Vec<Value> = match state.p2p.as_ref() {
-            Some(p2p) => p2p
-                .peer_snapshot()
-                .into_iter()
-                .map(|p| {
-                    let last_seen_secs = now
-                        .checked_duration_since(p.last_seen)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let connected_for_secs = now
-                        .checked_duration_since(p.connected_at)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    // P7-R1 fix: peer_id_prefix is a per-session
-                    // correlator. Redact in min mode.
-                    let peer_id_field: Value = if minimize {
-                        Value::String("[redacted]".to_string())
-                    } else {
-                        Value::String(hex::encode(&p.id[..8]))
-                    };
-                    let addr_field: Value = if minimize {
-                        Value::String("[redacted]".to_string())
-                    } else {
-                        Value::String(p.addr.to_string())
-                    };
-                    let user_agent_field: Value = if minimize {
-                        Value::String("[redacted]".to_string())
-                    } else {
-                        Value::String(p.user_agent.clone())
-                    };
-                    let bytes_recv_val = if minimize { 0u64 } else { p.bytes_recv };
-                    let bytes_sent_val = if minimize { 0u64 } else { p.bytes_sent };
-                    json!({
-                        // Identity — redacted under min-metadata.
-                        "peer_id_prefix":      peer_id_field,
-                        "addr":                addr_field,
-                        "outbound":            p.outbound,
-                        // Reported chain tip — the actually-useful field.
-                        // Defaults to 0 if the peer never sent a Version
-                        // (still mid-handshake).
-                        "reported_height":     p.height,
-                        "reported_tip_hash":   hex::encode(p.tip_hash.as_bytes()),
-                        // Identity / protocol
-                        "protocol_version":    p.version,
-                        "user_agent":          user_agent_field,
-                        "encrypted":           p.encrypted,
-                        // Health-ish
-                        "reputation":          p.reputation,
-                        "last_seen_secs_ago":  last_seen_secs,
-                        "connected_for_secs":  connected_for_secs,
-                        "bytes_recv":          bytes_recv_val,
-                        "bytes_sent":          bytes_sent_val,
-                        // State (Connecting / Connected / Disconnected)
-                        "state":               format!("{:?}", p.state),
-                        "metadata_minimized":  minimize,
+    module
+        .register_blocking_method("get_peer_info", |_params, state, _ext| {
+            // P7-R2 SURGICAL FIX (2026-07-03): honor minimize_metadata
+            // on public listeners. Pre-fix code built its own peer JSON
+            // that always exposed addr, user_agent, peer_id_prefix
+            // regardless of the flag. Now redact them consistently.
+            let minimize = state.minimize_metadata;
+            let now = std::time::Instant::now();
+            let peers: Vec<Value> = match state.p2p.as_ref() {
+                Some(p2p) => p2p
+                    .peer_snapshot()
+                    .into_iter()
+                    .map(|p| {
+                        let last_seen_secs = now
+                            .checked_duration_since(p.last_seen)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let connected_for_secs = now
+                            .checked_duration_since(p.connected_at)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        // P7-R1 fix: peer_id_prefix is a per-session
+                        // correlator. Redact in min mode.
+                        let peer_id_field: Value = if minimize {
+                            Value::String("[redacted]".to_string())
+                        } else {
+                            Value::String(hex::encode(&p.id[..8]))
+                        };
+                        let addr_field: Value = if minimize {
+                            Value::String("[redacted]".to_string())
+                        } else {
+                            Value::String(p.addr.to_string())
+                        };
+                        let user_agent_field: Value = if minimize {
+                            Value::String("[redacted]".to_string())
+                        } else {
+                            Value::String(p.user_agent.clone())
+                        };
+                        let bytes_recv_val = if minimize { 0u64 } else { p.bytes_recv };
+                        let bytes_sent_val = if minimize { 0u64 } else { p.bytes_sent };
+                        json!({
+                            // Identity — redacted under min-metadata.
+                            "peer_id_prefix":      peer_id_field,
+                            "addr":                addr_field,
+                            "outbound":            p.outbound,
+                            // Reported chain tip — the actually-useful field.
+                            // Defaults to 0 if the peer never sent a Version
+                            // (still mid-handshake).
+                            "reported_height":     p.height,
+                            "reported_tip_hash":   hex::encode(p.tip_hash.as_bytes()),
+                            // Identity / protocol
+                            "protocol_version":    p.version,
+                            "user_agent":          user_agent_field,
+                            "encrypted":           p.encrypted,
+                            // Health-ish
+                            "reputation":          p.reputation,
+                            "last_seen_secs_ago":  last_seen_secs,
+                            "connected_for_secs":  connected_for_secs,
+                            "bytes_recv":          bytes_recv_val,
+                            "bytes_sent":          bytes_sent_val,
+                            // State (Connecting / Connected / Disconnected)
+                            "state":               format!("{:?}", p.state),
+                            "metadata_minimized":  minimize,
+                        })
                     })
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+                    .collect(),
+                None => Vec::new(),
+            };
 
-        // Summary for monitoring dashboards that just want the
-        // divergence signal, not the full per-peer detail.
-        let local_tip = state.chain.tip();
-        let reported_heights: Vec<u64> = peers
-            .iter()
-            .filter_map(|p| p.get("reported_height").and_then(|h| h.as_u64()))
-            .filter(|&h| h > 0)
-            .collect();
-        let max_peer_height = reported_heights.iter().copied().max().unwrap_or(0);
-        let min_peer_height = reported_heights.iter().copied().min().unwrap_or(0);
-        let divergence_from_max = max_peer_height.saturating_sub(local_tip.height);
+            // Summary for monitoring dashboards that just want the
+            // divergence signal, not the full per-peer detail.
+            let local_tip = state.chain.tip();
+            let reported_heights: Vec<u64> = peers
+                .iter()
+                .filter_map(|p| p.get("reported_height").and_then(|h| h.as_u64()))
+                .filter(|&h| h > 0)
+                .collect();
+            let max_peer_height = reported_heights.iter().copied().max().unwrap_or(0);
+            let min_peer_height = reported_heights.iter().copied().min().unwrap_or(0);
+            let divergence_from_max = max_peer_height.saturating_sub(local_tip.height);
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "local_height":         local_tip.height,
-            "local_tip_hash":       hex::encode(local_tip.hash.as_bytes()),
-            "peer_count":           peers.len(),
-            "peers":                peers,
-            // Quick-glance divergence summary
-            "max_peer_height":      max_peer_height,
-            "min_peer_height":      min_peer_height,
-            "divergence_from_max":  divergence_from_max,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "local_height":         local_tip.height,
+                "local_tip_hash":       hex::encode(local_tip.hash.as_bytes()),
+                "peer_count":           peers.len(),
+                "peers":                peers,
+                // Quick-glance divergence summary
+                "max_peer_height":      max_peer_height,
+                "min_peer_height":      min_peer_height,
+                "divergence_from_max":  divergence_from_max,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_blockchain_info (alias with more fields) ───────────
     // register_blocking_method — same rationale as get_info above.
-    module.register_blocking_method("get_blockchain_info", |_params, state, _ext| {
-        let tip = state.chain.tip();
-        let stats = state.chain.stats();
-        Ok::<_, ErrorObjectOwned>(json!({
-            "network":         state.network_name,
-            "version":         env!("CARGO_PKG_VERSION"),
-            "build_commit":    crate::build_info::git_commit(),
-            "build_dirty":     crate::build_info::git_dirty(),
-            "build_profile":   crate::build_info::build_profile(),
-            "height":          tip.height,
-            "tip_hash":        hex::encode(tip.hash.as_bytes()),
-            "timestamp":       tip.timestamp,
-            "difficulty":      stats.difficulty.to_string(),
-            "total_difficulty": stats.total_difficulty.to_string(),
-            "total_supply":    supply_atomic_decimal(stats.total_supply),
-            "mempool_size":    state.mempool.len(),
-            "is_synced":       state.chain.is_synced(),
-            "rpc_auth_enabled": state.auth_enabled,
-            "metadata_minimized": state.minimize_metadata,
-            "stratum_public_bind_requested": state.stratum_public_bind_requested,
-            "stratum_public_bind_ack": state.stratum_public_bind_ack,
-            "stratum_native_tls_enabled": state.stratum_native_tls_enabled,
-            "stratum_tls_proxy_ack": state.stratum_tls_proxy_ack,
-            "stratum_transport_hardened": state.stratum_transport_hardened,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_blocking_method("get_blockchain_info", |_params, state, _ext| {
+            let tip = state.chain.tip();
+            let stats = state.chain.stats();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "network":         state.network_name,
+                "version":         env!("CARGO_PKG_VERSION"),
+                "build_commit":    crate::build_info::git_commit(),
+                "build_dirty":     crate::build_info::git_dirty(),
+                "build_profile":   crate::build_info::build_profile(),
+                "height":          tip.height,
+                "tip_hash":        hex::encode(tip.hash.as_bytes()),
+                "timestamp":       tip.timestamp,
+                "difficulty":      stats.difficulty.to_string(),
+                "total_difficulty": stats.total_difficulty.to_string(),
+                "total_supply":    supply_atomic_decimal(stats.total_supply),
+                "mempool_size":    state.mempool.len(),
+                "is_synced":       state.chain.is_synced(),
+                "rpc_auth_enabled": state.auth_enabled,
+                "metadata_minimized": state.minimize_metadata,
+                "stratum_public_bind_requested": state.stratum_public_bind_requested,
+                "stratum_public_bind_ack": state.stratum_public_bind_ack,
+                "stratum_native_tls_enabled": state.stratum_native_tls_enabled,
+                "stratum_tls_proxy_ack": state.stratum_tls_proxy_ack,
+                "stratum_transport_hardened": state.stratum_transport_hardened,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_mempool_info ───────────────────────────────────────
-    module.register_method("get_mempool_info", |_params, state, _ext| {
-        let mp = state.mempool.stats();
-        Ok::<_, ErrorObjectOwned>(json!({
-            "size":       mp.tx_count,
-            "bytes":      mp.size_bytes,
-            "total_fees": mp.total_fee.as_atomic(),
-            "max_size":   mp.max_size,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_mempool_info", |_params, state, _ext| {
+            let mp = state.mempool.stats();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "size":       mp.tx_count,
+                "bytes":      mp.size_bytes,
+                "total_fees": mp.total_fee.as_atomic(),
+                "max_size":   mp.max_size,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_mempool_transactions ──────────────────────────────
     //
     // Returns individual transaction details from the mempool so
     // the explorer can render them in a table (like the blocks page).
-    module.register_method("get_mempool_transactions", |_params, state, _ext| {
-        // Layer 2: mempool iteration up to 500 txs under block_in_place
-        // keeps the worker thread reusable during the fetch.
-        let txs = tokio::task::block_in_place(|| {
-            state.mempool.get_block_transactions(
-                crate::constants::MAX_BLOCK_SIZE,
-                500, // max 500 txs
-            )
-        });
-        let tx_list: Vec<Value> = txs.iter().map(|tx| {
-            let kind = match tx.tx_type {
-                crate::transaction::TxType::Coinbase => "coinbase",
-                crate::transaction::TxType::Transfer => "transfer",
-                crate::transaction::TxType::Churn => "churn",
-            };
-            json!({
-                "hash":    hex::encode(tx.hash().as_bytes()),
-                "kind":    kind,
-                "inputs":  tx.input_count(),
-                "outputs": tx.output_count(),
-                "fee":     tx.fee.as_atomic(),
-                "size":    tx.size(),
-            })
-        }).collect();
-        Ok::<_, ErrorObjectOwned>(json!({
-            "count": tx_list.len(),
-            "transactions": tx_list,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_mempool_transactions", |_params, state, _ext| {
+            // Layer 2: mempool iteration up to 500 txs under block_in_place
+            // keeps the worker thread reusable during the fetch.
+            let txs = tokio::task::block_in_place(|| {
+                state.mempool.get_block_transactions(
+                    crate::constants::MAX_BLOCK_SIZE,
+                    500, // max 500 txs
+                )
+            });
+            let tx_list: Vec<Value> = txs
+                .iter()
+                .map(|tx| {
+                    let kind = match tx.tx_type {
+                        crate::transaction::TxType::Coinbase => "coinbase",
+                        crate::transaction::TxType::Transfer => "transfer",
+                        crate::transaction::TxType::Churn => "churn",
+                    };
+                    json!({
+                        "hash":    hex::encode(tx.hash().as_bytes()),
+                        "kind":    kind,
+                        "inputs":  tx.input_count(),
+                        "outputs": tx.output_count(),
+                        "fee":     tx.fee.as_atomic(),
+                        "size":    tx.size(),
+                    })
+                })
+                .collect();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "count": tx_list.len(),
+                "transactions": tx_list,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_supply_info ───────────────────────────────────────
-    module.register_method("get_supply_info", |_params, state, _ext| {
-        let stats = state.chain.stats();
-        let height = stats.height;
-        let reward = crate::emission::calculate_block_reward(height);
-        let phase = crate::emission::emission_phase(height);
-        Ok::<_, ErrorObjectOwned>(json!({
-            "height":             height,
-            "current_reward":     reward.as_atomic(),
-            "total_emitted":      supply_atomic_decimal(stats.total_supply),
-            "emission_phase":     phase.name(),
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_supply_info", |_params, state, _ext| {
+            let stats = state.chain.stats();
+            let height = stats.height;
+            let reward = crate::emission::calculate_block_reward(height);
+            let phase = crate::emission::emission_phase(height);
+            Ok::<_, ErrorObjectOwned>(json!({
+                "height":             height,
+                "current_reward":     reward.as_atomic(),
+                "total_emitted":      supply_atomic_decimal(stats.total_supply),
+                "emission_phase":     phase.name(),
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_block_by_height ───────────────────────────────────
     //
@@ -956,20 +987,24 @@ pub async fn start_rpc_server(
     // the explorer only displays a list of txids and their kind,
     // and full tx bodies require a tx-index that doesn't exist
     // yet (see `get_transaction` below).
-    module.register_method("get_block_by_height", |params, state, _ext| {
-        let (h,): (u64,) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        // Layer 2: DB lookup + serialize under block_in_place so a slow
-        // RocksDB read doesn't freeze the worker mid-handler.
-        let block_opt = tokio::task::block_in_place(|| state.chain.get_block_by_height(h));
-        match block_opt {
-            Some(block) => Ok::<_, ErrorObjectOwned>(serialize_block(&block, h)),
-            None => Err(ErrorObjectOwned::owned(
-                -32000, format!("block at height {} not found", h), None::<()>,
-            )),
-        }
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_block_by_height", |params, state, _ext| {
+            let (h,): (u64,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+            })?;
+            // Layer 2: DB lookup + serialize under block_in_place so a slow
+            // RocksDB read doesn't freeze the worker mid-handler.
+            let block_opt = tokio::task::block_in_place(|| state.chain.get_block_by_height(h));
+            match block_opt {
+                Some(block) => Ok::<_, ErrorObjectOwned>(serialize_block(&block, h)),
+                None => Err(ErrorObjectOwned::owned(
+                    -32000,
+                    format!("block at height {} not found", h),
+                    None::<()>,
+                )),
+            }
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── find_fork_point (light-wallet reorg recovery, v1.1) ────
     //
@@ -978,31 +1013,41 @@ pub async fn start_rpc_server(
     // so the wallet rewinds there instead of full-rescanning. See
     // src/rpc/lightwallet.rs::fork_point_in_journal and
     // docs/wallet-v2-reorg-handling-design.md §3.5.
-    module.register_method("find_fork_point", |params, state, _ext| {
-        let (journal_hex,): (Vec<(u64, String)>,) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        // DoS guard: reject an oversized journal before any hex decode or
-        // chain lookups. A real wallet journal is a few thousand entries at
-        // most (see wallet::scanner::JOURNAL_MAX_DEFAULT).
-        const MAX_JOURNAL: usize = 4096;
-        if journal_hex.len() > MAX_JOURNAL {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!("find_fork_point: journal too large ({} > {})", journal_hex.len(), MAX_JOURNAL),
-                None::<()>,
-            ));
-        }
-        let journal = crate::rpc::lightwallet::parse_journal_hex(&journal_hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("find_fork_point: {}", e), None::<()>)
-        })?;
-        // Layer 2: canonical-hash lookups under block_in_place — same
-        // rationale as get_block_by_height above.
-        let fork = tokio::task::block_in_place(|| {
-            crate::rpc::lightwallet::fork_point_in_journal(&journal, |h| state.chain.get_block_hash(h))
-        });
-        Ok::<_, ErrorObjectOwned>(serde_json::json!({ "fork_point": fork }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("find_fork_point", |params, state, _ext| {
+            let (journal_hex,): (Vec<(u64, String)>,) =
+                params.parse().map_err(|e: ErrorObjectOwned| {
+                    ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+                })?;
+            // DoS guard: reject an oversized journal before any hex decode or
+            // chain lookups. A real wallet journal is a few thousand entries at
+            // most (see wallet::scanner::JOURNAL_MAX_DEFAULT).
+            const MAX_JOURNAL: usize = 4096;
+            if journal_hex.len() > MAX_JOURNAL {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!(
+                        "find_fork_point: journal too large ({} > {})",
+                        journal_hex.len(),
+                        MAX_JOURNAL
+                    ),
+                    None::<()>,
+                ));
+            }
+            let journal =
+                crate::rpc::lightwallet::parse_journal_hex(&journal_hex).map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("find_fork_point: {}", e), None::<()>)
+                })?;
+            // Layer 2: canonical-hash lookups under block_in_place — same
+            // rationale as get_block_by_height above.
+            let fork = tokio::task::block_in_place(|| {
+                crate::rpc::lightwallet::fork_point_in_journal(&journal, |h| {
+                    state.chain.get_block_hash(h)
+                })
+            });
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "fork_point": fork }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_block (by hash) ───────────────────────────────────
     //
@@ -1010,34 +1055,36 @@ pub async fn start_rpc_server(
     // bar in `src/explorer/app/11-router.js` calls this
     // with a 64-char hex string; we accept that and fall back to
     // a 32-byte raw form if the input isn't hex.
-    module.register_method("get_block", |params, state, _ext| {
-        let (hash_hex,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        let mut bytes = [0u8; 32];
-        if hex::decode_to_slice(hash_hex.trim_start_matches("0x"), &mut bytes).is_err() {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!("get_block: expected 64-char hex hash, got {:?}", hash_hex),
-                None::<()>,
-            ));
-        }
-        let hash = crate::primitives::Hash::from_bytes(bytes);
-        // Layer 2: DB lookup under block_in_place — same rationale as
-        // get_block_by_height above.
-        let block_opt = tokio::task::block_in_place(|| state.chain.get_block(&hash));
-        match block_opt {
-            Some(block) => {
-                let height = block.header.height;
-                Ok::<_, ErrorObjectOwned>(serialize_block(&block, height))
+    module
+        .register_method("get_block", |params, state, _ext| {
+            let (hash_hex,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+            })?;
+            let mut bytes = [0u8; 32];
+            if hex::decode_to_slice(hash_hex.trim_start_matches("0x"), &mut bytes).is_err() {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("get_block: expected 64-char hex hash, got {:?}", hash_hex),
+                    None::<()>,
+                ));
             }
-            None => Err(ErrorObjectOwned::owned(
-                -32000,
-                format!("block with hash {} not found", hex::encode(bytes)),
-                None::<()>,
-            )),
-        }
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            let hash = crate::primitives::Hash::from_bytes(bytes);
+            // Layer 2: DB lookup under block_in_place — same rationale as
+            // get_block_by_height above.
+            let block_opt = tokio::task::block_in_place(|| state.chain.get_block(&hash));
+            match block_opt {
+                Some(block) => {
+                    let height = block.header.height;
+                    Ok::<_, ErrorObjectOwned>(serialize_block(&block, height))
+                }
+                None => Err(ErrorObjectOwned::owned(
+                    -32000,
+                    format!("block with hash {} not found", hex::encode(bytes)),
+                    None::<()>,
+                )),
+            }
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_block_template ────────────────────────────────────
     //
@@ -1051,20 +1098,22 @@ pub async fn start_rpc_server(
     // Accepts either `[]` or `[address_string]` for forward
     // compat with the 2.0 miner CLI; the address parameter is
     // ignored.
-    module.register_method("get_block_template", |_params, state, _ext| {
-        // SECURITY (runtime resilience, Layer 2): build_template_json iterates
-        // mempool and runs `chain.validate_transaction()` for every candidate
-        // (full ring sig + range proof verify). On a busy mempool this is the
-        // most CPU-heavy synchronous call in the RPC surface, and it runs
-        // many times per minute because the failover miner polls for fresh
-        // templates. `block_in_place` lets tokio's multi-thread runtime
-        // (Layer 1 forces 4 workers) keep scheduling other tasks during the
-        // call instead of monopolizing the worker thread.
-        let template = tokio::task::block_in_place(|| {
-            crate::mining::template::build_template_json(&state.chain, &state.mempool)
-        });
-        Ok::<_, ErrorObjectOwned>(template)
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_block_template", |_params, state, _ext| {
+            // SECURITY (runtime resilience, Layer 2): build_template_json iterates
+            // mempool and runs `chain.validate_transaction()` for every candidate
+            // (full ring sig + range proof verify). On a busy mempool this is the
+            // most CPU-heavy synchronous call in the RPC surface, and it runs
+            // many times per minute because the failover miner polls for fresh
+            // templates. `block_in_place` lets tokio's multi-thread runtime
+            // (Layer 1 forces 4 workers) keep scheduling other tasks during the
+            // call instead of monopolizing the worker thread.
+            let template = tokio::task::block_in_place(|| {
+                crate::mining::template::build_template_json(&state.chain, &state.mempool)
+            });
+            Ok::<_, ErrorObjectOwned>(template)
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── submit_block ──────────────────────────────────────────
     module.register_method("submit_block", |params, state, _ext| {
@@ -1262,64 +1311,72 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── send_raw_transaction ──────────────────────────────────
-    module.register_method("send_raw_transaction", |params, state, _ext| {
-        let (hex_tx,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        // Bound hex input length. Mirrors submit_block above and
-        // `is_nullifier_spent` at ~L1309. (Bitcoin Core exposes a
-        // `sendrawtransaction` RPC; the prior comment specifically
-        // cited `MAX_STANDARD_TX_WEIGHT` as the size cap primitive.
-        // That specific constant was not re-verified against upstream
-        // this session and is dropped. The 2× MAX_TX_SIZE × 2 cap
-        // below stands on its own reasoning: 2 for hex, 2 for slack;
-        // anything larger decodes to bytes larger than any valid tx
-        // and is rejected downstream, but the pre-check saves the
-        // allocation and the borsh parse.)
-        const MAX_HEX_TX: usize = 2 * 2 * crate::constants::MAX_TX_SIZE;
-        if hex_tx.len() > MAX_HEX_TX {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!("hex tx too large: {} chars (max {})", hex_tx.len(), MAX_HEX_TX),
-                None::<()>,
-            ));
-        }
-        let tx_bytes = hex::decode(&hex_tx).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
-        })?;
-        let tx: crate::transaction::Transaction = borsh::from_slice(&tx_bytes).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("bad tx encoding: {}", e), None::<()>)
-        })?;
-        let hash = tx.hash();
-        let tx_for_broadcast = tx.clone();
-        // SECURITY (runtime resilience, Layer 2): mempool admit runs full
-        // crypto verify (ring sig + range proof) and walks the chain DB to
-        // check key-image conflicts. `block_in_place` lets tokio's multi-
-        // thread runtime keep scheduling other tasks during the validation.
-        let admit_result = tokio::task::block_in_place(|| {
-            state.mempool.add_with_chain(tx, &state.chain)
-        });
-        match admit_result {
-            Ok(_) => {
-                // Broadcast via Dandelion++ so other nodes see the tx
-                if let Some(p2p) = state.p2p.as_ref() {
-                    let p2p = p2p.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = p2p.broadcast_transaction(tx_for_broadcast).await {
-                            warn!("Tx broadcast failed: {}", e);
-                        }
-                    });
-                }
-                Ok::<_, ErrorObjectOwned>(json!({
-                    "accepted": true,
-                    "hash": hex::encode(hash.as_bytes()),
-                }))
+    module
+        .register_method("send_raw_transaction", |params, state, _ext| {
+            let (hex_tx,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+            })?;
+            // Bound hex input length. Mirrors submit_block above and
+            // `is_nullifier_spent` at ~L1309. (Bitcoin Core exposes a
+            // `sendrawtransaction` RPC; the prior comment specifically
+            // cited `MAX_STANDARD_TX_WEIGHT` as the size cap primitive.
+            // That specific constant was not re-verified against upstream
+            // this session and is dropped. The 2× MAX_TX_SIZE × 2 cap
+            // below stands on its own reasoning: 2 for hex, 2 for slack;
+            // anything larger decodes to bytes larger than any valid tx
+            // and is rejected downstream, but the pre-check saves the
+            // allocation and the borsh parse.)
+            const MAX_HEX_TX: usize = 2 * 2 * crate::constants::MAX_TX_SIZE;
+            if hex_tx.len() > MAX_HEX_TX {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!(
+                        "hex tx too large: {} chars (max {})",
+                        hex_tx.len(),
+                        MAX_HEX_TX
+                    ),
+                    None::<()>,
+                ));
             }
-            Err(e) => Err(ErrorObjectOwned::owned(
-                -32002, format!("tx rejected: {}", e), None::<()>,
-            )),
-        }
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            let tx_bytes = hex::decode(&hex_tx).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
+            })?;
+            let tx: crate::transaction::Transaction =
+                borsh::from_slice(&tx_bytes).map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("bad tx encoding: {}", e), None::<()>)
+                })?;
+            let hash = tx.hash();
+            let tx_for_broadcast = tx.clone();
+            // SECURITY (runtime resilience, Layer 2): mempool admit runs full
+            // crypto verify (ring sig + range proof) and walks the chain DB to
+            // check key-image conflicts. `block_in_place` lets tokio's multi-
+            // thread runtime keep scheduling other tasks during the validation.
+            let admit_result =
+                tokio::task::block_in_place(|| state.mempool.add_with_chain(tx, &state.chain));
+            match admit_result {
+                Ok(_) => {
+                    // Broadcast via Dandelion++ so other nodes see the tx
+                    if let Some(p2p) = state.p2p.as_ref() {
+                        let p2p = p2p.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = p2p.broadcast_transaction(tx_for_broadcast).await {
+                                warn!("Tx broadcast failed: {}", e);
+                            }
+                        });
+                    }
+                    Ok::<_, ErrorObjectOwned>(json!({
+                        "accepted": true,
+                        "hash": hex::encode(hash.as_bytes()),
+                    }))
+                }
+                Err(e) => Err(ErrorObjectOwned::owned(
+                    -32002,
+                    format!("tx rejected: {}", e),
+                    None::<()>,
+                )),
+            }
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_privacy_stats ─────────────────────────────────────
     // Aggregate view of the Phase 2 privacy stores.
@@ -1353,40 +1410,44 @@ pub async fn start_rpc_server(
     // ── get_burn_stats ────────────────────────────────────────
     //
     // Returns fee burn statistics for the explorer burn page.
-    module.register_method("get_burn_stats", |_params, state, _ext| {
-        let stats = state.chain.stats();
-        let height = stats.height;
-        let is_active = height >= crate::constants::FEE_DISTRIBUTION_HEIGHT;
+    module
+        .register_method("get_burn_stats", |_params, state, _ext| {
+            let stats = state.chain.stats();
+            let height = stats.height;
+            let is_active = height >= crate::constants::FEE_DISTRIBUTION_HEIGHT;
 
-        let burn_pct = crate::constants::FEE_BURN_NORMAL_PERCENT;
-        let miner_pct = crate::constants::FEE_MINER_NORMAL_PERCENT;
+            let burn_pct = crate::constants::FEE_BURN_NORMAL_PERCENT;
+            let miner_pct = crate::constants::FEE_MINER_NORMAL_PERCENT;
 
-        let supply = supply_atomic_decimal(stats.total_supply);
-        let max_supply = crate::constants::MAX_SUPPLY;
-        let reward = crate::emission::calculate_block_reward(height).as_atomic();
-        // Fees per block needed to make chain deflationary:
-        // burn needs to exceed block reward → fee * burn_pct/100 > reward
-        // → fee > reward * 100 / burn_pct
-        let deflation_threshold = if burn_pct > 0 {
-            reward as f64 * 100.0 / burn_pct as f64
-        } else { 0.0 };
+            let supply = supply_atomic_decimal(stats.total_supply);
+            let max_supply = crate::constants::MAX_SUPPLY;
+            let reward = crate::emission::calculate_block_reward(height).as_atomic();
+            // Fees per block needed to make chain deflationary:
+            // burn needs to exceed block reward → fee * burn_pct/100 > reward
+            // → fee > reward * 100 / burn_pct
+            let deflation_threshold = if burn_pct > 0 {
+                reward as f64 * 100.0 / burn_pct as f64
+            } else {
+                0.0
+            };
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "active": is_active,
-            "activation_height": crate::constants::FEE_DISTRIBUTION_HEIGHT,
-            "current_height": height,
-            "miner_pct_normal": miner_pct,
-            "burn_pct_normal": burn_pct,
-            "miner_pct_congested": crate::constants::FEE_MINER_CONGESTED_PERCENT,
-            "burn_pct_congested": crate::constants::FEE_BURN_CONGESTED_PERCENT,
-            "protocol_pct": 0,
-            "block_reward": reward,
-            "circulating_supply": supply,
-            "max_supply": supply_atomic_decimal(max_supply),
-            "deflation_threshold_fee_per_block": deflation_threshold as u64,
-            "congestion_threshold_pct": crate::constants::CONGESTION_THRESHOLD,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "active": is_active,
+                "activation_height": crate::constants::FEE_DISTRIBUTION_HEIGHT,
+                "current_height": height,
+                "miner_pct_normal": miner_pct,
+                "burn_pct_normal": burn_pct,
+                "miner_pct_congested": crate::constants::FEE_MINER_CONGESTED_PERCENT,
+                "burn_pct_congested": crate::constants::FEE_BURN_CONGESTED_PERCENT,
+                "protocol_pct": 0,
+                "block_reward": reward,
+                "circulating_supply": supply,
+                "max_supply": supply_atomic_decimal(max_supply),
+                "deflation_threshold_fee_per_block": deflation_threshold as u64,
+                "congestion_threshold_pct": crate::constants::CONGESTION_THRESHOLD,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_finality_info ────────────────────────────────────
     //
@@ -1419,12 +1480,14 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_spark_anchor ──────────────────────────────────────
-    module.register_method("get_spark_anchor", |_params, state, _ext| {
-        Ok::<_, ErrorObjectOwned>(json!({
-            "root": hex::encode(state.chain.spark_root()),
-            "size": state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_spark_anchor", |_params, state, _ext| {
+            Ok::<_, ErrorObjectOwned>(json!({
+                "root": hex::encode(state.chain.spark_root()),
+                "size": state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── is_nullifier_spent ────────────────────────────────────
     // Wallet calls before building a shielded spend to make sure it
@@ -1488,31 +1551,33 @@ pub async fn start_rpc_server(
     // ── get_decoys ────────────────────────────────────────────
     // Wallet calls this when building a CLSAG ring signature to
     // get decoy outputs for the ring. Params: (count, min_age).
-    module.register_method("get_decoys", |params, state, _ext| {
-        let (count, min_age): (usize, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        let capped = count.min(256); // sanity cap
-        // Layer 2: up to 256 output records scanned from the chain DB
-        // with age filtering; wrap in block_in_place.
-        let decoys = tokio::task::block_in_place(|| {
-            state.chain.get_decoy_outputs(capped, min_age)
-        });
-        let encoded: Vec<Value> = decoys
-            .iter()
-            .map(|d| {
-                json!({
-                    "public_key": hex::encode(d.public_key.as_bytes()),
-                    "commitment": hex::encode(d.commitment),
-                    "height": d.height,
+    module
+        .register_method("get_decoys", |params, state, _ext| {
+            let (count, min_age): (usize, u64) =
+                params.parse().map_err(|e: ErrorObjectOwned| {
+                    ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+                })?;
+            let capped = count.min(256); // sanity cap
+                                         // Layer 2: up to 256 output records scanned from the chain DB
+                                         // with age filtering; wrap in block_in_place.
+            let decoys =
+                tokio::task::block_in_place(|| state.chain.get_decoy_outputs(capped, min_age));
+            let encoded: Vec<Value> = decoys
+                .iter()
+                .map(|d| {
+                    json!({
+                        "public_key": hex::encode(d.public_key.as_bytes()),
+                        "commitment": hex::encode(d.commitment),
+                        "height": d.height,
+                    })
                 })
-            })
-            .collect();
-        Ok::<_, ErrorObjectOwned>(json!({
-            "count": encoded.len(),
-            "decoys": encoded,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+                .collect();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "count": encoded.len(),
+                "decoys": encoded,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_network_info ──────────────────────────────────────
     //
@@ -1524,89 +1589,97 @@ pub async fn start_rpc_server(
     // doesn't surface the split yet — returning `null` rather
     // than `0` is the honest signal, per the silent-stub fix
     // in `rpc::node_api::get_network_info`.
-    module.register_method("get_network_info", |_params, state, _ext| {
-        let connections = state
-            .p2p
-            .as_ref()
-            .map(|p| p.network_stats().peer_count)
-            .unwrap_or(0);
-        Ok::<_, ErrorObjectOwned>(json!({
-            "network":          state.network_name,
-            "version":          env!("CARGO_PKG_VERSION"),
-            "protocol_version": crate::constants::PROTOCOL_VERSION,
-            "connections":      connections,
-            "incoming":         Value::Null,
-            "outgoing":         Value::Null,
-            "white_peers":      Value::Null,
-            "grey_peers":       Value::Null,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_network_info", |_params, state, _ext| {
+            let connections = state
+                .p2p
+                .as_ref()
+                .map(|p| p.network_stats().peer_count)
+                .unwrap_or(0);
+            Ok::<_, ErrorObjectOwned>(json!({
+                "network":          state.network_name,
+                "version":          env!("CARGO_PKG_VERSION"),
+                "protocol_version": crate::constants::PROTOCOL_VERSION,
+                "connections":      connections,
+                "incoming":         Value::Null,
+                "outgoing":         Value::Null,
+                "white_peers":      Value::Null,
+                "grey_peers":       Value::Null,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_sync_status ───────────────────────────────────────
-    module.register_method("get_sync_status", |_params, state, _ext| {
-        let target = state.chain.target_height();
-        let height = state.chain.height();
-        let peers = state
-            .p2p
-            .as_ref()
-            .map(|p| p.network_stats().peer_count as u32)
-            .unwrap_or(0);
-        let progress = if target > 0 {
-            (height as f64 / target as f64).min(1.0)
-        } else {
-            1.0
-        };
-        Ok::<_, ErrorObjectOwned>(json!({
-            "synced":        state.chain.is_synced(),
-            "height":        height,
-            "target_height": target,
-            "progress":      progress,
-            "peers":         peers,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_sync_status", |_params, state, _ext| {
+            let target = state.chain.target_height();
+            let height = state.chain.height();
+            let peers = state
+                .p2p
+                .as_ref()
+                .map(|p| p.network_stats().peer_count as u32)
+                .unwrap_or(0);
+            let progress = if target > 0 {
+                (height as f64 / target as f64).min(1.0)
+            } else {
+                1.0
+            };
+            Ok::<_, ErrorObjectOwned>(json!({
+                "synced":        state.chain.is_synced(),
+                "height":        height,
+                "target_height": target,
+                "progress":      progress,
+                "peers":         peers,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_anonymity_set ─────────────────────────────────────
     //
     // The single most important privacy metric: every unspent
     // output is a potential decoy, so the size of this set is
     // the size of every future spend's anonymity set.
-    module.register_method("get_anonymity_set", |_params, state, _ext| {
-        let count = state.chain.available_output_count();
-        let height = state.chain.height();
-        let outputs_per_block = if height > 0 {
-            count / usize::try_from(height).unwrap_or(usize::MAX)
-        } else {
-            0
-        };
-        Ok::<_, ErrorObjectOwned>(json!({
-            "anonymity_set":    count,
-            "height":           height,
-            "outputs_per_block": outputs_per_block,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_anonymity_set", |_params, state, _ext| {
+            let count = state.chain.available_output_count();
+            let height = state.chain.height();
+            let outputs_per_block = if height > 0 {
+                count / usize::try_from(height).unwrap_or(usize::MAX)
+            } else {
+                0
+            };
+            Ok::<_, ErrorObjectOwned>(json!({
+                "anonymity_set":    count,
+                "height":           height,
+                "outputs_per_block": outputs_per_block,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_chain_events ──────────────────────────────────────
     //
     // Recent chain convergence events (reorgs, forks, rejects,
     // checkpoints) for the explorer timeline. `limit` is
     // clamped server-side to 500.
-    module.register_method("get_chain_events", |params, state, _ext| {
-        // Accept either [] (defaults) or [limit].
-        let limit: usize = match params.parse::<Vec<usize>>() {
-            Ok(v) => v.into_iter().next().unwrap_or(100),
-            Err(_) => 100,
-        };
-        let capped = limit.min(500);
-        let events = state.chain.get_events(capped);
-        let height = state.chain.height();
-        let tip = state.chain.tip();
-        Ok::<_, ErrorObjectOwned>(json!({
-            "events":         events,
-            "count":          events.len(),
-            "current_height": height,
-            "current_tip":    hex::encode(tip.hash.as_bytes()),
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_chain_events", |params, state, _ext| {
+            // Accept either [] (defaults) or [limit].
+            let limit: usize = match params.parse::<Vec<usize>>() {
+                Ok(v) => v.into_iter().next().unwrap_or(100),
+                Err(_) => 100,
+            };
+            let capped = limit.min(500);
+            let events = state.chain.get_events(capped);
+            let height = state.chain.height();
+            let tip = state.chain.tip();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "events":         events,
+                "count":          events.len(),
+                "current_height": height,
+                "current_tip":    hex::encode(tip.hash.as_bytes()),
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_mining_live ───────────────────────────────────────
     //
@@ -1619,37 +1692,39 @@ pub async fn start_rpc_server(
     // sidecar that pushes live samples to a shared buffer) can
     // overwrite these values — the shape is fixed so the TUI
     // doesn't need to change.
-    module.register_method("get_mining_live", |_params, state, _ext| {
-        let tip = state.chain.tip();
-        let height = tip.height;
-        // The ChainTip struct doesn't carry the target directly —
-        // we'd have to fetch the full BlockHeader for that. Since
-        // this handler reports "not mining" to non-miner nodes and
-        // the `target_hex` field is display-only in the TUI, we
-        // return an empty string; a future miner-sidecar variant
-        // that provides a real template will set this from the
-        // template's header target.
-        let target_hex = String::new();
-        Ok::<_, ErrorObjectOwned>(json!({
-            "is_mining":            false,
-            "hashrate":             0.0,
-            "hashes_total":         0u64,
-            "blocks_found":         0u64,
-            // CoinCync 1.0 is RandomX-only (algorithm index 0).
-            "algorithm":            0u64,
-            "algorithm_name":       "RandomX",
-            "mining_height":        height + 1,
-            "target_hex":           target_hex,
-            "best_hash_hex":        "",
-            "best_leading_zeros":   0u64,
-            "target_leading_zeros": 0u64,
-            "current_nonce":        0u64,
-            "block_just_found":     false,
-            "winning_nonce":        0u64,
-            "winning_hash_hex":     "",
-            "sample_hashes":        Value::Array(vec![]),
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_mining_live", |_params, state, _ext| {
+            let tip = state.chain.tip();
+            let height = tip.height;
+            // The ChainTip struct doesn't carry the target directly —
+            // we'd have to fetch the full BlockHeader for that. Since
+            // this handler reports "not mining" to non-miner nodes and
+            // the `target_hex` field is display-only in the TUI, we
+            // return an empty string; a future miner-sidecar variant
+            // that provides a real template will set this from the
+            // template's header target.
+            let target_hex = String::new();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "is_mining":            false,
+                "hashrate":             0.0,
+                "hashes_total":         0u64,
+                "blocks_found":         0u64,
+                // CoinCync 1.0 is RandomX-only (algorithm index 0).
+                "algorithm":            0u64,
+                "algorithm_name":       "RandomX",
+                "mining_height":        height + 1,
+                "target_hex":           target_hex,
+                "best_hash_hex":        "",
+                "best_leading_zeros":   0u64,
+                "target_leading_zeros": 0u64,
+                "current_nonce":        0u64,
+                "block_just_found":     false,
+                "winning_nonce":        0u64,
+                "winning_hash_hex":     "",
+                "sample_hashes":        Value::Array(vec![]),
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_peers ─────────────────────────────────────────────
     //
@@ -1664,21 +1739,23 @@ pub async fn start_rpc_server(
     // On nodes started without a `P2PNode` (e.g. RPC-only test
     // harness), we honestly return an empty list rather than
     // synthesising fake peers.
-    module.register_method("get_peers", |_params, state, _ext| {
-        let peers_json: Vec<Value> = match state.p2p.as_ref() {
-            Some(p2p) => p2p
-                .connected_peers()
-                .into_iter()
-                .map(|p| serialize_peer_info(&p, state.minimize_metadata))
-                .collect(),
-            None => Vec::new(),
-        };
-        Ok::<_, ErrorObjectOwned>(json!({
-            "count": peers_json.len(),
-            "peers": peers_json,
-            "metadata_minimized": state.minimize_metadata,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_peers", |_params, state, _ext| {
+            let peers_json: Vec<Value> = match state.p2p.as_ref() {
+                Some(p2p) => p2p
+                    .connected_peers()
+                    .into_iter()
+                    .map(|p| serialize_peer_info(&p, state.minimize_metadata))
+                    .collect(),
+                None => Vec::new(),
+            };
+            Ok::<_, ErrorObjectOwned>(json!({
+                "count": peers_json.len(),
+                "peers": peers_json,
+                "metadata_minimized": state.minimize_metadata,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_transaction ───────────────────────────────────────
     //
@@ -1818,15 +1895,17 @@ pub async fn start_rpc_server(
     // match a block hash or txid. Returning an explicit error
     // makes the missing surface obvious instead of silently
     // returning empty results.
-    module.register_method("get_asset_info", |_params, _state, _ext| {
-        Err::<Value, _>(ErrorObjectOwned::owned(
-            -32601,
-            "get_asset_info is not implemented: CoinCync 1.0 has no \
+    module
+        .register_method("get_asset_info", |_params, _state, _ext| {
+            Err::<Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "get_asset_info is not implemented: CoinCync 1.0 has no \
              confidential-asset layer (the asset stack was removed \
              in the 2.0 → 1.0 trim). Single-asset CYNC only.",
-            None::<()>,
-        ))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+                None::<()>,
+            ))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_block_range ───────────────────────────────────────
     //
@@ -1838,40 +1917,44 @@ pub async fn start_rpc_server(
     // that bit `Transaction::signing_hash` in an earlier audit.
     // The server caps the range to MAX_RANGE blocks per call to
     // prevent huge responses.
-    module.register_method("get_block_range", |params, state, _ext| {
-        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        const MAX_RANGE: u64 = 100;
-        if end < start {
-            return Err(ErrorObjectOwned::owned(
-                -32602, "end must be >= start".to_string(), None::<()>,
-            ));
-        }
-        // Saturating arithmetic on caller-controlled u64 height bounds.
-        // Pre-fix `end - start + 1` overflowed when start=0/end=u64::MAX,
-        // and `start + capped` overflowed near MAX. In debug builds the
-        // bare addition panics; in release it wraps to give an empty
-        // range — both wrong. With saturating math we degrade cleanly
-        // to a small or empty range at the u64::MAX boundary, which is
-        // the right semantics (no blocks exist that high anyway).
-        let span = end.saturating_sub(start).saturating_add(1);
-        let capped = span.min(MAX_RANGE);
-        let mut blocks = Vec::with_capacity(capped as usize);
-        let loop_end = start.saturating_add(capped);
-        for h in start..loop_end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                blocks.push(serialize_block(&block, h));
+    module
+        .register_method("get_block_range", |params, state, _ext| {
+            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+            })?;
+            const MAX_RANGE: u64 = 100;
+            if end < start {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "end must be >= start".to_string(),
+                    None::<()>,
+                ));
             }
-        }
-        let response_end = start.saturating_add(capped).saturating_sub(1);
-        Ok::<_, ErrorObjectOwned>(json!({
-            "start": start,
-            "end": response_end,
-            "count": blocks.len(),
-            "blocks": blocks,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            // Saturating arithmetic on caller-controlled u64 height bounds.
+            // Pre-fix `end - start + 1` overflowed when start=0/end=u64::MAX,
+            // and `start + capped` overflowed near MAX. In debug builds the
+            // bare addition panics; in release it wraps to give an empty
+            // range — both wrong. With saturating math we degrade cleanly
+            // to a small or empty range at the u64::MAX boundary, which is
+            // the right semantics (no blocks exist that high anyway).
+            let span = end.saturating_sub(start).saturating_add(1);
+            let capped = span.min(MAX_RANGE);
+            let mut blocks = Vec::with_capacity(capped as usize);
+            let loop_end = start.saturating_add(capped);
+            for h in start..loop_end {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    blocks.push(serialize_block(&block, h));
+                }
+            }
+            let response_end = start.saturating_add(capped).saturating_sub(1);
+            Ok::<_, ErrorObjectOwned>(json!({
+                "start": start,
+                "end": response_end,
+                "count": blocks.len(),
+                "blocks": blocks,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_output_digests ───────────────────────────────────
     //
@@ -1887,34 +1970,39 @@ pub async fn start_rpc_server(
     // Range capped to 100 blocks per request to bound response
     // size; the same bound applies at the network layer
     // (`MessageType::GetOutputDigests`).
-    module.register_method("get_output_digests", |params, state, _ext| {
-        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        if end < start {
-            return Err(ErrorObjectOwned::owned(
-                -32602, "end must be >= start".to_string(), None::<()>,
-            ));
-        }
-        const MAX_DIGEST_BLOCKS: u64 = 100;
-        let chain_height = state.chain.height();
-        let end = end.min(start.saturating_add(MAX_DIGEST_BLOCKS - 1)).min(chain_height);
-        let mut digests = Vec::with_capacity(((end - start + 1) as usize).min(
-            MAX_DIGEST_BLOCKS as usize,
-        ));
-        for h in start..=end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
+    module
+        .register_method("get_output_digests", |params, state, _ext| {
+            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+            })?;
+            if end < start {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "end must be >= start".to_string(),
+                    None::<()>,
+                ));
             }
-        }
-        let count = digests.len();
-        Ok::<_, ErrorObjectOwned>(json!({
-            "start": start,
-            "end": end,
-            "count": count,
-            "digests": digests,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            const MAX_DIGEST_BLOCKS: u64 = 100;
+            let chain_height = state.chain.height();
+            let end = end
+                .min(start.saturating_add(MAX_DIGEST_BLOCKS - 1))
+                .min(chain_height);
+            let mut digests =
+                Vec::with_capacity(((end - start + 1) as usize).min(MAX_DIGEST_BLOCKS as usize));
+            for h in start..=end {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
+                }
+            }
+            let count = digests.len();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "start": start,
+                "end": end,
+                "count": count,
+                "digests": digests,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_sync_checkpoints ─────────────────────────────────
     //
@@ -1967,131 +2055,146 @@ pub async fn start_rpc_server(
     // HARDENING (Layer 7): Prometheus-compatible metrics endpoint.
     // Returns key node metrics in a flat JSON format that can be
     // scraped by monitoring tools or displayed in the explorer.
-    module.register_method("get_metrics", |_params, state, _ext| {
-        let stats = state.chain.stats();
-        let mp_stats = state.mempool.stats();
-        let peer_count = state.p2p.as_ref().map(|p| p.peer_count()).unwrap_or(0);
+    module
+        .register_method("get_metrics", |_params, state, _ext| {
+            let stats = state.chain.stats();
+            let mp_stats = state.mempool.stats();
+            let peer_count = state.p2p.as_ref().map(|p| p.peer_count()).unwrap_or(0);
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            // Chain metrics
-            "chain_height": stats.height,
-            "chain_difficulty": stats.difficulty.to_string(),
-            "chain_total_difficulty": stats.total_difficulty.to_string(),
-            "chain_total_blocks": stats.total_blocks,
-            "chain_total_transactions": stats.total_transactions,
-            "chain_supply_atomic": supply_atomic_decimal(stats.total_supply),
+            Ok::<_, ErrorObjectOwned>(json!({
+                // Chain metrics
+                "chain_height": stats.height,
+                "chain_difficulty": stats.difficulty.to_string(),
+                "chain_total_difficulty": stats.total_difficulty.to_string(),
+                "chain_total_blocks": stats.total_blocks,
+                "chain_total_transactions": stats.total_transactions,
+                "chain_supply_atomic": supply_atomic_decimal(stats.total_supply),
 
-            // Mempool metrics
-            "mempool_size": mp_stats.tx_count,
-            "mempool_bytes": mp_stats.size_bytes,
-            "mempool_total_fee": mp_stats.total_fee.as_atomic(),
+                // Mempool metrics
+                "mempool_size": mp_stats.tx_count,
+                "mempool_bytes": mp_stats.size_bytes,
+                "mempool_total_fee": mp_stats.total_fee.as_atomic(),
 
-            // Network metrics
-            "peer_count": peer_count,
+                // Network metrics
+                "peer_count": peer_count,
 
-            // Node metadata
-            "version": crate::VERSION,
-            "network": &state.network_name,
-            "uptime_estimate": "running",
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+                // Node metadata
+                "version": crate::VERSION,
+                "network": &state.network_name,
+                "uptime_estimate": "running",
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_health ──────────────────────────────────────────
     //
     // HARDENING (Layer 7): Simple health check endpoint.
     // Returns 200 OK if the node is running. Used by load balancers,
     // monitoring tools, and the explorer status page.
-    module.register_method("get_health", |_params, state, _ext| {
-        let stats = state.chain.stats();
-        let synced = state.chain.is_synced();
-        let peer_count = state.p2p.as_ref().map(|p| p.peer_count()).unwrap_or(0);
+    module
+        .register_method("get_health", |_params, state, _ext| {
+            let stats = state.chain.stats();
+            let synced = state.chain.is_synced();
+            let peer_count = state.p2p.as_ref().map(|p| p.peer_count()).unwrap_or(0);
 
-        let healthy = synced && peer_count > 0;
+            let healthy = synced && peer_count > 0;
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "status": if healthy { "healthy" } else { "degraded" },
-            "synced": synced,
-            "height": stats.height,
-            "peers": peer_count,
-            "checks": {
-                "chain_synced": synced,
-                "has_peers": peer_count > 0,
-                "has_tip": stats.height > 0,
-            }
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "status": if healthy { "healthy" } else { "degraded" },
+                "synced": synced,
+                "height": stats.height,
+                "peers": peer_count,
+                "checks": {
+                    "chain_synced": synced,
+                    "has_peers": peer_count > 0,
+                    "has_tip": stats.height > 0,
+                }
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_state_snapshot ─────────────────────────────────────
     // Returns a compact chain state summary for fast sync verification.
     // New nodes can compare their state against this to detect divergence.
-    module.register_method("get_state_snapshot", |_params, state, _ext| {
-        let stats = state.chain.stats();
-        let tip = state.chain.tip_hash();
+    module
+        .register_method("get_state_snapshot", |_params, state, _ext| {
+            let stats = state.chain.stats();
+            let tip = state.chain.tip_hash();
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "height": stats.height,
-            "tip_hash": tip.to_hex(),
-            "total_difficulty": stats.total_difficulty.to_string(),
-            "total_supply": supply_atomic_decimal(stats.total_supply),
-            "total_transactions": stats.total_transactions,
-            "checkpoints": crate::testnet::testnet_checkpoints().iter()
-                .map(|cp| json!({"height": cp.height, "hash": cp.hash.to_hex()}))
-                .collect::<Vec<_>>(),
-            "version": "1.0.0",
-            "network": "testnet",
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "height": stats.height,
+                "tip_hash": tip.to_hex(),
+                "total_difficulty": stats.total_difficulty.to_string(),
+                "total_supply": supply_atomic_decimal(stats.total_supply),
+                "total_transactions": stats.total_transactions,
+                "checkpoints": crate::testnet::testnet_checkpoints().iter()
+                    .map(|cp| json!({"height": cp.height, "hash": cp.hash.to_hex()}))
+                    .collect::<Vec<_>>(),
+                "version": "1.0.0",
+                "network": "testnet",
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_blocks_batch ─────────────────────────────────────
     // Returns up to 100 serialized blocks in a single RPC call for fast sync.
     // Clients request a height range and get back hex-encoded blocks.
-    module.register_method("get_blocks_batch", |params, state, _ext| {
-        let (from_height, count): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("params: [from_height, count]: {}", e), None::<()>)
-        })?;
-        let count = count.min(100); // Cap at 100 blocks per request
-        let mut blocks = Vec::new();
-        // Saturating arithmetic so from_height near u64::MAX doesn't
-        // overflow. In debug builds the bare addition panics; in
-        // release it wraps to an empty range. With saturating_add the
-        // loop is simply empty at the saturation point, which is the
-        // correct semantics (no blocks exist at u64::MAX anyway).
-        let end = from_height.saturating_add(count);
-        for h in from_height..end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                let block_hex = hex::encode(borsh::to_vec(&block).unwrap_or_default());
-                blocks.push(json!({
-                    "height": h,
-                    "hash": block.hash().to_hex(),
-                    "hex": block_hex,
-                }));
-            } else {
-                break; // No more blocks at this height
+    module
+        .register_method("get_blocks_batch", |params, state, _ext| {
+            let (from_height, count): (u64, u64) =
+                params.parse().map_err(|e: ErrorObjectOwned| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("params: [from_height, count]: {}", e),
+                        None::<()>,
+                    )
+                })?;
+            let count = count.min(100); // Cap at 100 blocks per request
+            let mut blocks = Vec::new();
+            // Saturating arithmetic so from_height near u64::MAX doesn't
+            // overflow. In debug builds the bare addition panics; in
+            // release it wraps to an empty range. With saturating_add the
+            // loop is simply empty at the saturation point, which is the
+            // correct semantics (no blocks exist at u64::MAX anyway).
+            let end = from_height.saturating_add(count);
+            for h in from_height..end {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    let block_hex = hex::encode(borsh::to_vec(&block).unwrap_or_default());
+                    blocks.push(json!({
+                        "height": h,
+                        "hash": block.hash().to_hex(),
+                        "hex": block_hex,
+                    }));
+                } else {
+                    break; // No more blocks at this height
+                }
             }
-        }
-        Ok::<_, ErrorObjectOwned>(json!({
-            "blocks": blocks,
-            "count": blocks.len(),
-            "from": from_height,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "blocks": blocks,
+                "count": blocks.len(),
+                "from": from_height,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ═══════════════════════════════════════════════════════════════
     // CHAIN VERIFICATION RPCs — supports coincync-verify-chain.sh
     // ═══════════════════════════════════════════════════════════════
 
     // ── get_expected_reward ──────────────────────────────────────
-    module.register_method("get_expected_reward", |params, _state, _ext| {
-        let (height,): (u64,) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("params: [height]: {}", e), None::<()>)
-        })?;
-        let reward = crate::emission::calculate_block_reward(height);
-        Ok::<_, ErrorObjectOwned>(json!({
-            "reward": reward.as_atomic(),
-            "height": height,
-            "in_cync": reward.as_atomic() as f64 / 1_000_000_000_000.0,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_expected_reward", |params, _state, _ext| {
+            let (height,): (u64,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [height]: {}", e), None::<()>)
+            })?;
+            let reward = crate::emission::calculate_block_reward(height);
+            Ok::<_, ErrorObjectOwned>(json!({
+                "reward": reward.as_atomic(),
+                "height": height,
+                "in_cync": reward.as_atomic() as f64 / 1_000_000_000_000.0,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_keyimage_uniqueness ──────────────────────────────
     module.register_method("verify_keyimage_uniqueness", |_params, state, _ext| {
@@ -2132,219 +2235,248 @@ pub async fn start_rpc_server(
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── check_zero_commitments_in_range ─────────────────────────
-    module.register_method("check_zero_commitments_in_range", |params, state, _ext| {
-        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-        })?;
-        let (start, end) = rpc_clamp_audit_range(start, end)?;
-        let mut zero_count = 0u64;
-        let mut locations = Vec::new();
+    module
+        .register_method("check_zero_commitments_in_range", |params, state, _ext| {
+            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
+            })?;
+            let (start, end) = rpc_clamp_audit_range(start, end)?;
+            let mut zero_count = 0u64;
+            let mut locations = Vec::new();
 
-        for h in start..=end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                for tx in &block.transactions {
-                    for (idx, output) in tx.outputs.iter().enumerate() {
-                        if output.commitment == [0u8; 32] {
-                            zero_count += 1;
-                            locations.push(json!({
-                                "height": h,
-                                "tx_hash": tx.hash().to_hex(),
-                                "output_index": idx,
-                                "issue": "zero_commitment",
-                            }));
-                        }
-                        if output.stealth_address.as_bytes() == &[0u8; 32] {
-                            zero_count += 1;
-                            locations.push(json!({
-                                "height": h,
-                                "tx_hash": tx.hash().to_hex(),
-                                "output_index": idx,
-                                "issue": "zero_stealth_address",
-                            }));
+            for h in start..=end {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    for tx in &block.transactions {
+                        for (idx, output) in tx.outputs.iter().enumerate() {
+                            if output.commitment == [0u8; 32] {
+                                zero_count += 1;
+                                locations.push(json!({
+                                    "height": h,
+                                    "tx_hash": tx.hash().to_hex(),
+                                    "output_index": idx,
+                                    "issue": "zero_commitment",
+                                }));
+                            }
+                            if output.stealth_address.as_bytes() == &[0u8; 32] {
+                                zero_count += 1;
+                                locations.push(json!({
+                                    "height": h,
+                                    "tx_hash": tx.hash().to_hex(),
+                                    "output_index": idx,
+                                    "issue": "zero_stealth_address",
+                                }));
+                            }
                         }
                     }
                 }
             }
-        }
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "zero_count": zero_count,
-            "locations": locations,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "zero_count": zero_count,
+                "locations": locations,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_signatures_in_range ──────────────────────────────
-    module.register_method("verify_signatures_in_range", |params, state, _ext| {
-        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-        })?;
-        let (start, end) = rpc_clamp_audit_range(start, end)?;
-        let mut checked = 0u64;
-        let mut failures = 0u64;
-        let mut findings = Vec::new();
+    module
+        .register_method("verify_signatures_in_range", |params, state, _ext| {
+            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
+            })?;
+            let (start, end) = rpc_clamp_audit_range(start, end)?;
+            let mut checked = 0u64;
+            let mut failures = 0u64;
+            let mut findings = Vec::new();
 
-        for h in start..=end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                for tx in &block.transactions {
-                    if tx.is_coinbase() { continue; }
-                    for (idx, input) in tx.inputs.iter().enumerate() {
+            for h in start..=end {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    for tx in &block.transactions {
+                        if tx.is_coinbase() {
+                            continue;
+                        }
+                        for (idx, input) in tx.inputs.iter().enumerate() {
+                            checked += 1;
+                            if !crate::consensus::verify_ring_signature(&tx, input, idx) {
+                                failures += 1;
+                                findings.push(format!(
+                                    "Invalid CLSAG at h={} tx={} input={}",
+                                    h,
+                                    tx.hash().to_hex()[..16].to_string(),
+                                    idx
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok::<_, ErrorObjectOwned>(json!({
+                "valid": failures == 0,
+                "checked": checked,
+                "failures": failures,
+                "findings": &findings[..findings.len().min(50)],
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
+    // ── verify_range_proofs_in_range ────────────────────────────
+    module
+        .register_method("verify_range_proofs_in_range", |params, state, _ext| {
+            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
+            })?;
+            let (start, end) = rpc_clamp_audit_range(start, end)?;
+            let mut checked = 0u64;
+            let mut failures = 0u64;
+            let mut findings = Vec::new();
+
+            for h in start..=end {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    for tx in &block.transactions {
+                        if tx.is_coinbase() {
+                            continue;
+                        }
                         checked += 1;
-                        if !crate::consensus::verify_ring_signature(&tx, input, idx) {
+                        if !crate::consensus::verify_output_range_proofs(&tx, h) {
                             failures += 1;
                             findings.push(format!(
-                                "Invalid CLSAG at h={} tx={} input={}",
-                                h, tx.hash().to_hex()[..16].to_string(), idx
+                                "Invalid range proof at h={} tx={}",
+                                h,
+                                tx.hash().to_hex()[..16].to_string()
                             ));
                         }
                     }
                 }
             }
-        }
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "valid": failures == 0,
-            "checked": checked,
-            "failures": failures,
-            "findings": &findings[..findings.len().min(50)],
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
-
-    // ── verify_range_proofs_in_range ────────────────────────────
-    module.register_method("verify_range_proofs_in_range", |params, state, _ext| {
-        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-        })?;
-        let (start, end) = rpc_clamp_audit_range(start, end)?;
-        let mut checked = 0u64;
-        let mut failures = 0u64;
-        let mut findings = Vec::new();
-
-        for h in start..=end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                for tx in &block.transactions {
-                    if tx.is_coinbase() { continue; }
-                    checked += 1;
-                    if !crate::consensus::verify_output_range_proofs(&tx, h) {
-                        failures += 1;
-                        findings.push(format!(
-                            "Invalid range proof at h={} tx={}",
-                            h, tx.hash().to_hex()[..16].to_string()
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok::<_, ErrorObjectOwned>(json!({
-            "valid": failures == 0,
-            "checked": checked,
-            "failures": failures,
-            "findings": &findings[..findings.len().min(50)],
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "valid": failures == 0,
+                "checked": checked,
+                "failures": failures,
+                "findings": &findings[..findings.len().min(50)],
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_commitment_balance_in_range ──────────────────────
-    module.register_method("verify_commitment_balance_in_range", |params, state, _ext| {
-        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-        })?;
-        let (start, end) = rpc_clamp_audit_range(start, end)?;
-        let mut checked = 0u64;
-        let mut failures = 0u64;
-        let mut findings = Vec::new();
+    module
+        .register_method(
+            "verify_commitment_balance_in_range",
+            |params, state, _ext| {
+                let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("params: [start, end]: {}", e),
+                        None::<()>,
+                    )
+                })?;
+                let (start, end) = rpc_clamp_audit_range(start, end)?;
+                let mut checked = 0u64;
+                let mut failures = 0u64;
+                let mut findings = Vec::new();
 
-        for h in start..=end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                for tx in &block.transactions {
-                    if tx.is_coinbase() { continue; }
-                    checked += 1;
-                    if !crate::consensus::verify_balance_proof(&tx) {
-                        failures += 1;
-                        findings.push(format!(
-                            "Commitment imbalance at h={} tx={}",
-                            h, tx.hash().to_hex()[..16].to_string()
-                        ));
+                for h in start..=end {
+                    if let Some(block) = state.chain.get_block_by_height(h) {
+                        for tx in &block.transactions {
+                            if tx.is_coinbase() {
+                                continue;
+                            }
+                            checked += 1;
+                            if !crate::consensus::verify_balance_proof(&tx) {
+                                failures += 1;
+                                findings.push(format!(
+                                    "Commitment imbalance at h={} tx={}",
+                                    h,
+                                    tx.hash().to_hex()[..16].to_string()
+                                ));
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "valid": failures == 0,
-            "checked": checked,
-            "failures": failures,
-            "findings": &findings[..findings.len().min(50)],
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+                Ok::<_, ErrorObjectOwned>(json!({
+                    "valid": failures == 0,
+                    "checked": checked,
+                    "failures": failures,
+                    "findings": &findings[..findings.len().min(50)],
+                }))
+            },
+        )
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── full_chain_audit ────────────────────────────────────────
-    module.register_method("full_chain_audit", |params, state, _ext| {
-        let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-        })?;
-        let (start, end) = rpc_clamp_audit_range(start, end)?;
-        let mut blocks_checked = 0u64;
-        let mut txs_checked = 0u64;
-        let mut findings = Vec::new();
+    module
+        .register_method("full_chain_audit", |params, state, _ext| {
+            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
+            })?;
+            let (start, end) = rpc_clamp_audit_range(start, end)?;
+            let mut blocks_checked = 0u64;
+            let mut txs_checked = 0u64;
+            let mut findings = Vec::new();
 
-        for h in start..=end {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                blocks_checked += 1;
-                txs_checked += block.transactions.len() as u64;
+            for h in start..=end {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    blocks_checked += 1;
+                    txs_checked += block.transactions.len() as u64;
 
-                // Verify merkle root
-                let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| tx.hash()).collect();
-                let computed_root = crate::primitives::merkle_root(&tx_hashes);
-                if computed_root != block.header.tx_root {
-                    findings.push(format!("h={}: merkle root mismatch", h));
-                }
-
-                // Verify block reward
-                let _expected_reward = crate::emission::calculate_block_reward(h);
-                if let Some(coinbase) = block.transactions.first() {
-                    // Basic check: coinbase exists and is coinbase type
-                    if !coinbase.is_coinbase() {
-                        findings.push(format!("h={}: first tx is not coinbase", h));
-                    }
-                }
-
-                // Verify all transactions
-                for tx in &block.transactions {
-                    if tx.is_coinbase() { continue; }
-
-                    // Structural validation
-                    if let Err(e) = crate::consensus::validate_transaction_basic(&tx) {
-                        findings.push(format!("h={}: structural: {}", h, e));
+                    // Verify merkle root
+                    let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| tx.hash()).collect();
+                    let computed_root = crate::primitives::merkle_root(&tx_hashes);
+                    if computed_root != block.header.tx_root {
+                        findings.push(format!("h={}: merkle root mismatch", h));
                     }
 
-                    // Ring signatures
-                    for (idx, input) in tx.inputs.iter().enumerate() {
-                        if !crate::consensus::verify_ring_signature(&tx, input, idx) {
-                            findings.push(format!("h={}: CLSAG invalid input {}", h, idx));
+                    // Verify block reward
+                    let _expected_reward = crate::emission::calculate_block_reward(h);
+                    if let Some(coinbase) = block.transactions.first() {
+                        // Basic check: coinbase exists and is coinbase type
+                        if !coinbase.is_coinbase() {
+                            findings.push(format!("h={}: first tx is not coinbase", h));
                         }
                     }
 
-                    // Range proofs
-                    if !crate::consensus::verify_output_range_proofs(&tx, h) {
-                        findings.push(format!("h={}: range proof invalid", h));
-                    }
+                    // Verify all transactions
+                    for tx in &block.transactions {
+                        if tx.is_coinbase() {
+                            continue;
+                        }
 
-                    // Balance
-                    if !crate::consensus::verify_balance_proof(&tx) {
-                        findings.push(format!("h={}: commitment imbalance", h));
+                        // Structural validation
+                        if let Err(e) = crate::consensus::validate_transaction_basic(&tx) {
+                            findings.push(format!("h={}: structural: {}", h, e));
+                        }
+
+                        // Ring signatures
+                        for (idx, input) in tx.inputs.iter().enumerate() {
+                            if !crate::consensus::verify_ring_signature(&tx, input, idx) {
+                                findings.push(format!("h={}: CLSAG invalid input {}", h, idx));
+                            }
+                        }
+
+                        // Range proofs
+                        if !crate::consensus::verify_output_range_proofs(&tx, h) {
+                            findings.push(format!("h={}: range proof invalid", h));
+                        }
+
+                        // Balance
+                        if !crate::consensus::verify_balance_proof(&tx) {
+                            findings.push(format!("h={}: commitment imbalance", h));
+                        }
                     }
                 }
             }
-        }
 
-        Ok::<_, ErrorObjectOwned>(json!({
-            "valid": findings.is_empty(),
-            "blocks_checked": blocks_checked,
-            "txs_checked": txs_checked,
-            "findings": findings.len(),
-            "details": &findings[..findings.len().min(100)],
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+            Ok::<_, ErrorObjectOwned>(json!({
+                "valid": findings.is_empty(),
+                "blocks_checked": blocks_checked,
+                "txs_checked": txs_checked,
+                "findings": findings.len(),
+                "details": &findings[..findings.len().min(100)],
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     let bearer_validator = if apply_bearer_middleware {
         let plaintext = api_key_arc
@@ -2381,9 +2513,8 @@ pub async fn start_rpc_server(
     } else {
         crate::rpc::ratelimit::RateLimitConfig::strict()
     };
-    let rpc_rate_limiter = std::sync::Arc::new(
-        crate::rpc::ratelimit::RateLimiter::new(rate_limiter_config),
-    );
+    let rpc_rate_limiter =
+        std::sync::Arc::new(crate::rpc::ratelimit::RateLimiter::new(rate_limiter_config));
     let bearer_validator = bearer_validator.with_rate_limiter(rpc_rate_limiter);
 
     let server = ServerBuilder::default()
@@ -2511,7 +2642,8 @@ mod tests {
                 .expect("request");
             assert!(
                 validator.validate(&mut req).is_ok(),
-                "rotation-window validator must accept {}", key
+                "rotation-window validator must accept {}",
+                key
             );
         }
         let mut bad = Request::builder()

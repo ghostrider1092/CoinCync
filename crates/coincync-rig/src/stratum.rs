@@ -44,8 +44,8 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, info, warn};
 
@@ -408,7 +408,11 @@ fn parse_notify(params: &Value) -> Result<Job> {
     let target_bytes = hex_decode_32(target_hex).context("target not 32-byte hex")?;
     let seed_bytes = hex_decode_32(seed_hex).context("seed_hash not 32-byte hex")?;
 
-    if reserved_offset.checked_add(4).map(|end| end > blob.len()).unwrap_or(true) {
+    if reserved_offset
+        .checked_add(4)
+        .map(|end| end > blob.len())
+        .unwrap_or(true)
+    {
         return Err(anyhow!(
             "reserved_offset {reserved_offset} doesn't leave 4 bytes inside a {len}-byte blob",
             len = blob.len()
@@ -444,15 +448,7 @@ mod tests {
         let blob_hex = "00".repeat(76);
         let target_hex = "ff".repeat(32);
         let seed_hex = "11".repeat(32);
-        let params = json!([
-            "abc123",
-            blob_hex,
-            target_hex,
-            seed_hex,
-            1399u64,
-            39u64,
-            true,
-        ]);
+        let params = json!(["abc123", blob_hex, target_hex, seed_hex, 1399u64, 39u64, true,]);
         let job = parse_notify(&params).expect("parse");
         assert_eq!(job.job_id, "abc123");
         assert_eq!(job.blob.len(), 76);
@@ -469,11 +465,7 @@ mod tests {
         let target_hex = "00".repeat(32);
         let seed_hex = "00".repeat(32);
         let params = json!([
-            "j",
-            blob_hex,
-            target_hex,
-            seed_hex,
-            1u64,
+            "j", blob_hex, target_hex, seed_hex, 1u64,
             38u64, // offset 38 + 4 = 42 > 40 → reject
             true,
         ]);

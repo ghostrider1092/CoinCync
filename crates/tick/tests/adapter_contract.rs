@@ -9,11 +9,11 @@
 
 #![cfg(feature = "mock")]
 
-use tick::{
-    AggregateFleetHealth, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer,
-    HealthSnapshot, MockAdapter, Severity, TickNotice, TickNoticeKind,
-};
 use tick::mock::{MockBlockId, MockPeerId, MockTxId};
+use tick::{
+    AggregateFleetHealth, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer, HealthSnapshot,
+    MockAdapter, Severity, TickNotice, TickNoticeKind,
+};
 
 // ─── Trait-shape smoke tests ───────────────────────────────────────────────
 
@@ -74,7 +74,7 @@ fn probe_peer_returns_unreachable_for_unknown_host() {
         role: "seed".into(),
     };
     let err = adapter.probe_peer(&peer).unwrap_err();
-    assert!(format!("{}", err).contains("unreachable"));
+    assert!(format!("{err}").contains("unreachable"));
 }
 
 // ─── Privacy contract: stem-phase & stem-relays ─────────────────────────

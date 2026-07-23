@@ -227,7 +227,7 @@ key crypto code without an attributable commit.
 If you intentionally changed the file:
 
 ```bash
-cargo run --bin update-critical-hashes
+COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes
 ```
 
 Then commit `critical_files.lock` alongside the change. Reviewers

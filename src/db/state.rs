@@ -7,12 +7,12 @@
 //! produce wrong ordering for heights > 255. Big-endian preserves numeric
 //! ordering under byte comparison.
 
+use super::{deserialize, serialize};
 use crate::db::shim::{Db, Tree};
-use crate::primitives::Hash;
 use crate::error::{Error, Result};
-use super::{serialize, deserialize};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use crate::primitives::Hash;
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Chain state snapshot
 #[derive(Clone, Debug, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -86,11 +86,14 @@ impl StateDb {
 
     /// Create new state database
     pub fn new(db: &Db) -> Result<Self> {
-        let state = db.open_tree("chain_state")
+        let state = db
+            .open_tree("chain_state")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let checkpoints = db.open_tree("checkpoints")
+        let checkpoints = db
+            .open_tree("checkpoints")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let undo = db.open_tree("undo_data")
+        let undo = db
+            .open_tree("undo_data")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         Ok(StateDb {
@@ -112,9 +115,7 @@ impl StateDb {
     /// Decode the schema-v1 chain-state record for the registered v1→v2
     /// migration. Keeping this separate from `get_state` prevents a malformed
     /// or mis-stamped database from selecting its layout by trial decoding.
-    pub(super) fn read_schema_v1_state_for_migration(
-        &self,
-    ) -> Result<Option<ChainStateData>> {
+    pub(super) fn read_schema_v1_state_for_migration(&self) -> Result<Option<ChainStateData>> {
         match self.state.get(Self::KEY_CHAIN_STATE) {
             Ok(Some(data)) => {
                 let legacy: ChainStateDataLegacyV1 = deserialize(&data).map_err(|e| {
@@ -133,7 +134,8 @@ impl StateDb {
     /// Save chain state
     pub fn save_state(&self, state: &ChainStateData) -> Result<()> {
         let data = serialize(state)?;
-        self.state.insert(Self::KEY_CHAIN_STATE, data)
+        self.state
+            .insert(Self::KEY_CHAIN_STATE, data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -149,14 +151,16 @@ impl StateDb {
 
     /// Set genesis hash
     pub fn set_genesis_hash(&self, hash: &Hash) -> Result<()> {
-        self.state.insert(Self::KEY_GENESIS_HASH, hash.as_bytes())
+        self.state
+            .insert(Self::KEY_GENESIS_HASH, hash.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
 
     /// Add checkpoint
     pub fn add_checkpoint(&self, height: u64, hash: &Hash) -> Result<()> {
-        self.checkpoints.insert(&height.to_be_bytes(), hash.as_bytes())
+        self.checkpoints
+            .insert(&height.to_be_bytes(), hash.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -199,7 +203,8 @@ impl StateDb {
 
     /// Store undo data for a block
     pub fn store_undo(&self, height: u64, data: &[u8]) -> Result<()> {
-        self.undo.insert(&height.to_be_bytes(), data)
+        self.undo
+            .insert(&height.to_be_bytes(), data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -215,7 +220,8 @@ impl StateDb {
 
     /// Remove undo data
     pub fn remove_undo(&self, height: u64) -> Result<()> {
-        self.undo.remove(&height.to_be_bytes())
+        self.undo
+            .remove(&height.to_be_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -249,7 +255,8 @@ impl StateDb {
         }
 
         for key in keys_to_remove {
-            self.undo.remove(&key)
+            self.undo
+                .remove(&key)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
             removed += 1;
         }
@@ -276,7 +283,8 @@ impl StateDb {
                 std::str::from_utf8(key).unwrap_or("<non-utf8>")
             )));
         }
-        self.state.insert(key, value)
+        self.state
+            .insert(key, value)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -307,7 +315,8 @@ impl StateDb {
                 std::str::from_utf8(key).unwrap_or("<non-utf8>")
             )));
         }
-        self.state.remove(key)
+        self.state
+            .remove(key)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -367,7 +376,10 @@ mod tests {
             last_checkpoint: 400_000,
         };
         let bytes = borsh::to_vec(&legacy).unwrap();
-        state_db.state.insert(StateDb::KEY_CHAIN_STATE, bytes).unwrap();
+        state_db
+            .state
+            .insert(StateDb::KEY_CHAIN_STATE, bytes)
+            .unwrap();
 
         assert!(
             state_db.get_state().is_err(),

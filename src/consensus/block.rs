@@ -3,11 +3,11 @@
 //! `Block` is a pure data struct. All consensus validation lives in
 //! `consensus/validation.rs`. Methods here are structural helpers.
 
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use super::BlockHeader;
-use crate::primitives::{Hash, Amount, KeyImage, merkle_root};
+use crate::primitives::{merkle_root, Amount, Hash, KeyImage};
 use crate::transaction::Transaction;
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Block {
@@ -17,13 +17,24 @@ pub struct Block {
 
 impl Block {
     pub fn new(header: BlockHeader, transactions: Vec<Transaction>) -> Self {
-        Block { header, transactions }
+        Block {
+            header,
+            transactions,
+        }
     }
 
-    pub fn hash(&self) -> Hash { self.header.hash() }
-    pub fn height(&self) -> u64 { self.header.height }
-    pub fn tx_count(&self) -> usize { self.transactions.len() }
-    pub fn is_genesis(&self) -> bool { self.header.height == 0 }
+    pub fn hash(&self) -> Hash {
+        self.header.hash()
+    }
+    pub fn height(&self) -> u64 {
+        self.header.height
+    }
+    pub fn tx_count(&self) -> usize {
+        self.transactions.len()
+    }
+    pub fn is_genesis(&self) -> bool {
+        self.header.height == 0
+    }
 
     /// The coinbase transaction (first transaction).
     pub fn coinbase(&self) -> Option<&Transaction> {
@@ -60,7 +71,9 @@ impl Block {
 
     /// Approximate serialized size in bytes.
     pub fn size(&self) -> usize {
-        let tx_sizes: usize = self.transactions.iter()
+        let tx_sizes: usize = self
+            .transactions
+            .iter()
             .map(|tx| tx.size())
             .fold(0usize, |acc, s| acc.saturating_add(s));
         200usize.saturating_add(tx_sizes)
@@ -75,8 +88,13 @@ mod tests {
     fn test_non_coinbase_empty_when_only_coinbase() {
         use crate::transaction::{Transaction, TxType};
         let coinbase = Transaction {
-            version: 1, tx_type: TxType::Coinbase, inputs: vec![], outputs: vec![],
-            fee: Amount::ZERO, range_proof: vec![], extra: vec![],
+            version: 1,
+            tx_type: TxType::Coinbase,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
         };
         let txs = vec![coinbase];
         let non_cb: Vec<_> = txs.iter().skip(1).collect();

@@ -145,11 +145,7 @@ impl Note {
     /// the rho input, producing notes incompatible with Zcash NU5
     /// (caught by `tests/zcash_conformance.rs::note_commitment_matches_zcash_nu5`).
     pub fn psi(&self) -> pallas::Base {
-        let wide = crate::spend_key::prf_expand_with(
-            &self.rseed,
-            PRF_EXPAND_PSI_TAG,
-            &self.rho,
-        );
+        let wide = crate::spend_key::prf_expand_with(&self.rseed, PRF_EXPAND_PSI_TAG, &self.rho);
         pallas::Base::from_uniform_bytes(&wide)
     }
 
@@ -158,11 +154,7 @@ impl Note {
     /// Same `rho`-binding pattern as [`psi`](Self::psi) per Zcash
     /// NU5 §4.7.3. Reference: orchard 0.12 `src/note.rs::RandomSeed::rcm`.
     pub fn rcm(&self) -> pallas::Scalar {
-        let wide = crate::spend_key::prf_expand_with(
-            &self.rseed,
-            PRF_EXPAND_RCM_TAG,
-            &self.rho,
-        );
+        let wide = crate::spend_key::prf_expand_with(&self.rseed, PRF_EXPAND_RCM_TAG, &self.rho);
         pallas::Scalar::from_uniform_bytes(&wide)
     }
 
@@ -245,14 +237,22 @@ mod tests {
     fn psi_differs_per_rseed() {
         let note_a = Note::new(nonzero(1), nonzero(2), 100, nonzero(3), nonzero(5)).unwrap();
         let note_b = Note::new(nonzero(1), nonzero(2), 100, nonzero(3), nonzero(6)).unwrap();
-        assert_ne!(note_a.psi(), note_b.psi(), "different rseed → different psi");
+        assert_ne!(
+            note_a.psi(),
+            note_b.psi(),
+            "different rseed → different psi"
+        );
     }
 
     #[test]
     fn rcm_differs_per_rseed() {
         let note_a = Note::new(nonzero(1), nonzero(2), 100, nonzero(3), nonzero(5)).unwrap();
         let note_b = Note::new(nonzero(1), nonzero(2), 100, nonzero(3), nonzero(6)).unwrap();
-        assert_ne!(note_a.rcm(), note_b.rcm(), "different rseed → different rcm");
+        assert_ne!(
+            note_a.rcm(),
+            note_b.rcm(),
+            "different rseed → different rcm"
+        );
     }
 
     #[test]
@@ -339,13 +339,17 @@ mod tests {
         let nk = NullifierDerivingKey::from_bytes(nk_bytes_chosen).expect("nk");
         let nf = derive_nullifier(&note, &nk).expect("nullifier derives");
         let nf2 = derive_nullifier(&note, &nk).unwrap();
-        assert_eq!(nf.0.to_bytes(), nf2.0.to_bytes(), "nf must be deterministic");
+        assert_eq!(
+            nf.0.to_bytes(),
+            nf2.0.to_bytes(),
+            "nf must be deterministic"
+        );
 
         // Different diversifier → different address → different
         // note → different commitment. Sanity for the address
         // derivation actually flowing through.
-        let note_alt = Note::new_for_address(&ivk, [6u8; 11], 1_000_000, rho, rseed)
-            .expect("alt note");
+        let note_alt =
+            Note::new_for_address(&ivk, [6u8; 11], 1_000_000, rho, rseed).expect("alt note");
         assert_ne!(
             note.commitment().unwrap().to_bytes(),
             note_alt.commitment().unwrap().to_bytes(),

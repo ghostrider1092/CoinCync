@@ -7,16 +7,16 @@
 # normalized to LF, so Windows and Linux produce the same values.
 #
 # To refresh after an INTENTIONAL change:
-#   cargo run --bin update-critical-hashes
+#   COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes
 #
 # NEVER refresh these hashes without a thorough review of the changes.
 # Accidental modifications to these files can cause chain forks.
 
 CONSTITUTION.md=ec619ff198957ac20824a137c0b16b319be099e43f2359ecb06a37097dd47302
 docs/BILL_OF_RIGHTS.md=b2d01894a0334133d068c660054b7352493bc7ca1ebb00c231638901a19be753
-src/testnet.rs=9c29275442a449a1b7b76d21e764afdc454a22898ef989a497f3babf3ecff9c5
-src/constants.rs=c707b58b437f28442ca5690ba029a60ede5d177df660af48032b032dd27b3056
-src/consensus/difficulty.rs=cde32a331bef8ecf7b3083c92105b64003217269f673e8de6c3cd0db445ce2df
-src/consensus/pow.rs=2ebbf02f569cdeb2bc244e2dd47d0601c8a550ef71b2706444ad72a4293e84e6
-src/consensus/validation.rs=2a4495878b9e5a61e33410b45888dc9ddeee474b754dc1d457d680008029ea2a
-src/emission/curve.rs=a283773c05b0f51f83ff2638fdaad00be3b90aec503837c0ded4c82de96a9fb6
+src/testnet.rs=79ebc4e64fd21b9b5e1207c325b255a3d89ccbd6aaf6e847ec0433d0cb8e1c97
+src/constants.rs=539d7514c5ce53d88b117129143d57797748b580c22fc666e37e2c9cd5007127
+src/consensus/difficulty.rs=d6e64d58e631fdf9d3e862db25b3721f2e4eb232420f1190c7606019c66c25b3
+src/consensus/pow.rs=b89664578f7e8dbf5a4690d49dcbea5db5ff889277809c33ee9444b83cf1b847
+src/consensus/validation.rs=2e1f5d234945890fe53d8659e77adfe189b876c19698e0a7410406a35aa43620
+src/emission/curve.rs=a391e8b966fd190f9c87912e35eef0647cf7ab3dc15ebcb2b951c65bbfb9fc50

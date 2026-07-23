@@ -11,12 +11,12 @@
 //!   RandomX VM key derived from the block height's epoch and the
 //!   chain-specific genesis hash.
 
-use crate::primitives::{Hash, hash_concat, hash_domain};
-use crate::error::Result;
 use crate::constants::SEQ_PAD_ITERATIONS;
+use crate::error::Result;
+use crate::primitives::{hash_concat, hash_domain, Hash};
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::OnceLock;
-use parking_lot::Mutex;
 
 // =============================================================================
 // Sequential Padding Cache — FIFO eviction via VecDeque
@@ -170,9 +170,13 @@ impl PowAlgorithm {
 
     pub fn is_available(&self) -> bool {
         #[cfg(feature = "randomx")]
-        { true }
+        {
+            true
+        }
         #[cfg(not(feature = "randomx"))]
-        { false }
+        {
+            false
+        }
     }
 }
 
@@ -203,7 +207,11 @@ fn compute_sequential_padding(seed: &Hash, iterations: u32) -> Hash {
 fn blake3_mix(sequential: &Hash, prev_hash: &Hash) -> Hash {
     hash_domain(
         b"CYNC1_ANCHOR_MIX",
-        &[sequential.as_bytes().as_slice(), prev_hash.as_bytes().as_slice()].concat(),
+        &[
+            sequential.as_bytes().as_slice(),
+            prev_hash.as_bytes().as_slice(),
+        ]
+        .concat(),
     )
 }
 
@@ -252,11 +260,7 @@ pub fn compute_pow_hash(
     height: u64,
 ) -> Result<Hash> {
     let _ = algo; // single algorithm — parameter kept for API compatibility
-    let input = hash_concat(&[
-        anchor.as_bytes(),
-        &nonce.to_le_bytes(),
-        tx_root.as_bytes(),
-    ]);
+    let input = hash_concat(&[anchor.as_bytes(), &nonce.to_le_bytes(), tx_root.as_bytes()]);
     let _ = anchor;
 
     #[cfg(feature = "randomx")]
@@ -273,7 +277,7 @@ pub fn compute_pow_hash(
             );
         });
         Err(Error::Internal(
-            "RandomX feature not enabled — CoinCync 1.0 requires --features randomx".into()
+            "RandomX feature not enabled — CoinCync 1.0 requires --features randomx".into(),
         ))
     }
 }
@@ -292,8 +296,8 @@ const RANDOMX_KEY_EPOCH: u64 = 2048;
 
 #[cfg(feature = "randomx")]
 mod randomx_cache {
-    use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
     use parking_lot::RwLock;
+    use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -358,16 +362,20 @@ mod randomx_cache {
     ///     single global VM behind a `parking_lot::Mutex`, so N mining
     ///     threads serialized through one VM. With per-thread VMs,
     ///     aggregate hashrate now scales linearly with `--threads`.
-    pub fn compute_hash(seed: &[u8; 32], input: &[u8]) -> std::result::Result<[u8; 32], crate::error::Error> {
+    pub fn compute_hash(
+        seed: &[u8; 32],
+        input: &[u8],
+    ) -> std::result::Result<[u8; 32], crate::error::Error> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let retry_at = RETRY_AFTER.load(Ordering::Relaxed);
         if retry_at != 0 && now_secs < retry_at {
-            return Err(crate::error::Error::Internal(
-                format!("RandomX in backoff for {}s", retry_at - now_secs),
-            ));
+            return Err(crate::error::Error::Internal(format!(
+                "RandomX in backoff for {}s",
+                retry_at - now_secs
+            )));
         }
 
         // 1. Ensure the global dataset matches the current seed.
@@ -421,7 +429,8 @@ mod randomx_cache {
     fn ensure_dataset(
         seed: &[u8; 32],
         now_secs: u64,
-    ) -> std::result::Result<(RandomXCache, Option<RandomXDataset>, RandomXFlag), crate::error::Error> {
+    ) -> std::result::Result<(RandomXCache, Option<RandomXDataset>, RandomXFlag), crate::error::Error>
+    {
         // Fast path: read-only check.
         {
             let guard = DATASET_CACHE.read();
@@ -463,7 +472,9 @@ mod randomx_cache {
     /// arrives at the read lock, sees the new entry, and Arc-clones
     /// the cache + dataset for its own VM construction (~ms, not
     /// 30-60s).
-    fn create_dataset_entry(seed: &[u8; 32]) -> std::result::Result<DatasetEntry, crate::error::Error> {
+    fn create_dataset_entry(
+        seed: &[u8; 32],
+    ) -> std::result::Result<DatasetEntry, crate::error::Error> {
         let start = std::time::Instant::now();
         let recommended = RandomXFlag::get_recommended_flags();
 
@@ -531,7 +542,8 @@ mod randomx_cache {
             Err(e) => {
                 tracing::warn!(
                     "RandomX init with {:?} failed: {}. Falling back.",
-                    active_flags, e
+                    active_flags,
+                    e
                 );
             }
         }
@@ -598,14 +610,14 @@ mod randomx_cache {
     /// (with operator-visible context) on cache or dataset alloc
     /// failure so the caller's tier ladder can retry with weaker
     /// flags.
-    fn try_build_entry(flags: RandomXFlag, seed: &[u8; 32]) -> std::result::Result<DatasetEntry, String> {
-        let cache = RandomXCache::new(flags, seed)
-            .map_err(|e| format!("cache init: {}", e))?;
+    fn try_build_entry(
+        flags: RandomXFlag,
+        seed: &[u8; 32],
+    ) -> std::result::Result<DatasetEntry, String> {
+        let cache = RandomXCache::new(flags, seed).map_err(|e| format!("cache init: {}", e))?;
 
         let dataset = if flags.contains(RandomXFlag::FLAG_FULL_MEM) {
-            tracing::info!(
-                "Building RandomX dataset (~2 GB, ~30-60s, one-time per epoch)..."
-            );
+            tracing::info!("Building RandomX dataset (~2 GB, ~30-60s, one-time per epoch)...");
             let ds_start = std::time::Instant::now();
             match RandomXDataset::new(flags, cache.clone(), 0) {
                 Ok(ds) => {
@@ -626,7 +638,12 @@ mod randomx_cache {
             None
         };
 
-        Ok(DatasetEntry { key: *seed, cache, dataset, flags })
+        Ok(DatasetEntry {
+            key: *seed,
+            cache,
+            dataset,
+            flags,
+        })
     }
 
     /// Test helper: build a single VM for the given flag set. The
@@ -635,7 +652,10 @@ mod randomx_cache {
     /// the equivalence test still uses this to assemble two VMs side
     /// by side and compare their hash output.
     #[cfg(test)]
-    fn try_create_vm(flags: RandomXFlag, seed: &[u8; 32]) -> std::result::Result<RandomXVM, String> {
+    fn try_create_vm(
+        flags: RandomXFlag,
+        seed: &[u8; 32],
+    ) -> std::result::Result<RandomXVM, String> {
         let entry = try_build_entry(flags, seed)?;
         RandomXVM::new(flags, Some(entry.cache), entry.dataset)
             .map_err(|e| format!("VM init: {}", e))
@@ -652,7 +672,9 @@ mod randomx_cache {
     pub fn clear_cache() {
         let mut guard = DATASET_CACHE.write();
         *guard = None;
-        THREAD_VM.with(|cell| { *cell.borrow_mut() = None; });
+        THREAD_VM.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
     }
 
     /// Consensus-equivalence test: full-mem mode and light mode MUST
@@ -681,20 +703,20 @@ mod randomx_cache {
             let input = b"coincync randomx fast-vs-light equivalence test";
 
             // Light mode — recommended flags minus FULL_MEM.
-            let light_flags = RandomXFlag::get_recommended_flags()
-                & !RandomXFlag::FLAG_FULL_MEM;
+            let light_flags = RandomXFlag::get_recommended_flags() & !RandomXFlag::FLAG_FULL_MEM;
             let light_vm = try_create_vm(light_flags, &seed)
                 .expect("light-mode VM build must succeed on test host");
-            let light_hash = light_vm.calculate_hash(input)
+            let light_hash = light_vm
+                .calculate_hash(input)
                 .expect("light-mode hash must succeed");
 
             // Full mode — recommended flags including FULL_MEM. This
             // is the 30-60s init.
-            let full_flags = RandomXFlag::get_recommended_flags()
-                | RandomXFlag::FLAG_FULL_MEM;
+            let full_flags = RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM;
             let full_vm = try_create_vm(full_flags, &seed)
                 .expect("full-mem VM build must succeed on test host with ~3 GB free");
-            let full_hash = full_vm.calculate_hash(input)
+            let full_hash = full_vm
+                .calculate_hash(input)
                 .expect("full-mem hash must succeed");
 
             assert_eq!(
@@ -733,8 +755,7 @@ mod randomx_cache {
             let input = b"coincync randomx phase-2 concurrent-threads consistency test";
 
             // Single-thread baseline: what the hash SHOULD be.
-            let baseline = super::compute_hash(&seed, input)
-                .expect("baseline hash must succeed");
+            let baseline = super::compute_hash(&seed, input).expect("baseline hash must succeed");
 
             // Fan out: each thread hashes the same input and reports.
             const N_THREADS: usize = 8;
@@ -869,8 +890,7 @@ fn randomx_key_for_height(height: u64) -> [u8; 32] {
 #[cfg(feature = "randomx")]
 fn compute_randomx_hash(input: &Hash, height: u64) -> Result<Hash> {
     let seed = randomx_key_for_height(height);
-    randomx_cache::compute_hash(&seed, input.as_bytes())
-        .map(Hash::from_bytes)
+    randomx_cache::compute_hash(&seed, input.as_bytes()).map(Hash::from_bytes)
 }
 
 // =============================================================================
@@ -889,17 +909,27 @@ impl std::fmt::Display for PowVerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PowVerifyError::AnchorMismatch { expected, claimed } => {
-                write!(f, "Anchor mismatch: expected {}, got {}",
+                write!(
+                    f,
+                    "Anchor mismatch: expected {}, got {}",
                     hex::encode(&expected.as_bytes()[..8]),
-                    hex::encode(&claimed.as_bytes()[..8]))
+                    hex::encode(&claimed.as_bytes()[..8])
+                )
             }
             PowVerifyError::AlgorithmMismatch { expected, claimed } => {
-                write!(f, "Algorithm mismatch: expected {}, got {}", expected, claimed)
+                write!(
+                    f,
+                    "Algorithm mismatch: expected {}, got {}",
+                    expected, claimed
+                )
             }
             PowVerifyError::TargetNotMet { hash, target } => {
-                write!(f, "Hash doesn't meet target: hash={}, target={}",
+                write!(
+                    f,
+                    "Hash doesn't meet target: hash={}, target={}",
                     hex::encode(&hash.as_bytes()[..8]),
-                    hex::encode(&target.as_bytes()[..8]))
+                    hex::encode(&target.as_bytes()[..8])
+                )
             }
             PowVerifyError::AnchorComputation(e) => {
                 write!(f, "Anchor computation failed: {}", e)
@@ -918,10 +948,11 @@ pub fn verify_pow(
     claimed_anchor: &Hash,
     claimed_algo: u8,
 ) -> Result<()> {
-    let anchor = compute_full_anchor(prev_hash, height, timestamp)
-        .map_err(|e| crate::error::Error::PowValidation(
-            PowVerifyError::AnchorComputation(e.to_string()).to_string()
-        ))?;
+    let anchor = compute_full_anchor(prev_hash, height, timestamp).map_err(|e| {
+        crate::error::Error::PowValidation(
+            PowVerifyError::AnchorComputation(e.to_string()).to_string(),
+        )
+    })?;
 
     if anchor.mixed_hash != *claimed_anchor {
         let error = PowVerifyError::AnchorMismatch {
@@ -1023,13 +1054,22 @@ mod tests {
         assert_eq!(a1.mixed_hash, a2.mixed_hash, "must be deterministic");
 
         let a3 = compute_full_anchor(&prev2, height, ts).unwrap();
-        assert_ne!(a1.mixed_hash, a3.mixed_hash, "different prev_hash must give different anchor");
+        assert_ne!(
+            a1.mixed_hash, a3.mixed_hash,
+            "different prev_hash must give different anchor"
+        );
 
         let a4 = compute_full_anchor(&prev1, height + 1, ts).unwrap();
-        assert_ne!(a1.mixed_hash, a4.mixed_hash, "different height must give different anchor");
+        assert_ne!(
+            a1.mixed_hash, a4.mixed_hash,
+            "different height must give different anchor"
+        );
 
         let a5 = compute_full_anchor(&prev1, height, ts + 1).unwrap();
-        assert_ne!(a1.mixed_hash, a5.mixed_hash, "different timestamp must give different anchor");
+        assert_ne!(
+            a1.mixed_hash, a5.mixed_hash,
+            "different timestamp must give different anchor"
+        );
     }
 
     #[test]
@@ -1058,14 +1098,27 @@ mod tests {
 
         assert!(cache.anchors.len() <= SEQ_PAD_CACHE_MAX);
         assert!(cache.insertion_order.len() <= SEQ_PAD_CACHE_MAX);
-        assert_eq!(cache.anchors.len(), cache.insertion_order.len(),
-            "anchors and insertion_order must stay in lockstep");
+        assert_eq!(
+            cache.anchors.len(),
+            cache.insertion_order.len(),
+            "anchors and insertion_order must stay in lockstep"
+        );
 
         let oldest_key = (Hash::from_bytes([0u8; 32]), 0u64, 0u64);
-        assert!(cache.get(&oldest_key).is_none(), "oldest entry should be evicted");
+        assert!(
+            cache.get(&oldest_key).is_none(),
+            "oldest entry should be evicted"
+        );
 
         let newest_i = (SEQ_PAD_CACHE_MAX + 99) as u8;
-        let newest_key = (Hash::from_bytes([newest_i; 32]), (SEQ_PAD_CACHE_MAX + 99) as u64, 0u64);
-        assert!(cache.get(&newest_key).is_some(), "newest entry should be present");
+        let newest_key = (
+            Hash::from_bytes([newest_i; 32]),
+            (SEQ_PAD_CACHE_MAX + 99) as u64,
+            0u64,
+        );
+        assert!(
+            cache.get(&newest_key).is_some(),
+            "newest entry should be present"
+        );
     }
 }

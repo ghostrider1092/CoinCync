@@ -2,9 +2,9 @@
 //!
 //! Allows nodes to operate with only recent blocks, saving ~90% disk space.
 
-use std::collections::HashSet;
-use crate::primitives::Hash;
 use crate::consensus::Block;
+use crate::primitives::Hash;
+use std::collections::HashSet;
 
 /// Pruning mode configuration
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,9 +162,7 @@ impl ChainPruner {
 
     /// Get heights that can be pruned
     pub fn prunable_heights(&self, from: u64, to: u64) -> Vec<u64> {
-        (from..to)
-            .filter(|h| self.can_prune(*h))
-            .collect()
+        (from..to).filter(|h| self.can_prune(*h)).collect()
     }
 
     /// Estimate bytes that would be freed by pruning
@@ -174,7 +172,8 @@ impl ChainPruner {
             PruningMode::KeepRecent(keep) => self.current_height.saturating_sub(*keep),
             PruningMode::KeepUnspent => {
                 // Estimate based on protected blocks
-                self.current_height.saturating_sub(self.protected_blocks.len() as u64)
+                self.current_height
+                    .saturating_sub(self.protected_blocks.len() as u64)
             }
             PruningMode::Custom(rules) => {
                 // O(1) estimate instead of iterating every height.
@@ -185,10 +184,14 @@ impl ChainPruner {
                 } else {
                     0
                 };
-                let protected_in_range = self.protected_blocks.iter()
+                let protected_in_range = self
+                    .protected_blocks
+                    .iter()
                     .filter(|&&h| h < min_height)
                     .count() as u64;
-                min_height.saturating_sub(checkpoint_count).saturating_sub(protected_in_range)
+                min_height
+                    .saturating_sub(checkpoint_count)
+                    .saturating_sub(protected_in_range)
             }
         };
 

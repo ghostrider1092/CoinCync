@@ -138,13 +138,15 @@ impl CyncNodeRpc {
             ));
         }
         if reqwest::Url::parse(&config.rpc_url).is_err() {
-            return Err(Error::Verification("CyncConfig.rpc_url must be a valid URL"));
+            return Err(Error::Verification(
+                "CyncConfig.rpc_url must be a valid URL",
+            ));
         }
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(60))
             .build()
-            .map_err(|e| Error::Rpc(format!("reqwest client build: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("reqwest client build: {e}")))?;
         Ok(Self {
             config,
             http,
@@ -179,12 +181,12 @@ impl CyncNodeRpc {
         let resp = req
             .send()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC HTTP: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC HTTP: {e}")))?;
         let status = resp.status();
         let body: JsonRpcResponse<T> = resp
             .json()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {e}")))?;
 
         if let Some(err) = body.error {
             return Err(Error::Rpc(format!(
@@ -194,8 +196,7 @@ impl CyncNodeRpc {
         }
         body.result.ok_or_else(|| {
             Error::Rpc(format!(
-                "coincync-node {} returned no result (status {})",
-                method, status
+                "coincync-node {method} returned no result (status {status})"
             ))
         })
     }
@@ -205,11 +206,13 @@ impl CyncNodeRpc {
     /// confirmed).
     async fn try_get_block_height(&self, txid: &CyncTxid) -> Option<u64> {
         let txid_hex = txid.to_hex();
-        let info: serde_json::Value =
-            match self.call("get_transaction", serde_json::json!([txid_hex])).await {
-                Ok(v) => v,
-                Err(_) => return None,
-            };
+        let info: serde_json::Value = match self
+            .call("get_transaction", serde_json::json!([txid_hex]))
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
         info.get("block_height").and_then(|v| v.as_u64())
     }
 
@@ -484,13 +487,15 @@ pub fn derive_swap_spender_secret(
     counterparty_spend_secret: &[u8; 32],
     adaptor_secret: &[u8; 32],
 ) -> Result<[u8; 32]> {
-    let s = Option::<Ristretto255Scalar>::from(
-        Ristretto255Scalar::from_canonical_bytes(*counterparty_spend_secret),
-    )
-    .ok_or(Error::Verification("counterparty_spend_secret out of range"))?;
-    let t = Option::<Ristretto255Scalar>::from(
-        Ristretto255Scalar::from_canonical_bytes(*adaptor_secret),
-    )
+    let s = Option::<Ristretto255Scalar>::from(Ristretto255Scalar::from_canonical_bytes(
+        *counterparty_spend_secret,
+    ))
+    .ok_or(Error::Verification(
+        "counterparty_spend_secret out of range",
+    ))?;
+    let t = Option::<Ristretto255Scalar>::from(Ristretto255Scalar::from_canonical_bytes(
+        *adaptor_secret,
+    ))
     .ok_or(Error::Verification("adaptor_secret out of range"))?;
     Ok((s + t).to_bytes())
 }
@@ -503,9 +508,9 @@ pub fn derive_swap_spender_secret(
 /// in this module so the swap key-derivation surface is
 /// self-contained for callers who only care about the chain side.
 pub fn cync_adaptor_point_from_secret(adaptor_secret: &[u8; 32]) -> Result<[u8; 32]> {
-    let t = Option::<Ristretto255Scalar>::from(
-        Ristretto255Scalar::from_canonical_bytes(*adaptor_secret),
-    )
+    let t = Option::<Ristretto255Scalar>::from(Ristretto255Scalar::from_canonical_bytes(
+        *adaptor_secret,
+    ))
     .ok_or(Error::Verification("adaptor_secret out of range"))?;
     Ok((&t * RISTRETTO_BASEPOINT_TABLE).compress().to_bytes())
 }
@@ -650,7 +655,7 @@ pub fn wait_for_confirmations(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = CyncNodeRpc::new(config.clone())?;
     let txid = CyncTxid::from_hex(txid)?;
     rt.block_on(chain.wait_for_confirmations(
@@ -665,7 +670,7 @@ pub fn broadcast(config: &CyncConfig, tx_bytes: &[u8]) -> Result<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = CyncNodeRpc::new(config.clone())?;
     let tx_hex = hex::encode(tx_bytes);
     let txid = rt.block_on(chain.broadcast(&tx_hex))?;
@@ -738,9 +743,9 @@ mod tests {
         let cync = CyncTxid([1u8; 32]);
         let btc = crate::btc::Txid([1u8; 32]);
         assert_eq!(cync.0, btc.0); // bytes match
-        // The types do not implement cross-type equality, so the
-        // following would not compile:
-        //   assert_eq!(cync, btc);   // ← E0308 mismatched types
+                                   // The types do not implement cross-type equality, so the
+                                   // following would not compile:
+                                   //   assert_eq!(cync, btc);   // ← E0308 mismatched types
     }
 
     #[tokio::test]
@@ -802,17 +807,13 @@ mod tests {
         let unknown = CyncTxid([0x77; 32]);
         let timeout = Duration::from_millis(150);
         let start = Instant::now();
-        let r = chain
-            .wait_for_confirmations(&unknown, 1, timeout)
-            .await;
+        let r = chain.wait_for_confirmations(&unknown, 1, timeout).await;
         let elapsed = start.elapsed();
         assert!(matches!(r, Err(Error::Timeout { .. })));
         assert!(
             elapsed >= Duration::from_millis(100),
-            "wait_for_confirmations returned in {:?} \u{2014} expected ~{:?}. \
-             The deadline arithmetic or `>=` check appears mutated.",
-            elapsed,
-            timeout
+            "wait_for_confirmations returned in {elapsed:?} \u{2014} expected ~{timeout:?}. \
+             The deadline arithmetic or `>=` check appears mutated."
         );
     }
 
@@ -840,17 +841,16 @@ mod tests {
         let tx_hex = "feedface";
         let txid = chain.broadcast(tx_hex).await.unwrap(); // recorded at height 5
         chain.mine_blocks(1); // tip = 5
-        // Real depth = 5 - 5 + 1 = 1. Require 2 confirmations.
+                              // Real depth = 5 - 5 + 1 = 1. Require 2 confirmations.
         let r = chain
             .wait_for_confirmations(&txid, 2, Duration::from_millis(80))
             .await;
         assert!(
             matches!(r, Err(Error::Timeout { .. })),
-            "depth arithmetic appears mutated \u{2014} got {:?} when expecting Timeout. \
+            "depth arithmetic appears mutated \u{2014} got {r:?} when expecting Timeout. \
              With real arithmetic depth=1 (< 2 confirmations), but `-` flipped to `+` \
              gives depth=11 and `-` flipped to `/` gives depth=2, both of which \
-             would erroneously return Ok.",
-            r
+             would erroneously return Ok."
         );
     }
 
@@ -884,8 +884,7 @@ mod tests {
         match r {
             Err(_) => { /* expected */ }
             Ok(s) => panic!(
-                "broadcast returned Ok({:?}) on unreachable RPC URL \u{2014} function body appears mutated",
-                s
+                "broadcast returned Ok({s:?}) on unreachable RPC URL \u{2014} function body appears mutated"
             ),
         }
     }
@@ -968,7 +967,11 @@ mod tests {
         let rpc = cync_rpc_against(&server.uri());
         let txid = CyncTxid([0x88; 32]);
         let h = rpc.try_get_block_height(&txid).await;
-        assert_eq!(h, Some(42), "try_get_block_height must return the exact field");
+        assert_eq!(
+            h,
+            Some(42),
+            "try_get_block_height must return the exact field"
+        );
     }
 
     /// `broadcast` returns the txid hash on `accepted: true`. Catches
@@ -980,13 +983,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_string_contains("send_raw_transaction"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": "coincync-swap",
-                    "result": {"accepted": true, "hash": hash_hex}
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "coincync-swap",
+                "result": {"accepted": true, "hash": hash_hex}
+            })))
             .mount(&server)
             .await;
 
@@ -1066,16 +1067,12 @@ mod tests {
         let txid = CyncTxid([0xaa; 32]);
         let timeout = Duration::from_millis(150);
         let start = Instant::now();
-        let r = rpc
-            .wait_for_confirmations(&txid, 1, timeout)
-            .await;
+        let r = rpc.wait_for_confirmations(&txid, 1, timeout).await;
         let elapsed = start.elapsed();
         assert!(matches!(r, Err(Error::Timeout { .. })));
         assert!(
             elapsed >= Duration::from_millis(100),
-            "cync rpc wait returned in {:?} \u{2014} expected ~{:?}",
-            elapsed,
-            timeout
+            "cync rpc wait returned in {elapsed:?} \u{2014} expected ~{timeout:?}"
         );
     }
 
@@ -1156,8 +1153,7 @@ mod tests {
             .await;
         assert!(
             matches!(r, Err(Error::Timeout { .. })),
-            "depth arithmetic at cync.rs:260 appears mutated \u{2014} got {:?} when expecting Timeout",
-            r
+            "depth arithmetic at cync.rs:260 appears mutated \u{2014} got {r:?} when expecting Timeout"
         );
     }
 
@@ -1187,8 +1183,14 @@ mod tests {
         let derived = derive_swap_recipient_spend_pub(&p_bytes, &t_pub).unwrap();
 
         // Recompute manually.
-        let p = CompressedRistretto::from_slice(&p_bytes).unwrap().decompress().unwrap();
-        let t = CompressedRistretto::from_slice(&t_pub).unwrap().decompress().unwrap();
+        let p = CompressedRistretto::from_slice(&p_bytes)
+            .unwrap()
+            .decompress()
+            .unwrap();
+        let t = CompressedRistretto::from_slice(&t_pub)
+            .unwrap()
+            .decompress()
+            .unwrap();
         let expected = (p + t).compress().to_bytes();
         assert_eq!(derived, expected);
 
@@ -1210,7 +1212,9 @@ mod tests {
         let spender_sec = derive_swap_spender_secret(&s_sk, &t_sk).unwrap();
 
         let derived_scalar = Ristretto255Scalar::from_canonical_bytes(spender_sec).unwrap();
-        let derived_pub = (&derived_scalar * RISTRETTO_BASEPOINT_TABLE).compress().to_bytes();
+        let derived_pub = (&derived_scalar * RISTRETTO_BASEPOINT_TABLE)
+            .compress()
+            .to_bytes();
         assert_eq!(
             derived_pub, recipient_pub,
             "spender's secret must be the discrete log of the recipient's pubkey"
@@ -1371,7 +1375,9 @@ mod tests {
         let r = build_lock_tx(&cfg, 1_000_000, &[1u8; 32], &[2u8; 32], 1440);
         assert!(matches!(
             r,
-            Err(Error::NotImplemented { stage: "cync.build_lock_tx" })
+            Err(Error::NotImplemented {
+                stage: "cync.build_lock_tx"
+            })
         ));
     }
 
@@ -1442,8 +1448,7 @@ mod tests {
         let (t, _) = test_ristretto_keypair(400);
         let t_point = cync_adaptor_point_from_secret(&t).unwrap();
 
-        let bundle =
-            compute_swap_lock_recipient(&spend_pt, &[0u8; 32], &t_point, 1, None).unwrap();
+        let bundle = compute_swap_lock_recipient(&spend_pt, &[0u8; 32], &t_point, 1, None).unwrap();
         assert_eq!(bundle.lock_height, None);
     }
 }

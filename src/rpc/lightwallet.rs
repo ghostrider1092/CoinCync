@@ -32,12 +32,12 @@
 //! - `GET  /wallet/outputs?height=N` — get output digests for a block range
 //! - `GET  /wallet/coin_info` — coin specification (ticker, decimals, etc.)
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::chain::SharedBlockchain;
 use crate::mempool::SharedMempool;
-use crate::wallet::lightsync::BlockDigest;
 use crate::primitives::PublicKey;
+use crate::wallet::lightsync::BlockDigest;
 
 /// Hard cap on number of candidate outputs returned per scan request.
 ///
@@ -85,7 +85,7 @@ pub const COINCYNC_SPEC: CoinSpec = CoinSpec {
     ticker: "CYNC",
     name: "CoinCync",
     decimals: 12,
-    address_prefix: "tCYNC",  // testnet; mainnet will be "CYNC"
+    address_prefix: "tCYNC", // testnet; mainnet will be "CYNC"
     default_ring_size: 11,
     default_rpc_port: 28081,
     default_p2p_port: 28080,
@@ -214,9 +214,7 @@ impl LightWalletServer {
             //
             // saturating_add is defensive: a tip at u64::MAX has bigger
             // problems than ring-size selection.
-            ring_size: crate::constants::ring_size_at_height(
-                stats.height.saturating_add(1),
-            ),
+            ring_size: crate::constants::ring_size_at_height(stats.height.saturating_add(1)),
             network: "testnet".to_string(),
         }
     }
@@ -307,7 +305,13 @@ impl LightWalletServer {
                     // scanning is O(outputs) with a fast view-tag reject
                     // there, so the extra bandwidth is the trade-off for
                     // never leaking the view_secret to the server.
-                    if is_output_for_keys(&output.tx_public_key, &output.stealth_address, &view_pub, &spend_pub, output.output_index) {
+                    if is_output_for_keys(
+                        &output.tx_public_key,
+                        &output.stealth_address,
+                        &view_pub,
+                        &spend_pub,
+                        output.output_index,
+                    ) {
                         detected.push(DetectedOutput {
                             tx_hash: hex::encode(output.tx_hash.as_bytes()),
                             output_index: output.output_index,
@@ -358,13 +362,13 @@ impl LightWalletServer {
 
     /// Submit a raw signed transaction (built client-side by the wallet).
     pub fn submit_transaction(&self, tx_hex: &str) -> std::result::Result<String, String> {
-        let tx_bytes = hex::decode(tx_hex)
-            .map_err(|e| format!("invalid hex: {}", e))?;
-        let tx: crate::transaction::Transaction = borsh::from_slice(&tx_bytes)
-            .map_err(|e| format!("invalid transaction: {}", e))?;
+        let tx_bytes = hex::decode(tx_hex).map_err(|e| format!("invalid hex: {}", e))?;
+        let tx: crate::transaction::Transaction =
+            borsh::from_slice(&tx_bytes).map_err(|e| format!("invalid transaction: {}", e))?;
 
         let tx_hash = tx.hash();
-        self.mempool.add_with_chain(tx, &self.chain)
+        self.mempool
+            .add_with_chain(tx, &self.chain)
             .map_err(|e| format!("rejected: {}", e))?;
 
         Ok(hex::encode(tx_hash.as_bytes()))
@@ -655,7 +659,10 @@ mod tests {
             (100u64, "01".repeat(32)),                  // 64 hex chars -> [1; 32]
             (200u64, format!("0x{}", "02".repeat(32))), // 0x prefix tolerated
         ];
-        assert_eq!(parse_journal_hex(&good).expect("valid"), vec![(100, h(1)), (200, h(2))]);
+        assert_eq!(
+            parse_journal_hex(&good).expect("valid"),
+            vec![(100, h(1)), (200, h(2))]
+        );
         // Non-hex rejected; wrong length rejected.
         assert!(parse_journal_hex(&[(5u64, "zz".repeat(32))]).is_err());
         assert!(parse_journal_hex(&[(5u64, "0102".to_string())]).is_err());

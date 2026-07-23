@@ -176,7 +176,7 @@ git diff CONSTITUTION.md docs/BILL_OF_RIGHTS.md src/constants.rs src/consensus/ 
 If the change is intentional and reviewed, refresh the lockfile:
 
 ```bash
-cargo run --bin update-critical-hashes --release
+COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes
 ```
 
 Commit the updated `critical_files.lock` alongside your code change. **Never refresh without reading the diff first.** A bad refresh launders an accidental consensus rule change into the chain.
@@ -188,7 +188,7 @@ Update both lock-step lists:
 - `build.rs::CRITICAL_FILES`
 - `src/bin/update_critical_hashes.rs::CRITICAL_FILES`
 
-Then re-run `cargo run --bin update-critical-hashes --release` to compute the initial hash.
+Then re-run `COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes` to compute the initial hash.
 
 ---
 
@@ -330,7 +330,7 @@ No CIP needed for read-only RPC additions. CIP needed if it changes consensus-re
 1. Open the relevant module under `src/consensus/` or `src/crypto/`.
 2. Add a regression test that fails without the fix.
 3. Implement the fix.
-4. If the file is in `critical_files.lock`, run `cargo run --bin update-critical-hashes --release` after the fix is reviewed.
+4. If the file is in `critical_files.lock`, run `COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes` after the fix is reviewed.
 5. Reference Article XVII (Security Strengthening Exception) in the PR description if the fix is security-driven.
 
 ### "I want to add a wallet feature"
@@ -360,7 +360,7 @@ Don't, unless it strictly *strengthens* a user protection. The bar is in Article
 1. Append the new article in principle language (≤4 sentences) — see existing articles for voice.
 2. Add a Commentary section in `docs/CONSTITUTIONAL_COMMENTARY.md` explaining the failure mode it forecloses.
 3. Add a tripwire constant in `src/constants.rs` if applicable.
-4. Refresh `critical_files.lock` (`cargo run --bin update-critical-hashes --release`).
+4. Refresh `critical_files.lock` (`COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes`).
 5. Commit with a clear "constitution: …" prefix.
 
 ---

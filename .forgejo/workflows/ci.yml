@@ -1,0 +1,58 @@
+name: CI
+
+# Repository Actions and a runner advertising the `docker` label must be
+# configured in Codeberg before this workflow can enforce merges.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: docker
+    container:
+      image: rust:1.88.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libclang-dev clang cmake make lld git ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Toolchain and components
+        run: |
+          rustup component add rustfmt clippy
+          rustc --version
+          cargo --version
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy — root crate
+        run: |
+          cargo clippy --locked -p coincync --all-targets --all-features -- -D warnings \
+            -A clippy::cast_lossless -A clippy::cast_possible_truncation \
+            -A clippy::cast_sign_loss -A clippy::print_stdout \
+            -A clippy::unwrap_in_result -A clippy::dbg_macro
+
+      # Path dependencies would otherwise relint the root crate with the
+      # stricter policy owned by the remaining workspace crates.
+      - name: Clippy — remaining workspace
+        run: cargo clippy --locked --workspace --exclude coincync --no-deps --all-targets --all-features -- -D warnings
+
+      - name: Dependency vulnerability audit
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
+          cargo audit --file fuzz/Cargo.lock
+
+      - name: License, bans, and sources policy
+        run: |
+          cargo install cargo-deny --locked --version 0.20.2
+          cargo deny check --hide-inclusion-graph licenses bans sources
+
+      - name: Test suite
+        run: cargo test --locked --workspace --no-fail-fast

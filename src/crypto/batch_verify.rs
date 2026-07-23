@@ -131,7 +131,11 @@ impl BatchVerifier {
             };
         }
 
-        let cache = if self.use_cache { Some(global_cache()) } else { None };
+        let cache = if self.use_cache {
+            Some(global_cache())
+        } else {
+            None
+        };
         let total = self.signatures.len();
 
         let mut cached_results: Vec<Option<bool>> = Vec::with_capacity(total);
@@ -155,15 +159,9 @@ impl BatchVerifier {
         };
 
         let results: Vec<bool> = if total - cached_count > self.parallel_threshold {
-            self.signatures.par_iter()
-                .enumerate()
-                .map(verify)
-                .collect()
+            self.signatures.par_iter().enumerate().map(verify).collect()
         } else {
-            self.signatures.iter()
-                .enumerate()
-                .map(verify)
-                .collect()
+            self.signatures.iter().enumerate().map(verify).collect()
         };
 
         let mut invalid_indices = Vec::new();
@@ -198,7 +196,7 @@ impl BatchVerifier {
     /// Deserializes the ring data and signature, then calls the actual CLSAG
     /// verification function.
     fn verify_single(sig: &SignatureData) -> bool {
-        use crate::crypto::clsag::{ClsagSignature, RingMember, clsag_verify};
+        use crate::crypto::clsag::{clsag_verify, ClsagSignature, RingMember};
         use crate::crypto::curve::Commitment;
 
         // Parse the signature
@@ -235,8 +233,8 @@ impl BatchVerifier {
         // second-verification layer used by mempool + block validation
         // where DEFENSIVE early-out is cheaper than trusting the
         // downstream check. Reject at this layer too.
-        use curve25519_dalek::traits::Identity;
         use curve25519_dalek::ristretto::RistrettoPoint;
+        use curve25519_dalek::traits::Identity;
         if pseudo_output.as_point().as_point() == &RistrettoPoint::identity() {
             return false;
         }
@@ -285,7 +283,11 @@ impl ParallelTxValidator {
     /// Validate transactions in parallel
     ///
     /// Returns indices of invalid transactions.
-    pub fn validate_transactions<F>(&self, txs: &[crate::transaction::Transaction], validate_fn: F) -> Vec<usize>
+    pub fn validate_transactions<F>(
+        &self,
+        txs: &[crate::transaction::Transaction],
+        validate_fn: F,
+    ) -> Vec<usize>
     where
         F: Fn(&crate::transaction::Transaction) -> bool + Sync,
     {
@@ -294,7 +296,8 @@ impl ParallelTxValidator {
         }
 
         // Parallel validation on rayon's global thread pool.
-        let invalid: Vec<usize> = txs.par_iter()
+        let invalid: Vec<usize> = txs
+            .par_iter()
             .enumerate()
             .filter(|(_, tx)| !validate_fn(tx))
             .map(|(i, _)| i)
@@ -304,7 +307,11 @@ impl ParallelTxValidator {
     }
 
     /// Validate and return valid transactions
-    pub fn filter_valid<F>(&self, txs: Vec<crate::transaction::Transaction>, validate_fn: F) -> Vec<crate::transaction::Transaction>
+    pub fn filter_valid<F>(
+        &self,
+        txs: Vec<crate::transaction::Transaction>,
+        validate_fn: F,
+    ) -> Vec<crate::transaction::Transaction>
     where
         F: Fn(&crate::transaction::Transaction) -> bool + Sync,
     {
@@ -312,9 +319,7 @@ impl ParallelTxValidator {
             return Vec::new();
         }
 
-        txs.into_par_iter()
-            .filter(|tx| validate_fn(tx))
-            .collect()
+        txs.into_par_iter().filter(|tx| validate_fn(tx)).collect()
     }
 }
 

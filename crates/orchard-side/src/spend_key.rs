@@ -157,7 +157,7 @@ impl SpendingKey {
     /// see signed against.
     ///
     /// Per orchard 0.12 `src/keys.rs::SpendAuthorizingKey::from`
-    /// + NU5 §4.2.3. Catching this is the difference between
+    /// and NU5 §4.2.3. Catching this is the difference between
     /// "ak.x matches orchard byte-for-byte" (always true even
     /// without the negation) and "ask bytes match orchard"
     /// (only true with the negation). Affects spend-auth signing
@@ -386,8 +386,8 @@ impl FullViewingKey {
             .chain(crate::commitment::bytes_to_255_le_bits(&self.nk));
 
         let domain = CommitDomain::new("z.cash:Orchard-CommitIvk");
-        let ivk_base: pallas::Base = Option::from(domain.short_commit(bits, &rivk))
-            .ok_or(Error::DomainRule(
+        let ivk_base: pallas::Base =
+            Option::from(domain.short_commit(bits, &rivk)).ok_or(Error::DomainRule(
                 "CommitIvk yielded identity — regenerate seed (rotate rivk via fresh sk)",
             ))?;
 
@@ -422,10 +422,9 @@ impl IncomingViewingKey {
         // ivk as a Pallas scalar. Per the spec, a small fraction
         // of CommitIvk outputs are ≥ q_S and must be rejected;
         // the wallet should rotate the seed and retry.
-        let ivk_scalar: pallas::Scalar = Option::from(pallas::Scalar::from_repr(self.0))
-            .ok_or(Error::DomainRule(
-                "ivk is not a canonical Pallas scalar — rotate sk and retry",
-            ))?;
+        let ivk_scalar: pallas::Scalar = Option::from(pallas::Scalar::from_repr(self.0)).ok_or(
+            Error::DomainRule("ivk is not a canonical Pallas scalar — rotate sk and retry"),
+        )?;
 
         // gd = DiversifyHash(d). Per Zcash NU5 §5.4.1.6, this is
         // the IETF Simplified-SWU **hash-to-curve** on Pallas with
@@ -485,7 +484,7 @@ mod tests {
     #[test]
     fn spending_key_debug_redacts() {
         let sk = SpendingKey::from_bytes([7u8; 32]).unwrap();
-        let dbg = format!("{:?}", sk);
+        let dbg = format!("{sk:?}");
         assert!(dbg.contains("redacted"));
         assert!(!dbg.contains("07"), "must not leak raw bytes");
     }
@@ -703,8 +702,8 @@ mod tests {
         use group::GroupEncoding;
         let (_, ivk) = canonical_ivk_fixture(170).expect("find canonical ivk");
         let (gd_bytes, pkd_bytes) = ivk.address_at([5u8; 11]).unwrap();
-        let gd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = gd_bytes.into();
-        let pkd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = pkd_bytes.into();
+        let gd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = gd_bytes;
+        let pkd_bytes_arr: <pallas::Point as GroupEncoding>::Repr = pkd_bytes;
         assert!(
             bool::from(pallas::Point::from_bytes(&gd_bytes_arr).is_some()),
             "gd bytes must roundtrip through GroupEncoding"

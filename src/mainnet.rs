@@ -3,10 +3,10 @@
 //! Configuration and genesis block for CoinCync mainnet.
 //! This is the production network — changes here affect real funds.
 
-use crate::primitives::{Hash, PublicKey, Amount};
-use crate::consensus::{Block, BlockHeader};
 use crate::config::NetworkType;
-use crate::transaction::{Transaction, TxType, TxOutput};
+use crate::consensus::{Block, BlockHeader};
+use crate::primitives::{Amount, Hash, PublicKey};
+use crate::transaction::{Transaction, TxOutput, TxType};
 use std::net::SocketAddr;
 
 /// Mainnet network magic bytes ("CYNC")
@@ -41,9 +41,9 @@ pub const MAINNET_SEED_NODES: &[&str] = &[
     // 2026-06-06: rewritten to the live Vultr fleet. Previous LON,
     // SYD, NYC3, SFO, TOR entries referenced boxes that no longer
     // exist. Re-populate pre-mainnet with the launch fleet.
-    "66.135.23.193:19080",    // seed1 — New York
-    "140.82.57.168:19080",    // seed2 — Amsterdam
-    "207.148.111.76:19080",   // seed3 — Tokyo
+    "66.135.23.193:19080",  // seed1 — New York
+    "140.82.57.168:19080",  // seed2 — Amsterdam
+    "207.148.111.76:19080", // seed3 — Tokyo
 ];
 
 /// Mainnet minimum ring size (same as testnet — constitutional minimum)
@@ -77,10 +77,8 @@ pub const MAINNET_INITIAL_DIFFICULTY: u64 = 10_000;
 // this constant must be recomputed — `test_mainnet_genesis_hash_consistency`
 // below fails fast so CI catches it before it ships.
 pub const MAINNET_GENESIS_HASH: [u8; 32] = [
-    0x9d, 0xbb, 0x99, 0xab, 0x3e, 0x63, 0xac, 0x14,
-    0x0f, 0x4a, 0xdf, 0xb8, 0xfb, 0x76, 0xef, 0xbd,
-    0x66, 0x5f, 0xb7, 0xf2, 0x3d, 0x75, 0xda, 0x9f,
-    0xa7, 0xda, 0x82, 0xe4, 0xd5, 0xc0, 0x33, 0x68,
+    0x9d, 0xbb, 0x99, 0xab, 0x3e, 0x63, 0xac, 0x14, 0x0f, 0x4a, 0xdf, 0xb8, 0xfb, 0x76, 0xef, 0xbd,
+    0x66, 0x5f, 0xb7, 0xf2, 0x3d, 0x75, 0xda, 0x9f, 0xa7, 0xda, 0x82, 0xe4, 0xd5, 0xc0, 0x33, 0x68,
 ];
 
 // AUDIT (2026-07-02): removed the `pub mod emission { ... }` block that
@@ -134,7 +132,8 @@ impl Default for MainnetConfig {
             block_time: MAINNET_BLOCK_TIME,
             initial_difficulty: MAINNET_INITIAL_DIFFICULTY,
             dns_seeds: MAINNET_DNS_SEEDS.iter().map(|s| s.to_string()).collect(),
-            seed_nodes: MAINNET_SEED_NODES.iter()
+            seed_nodes: MAINNET_SEED_NODES
+                .iter()
                 .filter_map(|s| s.parse().ok())
                 .collect(),
         }
@@ -240,7 +239,8 @@ pub fn expected_genesis_hash() -> Hash {
         if MAINNET_GENESIS_HASH != [0u8; 32] {
             let computed = mainnet_genesis().hash();
             assert_eq!(
-                hardcoded, computed,
+                hardcoded,
+                computed,
                 "CRITICAL: Hardcoded mainnet genesis hash does not match computed genesis hash! \
                  Someone changed the genesis block struct without updating MAINNET_GENESIS_HASH. \
                  Computed: {}",
@@ -330,7 +330,10 @@ mod tests {
     fn test_mainnet_genesis_differs_from_testnet() {
         let mainnet = mainnet_genesis().hash();
         let testnet = crate::testnet::testnet_genesis().hash();
-        assert_ne!(mainnet, testnet, "Mainnet and testnet genesis must be different!");
+        assert_ne!(
+            mainnet, testnet,
+            "Mainnet and testnet genesis must be different!"
+        );
     }
 
     #[test]
@@ -347,10 +350,16 @@ mod tests {
         // Verify seed nodes constant is defined (may be empty pre-launch)
         // When populated, each should be a valid socket address
         for seed in MAINNET_SEED_NODES {
-            assert!(seed.parse::<std::net::SocketAddr>().is_ok(),
-                "Seed node '{}' is not a valid socket address", seed);
+            assert!(
+                seed.parse::<std::net::SocketAddr>().is_ok(),
+                "Seed node '{}' is not a valid socket address",
+                seed
+            );
         }
         // DNS seeds should be non-empty
-        assert!(!MAINNET_DNS_SEEDS.is_empty(), "DNS seeds must be configured");
+        assert!(
+            !MAINNET_DNS_SEEDS.is_empty(),
+            "DNS seeds must be configured"
+        );
     }
 }

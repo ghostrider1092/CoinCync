@@ -213,11 +213,8 @@ enum Response {
 /// Type alias for the per-IP attach-rate limiter. governor's
 /// keyed-state limiter wraps a HashMap<IpAddr, _> internally;
 /// the type signature is verbose so we hide it here.
-type AttachLimiter = governor::RateLimiter<
-    IpAddr,
-    governor::state::keyed::DashMapStateStore<IpAddr>,
-    DefaultClock,
->;
+type AttachLimiter =
+    governor::RateLimiter<IpAddr, governor::state::keyed::DashMapStateStore<IpAddr>, DefaultClock>;
 
 /// Prometheus metrics registered on the dedicated metrics
 /// endpoint. Each field is a separate counter / gauge so a
@@ -244,9 +241,11 @@ struct Metrics {
 impl Metrics {
     fn new() -> Self {
         let registry = Registry::new();
-        let connections_attempted =
-            IntCounter::new("coord_connections_attempted_total", "Total WSS connections accepted")
-                .expect("static counter init");
+        let connections_attempted = IntCounter::new(
+            "coord_connections_attempted_total",
+            "Total WSS connections accepted",
+        )
+        .expect("static counter init");
         let connections_rejected_limit = IntCounter::new(
             "coord_connections_rejected_max_total",
             "Connections rejected because MAX_CONNECTIONS was reached",
@@ -726,8 +725,7 @@ async fn handle_attach(
             request_id,
             code: "rate_limited",
             message: format!(
-                "attach rate limit exceeded ({} attempts/min/IP)",
-                ATTACH_RATE_PER_MINUTE_PER_IP
+                "attach rate limit exceeded ({ATTACH_RATE_PER_MINUTE_PER_IP} attempts/min/IP)"
             ),
         };
     }
@@ -946,7 +944,10 @@ fn canonicalize_ip_for_rate_limit(ip: IpAddr) -> IpAddr {
                 segments[1],
                 segments[2],
                 segments[3],
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
             ))
         }
     }

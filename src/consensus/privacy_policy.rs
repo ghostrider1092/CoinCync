@@ -140,8 +140,8 @@ mod tests {
 
     /// Generate a valid non-identity Ristretto point for test commitments.
     fn valid_commitment() -> [u8; 32] {
-        use curve25519_dalek::scalar::Scalar;
         use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+        use curve25519_dalek::scalar::Scalar;
         let s = Scalar::from(42u64);
         (s * RISTRETTO_BASEPOINT_POINT).compress().to_bytes()
     }
@@ -177,27 +177,30 @@ mod tests {
             vec![mk_output([0u8; 32], [2u8; 32])],
         );
         // Rule 1 should fire before Rule 3, even though inputs are empty.
-        assert!(matches!(check_tx_privacy(&tx), Err(Error::TransparentOutputForbidden)));
+        assert!(matches!(
+            check_tx_privacy(&tx),
+            Err(Error::TransparentOutputForbidden)
+        ));
     }
 
     #[test]
     fn zero_stealth_rejected() {
         let c = valid_commitment();
-        let tx = mk_tx(
-            vec![],
-            vec![mk_output(c, [0u8; 32])],
-        );
-        assert!(matches!(check_tx_privacy(&tx), Err(Error::RawPubkeyForbidden)));
+        let tx = mk_tx(vec![], vec![mk_output(c, [0u8; 32])]);
+        assert!(matches!(
+            check_tx_privacy(&tx),
+            Err(Error::RawPubkeyForbidden)
+        ));
     }
 
     #[test]
     fn empty_inputs_rejected() {
         let c = valid_commitment();
         let s = valid_commitment(); // valid stealth so rules 1+2 pass
-        let tx = mk_tx(
-            vec![],
-            vec![mk_output(c, s)],
-        );
-        assert!(matches!(check_tx_privacy(&tx), Err(Error::UnshieldedForbidden)));
+        let tx = mk_tx(vec![], vec![mk_output(c, s)]);
+        assert!(matches!(
+            check_tx_privacy(&tx),
+            Err(Error::UnshieldedForbidden)
+        ));
     }
 }

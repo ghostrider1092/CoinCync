@@ -3,6 +3,7 @@
 //! Real elliptic curve cryptography using curve25519-dalek.
 //! This module provides the foundational EC operations for CoinCync.
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT,
     ristretto::{CompressedRistretto, RistrettoPoint},
@@ -10,12 +11,10 @@ use curve25519_dalek::{
     traits::Identity,
 };
 use rand_core::{CryptoRng, RngCore};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha3::{Digest, Sha3_512};
-use zeroize::{Zeroize, ZeroizeOnDrop};
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
-use borsh::{BorshSerialize, BorshDeserialize};
 use std::fmt;
-
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Generator point G (Ristretto basepoint)
 pub fn generator() -> RistrettoPoint {
@@ -34,10 +33,9 @@ pub fn generator_h() -> RistrettoPoint {
     use once_cell::sync::Lazy;
     // Extracted from bulletproofs::PedersenGens::default().B_blinding
     const H_BYTES: [u8; 32] = [
-        0x8c, 0x92, 0x40, 0xb4, 0x56, 0xa9, 0xe6, 0xdc,
-        0x65, 0xc3, 0x77, 0xa1, 0x04, 0x8d, 0x74, 0x5f,
-        0x94, 0xa0, 0x8c, 0xdb, 0x7f, 0x44, 0xcb, 0xcd,
-        0x7b, 0x46, 0xf3, 0x40, 0x48, 0x87, 0x11, 0x34,
+        0x8c, 0x92, 0x40, 0xb4, 0x56, 0xa9, 0xe6, 0xdc, 0x65, 0xc3, 0x77, 0xa1, 0x04, 0x8d, 0x74,
+        0x5f, 0x94, 0xa0, 0x8c, 0xdb, 0x7f, 0x44, 0xcb, 0xcd, 0x7b, 0x46, 0xf3, 0x40, 0x48, 0x87,
+        0x11, 0x34,
     ];
     static H_POINT: Lazy<RistrettoPoint> = Lazy::new(|| {
         CompressedRistretto::from_slice(&H_BYTES)
@@ -166,9 +164,7 @@ impl PublicPoint {
 
     /// Decompress from bytes
     pub fn from_bytes(bytes: [u8; 32]) -> Option<Self> {
-        CompressedRistretto(bytes)
-            .decompress()
-            .map(PublicPoint)
+        CompressedRistretto(bytes).decompress().map(PublicPoint)
     }
 
     /// Compress to bytes
@@ -292,8 +288,9 @@ impl BorshDeserialize for PublicPoint {
     fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
         let mut bytes = [0u8; 32];
         reader.read_exact(&mut bytes)?;
-        PublicPoint::from_bytes(bytes)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid curve point"))
+        PublicPoint::from_bytes(bytes).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid curve point")
+        })
     }
 }
 

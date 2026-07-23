@@ -221,7 +221,7 @@ lobste.rs: smaller HN, Rust + cryptography focus, less crypto-friendly but more 
 > Submitted because the constitutional-tripwire system is a programming-language idea (compile-time-enforced invariants over a long-lived codebase) that happens to be applied to a privacy coin. The crypto context is secondary; the tag is `cryptocurrencies` because that's the host project.
 
 **Q: "Compile-time check? doesn't `cargo build` just succeed if you change the hash?"**
-> Yes — that's what makes it visible. The check fires in build.rs and reads `critical_files.lock`. Updating a hash is a deliberate commit (`cargo run --bin update-critical-hashes`) that any reviewer sees. It's not "make corruption impossible" — it's "make corruption attributable."
+> Yes — that's what makes it visible. The check fires in build.rs and reads `critical_files.lock`. Updating a hash is a deliberate commit (`COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes`) that any reviewer sees. It's not "make corruption impossible" — it's "make corruption attributable."
 
 **Q: "Show me the build.rs"**
 > https://git.coincync.network/coincync/cync-protocol/blob/main/build.rs — `CRITICAL_FILES` is at the top, the SHA-256 verification loop runs on every cargo invocation. ~150 lines total.

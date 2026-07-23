@@ -15,9 +15,9 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
 use crate::chain::SharedBlockchain;
+use crate::error::{Error, Result};
 use crate::mempool::SharedMempool;
 use crate::primitives::{Hash, PublicKey};
-use crate::error::{Error, Result};
 
 const MIN_SUBMIT_INTERVAL_MS: u64 = 200;
 const MAX_INVALID_STREAK: u32 = 20;
@@ -120,7 +120,12 @@ fn validate_stratum_exposure_policy(config: &StratumConfig) -> Result<()> {
                 .into(),
         ));
     }
-    if config.auth_password.as_deref().map(str::is_empty).unwrap_or(true) {
+    if config
+        .auth_password
+        .as_deref()
+        .map(str::is_empty)
+        .unwrap_or(true)
+    {
         return Err(Error::InvalidState(
             "Refusing public Stratum bind without COINCYNC_STRATUM_PASSWORD. \
              Public Stratum must require worker authorization."
@@ -218,9 +223,14 @@ impl Share {
     /// Verify a share meets the target difficulty
     ///
     /// Returns ShareResult indicating if the share is valid and potentially a block.
-    pub fn verify(&self, job: &MiningJob, share_difficulty: u64, extranonce1: &[u8]) -> ShareResult {
+    pub fn verify(
+        &self,
+        job: &MiningJob,
+        share_difficulty: u64,
+        extranonce1: &[u8],
+    ) -> ShareResult {
         use crate::consensus::{compute_pow_hash, PowAlgorithm};
-        use sha3::{Sha3_256, Digest};
+        use sha3::{Digest, Sha3_256};
 
         // Build the coinbase transaction
         let mut coinbase = Vec::new();
@@ -379,11 +389,7 @@ pub struct StratumServer {
 
 impl StratumServer {
     /// Create a new Stratum server
-    pub fn new(
-        config: StratumConfig,
-        chain: SharedBlockchain,
-        mempool: SharedMempool,
-    ) -> Self {
+    pub fn new(config: StratumConfig, chain: SharedBlockchain, mempool: SharedMempool) -> Self {
         let (job_broadcast, _) = broadcast::channel(16);
         let banlist_path = std::env::var("COINCYNC_STRATUM_BANLIST_PATH")
             .ok()
@@ -391,10 +397,7 @@ impl StratumServer {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .or_else(|| Some(PathBuf::from("stratum_bans.json")));
-        let bans = banlist_path
-            .as_ref()
-            .map(load_banlist)
-            .unwrap_or_default();
+        let bans = banlist_path.as_ref().map(load_banlist).unwrap_or_default();
 
         StratumServer {
             config,
@@ -638,7 +641,10 @@ impl StratumServer {
                     Ok(0) => break, // Connection closed
                     Ok(_) if !line.ends_with('\n') => {
                         // Line exceeded MAX_LINE_LENGTH without a newline
-                        warn!("Worker {} sent oversized message (>{} bytes), disconnecting", worker_id, MAX_LINE_LENGTH);
+                        warn!(
+                            "Worker {} sent oversized message (>{} bytes), disconnecting",
+                            worker_id, MAX_LINE_LENGTH
+                        );
                         break;
                     }
                     Ok(_) => {
@@ -654,7 +660,9 @@ impl StratumServer {
                             &addr.ip().to_string(),
                             &bans,
                             banlist_path.as_ref(),
-                        ).await {
+                        )
+                        .await
+                        {
                             let _ = tx.send(response).await;
                         }
                     }
@@ -768,7 +776,11 @@ async fn handle_stratum_message(
             // Enforce authorization before accepting shares.
             {
                 let workers_read = workers.read().await;
-                if !workers_read.get(&worker_id).map(|w| w.authorized).unwrap_or(false) {
+                if !workers_read
+                    .get(&worker_id)
+                    .map(|w| w.authorized)
+                    .unwrap_or(false)
+                {
                     return Some(format!(
                         r#"{{"id":{},"result":false,"error":[24,"Not authorized",null]}}"#,
                         id
@@ -788,7 +800,10 @@ async fn handle_stratum_message(
                         worker.invalid_streak = worker.invalid_streak.saturating_add(1);
                         if worker.invalid_streak >= MAX_INVALID_STREAK {
                             worker.authorized = false;
-                            warn!("Worker {} hit submit-rate abuse threshold; deauthorizing", worker_id);
+                            warn!(
+                                "Worker {} hit submit-rate abuse threshold; deauthorizing",
+                                worker_id
+                            );
                         }
                         throttled = true;
                     } else {
@@ -922,7 +937,11 @@ async fn handle_stratum_message(
                     ShareResult::Block(hash) => {
                         s.valid_shares += 1;
                         s.blocks_found += 1;
-                        info!("BLOCK FOUND by worker {}! Hash: {}", worker_id, hex::encode(hash.as_bytes()));
+                        info!(
+                            "BLOCK FOUND by worker {}! Hash: {}",
+                            worker_id,
+                            hex::encode(hash.as_bytes())
+                        );
                     }
                     ShareResult::Stale => s.stale_shares += 1,
                     ShareResult::Invalid | ShareResult::Duplicate => s.invalid_shares += 1,
@@ -938,24 +957,18 @@ async fn handle_stratum_message(
                 ShareResult::Valid | ShareResult::Block(_) => {
                     Some(format!(r#"{{"id":{},"result":true,"error":null}}"#, id))
                 }
-                ShareResult::Stale => {
-                    Some(format!(
-                        r#"{{"id":{},"result":false,"error":[21,"Stale share",null]}}"#,
-                        id
-                    ))
-                }
-                ShareResult::Invalid => {
-                    Some(format!(
-                        r#"{{"id":{},"result":false,"error":[23,"Low difficulty share",null]}}"#,
-                        id
-                    ))
-                }
-                ShareResult::Duplicate => {
-                    Some(format!(
-                        r#"{{"id":{},"result":false,"error":[22,"Duplicate share",null]}}"#,
-                        id
-                    ))
-                }
+                ShareResult::Stale => Some(format!(
+                    r#"{{"id":{},"result":false,"error":[21,"Stale share",null]}}"#,
+                    id
+                )),
+                ShareResult::Invalid => Some(format!(
+                    r#"{{"id":{},"result":false,"error":[23,"Low difficulty share",null]}}"#,
+                    id
+                )),
+                ShareResult::Duplicate => Some(format!(
+                    r#"{{"id":{},"result":false,"error":[22,"Duplicate share",null]}}"#,
+                    id
+                )),
             }
         }
 
@@ -975,7 +988,9 @@ async fn handle_stratum_message(
 
 /// Format mining.notify message
 fn format_mining_notify(job: &MiningJob) -> String {
-    let merkle: Vec<String> = job.merkle_branches.iter()
+    let merkle: Vec<String> = job
+        .merkle_branches
+        .iter()
         .map(|h| hex::encode(h.as_bytes()))
         .collect();
 
@@ -1005,7 +1020,7 @@ fn create_coinbase_prefix(height: u64) -> Vec<u8> {
     prefix.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     // Script length placeholder (will include height + extranonce)
     prefix.push(8 + 4); // height (8) + extranonce1 (4)
-    // Height in script (BIP34)
+                        // Height in script (BIP34)
     prefix.push(8);
     prefix.extend_from_slice(&height.to_le_bytes());
     prefix
@@ -1051,15 +1066,9 @@ fn compute_merkle_branches(mempool: &SharedMempool) -> Vec<Hash> {
         let mut next_level = Vec::new();
         for chunk in level.chunks(2) {
             let combined = if chunk.len() == 2 {
-                crate::primitives::hash_concat(&[
-                    chunk[0].as_bytes(),
-                    chunk[1].as_bytes(),
-                ])
+                crate::primitives::hash_concat(&[chunk[0].as_bytes(), chunk[1].as_bytes()])
             } else {
-                crate::primitives::hash_concat(&[
-                    chunk[0].as_bytes(),
-                    chunk[0].as_bytes(),
-                ])
+                crate::primitives::hash_concat(&[chunk[0].as_bytes(), chunk[0].as_bytes()])
             };
             next_level.push(combined);
         }
@@ -1082,7 +1091,11 @@ fn difficulty_to_nbits(difficulty: u64) -> u32 {
     // SECURITY (A6-SHIFT): Guard against shift >= 24 on the mantissa mask,
     // which causes UB/panic for difficulty >= 2^32.
     let shift_amount = leading_zeros * 8;
-    let mantissa = if shift_amount >= 24 { 0u32 } else { 0xFFFFFF >> shift_amount };
+    let mantissa = if shift_amount >= 24 {
+        0u32
+    } else {
+        0xFFFFFF >> shift_amount
+    };
 
     ((exponent as u32) << 24) | mantissa
 }
@@ -1104,11 +1117,12 @@ fn timestamp_now_ms() -> u64 {
 
 fn load_banlist(path: &PathBuf) -> HashMap<String, PersistedBanEntry> {
     match std::fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str::<HashMap<String, PersistedBanEntry>>(&raw)
-            .unwrap_or_else(|e| {
+        Ok(raw) => {
+            serde_json::from_str::<HashMap<String, PersistedBanEntry>>(&raw).unwrap_or_else(|e| {
                 warn!("Failed to parse Stratum banlist {}: {}", path.display(), e);
                 HashMap::new()
-            }),
+            })
+        }
         Err(_) => HashMap::new(),
     }
 }
@@ -1116,7 +1130,11 @@ fn load_banlist(path: &PathBuf) -> HashMap<String, PersistedBanEntry> {
 fn persist_banlist(path: &PathBuf, bans: &HashMap<String, PersistedBanEntry>) {
     if let Ok(raw) = serde_json::to_string_pretty(bans) {
         if let Err(e) = std::fs::write(path, raw) {
-            warn!("Failed to persist Stratum banlist {}: {}", path.display(), e);
+            warn!(
+                "Failed to persist Stratum banlist {}: {}",
+                path.display(),
+                e
+            );
         }
     }
 }
@@ -1335,15 +1353,23 @@ mod tests {
             "198.51.100.77",
             &bans,
             None,
-        ).await.expect("response");
+        )
+        .await
+        .expect("response");
         assert!(resp.contains("Throttled submit rate"));
 
         let guard = workers.read().await;
         let updated = guard.get(&worker_id).expect("worker still present");
-        assert!(!updated.authorized, "worker should be deauthorized at streak threshold");
+        assert!(
+            !updated.authorized,
+            "worker should be deauthorized at streak threshold"
+        );
         drop(guard);
 
         let bans_guard = bans.read().await;
-        assert!(bans_guard.get("198.51.100.77").is_some(), "throttled submit should register strike");
+        assert!(
+            bans_guard.get("198.51.100.77").is_some(),
+            "throttled submit should register strike"
+        );
     }
 }

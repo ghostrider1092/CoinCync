@@ -74,7 +74,7 @@ hundreds.
   N blocks where `prev_difficulty` is still the seed value.
 - **Fork coordination.** Any change here is consensus-breaking. Requires: an
   activation height, `critical_files.lock` refresh via
-  `cargo run --bin update-critical-hashes` (elevation on Windows), a testnet
+  `COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes` (elevation on Windows), a testnet
   dry run, and fleet-wide upgrade before activation.
 
 ## Recommendation

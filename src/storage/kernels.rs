@@ -87,8 +87,8 @@ impl KernelStore {
 
         let mut loaded: Vec<(u64, MwKernel)> = Vec::new();
         for item in kernels_tree.iter() {
-            let (key, value) = item
-                .map_err(|e| Error::DatabaseError(format!("mw_kernels iter: {}", e)))?;
+            let (key, value) =
+                item.map_err(|e| Error::DatabaseError(format!("mw_kernels iter: {}", e)))?;
             let key_bytes: [u8; 8] = key
                 .as_ref()
                 .try_into()
@@ -170,10 +170,7 @@ impl KernelStore {
                      cleanly. Investigate disk + RocksDB state before restart.",
                     idx
                 );
-                panic!(
-                    "R-61: mw_kernels write failed at idx {}: {}",
-                    idx, e
-                );
+                panic!("R-61: mw_kernels write failed at idx {}: {}", idx, e);
             }
         }
         kernels.push(kernel);
@@ -191,7 +188,10 @@ impl KernelStore {
     pub fn checkpoint_at_height(&self, height: u64) {
         let kernels_len = self.kernels.read().len();
         let mut cps = self.checkpoints.write();
-        cps.push(KernelCheckpoint { height, kernels_len });
+        cps.push(KernelCheckpoint {
+            height,
+            kernels_len,
+        });
         // Bound the stack — checkpoints deeper than the chain's reorg
         // cap can never be a rewind target.
         if cps.len() > MAX_REORG_CHECKPOINTS {
@@ -743,8 +743,10 @@ mod tests {
             thread::sleep(Duration::from_millis(600));
             stop.store(true, Ordering::Relaxed);
             writer.join().expect("writer thread panicked");
-            let total_reads: u64 =
-                readers.into_iter().map(|r| r.join().expect("reader panicked")).sum();
+            let total_reads: u64 = readers
+                .into_iter()
+                .map(|r| r.join().expect("reader panicked"))
+                .sum();
             assert!(total_reads > 0, "readers made no progress — possible stall");
             let r1 = store.current_root();
             assert_eq!(r1, store.current_root(), "root not stable while quiescent");

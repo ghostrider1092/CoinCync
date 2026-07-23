@@ -1,4 +1,4 @@
-﻿//! Bitcoin-side primitives for the atomic swap.
+//! Bitcoin-side primitives for the atomic swap.
 //!
 //! The BTC side of the swap is "the easy side" â€” Bitcoin's scripting
 //! supports HTLC + adaptor-signature constructions natively, and there
@@ -143,7 +143,10 @@ impl BitcoinCoreRpc {
     /// Build a new client. Validates the config minimally: URL parses,
     /// network string is recognised.
     pub fn new(config: BtcConfig) -> Result<Self> {
-        if !matches!(config.network.as_str(), "mainnet" | "testnet" | "regtest" | "signet") {
+        if !matches!(
+            config.network.as_str(),
+            "mainnet" | "testnet" | "regtest" | "signet"
+        ) {
             return Err(Error::Verification(
                 "BtcConfig.network must be one of mainnet/testnet/regtest/signet",
             ));
@@ -158,7 +161,7 @@ impl BitcoinCoreRpc {
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(60))
             .build()
-            .map_err(|e| Error::Rpc(format!("reqwest client build: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("reqwest client build: {e}")))?;
         Ok(Self {
             config,
             http,
@@ -199,13 +202,13 @@ impl BitcoinCoreRpc {
         let resp = req
             .send()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC HTTP: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC HTTP: {e}")))?;
 
         let status = resp.status();
         let body: JsonRpcResponse<T> = resp
             .json()
             .await
-            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {}", e)))?;
+            .map_err(|e| Error::Rpc(format!("RPC JSON decode: {e}")))?;
 
         if let Some(err) = body.error {
             return Err(Error::Rpc(format!(
@@ -215,8 +218,7 @@ impl BitcoinCoreRpc {
         }
         body.result.ok_or_else(|| {
             Error::Rpc(format!(
-                "bitcoind {} returned no result (status {})",
-                method, status
+                "bitcoind {method} returned no result (status {status})"
             ))
         })
     }
@@ -573,9 +575,8 @@ pub fn build_lock_tx(config: &BtcConfig, request: &LockTxRequest) -> Result<Vec<
         .utxos
         .iter()
         .map(|u| {
-            let prev_txid = bitcoin::Txid::from_raw_hash(
-                bitcoin::hashes::Hash::from_byte_array(u.txid.0),
-            );
+            let prev_txid =
+                bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(u.txid.0));
             TxIn {
                 previous_output: OutPoint {
                     txid: prev_txid,
@@ -784,7 +785,7 @@ pub fn build_claim_tx(
 
     // BIP-341 key-path spend: witness is a single 64-byte signature.
     let mut witness = bitcoin::Witness::new();
-    witness.push(signature.to_vec());
+    witness.push(signature);
     tx.input[0].witness = witness;
 
     Ok(bitcoin::consensus::encode::serialize(&tx))
@@ -798,11 +799,7 @@ pub fn build_claim_tx(
 /// during construction. This rejects alternate inputs, outputs,
 /// transaction metadata, or witness shapes before a caller advances
 /// swap state for an unrelated broadcast.
-pub fn validate_claim_tx(
-    config: &BtcConfig,
-    base: &ClaimTxBase,
-    tx_bytes: &[u8],
-) -> Result<()> {
+pub fn validate_claim_tx(config: &BtcConfig, base: &ClaimTxBase, tx_bytes: &[u8]) -> Result<()> {
     let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(tx_bytes)
         .map_err(|_| Error::Verification("claim transaction consensus decode failed"))?;
     if tx.input.len() != 1 {
@@ -890,9 +887,8 @@ fn build_claim_tx_internal(
         script_pubkey: prev_script,
     };
 
-    let prev_txid = bitcoin::Txid::from_raw_hash(
-        bitcoin::hashes::Hash::from_byte_array(base.lock_txid.0),
-    );
+    let prev_txid =
+        bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(base.lock_txid.0));
     let input = TxIn {
         previous_output: OutPoint {
             txid: prev_txid,
@@ -940,8 +936,10 @@ fn refund_script(branch: &RefundBranch) -> Result<bitcoin::ScriptBuf> {
     use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CSV, OP_DROP};
     use bitcoin::script::Builder;
 
-    let bob_xonly = bitcoin::secp256k1::XOnlyPublicKey::from_slice(&branch.bob_pubkey)
-        .map_err(|_| Error::Verification("refund branch bob_pubkey is not a valid x-only pubkey"))?;
+    let bob_xonly =
+        bitcoin::secp256k1::XOnlyPublicKey::from_slice(&branch.bob_pubkey).map_err(|_| {
+            Error::Verification("refund branch bob_pubkey is not a valid x-only pubkey")
+        })?;
 
     Ok(Builder::new()
         .push_int(branch.csv_blocks as i64)
@@ -956,12 +954,12 @@ fn refund_script(branch: &RefundBranch) -> Result<bitcoin::ScriptBuf> {
 /// refund script tree. Used both during lock construction (to derive
 /// the output key) and during claim/refund construction (to
 /// reconstruct the same scriptPubkey for sighash computation).
-fn refund_script_merkle_root(
-    branch: &RefundBranch,
-) -> Result<bitcoin::taproot::TapNodeHash> {
+fn refund_script_merkle_root(branch: &RefundBranch) -> Result<bitcoin::taproot::TapNodeHash> {
     let script = refund_script(branch)?;
-    let leaf_hash =
-        bitcoin::taproot::TapLeafHash::from_script(&script, bitcoin::taproot::LeafVersion::TapScript);
+    let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(
+        &script,
+        bitcoin::taproot::LeafVersion::TapScript,
+    );
     // For a single-leaf tree the merkle root *is* the leaf hash â€”
     // there's no sibling to combine with.
     Ok(bitcoin::taproot::TapNodeHash::from(leaf_hash))
@@ -979,7 +977,11 @@ fn lock_prev_script(
         Some(b) => Some(refund_script_merkle_root(b)?),
         None => None,
     };
-    Ok(bitcoin::ScriptBuf::new_p2tr(&secp, internal_key, merkle_root))
+    Ok(bitcoin::ScriptBuf::new_p2tr(
+        &secp,
+        internal_key,
+        merkle_root,
+    ))
 }
 
 /// Tweak Alice's claim secret for a lock that has a script tree.
@@ -1012,7 +1014,8 @@ pub fn tweaked_claim_secret(
         Some(b) => Some(refund_script_merkle_root(b)?),
         None => None,
     };
-    let tweaked = kp.add_xonly_tweak(&secp, &untweaked_to_taptweak(&kp, merkle_root)?)
+    let tweaked = kp
+        .add_xonly_tweak(&secp, &untweaked_to_taptweak(&kp, merkle_root)?)
         .map_err(|_| Error::Verification("Taproot tweak addition failed"))?;
     Ok(tweaked.secret_key().secret_bytes())
 }
@@ -1025,8 +1028,9 @@ fn untweaked_to_taptweak(
     use bitcoin::hashes::Hash;
     let (xonly, _parity) = kp.x_only_public_key();
     let tweak = bitcoin::taproot::TapTweakHash::from_key_and_tweak(xonly, merkle_root);
-    bitcoin::secp256k1::Scalar::from_be_bytes(tweak.to_byte_array())
-        .map_err(|_| Error::Verification("TapTweak hash outside scalar range â€” vanishingly improbable"))
+    bitcoin::secp256k1::Scalar::from_be_bytes(tweak.to_byte_array()).map_err(|_| {
+        Error::Verification("TapTweak hash outside scalar range â€” vanishingly improbable")
+    })
 }
 
 // â”€â”€ Refund-transaction construction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1102,8 +1106,10 @@ pub fn build_refund_tx(
 
     // Recompute sighash + verify the supplied signature against
     // Bob's pubkey.
-    let parsed_sig = bitcoin::secp256k1::schnorr::Signature::from_slice(signature)
-        .map_err(|_| Error::Verification("refund signature is not 64 bytes / invalid wire shape"))?;
+    let parsed_sig =
+        bitcoin::secp256k1::schnorr::Signature::from_slice(signature).map_err(|_| {
+            Error::Verification("refund signature is not 64 bytes / invalid wire shape")
+        })?;
     let bob_xonly = bitcoin::secp256k1::XOnlyPublicKey::from_slice(&base.refund_branch.bob_pubkey)
         .map_err(|_| Error::Verification("refund_branch.bob_pubkey invalid"))?;
     let mut cache = bitcoin::sighash::SighashCache::new(&tx);
@@ -1121,12 +1127,13 @@ pub fn build_refund_tx(
         .map_err(|_| Error::Verification("BIP-341 script-path sighash compute failed"))?;
     let msg = bitcoin::secp256k1::Message::from_digest(*sighash.as_ref());
     let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-    secp.verify_schnorr(&parsed_sig, &msg, &bob_xonly).map_err(|_| {
-        Error::Verification(
-            "refund signature does not verify under BIP-340 against the script-path \
+    secp.verify_schnorr(&parsed_sig, &msg, &bob_xonly)
+        .map_err(|_| {
+            Error::Verification(
+                "refund signature does not verify under BIP-340 against the script-path \
              sighash + refund_branch.bob_pubkey",
-        )
-    })?;
+            )
+        })?;
 
     // â”€â”€ Compose the BIP-341 script-path witness â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //
@@ -1157,7 +1164,7 @@ pub fn build_refund_tx(
         .ok_or(Error::Verification("control block lookup failed"))?;
 
     let mut witness = bitcoin::Witness::new();
-    witness.push(signature.to_vec());
+    witness.push(signature);
     witness.push(script.as_bytes());
     witness.push(control_block.serialize());
     tx.input[0].witness = witness;
@@ -1216,9 +1223,8 @@ fn build_refund_tx_internal(
         script_pubkey: prev_script,
     };
 
-    let prev_txid = bitcoin::Txid::from_raw_hash(
-        bitcoin::hashes::Hash::from_byte_array(base.lock_txid.0),
-    );
+    let prev_txid =
+        bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(base.lock_txid.0));
 
     // BIP-68: blocks-relative sequence. Lower 16 bits hold the
     // value; type bit (bit 22) = 0 for blocks, 1 for 512-second
@@ -1268,10 +1274,14 @@ pub fn wait_for_confirmations(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = BitcoinCoreRpc::new(config.clone())?;
     let txid = Txid::from_hex(txid)?;
-    rt.block_on(chain.wait_for_confirmations(&txid, confirmations, Duration::from_secs(timeout_secs)))
+    rt.block_on(chain.wait_for_confirmations(
+        &txid,
+        confirmations,
+        Duration::from_secs(timeout_secs),
+    ))
 }
 
 /// Broadcast a signed transaction to the Bitcoin network. Returns
@@ -1280,7 +1290,7 @@ pub fn broadcast(config: &BtcConfig, tx_bytes: &[u8]) -> Result<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Rpc(format!("tokio runtime: {}", e)))?;
+        .map_err(|e| Error::Rpc(format!("tokio runtime: {e}")))?;
     let chain = BitcoinCoreRpc::new(config.clone())?;
     let tx_hex = hex::encode(tx_bytes);
     let txid = rt.block_on(chain.broadcast(&tx_hex))?;
@@ -1390,19 +1400,15 @@ mod tests {
         let unknown = Txid([0x66; 32]);
         let timeout = Duration::from_millis(150);
         let start = Instant::now();
-        let r = chain
-            .wait_for_confirmations(&unknown, 1, timeout)
-            .await;
+        let r = chain.wait_for_confirmations(&unknown, 1, timeout).await;
         let elapsed = start.elapsed();
         assert!(matches!(r, Err(Error::Timeout { .. })));
         // Real impl waits ~150ms; both mutations exit immediately (<5ms).
         // Threshold 100ms gives generous headroom for scheduling jitter.
         assert!(
             elapsed >= Duration::from_millis(100),
-            "wait_for_confirmations returned in {:?} \u{2014} expected ~{:?}. \
-             The deadline arithmetic or `>=` check appears mutated.",
-            elapsed,
-            timeout
+            "wait_for_confirmations returned in {elapsed:?} \u{2014} expected ~{timeout:?}. \
+             The deadline arithmetic or `>=` check appears mutated."
         );
     }
 
@@ -1441,8 +1447,7 @@ mod tests {
         match r {
             Err(_) => { /* expected */ }
             Ok(s) => panic!(
-                "broadcast returned Ok({:?}) on unreachable RPC URL \u{2014} function body appears mutated",
-                s
+                "broadcast returned Ok({s:?}) on unreachable RPC URL \u{2014} function body appears mutated"
             ),
         }
     }
@@ -1530,16 +1535,12 @@ mod tests {
         let txid = Txid([0x43; 32]);
         let timeout = Duration::from_millis(150);
         let start = Instant::now();
-        let r = rpc
-            .wait_for_confirmations(&txid, 1, timeout)
-            .await;
+        let r = rpc.wait_for_confirmations(&txid, 1, timeout).await;
         let elapsed = start.elapsed();
         assert!(matches!(r, Err(Error::Timeout { .. })));
         assert!(
             elapsed >= Duration::from_millis(100),
-            "rpc wait_for_confirmations returned in {:?} \u{2014} expected ~{:?}",
-            elapsed,
-            timeout
+            "rpc wait_for_confirmations returned in {elapsed:?} \u{2014} expected ~{timeout:?}"
         );
     }
 
@@ -1639,8 +1640,7 @@ mod tests {
             refund_branch: None,
         };
         let bytes = build_lock_tx(&cfg, &request).unwrap();
-        let parsed: bitcoin::Transaction =
-            bitcoin::consensus::encode::deserialize(&bytes).unwrap();
+        let parsed: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(&bytes).unwrap();
         assert_eq!(parsed.output.len(), 1, "no change output expected");
         assert_eq!(parsed.output[0].value.to_sat(), 99_000);
     }
@@ -1712,8 +1712,7 @@ mod tests {
         // chain-confusion attack can't slip past.
         let cfg = standard_regtest_config();
         // A known mainnet P2TR address (bc1p prefix).
-        let mainnet_addr =
-            "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0";
+        let mainnet_addr = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0";
         let request = LockTxRequest {
             utxos: vec![FundingUtxo {
                 txid: Txid([0x11; 32]),
@@ -1798,8 +1797,7 @@ mod tests {
             refund_branch: None,
         };
         let bytes = build_lock_tx(&cfg, &request).unwrap();
-        let parsed: bitcoin::Transaction =
-            bitcoin::consensus::encode::deserialize(&bytes).unwrap();
+        let parsed: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(&bytes).unwrap();
         assert_eq!(parsed.input.len(), 2);
         // Verify the second input vout is preserved.
         assert_eq!(parsed.input[1].previous_output.vout, 7);
@@ -1843,29 +1841,24 @@ mod tests {
             match (net, result) {
                 ("regtest", Ok(_)) => { /* regtest network + regtest addr: full success */ }
                 ("regtest", Err(e)) => {
-                    panic!("build_lock_tx unexpectedly failed for regtest: {:?}", e)
+                    panic!("build_lock_tx unexpectedly failed for regtest: {e:?}")
                 }
                 (_, Ok(_)) => panic!(
-                    "build_lock_tx unexpectedly succeeded with {} network + regtest address",
-                    net
+                    "build_lock_tx unexpectedly succeeded with {net} network + regtest address"
                 ),
                 (_, Err(Error::Verification(msg))) => {
                     assert!(
                         !msg.contains("BtcConfig.network must be"),
-                        "build_lock_tx errored at network match for '{}' \u{2014} arm appears to be missing. \
-                         Got: {}",
-                        net,
-                        msg
+                        "build_lock_tx errored at network match for '{net}' \u{2014} arm appears to be missing. \
+                         Got: {msg}"
                     );
                     // Should be the require_network error, not the match error.
                     assert!(
                         msg.contains("change_address") || msg.contains("network mismatch"),
-                        "expected require_network error for '{}', got: {}",
-                        net,
-                        msg
+                        "expected require_network error for '{net}', got: {msg}"
                     );
                 }
-                (_, Err(e)) => panic!("unexpected error variant for '{}': {:?}", net, e),
+                (_, Err(e)) => panic!("unexpected error variant for '{net}': {e:?}"),
             }
         }
     }
@@ -2024,15 +2017,14 @@ mod tests {
 
         // Witness has one element = the 64-byte signature.
         assert_eq!(parsed.input[0].witness.len(), 1);
-        let wit_bytes: &[u8] = &parsed.input[0].witness.iter().next().unwrap();
+        let wit_bytes: &[u8] = parsed.input[0].witness.iter().next().unwrap();
         assert_eq!(wit_bytes, &sig[..]);
     }
 
     #[test]
     fn validate_claim_tx_accepts_exact_constructed_claim() {
         let cfg = standard_regtest_config();
-        let (sig, _, base) =
-            sign_real_claim(&cfg, Txid([0xbc; 32]), 500_000, 1_000, 52, 0x71);
+        let (sig, _, base) = sign_real_claim(&cfg, Txid([0xbc; 32]), 500_000, 1_000, 52, 0x71);
         let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
 
         validate_claim_tx(&cfg, &base, &bytes).unwrap();
@@ -2041,11 +2033,9 @@ mod tests {
     #[test]
     fn validate_claim_tx_rejects_different_lock_outpoint() {
         let cfg = standard_regtest_config();
-        let (sig, _, base) =
-            sign_real_claim(&cfg, Txid([0xbd; 32]), 500_000, 1_000, 53, 0x72);
+        let (sig, _, base) = sign_real_claim(&cfg, Txid([0xbd; 32]), 500_000, 1_000, 53, 0x72);
         let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
-        let mut tx: bitcoin::Transaction =
-            bitcoin::consensus::encode::deserialize(&bytes).unwrap();
+        let mut tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(&bytes).unwrap();
         tx.input[0].previous_output.vout += 1;
         let altered = bitcoin::consensus::encode::serialize(&tx);
 
@@ -2058,11 +2048,9 @@ mod tests {
     #[test]
     fn validate_claim_tx_rejects_different_claim_output() {
         let cfg = standard_regtest_config();
-        let (sig, _, base) =
-            sign_real_claim(&cfg, Txid([0xbe; 32]), 500_000, 1_000, 54, 0x73);
+        let (sig, _, base) = sign_real_claim(&cfg, Txid([0xbe; 32]), 500_000, 1_000, 54, 0x73);
         let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
-        let mut tx: bitcoin::Transaction =
-            bitcoin::consensus::encode::deserialize(&bytes).unwrap();
+        let mut tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(&bytes).unwrap();
         tx.output[0].value = bitcoin::Amount::from_sat(498_999);
         let altered = bitcoin::consensus::encode::serialize(&tx);
 
@@ -2075,8 +2063,7 @@ mod tests {
     #[test]
     fn validate_claim_tx_rejects_different_session_amount() {
         let cfg = standard_regtest_config();
-        let (sig, _, base) =
-            sign_real_claim(&cfg, Txid([0xbf; 32]), 500_000, 1_000, 55, 0x74);
+        let (sig, _, base) = sign_real_claim(&cfg, Txid([0xbf; 32]), 500_000, 1_000, 55, 0x74);
         let bytes = build_claim_tx(&cfg, &base, &sig).unwrap();
         let mut expected = base.clone();
         expected.lock_value_sats += 1;
@@ -2094,7 +2081,8 @@ mod tests {
         // attach it to a base with a different destination â€” the
         // sighash changes, the sig no longer verifies.
         let cfg = standard_regtest_config();
-        let (sig, _xonly, mut base) = sign_real_claim(&cfg, Txid([0xcd; 32]), 500_000, 1_000, 60, 0x80);
+        let (sig, _xonly, mut base) =
+            sign_real_claim(&cfg, Txid([0xcd; 32]), 500_000, 1_000, 60, 0x80);
 
         // Tamper: redirect to a different destination.
         base.dest_address = test_change_address(61);
@@ -2132,7 +2120,10 @@ mod tests {
         let h1 = claim_sighash(&cfg, &base).unwrap();
         base.fee_sats = 2_000;
         let h2 = claim_sighash(&cfg, &base).unwrap();
-        assert_ne!(h1, h2, "different fee changes output value â†’ different sighash");
+        assert_ne!(
+            h1, h2,
+            "different fee changes output value â†’ different sighash"
+        );
     }
 
     #[test]
@@ -2199,13 +2190,14 @@ mod tests {
                 assert!(
                     !msg.contains("dust threshold"),
                     "build_claim_tx erroneously rejected claim_value == DUST_THRESHOLD_SATS \
-                     (the `<` check at btc.rs:825 must NOT trigger at equality). Error: {}",
-                    msg
+                     (the `<` check at btc.rs:825 must NOT trigger at equality). Error: {msg}"
                 );
                 // We expect signature verification to fail downstream.
             }
-            Err(e) => panic!("unexpected error variant: {:?}", e),
-            Ok(_) => panic!("bogus sig should have failed verification, but build_claim_tx returned Ok"),
+            Err(e) => panic!("unexpected error variant: {e:?}"),
+            Ok(_) => {
+                panic!("bogus sig should have failed verification, but build_claim_tx returned Ok")
+            }
         }
     }
 
@@ -2237,15 +2229,12 @@ mod tests {
                     Err(Error::Verification(msg)) => {
                         assert!(
                             !msg.contains("BtcConfig.network must be"),
-                            "build_claim_tx errored at network match for '{}' \u{2014} arm appears to be missing. Got: {}",
-                            net,
-                            msg
+                            "build_claim_tx errored at network match for '{net}' \u{2014} arm appears to be missing. Got: {msg}"
                         );
                     }
-                    Err(e) => panic!("unexpected error variant for '{}': {:?}", net, e),
+                    Err(e) => panic!("unexpected error variant for '{net}': {e:?}"),
                     Ok(_) => panic!(
-                        "build_claim_tx unexpectedly succeeded with {} network + regtest dest_address",
-                        net
+                        "build_claim_tx unexpectedly succeeded with {net} network + regtest dest_address"
                     ),
                 }
             }
@@ -2313,8 +2302,7 @@ mod tests {
         //    actor test) creates an adaptor pre-sig over the sighash.
         let aux_rand = [0xa1; 32];
         let (pre_sig, signer_x) =
-            create_pre_sig_bip340(&alice_sk, &sighash, &adaptor_pt, &aux_rand)
-                .expect("pre-sig");
+            create_pre_sig_bip340(&alice_sk, &sighash, &adaptor_pt, &aux_rand).expect("pre-sig");
 
         // The pre-signer's x-only pubkey must match the lock's
         // internal key (this is how the verifier ties the witness
@@ -2322,8 +2310,8 @@ mod tests {
         assert_eq!(signer_x.serialize(), base.lock_internal_key);
 
         // 3. Alice decrypts the pre-sig with her secret `t`.
-        let final_sig = decrypt_btc_adaptor(&pre_sig, &adaptor_secret, &adaptor_pt)
-            .expect("decrypt");
+        let final_sig =
+            decrypt_btc_adaptor(&pre_sig, &adaptor_secret, &adaptor_pt).expect("decrypt");
 
         // 4. Alice finalizes the claim tx with the real signature.
         let tx_bytes = build_claim_tx(&cfg, &base, &final_sig).expect("finalize");
@@ -2386,8 +2374,7 @@ mod tests {
         // Programmatic check: reconstruct the merkle root + tweaked
         // output key locally and assert the on-chain scriptPubkey
         // matches what `lock_prev_script` would compute.
-        let internal_xonly =
-            bitcoin::secp256k1::XOnlyPublicKey::from_slice(&internal).unwrap();
+        let internal_xonly = bitcoin::secp256k1::XOnlyPublicKey::from_slice(&internal).unwrap();
         let expected = lock_prev_script(internal_xonly, Some(&refund)).unwrap();
         assert_eq!(lock_out.script_pubkey, expected);
     }
@@ -2445,8 +2432,7 @@ mod tests {
         let parsed: bitcoin::Transaction =
             bitcoin::consensus::encode::deserialize(&tx_bytes).unwrap();
         let wit_bytes: Vec<u8> = parsed.input[0].witness.iter().next().unwrap().to_vec();
-        let parsed_sig =
-            bitcoin::secp256k1::schnorr::Signature::from_slice(&wit_bytes).unwrap();
+        let parsed_sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&wit_bytes).unwrap();
         let (tweaked_xonly, _) = tweaked_kp.x_only_public_key();
         secp.verify_schnorr(&parsed_sig, &msg, &tweaked_xonly)
             .expect("witness must verify under the tweaked output key");
@@ -2507,7 +2493,11 @@ mod tests {
         let parsed: bitcoin::Transaction =
             bitcoin::consensus::encode::deserialize(&tx_bytes).expect("decode");
         assert_eq!(parsed.input.len(), 1);
-        assert_eq!(parsed.input[0].witness.len(), 3, "script-path witness has 3 elements");
+        assert_eq!(
+            parsed.input[0].witness.len(),
+            3,
+            "script-path witness has 3 elements"
+        );
 
         let mut wit_iter = parsed.input[0].witness.iter();
         let w_sig: &[u8] = wit_iter.next().unwrap();
@@ -2522,8 +2512,7 @@ mod tests {
 
         // 5. BIP-341 consensus check: the witness signature verifies
         //    under bob_pubkey against the script-path sighash.
-        let parsed_sig =
-            bitcoin::secp256k1::schnorr::Signature::from_slice(w_sig).unwrap();
+        let parsed_sig = bitcoin::secp256k1::schnorr::Signature::from_slice(w_sig).unwrap();
         secp.verify_schnorr(&parsed_sig, &msg, &bob_xonly)
             .expect("script-path sig must verify under bob_pubkey");
 
@@ -2585,12 +2574,13 @@ mod tests {
                 assert!(
                     !msg.contains("dust threshold"),
                     "build_refund_tx erroneously rejected refund_value == DUST_THRESHOLD_SATS \
-                     (the `<` check at btc.rs:1154 must NOT trigger at equality). Error: {}",
-                    msg
+                     (the `<` check at btc.rs:1154 must NOT trigger at equality). Error: {msg}"
                 );
             }
-            Err(e) => panic!("unexpected error variant: {:?}", e),
-            Ok(_) => panic!("bogus sig should have failed verification, but build_refund_tx returned Ok"),
+            Err(e) => panic!("unexpected error variant: {e:?}"),
+            Ok(_) => {
+                panic!("bogus sig should have failed verification, but build_refund_tx returned Ok")
+            }
         }
     }
 
@@ -2670,15 +2660,12 @@ mod tests {
                     Err(Error::Verification(msg)) => {
                         assert!(
                             !msg.contains("BtcConfig.network must be"),
-                            "build_refund_tx errored at network match for '{}' \u{2014} arm appears to be missing. Got: {}",
-                            net,
-                            msg
+                            "build_refund_tx errored at network match for '{net}' \u{2014} arm appears to be missing. Got: {msg}"
                         );
                     }
-                    Err(e) => panic!("unexpected error variant for '{}': {:?}", net, e),
+                    Err(e) => panic!("unexpected error variant for '{net}': {e:?}"),
                     Ok(_) => panic!(
-                        "build_refund_tx unexpectedly succeeded with {} network + regtest dest_address",
-                        net
+                        "build_refund_tx unexpectedly succeeded with {net} network + regtest dest_address"
                     ),
                 }
             }
@@ -2721,8 +2708,7 @@ mod tests {
             refund_branch: None,
         };
         let bytes = build_lock_tx(&cfg, &request).unwrap();
-        let parsed: bitcoin::Transaction =
-            bitcoin::consensus::encode::deserialize(&bytes).unwrap();
+        let parsed: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(&bytes).unwrap();
         assert_eq!(parsed.lock_time.to_consensus_u32(), 800_000);
     }
 }

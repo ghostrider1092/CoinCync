@@ -261,12 +261,12 @@ impl Circuit<pallas::Base> for ActionCircuit {
             .try_into()
             .expect("ACTION_ADVICE_COLUMNS-sized vec must convert");
 
-        let lagrange_coeffs: [Column<Fixed>; ACTION_FIXED_LAGRANGE_COLUMNS] =
-            (0..ACTION_FIXED_LAGRANGE_COLUMNS)
-                .map(|_| meta.fixed_column())
-                .collect::<Vec<_>>()
-                .try_into()
-                .expect("ACTION_FIXED_LAGRANGE_COLUMNS-sized vec must convert");
+        let lagrange_coeffs: [Column<Fixed>; ACTION_FIXED_LAGRANGE_COLUMNS] = (0
+            ..ACTION_FIXED_LAGRANGE_COLUMNS)
+            .map(|_| meta.fixed_column())
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("ACTION_FIXED_LAGRANGE_COLUMNS-sized vec must convert");
 
         ActionConfig {
             instance,
@@ -315,7 +315,7 @@ fn action_vk() -> Result<&'static VerifyingKey<vesta::Affine>> {
         return Ok(vk);
     }
     let vk = keygen_vk(action_params(), &ActionCircuit::default())
-        .map_err(|e| Error::InvalidProof(format!("keygen_vk: {:?}", e)))?;
+        .map_err(|e| Error::InvalidProof(format!("keygen_vk: {e:?}")))?;
     Ok(VK.get_or_init(|| vk))
 }
 
@@ -328,7 +328,7 @@ fn action_pk() -> Result<&'static ProvingKey<vesta::Affine>> {
     }
     let vk = action_vk()?.clone();
     let pk = keygen_pk(action_params(), vk, &ActionCircuit::default())
-        .map_err(|e| Error::InvalidProof(format!("keygen_pk: {:?}", e)))?;
+        .map_err(|e| Error::InvalidProof(format!("keygen_pk: {e:?}")))?;
     Ok(PK.get_or_init(|| pk))
 }
 
@@ -439,7 +439,7 @@ pub fn prove_action(stmt: &ActionStatement, witness: &ActionWitness) -> Result<P
         OsRng,
         &mut transcript,
     )
-    .map_err(|e| Error::InvalidProof(format!("create_proof: {:?}", e)))?;
+    .map_err(|e| Error::InvalidProof(format!("create_proof: {e:?}")))?;
 
     let bytes = transcript.finalize();
     Proof::from_bytes(bytes)
@@ -466,7 +466,7 @@ pub fn verify_action(proof: &Proof, stmt: &ActionStatement) -> Result<()> {
     // can't accidentally mismatch.
     let instances = pack_statement(stmt);
     verify_proof(params, vk, strategy, &[&[&instances]], &mut transcript)
-        .map_err(|e| Error::InvalidProof(format!("verify_proof: {:?}", e)))?;
+        .map_err(|e| Error::InvalidProof(format!("verify_proof: {e:?}")))?;
     Ok(())
 }
 
@@ -494,7 +494,7 @@ pub fn verify_action(proof: &Proof, stmt: &ActionStatement) -> Result<()> {
 ///    `EccChip::configure(meta, config.advices,
 ///    config.lagrange_coeffs, range_check)` using the columns
 ///    Step 1 laid down; requires adding `LookupRangeCheckConfig`
-///    + a lookup table column + a `FixedPoints` impl for the
+///    plus a lookup table column and a `FixedPoints` impl for the
 ///    precomputed Lagrange-coefficient tables.
 ///
 ///    **Dep-graph constraint discovered 2026-05-17:** the
@@ -603,7 +603,10 @@ mod tests {
         // Proofs are non-trivial in size even for an empty
         // circuit — the IPA commitment + Blake2b transcript add
         // structural bytes.
-        assert!(proof.bytes.len() > 16, "real halo2 proof has at least the IPA scaffold bytes");
+        assert!(
+            proof.bytes.len() > 16,
+            "real halo2 proof has at least the IPA scaffold bytes"
+        );
     }
 
     #[test]

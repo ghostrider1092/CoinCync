@@ -10,16 +10,13 @@
 //! - For advanced EC operations, use the `crypto::curve` module
 //! - For real transaction signatures, use CLSAG in `crypto::clsag` module
 
-use std::fmt;
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use rand::{RngCore, CryptoRng};
-use zeroize::Zeroize;
-use curve25519_dalek::{
-    constants::RISTRETTO_BASEPOINT_POINT,
-    scalar::Scalar,
-};
 use crate::error::{Error, Result};
+use borsh::{BorshDeserialize, BorshSerialize};
+use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use zeroize::Zeroize;
 
 /// A 32-byte public key
 #[derive(Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
@@ -30,16 +27,26 @@ impl PublicKey {
     // H-3 FIX: Restrict unchecked constructors to crate-internal use only.
     // External callers must use from_bytes_checked() which validates the curve point.
     /// Unchecked constructor. Use `from_bytes_checked()` for untrusted input.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self { PublicKey(bytes) }
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        PublicKey(bytes)
+    }
     pub(crate) fn from_slice(slice: &[u8]) -> Result<Self> {
-        if slice.len() != 32 { return Err(Error::InvalidPublicKey("wrong length".into())); }
+        if slice.len() != 32 {
+            return Err(Error::InvalidPublicKey("wrong length".into()));
+        }
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(slice);
         Ok(PublicKey(bytes))
     }
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
-    pub fn as_slice(&self) -> &[u8] { &self.0 }
-    pub fn to_hex(&self) -> String { hex::encode(self.0) }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
     pub fn from_hex(s: &str) -> Result<Self> {
         let bytes = hex::decode(s).map_err(|e| Error::InvalidPublicKey(e.to_string()))?;
         Self::from_slice(&bytes)
@@ -75,7 +82,7 @@ impl PublicKey {
         // protocol layer above this one.
         if point == curve25519_dalek::ristretto::RistrettoPoint::default() {
             return Err(Error::InvalidPublicKey(
-                "identity point not allowed as public key".into()
+                "identity point not allowed as public key".into(),
             ));
         }
         Ok(PublicKey(bytes))
@@ -93,7 +100,7 @@ impl PublicKey {
             .ok_or_else(|| Error::InvalidPublicKey("not a valid Ristretto point".into()))?;
         if point == curve25519_dalek::ristretto::RistrettoPoint::default() {
             return Err(Error::InvalidPublicKey(
-                "identity point not allowed as public key".into()
+                "identity point not allowed as public key".into(),
             ));
         }
         Ok(())
@@ -101,22 +108,43 @@ impl PublicKey {
 }
 
 impl fmt::Debug for PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "PublicKey({}...)", &self.to_hex()[..8]) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PublicKey({}...)", &self.to_hex()[..8])
+    }
 }
 impl fmt::Display for PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.to_hex()) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
 }
-impl AsRef<[u8]> for PublicKey { fn as_ref(&self) -> &[u8] { &self.0 } }
-impl From<[u8; 32]> for PublicKey { fn from(bytes: [u8; 32]) -> Self { PublicKey(bytes) } }
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl From<[u8; 32]> for PublicKey {
+    fn from(bytes: [u8; 32]) -> Self {
+        PublicKey(bytes)
+    }
+}
 
 impl Serialize for PublicKey {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> where S: serde::Serializer {
-        if serializer.is_human_readable() { serializer.serialize_str(&self.to_hex()) }
-        else { serializer.serialize_bytes(&self.0) }
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.to_hex())
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
     }
 }
 impl<'de> Deserialize<'de> for PublicKey {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error> where D: serde::Deserializer<'de> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         if deserializer.is_human_readable() {
             let s = <String as Deserialize>::deserialize(deserializer)?;
             PublicKey::from_hex(&s).map_err(serde::de::Error::custom)
@@ -138,14 +166,20 @@ impl SecretKey {
         rng.fill_bytes(&mut bytes);
         SecretKey(bytes)
     }
-    pub fn from_bytes(bytes: [u8; 32]) -> Self { SecretKey(bytes) }
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        SecretKey(bytes)
+    }
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        if slice.len() != 32 { return Err(Error::InvalidSecretKey("wrong length".into())); }
+        if slice.len() != 32 {
+            return Err(Error::InvalidSecretKey("wrong length".into()));
+        }
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(slice);
         Ok(SecretKey(bytes))
     }
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
     /// Derive the public key using proper elliptic curve multiplication: P = s * G
     pub fn public_key(&self) -> PublicKey {
         let scalar = Scalar::from_bytes_mod_order(self.0);
@@ -167,8 +201,16 @@ impl SecretKey {
     }
 }
 
-impl Clone for SecretKey { fn clone(&self) -> Self { SecretKey(self.0) } }
-impl fmt::Debug for SecretKey { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "SecretKey([REDACTED])") } }
+impl Clone for SecretKey {
+    fn clone(&self) -> Self {
+        SecretKey(self.0)
+    }
+}
+impl fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretKey([REDACTED])")
+    }
+}
 impl Drop for SecretKey {
     fn drop(&mut self) {
         // Use zeroize for secure memory clearing (prevents compiler optimization)
@@ -177,7 +219,10 @@ impl Drop for SecretKey {
 }
 
 /// A key pair
-pub struct KeyPair { pub secret: SecretKey, pub public: PublicKey }
+pub struct KeyPair {
+    pub secret: SecretKey,
+    pub public: PublicKey,
+}
 
 impl KeyPair {
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
@@ -193,7 +238,9 @@ impl KeyPair {
 
 impl fmt::Debug for KeyPair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KeyPair").field("public", &self.public).finish()
+        f.debug_struct("KeyPair")
+            .field("public", &self.public)
+            .finish()
     }
 }
 
@@ -203,15 +250,23 @@ pub struct Signature([u8; 64]);
 
 impl Signature {
     pub const LEN: usize = 64;
-    pub fn from_bytes(bytes: [u8; 64]) -> Self { Signature(bytes) }
+    pub fn from_bytes(bytes: [u8; 64]) -> Self {
+        Signature(bytes)
+    }
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        if slice.len() != 64 { return Err(Error::InvalidSignature("wrong length".into())); }
+        if slice.len() != 64 {
+            return Err(Error::InvalidSignature("wrong length".into()));
+        }
         let mut bytes = [0u8; 64];
         bytes.copy_from_slice(slice);
         Ok(Signature(bytes))
     }
-    pub fn as_bytes(&self) -> &[u8; 64] { &self.0 }
-    pub fn to_hex(&self) -> String { hex::encode(self.0) }
+    pub fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
     pub fn from_hex(s: &str) -> Result<Self> {
         let bytes = hex::decode(s).map_err(|e| Error::InvalidSignature(e.to_string()))?;
         Self::from_slice(&bytes)
@@ -219,7 +274,10 @@ impl Signature {
 }
 
 impl Serialize for Signature {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> where S: serde::Serializer {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         if serializer.is_human_readable() {
             serializer.serialize_str(&self.to_hex())
         } else {
@@ -229,7 +287,10 @@ impl Serialize for Signature {
 }
 
 impl<'de> Deserialize<'de> for Signature {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error> where D: serde::Deserializer<'de> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
         if deserializer.is_human_readable() {
             let s = <&str as Deserialize>::deserialize(deserializer)?;
             Signature::from_hex(s).map_err(serde::de::Error::custom)
@@ -240,13 +301,21 @@ impl<'de> Deserialize<'de> for Signature {
                 fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     write!(f, "64 bytes")
                 }
-                fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> std::result::Result<Self::Value, E> {
+                fn visit_bytes<E: serde::de::Error>(
+                    self,
+                    v: &[u8],
+                ) -> std::result::Result<Self::Value, E> {
                     Signature::from_slice(v).map_err(E::custom)
                 }
-                fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> std::result::Result<Self::Value, A::Error> {
                     let mut bytes = [0u8; 64];
                     for (i, b) in bytes.iter_mut().enumerate() {
-                        *b = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                        *b = seq
+                            .next_element()?
+                            .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                     }
                     Ok(Signature(bytes))
                 }
@@ -257,35 +326,51 @@ impl<'de> Deserialize<'de> for Signature {
 }
 
 impl fmt::Debug for Signature {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "Signature({}...)", &self.to_hex()[..16]) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Signature({}...)", &self.to_hex()[..16])
+    }
 }
 
 /// A key image (prevents double-spending)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
 pub struct KeyImage([u8; 32]);
 
 impl KeyImage {
     pub const LEN: usize = 32;
-    pub fn from_bytes(bytes: [u8; 32]) -> Self { KeyImage(bytes) }
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        KeyImage(bytes)
+    }
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        if slice.len() != 32 { return Err(Error::InvalidSignature("wrong key image length".into())); }
+        if slice.len() != 32 {
+            return Err(Error::InvalidSignature("wrong key image length".into()));
+        }
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(slice);
         Ok(KeyImage(bytes))
     }
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
-    pub fn to_hex(&self) -> String { hex::encode(self.0) }
-    
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
     // DELETED (C10): blake3-based from_secret_key() removed entirely.
     // Was incompatible with CLSAG key image formula I = x * Hp(x*G).
     // All callers now use crypto::KeyImage::from_secret() instead.
 }
 
 impl fmt::Debug for KeyImage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "KeyImage({}...)", &self.to_hex()[..16]) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "KeyImage({}...)", &self.to_hex()[..16])
+    }
 }
 impl fmt::Display for KeyImage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.to_hex()) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
 }
 
 // NOTE: Broken sign/verify stubs were removed. CoinCync uses CLSAG ring

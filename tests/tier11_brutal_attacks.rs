@@ -10,18 +10,17 @@
 //!
 //! If ANY of these pass when they shouldn't, the chain is compromised.
 
-use coincync::mempool::Mempool;
-use coincync::primitives::{Amount, PublicKey, KeyImage, Hash, merkle_root};
-use coincync::transaction::{Transaction, TxType, TxInput, TxOutput, RingMemberRef};
-use coincync::crypto::{
-    SecretScalar, BlindingFactor, PedersenCommitment, KeyImage as CryptoKeyImage,
-    ClsagSignature, ClsagRingMember, EcCommitment, PublicPoint,
-    clsag_sign, clsag_verify,
-    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch, RangeProof,
-};
 use coincync::consensus::validate_transaction_basic;
-use coincync::constants::{BOOTSTRAP_MIN_RING_SIZE, MIN_FEE_PER_BYTE, TOTAL_SUPPLY_TARGET, COIN};
-use coincync::transaction::{TransactionBuilder, SpendableInput, Recipient, DecoyOutput};
+use coincync::constants::{BOOTSTRAP_MIN_RING_SIZE, COIN, MIN_FEE_PER_BYTE, TOTAL_SUPPLY_TARGET};
+use coincync::crypto::{
+    clsag_sign, clsag_verify, create_aggregated_range_proof_for_height,
+    verify_range_proofs_dispatch, BlindingFactor, ClsagRingMember, ClsagSignature, EcCommitment,
+    KeyImage as CryptoKeyImage, PedersenCommitment, PublicPoint, RangeProof, SecretScalar,
+};
+use coincync::mempool::Mempool;
+use coincync::primitives::{merkle_root, Amount, Hash, KeyImage, PublicKey};
+use coincync::transaction::{DecoyOutput, Recipient, SpendableInput, TransactionBuilder};
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use rand::rngs::OsRng;
 
 // =============================================================================
@@ -31,7 +30,10 @@ use rand::rngs::OsRng;
 fn generate_keypair() -> (coincync::primitives::SecretKey, PublicKey) {
     let secret = SecretScalar::random(&mut OsRng);
     let public = secret.to_public();
-    (coincync::primitives::SecretKey::from_bytes(secret.to_bytes()), PublicKey::from_bytes(public.to_bytes()))
+    (
+        coincync::primitives::SecretKey::from_bytes(secret.to_bytes()),
+        PublicKey::from_bytes(public.to_bytes()),
+    )
 }
 
 fn build_legit_tx(fee: u64) -> Transaction {
@@ -48,22 +50,32 @@ fn build_legit_tx(fee: u64) -> Transaction {
         blinding: BlindingFactor::random(&mut rng),
         height: 1000,
     };
-    let decoys: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1).map(|_| {
-        let s = SecretScalar::random(&mut rng);
-        let bf = BlindingFactor::random(&mut rng);
-        DecoyOutput {
-            public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(2_000_000_000, &bf).to_bytes(),
-            height: 500,
-        }
-    }).collect();
+    let decoys: Vec<DecoyOutput> = (0..BOOTSTRAP_MIN_RING_SIZE - 1)
+        .map(|_| {
+            let s = SecretScalar::random(&mut rng);
+            let bf = BlindingFactor::random(&mut rng);
+            DecoyOutput {
+                public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
+                commitment: PedersenCommitment::commit(2_000_000_000, &bf).to_bytes(),
+                height: 500,
+            }
+        })
+        .collect();
     let real_idx = rand::random::<usize>() % BOOTSTRAP_MIN_RING_SIZE;
     let mut builder = TransactionBuilder::transfer().with_target_height(0);
     builder.add_input(input, decoys, real_idx).unwrap();
-    builder.add_output(&Recipient {
-        spend_public: r_spend, view_public: r_view,
-        amount: Amount::from_atomic(output_amount), lock_height: None,
-    }, 0, &mut rng).unwrap();
+    builder
+        .add_output(
+            &Recipient {
+                spend_public: r_spend,
+                view_public: r_view,
+                amount: Amount::from_atomic(output_amount),
+                lock_height: None,
+            },
+            0,
+            &mut rng,
+        )
+        .unwrap();
     builder.set_fee(Amount::from_atomic(fee));
     builder.build(&mut rng).unwrap()
 }
@@ -137,9 +149,8 @@ fn attack_commitment_wraparound() {
     let _honest_commit = PedersenCommitment::commit(0, &bf);
 
     // Create proof for 0
-    let proof = create_aggregated_range_proof_for_height(
-        &[amount], &[bf.clone()], &mut rng, 0
-    ).unwrap();
+    let proof =
+        create_aggregated_range_proof_for_height(&[amount], &[bf.clone()], &mut rng, 0).unwrap();
 
     // But verify against a commitment for u64::MAX (different blinding)
     let evil_bf = BlindingFactor::random(&mut rng);
@@ -197,8 +208,14 @@ fn attack_coinbase_into_mempool() {
         inputs: vec![],
         outputs: vec![TxOutput {
             stealth_address: PublicKey::from_bytes(attacker_key.to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(5_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(
+                5_000_000_000,
+                &BlindingFactor::random(&mut OsRng),
+            )
+            .to_bytes(),
             encrypted_amount: vec![0u8; 8],
             view_tag: 0,
             lock_height: None,
@@ -255,19 +272,24 @@ fn attack_clsag_forgery_without_secret() {
     let message = b"attacker_forged_this";
 
     // Build a real ring (attacker sees these on-chain)
-    let ring: Vec<ClsagRingMember> = (0..ring_size).map(|_| {
-        let s = SecretScalar::random(&mut OsRng);
-        let bf = BlindingFactor::random(&mut OsRng);
-        let commit = PedersenCommitment::commit(1_000_000_000, &bf);
-        ClsagRingMember::new(s.to_public(), EcCommitment::from_point(
-            PublicPoint::from_bytes(commit.to_bytes()).unwrap()
-        ))
-    }).collect();
+    let ring: Vec<ClsagRingMember> = (0..ring_size)
+        .map(|_| {
+            let s = SecretScalar::random(&mut OsRng);
+            let bf = BlindingFactor::random(&mut OsRng);
+            let commit = PedersenCommitment::commit(1_000_000_000, &bf);
+            ClsagRingMember::new(
+                s.to_public(),
+                EcCommitment::from_point(PublicPoint::from_bytes(commit.to_bytes()).unwrap()),
+            )
+        })
+        .collect();
 
     let pseudo_output = EcCommitment::from_point(
         PublicPoint::from_bytes(
-            PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes()
-        ).unwrap()
+            PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng))
+                .to_bytes(),
+        )
+        .unwrap(),
     );
 
     // Attacker's "forged" signature: random values stuffed into fields
@@ -304,30 +326,50 @@ fn attack_clsag_signature_not_replayable_across_messages() {
     let mut ring: Vec<ClsagRingMember> = Vec::new();
     for i in 0..ring_size {
         let (pk, commit) = if i == 0 {
-            (real_secret.to_public(), PedersenCommitment::commit(1_000_000_000, &real_blinding))
+            (
+                real_secret.to_public(),
+                PedersenCommitment::commit(1_000_000_000, &real_blinding),
+            )
         } else {
             let s = SecretScalar::random(&mut OsRng);
             let bf = BlindingFactor::random(&mut OsRng);
-            (s.to_public(), PedersenCommitment::commit(1_000_000_000, &bf))
+            (
+                s.to_public(),
+                PedersenCommitment::commit(1_000_000_000, &bf),
+            )
         };
-        ring.push(ClsagRingMember::new(pk, EcCommitment::from_point(
-            PublicPoint::from_bytes(commit.to_bytes()).unwrap()
-        )));
+        ring.push(ClsagRingMember::new(
+            pk,
+            EcCommitment::from_point(PublicPoint::from_bytes(commit.to_bytes()).unwrap()),
+        ));
     }
 
     let pseudo_output = EcCommitment::from_point(
         PublicPoint::from_bytes(
-            PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes()
-        ).unwrap()
+            PedersenCommitment::commit(1_000_000_000, &pseudo_blinding).to_bytes(),
+        )
+        .unwrap(),
     );
     let blinding_diff = SecretScalar::from_bytes(real_blinding.sub(&pseudo_blinding).to_bytes());
 
     // Sign message A
     let message_a = b"legitimate_transaction_hash_aaaa";
-    let sig = clsag_sign(message_a, &ring, 0, &real_secret, &blinding_diff, &pseudo_output, &mut OsRng).unwrap();
+    let sig = clsag_sign(
+        message_a,
+        &ring,
+        0,
+        &real_secret,
+        &blinding_diff,
+        &pseudo_output,
+        &mut OsRng,
+    )
+    .unwrap();
 
     // Verify it works for message A
-    assert!(clsag_verify(message_a, &ring, &pseudo_output, &sig), "Original sig must verify");
+    assert!(
+        clsag_verify(message_a, &ring, &pseudo_output, &sig),
+        "Original sig must verify"
+    );
 
     // Try to replay for message B (different transaction)
     let message_b = b"attacker_wants_to_steal_funds_bb";
@@ -353,17 +395,26 @@ fn attack_merkle_collision_impossible() {
     let hash_b = tx_b.hash();
 
     // Transactions must have different hashes
-    assert_ne!(hash_a, hash_b, "Different transactions must have different hashes");
+    assert_ne!(
+        hash_a, hash_b,
+        "Different transactions must have different hashes"
+    );
 
     // Merkle roots must be different for different sets
     let root_single_a = merkle_root(&[hash_a]);
     let root_single_b = merkle_root(&[hash_b]);
-    assert_ne!(root_single_a, root_single_b, "Different tx sets must produce different merkle roots");
+    assert_ne!(
+        root_single_a, root_single_b,
+        "Different tx sets must produce different merkle roots"
+    );
 
     // Order matters
     let root_ab = merkle_root(&[hash_a, hash_b]);
     let root_ba = merkle_root(&[hash_b, hash_a]);
-    assert_ne!(root_ab, root_ba, "Merkle root must be order-dependent (prevents reordering attacks)");
+    assert_ne!(
+        root_ab, root_ba,
+        "Merkle root must be order-dependent (prevents reordering attacks)"
+    );
 }
 
 // =============================================================================
@@ -423,7 +474,9 @@ fn attack_transfer_no_inputs() {
         inputs: vec![], // NO INPUTS — money from nothing
         outputs: vec![TxOutput {
             stealth_address: PublicKey::from_bytes(attacker.to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: PedersenCommitment::commit(999_000_000_000, &bf).to_bytes(),
             encrypted_amount: vec![0u8; 8],
             view_tag: 0,
@@ -462,7 +515,9 @@ fn attack_type_confusion_coinbase_as_transfer() {
         inputs: vec![],            // but has no inputs like coinbase
         outputs: vec![TxOutput {
             stealth_address: PublicKey::from_bytes(attacker.to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: PedersenCommitment::commit(5_000_000_000, &bf).to_bytes(),
             encrypted_amount: vec![0u8; 8],
             view_tag: 0,
@@ -499,7 +554,8 @@ fn attack_ring_size_one_rejected() {
         tx_type: TxType::Transfer,
         inputs: vec![TxInput {
             key_image: KeyImage::from_bytes(ki.to_bytes()),
-            ring_members: vec![RingMemberRef { // Only 1 ring member!
+            ring_members: vec![RingMemberRef {
+                // Only 1 ring member!
                 public_key: PublicKey::from_bytes(secret.to_public().to_bytes()),
                 commitment: commitment.to_bytes(),
             }],
@@ -512,11 +568,17 @@ fn attack_ring_size_one_rejected() {
             pseudo_output_commitment: commitment.to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: commitment.to_bytes(),
             encrypted_amount: vec![0u8; 8],
-            view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(50_000_000),
         range_proof: vec![0u8; 64],
@@ -543,12 +605,18 @@ fn attack_amount_overflow_in_fee() {
     let commitment = PedersenCommitment::commit(1_000_000_000, &bf);
     let ring_size = BOOTSTRAP_MIN_RING_SIZE;
 
-    let ring_members: Vec<RingMemberRef> = (0..ring_size).map(|_| {
-        RingMemberRef {
-            public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-        }
-    }).collect();
+    let ring_members: Vec<RingMemberRef> = (0..ring_size)
+        .map(|_| RingMemberRef {
+            public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(
+                1_000_000_000,
+                &BlindingFactor::random(&mut OsRng),
+            )
+            .to_bytes(),
+        })
+        .collect();
 
     // Fee set to u64::MAX — should not cause overflow in any calculation
     let tx = Transaction {
@@ -558,17 +626,25 @@ fn attack_amount_overflow_in_fee() {
             key_image: KeyImage::from_bytes(ki.to_bytes()),
             ring_members,
             signature: ClsagSignature {
-                key_image: ki, commitment_image: secret.to_public(),
-                c1: [0x42; 32], responses: vec![[0x13; 32]; ring_size],
+                key_image: ki,
+                commitment_image: secret.to_public(),
+                c1: [0x42; 32],
+                responses: vec![[0x13; 32]; ring_size],
             },
             pseudo_output_commitment: commitment.to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: commitment.to_bytes(),
             encrypted_amount: vec![0u8; 8],
-            view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(u64::MAX), // absurd fee
         range_proof: vec![0u8; 64],

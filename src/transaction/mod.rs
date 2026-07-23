@@ -6,17 +6,17 @@
 //! - Bulletproofs+ for amount privacy
 //! - Transaction fragmentation for large payments
 
-mod types;
 mod builder;
-mod validator;
 pub mod recovery;
+mod types;
+mod validator;
 
-pub use types::{Transaction, TxInput, TxOutput, TxType, RingMemberRef, SigningInputView};
-#[allow(deprecated)] // SimpleTransactionBuilder is itself deprecated; re-export kept for the deprecated send.rs path
+#[allow(deprecated)]
+// SimpleTransactionBuilder is itself deprecated; re-export kept for the deprecated send.rs path
 pub use builder::{
-    TransactionBuilder, SimpleTransactionBuilder,
-    SpendableInput, Recipient, DecoyOutput,
-    decrypt_amount,
+    decrypt_amount, DecoyOutput, Recipient, SimpleTransactionBuilder, SpendableInput,
+    TransactionBuilder,
 };
+pub use recovery::{validate_recovery_extra, RecoveryMeta};
+pub use types::{RingMemberRef, SigningInputView, Transaction, TxInput, TxOutput, TxType};
 pub use validator::validate_transaction;
-pub use recovery::{RecoveryMeta, validate_recovery_extra};

@@ -17,8 +17,8 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -191,30 +191,62 @@ impl MetricsState {
             s.push('\n');
         };
 
-        m(&mut s, "coincync_rig_hashes_total", "counter",
-          "Total hashes computed since miner start.",
-          self.hashes_total.load(Ordering::Relaxed));
-        m(&mut s, "coincync_rig_blocks_found_total", "counter",
-          "Blocks the miner found locally (before submit).",
-          self.blocks_found_total.load(Ordering::Relaxed));
-        m(&mut s, "coincync_rig_blocks_accepted_total", "counter",
-          "Blocks the daemon accepted into the chain.",
-          self.blocks_accepted_total.load(Ordering::Relaxed));
-        m(&mut s, "coincync_rig_blocks_rejected_total", "counter",
-          "Blocks the daemon rejected on submit (usually lost race).",
-          self.blocks_rejected_total.load(Ordering::Relaxed));
-        m(&mut s, "coincync_rig_uptime_seconds", "counter",
-          "Wall seconds since miner start.",
-          uptime);
-        m(&mut s, "coincync_rig_current_template_height", "gauge",
-          "Block height the current template targets.",
-          self.current_template_height.load(Ordering::Relaxed));
-        m(&mut s, "coincync_rig_current_hashrate_hps", "gauge",
-          "Hashes per second from the last completed mining iteration.",
-          self.current_hashrate_hps.load(Ordering::Relaxed));
-        m(&mut s, "coincync_rig_threads", "gauge",
-          "Active worker threads.",
-          self.threads.load(Ordering::Relaxed));
+        m(
+            &mut s,
+            "coincync_rig_hashes_total",
+            "counter",
+            "Total hashes computed since miner start.",
+            self.hashes_total.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_blocks_found_total",
+            "counter",
+            "Blocks the miner found locally (before submit).",
+            self.blocks_found_total.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_blocks_accepted_total",
+            "counter",
+            "Blocks the daemon accepted into the chain.",
+            self.blocks_accepted_total.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_blocks_rejected_total",
+            "counter",
+            "Blocks the daemon rejected on submit (usually lost race).",
+            self.blocks_rejected_total.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_uptime_seconds",
+            "counter",
+            "Wall seconds since miner start.",
+            uptime,
+        );
+        m(
+            &mut s,
+            "coincync_rig_current_template_height",
+            "gauge",
+            "Block height the current template targets.",
+            self.current_template_height.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_current_hashrate_hps",
+            "gauge",
+            "Hashes per second from the last completed mining iteration.",
+            self.current_hashrate_hps.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_threads",
+            "gauge",
+            "Active worker threads.",
+            self.threads.load(Ordering::Relaxed),
+        );
 
         s
     }
@@ -273,12 +305,9 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<MetricsState>) -> 
     // just need to read enough to let the client see we're listening).
     // Cap the read at 4 KB to defend against header-flood scrapers.
     let mut buf = [0u8; 4096];
-    let n = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        stream.read(&mut buf),
-    )
-    .await
-    .unwrap_or(Ok(0))?;
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .unwrap_or(Ok(0))?;
 
     let is_metrics_get = n >= 12 && buf[..12].starts_with(b"GET /metrics");
     if !is_metrics_get {

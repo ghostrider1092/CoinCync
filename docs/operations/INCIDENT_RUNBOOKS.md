@@ -475,7 +475,7 @@ Two paths:
 OR (preferred for non-trivial changes):
 
 1. Revert `critical_files.lock` to its pre-edit state.
-2. Run `cargo run --release --bin update-critical-hashes`. The
+2. Run `COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes`. The
    binary fails-to-build because of the integrity check; you'll
    need to bypass it by manually patching the hash in `.lock`
    first (Path A), then run the binary as a sanity check.

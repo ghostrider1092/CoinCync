@@ -73,8 +73,7 @@ impl RelayScoreMap {
     /// The top `n` peers by relay score, highest first. Deterministic: ties
     /// broken by `PeerId`. Phase 2's eviction axis will protect this set.
     pub fn top(&self, n: usize) -> Vec<PeerId> {
-        let mut v: Vec<(PeerId, u32)> =
-            self.scores.iter().map(|(k, s)| (*k, *s)).collect();
+        let mut v: Vec<(PeerId, u32)> = self.scores.iter().map(|(k, s)| (*k, *s)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v.into_iter().take(n).map(|(k, _)| k).collect()
     }

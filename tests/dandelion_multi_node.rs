@@ -32,11 +32,11 @@
 //!   reorderings are out of scope; they belong in a dedicated
 //!   adversarial-network harness.
 
-use coincync::network::{DandelionRouter, generate_peer_id};
-use coincync::network::peer::PeerId;
 use coincync::network::dandelion::{DandelionActions, StemAction};
-use coincync::transaction::{Transaction, TxType};
+use coincync::network::peer::PeerId;
+use coincync::network::{generate_peer_id, DandelionRouter};
 use coincync::primitives::{Amount, Hash};
+use coincync::transaction::{Transaction, TxType};
 use std::collections::{HashMap, HashSet};
 
 // ─── Test network harness ───────────────────────────────────────────
@@ -145,7 +145,10 @@ impl TestNetwork {
             }
         }
 
-        StepStats { stem_deliveries, fluff_deliveries }
+        StepStats {
+            stem_deliveries,
+            fluff_deliveries,
+        }
     }
 
     fn fluff_count(&self, hash: &Hash) -> usize {
@@ -209,7 +212,8 @@ fn stem_relay_fans_out_to_one_peer() {
 
     if !net.routers[0].stats().is_fluff_epoch {
         assert_eq!(
-            stem_destinations.len(), 1,
+            stem_destinations.len(),
+            1,
             "stem fan-out must be exactly 1 (privacy invariant), got {}",
             stem_destinations.len()
         );
@@ -247,7 +251,8 @@ fn stem_eventually_fluffs_to_full_graph() {
         "tx must eventually fluff (embargo fail-safe) — never observed in 2000s"
     );
     assert_eq!(
-        net.fluff_count(&hash), 5,
+        net.fluff_count(&hash),
+        5,
         "after fluff, all 5 nodes must have seen the tx"
     );
 }
@@ -336,7 +341,9 @@ fn embargo_timeout_fluffs_eventually() {
             fluffed = true;
             break;
         }
-        if now > 60_000 { break; }
+        if now > 60_000 {
+            break;
+        }
     }
 
     let stats = router.stats();

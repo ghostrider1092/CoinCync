@@ -142,7 +142,7 @@ echo
 echo "  1. Open src/testnet.rs"
 echo "  2. Append the lines above to TESTNET_CHECKPOINT_LIST"
 echo "  3. Update test_checkpoints_populated assertion to use new highest height"
-echo "  4. cargo run --release --bin update-critical-hashes"
+echo "  4. COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes"
 echo "  5. cargo test --lib --features 'randomx testnet' testnet::"
 echo "  6. git add -p && git commit"
 echo

@@ -38,17 +38,17 @@
 //! ## Module layout
 //!
 //! - [`action`]       — Action statement + proof construction +
-//!                      verification (the Halo2 circuit itself).
+//!   verification (the Halo2 circuit itself).
 //! - [`note`]         — Note structure (recipient, value, ρ, ψ
-//!                      randomness, memo placeholder).
+//!   randomness, memo placeholder).
 //! - [`nullifier`]    — Nullifier derivation from note + nk.
 //! - [`commitment`]   — Note commitment derivation (Sinsemilla).
 //! - [`value_commit`] — Pedersen-style value commitments with
-//!                      homomorphic add for balance proofs.
+//!   homomorphic add for balance proofs.
 //! - [`spend_key`]    — Hierarchical key derivation: spending key
-//!                      → spending validating key → full viewing
-//!                      key → incoming viewing key → diversified
-//!                      address.
+//!   → spending validating key → full viewing
+//!   key → incoming viewing key → diversified
+//!   address.
 //! - [`proof`]        — Halo2 proof envelope + (de)serialization.
 //!
 //! ## What this crate does NOT own
@@ -126,13 +126,21 @@ mod tests {
         );
     }
 
+    // This deliberately guards a compile-time policy constant against accidental edits.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn max_actions_per_tx_is_sane() {
         // The exact ceiling will be tuned with block-size budgeting,
         // but a value of 0 or absurdly large is wrong. This is a
         // tripwire so future PRs that fat-finger the constant get
         // caught by CI.
-        assert!(MAX_ACTIONS_PER_TX >= 2, "must permit at least spend + dummy");
-        assert!(MAX_ACTIONS_PER_TX <= 1024, "absurdly large = block-budget bug");
+        assert!(
+            MAX_ACTIONS_PER_TX >= 2,
+            "must permit at least spend + dummy"
+        );
+        assert!(
+            MAX_ACTIONS_PER_TX <= 1024,
+            "absurdly large = block-budget bug"
+        );
     }
 }

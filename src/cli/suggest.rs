@@ -40,7 +40,11 @@ pub fn suggest_command<'a>(input: &str, commands: &[&'a str]) -> Option<&'a str>
 }
 
 /// Find multiple suggestions (up to n)
-pub fn suggest_commands<'a>(input: &str, commands: &[&'a str], max_suggestions: usize) -> Vec<&'a str> {
+pub fn suggest_commands<'a>(
+    input: &str,
+    commands: &[&'a str],
+    max_suggestions: usize,
+) -> Vec<&'a str> {
     let input_lower = input.to_lowercase();
 
     let mut scored: Vec<_> = commands

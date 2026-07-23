@@ -816,10 +816,7 @@ impl NoiseTransport {
     /// `self.remote_static()` gives the responder's long-term key —
     /// the caller MUST compare it against an out-of-band expectation
     /// before proceeding.
-    pub fn handshake_initiator(
-        mut stream: TcpStream,
-        local_static_key: &[u8; 32],
-    ) -> Result<Self> {
+    pub fn handshake_initiator(mut stream: TcpStream, local_static_key: &[u8; 32]) -> Result<Self> {
         let params = NOISE_PARAMS
             .parse()
             .map_err(|e| Error::Rpc(format!("Noise params parse: {e}")))?;
@@ -855,10 +852,7 @@ impl NoiseTransport {
     /// Responder (server) role. Drives the XX handshake to completion.
     /// After this returns, `self.remote_static()` gives the initiator's
     /// long-term key.
-    pub fn handshake_responder(
-        mut stream: TcpStream,
-        local_static_key: &[u8; 32],
-    ) -> Result<Self> {
+    pub fn handshake_responder(mut stream: TcpStream, local_static_key: &[u8; 32]) -> Result<Self> {
         let params = NOISE_PARAMS
             .parse()
             .map_err(|e| Error::Rpc(format!("Noise params parse: {e}")))?;
@@ -893,11 +887,9 @@ impl NoiseTransport {
     /// Transition `handshake` into transport mode + snapshot the
     /// remote static key. Shared post-handshake setup for both roles.
     fn finalize(stream: TcpStream, handshake: snow::HandshakeState) -> Result<Self> {
-        let remote_static_slice = handshake
-            .get_remote_static()
-            .ok_or(Error::Rpc(format!(
-                "Noise XX handshake completed without remote static key"
-            )))?;
+        let remote_static_slice = handshake.get_remote_static().ok_or(Error::Rpc(
+            "Noise XX handshake completed without remote static key".to_string(),
+        ))?;
         if remote_static_slice.len() != 32 {
             return Err(Error::Rpc(format!(
                 "Noise XX remote static key has unexpected length {}",
@@ -1380,9 +1372,7 @@ impl Coordinator {
                     // Restore production timeout for the remainder of
                     // the handshake.
                     if let Err(e) = transport.set_timeout(DEFAULT_SOCKET_TIMEOUT) {
-                        return Err(Error::Rpc(format!(
-                            "listen_filtered: restore timeout: {e}"
-                        )));
+                        return Err(Error::Rpc(format!("listen_filtered: restore timeout: {e}")));
                     }
                     return Ok(Self {
                         transport: CoordTransport::Plain(transport),
@@ -1390,8 +1380,7 @@ impl Coordinator {
                     });
                 }
                 Err(e) => {
-                    last_err =
-                        Some(format!("attempt {attempt} (peer {peer_addr}): {e}"));
+                    last_err = Some(format!("attempt {attempt} (peer {peer_addr}): {e}"));
                     // Drop transport → close stream → loop.
                     continue;
                 }
@@ -1450,12 +1439,10 @@ impl Coordinator {
 
             // Noise handshake. A peer who can't complete this gets
             // filtered here — no Hello stage reached.
-            let mut noise = match NoiseTransport::handshake_responder(stream, local_static_key)
-            {
+            let mut noise = match NoiseTransport::handshake_responder(stream, local_static_key) {
                 Ok(t) => t,
                 Err(e) => {
-                    last_err =
-                        Some(format!("attempt {attempt} (peer {peer_addr}) Noise: {e}"));
+                    last_err = Some(format!("attempt {attempt} (peer {peer_addr}) Noise: {e}"));
                     continue;
                 }
             };
@@ -1473,8 +1460,7 @@ impl Coordinator {
                     });
                 }
                 Err(e) => {
-                    last_err =
-                        Some(format!("attempt {attempt} (peer {peer_addr}): {e}"));
+                    last_err = Some(format!("attempt {attempt} (peer {peer_addr}): {e}"));
                     continue;
                 }
             }
@@ -1836,9 +1822,9 @@ fn validate_hello_plain(
         .handle_inbound(hello)
         .map_err(|e| format!("Hello validation: {e}"))?;
     match action {
-        HandshakeAction::WaitForCaller { next_call } if next_call == "respond_with_hello_ack" => {
-            Ok(session)
-        }
+        HandshakeAction::WaitForCaller {
+            next_call: "respond_with_hello_ack",
+        } => Ok(session),
         HandshakeAction::Aborted { reason } => {
             Err(format!("peer's first message was Abort: {reason}"))
         }
@@ -1862,9 +1848,9 @@ fn validate_hello_noise(
         .handle_inbound(hello)
         .map_err(|e| format!("Hello validation: {e}"))?;
     match action {
-        HandshakeAction::WaitForCaller { next_call } if next_call == "respond_with_hello_ack" => {
-            Ok(session)
-        }
+        HandshakeAction::WaitForCaller {
+            next_call: "respond_with_hello_ack",
+        } => Ok(session),
         HandshakeAction::Aborted { reason } => {
             Err(format!("peer's first message was Abort: {reason}"))
         }
@@ -1951,8 +1937,8 @@ mod tests {
             btc_timeout_blocks: 100,
             alice_cync_address: "alice_addr".into(),
             bob_btc_address: "bob_addr".into(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         }
     }
 
@@ -2046,7 +2032,7 @@ btc_network: "regtest".to_string(),
             HandshakeAction::WaitForCaller { next_call } => {
                 assert_eq!(next_call, "respond_with_hello_ack")
             }
-            other => panic!("expected WaitForCaller, got {:?}", other),
+            other => panic!("expected WaitForCaller, got {other:?}"),
         }
 
         // 2. Bob receives HelloAck -> needs accept_or_send_abort
@@ -2061,14 +2047,14 @@ btc_network: "regtest".to_string(),
             HandshakeAction::WaitForCaller { next_call } => {
                 assert_eq!(next_call, "accept_or_send_abort")
             }
-            other => panic!("expected WaitForCaller, got {:?}", other),
+            other => panic!("expected WaitForCaller, got {other:?}"),
         }
 
         // 3. Alice receives Accept -> needs send_adaptors
         let accept = bob.accept().unwrap();
         match alice2.handle_inbound(accept).unwrap() {
             HandshakeAction::WaitForCaller { next_call } => assert_eq!(next_call, "send_adaptors"),
-            other => panic!("expected WaitForCaller, got {:?}", other),
+            other => panic!("expected WaitForCaller, got {other:?}"),
         }
     }
 
@@ -2266,8 +2252,8 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let alice_adapt = AdaptorBundle {
@@ -2336,8 +2322,7 @@ btc_network: "regtest".to_string(),
             // loopback. If the race ever shows up in CI we can
             // poll-and-retry instead.
             thread::sleep(Duration::from_millis(100));
-            let mut coord =
-                Coordinator::connect(&bob_endpoint, bob_swap_id).expect("bob connect");
+            let mut coord = Coordinator::connect(&bob_endpoint, bob_swap_id).expect("bob connect");
             coord
                 .set_timeout(Duration::from_secs(5))
                 .expect("bob timeout");
@@ -2423,8 +2408,8 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let alice_adapt = AdaptorBundle {
@@ -2441,10 +2426,8 @@ btc_network: "regtest".to_string(),
         };
 
         // Snapshot channels for assertion in the main thread.
-        let (alice_tx, alice_rx) =
-            mpsc::channel::<(HandshakeSession, Option<[u8; 32]>)>();
-        let (bob_tx, bob_rx) =
-            mpsc::channel::<(HandshakeSession, Option<[u8; 32]>)>();
+        let (alice_tx, alice_rx) = mpsc::channel::<(HandshakeSession, Option<[u8; 32]>)>();
+        let (bob_tx, bob_rx) = mpsc::channel::<(HandshakeSession, Option<[u8; 32]>)>();
 
         // ── Alice thread (responder) ──
         let alice_endpoint = endpoint.clone();
@@ -2492,9 +2475,8 @@ btc_network: "regtest".to_string(),
         let alice_adapt_expected = alice_adapt.clone();
         let bob_handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(100));
-            let mut coord =
-                Coordinator::connect_noise(&bob_endpoint, bob_swap_id, &bob_static)
-                    .expect("bob connect_noise");
+            let mut coord = Coordinator::connect_noise(&bob_endpoint, bob_swap_id, &bob_static)
+                .expect("bob connect_noise");
             coord
                 .set_timeout(Duration::from_secs(5))
                 .expect("bob timeout");
@@ -2570,8 +2552,7 @@ btc_network: "regtest".to_string(),
         // other process is listening there; for the test, port 1
         // (privileged + reserved) is almost certainly closed for
         // userspace bindings on every reasonable OS.
-        let result =
-            Coordinator::connect("127.0.0.1:1", "test-swap-no-peer".to_string());
+        let result = Coordinator::connect("127.0.0.1:1", "test-swap-no-peer".to_string());
         assert!(
             matches!(result, Err(Error::Rpc(_))),
             "expected Error::Rpc, got {result:?}"
@@ -2599,8 +2580,7 @@ btc_network: "regtest".to_string(),
         use std::io::{Read, Write};
         use std::net::TcpListener;
         std::thread::spawn(move || {
-            let listener =
-                TcpListener::bind("127.0.0.1:0").expect("mock SOCKS5 bind");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("mock SOCKS5 bind");
             let proxy_addr = listener.local_addr().unwrap();
             ready_tx
                 .send(proxy_addr.to_string())
@@ -2641,9 +2621,8 @@ btc_network: "regtest".to_string(),
             assert_eq!(got_port, target_port, "CONNECT target port");
 
             // ── Dial the actual target ──
-            let target =
-                std::net::TcpStream::connect(format!("{target_host}:{target_port}"))
-                    .expect("mock SOCKS5 dial target");
+            let target = std::net::TcpStream::connect(format!("{target_host}:{target_port}"))
+                .expect("mock SOCKS5 dial target");
             target
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -2713,17 +2692,8 @@ btc_network: "regtest".to_string(),
         let alice_endpoint = ephemeral_endpoint();
         let (proxy_ready_tx, proxy_ready_rx) = mpsc::channel::<String>();
 
-        let alice_host: String = alice_endpoint
-            .split(':')
-            .next()
-            .unwrap()
-            .to_string();
-        let alice_port: u16 = alice_endpoint
-            .split(':')
-            .nth(1)
-            .unwrap()
-            .parse()
-            .unwrap();
+        let alice_host: String = alice_endpoint.split(':').next().unwrap().to_string();
+        let alice_port: u16 = alice_endpoint.split(':').nth(1).unwrap().parse().unwrap();
         let proxy_handle =
             spawn_mock_socks5_forwarder(alice_host.clone(), alice_port, proxy_ready_tx);
         let proxy_addr = proxy_ready_rx
@@ -2743,8 +2713,8 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let blob = vec![0xAA; 64];
@@ -2868,8 +2838,8 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let (alice_tx, alice_rx) = mpsc::channel::<(HandshakeSession, Option<[u8; 32]>)>();
@@ -2933,8 +2903,7 @@ btc_network: "regtest".to_string(),
         join_with_timeout(bob_handle, Duration::from_secs(30), "bob");
         let (alice_session, alice_sees_bob) =
             alice_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let (bob_session, bob_sees_alice) =
-            bob_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let (bob_session, bob_sees_alice) = bob_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
         assert_eq!(alice_session.phase, Phase::Negotiated);
         assert_eq!(bob_session.phase, Phase::Negotiated);
@@ -2999,8 +2968,8 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let alice_bundle = AdaptorBundle {
@@ -3051,8 +3020,8 @@ btc_network: "regtest".to_string(),
         let endpoint_silent = endpoint.clone();
         let silent_handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
-            let _silent = std::net::TcpStream::connect(&endpoint_silent)
-                .expect("silent peer connect");
+            let _silent =
+                std::net::TcpStream::connect(&endpoint_silent).expect("silent peer connect");
             // Keep it alive long enough for Alice to time out + loop.
             thread::sleep(Duration::from_millis(1500));
             // Drop silently.
@@ -3068,8 +3037,7 @@ btc_network: "regtest".to_string(),
             // Wait long enough that Alice has timed out the silent
             // peer (300ms + slack) and is back in the accept loop.
             thread::sleep(Duration::from_millis(700));
-            let mut coord = Coordinator::connect(&endpoint_bob, bob_swap_id)
-                .expect("bob connect");
+            let mut coord = Coordinator::connect(&endpoint_bob, bob_swap_id).expect("bob connect");
             coord.set_timeout(Duration::from_secs(5)).unwrap();
             let verifier: AdaptorVerifier = Box::new(|_| Ok(()));
             coord
@@ -3122,8 +3090,8 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let bundle = AdaptorBundle {
@@ -3194,8 +3162,7 @@ btc_network: "regtest".to_string(),
         let bob_handle = thread::spawn(move || {
             // Wait long enough that Alice has rejected the bad peer.
             thread::sleep(Duration::from_millis(500));
-            let mut coord = Coordinator::connect(&endpoint_bob, bob_swap_id)
-                .expect("bob connect");
+            let mut coord = Coordinator::connect(&endpoint_bob, bob_swap_id).expect("bob connect");
             coord.set_timeout(Duration::from_secs(5)).unwrap();
             let verifier: AdaptorVerifier = Box::new(|_| Ok(()));
             coord
@@ -3296,8 +3263,8 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let bundle = AdaptorBundle {
@@ -3348,8 +3315,7 @@ btc_network: "regtest".to_string(),
         let garbage_handle = thread::spawn(move || {
             use std::io::Write;
             thread::sleep(Duration::from_millis(50));
-            let mut bad = std::net::TcpStream::connect(&endpoint_garbage)
-                .expect("garbage connect");
+            let mut bad = std::net::TcpStream::connect(&endpoint_garbage).expect("garbage connect");
             // 4-byte length prefix (consistent with framed messages)
             // pointing at 16 bytes of zeros — not a valid Noise XX
             // first message.
@@ -3365,12 +3331,8 @@ btc_network: "regtest".to_string(),
         let bob_bundle = bundle.clone();
         let bob_handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(500));
-            let mut coord = Coordinator::connect_noise(
-                &endpoint_bob,
-                bob_swap_id,
-                &bob_static,
-            )
-            .expect("bob connect_noise");
+            let mut coord = Coordinator::connect_noise(&endpoint_bob, bob_swap_id, &bob_static)
+                .expect("bob connect_noise");
             coord.set_timeout(Duration::from_secs(5)).unwrap();
             let verifier: AdaptorVerifier = Box::new(|_| Ok(()));
             coord
@@ -3415,16 +3377,16 @@ btc_network: "regtest".to_string(),
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".to_string(),
             bob_btc_address: "bob".to_string(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         };
 
         let (alice_tx, alice_rx) = mpsc::channel::<std::result::Result<(), String>>();
 
         let alice_endpoint = endpoint.clone();
         let alice_handle = thread::spawn(move || {
-            let mut coord = Coordinator::listen(&alice_endpoint, "swap-A".to_string())
-                .expect("alice listen");
+            let mut coord =
+                Coordinator::listen(&alice_endpoint, "swap-A".to_string()).expect("alice listen");
             coord.set_timeout(Duration::from_secs(5)).unwrap();
             let verifier: AdaptorVerifier = Box::new(|_| Ok(()));
             let r = coord.run_alice(
@@ -3484,7 +3446,9 @@ btc_network: "regtest".to_string(),
             .expect("alice result");
         let err_msg = alice_result.expect_err("alice must reject mismatched swap_id");
         assert!(
-            err_msg.contains("swap_id") || err_msg.contains("SwapId") || err_msg.contains("mismatch"),
+            err_msg.contains("swap_id")
+                || err_msg.contains("SwapId")
+                || err_msg.contains("mismatch"),
             "expected swap_id mismatch error, got: {err_msg}"
         );
     }

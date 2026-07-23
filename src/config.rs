@@ -19,16 +19,14 @@
 //! - `CYNC_RPC_PORT=28081`
 //! - `CYNC_DATA_DIR=/custom/path`
 
-use std::path::{Path, PathBuf};
-use std::env;
-use serde::{Serialize, Deserialize};
 use crate::constants::{
-    DEFAULT_P2P_PORT, DEFAULT_RPC_PORT, TESTNET_P2P_PORT, TESTNET_RPC_PORT,
-    REGTEST_P2P_PORT, REGTEST_RPC_PORT,
-    MAINNET_ADDRESS_PREFIX, TESTNET_ADDRESS_PREFIX,
-    ADDRESS_HRP, T_ADDRESS_HRP, R_ADDRESS_HRP,
-    MAX_PEERS, DB_CACHE_SIZE_MB,
+    ADDRESS_HRP, DB_CACHE_SIZE_MB, DEFAULT_P2P_PORT, DEFAULT_RPC_PORT, MAINNET_ADDRESS_PREFIX,
+    MAX_PEERS, REGTEST_P2P_PORT, REGTEST_RPC_PORT, R_ADDRESS_HRP, TESTNET_ADDRESS_PREFIX,
+    TESTNET_P2P_PORT, TESTNET_RPC_PORT, T_ADDRESS_HRP,
 };
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::path::{Path, PathBuf};
 
 /// Node tier in the hybrid network model.
 ///
@@ -188,7 +186,9 @@ impl NetworkType {
 
     /// Alias for `default_p2p_port` — some ported code calls `.p2p_port()`.
     #[inline]
-    pub fn p2p_port(&self) -> u16 { self.default_p2p_port() }
+    pub fn p2p_port(&self) -> u16 {
+        self.default_p2p_port()
+    }
 
     pub fn default_rpc_port(&self) -> u16 {
         self.params().rpc_port
@@ -230,9 +230,15 @@ impl NetworkType {
 
     /// Parse from magic bytes. Returns None if unknown.
     pub fn from_magic_bytes(bytes: [u8; 4]) -> Option<Self> {
-        if bytes == crate::constants::MAINNET_MAGIC { return Some(NetworkType::Mainnet); }
-        if bytes == crate::constants::TESTNET_MAGIC { return Some(NetworkType::Testnet); }
-        if bytes == crate::constants::REGTEST_MAGIC { return Some(NetworkType::Regtest); }
+        if bytes == crate::constants::MAINNET_MAGIC {
+            return Some(NetworkType::Mainnet);
+        }
+        if bytes == crate::constants::TESTNET_MAGIC {
+            return Some(NetworkType::Testnet);
+        }
+        if bytes == crate::constants::REGTEST_MAGIC {
+            return Some(NetworkType::Regtest);
+        }
         None
     }
 }
@@ -771,10 +777,18 @@ pub struct PruningConfig {
     pub checkpoint_interval: u64,
 }
 
-fn default_prune_mode() -> String { "archive".to_string() }
-fn default_keep_blocks() -> u64 { 5000 }
-fn default_prune_interval() -> u64 { 1000 }
-fn default_checkpoint_interval() -> u64 { 10000 }
+fn default_prune_mode() -> String {
+    "archive".to_string()
+}
+fn default_keep_blocks() -> u64 {
+    5000
+}
+fn default_prune_interval() -> u64 {
+    1000
+}
+fn default_checkpoint_interval() -> u64 {
+    10000
+}
 
 impl Default for PruningConfig {
     fn default() -> Self {
@@ -817,15 +831,13 @@ impl Default for WalletConfig {
 
 /// Get default data directory
 fn default_data_dir(network: NetworkType) -> PathBuf {
-    let base = dirs_next::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("coincync").join(network.data_dir_name())
 }
 
 /// Get default wallet path
 fn default_wallet_path() -> PathBuf {
-    let base = dirs_next::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("coincync").join("wallet.dat")
 }
 
@@ -1167,7 +1179,8 @@ impl NodeConfig {
                 errors.push("mining threads must be at least 1 when mining is enabled".to_string());
             }
             if self.mining.miner_address.is_none() && self.mining.pool_url.is_none() {
-                errors.push("miner_address or pool_url required when mining is enabled".to_string());
+                errors
+                    .push("miner_address or pool_url required when mining is enabled".to_string());
             }
         }
 
@@ -1198,9 +1211,10 @@ impl NodeConfig {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(crate::error::Error::ConfigError(
-                format!("Configuration validation failed:\n  - {}", errors.join("\n  - "))
-            ))
+            Err(crate::error::Error::ConfigError(format!(
+                "Configuration validation failed:\n  - {}",
+                errors.join("\n  - ")
+            )))
         }
     }
 
@@ -1279,7 +1293,8 @@ threads = 1
 # miner_address = "CYNC..."
 # Pool URL for pool mining (optional)
 # pool_url = "stratum+tcp://pool.example.com:3333"
-"#.to_string()
+"#
+        .to_string()
     }
 }
 

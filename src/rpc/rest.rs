@@ -17,18 +17,18 @@
 //! - CORS restricted to known origins
 //! - Rate limiting via X-RateLimit headers
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use axum::{
-    extract::{Path, Query, State, WebSocketUpgrade, ws},
+    extract::{ws, Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::{Json, IntoResponse},
+    response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -146,16 +146,13 @@ async fn jsonrpc_call(
             format!("Bearer {}", key.trim()),
         );
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("REST backend unavailable: {}", e);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": "Service temporarily unavailable" })),
-            )
-        })?;
+    let resp = req.send().await.map_err(|e| {
+        tracing::error!("REST backend unavailable: {}", e);
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": "Service temporarily unavailable" })),
+        )
+    })?;
 
     let json: Value = resp.json().await.map_err(|e| {
         tracing::error!("REST invalid backend response: {}", e);
@@ -210,7 +207,7 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     "get_privacy_stats",
     // Block queries — explorer uses get_block_range for "latest blocks".
     "get_block_by_height",
-    "get_block",            // by hash hex (embedded explorer search bar)
+    "get_block", // by hash hex (embedded explorer search bar)
     "get_block_range",
     // Peer table for the explorer "Peers" tab.
     "get_peers",
@@ -232,7 +229,6 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     "is_spark_serial_spent",
     // Decoy selection for wallet spend construction.
     "get_decoys",
-
     // ── Forward-compat reservations (P1+ — not yet registered) ─
     // Keeping these in the allowlist so the REST proxy doesn't
     // need to be re-edited when the P1 wallet wiring lands.
@@ -279,7 +275,10 @@ async fn rpc_proxy(
     }
 
     let parsed: Value = serde_json::from_str(&body).map_err(|_| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid JSON"})))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON"})),
+        )
     })?;
 
     let method = parsed["method"].as_str().unwrap_or("");
@@ -287,12 +286,15 @@ async fn rpc_proxy(
         tracing::warn!("REST /rpc blocked disallowed method: {}", method);
         return Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": format!("Method '{}' not allowed via public API", method)})),
+            Json(
+                serde_json::json!({"error": format!("Method '{}' not allowed via public API", method)}),
+            ),
         ));
     }
 
     let url = format!("http://{}", st.jsonrpc_addr);
-    let mut req = st.client
+    let mut req = st
+        .client
         .post(&url)
         .header("Content-Type", "application/json")
         .body(body);
@@ -302,18 +304,20 @@ async fn rpc_proxy(
             format!("Bearer {}", key.trim()),
         );
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("REST /rpc backend error: {}", e);
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Service temporarily unavailable"})))
-        })?;
-    let mut json: Value = resp.json().await
-        .map_err(|e| {
-            tracing::error!("REST /rpc parse error: {}", e);
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Service temporarily unavailable"})))
-        })?;
+    let resp = req.send().await.map_err(|e| {
+        tracing::error!("REST /rpc backend error: {}", e);
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": "Service temporarily unavailable"})),
+        )
+    })?;
+    let mut json: Value = resp.json().await.map_err(|e| {
+        tracing::error!("REST /rpc parse error: {}", e);
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": "Service temporarily unavailable"})),
+        )
+    })?;
 
     // ITEM 5 (privacy): Strip anonymity-set / network-state stats from
     // get_info responses on the public proxy. These are useful for the
@@ -326,19 +330,19 @@ async fn rpc_proxy(
     if method == "get_info" {
         if let Some(result) = json.get_mut("result").and_then(Value::as_object_mut) {
             for redacted in &[
-                "available_outputs",     // anonymity-set size; correlator for ring sizes
-                "anonymity_set",         // alias of the same metric
-                "effective_ring_size",   // tells analyst what ring the wallet is actually using
-                "mempool_size",          // useful for spam fingerprinting
-                "tx_pool_size",          // alias
-                "peer_count",            // network-state snapshot, not user-relevant
-                "process_count",         // operator-only stat
+                "available_outputs",   // anonymity-set size; correlator for ring sizes
+                "anonymity_set",       // alias of the same metric
+                "effective_ring_size", // tells analyst what ring the wallet is actually using
+                "mempool_size",        // useful for spam fingerprinting
+                "tx_pool_size",        // alias
+                "peer_count",          // network-state snapshot, not user-relevant
+                "process_count",       // operator-only stat
                 "process_count_available",
-                "build_commit",          // version fingerprinting
+                "build_commit", // version fingerprinting
                 "build_dirty",
                 "build_profile",
                 "metadata_minimized",
-                "rpc_auth_enabled",      // tells whether the node has auth at all
+                "rpc_auth_enabled", // tells whether the node has auth at all
                 "stratum_native_tls_enabled",
                 "stratum_public_bind_ack",
                 "stratum_public_bind_requested",
@@ -375,7 +379,9 @@ impl Pagination {
         self.page.unwrap_or(1).max(1)
     }
     fn limit(&self) -> u64 {
-        self.limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE)
+        self.limit
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE)
     }
     fn offset(&self) -> u64 {
         (self.page() - 1) * self.limit()
@@ -597,7 +603,10 @@ async fn health_ready(State(st): State<RestState>) -> impl IntoResponse {
         .get("tip_age_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(u64::MAX);
-    let is_synced = info.get("synced").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_synced = info
+        .get("synced")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Peer floor: a node with 0-2 peers can't reliably serve fresh
     // tip queries. LB should skip it until it recovers.
@@ -764,7 +773,10 @@ async fn get_block_transactions(
     .await?;
 
     // get_block_by_height already returns transactions array
-    let txs = block.get("transactions").cloned().unwrap_or(Value::Array(vec![]));
+    let txs = block
+        .get("transactions")
+        .cloned()
+        .unwrap_or(Value::Array(vec![]));
     let tx_count = block.get("tx_count").and_then(|v| v.as_u64()).unwrap_or(0);
 
     Ok(Json(serde_json::json!({
@@ -804,13 +816,19 @@ async fn get_recent_blocks(
             &st,
             "get_block_by_height",
             Value::Array(vec![Value::Number(h.into())]),
-        ).await {
+        )
+        .await
+        {
             Ok(block) => blocks.push(block),
             Err(_) => continue, // skip missing blocks (shouldn't happen)
         }
     }
 
-    let total_pages = if chain_height == 0 { 1 } else { (chain_height + limit - 1) / limit };
+    let total_pages = if chain_height == 0 {
+        1
+    } else {
+        (chain_height + limit - 1) / limit
+    };
 
     Ok(Json(serde_json::json!({
         "blocks": blocks,
@@ -845,13 +863,17 @@ async fn get_transaction(
 }
 
 /// GET /api/v1/mempool — pending transactions
-async fn get_mempool(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+async fn get_mempool(
+    State(st): State<RestState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let pool = jsonrpc_call(&st, "get_mempool_transactions", Value::Array(vec![])).await?;
     Ok(Json(pool))
 }
 
 /// GET /api/v1/mempool/stats — mempool statistics without full tx list
-async fn get_mempool_stats(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+async fn get_mempool_stats(
+    State(st): State<RestState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let info = jsonrpc_call(&st, "get_mempool_info", Value::Array(vec![])).await?;
     let size = info.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
     let bytes = info.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -932,7 +954,9 @@ async fn search(
             &st,
             "get_block_by_height",
             Value::Array(vec![Value::Number(height.into())]),
-        ).await {
+        )
+        .await
+        {
             return Ok(Json(serde_json::json!({
                 "type": "block",
                 "query": q,
@@ -948,7 +972,9 @@ async fn search(
             &st,
             "get_block",
             Value::Array(vec![Value::String(q.to_string())]),
-        ).await {
+        )
+        .await
+        {
             return Ok(Json(serde_json::json!({
                 "type": "block",
                 "query": q,
@@ -961,7 +987,9 @@ async fn search(
             &st,
             "get_transaction",
             Value::Array(vec![Value::String(q.to_string())]),
-        ).await {
+        )
+        .await
+        {
             return Ok(Json(serde_json::json!({
                 "type": "transaction",
                 "query": q,
@@ -974,7 +1002,9 @@ async fn search(
             &st,
             "get_asset_info",
             Value::Array(vec![Value::String(q.to_string())]),
-        ).await {
+        )
+        .await
+        {
             return Ok(Json(serde_json::json!({
                 "type": "asset",
                 "query": q,
@@ -1001,7 +1031,9 @@ async fn search(
 ///
 /// Powers the explorer's vital signs panel: health score, status text,
 /// decay clock, zombie detection, anonymity set.
-async fn get_network(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+async fn get_network(
+    State(st): State<RestState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let overview = jsonrpc_call(&st, "get_network_overview", Value::Array(vec![])).await?;
     Ok(Json(overview))
 }
@@ -1010,7 +1042,9 @@ async fn get_network(State(st): State<RestState>) -> Result<Json<Value>, (Status
 ///
 /// The headline privacy metric for CoinCync. Shows total unspent
 /// outputs (every output in the UTXO set is a potential ring decoy).
-async fn get_anonymity(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+async fn get_anonymity(
+    State(st): State<RestState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let data = jsonrpc_call(&st, "get_anonymity_set", Value::Array(vec![])).await?;
     Ok(Json(data))
 }
@@ -1083,7 +1117,9 @@ async fn get_chain_stats(
             &st,
             "get_block_by_height",
             Value::Array(vec![Value::Number(h.into())]),
-        ).await {
+        )
+        .await
+        {
             if let Some(ts) = block["timestamp"].as_u64() {
                 timestamps.push(ts);
             }
@@ -1101,7 +1137,9 @@ async fn get_chain_stats(
 
     // Average block time from timestamp differences
     let avg_block_time = if timestamps.len() >= 2 {
-        let time_span = timestamps.last().unwrap_or(&0)
+        let time_span = timestamps
+            .last()
+            .unwrap_or(&0)
             .saturating_sub(*timestamps.first().unwrap_or(&0));
         if timestamps.len() > 1 {
             time_span as f64 / (timestamps.len() - 1) as f64
@@ -1205,7 +1243,9 @@ async fn get_emission(
             &st,
             "get_block_by_height",
             Value::Array(vec![Value::Number(h.into())]),
-        ).await {
+        )
+        .await
+        {
             let reward = block["reward"].as_u64().unwrap_or(0);
             cumulative += reward * step; // Approximate: assume reward is constant within step
             points.push(serde_json::json!({
@@ -1243,17 +1283,14 @@ async fn get_asset(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     validate_hex_hash(&id)?;
-    let asset = jsonrpc_call(
-        &st,
-        "get_asset_info",
-        Value::Array(vec![Value::String(id)]),
-    )
-    .await?;
+    let asset = jsonrpc_call(&st, "get_asset_info", Value::Array(vec![Value::String(id)])).await?;
     Ok(Json(asset))
 }
 
 /// GET /api/v1/assets — list all registered assets
-async fn list_assets(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+async fn list_assets(
+    State(st): State<RestState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let assets = jsonrpc_call(&st, "list_assets", Value::Array(vec![])).await?;
     Ok(Json(assets))
 }
@@ -1292,12 +1329,7 @@ async fn ws_upgrade(
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
         if ACTIVE_WS_CONNECTIONS
-            .compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
+            .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
             break;
@@ -1429,7 +1461,9 @@ async fn ws_handler(mut socket: ws::WebSocket, state: RestState, client_ip: Stri
 /// GET /api/v1/events — recent chain events (reorgs, rollbacks, forks)
 ///
 /// Powers the convergence timeline in the explorer.
-async fn get_chain_events(State(st): State<RestState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+async fn get_chain_events(
+    State(st): State<RestState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let events = jsonrpc_call(&st, "get_chain_events", Value::Array(vec![])).await?;
     Ok(Json(events))
 }
@@ -1496,10 +1530,12 @@ pub async fn run_rest_api(
     ];
     // Allow explorer served from node's own ports
     let explorer_port = listen_addr.port().wrapping_sub(1);
-    if let Ok(hv) = format!("http://127.0.0.1:{}", explorer_port).parse::<axum::http::HeaderValue>() {
+    if let Ok(hv) = format!("http://127.0.0.1:{}", explorer_port).parse::<axum::http::HeaderValue>()
+    {
         origins.push(hv);
     }
-    if let Ok(hv) = format!("http://localhost:{}", explorer_port).parse::<axum::http::HeaderValue>() {
+    if let Ok(hv) = format!("http://localhost:{}", explorer_port).parse::<axum::http::HeaderValue>()
+    {
         origins.push(hv);
     }
     // Custom origins from environment
@@ -1519,10 +1555,7 @@ pub async fn run_rest_api(
             axum::http::Method::POST,
             axum::http::Method::OPTIONS,
         ])
-        .allow_headers([
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::ACCEPT,
-        ]);
+        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::ACCEPT]);
 
     let mut app = Router::new();
 
@@ -1600,7 +1633,10 @@ pub async fn run_rest_api(
         .route("/api/v1/blocks/recent", get(get_recent_blocks))
         .route("/api/v1/block/hash/{hash}", get(get_block_by_hash))
         .route("/api/v1/block/height/{height}", get(get_block_by_height))
-        .route("/api/v1/block/{height}/transactions", get(get_block_transactions))
+        .route(
+            "/api/v1/block/{height}/transactions",
+            get(get_block_transactions),
+        )
         // ─── Transactions ────────────────────────────────────
         .route("/api/v1/transaction/{hash}", get(get_transaction))
         .route("/api/v1/transaction/submit", post(submit_transaction))
@@ -1791,7 +1827,10 @@ mod tests {
 
     #[test]
     fn test_pagination_defaults() {
-        let p = Pagination { page: None, limit: None };
+        let p = Pagination {
+            page: None,
+            limit: None,
+        };
         assert_eq!(p.page(), 1);
         assert_eq!(p.limit(), DEFAULT_PAGE_SIZE);
         assert_eq!(p.offset(), 0);
@@ -1799,7 +1838,10 @@ mod tests {
 
     #[test]
     fn test_pagination_clamp() {
-        let p = Pagination { page: Some(0), limit: Some(500) };
+        let p = Pagination {
+            page: Some(0),
+            limit: Some(500),
+        };
         assert_eq!(p.page(), 1);
         assert_eq!(p.limit(), MAX_PAGE_SIZE);
     }
@@ -1823,8 +1865,8 @@ mod tests {
             "get_block_by_height",
             "get_block",
             "get_peers",
-            "get_transaction",   // NotImplemented stub but still allowlisted
-            "get_asset_info",    // NotImplemented stub but still allowlisted
+            "get_transaction", // NotImplemented stub but still allowlisted
+            "get_asset_info",  // NotImplemented stub but still allowlisted
         ] {
             assert!(
                 RPC_ALLOWED_METHODS.contains(&method),

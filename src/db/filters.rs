@@ -4,12 +4,12 @@
 //! Network (Tier 2) and Archive (Tier 3) nodes build and store filters
 //! for every block, then serve them to Personal (Tier 1) nodes on request.
 
-use crate::db::shim::{Db, Tree};
-use crate::primitives::Hash;
+use super::{deserialize, serialize};
 use crate::consensus::Block;
-use crate::network::block_filter::{BlockFilter, FilterCheckpoint};
+use crate::db::shim::{Db, Tree};
 use crate::error::{Error, Result};
-use super::{serialize, deserialize};
+use crate::network::block_filter::{BlockFilter, FilterCheckpoint};
+use crate::primitives::Hash;
 
 /// Persistent block filter storage.
 ///
@@ -35,9 +35,11 @@ impl FilterDb {
 
     /// Open or create the filter database from an existing sled Db handle.
     pub fn new(db: &Db) -> Result<Self> {
-        let filters = db.open_tree("block_filters")
+        let filters = db
+            .open_tree("block_filters")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let checkpoints = db.open_tree("filter_checkpoints")
+        let checkpoints = db
+            .open_tree("filter_checkpoints")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         // Recover tip height from last entry. A malformed (non-8-byte)
@@ -78,7 +80,11 @@ impl FilterDb {
     /// — legitimate-looking but wrong. Bundle both writes in a
     /// single Transactional batch. `tip_height` update is in-memory
     /// only, so it doesn't need to be part of the atomic set.
-    pub fn build_and_store(&mut self, block: &Block, prev_filter_hash: Hash) -> Result<BlockFilter> {
+    pub fn build_and_store(
+        &mut self,
+        block: &Block,
+        prev_filter_hash: Hash,
+    ) -> Result<BlockFilter> {
         let filter = BlockFilter::from_block(block, prev_filter_hash);
         let height = filter.height;
 
@@ -97,16 +103,20 @@ impl FilterDb {
 
         use crate::db::shim::transaction::Transactional;
         let trees: &[&Tree] = &[&self.filters, &self.checkpoints];
-        trees.transaction(|tx| {
-            tx[0].insert(&height_key[..], data.as_slice())?;
-            if let Some(ref cp_data) = checkpoint_pair {
-                tx[1].insert(&height_key[..], cp_data.as_slice())?;
-            }
-            Ok(())
-        }).map_err(|e| Error::DatabaseError(format!(
-            "R-47: atomic filter+checkpoint commit failed at height {}: {:?}",
-            height, e
-        )))?;
+        trees
+            .transaction(|tx| {
+                tx[0].insert(&height_key[..], data.as_slice())?;
+                if let Some(ref cp_data) = checkpoint_pair {
+                    tx[1].insert(&height_key[..], cp_data.as_slice())?;
+                }
+                Ok(())
+            })
+            .map_err(|e| {
+                Error::DatabaseError(format!(
+                    "R-47: atomic filter+checkpoint commit failed at height {}: {:?}",
+                    height, e
+                ))
+            })?;
 
         if height > self.tip_height {
             self.tip_height = height;
@@ -199,7 +209,8 @@ impl FilterDb {
                     return Err(Error::DatabaseError(format!(
                         "R-48: filter-checkpoint iteration failed after {} entries — \
                          refusing to return a truncated checkpoint set. Underlying: {}",
-                        checkpoints.len(), e
+                        checkpoints.len(),
+                        e
                     )));
                 }
             }
@@ -221,8 +232,8 @@ impl FilterDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::chain::create_genesis_block;
+    use tempfile::tempdir;
 
     #[test]
     fn test_filter_storage_roundtrip() {

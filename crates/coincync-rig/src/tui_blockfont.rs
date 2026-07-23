@@ -45,7 +45,7 @@ pub fn glyph(c: char) -> &'static [&'static str; HEIGHT] {
         'M' => &GM,
         'G' => &GG,
         ' ' => &GSPACE,
-        _   => &GSPACE,
+        _ => &GSPACE,
     }
 }
 
@@ -57,8 +57,8 @@ pub fn render(text: &str) -> [String; HEIGHT] {
     for (i, c) in text.chars().enumerate() {
         let g = glyph(c);
         if i > 0 {
-            for r in 0..HEIGHT {
-                rows[r].push(' ');
+            for row in rows.iter_mut() {
+                row.push(' ');
             }
         }
         for r in 0..HEIGHT {
@@ -72,139 +72,25 @@ pub fn render(text: &str) -> [String; HEIGHT] {
 // 5×4 (5×5 for some) bitmap-style. Visual-by-eye design, keep at fixed
 // width per glyph and let `render` insert kerning gaps.
 
-const G0: [&str; HEIGHT] = [
-    "████",
-    "█  █",
-    "█  █",
-    "█  █",
-    "████",
-];
-const G1: [&str; HEIGHT] = [
-    "  █",
-    " ██",
-    "  █",
-    "  █",
-    "███",
-];
-const G2: [&str; HEIGHT] = [
-    "████",
-    "   █",
-    "████",
-    "█   ",
-    "████",
-];
-const G3: [&str; HEIGHT] = [
-    "████",
-    "   █",
-    " ███",
-    "   █",
-    "████",
-];
-const G4: [&str; HEIGHT] = [
-    "█  █",
-    "█  █",
-    "████",
-    "   █",
-    "   █",
-];
-const G5: [&str; HEIGHT] = [
-    "████",
-    "█   ",
-    "████",
-    "   █",
-    "████",
-];
-const G6: [&str; HEIGHT] = [
-    "████",
-    "█   ",
-    "████",
-    "█  █",
-    "████",
-];
-const G7: [&str; HEIGHT] = [
-    "████",
-    "   █",
-    "  █ ",
-    " █  ",
-    " █  ",
-];
-const G8: [&str; HEIGHT] = [
-    "████",
-    "█  █",
-    "████",
-    "█  █",
-    "████",
-];
-const G9: [&str; HEIGHT] = [
-    "████",
-    "█  █",
-    "████",
-    "   █",
-    "████",
-];
-const GDOT: [&str; HEIGHT] = [
-    " ",
-    " ",
-    " ",
-    " ",
-    "█",
-];
-const GCOMMA: [&str; HEIGHT] = [
-    " ",
-    " ",
-    " ",
-    "█",
-    "█",
-];
-const GH: [&str; HEIGHT] = [
-    "█  █",
-    "█  █",
-    "████",
-    "█  █",
-    "█  █",
-];
-const GSLASH: [&str; HEIGHT] = [
-    "   █",
-    "  █ ",
-    " █  ",
-    "█   ",
-    "█   ",
-];
-const GS_LOWER: [&str; HEIGHT] = [
-    "███",
-    "█  ",
-    "███",
-    "  █",
-    "███",
-];
-const GK: [&str; HEIGHT] = [
-    "█  █",
-    "█ █ ",
-    "██  ",
-    "█ █ ",
-    "█  █",
-];
-const GM: [&str; HEIGHT] = [
-    "█   █",
-    "██ ██",
-    "█ █ █",
-    "█   █",
-    "█   █",
-];
-const GG: [&str; HEIGHT] = [
-    "████",
-    "█   ",
-    "█ ██",
-    "█  █",
-    "████",
-];
-const GSPACE: [&str; HEIGHT] = [
-    "  ",
-    "  ",
-    "  ",
-    "  ",
-    "  ",
-];
+const G0: [&str; HEIGHT] = ["████", "█  █", "█  █", "█  █", "████"];
+const G1: [&str; HEIGHT] = ["  █", " ██", "  █", "  █", "███"];
+const G2: [&str; HEIGHT] = ["████", "   █", "████", "█   ", "████"];
+const G3: [&str; HEIGHT] = ["████", "   █", " ███", "   █", "████"];
+const G4: [&str; HEIGHT] = ["█  █", "█  █", "████", "   █", "   █"];
+const G5: [&str; HEIGHT] = ["████", "█   ", "████", "   █", "████"];
+const G6: [&str; HEIGHT] = ["████", "█   ", "████", "█  █", "████"];
+const G7: [&str; HEIGHT] = ["████", "   █", "  █ ", " █  ", " █  "];
+const G8: [&str; HEIGHT] = ["████", "█  █", "████", "█  █", "████"];
+const G9: [&str; HEIGHT] = ["████", "█  █", "████", "   █", "████"];
+const GDOT: [&str; HEIGHT] = [" ", " ", " ", " ", "█"];
+const GCOMMA: [&str; HEIGHT] = [" ", " ", " ", "█", "█"];
+const GH: [&str; HEIGHT] = ["█  █", "█  █", "████", "█  █", "█  █"];
+const GSLASH: [&str; HEIGHT] = ["   █", "  █ ", " █  ", "█   ", "█   "];
+const GS_LOWER: [&str; HEIGHT] = ["███", "█  ", "███", "  █", "███"];
+const GK: [&str; HEIGHT] = ["█  █", "█ █ ", "██  ", "█ █ ", "█  █"];
+const GM: [&str; HEIGHT] = ["█   █", "██ ██", "█ █ █", "█   █", "█   █"];
+const GG: [&str; HEIGHT] = ["████", "█   ", "█ ██", "█  █", "████"];
+const GSPACE: [&str; HEIGHT] = ["  ", "  ", "  ", "  ", "  "];
 
 /// Format a hashrate (raw H/s) as a hero-display string.
 /// Auto-scales:
@@ -216,7 +102,7 @@ const GSPACE: [&str; HEIGHT] = [
 /// unit at a smaller scale beside the hero digits.
 pub fn format_hashrate(hps: u64) -> (String, &'static str) {
     if hps < 10_000 {
-        (format!("{}", hps), "H/s")
+        (format!("{hps}"), "H/s")
     } else if hps < 10_000_000 {
         (format!("{:.1}", hps as f64 / 1_000.0), "KH/s")
     } else if hps < 10_000_000_000 {

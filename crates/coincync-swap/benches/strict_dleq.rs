@@ -24,12 +24,11 @@
 #![cfg(feature = "strict-dleq")]
 
 use coincync_swap::adaptor::AdaptorSecret;
-use coincync_swap::strict_dleq::{
-    prove_cross_curve_strict, verify_cross_curve_strict,
-};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use coincync_swap::strict_dleq::{prove_cross_curve_strict, verify_cross_curve_strict};
+use criterion::{criterion_group, criterion_main, Criterion};
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::scalar::Scalar as Curve25519Scalar;
+use std::hint::black_box;
 
 /// Build a deterministic input fixture: the same shape as
 /// `honest_strict_proof_fixture` in the unit tests. A small scalar
@@ -49,8 +48,7 @@ fn fixture() -> (AdaptorSecret, [u8; 33], [u8; 32]) {
     let t_btc = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
 
     // T_cync = secret · G_cync (Ristretto, little-endian).
-    let t_cync_scalar =
-        Curve25519Scalar::from_canonical_bytes(secret.ristretto_bytes()).unwrap();
+    let t_cync_scalar = Curve25519Scalar::from_canonical_bytes(secret.ristretto_bytes()).unwrap();
     let t_cync = (&t_cync_scalar * RISTRETTO_BASEPOINT_TABLE)
         .compress()
         .to_bytes();
@@ -77,16 +75,11 @@ fn bench_prove(c: &mut Criterion) {
 fn bench_verify(c: &mut Criterion) {
     let (secret, t_btc, t_cync) = fixture();
     let seed = [0x77u8; 32];
-    let proof = prove_cross_curve_strict(&secret, &t_btc, &t_cync, &seed)
-        .expect("setup: prove");
+    let proof = prove_cross_curve_strict(&secret, &t_btc, &t_cync, &seed).expect("setup: prove");
     c.bench_function("strict_dleq::verify", |b| {
         b.iter(|| {
-            verify_cross_curve_strict(
-                black_box(&proof),
-                black_box(&t_btc),
-                black_box(&t_cync),
-            )
-            .expect("verify")
+            verify_cross_curve_strict(black_box(&proof), black_box(&t_btc), black_box(&t_cync))
+                .expect("verify")
         });
     });
 }

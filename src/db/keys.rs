@@ -8,11 +8,11 @@
 //! [0,1,0,0,0,0,0,0] which sorts BEFORE epoch 1 [1,0,0,0,0,0,0,0].
 //! Big-endian preserves numeric ordering under lexicographic comparison.
 
+use super::{deserialize, serialize};
 use crate::db::shim::{Db, Tree};
 use crate::error::{Error, Result};
-use super::{serialize, deserialize};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Encrypted key data
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -65,13 +65,17 @@ impl KeyDb {
 
     /// Create new key database
     pub fn new(db: &Db) -> Result<Self> {
-        let spend_keys = db.open_tree("spend_keys")
+        let spend_keys = db
+            .open_tree("spend_keys")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let view_keys = db.open_tree("view_keys")
+        let view_keys = db
+            .open_tree("view_keys")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let metadata = db.open_tree("key_metadata")
+        let metadata = db
+            .open_tree("key_metadata")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let current_epoch = db.open_tree("key_epoch")
+        let current_epoch = db
+            .open_tree("key_epoch")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         Ok(KeyDb {
@@ -95,14 +99,17 @@ impl KeyDb {
     /// durability.
     pub fn store_spend_key(&self, epoch: u64, encrypted: &EncryptedKey) -> Result<()> {
         let data = serialize(encrypted)?;
-        self.spend_keys.insert(&epoch.to_be_bytes(), data)
+        self.spend_keys
+            .insert(&epoch.to_be_bytes(), data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         // R-37: force durability before returning — the caller
         // treats this fn as "the key is safely on disk".
-        self.spend_keys.flush()
-            .map_err(|e| Error::DatabaseError(format!(
-                "R-37: spend_key flush failed at epoch {}: {}", epoch, e
-            )))?;
+        self.spend_keys.flush().map_err(|e| {
+            Error::DatabaseError(format!(
+                "R-37: spend_key flush failed at epoch {}: {}",
+                epoch, e
+            ))
+        })?;
         Ok(())
     }
 
@@ -121,7 +128,8 @@ impl KeyDb {
     /// Store view key for epoch
     pub fn store_view_key(&self, epoch: u64, entry: &KeyEntry) -> Result<()> {
         let data = serialize(entry)?;
-        self.view_keys.insert(&epoch.to_be_bytes(), data)
+        self.view_keys
+            .insert(&epoch.to_be_bytes(), data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -191,14 +199,16 @@ impl KeyDb {
 
     /// Set current epoch
     pub fn set_current_epoch(&self, epoch: u64) -> Result<()> {
-        self.current_epoch.insert(Self::KEY_CURRENT_EPOCH, &epoch.to_be_bytes())
+        self.current_epoch
+            .insert(Self::KEY_CURRENT_EPOCH, &epoch.to_be_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
 
     /// Store master key hash (for password verification)
     pub fn store_master_key_hash(&self, hash: &[u8; 32]) -> Result<()> {
-        self.metadata.insert(Self::KEY_MASTER_KEY_HASH, hash.as_slice())
+        self.metadata
+            .insert(Self::KEY_MASTER_KEY_HASH, hash.as_slice())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -207,7 +217,9 @@ impl KeyDb {
     pub fn get_master_key_hash(&self) -> Result<Option<[u8; 32]>> {
         match self.metadata.get(Self::KEY_MASTER_KEY_HASH) {
             Ok(Some(data)) => {
-                let bytes: [u8; 32] = data.as_ref().try_into()
+                let bytes: [u8; 32] = data
+                    .as_ref()
+                    .try_into()
                     .map_err(|_| Error::DatabaseError("invalid master key hash".into()))?;
                 Ok(Some(bytes))
             }
@@ -237,19 +249,26 @@ impl KeyDb {
 
         let epoch_key = epoch.to_be_bytes();
         let trees_slice: &[&Tree] = &[&self.spend_keys, &self.view_keys];
-        trees_slice.transaction(|tx| {
-            tx[0].remove(&epoch_key[..])?;
-            tx[1].remove(&epoch_key[..])?;
-            Ok(())
-        }).map_err(|e| Error::DatabaseError(format!(
-            "R-38: atomic delete_epoch_keys failed at epoch {}: {:?}", epoch, e
-        )))?;
+        trees_slice
+            .transaction(|tx| {
+                tx[0].remove(&epoch_key[..])?;
+                tx[1].remove(&epoch_key[..])?;
+                Ok(())
+            })
+            .map_err(|e| {
+                Error::DatabaseError(format!(
+                    "R-38: atomic delete_epoch_keys failed at epoch {}: {:?}",
+                    epoch, e
+                ))
+            })?;
         // Force fsync: an unerased ex-active key is a security
         // regression, so we accept the flush latency.
-        self.spend_keys.flush()
-            .map_err(|e| Error::DatabaseError(format!(
-                "R-38: flush after delete_epoch_keys failed at epoch {}: {}", epoch, e
-            )))?;
+        self.spend_keys.flush().map_err(|e| {
+            Error::DatabaseError(format!(
+                "R-38: flush after delete_epoch_keys failed at epoch {}: {}",
+                epoch, e
+            ))
+        })?;
         Ok(())
     }
 
@@ -260,13 +279,17 @@ impl KeyDb {
 
     /// Clear all keys (dangerous!)
     pub fn clear(&self) -> Result<()> {
-        self.spend_keys.clear()
+        self.spend_keys
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.view_keys.clear()
+        self.view_keys
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.metadata.clear()
+        self.metadata
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.current_epoch.clear()
+        self.current_epoch
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }

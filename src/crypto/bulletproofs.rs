@@ -7,16 +7,16 @@
 //! - BlindingFactor is securely zeroized on drop using the zeroize crate
 //! - Commitment operations return Option/Result to handle invalid points
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use merlin::Transcript;
-use rand::{RngCore, CryptoRng};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
 use once_cell::sync::Lazy;
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::primitives::Amount;
-use crate::error::{Error, Result};
 use crate::crypto::secure::ct_eq;
+use crate::error::{Error, Result};
+use crate::primitives::Amount;
 
 // MIGRATION: All types now use curve25519-dalek v4 (no more dalek-ng)
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
@@ -36,10 +36,8 @@ pub const MAX_AGGREGATION: usize = 16;
 /// Extracted from bulletproofs::PedersenGens::default().B_blinding.
 /// Hardcoding eliminates the dependency on the old bulletproofs crate.
 const H_GENERATOR_COMPRESSED: [u8; 32] = [
-    0x8c, 0x92, 0x40, 0xb4, 0x56, 0xa9, 0xe6, 0xdc,
-    0x65, 0xc3, 0x77, 0xa1, 0x04, 0x8d, 0x74, 0x5f,
-    0x94, 0xa0, 0x8c, 0xdb, 0x7f, 0x44, 0xcb, 0xcd,
-    0x7b, 0x46, 0xf3, 0x40, 0x48, 0x87, 0x11, 0x34,
+    0x8c, 0x92, 0x40, 0xb4, 0x56, 0xa9, 0xe6, 0xdc, 0x65, 0xc3, 0x77, 0xa1, 0x04, 0x8d, 0x74, 0x5f,
+    0x94, 0xa0, 0x8c, 0xdb, 0x7f, 0x44, 0xcb, 0xcd, 0x7b, 0x46, 0xf3, 0x40, 0x48, 0x87, 0x11, 0x34,
 ];
 
 /// Decompressed H generator (value base) — cached
@@ -203,7 +201,7 @@ impl PedersenCommitment {
 
     /// Get as bytes slice
     pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0.0
+        &self.0 .0
     }
 
     /// Get compressed point
@@ -230,7 +228,7 @@ impl std::fmt::Debug for PedersenCommitment {
 
 impl std::hash::Hash for PedersenCommitment {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.0.hash(state);
+        self.0 .0.hash(state);
     }
 }
 
@@ -380,7 +378,9 @@ pub fn verify_commitment(
 
 /// Round up to the next power of two
 fn next_power_of_two(n: usize) -> usize {
-    if n == 0 { return 1; }
+    if n == 0 {
+        return 1;
+    }
     n.next_power_of_two()
 }
 
@@ -404,7 +404,9 @@ pub fn create_aggregated_range_proof<R: RngCore + CryptoRng>(
 
 /// Verify a range proof (delegates to BP+)
 pub fn verify_range_proof(commitment: &PedersenCommitment, proof: &RangeProof) -> bool {
-    if proof.is_empty() { return false; }
+    if proof.is_empty() {
+        return false;
+    }
     verify_range_proof_bp_plus(commitment, proof)
 }
 
@@ -416,8 +418,12 @@ pub fn verify_coinbase_output(commitment: &PedersenCommitment, expected_amount: 
 
 /// Verify an aggregated range proof (delegates to BP+)
 pub fn verify_range_proofs(commitments: &[PedersenCommitment], proof: &RangeProof) -> bool {
-    if commitments.is_empty() { return proof.is_empty(); }
-    if proof.is_empty() { return false; }
+    if commitments.is_empty() {
+        return proof.is_empty();
+    }
+    if proof.is_empty() {
+        return false;
+    }
     verify_range_proofs_bp_plus(commitments, proof)
 }
 
@@ -425,7 +431,9 @@ pub fn verify_range_proofs(commitments: &[PedersenCommitment], proof: &RangeProo
 pub fn batch_verify_range_proofs(
     commitments_and_proofs: &[(PedersenCommitment, RangeProof)],
 ) -> bool {
-    commitments_and_proofs.iter().all(|(c, p)| verify_range_proof(c, p))
+    commitments_and_proofs
+        .iter()
+        .all(|(c, p)| verify_range_proof(c, p))
 }
 
 // ─── Bulletproofs+ (BP+) range proofs ────────────────────────────────────────
@@ -439,12 +447,12 @@ pub fn batch_verify_range_proofs(
 
 use tari_bulletproofs_plus::{
     commitment_opening::CommitmentOpening as BpPlusOpening,
+    generators::pedersen_gens::{ExtensionDegree, PedersenGens as BpPlusPedersenGens},
     range_parameters::RangeParameters as BpPlusParams,
     range_proof::RangeProof as BpPlusProof,
     range_proof::VerifyAction,
     range_statement::RangeStatement as BpPlusStatement,
     range_witness::RangeWitness as BpPlusWitness,
-    generators::pedersen_gens::{PedersenGens as BpPlusPedersenGens, ExtensionDegree},
 };
 
 use crate::constants::{BULLETPROOFS_PLUS_HEIGHT, RANGE_PROOF_VERSION_BP_PLUS};
@@ -479,15 +487,10 @@ pub fn create_range_proof_bp_plus<R: RngCore + CryptoRng>(
         .map_err(|e| Error::CryptoError(format!("BP+ params: {e}")))?;
 
     let c = PedersenCommitment::commit(amount.as_atomic(), blinding);
-    let commitment = c.as_point().decompress()
-        .ok_or(Error::RangeProofInvalid)?;
+    let commitment = c.as_point().decompress().ok_or(Error::RangeProofInvalid)?;
 
-    let statement = BpPlusStatement::init(
-        params,
-        vec![commitment],
-        vec![None],
-        None,
-    ).map_err(|e| Error::CryptoError(format!("BP+ statement: {e}")))?;
+    let statement = BpPlusStatement::init(params, vec![commitment], vec![None], None)
+        .map_err(|e| Error::CryptoError(format!("BP+ statement: {e}")))?;
 
     let mut transcript = Transcript::new(b"CoinCync_RangeProof_BPPlus");
     let proof = BpPlusProof::prove_with_rng(&mut transcript, &statement, &witness, rng)
@@ -515,7 +518,10 @@ pub fn create_aggregated_range_proof_bp_plus<R: RngCore + CryptoRng>(
         return Err(Error::RangeProofInvalid);
     }
     if amounts.is_empty() {
-        return Ok(RangeProof { version: RANGE_PROOF_VERSION_BP_PLUS, data: vec![] });
+        return Ok(RangeProof {
+            version: RANGE_PROOF_VERSION_BP_PLUS,
+            data: vec![],
+        });
     }
     if amounts.len() > MAX_AGGREGATION {
         return Err(Error::RangeProofInvalid);
@@ -525,7 +531,9 @@ pub fn create_aggregated_range_proof_bp_plus<R: RngCore + CryptoRng>(
     let padded_count = next_power_of_two(real_count);
 
     // Build openings (real + zero-padding)
-    let mut openings: Vec<BpPlusOpening> = amounts.iter().zip(blindings.iter())
+    let mut openings: Vec<BpPlusOpening> = amounts
+        .iter()
+        .zip(blindings.iter())
         .map(|(a, b)| BpPlusOpening::new(a.as_atomic(), vec![*b.as_scalar()]))
         .collect();
     for _ in real_count..padded_count {
@@ -545,7 +553,9 @@ pub fn create_aggregated_range_proof_bp_plus<R: RngCore + CryptoRng>(
         commitments.push(c.as_point().decompress().ok_or(Error::RangeProofInvalid)?);
     }
     let identity = PedersenCommitment::commit(0, &BlindingFactor::from_bytes([0u8; 32]))
-        .as_point().decompress().ok_or(Error::RangeProofInvalid)?;
+        .as_point()
+        .decompress()
+        .ok_or(Error::RangeProofInvalid)?;
     for _ in real_count..padded_count {
         commitments.push(identity);
     }
@@ -560,7 +570,9 @@ pub fn create_aggregated_range_proof_bp_plus<R: RngCore + CryptoRng>(
     let proof_bytes = proof.to_bytes();
     tracing::info!(
         "BP+ aggregated range proof ({} bytes) for {} outputs (padded to {})",
-        proof_bytes.len(), real_count, padded_count,
+        proof_bytes.len(),
+        real_count,
+        padded_count,
     );
 
     Ok(RangeProof {
@@ -601,14 +613,12 @@ pub fn verify_range_proof_bp_plus(commitment: &PedersenCommitment, proof: &Range
         &[statement],
         &[bp_proof],
         VerifyAction::VerifyOnly,
-    ).is_ok()
+    )
+    .is_ok()
 }
 
 /// Verify an aggregated BP+ range proof for multiple commitments.
-pub fn verify_range_proofs_bp_plus(
-    commitments: &[PedersenCommitment],
-    proof: &RangeProof,
-) -> bool {
+pub fn verify_range_proofs_bp_plus(commitments: &[PedersenCommitment], proof: &RangeProof) -> bool {
     if commitments.is_empty() {
         return proof.is_empty();
     }
@@ -632,7 +642,9 @@ pub fn verify_range_proofs_bp_plus(
         }
     }
     let identity = match PedersenCommitment::commit(0, &BlindingFactor::from_bytes([0u8; 32]))
-        .as_point().decompress() {
+        .as_point()
+        .decompress()
+    {
         Some(p) => p,
         None => return false,
     };
@@ -656,7 +668,8 @@ pub fn verify_range_proofs_bp_plus(
         &[statement],
         &[bp_proof],
         VerifyAction::VerifyOnly,
-    ).is_ok()
+    )
+    .is_ok()
 }
 
 // ─── Height-aware dispatch ──────────────────────────────────────────────────
@@ -692,11 +705,17 @@ pub fn create_aggregated_range_proof_for_height<R: RngCore + CryptoRng>(
 /// Verify a range proof, dispatching based on the proof's version byte.
 ///
 /// SECURITY (C-2 FIX): Height-gated dispatch — see `verify_range_proofs_dispatch`.
-pub fn verify_range_proof_dispatch(commitment: &PedersenCommitment, proof: &RangeProof, current_height: u64) -> bool {
+pub fn verify_range_proof_dispatch(
+    commitment: &PedersenCommitment,
+    proof: &RangeProof,
+    current_height: u64,
+) -> bool {
     let bp_plus_active = current_height >= crate::constants::BULLETPROOFS_PLUS_HEIGHT;
     match proof.version {
         RANGE_PROOF_VERSION if !bp_plus_active => verify_range_proof(commitment, proof),
-        RANGE_PROOF_VERSION_BP_PLUS if bp_plus_active => verify_range_proof_bp_plus(commitment, proof),
+        RANGE_PROOF_VERSION_BP_PLUS if bp_plus_active => {
+            verify_range_proof_bp_plus(commitment, proof)
+        }
         _ => false,
     }
 }
@@ -715,11 +734,15 @@ pub fn verify_range_proofs_dispatch(
     let bp_plus_active = current_height >= crate::constants::BULLETPROOFS_PLUS_HEIGHT;
     match proof.version {
         RANGE_PROOF_VERSION if !bp_plus_active => verify_range_proofs(commitments, proof),
-        RANGE_PROOF_VERSION_BP_PLUS if bp_plus_active => verify_range_proofs_bp_plus(commitments, proof),
+        RANGE_PROOF_VERSION_BP_PLUS if bp_plus_active => {
+            verify_range_proofs_bp_plus(commitments, proof)
+        }
         v => {
             tracing::warn!(
                 "Range proof version {} not active at height {} (BP+ active: {})",
-                v, current_height, bp_plus_active
+                v,
+                current_height,
+                bp_plus_active
             );
             false
         }
@@ -781,9 +804,8 @@ mod tests {
             Amount::from_atomic(200_000_000),
         ];
 
-        let blindings: Vec<BlindingFactor> = (0..2)
-            .map(|_| BlindingFactor::random(&mut OsRng))
-            .collect();
+        let blindings: Vec<BlindingFactor> =
+            (0..2).map(|_| BlindingFactor::random(&mut OsRng)).collect();
 
         let commitments: Vec<PedersenCommitment> = amounts
             .iter()
@@ -836,9 +858,8 @@ mod tests {
             Amount::from_atomic(50_000_000),
         ];
 
-        let blindings: Vec<BlindingFactor> = (0..3)
-            .map(|_| BlindingFactor::random(&mut OsRng))
-            .collect();
+        let blindings: Vec<BlindingFactor> =
+            (0..3).map(|_| BlindingFactor::random(&mut OsRng)).collect();
 
         let commitments: Vec<PedersenCommitment> = amounts
             .iter()
@@ -859,9 +880,8 @@ mod tests {
             .map(|i| Amount::from_atomic(i * 1_000_000))
             .collect();
 
-        let blindings: Vec<BlindingFactor> = (0..5)
-            .map(|_| BlindingFactor::random(&mut OsRng))
-            .collect();
+        let blindings: Vec<BlindingFactor> =
+            (0..5).map(|_| BlindingFactor::random(&mut OsRng)).collect();
 
         let commitments: Vec<PedersenCommitment> = amounts
             .iter()
@@ -889,7 +909,11 @@ mod tests {
 
         // With BP+ from genesis, verify_range_proof also delegates to BP+
         assert!(verify_range_proof(&commitment, &proof));
-        assert!(verify_range_proof_dispatch(&commitment, &proof, BULLETPROOFS_PLUS_HEIGHT));
+        assert!(verify_range_proof_dispatch(
+            &commitment,
+            &proof,
+            BULLETPROOFS_PLUS_HEIGHT
+        ));
     }
 
     #[test]
@@ -898,17 +922,23 @@ mod tests {
             Amount::from_atomic(100_000_000),
             Amount::from_atomic(200_000_000),
         ];
-        let blindings: Vec<BlindingFactor> = (0..2)
-            .map(|_| BlindingFactor::random(&mut OsRng))
-            .collect();
-        let commitments: Vec<PedersenCommitment> = amounts.iter().zip(blindings.iter())
+        let blindings: Vec<BlindingFactor> =
+            (0..2).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let commitments: Vec<PedersenCommitment> = amounts
+            .iter()
+            .zip(blindings.iter())
             .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
             .collect();
 
-        let proof = create_aggregated_range_proof_bp_plus(&amounts, &blindings, &mut OsRng).unwrap();
+        let proof =
+            create_aggregated_range_proof_bp_plus(&amounts, &blindings, &mut OsRng).unwrap();
         assert_eq!(proof.version, RANGE_PROOF_VERSION_BP_PLUS);
         assert!(verify_range_proofs_bp_plus(&commitments, &proof));
-        assert!(verify_range_proofs_dispatch(&commitments, &proof, BULLETPROOFS_PLUS_HEIGHT));
+        assert!(verify_range_proofs_dispatch(
+            &commitments,
+            &proof,
+            BULLETPROOFS_PLUS_HEIGHT
+        ));
     }
 
     #[test]
@@ -935,9 +965,14 @@ mod tests {
         assert_eq!(proof.version, RANGE_PROOF_VERSION_BP_PLUS);
         assert!(verify_range_proof_dispatch(&commitment, &proof, 0));
 
-        let proof_high = create_range_proof_for_height(amount, &blinding, &mut OsRng, 100_000).unwrap();
+        let proof_high =
+            create_range_proof_for_height(amount, &blinding, &mut OsRng, 100_000).unwrap();
         assert_eq!(proof_high.version, RANGE_PROOF_VERSION_BP_PLUS);
-        assert!(verify_range_proof_dispatch(&commitment, &proof_high, 100_000));
+        assert!(verify_range_proof_dispatch(
+            &commitment,
+            &proof_high,
+            100_000
+        ));
     }
 
     #[test]
@@ -958,32 +993,46 @@ mod tests {
             Amount::from_atomic(100_000_000),
             Amount::from_atomic(50_000_000),
         ];
-        let blindings: Vec<BlindingFactor> = (0..3)
-            .map(|_| BlindingFactor::random(&mut OsRng))
-            .collect();
-        let commitments: Vec<PedersenCommitment> = amounts.iter().zip(blindings.iter())
+        let blindings: Vec<BlindingFactor> =
+            (0..3).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let commitments: Vec<PedersenCommitment> = amounts
+            .iter()
+            .zip(blindings.iter())
             .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
             .collect();
 
-        let proof = create_aggregated_range_proof_bp_plus(&amounts, &blindings, &mut OsRng).unwrap();
+        let proof =
+            create_aggregated_range_proof_bp_plus(&amounts, &blindings, &mut OsRng).unwrap();
         assert!(verify_range_proofs_bp_plus(&commitments, &proof));
     }
 
     #[test]
     fn test_power_of_2_padding_boundary() {
         // 4 outputs (power of 2) - no padding needed
-        let amounts_4: Vec<Amount> = (1..=4).map(|i| Amount::from_atomic(i * 1_000_000)).collect();
-        let blindings_4: Vec<BlindingFactor> = (0..4).map(|_| BlindingFactor::random(&mut OsRng)).collect();
-        let commitments_4: Vec<PedersenCommitment> = amounts_4.iter().zip(blindings_4.iter())
-            .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b)).collect();
+        let amounts_4: Vec<Amount> = (1..=4)
+            .map(|i| Amount::from_atomic(i * 1_000_000))
+            .collect();
+        let blindings_4: Vec<BlindingFactor> =
+            (0..4).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let commitments_4: Vec<PedersenCommitment> = amounts_4
+            .iter()
+            .zip(blindings_4.iter())
+            .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
+            .collect();
         let proof_4 = create_aggregated_range_proof(&amounts_4, &blindings_4, &mut OsRng).unwrap();
         assert!(verify_range_proofs(&commitments_4, &proof_4));
 
         // 5 outputs (not power of 2) - must pad to 8
-        let amounts_5: Vec<Amount> = (1..=5).map(|i| Amount::from_atomic(i * 1_000_000)).collect();
-        let blindings_5: Vec<BlindingFactor> = (0..5).map(|_| BlindingFactor::random(&mut OsRng)).collect();
-        let commitments_5: Vec<PedersenCommitment> = amounts_5.iter().zip(blindings_5.iter())
-            .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b)).collect();
+        let amounts_5: Vec<Amount> = (1..=5)
+            .map(|i| Amount::from_atomic(i * 1_000_000))
+            .collect();
+        let blindings_5: Vec<BlindingFactor> =
+            (0..5).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let commitments_5: Vec<PedersenCommitment> = amounts_5
+            .iter()
+            .zip(blindings_5.iter())
+            .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
+            .collect();
         let proof_5 = create_aggregated_range_proof(&amounts_5, &blindings_5, &mut OsRng).unwrap();
         assert!(verify_range_proofs(&commitments_5, &proof_5));
     }

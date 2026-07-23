@@ -12,8 +12,8 @@ use tracing::error;
 
 use coincync::config::Network;
 use coincync::wallet::{
-    WalletKeys, WalletData,
-    save_wallet, load_wallet, wallet_exists, generate_mnemonic, mnemonic_to_seed,
+    generate_mnemonic, load_wallet, mnemonic_to_seed, save_wallet, wallet_exists, WalletData,
+    WalletKeys,
 };
 
 #[derive(Parser)]
@@ -478,9 +478,11 @@ async fn main() {
     let wallet_path = resolve_home(&cli.wallet);
 
     let result = match cli.command {
-        Command::Create { password, force, no_encrypt } => {
-            cmd_create(&wallet_path, password, force, no_encrypt, network).await
-        }
+        Command::Create {
+            password,
+            force,
+            no_encrypt,
+        } => cmd_create(&wallet_path, password, force, no_encrypt, network).await,
         Command::Restore { seed, password } => {
             cmd_restore(&wallet_path, seed, password, network).await
         }
@@ -489,59 +491,118 @@ async fn main() {
         Command::Address { password } => cmd_address(&wallet_path, password, network).await,
         Command::Balance { password } => cmd_balance(&wallet_path, password).await,
         Command::ShowSeed { password } => cmd_show_seed(&wallet_path, password).await,
-        Command::Scan { password, from, max_blocks } => {
-            cmd_scan(&wallet_path, password, from, max_blocks, &cli.node).await
-        }
+        Command::Scan {
+            password,
+            from,
+            max_blocks,
+        } => cmd_scan(&wallet_path, password, from, max_blocks, &cli.node).await,
         Command::PrivacyStats => cmd_privacy_stats(&cli.node).await,
-        Command::Send { password, to_spend, to_view, amount, fee_multiplier, split_output, memo, recovery_address, recovery_timeout } => {
-            cmd_send(&wallet_path, password, to_spend, to_view, amount, fee_multiplier, split_output, memo, recovery_address, recovery_timeout, &cli.node).await
+        Command::Send {
+            password,
+            to_spend,
+            to_view,
+            amount,
+            fee_multiplier,
+            split_output,
+            memo,
+            recovery_address,
+            recovery_timeout,
+        } => {
+            cmd_send(
+                &wallet_path,
+                password,
+                to_spend,
+                to_view,
+                amount,
+                fee_multiplier,
+                split_output,
+                memo,
+                recovery_address,
+                recovery_timeout,
+                &cli.node,
+            )
+            .await
         }
-        Command::MultisigGen { threshold, total, output_dir } => {
-            cmd_multisig_gen(threshold, total, &output_dir, network).await
-        }
-        Command::MultisigInfo { share_file } => {
-            cmd_multisig_info(&share_file).await
-        }
-        Command::MultisigSend { key_shares, to_spend, to_view, amount } => {
-            cmd_multisig_send(&key_shares, &to_spend, &to_view, amount, &cli.node).await
-        }
+        Command::MultisigGen {
+            threshold,
+            total,
+            output_dir,
+        } => cmd_multisig_gen(threshold, total, &output_dir, network).await,
+        Command::MultisigInfo { share_file } => cmd_multisig_info(&share_file).await,
+        Command::MultisigSend {
+            key_shares,
+            to_spend,
+            to_view,
+            amount,
+        } => cmd_multisig_send(&key_shares, &to_spend, &to_view, amount, &cli.node).await,
         Command::MultisigRound1 { share_file, output } => {
             cmd_multisig_round1(&share_file, &output).await
         }
-        Command::MultisigRound2 { share_file, nonce_file, commitments, message, output } => {
-            cmd_multisig_round2(&share_file, &nonce_file, &commitments, &message, &output).await
-        }
-        Command::SetRecovery { password, address, timeout } => {
-            cmd_set_recovery(&wallet_path, password, &address, timeout).await
-        }
-        Command::CheckRecovery { password, node_override } => {
+        Command::MultisigRound2 {
+            share_file,
+            nonce_file,
+            commitments,
+            message,
+            output,
+        } => cmd_multisig_round2(&share_file, &nonce_file, &commitments, &message, &output).await,
+        Command::SetRecovery {
+            password,
+            address,
+            timeout,
+        } => cmd_set_recovery(&wallet_path, password, &address, timeout).await,
+        Command::CheckRecovery {
+            password,
+            node_override,
+        } => {
             let node_url = node_override.as_deref().unwrap_or(&cli.node);
             cmd_check_recovery(&wallet_path, password, node_url).await
         }
-        Command::AutoChurn { password, min_interval, max_interval, min_pct, max_pct } => {
-            cmd_auto_churn(&wallet_path, password, min_interval, max_interval, min_pct, max_pct, &cli.node).await
+        Command::AutoChurn {
+            password,
+            min_interval,
+            max_interval,
+            min_pct,
+            max_pct,
+        } => {
+            cmd_auto_churn(
+                &wallet_path,
+                password,
+                min_interval,
+                max_interval,
+                min_pct,
+                max_pct,
+                &cli.node,
+            )
+            .await
         }
-        Command::MultisigAggregate { commitments, shares, key_shares, message } => {
-            cmd_multisig_aggregate(&commitments, &shares, &key_shares, &message).await
-        }
+        Command::MultisigAggregate {
+            commitments,
+            shares,
+            key_shares,
+            message,
+        } => cmd_multisig_aggregate(&commitments, &shares, &key_shares, &message).await,
         Command::Subaddress { action } => match action {
             SubaddressAction::List { password } => {
                 cmd_subaddress_list(&wallet_path, password, network).await
             }
-            SubaddressAction::Create { password, account, label } => {
-                cmd_subaddress_create(&wallet_path, password, account, label, network).await
-            }
+            SubaddressAction::Create {
+                password,
+                account,
+                label,
+            } => cmd_subaddress_create(&wallet_path, password, account, label, network).await,
         },
         Command::Disclose { action } => match action {
-            DiscloseAction::Balance { password, utxo_index, threshold } => {
-                cmd_disclose_balance(&wallet_path, password, utxo_index, threshold).await
-            }
-            DiscloseAction::VerifyBalance { proof } => {
-                cmd_disclose_verify_balance(&proof).await
-            }
-            DiscloseAction::ScopedViewKey { password, from_height, to_height } => {
-                cmd_disclose_scoped_view_key(&wallet_path, password, from_height, to_height).await
-            }
+            DiscloseAction::Balance {
+                password,
+                utxo_index,
+                threshold,
+            } => cmd_disclose_balance(&wallet_path, password, utxo_index, threshold).await,
+            DiscloseAction::VerifyBalance { proof } => cmd_disclose_verify_balance(&proof).await,
+            DiscloseAction::ScopedViewKey {
+                password,
+                from_height,
+                to_height,
+            } => cmd_disclose_scoped_view_key(&wallet_path, password, from_height, to_height).await,
             DiscloseAction::ScanScoped { view_key } => {
                 cmd_disclose_scan_scoped(&view_key, &cli.node).await
             }
@@ -549,9 +610,10 @@ async fn main() {
                 cmd_disclose_verify_ownership(&proof).await
             }
         },
-        Command::ShowMemo { password, utxo_index } => {
-            cmd_show_memo(&wallet_path, password, utxo_index, &cli.node).await
-        }
+        Command::ShowMemo {
+            password,
+            utxo_index,
+        } => cmd_show_memo(&wallet_path, password, utxo_index, &cli.node).await,
     };
 
     if let Err(e) = result {
@@ -595,8 +657,7 @@ fn prompt_password(confirm: bool) -> Result<zeroize::Zeroizing<String>, String> 
     let theme = dialoguer::theme::ColorfulTheme::default();
     let mut prompt = dialoguer::Password::with_theme(&theme).with_prompt("Password");
     if confirm {
-        prompt = prompt
-            .with_confirmation("Confirm password", "passwords do not match");
+        prompt = prompt.with_confirmation("Confirm password", "passwords do not match");
     }
     let pw = zeroize::Zeroizing::new(
         prompt
@@ -622,7 +683,10 @@ fn prompt_password(confirm: bool) -> Result<zeroize::Zeroizing<String>, String> 
 ///
 /// `confirm` only applies to the interactive path — piping is assumed to
 /// be deliberate, and re-typing for confirmation is hostile to automation.
-fn resolve_password(opt: Option<String>, confirm: bool) -> Result<zeroize::Zeroizing<String>, String> {
+fn resolve_password(
+    opt: Option<String>,
+    confirm: bool,
+) -> Result<zeroize::Zeroizing<String>, String> {
     use std::io::Read;
     use zeroize::Zeroize;
     match opt {
@@ -632,7 +696,9 @@ fn resolve_password(opt: Option<String>, confirm: bool) -> Result<zeroize::Zeroi
             // v1.0.13 #5: stdin buffer is Zeroizing so the intermediate
             // copy is wiped on drop, including the error paths below.
             let mut buf = zeroize::Zeroizing::new(String::new());
-            handle.read_to_string(&mut *buf).map_err(|e| e.to_string())?;
+            handle
+                .read_to_string(&mut *buf)
+                .map_err(|e| e.to_string())?;
             if buf.len() > MAX_PASSWORD_LEN {
                 return Err(format!(
                     "stdin password too long (max {} bytes); refusing to read \
@@ -643,10 +709,11 @@ fn resolve_password(opt: Option<String>, confirm: bool) -> Result<zeroize::Zeroi
             // Strip ONE trailing newline (typical interactive paste
             // pattern). Don't trim() — leading/trailing whitespace
             // might be intentional in the password.
-            let pw_str = zeroize::Zeroizing::new(buf
-                .trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_string());
+            let pw_str = zeroize::Zeroizing::new(
+                buf.trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_string(),
+            );
             if pw_str.is_empty() {
                 return Err("password must not be empty when reading from stdin".into());
             }
@@ -760,7 +827,10 @@ async fn cmd_restore(
             write!(out, "24-word seed phrase: ").map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
             let mut line = String::new();
-            stdin.lock().read_line(&mut line).map_err(|e| e.to_string())?;
+            stdin
+                .lock()
+                .read_line(&mut line)
+                .map_err(|e| e.to_string())?;
             line.trim().to_string()
         }
     };
@@ -785,8 +855,7 @@ async fn cmd_restore(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    save_wallet(path, &data, Some(password.as_str()))
-        .map_err(|e| format!("save failed: {}", e))?;
+    save_wallet(path, &data, Some(password.as_str())).map_err(|e| format!("save failed: {}", e))?;
 
     println!("Wallet restored to {:?}", path);
     Ok(())
@@ -797,8 +866,8 @@ async fn cmd_open(path: &PathBuf, password: Option<String>) -> Result<(), String
         return Err(format!("no wallet at {:?}", path));
     }
     let password = resolve_password(password, false)?;
-    let _data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let _data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
     println!("Wallet unlocked successfully.");
     Ok(())
 }
@@ -844,7 +913,9 @@ async fn cmd_info(
             println!(
                 "Chain:    height={} synced={}",
                 info.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
-                info.get("is_synced").and_then(|v| v.as_bool()).unwrap_or(false),
+                info.get("is_synced")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             );
         }
         Err(e) => {
@@ -863,8 +934,8 @@ async fn cmd_address(
         return Err(format!("no wallet at {:?}", path));
     }
     let password = resolve_password(password, false)?;
-    let data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     let keys = WalletKeys::from_seed(data.seed);
     let epoch = keys
@@ -875,21 +946,24 @@ async fn cmd_address(
         Network::Mainnet => coincync::primitives::Network::Mainnet,
         Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
     };
-    let addr = coincync::primitives::Address::new(
-        prim_network,
-        epoch.spend_public,
-        epoch.view_public,
-    );
+    let addr =
+        coincync::primitives::Address::new(prim_network, epoch.spend_public, epoch.view_public);
     println!("Address:       {}", addr);
-    println!("Spend public:  {}", hex::encode(epoch.spend_public.as_bytes()));
-    println!("View public:   {}", hex::encode(epoch.view_public.as_bytes()));
+    println!(
+        "Spend public:  {}",
+        hex::encode(epoch.spend_public.as_bytes())
+    );
+    println!(
+        "View public:   {}",
+        hex::encode(epoch.view_public.as_bytes())
+    );
     Ok(())
 }
 
 async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), String> {
     let password = resolve_password(password, false)?;
-    let data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     println!("Wallet label:    {}", data.label);
     println!("Scanned height:  {}", data.scanned_height);
@@ -902,8 +976,8 @@ async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), Str
 
 async fn cmd_show_seed(path: &PathBuf, password: Option<String>) -> Result<(), String> {
     let password = resolve_password(password, false)?;
-    let data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     if let Some(phrase) = data.mnemonic_phrase.as_ref() {
         println!("24-word mnemonic:");
@@ -933,15 +1007,15 @@ async fn cmd_scan(
     node: &str,
 ) -> Result<(), String> {
     use coincync::consensus::Block;
-    use coincync::wallet::{Wallet, WalletScanner, KeyEpoch};
     use coincync::wallet::scanner::decrypted_to_utxo;
+    use coincync::wallet::{KeyEpoch, Wallet, WalletScanner};
 
     let password = resolve_password(password, false)?;
 
     // Open + unlock the real Wallet struct so we persist UTXOs into it.
-    let mut wallet = Wallet::open(path.clone())
-        .map_err(|e| format!("open wallet: {}", e))?;
-    wallet.unlock(&password)
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
         .map_err(|e| format!("unlock wallet: {}", e))?;
 
     let epoch: KeyEpoch = wallet
@@ -962,9 +1036,8 @@ async fn cmd_scan(
     // both keyed by stable identifiers (tx_hash + output_index, key_image),
     // so the only cost of overlap is a few extra block-fetches over RPC.
     const SCAN_BACKSTOP_BLOCKS: u64 = 20;
-    let start = from.unwrap_or_else(|| {
-        wallet.scanned_height().saturating_sub(SCAN_BACKSTOP_BLOCKS)
-    });
+    let start =
+        from.unwrap_or_else(|| wallet.scanned_height().saturating_sub(SCAN_BACKSTOP_BLOCKS));
     let end = start + max_blocks;
 
     println!("Scanning blocks {}..{} via {}", start, end, node);
@@ -1014,7 +1087,11 @@ async fn cmd_scan(
                     use coincync::wallet::scanner::ScanResult;
                     let outs = match scanner.scan_block_with_result(&block) {
                         ScanResult::Scanned { outputs, .. } => outputs,
-                        ScanResult::ReorgDetected { at_height, actual_prev, expected_prev } => {
+                        ScanResult::ReorgDetected {
+                            at_height,
+                            actual_prev,
+                            expected_prev,
+                        } => {
                             eprintln!(
                                 "reorg detected at height {} (block prev_hash={:?} != wallet's last hash={:?}); recovering…",
                                 at_height, actual_prev, expected_prev,
@@ -1026,9 +1103,9 @@ async fn cmd_scan(
                                 .collect();
                             match rpc_find_fork_point(node, &journal_hex).await? {
                                 Some(fork) => {
-                                    let outcome = scanner
-                                        .rewind_to_height(fork)
-                                        .map_err(|e| format!("reorg rewind to {}: {:?}", fork, e))?;
+                                    let outcome = scanner.rewind_to_height(fork).map_err(|e| {
+                                        format!("reorg rewind to {}: {:?}", fork, e)
+                                    })?;
                                     let removed = wallet.remove_outputs(&outcome.outputs_to_remove);
                                     for ki in &outcome.key_images_to_unspend {
                                         wallet.unmark_spent_by_key_image(ki);
@@ -1166,7 +1243,7 @@ async fn cmd_send(
 ) -> Result<(), String> {
     use coincync::primitives::{Amount, PublicKey};
     use coincync::transaction::DecoyOutput;
-    use coincync::wallet::{Wallet, KeyEpoch};
+    use coincync::wallet::{KeyEpoch, Wallet};
 
     // Parse recipient keys
     let parse_pk = |hex_str: &str, label: &str| -> Result<PublicKey, String> {
@@ -1200,9 +1277,9 @@ async fn cmd_send(
 
     // Unlock wallet
     let password = resolve_password(password, false)?;
-    let mut wallet = Wallet::open(path.clone())
-        .map_err(|e| format!("open wallet: {}", e))?;
-    wallet.unlock(&password)
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
         .map_err(|e| format!("unlock wallet: {}", e))?;
 
     let keys: KeyEpoch = wallet
@@ -1211,11 +1288,10 @@ async fn cmd_send(
         .ok_or_else(|| "wallet has no current key epoch".to_string())?;
 
     // Query chain tip for fee calculation + decoy sampling
-    let info = rpc_get_info(node).await.map_err(|e| format!("rpc get_info: {}", e))?;
-    let current_height = info
-        .get("height")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let info = rpc_get_info(node)
+        .await
+        .map_err(|e| format!("rpc get_info: {}", e))?;
+    let current_height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
 
     // Fetch decoys from the node.
     //
@@ -1230,9 +1306,13 @@ async fn cmd_send(
     // the wallet's decoy pool.
     let ring_size = 16usize;
     let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
-    let decoys_json = rpc_call(node, "get_decoys", serde_json::json!([ring_size * 8, min_decoy_age]))
-        .await
-        .map_err(|e| format!("rpc get_decoys: {}", e))?;
+    let decoys_json = rpc_call(
+        node,
+        "get_decoys",
+        serde_json::json!([ring_size * 8, min_decoy_age]),
+    )
+    .await
+    .map_err(|e| format!("rpc get_decoys: {}", e))?;
     let decoys_arr = decoys_json
         .get("decoys")
         .and_then(|v| v.as_array())
@@ -1276,7 +1356,10 @@ async fn cmd_send(
     let recipients = if split_output {
         let half_a = amount / 2 + (amount % 2);
         let half_b = amount / 2;
-        println!("  Drip-pair:       split {} -> {} + {} (both to recipient)", amount, half_a, half_b);
+        println!(
+            "  Drip-pair:       split {} -> {} + {} (both to recipient)",
+            amount, half_a, half_b
+        );
         vec![
             (to_spend, to_view, Amount::from_atomic(half_a)),
             (to_spend, to_view, Amount::from_atomic(half_b)),
@@ -1304,7 +1387,10 @@ async fn cmd_send(
             let addr_v = hex::decode(&addr_hex)
                 .map_err(|e| format!("invalid --recovery-address hex: {}", e))?;
             if addr_v.len() != 32 {
-                return Err(format!("--recovery-address must be 32 bytes (64 hex), got {}", addr_v.len()));
+                return Err(format!(
+                    "--recovery-address must be 32 bytes (64 hex), got {}",
+                    addr_v.len()
+                ));
             }
             let mut addr = [0u8; 32];
             addr.copy_from_slice(&addr_v);
@@ -1326,8 +1412,11 @@ async fn cmd_send(
             };
             meta.validate(recipients.len())
                 .map_err(|e| format!("invalid recovery config: {}", e))?;
-            println!("  Recovery:        addr={}…  timeout={} blocks",
-                &addr_hex[..16.min(addr_hex.len())], timeout);
+            println!(
+                "  Recovery:        addr={}…  timeout={} blocks",
+                &addr_hex[..16.min(addr_hex.len())],
+                timeout
+            );
             RecoveryMeta::encode_all(&[meta])
         }
         (Some(_), None) | (None, Some(_)) => {
@@ -1404,11 +1493,15 @@ async fn cmd_send(
         return Err(format!(
             "internal: failed to map all tx inputs back to UTXO keys (mapped {}/{}). \
              Refusing to submit without an in-flight reservation; rescan and retry.",
-            input_keys.len(), tx.inputs.len()
+            input_keys.len(),
+            tx.inputs.len()
         ));
     }
     if let Err(conflict) = wallet.reserve_utxos(&input_keys, tx_hash, current_height) {
-        return Err(format!("reservation conflict: {} (try `wallet scan` and retry)", conflict));
+        return Err(format!(
+            "reservation conflict: {} (try `wallet scan` and retry)",
+            conflict
+        ));
     }
     // Persist reservation before broadcasting. If save() fails we abort
     // BEFORE the network call so the wallet's view stays consistent.
@@ -1435,14 +1528,19 @@ async fn cmd_send(
                 for ki in tx.key_images() {
                     wallet.mark_spent_by_key_image(&ki);
                 }
-                wallet.save(Some(&password)).map_err(|e| format!("save wallet: {}", e))?;
+                wallet
+                    .save(Some(&password))
+                    .map_err(|e| format!("save wallet: {}", e))?;
                 Ok(())
             } else {
                 // Mempool said no. Release the reservation so a retry (with
                 // different decoys / fee) can re-select these UTXOs.
                 let released = wallet.release_reservations_by_tx(tx_hash);
                 let _ = wallet.save(Some(&password));
-                Err(format!("rpc rejected: {} (released {} reservation(s))", result, released))
+                Err(format!(
+                    "rpc rejected: {} (released {} reservation(s))",
+                    result, released
+                ))
             }
         }
         Err(e) => {
@@ -1466,7 +1564,10 @@ async fn cmd_send(
 async fn cmd_privacy_stats(node: &str) -> Result<(), String> {
     match rpc_call(node, "get_privacy_stats", serde_json::json!([])).await {
         Ok(stats) => {
-            println!("{}", serde_json::to_string_pretty(&stats).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&stats).unwrap_or_default()
+            );
             Ok(())
         }
         Err(e) => Err(format!("rpc get_privacy_stats: {}", e)),
@@ -1504,10 +1605,7 @@ async fn rpc_call(
             req = req.header("Authorization", format!("Bearer {}", key));
         }
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(|e| e.to_string())?;
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if let Some(err) = json.get("error") {
         return Err(format!("rpc error: {}", err));
@@ -1535,12 +1633,7 @@ async fn rpc_get_block_range(
     start: u64,
     end: u64,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let result = rpc_call(
-        node,
-        "get_block_range",
-        serde_json::json!([start, end]),
-    )
-    .await?;
+    let result = rpc_call(node, "get_block_range", serde_json::json!([start, end])).await?;
     let blocks = result
         .get("blocks")
         .and_then(|b| b.as_array())
@@ -1561,13 +1654,19 @@ async fn cmd_multisig_gen(
 ) -> Result<(), String> {
     use coincync::wallet::multisig;
 
-    println!("Generating {}-of-{} FROST multi-sig key shares...", threshold, total);
+    println!(
+        "Generating {}-of-{} FROST multi-sig key shares...",
+        threshold, total
+    );
 
-    let result = multisig::generate_shares(threshold, total)
-        .map_err(|e| format!("keygen failed: {}", e))?;
+    let result =
+        multisig::generate_shares(threshold, total).map_err(|e| format!("keygen failed: {}", e))?;
 
     println!();
-    println!("Group public key: {}", hex::encode(result.config.group_public_key));
+    println!(
+        "Group public key: {}",
+        hex::encode(result.config.group_public_key)
+    );
 
     // Build group address
     let prim_network = match network {
@@ -1587,14 +1686,15 @@ async fn cmd_multisig_gen(
     let _ = std::fs::create_dir_all(dir);
 
     for share in &result.shares {
-        let filename = format!("multisig-share-{}-of-{}-participant-{}.json",
-            threshold, total, share.participant_id);
+        let filename = format!(
+            "multisig-share-{}-of-{}-participant-{}.json",
+            threshold, total, share.participant_id
+        );
         let path = dir.join(&filename);
-        let json = serde_json::to_string_pretty(share)
-            .map_err(|e| format!("serialize: {}", e))?;
-        std::fs::write(&path, &json)
-            .map_err(|e| format!("write {}: {}", path.display(), e))?;
-        println!("  Share {}: {} ({})",
+        let json = serde_json::to_string_pretty(share).map_err(|e| format!("serialize: {}", e))?;
+        std::fs::write(&path, &json).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        println!(
+            "  Share {}: {} ({})",
             share.participant_id,
             filename,
             hex::encode(&share.verifying_share_bytes[..8])
@@ -1603,9 +1703,15 @@ async fn cmd_multisig_gen(
 
     println!();
     println!("Distribute each share file to its participant SECURELY.");
-    println!("No single share can spend — {} participants must cooperate.", threshold);
+    println!(
+        "No single share can spend — {} participants must cooperate.",
+        threshold
+    );
     println!();
-    println!("To sign a transaction, {} of {} participants run:", threshold, total);
+    println!(
+        "To sign a transaction, {} of {} participants run:",
+        threshold, total
+    );
     println!("  coincync-wallet multisig-sign --share-file <their-share.json> ...");
 
     Ok(())
@@ -1624,8 +1730,9 @@ async fn cmd_multisig_send(
     let mut shares = Vec::new();
     for f in key_share_files {
         let ks: multisig::KeyShare = serde_json::from_str(
-            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?
-        ).map_err(|e| format!("parse: {}", e))?;
+            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?,
+        )
+        .map_err(|e| format!("parse: {}", e))?;
         shares.push(ks);
     }
 
@@ -1634,21 +1741,31 @@ async fn cmd_multisig_send(
     }
 
     let config = &shares[0].config;
-    println!("Multi-sig send: {}-of-{} threshold", config.threshold, config.total);
+    println!(
+        "Multi-sig send: {}-of-{} threshold",
+        config.threshold, config.total
+    );
     println!("  Shares loaded: {}", shares.len());
     println!("  Group key:     {}", hex::encode(config.group_public_key));
 
     // Reconstruct the group secret directly into a ZeroizeOnDrop wrapper.
-    println!("  Reconstructing group secret from {} shares...", shares.len());
-    let secret = multisig::reconstruct_group_secret(&shares)
-        .map_err(|e| format!("reconstruct: {}", e))?;
+    println!(
+        "  Reconstructing group secret from {} shares...",
+        shares.len()
+    );
+    let secret =
+        multisig::reconstruct_group_secret(&shares).map_err(|e| format!("reconstruct: {}", e))?;
     println!("  Group secret reconstructed (will zeroize on drop)");
 
     // From here, use the reconstructed key like a normal wallet send
     // The CLSAG signing happens inside create_privacy_transaction
     // which calls clsag_sign with the secret key
     println!();
-    println!("  Recipient: {}...{}", &to_spend_hex[..8], &to_spend_hex[to_spend_hex.len()-4..]);
+    println!(
+        "  Recipient: {}...{}",
+        &to_spend_hex[..8],
+        &to_spend_hex[to_spend_hex.len() - 4..]
+    );
     println!("  Amount:    {} atomic CYNC", amount);
     println!();
     println!("  Note: Full multi-sig CLSAG integration uses the reconstructed");
@@ -1670,28 +1787,30 @@ async fn cmd_multisig_send(
 async fn cmd_multisig_round1(share_file: &str, output: &str) -> Result<(), String> {
     use coincync::wallet::multisig;
 
-    let data = std::fs::read_to_string(share_file)
-        .map_err(|e| format!("read: {}", e))?;
-    let share: multisig::KeyShare = serde_json::from_str(&data)
-        .map_err(|e| format!("parse: {}", e))?;
+    let data = std::fs::read_to_string(share_file).map_err(|e| format!("read: {}", e))?;
+    let share: multisig::KeyShare =
+        serde_json::from_str(&data).map_err(|e| format!("parse: {}", e))?;
 
-    println!("Round 1: generating nonces for participant {}...", share.participant_id);
+    println!(
+        "Round 1: generating nonces for participant {}...",
+        share.participant_id
+    );
 
-    let (commitment, secret) = multisig::signing_round1(&share)
-        .map_err(|e| format!("round1: {}", e))?;
+    let (commitment, secret) =
+        multisig::signing_round1(&share).map_err(|e| format!("round1: {}", e))?;
 
     // Save commitment (public — share with others)
-    let commit_json = serde_json::to_string_pretty(&commitment)
-        .map_err(|e| format!("serialize: {}", e))?;
-    std::fs::write(output, &commit_json)
-        .map_err(|e| format!("write: {}", e))?;
+    let commit_json =
+        serde_json::to_string_pretty(&commitment).map_err(|e| format!("serialize: {}", e))?;
+    std::fs::write(output, &commit_json).map_err(|e| format!("write: {}", e))?;
 
     // Save nonce secret (PRIVATE — keep for round 2)
     let nonce_file = format!("{}.nonces", output);
-    let nonce_bytes = secret.nonces.serialize()
+    let nonce_bytes = secret
+        .nonces
+        .serialize()
         .map_err(|e| format!("serialize nonces: {}", e))?;
-    std::fs::write(&nonce_file, &nonce_bytes)
-        .map_err(|e| format!("write nonces: {}", e))?;
+    std::fs::write(&nonce_file, &nonce_bytes).map_err(|e| format!("write nonces: {}", e))?;
 
     println!("  Commitment: {} (share this with other signers)", output);
     println!("  Nonces:     {} (SECRET — keep for round 2)", nonce_file);
@@ -1708,28 +1827,32 @@ async fn cmd_multisig_round2(
     use coincync::wallet::multisig;
 
     let share: multisig::KeyShare = serde_json::from_str(
-        &std::fs::read_to_string(share_file).map_err(|e| format!("read share: {}", e))?
-    ).map_err(|e| format!("parse share: {}", e))?;
+        &std::fs::read_to_string(share_file).map_err(|e| format!("read share: {}", e))?,
+    )
+    .map_err(|e| format!("parse share: {}", e))?;
 
     // Load round1 secret nonces
-    let nonce_bytes = std::fs::read(nonce_file)
-        .map_err(|e| format!("read nonces: {}", e))?;
-    let nonces: frost_ed25519::round1::SigningNonces = frost_ed25519::round1::SigningNonces::deserialize(&nonce_bytes)
-        .map_err(|e| format!("deserialize nonces: {}", e))?;
+    let nonce_bytes = std::fs::read(nonce_file).map_err(|e| format!("read nonces: {}", e))?;
+    let nonces: frost_ed25519::round1::SigningNonces =
+        frost_ed25519::round1::SigningNonces::deserialize(&nonce_bytes)
+            .map_err(|e| format!("deserialize nonces: {}", e))?;
 
     // Load all commitments
     let mut commitments = Vec::new();
     for f in commitment_files {
         let c: multisig::Round1Output = serde_json::from_str(
-            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?
-        ).map_err(|e| format!("parse {}: {}", f, e))?;
+            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?,
+        )
+        .map_err(|e| format!("parse {}: {}", f, e))?;
         commitments.push(c);
     }
 
-    let message = hex::decode(message_hex)
-        .map_err(|e| format!("bad message hex: {}", e))?;
+    let message = hex::decode(message_hex).map_err(|e| format!("bad message hex: {}", e))?;
 
-    println!("Round 2: signing for participant {}...", share.participant_id);
+    println!(
+        "Round 2: signing for participant {}...",
+        share.participant_id
+    );
 
     let secret = multisig::Round1Secret {
         participant_id: share.participant_id,
@@ -1739,10 +1862,8 @@ async fn cmd_multisig_round2(
     let sig_share = multisig::signing_round2(&share, &secret, &commitments, &message)
         .map_err(|e| format!("round2: {}", e))?;
 
-    let json = serde_json::to_string_pretty(&sig_share)
-        .map_err(|e| format!("serialize: {}", e))?;
-    std::fs::write(output, &json)
-        .map_err(|e| format!("write: {}", e))?;
+    let json = serde_json::to_string_pretty(&sig_share).map_err(|e| format!("serialize: {}", e))?;
+    std::fs::write(output, &json).map_err(|e| format!("write: {}", e))?;
 
     println!("  Signature share: {} (send to coordinator)", output);
     Ok(())
@@ -1759,8 +1880,9 @@ async fn cmd_multisig_aggregate(
     let mut all_key_shares = Vec::new();
     for f in key_share_files {
         let ks: multisig::KeyShare = serde_json::from_str(
-            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?
-        ).map_err(|e| format!("parse: {}", e))?;
+            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?,
+        )
+        .map_err(|e| format!("parse: {}", e))?;
         all_key_shares.push(ks);
     }
     let config = all_key_shares[0].config.clone();
@@ -1768,29 +1890,42 @@ async fn cmd_multisig_aggregate(
     let mut commitments = Vec::new();
     for f in commitment_files {
         let c: multisig::Round1Output = serde_json::from_str(
-            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?
-        ).map_err(|e| format!("parse: {}", e))?;
+            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?,
+        )
+        .map_err(|e| format!("parse: {}", e))?;
         commitments.push(c);
     }
 
     let mut sig_shares = Vec::new();
     for f in share_files {
         let s: multisig::Round2Output = serde_json::from_str(
-            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?
-        ).map_err(|e| format!("parse: {}", e))?;
+            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?,
+        )
+        .map_err(|e| format!("parse: {}", e))?;
         sig_shares.push(s);
     }
 
-    let message = hex::decode(message_hex)
-        .map_err(|e| format!("bad message hex: {}", e))?;
+    let message = hex::decode(message_hex).map_err(|e| format!("bad message hex: {}", e))?;
 
     println!("Aggregating {} signature shares...", sig_shares.len());
 
-    let signature = multisig::aggregate_signature(&commitments, &sig_shares, &config, &all_key_shares, &message)
-        .map_err(|e| format!("aggregate: {}", e))?;
+    let signature = multisig::aggregate_signature(
+        &commitments,
+        &sig_shares,
+        &config,
+        &all_key_shares,
+        &message,
+    )
+    .map_err(|e| format!("aggregate: {}", e))?;
 
-    println!("  Final signature: {}", hex::encode(&signature.signature_bytes));
-    println!("  Group key:       {}", hex::encode(&signature.group_public_key));
+    println!(
+        "  Final signature: {}",
+        hex::encode(&signature.signature_bytes)
+    );
+    println!(
+        "  Group key:       {}",
+        hex::encode(&signature.group_public_key)
+    );
 
     // Verify
     match multisig::verify_signature(&signature, &message) {
@@ -1802,19 +1937,30 @@ async fn cmd_multisig_aggregate(
 }
 
 async fn cmd_multisig_info(share_file: &str) -> Result<(), String> {
-    let data = std::fs::read_to_string(share_file)
-        .map_err(|e| format!("read {}: {}", share_file, e))?;
-    let share: coincync::wallet::multisig::KeyShare = serde_json::from_str(&data)
-        .map_err(|e| format!("parse: {}", e))?;
+    let data =
+        std::fs::read_to_string(share_file).map_err(|e| format!("read {}: {}", share_file, e))?;
+    let share: coincync::wallet::multisig::KeyShare =
+        serde_json::from_str(&data).map_err(|e| format!("parse: {}", e))?;
 
     println!("Multi-sig key share info:");
     println!("  Participant:  {}", share.participant_id);
-    println!("  Threshold:    {}-of-{}", share.config.threshold, share.config.total);
-    println!("  Group key:    {}", hex::encode(share.config.group_public_key));
-    println!("  Your share:   {}", hex::encode(&share.verifying_share_bytes[..8]));
+    println!(
+        "  Threshold:    {}-of-{}",
+        share.config.threshold, share.config.total
+    );
+    println!(
+        "  Group key:    {}",
+        hex::encode(share.config.group_public_key)
+    );
+    println!(
+        "  Your share:   {}",
+        hex::encode(&share.verifying_share_bytes[..8])
+    );
     println!();
-    println!("This share alone CANNOT spend. {} signers must cooperate.",
-        share.config.threshold);
+    println!(
+        "This share alone CANNOT spend. {} signers must cooperate.",
+        share.config.threshold
+    );
 
     Ok(())
 }
@@ -1846,29 +1992,39 @@ async fn cmd_set_recovery(
         recovery_address,
         timeout_blocks,
     };
-    meta.validate(1).map_err(|e| format!("invalid recovery config: {}", e))?;
+    meta.validate(1)
+        .map_err(|e| format!("invalid recovery config: {}", e))?;
 
     // Verify wallet opens
     let password = resolve_password(password, false)?;
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let _data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let _data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     let timeout_hours = timeout_blocks * 2 / 60; // approximate at 120s blocks
     let timeout_days = timeout_hours / 24;
 
     println!("Dead man's switch configured:");
     println!("  Recovery address: {}", recovery_address_hex);
-    println!("  Timeout:          {} blocks (≈{} days)", timeout_blocks, timeout_days);
+    println!(
+        "  Timeout:          {} blocks (≈{} days)",
+        timeout_blocks, timeout_days
+    );
     println!();
     println!("Future transactions from this wallet will include recovery");
-    println!("metadata. If this wallet is inactive for {} blocks,", timeout_blocks);
+    println!(
+        "metadata. If this wallet is inactive for {} blocks,",
+        timeout_blocks
+    );
     println!("the recovery address can sweep the outputs.");
     println!();
     println!("To include recovery metadata in a transaction, pass:");
-    println!("  --recovery-address {} --recovery-timeout {}", recovery_address_hex, timeout_blocks);
+    println!(
+        "  --recovery-address {} --recovery-timeout {}",
+        recovery_address_hex, timeout_blocks
+    );
     println!("with the 'send' command.");
     println!();
     println!("Recovery metadata encoding (for the tx extra field):");
@@ -1883,21 +2039,18 @@ async fn cmd_check_recovery(
     password: Option<String>,
     node: &str,
 ) -> Result<(), String> {
-    
-
     let password = resolve_password(password, false)?;
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
-    let _data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let _data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     // Get current chain height
-    let info = rpc_get_info(node).await.map_err(|e| format!("rpc: {}", e))?;
-    let current_height = info
-        .get("height")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let info = rpc_get_info(node)
+        .await
+        .map_err(|e| format!("rpc: {}", e))?;
+    let current_height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
 
     println!("Dead man's switch status:");
     println!("  Current chain height: {}", current_height);
@@ -1935,8 +2088,8 @@ async fn cmd_auto_churn(
     }
 
     // Verify wallet unlocks
-    let _data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let _data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     let config = ChurnConfig {
         enabled: true,
@@ -1947,12 +2100,17 @@ async fn cmd_auto_churn(
         node_url: node.to_string(),
     };
 
-    config.validate().map_err(|e| format!("invalid churn config: {}", e))?;
+    config
+        .validate()
+        .map_err(|e| format!("invalid churn config: {}", e))?;
 
     println!("Auto-churn starting:");
     println!("  Wallet:       {:?}", path);
     println!("  Node:         {}", node);
-    println!("  Interval:     {}-{} seconds (Poisson-distributed)", min_interval, max_interval);
+    println!(
+        "  Interval:     {}-{} seconds (Poisson-distributed)",
+        min_interval, max_interval
+    );
     println!("  Amount:       {}%-{}% of balance", min_pct, max_pct);
     println!();
     println!("Churn transactions are indistinguishable from real transfers.");
@@ -1989,8 +2147,8 @@ async fn cmd_subaddress_list(
         return Err(format!("no wallet at {:?}", path));
     }
     let password = resolve_password(password, false)?;
-    let data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     let keys = WalletKeys::from_seed(data.seed);
     let epoch = keys
@@ -2025,7 +2183,11 @@ async fn cmd_subaddress_list(
             used_marker,
             sub.index,
             sub.address(prim_network),
-            if sub.label.is_empty() { String::new() } else { format!("({})", sub.label) }
+            if sub.label.is_empty() {
+                String::new()
+            } else {
+                format!("({})", sub.label)
+            }
         );
     }
     println!();
@@ -2046,8 +2208,8 @@ async fn cmd_subaddress_create(
         return Err(format!("no wallet at {:?}", path));
     }
     let password = resolve_password(password, false)?;
-    let mut data = load_wallet(path, Some(password.as_str()))
-        .map_err(|e| format!("unlock failed: {}", e))?;
+    let mut data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
 
     let keys = WalletKeys::from_seed(data.seed);
     let epoch = keys
@@ -2070,7 +2232,8 @@ async fn cmd_subaddress_create(
     if let Some(lbl) = label {
         mgr.set_label(new_index, &lbl);
     }
-    let sub = mgr.get(new_index)
+    let sub = mgr
+        .get(new_index)
         .ok_or_else(|| "internal error: just-created subaddress not found".to_string())?
         .clone();
 
@@ -2081,19 +2244,27 @@ async fn cmd_subaddress_create(
 
     // Persist the updated subaddress set back into the wallet file.
     data.subaddresses = Some(mgr.export());
-    save_wallet(path, &data, Some(password.as_str()))
-        .map_err(|e| format!("save wallet: {}", e))?;
+    save_wallet(path, &data, Some(password.as_str())).map_err(|e| format!("save wallet: {}", e))?;
 
     println!("Generated subaddress:");
     println!("  Index:        {}", sub.index);
     println!("  Address:      {}", sub.address(prim_network));
-    println!("  Spend public: {}", hex::encode(sub.spend_public.as_bytes()));
-    println!("  View public:  {}", hex::encode(sub.view_public.as_bytes()));
+    println!(
+        "  Spend public: {}",
+        hex::encode(sub.spend_public.as_bytes())
+    );
+    println!(
+        "  View public:  {}",
+        hex::encode(sub.view_public.as_bytes())
+    );
     if !sub.label.is_empty() {
         println!("  Label:        {}", sub.label);
     }
     println!();
-    println!("Persisted to {:?}.  Share this address with senders — they cannot", path);
+    println!(
+        "Persisted to {:?}.  Share this address with senders — they cannot",
+        path
+    );
     println!("link payments to your other subaddresses on-chain.");
     Ok(())
 }
@@ -2104,27 +2275,29 @@ async fn cmd_disclose_balance(
     utxo_index: usize,
     threshold: u64,
 ) -> Result<(), String> {
-    use coincync::crypto::{create_balance_proof, PedersenCommitment, BlindingFactor};
+    use coincync::crypto::{create_balance_proof, BlindingFactor, PedersenCommitment};
     use coincync::wallet::Wallet;
 
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
     }
     let password = resolve_password(password, false)?;
-    let mut wallet = Wallet::open(path.clone())
-        .map_err(|e| format!("open wallet: {}", e))?;
-    wallet.unlock(&password)
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
         .map_err(|e| format!("unlock wallet: {}", e))?;
     let balance = wallet.balance();
     let utxos = balance.unspent_utxos();
     if utxos.is_empty() {
         return Err("wallet has no unspent UTXOs to prove balance over".into());
     }
-    let utxo = utxos.get(utxo_index)
-        .ok_or_else(|| format!(
+    let utxo = utxos.get(utxo_index).ok_or_else(|| {
+        format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
-            utxo_index, utxos.len()
-        ))?;
+            utxo_index,
+            utxos.len()
+        )
+    })?;
 
     let value = utxo.amount.as_atomic();
     if value < threshold {
@@ -2139,13 +2312,19 @@ async fn cmd_disclose_balance(
     let proof = create_balance_proof(value, &blinding, &commitment, threshold)
         .map_err(|e| format!("create_balance_proof: {}", e))?;
 
-    let json = serde_json::to_vec(&proof)
-        .map_err(|e| format!("serialize proof: {}", e))?;
+    let json = serde_json::to_vec(&proof).map_err(|e| format!("serialize proof: {}", e))?;
     let proof_hex = hex::encode(&json);
 
     println!("Balance proof (hex):");
-    println!("  utxo:        index={}  amount={}  height={}", utxo_index, value, utxo.height);
-    println!("  threshold:   {} atomic (≈ {:.4} CYNC)", threshold, threshold as f64 / 1e12);
+    println!(
+        "  utxo:        index={}  amount={}  height={}",
+        utxo_index, value, utxo.height
+    );
+    println!(
+        "  threshold:   {} atomic (≈ {:.4} CYNC)",
+        threshold,
+        threshold as f64 / 1e12
+    );
     println!("  proof_bytes: {} bytes", json.len());
     println!();
     println!("{}", proof_hex);
@@ -2177,13 +2356,18 @@ async fn cmd_disclose_scoped_view_key(
     }
     let password = resolve_password(password, false)?;
     let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
-    wallet.unlock(&password).map_err(|e| format!("unlock wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
     let epoch = wallet
         .current_keys()
         .ok_or_else(|| "wallet has no active key epoch".to_string())?;
     let scoped = ScopedViewKey::from_epoch(&epoch, from_height, to_height);
 
-    println!("Scoped view key — blocks {}..={} (inclusive)", from_height, to_height);
+    println!(
+        "Scoped view key — blocks {}..={} (inclusive)",
+        from_height, to_height
+    );
     println!();
     println!("{}", scoped.to_json());
     println!();
@@ -2207,7 +2391,9 @@ async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(),
     let v: serde_json::Value = serde_json::from_str(view_key_json)
         .map_err(|e| format!("invalid scoped-view-key JSON: {}", e))?;
     let get_bytes = |k: &str| -> Result<[u8; 32], String> {
-        let s = v.get(k).and_then(|x| x.as_str())
+        let s = v
+            .get(k)
+            .and_then(|x| x.as_str())
             .ok_or_else(|| format!("scoped-view-key missing field '{}'", k))?;
         let raw = hex::decode(s).map_err(|e| format!("bad hex for '{}': {}", k, e))?;
         if raw.len() != 32 {
@@ -2219,18 +2405,28 @@ async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(),
     };
     let view_secret = SecretKey::from_bytes(get_bytes("view_secret")?);
     let spend_public = PublicKey::from_bytes(get_bytes("spend_public")?);
-    let from_height = v.get("from_height").and_then(|x| x.as_u64())
+    let from_height = v
+        .get("from_height")
+        .and_then(|x| x.as_u64())
         .ok_or("scoped-view-key missing from_height")?;
-    let to_height = v.get("to_height").and_then(|x| x.as_u64())
+    let to_height = v
+        .get("to_height")
+        .and_then(|x| x.as_u64())
         .ok_or("scoped-view-key missing to_height")?;
     if from_height > to_height {
-        return Err(format!("from_height ({}) > to_height ({})", from_height, to_height));
+        return Err(format!(
+            "from_height ({}) > to_height ({})",
+            from_height, to_height
+        ));
     }
 
     let mut scanner = WalletScanner::new();
     scanner.add_keys(view_secret, spend_public, 0);
 
-    println!("Scoped scan — blocks {}..={} via {}", from_height, to_height, node);
+    println!(
+        "Scoped scan — blocks {}..={} via {}",
+        from_height, to_height, node
+    );
     let (mut found, mut total) = (0usize, 0u64);
     let mut cursor = from_height;
     while cursor <= to_height {
@@ -2241,20 +2437,25 @@ async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(),
         }
         for b in &blocks {
             let height = b.get("height").and_then(|x| x.as_u64()).unwrap_or(cursor);
-            let bytes_hex = b.get("bytes").and_then(|x| x.as_str())
+            let bytes_hex = b
+                .get("bytes")
+                .and_then(|x| x.as_str())
                 .ok_or("block missing bytes")?;
-            let block_bytes = hex::decode(bytes_hex)
-                .map_err(|e| format!("bad block hex: {}", e))?;
-            let block: Block = borsh::from_slice(&block_bytes)
-                .map_err(|e| format!("block decode: {}", e))?;
+            let block_bytes =
+                hex::decode(bytes_hex).map_err(|e| format!("bad block hex: {}", e))?;
+            let block: Block =
+                borsh::from_slice(&block_bytes).map_err(|e| format!("block decode: {}", e))?;
             if let ScanResult::Scanned { outputs, .. } = scanner.scan_block_with_result(&block) {
                 for o in &outputs {
                     found += 1;
                     total = total.saturating_add(o.amount);
                     println!(
                         "  h{:<8} {:>16} atomic (~{:.6} CYNC)  tx={} out={}",
-                        height, o.amount, o.amount as f64 / 1e12,
-                        hex::encode(&o.tx_hash.as_bytes()[..8]), o.output_index,
+                        height,
+                        o.amount,
+                        o.amount as f64 / 1e12,
+                        hex::encode(&o.tx_hash.as_bytes()[..8]),
+                        o.output_index,
                     );
                 }
             }
@@ -2264,22 +2465,24 @@ async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(),
     println!();
     println!(
         "Found {} output(s), total {} atomic (~{:.6} CYNC) in blocks {}..={}.",
-        found, total, total as f64 / 1e12, from_height, to_height,
+        found,
+        total,
+        total as f64 / 1e12,
+        from_height,
+        to_height,
     );
     println!("Bounded to the disclosed range — nothing outside it is visible to this key.");
     Ok(())
 }
 
 async fn cmd_disclose_verify_balance(proof_hex: &str) -> Result<(), String> {
-    use coincync::crypto::{DisclosureBalanceProof as BalanceProof, verify_balance_proof};
+    use coincync::crypto::{verify_balance_proof, DisclosureBalanceProof as BalanceProof};
 
-    let bytes = hex::decode(proof_hex)
-        .map_err(|e| format!("invalid proof hex: {}", e))?;
-    let proof: BalanceProof = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("decode BalanceProof: {}", e))?;
+    let bytes = hex::decode(proof_hex).map_err(|e| format!("invalid proof hex: {}", e))?;
+    let proof: BalanceProof =
+        serde_json::from_slice(&bytes).map_err(|e| format!("decode BalanceProof: {}", e))?;
 
-    let ok = verify_balance_proof(&proof)
-        .map_err(|e| format!("verify_balance_proof: {}", e))?;
+    let ok = verify_balance_proof(&proof).map_err(|e| format!("verify_balance_proof: {}", e))?;
 
     if ok {
         // Honesty (issue #253): this only checks the range-proof math over a
@@ -2288,12 +2491,18 @@ async fn cmd_disclose_verify_balance(proof_hex: &str) -> Result<(), String> {
         // funds — anyone can commit to any amount and produce a valid range
         // proof. Label the crypto result plainly and never imply funds.
         println!("CRYPTOGRAPHICALLY VALID — range proof well-formed");
-        println!("  threshold:   {} atomic (≈ {:.4} CYNC)",
-            proof.threshold, proof.threshold as f64 / 1e12);
+        println!(
+            "  threshold:   {} atomic (≈ {:.4} CYNC)",
+            proof.threshold,
+            proof.threshold as f64 / 1e12
+        );
         println!("  timestamp:   {} (unix epoch seconds)", proof.timestamp);
         println!("  commitment:  {}", hex::encode(proof.original_commitment));
         println!();
-        println!("The prover knows a value ≥ {} atomic for this commitment,", proof.threshold);
+        println!(
+            "The prover knows a value ≥ {} atomic for this commitment,",
+            proof.threshold
+        );
         println!("without revealing the actual value.");
         println!();
         println!("⚠ NOT ANCHORED TO CHAIN: this does not prove the commitment");
@@ -2307,15 +2516,14 @@ async fn cmd_disclose_verify_balance(proof_hex: &str) -> Result<(), String> {
 }
 
 async fn cmd_disclose_verify_ownership(proof_hex: &str) -> Result<(), String> {
-    use coincync::crypto::{OwnershipProof, verify_ownership_proof};
+    use coincync::crypto::{verify_ownership_proof, OwnershipProof};
 
-    let bytes = hex::decode(proof_hex)
-        .map_err(|e| format!("invalid proof hex: {}", e))?;
-    let proof: OwnershipProof = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("decode OwnershipProof: {}", e))?;
+    let bytes = hex::decode(proof_hex).map_err(|e| format!("invalid proof hex: {}", e))?;
+    let proof: OwnershipProof =
+        serde_json::from_slice(&bytes).map_err(|e| format!("decode OwnershipProof: {}", e))?;
 
-    let ok = verify_ownership_proof(&proof)
-        .map_err(|e| format!("verify_ownership_proof: {}", e))?;
+    let ok =
+        verify_ownership_proof(&proof).map_err(|e| format!("verify_ownership_proof: {}", e))?;
 
     if ok {
         // Honesty (issue #253): verify_ownership_proof only checks the
@@ -2325,9 +2533,15 @@ async fn cmd_disclose_verify_ownership(proof_hex: &str) -> Result<(), String> {
         // matches. So this proves "I know the key for this self-declared
         // output", not "I control real on-chain funds". Report accordingly.
         println!("CRYPTOGRAPHICALLY VALID — ownership signature well-formed");
-        println!("  tx_hash:        {}", hex::encode(proof.tx_hash.as_bytes()));
+        println!(
+            "  tx_hash:        {}",
+            hex::encode(proof.tx_hash.as_bytes())
+        );
         println!("  output_index:   {}", proof.output_index);
-        println!("  stealth_addr:   {}", hex::encode(proof.stealth_address.as_bytes()));
+        println!(
+            "  stealth_addr:   {}",
+            hex::encode(proof.stealth_address.as_bytes())
+        );
         println!();
         println!("The prover knows the secret key for the stealth address above,");
         println!("bound to the referenced output and message.");
@@ -2356,60 +2570,82 @@ async fn cmd_show_memo(
         return Err(format!("no wallet at {:?}", path));
     }
     let password = resolve_password(password, false)?;
-    let mut wallet = Wallet::open(path.clone())
-        .map_err(|e| format!("open wallet: {}", e))?;
-    wallet.unlock(&password)
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
         .map_err(|e| format!("unlock wallet: {}", e))?;
 
-    let keys = wallet.current_keys()
+    let keys = wallet
+        .current_keys()
         .ok_or_else(|| "wallet has no current key epoch".to_string())?;
     let view_secret_bytes: [u8; 32] = *keys.view_secret.as_bytes();
 
     let balance = wallet.balance();
     let utxos = balance.unspent_utxos();
-    let utxo = utxos.get(utxo_index)
-        .ok_or_else(|| format!(
+    let utxo = utxos.get(utxo_index).ok_or_else(|| {
+        format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
-            utxo_index, utxos.len()
-        ))?;
+            utxo_index,
+            utxos.len()
+        )
+    })?;
 
     let tx_hash_hex = hex::encode(utxo.tx_hash.as_bytes());
     let resp = rpc_call(node, "get_transaction", serde_json::json!([tx_hash_hex]))
         .await
         .map_err(|e| format!("rpc get_transaction: {}", e))?;
 
-    let outputs = resp.get("outputs")
+    let outputs = resp
+        .get("outputs")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "rpc response missing 'outputs' array".to_string())?;
-    let output = outputs.get(utxo.output_index as usize)
-        .ok_or_else(|| format!(
+    let output = outputs.get(utxo.output_index as usize).ok_or_else(|| {
+        format!(
             "output_index {} out of range (tx has {} outputs)",
-            utxo.output_index, outputs.len()
-        ))?;
-    let memo_hex = output.get("encrypted_memo")
+            utxo.output_index,
+            outputs.len()
+        )
+    })?;
+    let memo_hex = output
+        .get("encrypted_memo")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "rpc response missing 'encrypted_memo' field — node may be on an older build".to_string())?;
+        .ok_or_else(|| {
+            "rpc response missing 'encrypted_memo' field — node may be on an older build"
+                .to_string()
+        })?;
 
     if memo_hex.is_empty() {
-        println!("No memo on UTXO #{} (tx {} output {}).",
-            utxo_index, &tx_hash_hex[..16], utxo.output_index);
+        println!(
+            "No memo on UTXO #{} (tx {} output {}).",
+            utxo_index,
+            &tx_hash_hex[..16],
+            utxo.output_index
+        );
         return Ok(());
     }
 
-    let encrypted = hex::decode(memo_hex)
-        .map_err(|e| format!("decode encrypted_memo hex: {}", e))?;
+    let encrypted =
+        hex::decode(memo_hex).map_err(|e| format!("decode encrypted_memo hex: {}", e))?;
     let tx_pub_bytes: [u8; 32] = *utxo.tx_public_key.as_bytes();
 
     let plaintext = decrypt_memo(&encrypted, &view_secret_bytes, &tx_pub_bytes)
         .map_err(|e| format!("decrypt_memo: {} (memo is on-chain but this wallet's view key didn't decrypt — wrong key epoch or different recipient)", e))?;
 
-    println!("UTXO #{} (tx {}, output {}, height {}):",
-        utxo_index, &tx_hash_hex[..16], utxo.output_index, utxo.height);
+    println!(
+        "UTXO #{} (tx {}, output {}, height {}):",
+        utxo_index,
+        &tx_hash_hex[..16],
+        utxo.output_index,
+        utxo.height
+    );
     println!("  encrypted bytes: {}", encrypted.len());
     match std::str::from_utf8(&plaintext) {
         Ok(s) => println!("  decrypted memo:  {:?}", s),
-        Err(_) => println!("  decrypted bytes: {} (not valid UTF-8) — hex={}",
-            plaintext.len(), hex::encode(&plaintext)),
+        Err(_) => println!(
+            "  decrypted bytes: {} (not valid UTF-8) — hex={}",
+            plaintext.len(),
+            hex::encode(&plaintext)
+        ),
     }
     Ok(())
 }

@@ -221,9 +221,7 @@ pub mod tari_adapter {
     }
 
     /// Wrap a Tari kernel-excess style nullifier.
-    pub fn nullifier_to_bridge(
-        nullifier_bytes: [u8; 32],
-    ) -> Result<BridgeNullifier, BridgeError> {
+    pub fn nullifier_to_bridge(nullifier_bytes: [u8; 32]) -> Result<BridgeNullifier, BridgeError> {
         BridgeNullifier::from_bytes(nullifier_bytes)
     }
 
@@ -269,9 +267,7 @@ pub mod orchard_adapter {
     }
 
     /// Wrap an Orchard note nullifier.
-    pub fn nullifier_to_bridge(
-        nullifier_bytes: [u8; 32],
-    ) -> Result<BridgeNullifier, BridgeError> {
+    pub fn nullifier_to_bridge(nullifier_bytes: [u8; 32]) -> Result<BridgeNullifier, BridgeError> {
         BridgeNullifier::from_bytes(nullifier_bytes)
     }
 
@@ -472,9 +468,7 @@ mod tests {
             assert_correct_verifier(&tari_proof, ProofOrigin::OrchardHalo2).is_err(),
             "routing a Tari proof to the Orchard verifier must fail"
         );
-        assert!(
-            assert_correct_verifier(&tari_proof, ProofOrigin::TariBulletproofsPlus).is_ok()
-        );
+        assert!(assert_correct_verifier(&tari_proof, ProofOrigin::TariBulletproofsPlus).is_ok());
     }
 
     #[test]

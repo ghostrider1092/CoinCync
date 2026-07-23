@@ -10,12 +10,14 @@
 //! Chain: Monero (pre-mandatory ring size enforcement)
 //! Impact: Majority of historical Monero transactions traceable
 
-use coincync::mempool::Mempool;
-use coincync::primitives::{Amount, PublicKey, KeyImage};
-use coincync::transaction::{Transaction, TxType, TxInput, TxOutput, RingMemberRef};
 use coincync::consensus::validate_transaction_basic;
-use coincync::crypto::{SecretScalar, BlindingFactor, PedersenCommitment, KeyImage as CKI, ClsagSignature};
 use coincync::constants::BOOTSTRAP_MIN_RING_SIZE;
+use coincync::crypto::{
+    BlindingFactor, ClsagSignature, KeyImage as CKI, PedersenCommitment, SecretScalar,
+};
+use coincync::mempool::Mempool;
+use coincync::primitives::{Amount, KeyImage, PublicKey};
+use coincync::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use rand::rngs::OsRng;
 
 /// Test: Ring size 1 (no decoys) is rejected at consensus level
@@ -28,23 +30,39 @@ fn monero_linkability_ring_size_1_rejected() {
     let commit = PedersenCommitment::commit(1_000_000_000, &bf);
 
     let tx = Transaction {
-        version: 1, tx_type: TxType::Transfer,
+        version: 1,
+        tx_type: TxType::Transfer,
         inputs: vec![TxInput {
             key_image: KeyImage::from_bytes(ki.to_bytes()),
-            ring_members: vec![RingMemberRef { // ONLY 1 MEMBER
+            ring_members: vec![RingMemberRef {
+                // ONLY 1 MEMBER
                 public_key: PublicKey::from_bytes(secret.to_public().to_bytes()),
                 commitment: commit.to_bytes(),
             }],
-            signature: ClsagSignature { key_image: ki, commitment_image: secret.to_public(), c1: [0; 32], responses: vec![[0; 32]; 1] },
+            signature: ClsagSignature {
+                key_image: ki,
+                commitment_image: secret.to_public(),
+                c1: [0; 32],
+                responses: vec![[0; 32]; 1],
+            },
             pseudo_output_commitment: commit.to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            commitment: commit.to_bytes(), encrypted_amount: vec![0u8; 8], view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: commit.to_bytes(),
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(50_000_000),
-        range_proof: vec![0u8; 64], extra: vec![],
+        range_proof: vec![0u8; 64],
+        extra: vec![],
     };
 
     let basic = validate_transaction_basic(&tx);
@@ -75,33 +93,56 @@ fn monero_linkability_below_minimum_rejected() {
     let bf = BlindingFactor::random(&mut OsRng);
     let below_min = BOOTSTRAP_MIN_RING_SIZE - 1;
 
-    let ring: Vec<RingMemberRef> = (0..below_min).map(|_| RingMemberRef {
-        public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-        commitment: PedersenCommitment::commit(1_000_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes(),
-    }).collect();
+    let ring: Vec<RingMemberRef> = (0..below_min)
+        .map(|_| RingMemberRef {
+            public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            commitment: PedersenCommitment::commit(
+                1_000_000_000,
+                &BlindingFactor::random(&mut OsRng),
+            )
+            .to_bytes(),
+        })
+        .collect();
 
     let tx = Transaction {
-        version: 1, tx_type: TxType::Transfer,
+        version: 1,
+        tx_type: TxType::Transfer,
         inputs: vec![TxInput {
             key_image: KeyImage::from_bytes(ki.to_bytes()),
             ring_members: ring,
-            signature: ClsagSignature { key_image: ki, commitment_image: secret.to_public(), c1: [0; 32], responses: vec![[0; 32]; below_min] },
+            signature: ClsagSignature {
+                key_image: ki,
+                commitment_image: secret.to_public(),
+                c1: [0; 32],
+                responses: vec![[0; 32]; below_min],
+            },
             pseudo_output_commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
         }],
         outputs: vec![TxOutput {
-            stealth_address: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
-            tx_public_key: PublicKey::from_bytes(SecretScalar::random(&mut OsRng).to_public().to_bytes()),
+            stealth_address: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
+            tx_public_key: PublicKey::from_bytes(
+                SecretScalar::random(&mut OsRng).to_public().to_bytes(),
+            ),
             commitment: PedersenCommitment::commit(1_000_000_000, &bf).to_bytes(),
-            encrypted_amount: vec![0u8; 8], view_tag: 0, lock_height: None, encrypted_memo: vec![],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
         }],
         fee: Amount::from_atomic(50_000_000),
-        range_proof: vec![0u8; 64], extra: vec![],
+        range_proof: vec![0u8; 64],
+        extra: vec![],
     };
 
     let result = pool.add_skip_crypto(tx);
     assert!(
         result.is_err(),
         "MONERO LINKABILITY: Ring size {} (below minimum {}) was accepted!",
-        below_min, BOOTSTRAP_MIN_RING_SIZE
+        below_min,
+        BOOTSTRAP_MIN_RING_SIZE
     );
 }

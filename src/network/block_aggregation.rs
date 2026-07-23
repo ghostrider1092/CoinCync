@@ -201,8 +201,8 @@ impl BlockAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{RngCore, SeedableRng};
     use rand::rngs::StdRng;
+    use rand::{RngCore, SeedableRng};
 
     /// Build a single MwKernel with a real Schnorr signature over
     /// `msg`. Returns (excess scalar, kernel) so tests can verify

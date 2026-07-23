@@ -3,12 +3,12 @@
 //! Executes pruning plans against the sled database, removing full block data
 //! and storing compact `PrunedBlockData` headers in their place.
 
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
 use crate::error::{Error, Result};
-use crate::storage::{PruningPlan, PrunedBlockData};
+use crate::storage::{PrunedBlockData, PruningPlan};
 
 /// Result of a pruning operation
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,10 +71,13 @@ pub fn prune_blocks(db: &Database, plan: &PruningPlan) -> Result<PruneResult> {
                 timestamp: pruned_data.timestamp,
                 target: pruned_data.target.as_bytes().to_vec(),
                 tx_count: pruned_data.tx_count,
-            }).map_err(|e| Error::SerializationError(format!(
-                "R-36: failed to serialize PrunedBlockRecord for height {}: {}",
-                height, e
-            )))?;
+            })
+            .map_err(|e| {
+                Error::SerializationError(format!(
+                    "R-36: failed to serialize PrunedBlockRecord for height {}: {}",
+                    height, e
+                ))
+            })?;
 
             // Get original block size for stats BEFORE the atomic prune.
             // borsh serialization is deterministic; a failure here is
@@ -84,10 +87,12 @@ pub fn prune_blocks(db: &Database, plan: &PruningPlan) -> Result<PruneResult> {
             // retry. Propagate rather than silently underreporting the
             // stats — the stats matter for operator visibility even if
             // they're not consensus-critical.
-            let block_bytes = borsh::to_vec(&block).map_err(|e| Error::SerializationError(format!(
-                "R-36: failed to serialize Block for stats at height {}: {}",
-                height, e
-            )))?;
+            let block_bytes = borsh::to_vec(&block).map_err(|e| {
+                Error::SerializationError(format!(
+                    "R-36: failed to serialize Block for stats at height {}: {}",
+                    height, e
+                ))
+            })?;
             bytes_freed += block_bytes.len() as u64;
 
             // AUDIT (2026-07-01): use the atomic `store_pruned_and_remove`

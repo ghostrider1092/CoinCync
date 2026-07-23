@@ -16,12 +16,12 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use rand::{RngCore, rngs::OsRng};
+use rand::{rngs::OsRng, RngCore};
 use zeroize::Zeroize;
 
-use crate::primitives::hash_domain;
-use crate::crypto::{SecretScalar, PublicPoint};
+use crate::crypto::{PublicPoint, SecretScalar};
 use crate::error::{Error, Result};
+use crate::primitives::hash_domain;
 
 /// Maximum plaintext memo size (bytes)
 pub const MAX_MEMO_SIZE: usize = 256;
@@ -74,8 +74,9 @@ pub fn encrypt_memo(
     }
 
     let tx_scalar = SecretScalar::from_bytes(*tx_secret_bytes);
-    let view_point = PublicPoint::from_bytes(*recipient_view_public_bytes)
-        .ok_or(Error::CryptoError("invalid view public key for memo encryption".into()))?;
+    let view_point = PublicPoint::from_bytes(*recipient_view_public_bytes).ok_or(
+        Error::CryptoError("invalid view public key for memo encryption".into()),
+    )?;
     let mut shared_point = view_point.mul(&tx_scalar);
 
     // R-16 (R-7 class site) + R-17 fixes (2026-07-02):
@@ -177,8 +178,9 @@ pub fn decrypt_memo(
     }
 
     let view_scalar = SecretScalar::from_bytes(*view_secret_bytes);
-    let tx_point = PublicPoint::from_bytes(*tx_public_key_bytes)
-        .ok_or(Error::CryptoError("invalid tx public key for memo decryption".into()))?;
+    let tx_point = PublicPoint::from_bytes(*tx_public_key_bytes).ok_or(Error::CryptoError(
+        "invalid tx public key for memo decryption".into(),
+    ))?;
     let mut shared_point = tx_point.mul(&view_scalar);
 
     // Key derived from shared point; nonce read from the wire — see the
@@ -235,7 +237,10 @@ mod tests {
         let encrypted = encrypt_memo(memo, &tx_secret, &view_public).unwrap();
 
         assert!(encrypted.len() > memo.len());
-        assert_eq!(encrypted.len(), MEMO_NONCE_SIZE + memo.len() + MEMO_TAG_SIZE);
+        assert_eq!(
+            encrypted.len(),
+            MEMO_NONCE_SIZE + memo.len() + MEMO_TAG_SIZE
+        );
 
         let decrypted = decrypt_memo(&encrypted, &view_secret, &tx_public_bytes).unwrap();
         assert_eq!(decrypted, memo);

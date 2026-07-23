@@ -338,7 +338,7 @@ These ship in the repo but most users will never need them.
 After an *intentional* change to a consensus-critical file (`CONSTITUTION.md`, `BILL_OF_RIGHTS.md`, `src/constants.rs`, `src/consensus/*`, `src/emission/curve.rs`, `src/testnet.rs`), the build will fail with `UNCONSTITUTIONAL: Article X` errors until the lockfile is refreshed. Run:
 
 ```bash
-cargo run --bin update-critical-hashes --release
+COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes
 ```
 
 Commit the updated `critical_files.lock` alongside your code change. **Never refresh without reviewing the file change.**
@@ -365,7 +365,7 @@ Inspects + manages the Stratum-side ban list. Only relevant once a CoinCync mini
 | Set up multi-sig spending | `coincync-wallet multisig-gen --threshold 2 --total 3 --output-dir ./shares/` |
 | Restore wallet from seed | `coincync-wallet --network testnet ... restore` (interactive) |
 | Test full send-receive path | `pwsh scripts/smoke-test-tx.ps1` |
-| Refresh constitutional hashes | `cargo run --bin update-critical-hashes --release` |
+| Refresh constitutional hashes | `COINCYNC_REGEN_LOCK=1 cargo run --locked --release --bin update-critical-hashes` |
 
 ---
 

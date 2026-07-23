@@ -153,9 +153,7 @@ impl ActiveMinerSet {
         // first_seen is too far back to count by itself. Check
         // whether last_seen lies in the window AND isn't in the
         // future relative to the query.
-        if at_height >= record.last_seen_height
-            && at_height - record.last_seen_height < window
-        {
+        if at_height >= record.last_seen_height && at_height - record.last_seen_height < window {
             return true;
         }
         // Otherwise we have no evidence either way (miner's known

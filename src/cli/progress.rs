@@ -1,8 +1,8 @@
 //! Progress bars and spinners for CLI
 
-use indicatif::{ProgressBar, ProgressStyle, MultiProgress, ProgressDrawTarget};
-use std::time::Duration;
 use console::style;
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::time::Duration;
 
 /// Create a spinner for indeterminate operations
 pub fn create_spinner(message: &str) -> ProgressBar {
@@ -11,7 +11,7 @@ pub fn create_spinner(message: &str) -> ProgressBar {
         ProgressStyle::default_spinner()
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
             .template("{spinner:.cyan} {msg}")
-            .expect("invalid spinner template")
+            .expect("invalid spinner template"),
     );
     spinner.set_message(message.to_string());
     spinner.enable_steady_tick(Duration::from_millis(80));
@@ -25,7 +25,7 @@ pub fn create_progress_bar(total: u64, message: &str) -> ProgressBar {
         ProgressStyle::default_bar()
             .template("{msg}\n{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {eta}")
             .expect("invalid progress bar template")
-            .progress_chars("█▓▒░  ")
+            .progress_chars("█▓▒░  "),
     );
     bar.set_message(message.to_string());
     bar
@@ -95,12 +95,14 @@ impl WalletProgress {
 
     /// Finish with success message
     pub fn finish_success(&self, message: &str) {
-        self.main_bar.finish_with_message(format!("{} {}", style("✓").green(), message));
+        self.main_bar
+            .finish_with_message(format!("{} {}", style("✓").green(), message));
     }
 
     /// Finish with error message
     pub fn finish_error(&self, message: &str) {
-        self.main_bar.finish_with_message(format!("{} {}", style("✗").red(), message));
+        self.main_bar
+            .finish_with_message(format!("{} {}", style("✗").red(), message));
     }
 }
 
@@ -182,7 +184,7 @@ impl MiningProgress {
             ProgressStyle::default_spinner()
                 .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
                 .template("{spinner:.cyan} Mining... {msg}")
-                .expect("invalid mining progress template")
+                .expect("invalid mining progress template"),
         );
         bar.enable_steady_tick(Duration::from_millis(100));
         Self {
@@ -196,9 +198,7 @@ impl MiningProgress {
     pub fn update(&mut self, hashrate: f64, height: u64) {
         self.bar.set_message(format!(
             "Block {} | {:.2} H/s | {} blocks found",
-            height,
-            hashrate,
-            self.blocks_found
+            height, hashrate, self.blocks_found
         ));
     }
 

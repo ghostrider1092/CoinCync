@@ -143,7 +143,7 @@ hash from the build error and update:
 cargo build --release --lib 2>&1 | grep -A 2 "src/constants.rs"
 # Replace the entry in critical_files.lock manually (or run the
 # update-critical-hashes bin once the bootstrap is sorted):
-cargo run --bin update-critical-hashes
+COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes
 ```
 
 Commit `critical_files.lock` and `src/constants.rs` together so

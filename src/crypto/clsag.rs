@@ -3,21 +3,15 @@
 //! Compact Linkable Spontaneous Anonymous Group signatures.
 //! Based on the Monero CLSAG specification with proper curve operations.
 
-use curve25519_dalek::{
-    ristretto::RistrettoPoint,
-    scalar::Scalar,
-};
+use borsh::{BorshDeserialize, BorshSerialize};
+use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
 use rand_core::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
-use zeroize::Zeroize;
 use std::fmt;
+use zeroize::Zeroize;
 
-use super::curve::{
-    SecretScalar, PublicPoint, KeyImage, Commitment,
-    generator, hash_to_point,
-};
+use super::curve::{generator, hash_to_point, Commitment, KeyImage, PublicPoint, SecretScalar};
 use super::secure::ct_eq;
 use crate::error::{Error, Result};
 
@@ -32,7 +26,10 @@ pub struct RingMember {
 
 impl RingMember {
     pub fn new(public_key: PublicPoint, commitment: Commitment) -> Self {
-        RingMember { public_key, commitment }
+        RingMember {
+            public_key,
+            commitment,
+        }
     }
 }
 
@@ -68,8 +65,7 @@ impl ClsagSignature {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        borsh::from_slice(data)
-            .map_err(|e| Error::InvalidSignature(e.to_string()))
+        borsh::from_slice(data).map_err(|e| Error::InvalidSignature(e.to_string()))
     }
 }
 
@@ -178,11 +174,17 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
     let n = ring.len();
 
     if n < 2 {
-        return Err(Error::InvalidRingSize { expected: 2, got: n });
+        return Err(Error::InvalidRingSize {
+            expected: 2,
+            got: n,
+        });
     }
     if real_index >= n {
         // SECURITY (L3): Use saturating_add to prevent overflow in error message
-        return Err(Error::InvalidRingSize { expected: n, got: real_index.saturating_add(1) });
+        return Err(Error::InvalidRingSize {
+            expected: n,
+            got: real_index.saturating_add(1),
+        });
     }
 
     // Verify the secret key matches the public key at real_index
@@ -228,7 +230,8 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
     // panicking `.sub`/`.add` API on `PedersenCommitment` in
     // `bulletproofs.rs` operates on COMPRESSED bytes and CAN fail
     // decompression — but that's a different type not used here.
-    let aggregate_keys: Vec<RistrettoPoint> = ring.iter()
+    let aggregate_keys: Vec<RistrettoPoint> = ring
+        .iter()
         .map(|m| {
             let p = m.public_key.as_point();
             let c_diff = m.commitment.sub(pseudo_output);
@@ -269,7 +272,8 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
 
         // R_i = s_i * Hp(P_i) + c_i * (I + mu_c * D)
         // Aggregate key image: mu_p * I + mu_c * D
-        let aggregate_key_image = mu_p * key_image.as_point().as_point() + mu_c * commitment_image.as_point();
+        let aggregate_key_image =
+            mu_p * key_image.as_point().as_point() + mu_c * commitment_image.as_point();
         let r_i = responses[i] * hp_i + challenges[i] * aggregate_key_image;
 
         challenges[next] = clsag_hash(
@@ -369,7 +373,9 @@ pub fn clsag_verify(
     // semantics via the `_or return false` pattern here (we're in a
     // `fn -> bool` verifier), so any non-canonical byte string fails
     // the whole verification, not just its slot.
-    let responses: Vec<Scalar> = match signature.responses.iter()
+    let responses: Vec<Scalar> = match signature
+        .responses
+        .iter()
         .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
         .collect::<crate::error::Result<Vec<_>>>()
     {
@@ -396,11 +402,13 @@ pub fn clsag_verify(
     }
 
     // Compute aggregate coefficients
-    let (mu_p, mu_c) = compute_aggregate_coefficients(ring, &signature.key_image, pseudo_output, message);
+    let (mu_p, mu_c) =
+        compute_aggregate_coefficients(ring, &signature.key_image, pseudo_output, message);
 
     // Compute aggregate public keys (must match signing formulation)
     // W_i = mu_p * P_i + mu_c * (C_i - C')
-    let aggregate_keys: Vec<RistrettoPoint> = ring.iter()
+    let aggregate_keys: Vec<RistrettoPoint> = ring
+        .iter()
         .map(|m| {
             let p = m.public_key.as_point();
             let c_diff = m.commitment.sub(pseudo_output);
@@ -413,8 +421,8 @@ pub fn clsag_verify(
     // `signature.key_image`, `signature.commitment_image`) are fixed
     // before the loop starts and are not indexed by the loop variable,
     // so the value is loop-invariant. Bit-identical output.
-    let aggregate_key_image = mu_p * signature.key_image.as_point().as_point() +
-                    mu_c * signature.commitment_image.as_point();
+    let aggregate_key_image = mu_p * signature.key_image.as_point().as_point()
+        + mu_c * signature.commitment_image.as_point();
 
     // Verify the challenge chain by computing all challenges and checking closure
     // The ring signature forms a closed loop: c[1] -> c[2] -> ... -> c[n-1] -> c[0] -> c[1]
@@ -484,11 +492,17 @@ pub fn simple_ring_sign<R: RngCore + CryptoRng>(
     let n = public_keys.len();
 
     if n < 2 {
-        return Err(Error::InvalidRingSize { expected: 2, got: n });
+        return Err(Error::InvalidRingSize {
+            expected: 2,
+            got: n,
+        });
     }
     if real_index >= n {
         // SECURITY (L3): Use saturating_add to prevent overflow in error message
-        return Err(Error::InvalidRingSize { expected: n, got: real_index.saturating_add(1) });
+        return Err(Error::InvalidRingSize {
+            expected: n,
+            got: real_index.saturating_add(1),
+        });
     }
 
     // Verify secret key
@@ -524,7 +538,8 @@ pub fn simple_ring_sign<R: RngCore + CryptoRng>(
 
     // Initial challenge
     let mut challenges = vec![Scalar::ZERO; n];
-    challenges[(real_index + 1) % n] = simple_hash(message, public_keys, &key_image, &l_real, &r_real);
+    challenges[(real_index + 1) % n] =
+        simple_hash(message, public_keys, &key_image, &l_real, &r_real);
 
     // Build challenge chain
     for offset in 1..n {
@@ -571,7 +586,9 @@ pub fn simple_ring_verify(
     // consolidation — sibling of the responses-path in the main verify).
     // Same filter_map-drops-silently vulnerability the primary verifier
     // had; same PeerScalar-Result fix.
-    let responses: Vec<Scalar> = match signature.responses.iter()
+    let responses: Vec<Scalar> = match signature
+        .responses
+        .iter()
         .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
         .collect::<crate::error::Result<Vec<_>>>()
     {
@@ -712,9 +729,7 @@ mod tests {
         let pseudo_output = Commitment::commit(value, &z_pseudo);
 
         // Blinding difference: z_real - z_pseudo
-        let blinding_diff = SecretScalar::from_scalar(
-            z_real.as_scalar() - z_pseudo.as_scalar()
-        );
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
 
         // Create ring with decoys
         let decoy1_secret = SecretScalar::random(&mut OsRng);
@@ -740,7 +755,8 @@ mod tests {
             &blinding_diff,
             &pseudo_output,
             &mut OsRng,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Verify
         assert!(clsag_verify(message, &ring, &pseudo_output, &sig));
@@ -767,9 +783,7 @@ mod tests {
         let pseudo_output = Commitment::commit(100, &z_pseudo);
 
         // Blinding difference
-        let blinding_diff = SecretScalar::from_scalar(
-            z_real.as_scalar() - z_pseudo.as_scalar()
-        );
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
 
         let decoy = SecretScalar::random(&mut OsRng);
         let decoy_commitment = Commitment::commit(100, &SecretScalar::random(&mut OsRng));
@@ -781,7 +795,16 @@ mod tests {
 
         let message = b"test";
 
-        let sig = clsag_sign(message, &ring, 0, &secret, &blinding_diff, &pseudo_output, &mut OsRng).unwrap();
+        let sig = clsag_sign(
+            message,
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        )
+        .unwrap();
 
         // Serialize and deserialize (to_bytes now returns Result per
         // 2026-06-30 H3 fix — a validated signature can't fail to
@@ -809,9 +832,7 @@ mod tests {
         let real_commitment = Commitment::commit(1000, &z_real);
         let z_pseudo = SecretScalar::random(&mut OsRng);
         let pseudo_output = Commitment::commit(1000, &z_pseudo);
-        let blinding_diff = SecretScalar::from_scalar(
-            z_real.as_scalar() - z_pseudo.as_scalar(),
-        );
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
         let decoy = SecretScalar::random(&mut OsRng).to_public();
         let decoy_commitment = Commitment::commit(1000, &SecretScalar::random(&mut OsRng));
         let ring = vec![
@@ -819,9 +840,20 @@ mod tests {
             RingMember::new(decoy, decoy_commitment),
         ];
         let message = b"R-1 identity ring member test";
-        let sig = clsag_sign(message, &ring, 0, &secret, &blinding_diff, &pseudo_output, &mut OsRng).unwrap();
-        assert!(clsag_verify(message, &ring, &pseudo_output, &sig),
-            "sanity: unmodified ring verifies");
+        let sig = clsag_sign(
+            message,
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        )
+        .unwrap();
+        assert!(
+            clsag_verify(message, &ring, &pseudo_output, &sig),
+            "sanity: unmodified ring verifies"
+        );
 
         // Mutate the decoy public key to the identity point via the
         // library's dedicated constructor. An attacker constructing

@@ -1,7 +1,7 @@
 //! Interactive prompts for CLI
 
-use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use colored::Colorize;
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use rand::seq::SliceRandom;
 
 /// Result type for prompts
@@ -46,7 +46,10 @@ pub fn prompt_confirm(prompt: &str, default: bool) -> PromptResult<bool> {
 }
 
 /// Select from a list of options
-pub fn prompt_select<T: ToString + std::fmt::Display>(prompt: &str, options: &[T]) -> PromptResult<usize> {
+pub fn prompt_select<T: ToString + std::fmt::Display>(
+    prompt: &str,
+    options: &[T],
+) -> PromptResult<usize> {
     Select::with_theme(&ColorfulTheme::default())
         .with_prompt(prompt)
         .items(options)
@@ -74,7 +77,10 @@ pub fn verify_seed_phrase(mnemonic: &str) -> PromptResult<bool> {
 
     println!();
     println!("{}", "SEED PHRASE VERIFICATION".bright_yellow().bold());
-    println!("{}", "Please enter the following words to confirm you saved your seed phrase:".dimmed());
+    println!(
+        "{}",
+        "Please enter the following words to confirm you saved your seed phrase:".dimmed()
+    );
     println!();
 
     for &idx in &verify_indices {
@@ -87,12 +93,16 @@ pub fn verify_seed_phrase(mnemonic: &str) -> PromptResult<bool> {
 
         if input.trim().to_lowercase() != expected {
             println!();
-            println!("{} Incorrect! Expected word #{} to be '{}'",
+            println!(
+                "{} Incorrect! Expected word #{} to be '{}'",
                 "✗".red().bold(),
                 word_num,
                 expected.bright_white()
             );
-            println!("{}", "Please write down your seed phrase and try again.".yellow());
+            println!(
+                "{}",
+                "Please write down your seed phrase and try again.".yellow()
+            );
             return Ok(false);
         }
 
@@ -109,8 +119,8 @@ pub fn verify_seed_phrase(mnemonic: &str) -> PromptResult<bool> {
 /// L3 (audit fix): now uses the one-word-at-a-time display so a single
 /// screenshot can leak at most one word, not the whole phrase.
 pub fn display_and_verify_seed(mnemonic: &str) -> PromptResult<bool> {
-    use super::output::print_seed_phrase_one_at_a_time;
     use super::output::print_important_warning;
+    use super::output::print_seed_phrase_one_at_a_time;
 
     print_important_warning(
         "IMPORTANT: Write down your seed phrase!",
@@ -120,7 +130,7 @@ pub fn display_and_verify_seed(mnemonic: &str) -> PromptResult<bool> {
             "Never share it with anyone.",
             "CoinCync will NEVER ask for your seed phrase.",
             "The phrase will be shown ONE WORD AT A TIME.",
-        ]
+        ],
     );
 
     print_seed_phrase_one_at_a_time(mnemonic);
@@ -149,7 +159,11 @@ impl WalletCreationPrompt {
             .with_prompt("Wallet name (optional)")
             .allow_empty(true)
             .interact_text()?;
-        let name = if name_input.is_empty() { None } else { Some(name_input) };
+        let name = if name_input.is_empty() {
+            None
+        } else {
+            Some(name_input)
+        };
 
         // Network selection
         let networks = ["Mainnet", "Testnet"];
@@ -158,7 +172,12 @@ impl WalletCreationPrompt {
             .items(&networks)
             .default(0)
             .interact()?;
-        let network = if network_idx == 0 { "mainnet" } else { "testnet" }.to_string();
+        let network = if network_idx == 0 {
+            "mainnet"
+        } else {
+            "testnet"
+        }
+        .to_string();
 
         // Password
         let use_password = Confirm::with_theme(&ColorfulTheme::default())
@@ -173,7 +192,11 @@ impl WalletCreationPrompt {
             None
         };
 
-        Ok(Self { name, password, network })
+        Ok(Self {
+            name,
+            password,
+            network,
+        })
     }
 }
 
@@ -208,9 +231,11 @@ impl SendPrompt {
             .interact()?;
 
         let payment_id = if use_payment_id {
-            Some(Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("Payment ID")
-                .interact_text()?)
+            Some(
+                Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Payment ID")
+                    .interact_text()?,
+            )
         } else {
             None
         };

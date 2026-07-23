@@ -25,8 +25,8 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde_json::json;
 
 use coincync_swap::adaptor::{
-    cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor, cync_recover_secret,
-    create_pre_sig_bip340, decrypt_btc_adaptor, prove_cross_curve, recover_secret_from_btc_sig,
+    create_pre_sig_bip340, cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor,
+    cync_recover_secret, decrypt_btc_adaptor, prove_cross_curve, recover_secret_from_btc_sig,
     verify_cross_curve_proof, verify_pre_sig, AdaptorSecret,
 };
 
@@ -40,18 +40,54 @@ use coincync_swap::adaptor::{
 /// top byte of those fields ≤ 0x0f. The `signer_seckey`, `message`,
 /// and `aux_rand` fields have no such constraint (signer_seckey needs
 /// secp256k1 validity only; the others are opaque bytes).
+#[allow(clippy::type_complexity)] // test-vector table; a named alias would obscure the byte layout
 const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = &[
     //  vector_id           signer_seckey      adaptor_secret(*)  message             aux_rand           dleq_nonce_k(*)
     //  (*) = top byte must be ≤ 0x0f for Ristretto-canonical
-    ("vec-001-canonical",   [0x01; 32],        [0x02; 32],        [0x03; 32],         [0x04; 32],        [0x05; 32]),
-    ("vec-002-low-scalars", [0x11; 32],        [0x01; 32],        [0x13; 32],         [0x14; 32],        [0x07; 32]),
-    ("vec-003-mid-scalars", [0x42; 32],        [0x08; 32],        [0x44; 32],         [0x45; 32],        [0x09; 32]),
-    ("vec-004-alt-msg",     [0x01; 32],        [0x02; 32],        [0xff; 32],         [0x04; 32],        [0x05; 32]),
-    ("vec-005-alt-aux",     [0x01; 32],        [0x02; 32],        [0x03; 32],         [0xa0; 32],        [0x05; 32]),
+    (
+        "vec-001-canonical",
+        [0x01; 32],
+        [0x02; 32],
+        [0x03; 32],
+        [0x04; 32],
+        [0x05; 32],
+    ),
+    (
+        "vec-002-low-scalars",
+        [0x11; 32],
+        [0x01; 32],
+        [0x13; 32],
+        [0x14; 32],
+        [0x07; 32],
+    ),
+    (
+        "vec-003-mid-scalars",
+        [0x42; 32],
+        [0x08; 32],
+        [0x44; 32],
+        [0x45; 32],
+        [0x09; 32],
+    ),
+    (
+        "vec-004-alt-msg",
+        [0x01; 32],
+        [0x02; 32],
+        [0xff; 32],
+        [0x04; 32],
+        [0x05; 32],
+    ),
+    (
+        "vec-005-alt-aux",
+        [0x01; 32],
+        [0x02; 32],
+        [0x03; 32],
+        [0xa0; 32],
+        [0x05; 32],
+    ),
 ];
 
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{:02x}", x)).collect()
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Compute the output dir relative to the crate root.
@@ -76,10 +112,9 @@ fn emit_btc_adaptor(
     let t_sk = SecretKey::from_slice(&secret.secp256k1_bytes()).unwrap();
     let t_pub = PublicKey::from_secret_key(&secp, &t_sk);
 
-    let Ok((adaptor_sig, signer_x)) =
-        create_pre_sig_bip340(&signer_sk, msg, &t_pub, aux_rand)
+    let Ok((adaptor_sig, signer_x)) = create_pre_sig_bip340(&signer_sk, msg, &t_pub, aux_rand)
     else {
-        eprintln!("vec {}: create_pre_sig_bip340 failed (8 retries all odd-y); skipping", vec_id);
+        eprintln!("vec {vec_id}: create_pre_sig_bip340 failed (8 retries all odd-y); skipping");
         return;
     };
 
@@ -114,7 +149,7 @@ fn emit_btc_adaptor(
         "notes": "Self-generated regression vector. Locks the output bytes of create_pre_sig_bip340 + decrypt_btc_adaptor + recover_secret_from_btc_sig for fixed inputs. Any change in the impl that alters these output bytes fails the harness."
     });
 
-    let path = out_dir().join("btc-adaptor").join(format!("{}.json", vec_id));
+    let path = out_dir().join("btc-adaptor").join(format!("{vec_id}.json"));
     fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
     fs::write(&path, serde_json::to_string_pretty(&vec_json).unwrap()).expect("write");
     println!("emitted {}", path.display());
@@ -127,14 +162,13 @@ fn emit_cync_adaptor(
     msg: &[u8; 32],
     nonce_bytes: &[u8; 32],
 ) {
-    let secret = AdaptorSecret::from_ristretto_bytes(*secret_bytes)
-        .expect("Ristretto-canonical");
+    let secret = AdaptorSecret::from_ristretto_bytes(*secret_bytes).expect("Ristretto-canonical");
     let t_point = cync_adaptor_point(&secret).expect("adaptor point");
 
     let Ok((adaptor_sig, signer_pub)) =
         cync_create_pre_sig(signer_sk_bytes, msg, &t_point, nonce_bytes)
     else {
-        eprintln!("vec {}: cync_create_pre_sig failed (non-canonical input?); skipping", vec_id);
+        eprintln!("vec {vec_id}: cync_create_pre_sig failed (non-canonical input?); skipping");
         return;
     };
 
@@ -164,7 +198,9 @@ fn emit_cync_adaptor(
         "notes": "Self-generated regression vector. Same shape as btc-adaptor on the Ristretto255 side."
     });
 
-    let path = out_dir().join("ristretto-adaptor").join(format!("{}.json", vec_id));
+    let path = out_dir()
+        .join("ristretto-adaptor")
+        .join(format!("{vec_id}.json"));
     fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
     fs::write(&path, serde_json::to_string_pretty(&vec_json).unwrap()).expect("write");
     println!("emitted {}", path.display());
@@ -172,14 +208,13 @@ fn emit_cync_adaptor(
 
 fn emit_dleq(vec_id: &str, secret_bytes: &[u8; 32], nonce_k_bytes: &[u8; 32]) {
     let secp = Secp256k1::new();
-    let secret = AdaptorSecret::from_ristretto_bytes(*secret_bytes)
-        .expect("Ristretto-canonical");
+    let secret = AdaptorSecret::from_ristretto_bytes(*secret_bytes).expect("Ristretto-canonical");
     let t_sk = SecretKey::from_slice(&secret.secp256k1_bytes()).unwrap();
     let t_btc_bytes = PublicKey::from_secret_key(&secp, &t_sk).serialize();
     let t_cync_bytes = cync_adaptor_point(&secret).expect("cync pt");
 
     let Ok(proof) = prove_cross_curve(&secret, &t_btc_bytes, &t_cync_bytes, nonce_k_bytes) else {
-        eprintln!("vec {}: prove_cross_curve failed; skipping", vec_id);
+        eprintln!("vec {vec_id}: prove_cross_curve failed; skipping");
         return;
     };
     verify_cross_curve_proof(&proof, &t_btc_bytes, &t_cync_bytes).expect("verify");
@@ -204,14 +239,19 @@ fn emit_dleq(vec_id: &str, secret_bytes: &[u8; 32], nonce_k_bytes: &[u8; 32]) {
         "notes": "Self-generated regression vector for Maxwell-Poelstra cross-curve DLEQ."
     });
 
-    let path = out_dir().join("dleq-cross-curve").join(format!("{}.json", vec_id));
+    let path = out_dir()
+        .join("dleq-cross-curve")
+        .join(format!("{vec_id}.json"));
     fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
     fs::write(&path, serde_json::to_string_pretty(&vec_json).unwrap()).expect("write");
     println!("emitted {}", path.display());
 }
 
 fn main() {
-    println!("Generating reproducibility vectors → {}", out_dir().display());
+    println!(
+        "Generating reproducibility vectors → {}",
+        out_dir().display()
+    );
     println!();
 
     for &(id, signer_sk, secret, msg, aux_rand, dleq_nonce) in TEST_CASES {

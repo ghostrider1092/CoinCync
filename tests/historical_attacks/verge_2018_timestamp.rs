@@ -21,7 +21,8 @@ fn verge_2018_timestamp_drift_bounded() {
         MAX_TIMESTAMP_DRIFT <= 7200, // 2 hours max
         "VERGE ATTACK RISK: MAX_TIMESTAMP_DRIFT is {} seconds ({}h)! \
          Should be <= 2 hours. Attackers can manipulate difficulty via timestamps.",
-        MAX_TIMESTAMP_DRIFT, MAX_TIMESTAMP_DRIFT / 3600
+        MAX_TIMESTAMP_DRIFT,
+        MAX_TIMESTAMP_DRIFT / 3600
     );
     assert!(
         MAX_TIMESTAMP_DRIFT > 0,

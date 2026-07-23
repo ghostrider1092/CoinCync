@@ -99,7 +99,7 @@ uuid        = { version = "1", features = ["v7", "serde"] }
 # HMAC-SHA256 over (session_id || participant_pubkey || expiry),
 # keyed by a per-session secret minted by the creator. Constant-
 # time comparison via `subtle` to avoid timing leaks.
-hmac        = { version = "0.13", optional = true }
+hmac        = { version = "0.12", optional = true }
 sha2        = { version = "0.10", optional = true }
 subtle      = { version = "2",    optional = true }
 

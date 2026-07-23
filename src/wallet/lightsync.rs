@@ -30,18 +30,15 @@
 //!
 //! Bandwidth savings: ~50-100x reduction vs downloading full blocks.
 
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
-use crate::primitives::{Hash, PublicKey, SecretKey, hash_domain};
-use crate::transaction::TxOutput;
 use crate::consensus::Block;
-use crate::crypto::{
-    StealthAddress, is_output_ours,
-    BlindingFactor, SecretScalar, PublicPoint,
-};
-use crate::wallet::scanner::{ScanKeys, DecryptedOutput};
+use crate::crypto::{is_output_ours, BlindingFactor, PublicPoint, SecretScalar, StealthAddress};
+use crate::primitives::{hash_domain, Hash, PublicKey, SecretKey};
+use crate::transaction::TxOutput;
+use crate::wallet::scanner::{DecryptedOutput, ScanKeys};
 
 // =============================================================================
 // OUTPUT DIGEST - minimal per-output data for scanning
@@ -125,7 +122,9 @@ impl BlockDigest {
         for tx in &block.transactions {
             let tx_hash = tx.hash();
             for (idx, output) in tx.outputs.iter().enumerate() {
-                if idx > 255 { break; } // Same safety as WalletScanner
+                if idx > 255 {
+                    break;
+                } // Same safety as WalletScanner
                 outputs.push(OutputDigest::from_output(output, tx_hash, idx as u8));
             }
         }
@@ -194,7 +193,8 @@ impl SyncCheckpoint {
                 self.block_hash.as_bytes(),
                 &self.total_outputs.to_le_bytes(),
                 self.utxo_hash.as_bytes(),
-            ].concat(),
+            ]
+            .concat(),
         )
     }
 
@@ -355,7 +355,12 @@ impl LightWalletSync {
                 tx_public_key: output.tx_public_key,
             };
 
-            let mut matched = is_output_ours(&stealth, &keys.view_secret, &keys.spend_public, output.output_index);
+            let mut matched = is_output_ours(
+                &stealth,
+                &keys.view_secret,
+                &keys.spend_public,
+                output.output_index,
+            );
             let mut matched_subaddr: Option<(u32, u32)> = None;
 
             // SECURITY (C9-FIX): Check subaddress keys if primary didn't match
@@ -377,10 +382,8 @@ impl LightWalletSync {
                     output.output_index,
                 );
 
-                let (amount, blinding_factor) = decrypt_amount_light(
-                    &output.encrypted_amount,
-                    &shared_secret,
-                );
+                let (amount, blinding_factor) =
+                    decrypt_amount_light(&output.encrypted_amount, &shared_secret);
 
                 // 2026-06-03 ghost-balance defense (parity with
                 // wallet/scanner.rs::scan_output): verify the decrypted
@@ -389,10 +392,8 @@ impl LightWalletSync {
                 // 0894835. Light-sync path needs the same check —
                 // otherwise a malicious sender's forged encrypted_amount
                 // shows up as ghost balance in light wallets too.
-                let expected_commitment = crate::crypto::PedersenCommitment::commit(
-                    amount,
-                    &blinding_factor,
-                ).to_bytes();
+                let expected_commitment =
+                    crate::crypto::PedersenCommitment::commit(amount, &blinding_factor).to_bytes();
                 if expected_commitment != output.commitment {
                     tracing::debug!(
                         "lightsync: stealth match but commitment recompute mismatch \
@@ -489,12 +490,11 @@ impl LightWalletSync {
 
         // Update stats
         self.stats.digests_scanned += digests.len() as u64;
-        self.stats.outputs_scanned += digests.iter()
-            .map(|d| d.outputs.len() as u64)
-            .sum::<u64>();
+        self.stats.outputs_scanned += digests.iter().map(|d| d.outputs.len() as u64).sum::<u64>();
         self.stats.outputs_found += all_found.len() as u64;
         self.stats.total_amount += all_found.iter().map(|o| o.amount as u128).sum::<u128>();
-        self.stats.bytes_processed += digests.iter()
+        self.stats.bytes_processed += digests
+            .iter()
             .map(|d| d.estimated_size() as u64)
             .sum::<u64>();
         self.stats.scan_time_ms += start.elapsed().as_millis() as u64;
@@ -548,13 +548,23 @@ fn scan_output_digest_with_keys(
             tx_public_key: output.tx_public_key,
         };
 
-        let mut matched = is_output_ours(&stealth, &key_set.view_secret, &key_set.spend_public, output.output_index);
+        let mut matched = is_output_ours(
+            &stealth,
+            &key_set.view_secret,
+            &key_set.spend_public,
+            output.output_index,
+        );
         let mut matched_subaddr: Option<(u32, u32)> = None;
 
         // SECURITY (C9-FIX): Check subaddress keys if primary didn't match
         if !matched {
             for &(account, index, ref sub_spend) in &key_set.subaddress_keys {
-                if is_output_ours(&stealth, &key_set.view_secret, sub_spend, output.output_index) {
+                if is_output_ours(
+                    &stealth,
+                    &key_set.view_secret,
+                    sub_spend,
+                    output.output_index,
+                ) {
                     matched = true;
                     matched_subaddr = Some((account, index));
                     break;
@@ -569,17 +579,13 @@ fn scan_output_digest_with_keys(
                 output.output_index,
             );
 
-            let (amount, blinding_factor) = decrypt_amount_light(
-                &output.encrypted_amount,
-                &shared_secret,
-            );
+            let (amount, blinding_factor) =
+                decrypt_amount_light(&output.encrypted_amount, &shared_secret);
 
             // 2026-06-03 ghost-balance defense (parity with
             // wallet/scanner.rs::scan_output). See commit 0894835.
-            let expected_commitment = crate::crypto::PedersenCommitment::commit(
-                amount,
-                &blinding_factor,
-            ).to_bytes();
+            let expected_commitment =
+                crate::crypto::PedersenCommitment::commit(amount, &blinding_factor).to_bytes();
             if expected_commitment != output.commitment {
                 tracing::debug!(
                     "lightsync (free fn): stealth match but commitment recompute mismatch \
@@ -648,7 +654,11 @@ fn compute_view_tag_light(view_secret: &SecretKey, tx_public: &PublicKey, output
 }
 
 /// Compute shared secret for amount decryption (same as scanner.rs)
-fn compute_shared_secret_light(view_secret: &SecretKey, tx_public: &PublicKey, output_index: u8) -> [u8; 32] {
+fn compute_shared_secret_light(
+    view_secret: &SecretKey,
+    tx_public: &PublicKey,
+    output_index: u8,
+) -> [u8; 32] {
     let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
     let tx_point = match PublicPoint::from_bytes(*tx_public.as_bytes()) {
         Some(p) => p,
@@ -698,10 +708,10 @@ fn decrypt_amount_light(encrypted: &[u8], shared_secret: &[u8; 32]) -> (u64, Bli
 mod tests {
     use super::*;
     use crate::config::NetworkType;
-    use crate::primitives::{PublicKey, SecretKey, Amount};
-    use crate::crypto::{SecretScalar as CurveSecretScalar, PublicPoint as CurvePublicPoint};
     use crate::consensus::{Block, BlockHeader};
-    use crate::transaction::{Transaction, TxType, TxOutput};
+    use crate::crypto::{PublicPoint as CurvePublicPoint, SecretScalar as CurveSecretScalar};
+    use crate::primitives::{Amount, PublicKey, SecretKey};
+    use crate::transaction::{Transaction, TxOutput, TxType};
     use crate::wallet::scanner::{encrypt_amount, generate_view_tag};
     use rand::rngs::OsRng;
 
@@ -740,12 +750,12 @@ mod tests {
 
         // Derive stealth address: P = H(shared || idx)*G + spend_public
         let stealth_scalar = crate::crypto::hash_to_scalar(
-            &[shared_point.to_bytes().as_slice(), &[output_index]].concat()
+            &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
         );
         let spend_point = CurvePublicPoint::from_bytes(*spend_public.as_bytes())
             .expect("test spend_public is always a valid curve point");
         let stealth_point = CurvePublicPoint::from_point(
-            stealth_scalar * crate::crypto::generator() + *spend_point.as_point()
+            stealth_scalar * crate::crypto::generator() + *spend_point.as_point(),
         );
         let stealth_address = PublicKey::from_bytes(stealth_point.to_bytes());
 
@@ -1000,21 +1010,42 @@ mod tests {
 
     #[test]
     fn checkpoint_authenticate_accepts_matching_hardcoded() {
-        let cp = SyncCheckpoint::new(1000, Hash::from_bytes([7u8; 32]), 50_000, Hash::from_bytes([2u8; 32]));
+        let cp = SyncCheckpoint::new(
+            1000,
+            Hash::from_bytes([7u8; 32]),
+            50_000,
+            Hash::from_bytes([2u8; 32]),
+        );
         // A hardcoded checkpoint at this height with the SAME block hash.
-        assert_eq!(cp.authenticate_against(Some(&[7u8; 32])), CheckpointAuth::Authenticated);
+        assert_eq!(
+            cp.authenticate_against(Some(&[7u8; 32])),
+            CheckpointAuth::Authenticated
+        );
     }
 
     #[test]
     fn checkpoint_authenticate_rejects_forged() {
-        let cp = SyncCheckpoint::new(1000, Hash::from_bytes([7u8; 32]), 50_000, Hash::from_bytes([2u8; 32]));
+        let cp = SyncCheckpoint::new(
+            1000,
+            Hash::from_bytes([7u8; 32]),
+            50_000,
+            Hash::from_bytes([2u8; 32]),
+        );
         // A hardcoded checkpoint exists at this height but the hash DIFFERS.
-        assert_eq!(cp.authenticate_against(Some(&[9u8; 32])), CheckpointAuth::Forged);
+        assert_eq!(
+            cp.authenticate_against(Some(&[9u8; 32])),
+            CheckpointAuth::Forged
+        );
     }
 
     #[test]
     fn checkpoint_authenticate_unverifiable_without_hardcoded() {
-        let cp = SyncCheckpoint::new(1000, Hash::from_bytes([7u8; 32]), 50_000, Hash::from_bytes([2u8; 32]));
+        let cp = SyncCheckpoint::new(
+            1000,
+            Hash::from_bytes([7u8; 32]),
+            50_000,
+            Hash::from_bytes([2u8; 32]),
+        );
         // No hardcoded checkpoint at this height -> cannot authenticate; caller must not fast-skip.
         assert_eq!(cp.authenticate_against(None), CheckpointAuth::Unverifiable);
     }
@@ -1024,7 +1055,12 @@ mod tests {
         // Safety property that holds whether the hardcoded table is empty
         // (pre-launch) or populated: a made-up checkpoint at an arbitrary
         // height must NEVER authenticate.
-        let cp = SyncCheckpoint::new(123_456, Hash::from_bytes([3u8; 32]), 1, Hash::from_bytes([4u8; 32]));
+        let cp = SyncCheckpoint::new(
+            123_456,
+            Hash::from_bytes([3u8; 32]),
+            1,
+            Hash::from_bytes([4u8; 32]),
+        );
         assert_ne!(cp.authenticate(), CheckpointAuth::Authenticated);
     }
 

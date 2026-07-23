@@ -49,17 +49,17 @@
 //!   commit to the total fee on the value generator `H`. We use
 //!   `crate::crypto::curve::generator_h()` for H.
 
-use serde::{Deserialize, Serialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT as G,
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
     traits::Identity,
 };
-use borsh::{BorshSerialize, BorshDeserialize};
+use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
 use crate::constants::MW_CUTTHROUGH_DEPTH;
+use crate::error::{Error, Result};
 
 /// Approximate serialized size of a kernel, in bytes. Used by the
 /// cut-through engine to estimate disk savings (32-byte excess + ~64
@@ -164,8 +164,9 @@ impl ValidatedMwKernel {
     pub fn excess_point(&self) -> RistrettoPoint {
         // Unwrap is safe by construction — `validate` returned
         // Some only when this decode succeeded.
-        self.inner.excess_point()
-            .expect("R-31: ValidatedMwKernel invariant broken — excess bytes changed after validate()")
+        self.inner.excess_point().expect(
+            "R-31: ValidatedMwKernel invariant broken — excess bytes changed after validate()",
+        )
     }
 }
 
@@ -257,9 +258,9 @@ impl CutThroughEngine {
         let mut excess_sum = RistrettoPoint::identity();
         let mut fee_sum: u64 = 0;
         for k in kernels {
-            let p = k.excess_point().ok_or_else(|| {
-                Error::MwCutthroughVerifyFailed
-            })?;
+            let p = k
+                .excess_point()
+                .ok_or_else(|| Error::MwCutthroughVerifyFailed)?;
             excess_sum += p;
             fee_sum = fee_sum.checked_add(k.fee).ok_or(Error::AmountOverflow)?;
         }
@@ -281,13 +282,19 @@ impl CutThroughEngine {
             pending_candidates: self.pending.len(),
             kernels_kept: self.kept_kernels.len(),
             bytes_saved: self.bytes_saved,
-            compression_ratio: if total == 0 { 0.0 } else { self.bytes_saved as f64 / total as f64 },
+            compression_ratio: if total == 0 {
+                0.0
+            } else {
+                self.bytes_saved as f64 / total as f64
+            },
         }
     }
 }
 
 impl Default for CutThroughEngine {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -330,10 +337,7 @@ pub fn verify_cut_through(input: &[u8; 32], output: &[u8; 32]) -> bool {
 /// transaction is committed separately on `H` via each output's
 /// Pedersen commitment; the excess is the pure blinding-factor
 /// difference.
-pub fn compute_kernel_excess(
-    output_blindings: &[Scalar],
-    input_blindings: &[Scalar],
-) -> [u8; 32] {
+pub fn compute_kernel_excess(output_blindings: &[Scalar], input_blindings: &[Scalar]) -> [u8; 32] {
     let out_sum: Scalar = output_blindings.iter().sum();
     let in_sum: Scalar = input_blindings.iter().sum();
     let excess = out_sum - in_sum;

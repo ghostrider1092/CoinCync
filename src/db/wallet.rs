@@ -2,13 +2,13 @@
 //!
 //! Persistent storage for wallet state, scanned outputs, and transactions.
 
+use super::{deserialize, serialize};
 use crate::db::shim::{Db, Tree};
-use crate::primitives::{Hash, Amount, PublicKey};
-use crate::transaction::{Transaction, TxOutput};
 use crate::error::{Error, Result};
-use super::{serialize, deserialize};
-use serde::{Serialize, Deserialize};
-use borsh::{BorshSerialize, BorshDeserialize};
+use crate::primitives::{Amount, Hash, PublicKey};
+use crate::transaction::{Transaction, TxOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 
 /// Owned output (detected as ours during scanning)
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -134,19 +134,26 @@ impl WalletDb {
 
     /// Create new wallet database
     pub fn new(db: &Db) -> Result<Self> {
-        let outputs = db.open_tree("wallet_outputs")
+        let outputs = db
+            .open_tree("wallet_outputs")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let transactions = db.open_tree("wallet_transactions")
+        let transactions = db
+            .open_tree("wallet_transactions")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let scan_state = db.open_tree("wallet_scan_state")
+        let scan_state = db
+            .open_tree("wallet_scan_state")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let pending = db.open_tree("wallet_pending")
+        let pending = db
+            .open_tree("wallet_pending")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let labels = db.open_tree("wallet_labels")
+        let labels = db
+            .open_tree("wallet_labels")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let unspent_outputs = db.open_tree("unspent_outputs")
+        let unspent_outputs = db
+            .open_tree("unspent_outputs")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        let tx_by_time = db.open_tree("tx_by_time")
+        let tx_by_time = db
+            .open_tree("tx_by_time")
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
         Ok(WalletDb {
@@ -260,8 +267,11 @@ impl WalletDb {
     ) -> Result<bool> {
         let key = Self::make_output_key(tx_hash, index);
 
-        if let Some(data) = self.outputs.get(&key)
-            .map_err(|e| Error::DatabaseError(e.to_string()))? {
+        if let Some(data) = self
+            .outputs
+            .get(&key)
+            .map_err(|e| Error::DatabaseError(e.to_string()))?
+        {
             let mut output: OwnedOutput = deserialize(&data)?;
 
             if output.spent {
@@ -291,7 +301,8 @@ impl WalletDb {
                     // `if !output.spent` filter in get_unspent_outputs
                     // already tolerates (see the pre-existing
                     // docstring above L227-229).
-                    self.unspent_outputs.remove(key.as_slice())
+                    self.unspent_outputs
+                        .remove(key.as_slice())
                         .map_err(|e| Error::DatabaseError(e.to_string()))?;
                     return Ok(true);
                 }
@@ -305,7 +316,9 @@ impl WalletDb {
                 Err(e) => {
                     return Err(Error::DatabaseError(format!(
                         "R-46: mark_spent CAS failed for tx {} idx {}: {}",
-                        hex::encode(tx_hash.as_bytes()), index, e
+                        hex::encode(tx_hash.as_bytes()),
+                        index,
+                        e
                     )));
                 }
             }
@@ -323,8 +336,11 @@ impl WalletDb {
 
         for result in self.unspent_outputs.iter() {
             let (key, _) = result.map_err(|e| Error::DatabaseError(e.to_string()))?;
-            if let Some(data) = self.outputs.get(&key)
-                .map_err(|e| Error::DatabaseError(e.to_string()))? {
+            if let Some(data) = self
+                .outputs
+                .get(&key)
+                .map_err(|e| Error::DatabaseError(e.to_string()))?
+            {
                 let output: OwnedOutput = deserialize(&data)?;
                 if !output.spent {
                     outputs.push(output);
@@ -352,9 +368,14 @@ impl WalletDb {
     }
 
     /// Get spendable outputs (confirmed and not spent)
-    pub fn get_spendable_outputs(&self, current_height: u64, min_confirmations: u64) -> Result<Vec<OwnedOutput>> {
+    pub fn get_spendable_outputs(
+        &self,
+        current_height: u64,
+        min_confirmations: u64,
+    ) -> Result<Vec<OwnedOutput>> {
         let outputs = self.get_unspent_outputs()?;
-        Ok(outputs.into_iter()
+        Ok(outputs
+            .into_iter()
             .filter(|o| o.is_spendable(current_height, min_confirmations))
             .collect())
     }
@@ -363,12 +384,14 @@ impl WalletDb {
     pub fn calculate_balance(&self) -> Result<(u64, u64)> {
         let outputs = self.get_all_outputs()?;
 
-        let total: u64 = outputs.iter()
+        let total: u64 = outputs
+            .iter()
             .filter(|o| !o.spent)
             .filter_map(|o| o.amount)
             .sum();
 
-        let pending: u64 = outputs.iter()
+        let pending: u64 = outputs
+            .iter()
             .filter(|o| !o.spent && o.height == 0)
             .filter_map(|o| o.amount)
             .sum();
@@ -436,8 +459,11 @@ impl WalletDb {
 
         for result in self.tx_by_time.iter().rev().take(limit) {
             let (_, tx_hash_bytes) = result.map_err(|e| Error::DatabaseError(e.to_string()))?;
-            if let Some(data) = self.transactions.get(&tx_hash_bytes)
-                .map_err(|e| Error::DatabaseError(e.to_string()))? {
+            if let Some(data) = self
+                .transactions
+                .get(&tx_hash_bytes)
+                .map_err(|e| Error::DatabaseError(e.to_string()))?
+            {
                 let tx: WalletTx = deserialize(&data)?;
                 txs.push(tx);
             }
@@ -447,7 +473,11 @@ impl WalletDb {
     }
 
     /// Get transactions in height range
-    pub fn get_transactions_in_range(&self, start_height: u64, end_height: u64) -> Result<Vec<WalletTx>> {
+    pub fn get_transactions_in_range(
+        &self,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<WalletTx>> {
         let mut txs = Vec::new();
 
         for result in self.transactions.iter() {
@@ -479,7 +509,8 @@ impl WalletDb {
     /// Update scan state
     pub fn update_scan_state(&self, state: &ScanState) -> Result<()> {
         let data = serialize(state)?;
-        self.scan_state.insert(Self::KEY_SCAN_STATE, data)
+        self.scan_state
+            .insert(Self::KEY_SCAN_STATE, data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -488,7 +519,8 @@ impl WalletDb {
     pub fn add_pending(&self, tx: &Transaction) -> Result<()> {
         let hash = tx.hash();
         let data = serialize(tx)?;
-        self.pending.insert(hash.as_bytes(), data)
+        self.pending
+            .insert(hash.as_bytes(), data)
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -507,7 +539,8 @@ impl WalletDb {
 
     /// Remove pending transaction (confirmed or expired)
     pub fn remove_pending(&self, tx_hash: &Hash) -> Result<()> {
-        self.pending.remove(tx_hash.as_bytes())
+        self.pending
+            .remove(tx_hash.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -527,7 +560,8 @@ impl WalletDb {
 
     /// Set label for address
     pub fn set_label(&self, address: &PublicKey, label: &str) -> Result<()> {
-        self.labels.insert(address.as_bytes(), label.as_bytes())
+        self.labels
+            .insert(address.as_bytes(), label.as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -572,20 +606,27 @@ impl WalletDb {
     /// `clear()` is a full-wallet reset explicitly gated as
     /// "dangerous!"; recovery from an interrupted clear is a rescan.
     pub fn clear(&self) -> Result<()> {
-        self.outputs.clear()
+        self.outputs
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.transactions.clear()
+        self.transactions
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.scan_state.clear()
+        self.scan_state
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.pending.clear()
+        self.pending
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.labels.clear()
+        self.labels
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         // 2026-07-01: secondary indexes missing from the original clear.
-        self.unspent_outputs.clear()
+        self.unspent_outputs
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
-        self.tx_by_time.clear()
+        self.tx_by_time
+            .clear()
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }

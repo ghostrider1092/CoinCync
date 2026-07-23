@@ -45,8 +45,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use tick::{
-    AggregateFleetHealth, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer,
-    HealthSnapshot, Snapshot, TickError, TickNotice, TickResult,
+    AggregateFleetHealth, ChainAdapter, ChainTipState, DeploymentMode, FleetPeer, HealthSnapshot,
+    Snapshot, TickError, TickNotice, TickResult,
 };
 
 use crate::primitives::Hash;
@@ -300,8 +300,7 @@ fn aggregate_from_tips<Id>(
     let divergent_count = if median_difficulty == 0 {
         0
     } else {
-        tips
-            .iter()
+        tips.iter()
             .filter(|t| {
                 let diff = if t.difficulty > median_difficulty {
                     t.difficulty - median_difficulty
@@ -339,9 +338,10 @@ impl ChainAdapter for CoincyncAdapter {
     // ── Chain state ─────────────────────────────────────────────────
 
     fn tip_state(&self) -> TickResult<ChainTipState<Self::BlockId>> {
-        let rpc = self.local_rpc.as_ref().ok_or_else(|| {
-            TickError::Other("no local RPC client configured".into())
-        })?;
+        let rpc = self
+            .local_rpc
+            .as_ref()
+            .ok_or_else(|| TickError::Other("no local RPC client configured".into()))?;
         let info = get_info(rpc)?;
         Ok(ChainTipState {
             height: info.height,
@@ -395,11 +395,7 @@ impl ChainAdapter for CoincyncAdapter {
         })
     }
 
-    fn verify_peer_header_pow(
-        &self,
-        peer: &FleetPeer,
-        height: u64,
-    ) -> TickResult<bool> {
+    fn verify_peer_header_pow(&self, peer: &FleetPeer, height: u64) -> TickResult<bool> {
         // Fetch the block at `height` from `peer` via get_block_by_height.
         // Uses the shared fleet bearer (see `peer_bearer`) so an
         // auth-required peer host doesn't 401.
@@ -419,15 +415,14 @@ impl ChainAdapter for CoincyncAdapter {
                 e
             ))
         })?;
-        let block: crate::consensus::Block =
-            borsh::from_slice(&bytes).map_err(|e| {
-                TickError::Other(format!(
-                    "{} get_block_by_height({}) borsh decode failed: {}",
-                    client.url(),
-                    height,
-                    e
-                ))
-            })?;
+        let block: crate::consensus::Block = borsh::from_slice(&bytes).map_err(|e| {
+            TickError::Other(format!(
+                "{} get_block_by_height({}) borsh decode failed: {}",
+                client.url(),
+                height,
+                e
+            ))
+        })?;
 
         let header = &block.header;
 
@@ -491,18 +486,15 @@ impl ChainAdapter for CoincyncAdapter {
 
     // ── Propagation ─────────────────────────────────────────────────
 
-    fn rebroadcast_block(
-        &self,
-        block_id: &Self::BlockId,
-        to: &Self::PeerId,
-    ) -> TickResult<()> {
+    fn rebroadcast_block(&self, block_id: &Self::BlockId, to: &Self::PeerId) -> TickResult<()> {
         // Step 1: fetch the block from the LOCAL node by its hash. If
         // the local node doesn't have it, we have nothing to
         // re-broadcast — return a clear error rather than trying to
         // proceed with empty bytes.
-        let local = self.local_rpc.as_ref().ok_or_else(|| {
-            TickError::Other("no local RPC client configured".into())
-        })?;
+        let local = self
+            .local_rpc
+            .as_ref()
+            .ok_or_else(|| TickError::Other("no local RPC client configured".into()))?;
         let hash_hex = hex::encode(block_id.0.as_bytes());
         let local_block = rpc_client::get_block_by_hash(local, &hash_hex)?;
 
@@ -681,10 +673,7 @@ mod tests {
     fn fleet_peers_reads_config_file() {
         use std::io::Write;
         // Write a minimal fleet-config.json to a temp file.
-        let dir = std::env::temp_dir().join(format!(
-            "tick-fleet-cfg-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("tick-fleet-cfg-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("fleet-config.json");
         {
@@ -766,7 +755,10 @@ fleet_config_path = "/etc/coincync/fleet.json"
 "#;
         let cfg: CoincyncAdapterConfig = toml::from_str(raw).expect("should parse");
         assert_eq!(cfg.deployment_mode, DeploymentModeStr::Fleet);
-        assert_eq!(cfg.fleet_config_path, PathBuf::from("/etc/coincync/fleet.json"));
+        assert_eq!(
+            cfg.fleet_config_path,
+            PathBuf::from("/etc/coincync/fleet.json")
+        );
     }
 
     #[test]
@@ -795,10 +787,8 @@ fleet_config_path = "/etc/coincync/fleet.json"
                 let mut buf = [0u8; 4096];
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let _ = stream.read(&mut buf);
-                let response_body = format!(
-                    r#"{{"jsonrpc":"2.0","id":1,"result":{}}}"#,
-                    result_json
-                );
+                let response_body =
+                    format!(r#"{{"jsonrpc":"2.0","id":1,"result":{}}}"#, result_json);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\n\
                      Content-Type: application/json\r\n\
@@ -817,14 +807,17 @@ fleet_config_path = "/etc/coincync/fleet.json"
 
     #[test]
     fn tip_state_round_trips_via_mock_rpc_server() {
-        let url = spawn_one_shot_json_rpc_result(r#"{
+        let url = spawn_one_shot_json_rpc_result(
+            r#"{
             "height": 9569,
             "total_difficulty": "720000000",
             "top_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
             "is_synced": true,
             "peer_count": 8,
             "tip_age_secs": 12
-        }"#.to_string());
+        }"#
+            .to_string(),
+        );
 
         let cfg = CoincyncAdapterConfig {
             local_rpc_url: url,
@@ -918,11 +911,8 @@ fleet_config_path = "/etc/coincync/fleet.json"
 
     #[test]
     fn verify_peer_header_pow_returns_err_on_unreachable_peer() {
-        let adapter = CoincyncAdapter::new(
-            CoincyncAdapterConfig::default(),
-            None,
-        )
-        .expect("adapter build");
+        let adapter =
+            CoincyncAdapter::new(CoincyncAdapterConfig::default(), None).expect("adapter build");
         // Point at a port with nothing listening → connection refused.
         let peer = FleetPeer {
             name: "unreachable".into(),
@@ -943,15 +933,10 @@ fleet_config_path = "/etc/coincync/fleet.json"
     fn verify_peer_header_pow_returns_err_on_bad_borsh_bytes() {
         // Peer returns valid JSON with a `bytes` field, but the hex
         // decodes to nonsense that borsh can't deserialize into a Block.
-        let url = spawn_one_shot_json_rpc_result(
-            r#"{"bytes":"deadbeef"}"#.to_string(),
-        );
+        let url = spawn_one_shot_json_rpc_result(r#"{"bytes":"deadbeef"}"#.to_string());
 
-        let adapter = CoincyncAdapter::new(
-            CoincyncAdapterConfig::default(),
-            None,
-        )
-        .expect("adapter build");
+        let adapter =
+            CoincyncAdapter::new(CoincyncAdapterConfig::default(), None).expect("adapter build");
         let peer = FleetPeer {
             name: "confused".into(),
             rpc_url: url,
@@ -1150,10 +1135,8 @@ fleet_config_path = "/etc/coincync/fleet.json"
                     }
                 });
                 let _ = tx.send(auth);
-                let response_body = format!(
-                    r#"{{"jsonrpc":"2.0","id":1,"result":{}}}"#,
-                    result_json
-                );
+                let response_body =
+                    format!(r#"{{"jsonrpc":"2.0","id":1,"result":{}}}"#, result_json);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\n\
                      Content-Type: application/json\r\n\
@@ -1177,7 +1160,8 @@ fleet_config_path = "/etc/coincync/fleet.json"
         // `Authorization: Bearer <token>` on cross-fleet calls, so an
         // auth-required peer host doesn't 401. If a call site is ever
         // reverted to `None`, this fails.
-        let info = r#"{"height":1,"total_difficulty":"1","top_hash":"","is_synced":true,"peer_count":3}"#;
+        let info =
+            r#"{"height":1,"total_difficulty":"1","top_hash":"","is_synced":true,"peer_count":3}"#;
         let (url, rx) = spawn_one_shot_capture_auth(info.to_string());
 
         let adapter = CoincyncAdapter::new(
@@ -1258,10 +1242,7 @@ fleet_config_path = "/etc/coincync/fleet.json"
             role: "seed".into(),
         };
         adapter
-            .rebroadcast_block(
-                &BlockIdBytes(genesis.hash()),
-                &target_peer,
-            )
+            .rebroadcast_block(&BlockIdBytes(genesis.hash()), &target_peer)
             .expect("should succeed on happy path");
     }
 
@@ -1316,7 +1297,11 @@ fleet_config_path = "/etc/coincync/fleet.json"
         let err = adapter
             .rebroadcast_block(&BlockIdBytes(genesis.hash()), &target_peer)
             .unwrap_err();
-        assert!(matches!(err, tick::TickError::Unreachable(_)), "got: {:?}", err);
+        assert!(
+            matches!(err, tick::TickError::Unreachable(_)),
+            "got: {:?}",
+            err
+        );
     }
 
     #[test]

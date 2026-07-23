@@ -462,7 +462,7 @@ mod tests {
                 assert_eq!(height, 55);
                 assert_eq!(h, hash(0xAA));
             }
-            other => panic!("expected NewlyFinalized, got {:?}", other),
+            other => panic!("expected NewlyFinalized, got {other:?}"),
         }
         assert_eq!(t.soft_final_height(), Some(55));
         // 5th attestation: already past threshold, but height is

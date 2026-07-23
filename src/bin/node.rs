@@ -14,8 +14,8 @@ use coincync::chain::{Blockchain, ChainLoadOutcome};
 use coincync::config::Network;
 use coincync::db::Database;
 use coincync::mempool::SharedMempool;
-use coincync::network::P2PNode;
 use coincync::network::node::NodeConfig as P2PNodeConfig;
+use coincync::network::P2PNode;
 use coincync::rpc::{start_rpc_server, RpcConfig};
 
 #[derive(Parser)]
@@ -237,11 +237,7 @@ async fn main() {
     coincync::consensus::bind_randomx_genesis_for_network(network);
 
     // Resolve ~
-    let data_dir = if let Some(stripped) = cli
-        .data_dir
-        .to_string_lossy()
-        .strip_prefix("~/")
-    {
+    let data_dir = if let Some(stripped) = cli.data_dir.to_string_lossy().strip_prefix("~/") {
         dirs_next::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(stripped)
@@ -281,7 +277,9 @@ async fn main() {
                 &expected_genesis,
             ) {
                 Ok(coincync::db::MigrationOutcome::AlreadyStamped) => {
-                    info!("DB was already stamped at the expected schema version. No changes made.");
+                    info!(
+                        "DB was already stamped at the expected schema version. No changes made."
+                    );
                 }
                 Ok(coincync::db::MigrationOutcome::Stamped { genesis_hash }) => {
                     info!(
@@ -495,7 +493,10 @@ async fn main() {
                         "✓ Snapshot imported: height={} tip={} (produced by {} at unix {}).",
                         m.height, m.tip_hash, m.node_version, m.created_at
                     );
-                    info!("Start the node normally to resume from height {}.", m.height);
+                    info!(
+                        "Start the node normally to resume from height {}.",
+                        m.height
+                    );
                 }
                 Err(e) => {
                     error!("Snapshot import failed: {}", e);
@@ -519,7 +520,9 @@ async fn main() {
                 cli.proxy,
                 cli.tor,
                 cli.onion_only,
-            ).await {
+            )
+            .await
+            {
                 error!("node start failed: {}", e);
                 std::process::exit(1);
             }
@@ -649,9 +652,15 @@ async fn check_update() {
                 .to_string();
             let pre_note = if is_pre { " (prerelease)" } else { "" };
             if current == latest_clean {
-                println!("✓ You have the latest release{}: {} ({})", pre_note, tag, name);
+                println!(
+                    "✓ You have the latest release{}: {} ({})",
+                    pre_note, tag, name
+                );
             } else {
-                println!("⚠ A different release is available{}: {} ({})", pre_note, tag, name);
+                println!(
+                    "⚠ A different release is available{}: {} ({})",
+                    pre_note, tag, name
+                );
                 println!("    Current: {}", current);
                 println!("    Latest:  {}", latest_clean);
                 println!("    Download: {}", url);
@@ -683,7 +692,10 @@ fn extract_release(v: &serde_json::Value) -> Option<(String, String, String, boo
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    let is_pre = v.get("prerelease").and_then(|x| x.as_bool()).unwrap_or(false);
+    let is_pre = v
+        .get("prerelease")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     Some((tag, name, url, is_pre))
 }
 
@@ -800,9 +812,16 @@ async fn start_node(
             Ok(resolved) => {
                 let addrs: Vec<std::net::SocketAddr> = resolved.collect();
                 if addrs.is_empty() {
-                    warn!("Ignoring --addnode {:?}: hostname resolved to no addresses", raw);
+                    warn!(
+                        "Ignoring --addnode {:?}: hostname resolved to no addresses",
+                        raw
+                    );
                 } else {
-                    info!("--addnode {:?}: resolved to {} address(es)", raw, addrs.len());
+                    info!(
+                        "--addnode {:?}: resolved to {} address(es)",
+                        raw,
+                        addrs.len()
+                    );
                     extra_peers.extend(addrs);
                 }
             }
@@ -832,7 +851,9 @@ async fn start_node(
     }
 
     if no_peers {
-        info!("--no-peers: automatic peer discovery disabled (manual --addnode peers still allowed)");
+        info!(
+            "--no-peers: automatic peer discovery disabled (manual --addnode peers still allowed)"
+        );
         // Enforce true isolation: disable bootstrap seeds.
         p2p_config.bootstrap.dns_seeds.clear();
         p2p_config.bootstrap.seed_nodes.clear();
@@ -903,8 +924,16 @@ async fn start_node(
             "Proxy enabled: {}:{} ({}{})",
             cfg.address,
             cfg.port,
-            if cfg.onion_only { "onion-only" } else { "clearnet+onion" },
-            if cfg.username.is_some() { ", authenticated" } else { "" },
+            if cfg.onion_only {
+                "onion-only"
+            } else {
+                "clearnet+onion"
+            },
+            if cfg.username.is_some() {
+                ", authenticated"
+            } else {
+                ""
+            },
         );
         p2p_config.proxy = Some(cfg);
     }
@@ -1003,7 +1032,11 @@ async fn start_node(
     }
 
     let tip = chain.tip();
-    info!("Chain tip: height={}, hash={}", tip.height, hex::encode(&tip.hash.as_bytes()[..8]));
+    info!(
+        "Chain tip: height={}, hash={}",
+        tip.height,
+        hex::encode(&tip.hash.as_bytes()[..8])
+    );
 
     let chain_arc: Arc<Blockchain> = Arc::new(chain);
 
@@ -1048,8 +1081,8 @@ async fn start_node(
     let event_p2p = p2p.clone();
     let mut node_events = p2p.subscribe();
     tokio::spawn(async move {
-        use coincync::network::node::NodeEvent;
         use coincync::chain::BlockStatus;
+        use coincync::network::node::NodeEvent;
         use tokio::sync::broadcast::error::RecvError;
         info!("NodeEvent consumer started");
         loop {
@@ -1076,9 +1109,11 @@ async fn start_node(
                     // needed at this call site.
                     let block_status = event_chain.clone().process_block_async(block).await;
                     match block_status {
-                        Ok(status @ (BlockStatus::Accepted
-                                    | BlockStatus::AcceptedFork
-                                    | BlockStatus::AcceptedReorg { .. })) => {
+                        Ok(
+                            status @ (BlockStatus::Accepted
+                            | BlockStatus::AcceptedFork
+                            | BlockStatus::AcceptedReorg { .. }),
+                        ) => {
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.
                             event_mempool.remove_confirmed(&block_txs);
@@ -1121,7 +1156,8 @@ async fn start_node(
                             let evict_chain = event_chain.clone();
                             let _ = tokio::task::spawn_blocking(move || {
                                 evict_mempool.shadow_evict_invalid(evict_chain.as_ref());
-                            }).await;
+                            })
+                            .await;
 
                             // Notify IBD sync manager so it advances its
                             // local_height cursor and releases the next
@@ -1179,7 +1215,8 @@ async fn start_node(
                             let block_for_pool = block_for_relay.clone();
                             tokio::spawn(async move {
                                 p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_orphan(&peer_id, block_for_pool, &prev_hash).await;
+                                p2p2.notify_block_orphan(&peer_id, block_for_pool, &prev_hash)
+                                    .await;
                             });
                         }
                         Ok(BlockStatus::Invalid(reason)) => {
@@ -1263,9 +1300,7 @@ async fn start_node(
     let rpc_listen: std::net::SocketAddr = rpc_bind
         .as_deref()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            ([127, 0, 0, 1], network.default_rpc_port()).into()
-        });
+        .unwrap_or_else(|| ([127, 0, 0, 1], network.default_rpc_port()).into());
     let mut rpc_config = RpcConfig {
         listen_addr: rpc_listen,
         network_name: format!("{:?}", network).to_lowercase(),
@@ -1296,7 +1331,10 @@ async fn start_node(
     // still flows through the ctrl-c handler below.
     let metrics_listen: std::net::SocketAddr =
         ([127, 0, 0, 1], rpc_listen.port().wrapping_add(1)).into();
-    info!("Starting Prometheus /metrics endpoint on {}", metrics_listen);
+    info!(
+        "Starting Prometheus /metrics endpoint on {}",
+        metrics_listen
+    );
     tokio::spawn(async move {
         if let Err(e) = coincync::metrics::serve_metrics(metrics_listen).await {
             warn!("Metrics endpoint exited: {}", e);
@@ -1353,13 +1391,20 @@ async fn start_node(
     };
 
     if let Some(addr) = rest_listen {
-        info!("Starting REST API on {}{}",
+        info!(
+            "Starting REST API on {}{}",
             addr,
-            if serve_explorer { " (with embedded explorer at GET /)" } else { "" }
+            if serve_explorer {
+                " (with embedded explorer at GET /)"
+            } else {
+                ""
+            }
         );
         let jsonrpc_addr = rpc_listen;
         tokio::spawn(async move {
-            if let Err(e) = coincync::rpc::rest::run_rest_api(addr, jsonrpc_addr, serve_explorer).await {
+            if let Err(e) =
+                coincync::rpc::rest::run_rest_api(addr, jsonrpc_addr, serve_explorer).await
+            {
                 error!("REST API exited: {}", e);
             }
         });
@@ -1389,9 +1434,8 @@ async fn start_node(
     // receipts.
     #[cfg(unix)]
     {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate()
-        ).expect("failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -1471,10 +1515,15 @@ async fn start_node(
     info!("Draining RocksDB before exit...");
     let flush_deadline = std::time::Duration::from_secs(10);
     let flush_start = std::time::Instant::now();
-    match tokio::time::timeout(flush_deadline, tokio::task::spawn_blocking({
-        let db = db.clone();
-        move || db.flush_best_effort()
-    })).await {
+    match tokio::time::timeout(
+        flush_deadline,
+        tokio::task::spawn_blocking({
+            let db = db.clone();
+            move || db.flush_best_effort()
+        }),
+    )
+    .await
+    {
         Ok(Ok(())) => {
             info!(
                 flush_ms = flush_start.elapsed().as_millis(),

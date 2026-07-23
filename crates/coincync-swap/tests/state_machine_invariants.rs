@@ -49,8 +49,8 @@
 
 #![cfg(not(miri))]
 
-use proptest::prelude::*;
 use proptest::collection::vec;
+use proptest::prelude::*;
 
 use coincync_swap::protocol::{Role, State, Swap, SwapParameters, Transition};
 
@@ -86,10 +86,10 @@ fn fresh_swap(role: Role) -> Swap {
         "swap-property-test".to_string(),
         role,
         SwapParameters {
-            cync_amount: 1_000_000_000,        // 1.0 CYNC
-            btc_amount_sats: 25_000,           // 0.00025 BTC
-            cync_timeout_blocks: 100,          // ~3.3 hr at 120s/block
-            btc_timeout_blocks: 5,             // ~50 min at 600s/block (well under cync)
+            cync_amount: 1_000_000_000, // 1.0 CYNC
+            btc_amount_sats: 25_000,    // 0.00025 BTC
+            cync_timeout_blocks: 100,   // ~3.3 hr at 120s/block
+            btc_timeout_blocks: 5,      // ~50 min at 600s/block (well under cync)
             alice_cync_address: "tCYNCalice".to_string(),
             bob_btc_address: "tb1qbob".to_string(),
             cync_network: "regtest".to_string(),

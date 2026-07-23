@@ -272,7 +272,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 ## Common errors
 
 **Q: "INTEGRITY CHECK FAILED — UNCONSTITUTIONAL: Article X"**
-> Build-time tripwire fired. A consensus-critical file was modified without updating `critical_files.lock`. If you intentionally changed it: `cargo run --bin update-critical-hashes`. If you didn't: check `git diff <file>` and revert. This guard is the Constitution doing its job — don't try to disable it.
+> Build-time tripwire fired. A consensus-critical file was modified without updating `critical_files.lock`. If you intentionally changed it: `COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes`. If you didn't: check `git diff <file>` and revert. This guard is the Constitution doing its job — don't try to disable it.
 
 **Q: "Connection refused" on RPC port 28081**
 > The node binds RPC to `127.0.0.1:28081` by default. You're either calling from a different machine (need to enable explicitly with auth — see SECURITY.md) or the node isn't running (`systemctl status coincync-node`).

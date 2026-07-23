@@ -101,7 +101,8 @@ impl BloomFilter {
         // bloomfilter::Bloom::new takes (bitmap_size_bytes, items_count).
         // We approximate items_count from the desired bits and hash count.
         let bitmap_bytes = (num_bits + 7) / 8;
-        let estimated_items = (num_bits as f64 / num_hashes as f64 * std::f64::consts::LN_2) as usize;
+        let estimated_items =
+            (num_bits as f64 / num_hashes as f64 * std::f64::consts::LN_2) as usize;
         let estimated_items = estimated_items.max(1);
         let inner = bloomfilter::Bloom::new(bitmap_bytes, estimated_items);
 
@@ -269,7 +270,8 @@ impl CountingBloomFilter {
             let current = self.get_counter(index);
             if current < 15 {
                 if is_high {
-                    self.counters[byte_index] = (self.counters[byte_index] & 0x0F) | ((current + 1) << 4);
+                    self.counters[byte_index] =
+                        (self.counters[byte_index] & 0x0F) | ((current + 1) << 4);
                 } else {
                     self.counters[byte_index] = (self.counters[byte_index] & 0xF0) | (current + 1);
                 }
@@ -286,7 +288,8 @@ impl CountingBloomFilter {
             let current = self.get_counter(index);
             if current > 0 {
                 if is_high {
-                    self.counters[byte_index] = (self.counters[byte_index] & 0x0F) | ((current - 1) << 4);
+                    self.counters[byte_index] =
+                        (self.counters[byte_index] & 0x0F) | ((current - 1) << 4);
                 } else {
                     self.counters[byte_index] = (self.counters[byte_index] & 0xF0) | (current - 1);
                 }
@@ -321,7 +324,11 @@ impl KeyImageFilter {
 
     /// Get statistics
     pub fn stats(&self) -> (usize, f64, usize) {
-        (self.filter.count(), self.filter.estimated_fpr(), self.filter.memory_usage())
+        (
+            self.filter.count(),
+            self.filter.estimated_fpr(),
+            self.filter.memory_usage(),
+        )
     }
 }
 
@@ -352,7 +359,11 @@ mod tests {
         }
 
         // Should be below ~1% false positive rate
-        assert!(false_positives < 20, "Too many false positives: {}", false_positives);
+        assert!(
+            false_positives < 20,
+            "Too many false positives: {}",
+            false_positives
+        );
     }
 
     #[test]

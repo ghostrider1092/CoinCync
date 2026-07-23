@@ -102,26 +102,37 @@ mod tests {
 
     #[test]
     fn netgroup_concentration_trips_eclipse_pressure() {
-        let r = SentinelReading { largest_netgroup_pct: ECLIPSE_NETGROUP_PCT, ..Default::default() };
+        let r = SentinelReading {
+            largest_netgroup_pct: ECLIPSE_NETGROUP_PCT,
+            ..Default::default()
+        };
         assert_eq!(assess(&r), vec![ThreatSignature::EclipsePressure]);
     }
 
     #[test]
     fn high_conn_rate_trips_flood() {
-        let r = SentinelReading { inbound_new_per_min: FLOOD_CONN_PER_MIN, ..Default::default() };
+        let r = SentinelReading {
+            inbound_new_per_min: FLOOD_CONN_PER_MIN,
+            ..Default::default()
+        };
         assert_eq!(assess(&r), vec![ThreatSignature::FloodPattern]);
     }
 
     #[test]
     fn duplicate_churn_also_trips_flood() {
-        let r = SentinelReading { duplicate_msg_pct: FLOOD_DUPLICATE_PCT, ..Default::default() };
+        let r = SentinelReading {
+            duplicate_msg_pct: FLOOD_DUPLICATE_PCT,
+            ..Default::default()
+        };
         assert_eq!(assess(&r), vec![ThreatSignature::FloodPattern]);
     }
 
     #[test]
     fn dark_sentinels_trip_partition_onset() {
-        let r =
-            SentinelReading { unreachable_sentinel_pct: PARTITION_UNREACHABLE_PCT, ..Default::default() };
+        let r = SentinelReading {
+            unreachable_sentinel_pct: PARTITION_UNREACHABLE_PCT,
+            ..Default::default()
+        };
         assert_eq!(assess(&r), vec![ThreatSignature::PartitionOnset]);
     }
 
@@ -133,7 +144,10 @@ mod tests {
             duplicate_msg_pct: FLOOD_DUPLICATE_PCT - 1,
             unreachable_sentinel_pct: PARTITION_UNREACHABLE_PCT - 1,
         };
-        assert!(is_calm(&just_below), "one below every threshold must be calm");
+        assert!(
+            is_calm(&just_below),
+            "one below every threshold must be calm"
+        );
     }
 
     #[test]

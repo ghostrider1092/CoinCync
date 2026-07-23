@@ -20,11 +20,11 @@ pub mod error;
 
 // Kani proof harnesses for top-level helpers in constants.rs.
 // Compiled only under cfg(kani); see docs/security/KANI_SETUP.md.
-#[cfg(kani)]
-mod kani_proofs;
+pub mod build_info;
 pub mod config;
 pub mod helpers;
-pub mod build_info;
+#[cfg(kani)]
+mod kani_proofs;
 pub mod prelude;
 
 // ── Primitives + types ──────────────────────────────────────
@@ -45,17 +45,17 @@ pub mod crypto;
 pub mod wallet;
 
 // ── Storage ─────────────────────────────────────────────────
-pub mod storage;
 pub mod db;
 pub mod snapshot;
+pub mod storage;
 
 // ── Network + mining ────────────────────────────────────────
-pub mod network;
 pub mod mining;
+pub mod network;
 
 // ── RPC + CLI ───────────────────────────────────────────────
-pub mod rpc;
 pub mod cli;
+pub mod rpc;
 
 // ── Runtime observability ───────────────────────────────────
 pub mod runtime_watchdog;
@@ -74,12 +74,12 @@ pub mod tick_adapter;
 pub mod colony;
 
 // ── Network genesis definitions ─────────────────────────────
-pub mod testnet;
 pub mod mainnet;
+pub mod testnet;
 
 // ── Re-exports ──────────────────────────────────────────────
-pub use error::{Error, Result};
 pub use config::{Network, NodeConfig};
+pub use error::{Error, Result};
 
 /// Crate version string, used in P2P `user_agent` and diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

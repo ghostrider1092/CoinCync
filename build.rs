@@ -12,7 +12,7 @@
 //!
 //! To refresh after an INTENTIONAL change:
 //!
-//!     cargo run --bin update-critical-hashes
+//!     COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes
 //!
 //! The refresher lives at `src/bin/update_critical_hashes.rs` and uses a
 //! byte-identical SHA-256 implementation to the one in this file; changes
@@ -53,6 +53,7 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=PROFILE");
     explorer_assets::assemble();
+    println!("cargo:rerun-if-env-changed=COINCYNC_REGEN_LOCK");
 
     // Register cfg(kani) so the compiler doesn't warn when it sees
     // `#[cfg(kani)]` gated proof modules in src/. Kani itself sets
@@ -62,15 +63,39 @@ fn main() {
 
     emit_build_metadata();
 
+    // An integrity gate you can disable by deleting a file is not a gate.
+    // The intentional re-lock path (which must build the updater binary and
+    // therefore re-run this script) sets COINCYNC_REGEN_LOCK=1, which relaxes
+    // both the missing-lock and hash-mismatch checks to warnings so that
+    // `update-critical-hashes` can regenerate the lockfile. Every OTHER build
+    // treats a missing or mismatched lock as a hard failure.
+    let regen_lock = match std::env::var("COINCYNC_REGEN_LOCK") {
+        Ok(value) if value == "1" => true,
+        Ok(_) => panic!("COINCYNC_REGEN_LOCK must be exactly `1` when intentionally re-locking"),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("COINCYNC_REGEN_LOCK must contain valid Unicode")
+        }
+    };
+
     // ── Load the lockfile ────────────────────────────────────────────
     let lockfile = Path::new("critical_files.lock");
     if !lockfile.exists() {
-        println!(
-            "cargo:warning=critical_files.lock not found — \
-             run `cargo run --bin update-critical-hashes` to create it. \
-             Build continues for now; remove this warning by generating the lockfile."
+        if regen_lock {
+            println!(
+                "cargo:warning=critical_files.lock absent + COINCYNC_REGEN_LOCK set — \
+                 skipping the integrity check so update-critical-hashes can regenerate it."
+            );
+            return;
+        }
+        panic!(
+            "\n\ncritical_files.lock is MISSING — the consensus integrity gate cannot run.\n\
+             A missing lock is a HARD FAILURE: it must not silently permit the build, or the \
+             gate could be bypassed by deleting one file. To (re)generate it after an \
+             intentional consensus change, run:\n\
+             \n    COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes\n\n\
+             then commit the regenerated critical_files.lock alongside the change.\n"
         );
-        return;
     }
 
     let expected = parse_lockfile(lockfile);
@@ -95,7 +120,7 @@ fn main() {
             None => {
                 failures.push(format!(
                     "  MISSING FROM LOCKFILE: {} \
-                     (run `cargo run --bin update-critical-hashes`)",
+                     (run `COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes`)",
                     file_path
                 ));
                 continue;
@@ -112,6 +137,13 @@ fn main() {
     }
 
     if !failures.is_empty() {
+        if regen_lock {
+            println!(
+                "cargo:warning=critical files changed + COINCYNC_REGEN_LOCK set — \
+                 skipping the mismatch failure so update-critical-hashes can refresh the lock."
+            );
+            return;
+        }
         panic!(
             "\n\n\
              ╔══════════════════════════════════════════════════════════════╗\n\
@@ -125,12 +157,12 @@ fn main() {
              \n\
              If these changes are INTENTIONAL:\n\
                  1. Review the changes carefully — they affect consensus.\n\
-                 2. Run: cargo run --bin update-critical-hashes\n\
+                 2. Run: COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes\n\
                  3. Commit the updated critical_files.lock alongside the change.\n\
              \n\
              If these changes are NOT intentional:\n\
                  1. Run: git diff <file>\n\
-                 2. Revert with: git checkout -- <file>\n\
+                 2. Restore the reviewed version of the file.\n\
                  3. Rebuild.\n\
              \n",
             failures.join("\n")
@@ -218,26 +250,20 @@ fn sha256_file(path: &Path) -> String {
 
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let bit_len = (data.len() as u64) * 8;

@@ -1102,7 +1102,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_creation() {
-        let config = NodeConfig::default();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.data_dir = data_dir.path().to_path_buf();
         let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
         let node = P2PNode::new(config, chain, mempool);
@@ -1193,8 +1195,11 @@ mod tests {
 
     #[tokio::test]
     async fn set_chain_state_preserves_sequence_contract_at_facade() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.data_dir = data_dir.path().to_path_buf();
         let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
-        let node = P2PNode::new(NodeConfig::default(), chain.clone(), SharedMempool::new());
+        let node = P2PNode::new(config, chain.clone(), SharedMempool::new());
         let older_tip = Hash::from_bytes([0xAA; 32]);
         let newer_tip = Hash::from_bytes([0xBB; 32]);
         let older = node.next_chain_update();
@@ -1216,12 +1221,11 @@ mod tests {
 
     #[tokio::test]
     async fn stale_processed_block_task_cannot_regress_sync_state() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.data_dir = data_dir.path().to_path_buf();
         let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
-        let node = Arc::new(P2PNode::new(
-            NodeConfig::default(),
-            chain.clone(),
-            SharedMempool::new(),
-        ));
+        let node = Arc::new(P2PNode::new(config, chain.clone(), SharedMempool::new()));
         let newer_tip = Hash::from_bytes([0xBB; 32]);
         chain.restore_state(100, newer_tip, 1_000).unwrap();
         let stale_update = node.next_chain_update();
@@ -1294,7 +1298,9 @@ mod tests {
     /// and that connected_peers returns an empty list for a fresh node.
     #[tokio::test]
     async fn test_peer_count_and_connected_peers() {
-        let config = NodeConfig::default();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.data_dir = data_dir.path().to_path_buf();
         let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
         let node = P2PNode::new(config, chain, mempool);

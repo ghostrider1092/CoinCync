@@ -20,12 +20,12 @@
 //! to the wire-level framing risks breaking compatibility with already-deployed nodes.
 //! If a protocol v2 is introduced, consider migrating to a codec-based design then.
 
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use crate::error::{Error, Result};
 use crate::network::connection_tracker::{ConnectionTracker, MemoryReservation};
 use crate::network::protocol::{MessageHeader, MAX_MESSAGE_SIZE};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 
 /// Default read timeout — must be longer than PING_INTERVAL (120s)
 /// to prevent killing idle but valid connections between pings.
@@ -119,7 +119,10 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
                 let needed = HEADER_SIZE - self.header_buf.len();
                 if needed > 0 {
                     let mut buf = vec![0u8; needed];
-                    let n = self.reader.read(&mut buf).await
+                    let n = self
+                        .reader
+                        .read(&mut buf)
+                        .await
                         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
                     if n == 0 {
@@ -148,12 +151,16 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
                     // SECURITY (H15-FIX): Per-command size limit enforcement.
                     // Each message type has its own max size to prevent oversized
                     // payloads for small message types (e.g., 16MB "Ping").
-                    if let Ok(msg_type) = crate::network::protocol::MessageType::try_from(header.msg_type) {
+                    if let Ok(msg_type) =
+                        crate::network::protocol::MessageType::try_from(header.msg_type)
+                    {
                         let type_limit = msg_type.max_size();
                         if header.length as usize > type_limit {
                             tracing::warn!(
                                 "Message type {:?} exceeds per-type limit: {} > {}",
-                                msg_type, header.length, type_limit
+                                msg_type,
+                                header.length,
+                                type_limit
                             );
                             return Err(Error::MessageTooLarge);
                         }
@@ -184,7 +191,10 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
                     // Read in chunks to avoid large temporary allocations
                     let to_read = std::cmp::min(needed, 65536);
                     let mut buf = vec![0u8; to_read];
-                    let n = self.reader.read(&mut buf).await
+                    let n = self
+                        .reader
+                        .read(&mut buf)
+                        .await
                         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
                     if n == 0 {
@@ -252,7 +262,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
     /// successful completion or unrecoverable error — never on a dropped
     /// future.
     pub async fn read_message_with_inactivity_timeout(
-        &mut self, inactivity: Duration,
+        &mut self,
+        inactivity: Duration,
     ) -> Result<(u8, Vec<u8>)> {
         if self.tracker.is_some() {
             return Err(Error::ProtocolError(
@@ -285,7 +296,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
     }
 
     async fn read_message_with_inactivity_timeout_inner(
-        &mut self, inactivity: Duration,
+        &mut self,
+        inactivity: Duration,
     ) -> Result<FramedMessage> {
         // Phase 1: Read HEADER_SIZE bytes with inactivity timeout per chunk.
         // self.header_buf may already contain partial bytes from a previously
@@ -339,7 +351,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
                 if header.length as usize > type_limit {
                     tracing::warn!(
                         "Message type {:?} exceeds per-type limit: {} > {}",
-                        msg_type, header.length, type_limit
+                        msg_type,
+                        header.length,
+                        type_limit
                     );
                     self.header_buf.clear();
                     return Err(Error::MessageTooLarge);
@@ -400,7 +414,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
 
     /// Read the next complete message with default timeout
     pub async fn read_message_timeout(&mut self) -> Result<(u8, Vec<u8>)> {
-        self.read_message_with_inactivity_timeout(DEFAULT_READ_TIMEOUT).await
+        self.read_message_with_inactivity_timeout(DEFAULT_READ_TIMEOUT)
+            .await
     }
 
     fn reset_read_state(&mut self) {
@@ -445,22 +460,24 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
         use crate::network::protocol::MessageType;
 
         // Create header
-        let header = MessageHeader::new(
-            self.magic,
-            MessageType::try_from(msg_type)?,
-            payload,
-        );
+        let header = MessageHeader::new(self.magic, MessageType::try_from(msg_type)?, payload);
 
         // Serialize header
-        let header_bytes = borsh::to_vec(&header)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let header_bytes =
+            borsh::to_vec(&header).map_err(|e| Error::SerializationError(e.to_string()))?;
 
         // Write header and payload
-        self.writer.write_all(&header_bytes).await
+        self.writer
+            .write_all(&header_bytes)
+            .await
             .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
-        self.writer.write_all(payload).await
+        self.writer
+            .write_all(payload)
+            .await
             .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
-        self.writer.flush().await
+        self.writer
+            .flush()
+            .await
             .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
         Ok(())
@@ -468,7 +485,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
 
     /// Flush pending writes
     pub async fn flush(&mut self) -> Result<()> {
-        self.writer.flush().await
+        self.writer
+            .flush()
+            .await
             .map_err(|e| Error::ConnectionFailed(e.to_string()))
     }
 }
@@ -585,13 +604,11 @@ impl ExponentialBackoff {
         // Apply jitter
         let jitter_range = delay.as_secs_f64() * self.jitter;
         let jitter = rand::random::<f64>() * jitter_range * 2.0 - jitter_range;
-        let jittered = std::time::Duration::from_secs_f64(
-            (delay.as_secs_f64() + jitter).max(0.0)
-        );
+        let jittered = std::time::Duration::from_secs_f64((delay.as_secs_f64() + jitter).max(0.0));
 
         // Advance for next time
         self.current = std::time::Duration::from_secs_f64(
-            (self.current.as_secs_f64() * self.multiplier).min(self.max.as_secs_f64())
+            (self.current.as_secs_f64() * self.multiplier).min(self.max.as_secs_f64()),
         );
 
         jittered
@@ -675,7 +692,9 @@ mod tests {
         let (mut peer, local) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(local);
         let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
-        peer.write_all(&wire_message(magic, &[1, 2, 3, 4])).await.unwrap();
+        peer.write_all(&wire_message(magic, &[1, 2, 3, 4]))
+            .await
+            .unwrap();
         let message = framer.read_budgeted_message_timeout().await.unwrap();
         assert_eq!(message.payload, vec![1, 2, 3, 4]);
         assert_eq!(tracker.memory_usage(), 4);
@@ -690,7 +709,9 @@ mod tests {
         let (mut peer, local) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(local);
         let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
-        peer.write_all(&wire_message(magic, &[1, 2, 3, 4])).await.unwrap();
+        peer.write_all(&wire_message(magic, &[1, 2, 3, 4]))
+            .await
+            .unwrap();
         assert!(matches!(
             framer.read_budgeted_message_timeout().await,
             Err(Error::P2pMemoryBudgetExceeded { .. })
@@ -707,14 +728,12 @@ mod tests {
         let (reader, writer) = tokio::io::split(local);
         let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
         peer.write_all(&wire[..HEADER_SIZE + 2]).await.unwrap();
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(50),
-                framer.read_message_with_inactivity_timeout_inner(Duration::from_secs(5)),
-            )
-            .await
-            .is_err()
-        );
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            framer.read_message_with_inactivity_timeout_inner(Duration::from_secs(5)),
+        )
+        .await
+        .is_err());
         assert_eq!(tracker.memory_usage(), 2);
         peer.write_all(&wire[HEADER_SIZE + 2..]).await.unwrap();
         let message = framer.read_budgeted_message_timeout().await.unwrap();

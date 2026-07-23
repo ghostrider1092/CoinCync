@@ -182,7 +182,7 @@ unforgeability go through.
   (open question for v1.0.13 review).
 
 **Critical file.** Yes (`critical_files.lock`). Any change → must update
-the lock hash via `cargo run --bin update-critical-hashes` **with a
+the lock hash via `COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes` **with a
 review comment explaining why**.
 
 ### 1.2 Bulletproofs+ range proofs — `src/crypto/bulletproofs.rs`

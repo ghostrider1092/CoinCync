@@ -40,7 +40,7 @@ sha2       = "0.10"
 # state (including terminal `Completed`) and the binary will trust it on
 # load. The HMAC key lives in a sidecar at `<state_file>.hmac-key`
 # (0o600 on Unix). Closes CYNC-AUDIT-2026-05-17-state-file-hmac.
-hmac       = "0.13"
+hmac       = "0.12"
 # CYNC-side adaptor primitives — Ristretto255 (prime-order group on
 # Curve25519). Same version the parent `coincync` crate uses for
 # CLSAG so the resolver gets a single tree; `digest` feature is
@@ -185,3 +185,9 @@ strict-dleq = []
 [lints.rust]
 unsafe_code  = "forbid"
 missing_docs = "allow"
+
+# The aligned list continuations are intentional. Keep these exceptions
+# limited to rustdoc presentation; maintainability findings remain errors.
+[lints.clippy]
+doc_overindented_list_items = "allow"
+doc_lazy_continuation       = "allow"

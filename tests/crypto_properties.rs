@@ -12,18 +12,26 @@
 //! T4.7 — Range proof tightness: boundary values
 
 use coincync::crypto::{
-    SecretScalar, PublicPoint, EcCommitment, KeyImage as CryptoKeyImage,
-    generator, generator_h, hash_to_point,
-    PedersenCommitment, BlindingFactor,
-    create_range_proof_for_height, verify_range_proof_dispatch,
-    create_aggregated_range_proof_for_height, verify_range_proofs_dispatch,
+    create_aggregated_range_proof_for_height,
+    create_range_proof_for_height,
     // 2026-06-03 audit pass narrowed the legacy `generate_stealth_address`
     // to `#[cfg(test)] pub(crate)` inside stealth.rs (removed from the
     // public re-export). Test fixtures here pass valid curve points, so
     // the .expect() on the Result is a never-fires assertion.
     generate_stealth_address_checked,
+    generator,
+    generator_h,
+    hash_to_point,
+    verify_range_proof_dispatch,
+    verify_range_proofs_dispatch,
+    BlindingFactor,
+    EcCommitment,
+    KeyImage as CryptoKeyImage,
+    PedersenCommitment,
+    PublicPoint,
+    SecretScalar,
 };
-use coincync::primitives::{PublicKey, Amount};
+use coincync::primitives::{Amount, PublicKey};
 use rand::rngs::OsRng;
 use std::collections::HashSet;
 
@@ -43,8 +51,11 @@ fn keyimage_is_deterministic_for_same_secret() {
 
     for _ in 0..100 {
         let ki = CryptoKeyImage::from_secret(&secret);
-        assert_eq!(ki.to_bytes(), ki1.to_bytes(),
-            "keyimage must be deterministic for the same secret key");
+        assert_eq!(
+            ki.to_bytes(),
+            ki1.to_bytes(),
+            "keyimage must be deterministic for the same secret key"
+        );
     }
 }
 
@@ -60,7 +71,11 @@ fn different_secrets_produce_different_keyimages() {
         });
         let ki = CryptoKeyImage::from_secret(&secret);
         let inserted = keyimages.insert(ki.to_bytes());
-        assert!(inserted, "keyimage collision at i={} — two different secrets produced the same keyimage", i);
+        assert!(
+            inserted,
+            "keyimage collision at i={} — two different secrets produced the same keyimage",
+            i
+        );
     }
 }
 
@@ -80,13 +95,21 @@ fn stealth_addresses_for_same_recipient_are_all_different() {
 
     let mut addresses = HashSet::new();
     for _ in 0..500 {
-        let (stealth, _tx_secret) = generate_stealth_address_checked(&spend_pub, &view_pub, 0, &mut OsRng)
-            .expect("test fixtures pass valid curve points");
+        let (stealth, _tx_secret) =
+            generate_stealth_address_checked(&spend_pub, &view_pub, 0, &mut OsRng)
+                .expect("test fixtures pass valid curve points");
         let addr_bytes = *stealth.public_key.as_bytes();
         let inserted = addresses.insert(addr_bytes);
-        assert!(inserted, "stealth address collision — two derivations produced the same address");
+        assert!(
+            inserted,
+            "stealth address collision — two derivations produced the same address"
+        );
     }
-    assert_eq!(addresses.len(), 500, "all 500 stealth addresses should be unique");
+    assert_eq!(
+        addresses.len(),
+        500,
+        "all 500 stealth addresses should be unique"
+    );
 }
 
 #[test]
@@ -94,10 +117,16 @@ fn stealth_addresses_for_different_recipients_are_different() {
     let mut addresses = HashSet::new();
     for i in 0u64..100 {
         let spend = SecretScalar::from_bytes({
-            let mut b = [0u8; 32]; b[..8].copy_from_slice(&i.to_le_bytes()); b[8] = 1; b
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&i.to_le_bytes());
+            b[8] = 1;
+            b
         });
         let view = SecretScalar::from_bytes({
-            let mut b = [0u8; 32]; b[..8].copy_from_slice(&(i + 1000).to_le_bytes()); b[8] = 2; b
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&(i + 1000).to_le_bytes());
+            b[8] = 2;
+            b
         });
         let sp = PublicKey::from_bytes(spend.to_public().to_bytes());
         let vp = PublicKey::from_bytes(view.to_public().to_bytes());
@@ -105,7 +134,11 @@ fn stealth_addresses_for_different_recipients_are_different() {
             .expect("test fixtures pass valid curve points");
         addresses.insert(stealth.public_key.as_bytes().clone());
     }
-    assert_eq!(addresses.len(), 100, "stealth addresses for 100 different recipients should all be unique");
+    assert_eq!(
+        addresses.len(),
+        100,
+        "stealth addresses for 100 different recipients should all be unique"
+    );
 }
 
 // =============================================================================
@@ -130,8 +163,11 @@ fn pedersen_commitment_is_homomorphic() {
         let r_sum = r1.add(&r2);
         let c_direct = EcCommitment::commit(v1 + v2, &r_sum);
 
-        assert_eq!(c_sum.to_bytes(), c_direct.to_bytes(),
-            "Commit(v1,r1) + Commit(v2,r2) must equal Commit(v1+v2, r1+r2)");
+        assert_eq!(
+            c_sum.to_bytes(),
+            c_direct.to_bytes(),
+            "Commit(v1,r1) + Commit(v2,r2) must equal Commit(v1+v2, r1+r2)"
+        );
     }
 }
 
@@ -141,8 +177,11 @@ fn pedersen_commitment_zero_value_is_blinding_only() {
     let r = SecretScalar::random(&mut OsRng);
     let c_zero = EcCommitment::commit(0, &r);
     let expected = r.to_public(); // r*G
-    assert_eq!(c_zero.to_bytes(), expected.to_bytes(),
-        "Commit(0, r) should equal r*G");
+    assert_eq!(
+        c_zero.to_bytes(),
+        expected.to_bytes(),
+        "Commit(0, r) should equal r*G"
+    );
 }
 
 #[test]
@@ -151,8 +190,11 @@ fn pedersen_different_values_different_commitments() {
     let r = SecretScalar::random(&mut OsRng);
     let c1 = EcCommitment::commit(100, &r);
     let c2 = EcCommitment::commit(200, &r);
-    assert_ne!(c1.to_bytes(), c2.to_bytes(),
-        "different values with same blinding must produce different commitments");
+    assert_ne!(
+        c1.to_bytes(),
+        c2.to_bytes(),
+        "different values with same blinding must produce different commitments"
+    );
 }
 
 #[test]
@@ -162,8 +204,11 @@ fn pedersen_different_blindings_different_commitments() {
     let r2 = SecretScalar::random(&mut OsRng);
     let c1 = EcCommitment::commit(42, &r1);
     let c2 = EcCommitment::commit(42, &r2);
-    assert_ne!(c1.to_bytes(), c2.to_bytes(),
-        "same value with different blindings must produce different commitments (hiding)");
+    assert_ne!(
+        c1.to_bytes(),
+        c2.to_bytes(),
+        "same value with different blindings must produce different commitments (hiding)"
+    );
 }
 
 // =============================================================================
@@ -181,8 +226,10 @@ fn range_proof_valid_amount_verifies() {
     let proof = create_range_proof_for_height(amount, &blinding, &mut OsRng, 0)
         .expect("proof creation should succeed");
 
-    assert!(verify_range_proof_dispatch(&commitment, &proof, 0),
-        "valid range proof must verify");
+    assert!(
+        verify_range_proof_dispatch(&commitment, &proof, 0),
+        "valid range proof must verify"
+    );
 }
 
 #[test]
@@ -193,8 +240,10 @@ fn range_proof_zero_amount_verifies() {
     let proof = create_range_proof_for_height(Amount::ZERO, &blinding, &mut OsRng, 0)
         .expect("proof for zero should succeed");
 
-    assert!(verify_range_proof_dispatch(&commitment, &proof, 0),
-        "range proof for zero amount must verify");
+    assert!(
+        verify_range_proof_dispatch(&commitment, &proof, 0),
+        "range proof for zero amount must verify"
+    );
 }
 
 #[test]
@@ -210,8 +259,10 @@ fn range_proof_wrong_commitment_fails() {
     let wrong_blinding = BlindingFactor::random(&mut OsRng);
     let wrong = PedersenCommitment::commit(999_999, &wrong_blinding);
 
-    assert!(!verify_range_proof_dispatch(&wrong, &proof, 0),
-        "range proof must fail with wrong commitment");
+    assert!(
+        !verify_range_proof_dispatch(&wrong, &proof, 0),
+        "range proof must fail with wrong commitment"
+    );
 }
 
 #[test]
@@ -224,8 +275,10 @@ fn range_proof_large_value_verifies() {
     let proof = create_range_proof_for_height(Amount::from_atomic(value), &blinding, &mut OsRng, 0)
         .expect("proof for large value should succeed");
 
-    assert!(verify_range_proof_dispatch(&commitment, &proof, 0),
-        "range proof for large value must verify");
+    assert!(
+        verify_range_proof_dispatch(&commitment, &proof, 0),
+        "range proof for large value must verify"
+    );
 }
 
 // =============================================================================
@@ -241,15 +294,19 @@ fn aggregated_range_proof_multi_output_verifies() {
     let blindings: Vec<BlindingFactor> = (0..amounts.len())
         .map(|_| BlindingFactor::random(&mut OsRng))
         .collect();
-    let commitments: Vec<PedersenCommitment> = amounts.iter().zip(blindings.iter())
+    let commitments: Vec<PedersenCommitment> = amounts
+        .iter()
+        .zip(blindings.iter())
         .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
         .collect();
 
     let proof = create_aggregated_range_proof_for_height(&amounts, &blindings, &mut OsRng, 0)
         .expect("aggregated proof should succeed");
 
-    assert!(verify_range_proofs_dispatch(&commitments, &proof, 0),
-        "aggregated range proof must verify with correct commitments");
+    assert!(
+        verify_range_proofs_dispatch(&commitments, &proof, 0),
+        "aggregated range proof must verify with correct commitments"
+    );
 }
 
 // =============================================================================
@@ -323,8 +380,11 @@ fn scalar_add_is_commutative() {
     for _ in 0..100 {
         let a = SecretScalar::random(&mut OsRng);
         let b = SecretScalar::random(&mut OsRng);
-        assert_eq!(a.add(&b).to_bytes(), b.add(&a).to_bytes(),
-            "scalar addition must be commutative");
+        assert_eq!(
+            a.add(&b).to_bytes(),
+            b.add(&a).to_bytes(),
+            "scalar addition must be commutative"
+        );
     }
 }
 
@@ -332,8 +392,11 @@ fn scalar_add_is_commutative() {
 fn scalar_add_identity() {
     let a = SecretScalar::random(&mut OsRng);
     let zero = SecretScalar::from_bytes([0u8; 32]);
-    assert_eq!(a.add(&zero).to_bytes(), a.to_bytes(),
-        "adding zero scalar must be identity");
+    assert_eq!(
+        a.add(&zero).to_bytes(),
+        a.to_bytes(),
+        "adding zero scalar must be identity"
+    );
 }
 
 // =============================================================================
@@ -347,7 +410,10 @@ fn public_point_roundtrip_1000() {
         let public = secret.to_public();
         let bytes = public.to_bytes();
         let recovered = PublicPoint::from_bytes(bytes);
-        assert!(recovered.is_some(), "valid public point must roundtrip through bytes");
+        assert!(
+            recovered.is_some(),
+            "valid public point must roundtrip through bytes"
+        );
         assert_eq!(recovered.unwrap().to_bytes(), bytes);
     }
 }

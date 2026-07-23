@@ -33,8 +33,8 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde_json::Value;
 
 use coincync_swap::adaptor::{
-    cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor, cync_recover_secret,
-    create_pre_sig_bip340, decrypt_btc_adaptor, prove_cross_curve, recover_secret_from_btc_sig,
+    create_pre_sig_bip340, cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor,
+    cync_recover_secret, decrypt_btc_adaptor, prove_cross_curve, recover_secret_from_btc_sig,
     verify_pre_sig, AdaptorSecret,
 };
 
@@ -90,24 +90,29 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
 fn hex_field(json: &Value, path: &[&str]) -> Result<Vec<u8>, String> {
     let mut cur = json;
     for &key in path {
-        cur = cur.get(key).ok_or_else(|| format!("missing field path {:?}", path))?;
+        cur = cur
+            .get(key)
+            .ok_or_else(|| format!("missing field path {path:?}"))?;
     }
     let s = cur
         .as_str()
-        .ok_or_else(|| format!("field {:?} not a string", path))?;
+        .ok_or_else(|| format!("field {path:?} not a string"))?;
     hex_decode(s)
 }
 
 fn array<const N: usize>(v: Vec<u8>) -> Result<[u8; N], String> {
     let len = v.len();
-    v.try_into().map_err(|_| format!("expected {} bytes, got {}", N, len))
+    v.try_into()
+        .map_err(|_| format!("expected {N} bytes, got {len}"))
 }
 
 // ─── Primitive runners ─────────────────────────────────────────
 
 fn run_btc_adaptor(vec_path: &Path, json: &Value) -> Result<(), String> {
-    let signer_sk_bytes: [u8; 32] = array(hex_field(json, &["inputs", "signer_seckey_secp256k1"])?)?;
-    let adaptor_secret_bytes: [u8; 32] = array(hex_field(json, &["inputs", "adaptor_secret_ristretto"])?)?;
+    let signer_sk_bytes: [u8; 32] =
+        array(hex_field(json, &["inputs", "signer_seckey_secp256k1"])?)?;
+    let adaptor_secret_bytes: [u8; 32] =
+        array(hex_field(json, &["inputs", "adaptor_secret_ristretto"])?)?;
     let msg: [u8; 32] = array(hex_field(json, &["inputs", "message_hash"])?)?;
     let aux_rand: [u8; 32] = array(hex_field(json, &["inputs", "aux_rand"])?)?;
 
@@ -116,19 +121,20 @@ fn run_btc_adaptor(vec_path: &Path, json: &Value) -> Result<(), String> {
     let expected_signer_x = hex_field(json, &["expected", "signer_x_only_pubkey"])?;
     let expected_t_pub = hex_field(json, &["expected", "adaptor_pubkey_t_secp"])?;
     let expected_final_sig = hex_field(json, &["expected", "final_sig_64"])?;
-    let expected_recovered: [u8; 32] = array(hex_field(json, &["expected", "recovered_secret_secp"])?)?;
+    let expected_recovered: [u8; 32] =
+        array(hex_field(json, &["expected", "recovered_secret_secp"])?)?;
 
     let secp = Secp256k1::new();
     let signer_sk = SecretKey::from_slice(&signer_sk_bytes)
-        .map_err(|e| format!("invalid signer seckey: {}", e))?;
+        .map_err(|e| format!("invalid signer seckey: {e}"))?;
     let secret = AdaptorSecret::from_ristretto_bytes(adaptor_secret_bytes)
-        .map_err(|e| format!("invalid adaptor secret: {:?}", e))?;
+        .map_err(|e| format!("invalid adaptor secret: {e:?}"))?;
     let t_sk = SecretKey::from_slice(&secret.secp256k1_bytes())
-        .map_err(|e| format!("secret not valid secp scalar: {}", e))?;
+        .map_err(|e| format!("secret not valid secp scalar: {e}"))?;
     let t_pub = PublicKey::from_secret_key(&secp, &t_sk);
 
     let (adaptor_sig, signer_x) = create_pre_sig_bip340(&signer_sk, &msg, &t_pub, &aux_rand)
-        .map_err(|e| format!("create_pre_sig_bip340 failed: {:?}", e))?;
+        .map_err(|e| format!("create_pre_sig_bip340 failed: {e:?}"))?;
 
     if adaptor_sig.r_point.serialize().to_vec() != expected_r_point {
         return Err(format!("{}: r_point byte mismatch", vec_path.display()));
@@ -144,16 +150,16 @@ fn run_btc_adaptor(vec_path: &Path, json: &Value) -> Result<(), String> {
     }
 
     verify_pre_sig(&adaptor_sig, &signer_x, &t_pub, &msg)
-        .map_err(|e| format!("verify_pre_sig: {:?}", e))?;
+        .map_err(|e| format!("verify_pre_sig: {e:?}"))?;
 
     let final_sig = decrypt_btc_adaptor(&adaptor_sig, &secret, &t_pub)
-        .map_err(|e| format!("decrypt_btc_adaptor: {:?}", e))?;
+        .map_err(|e| format!("decrypt_btc_adaptor: {e:?}"))?;
     if final_sig.to_vec() != expected_final_sig {
         return Err(format!("{}: final_sig mismatch", vec_path.display()));
     }
 
     let recovered = recover_secret_from_btc_sig(&adaptor_sig, &final_sig)
-        .map_err(|e| format!("recover: {:?}", e))?;
+        .map_err(|e| format!("recover: {e:?}"))?;
     if recovered.secp256k1_bytes() != expected_recovered {
         return Err(format!("{}: recovered secret mismatch", vec_path.display()));
     }
@@ -161,53 +167,77 @@ fn run_btc_adaptor(vec_path: &Path, json: &Value) -> Result<(), String> {
 }
 
 fn run_ristretto_adaptor(vec_path: &Path, json: &Value) -> Result<(), String> {
-    let signer_sk_bytes: [u8; 32] = array(hex_field(json, &["inputs", "signer_seckey_ristretto"])?)?;
-    let adaptor_secret_bytes: [u8; 32] = array(hex_field(json, &["inputs", "adaptor_secret_ristretto"])?)?;
+    let signer_sk_bytes: [u8; 32] =
+        array(hex_field(json, &["inputs", "signer_seckey_ristretto"])?)?;
+    let adaptor_secret_bytes: [u8; 32] =
+        array(hex_field(json, &["inputs", "adaptor_secret_ristretto"])?)?;
     let msg: [u8; 32] = array(hex_field(json, &["inputs", "message_hash"])?)?;
     let nonce_bytes: [u8; 32] = array(hex_field(json, &["inputs", "nonce"])?)?;
 
-    let expected_r_point: [u8; 32] = array(hex_field(json, &["expected", "adaptor_r_point_ristretto"])?)?;
+    let expected_r_point: [u8; 32] =
+        array(hex_field(json, &["expected", "adaptor_r_point_ristretto"])?)?;
     let expected_s_pre: [u8; 32] = array(hex_field(json, &["expected", "adaptor_s_pre"])?)?;
-    let expected_signer_pub: [u8; 32] = array(hex_field(json, &["expected", "signer_pub_ristretto"])?)?;
-    let expected_t_point: [u8; 32] = array(hex_field(json, &["expected", "adaptor_pubkey_t_ristretto"])?)?;
+    let expected_signer_pub: [u8; 32] =
+        array(hex_field(json, &["expected", "signer_pub_ristretto"])?)?;
+    let expected_t_point: [u8; 32] = array(hex_field(
+        json,
+        &["expected", "adaptor_pubkey_t_ristretto"],
+    )?)?;
     let expected_final_sig = hex_field(json, &["expected", "final_sig_64"])?;
-    let expected_recovered: [u8; 32] = array(hex_field(json, &["expected", "recovered_secret_ristretto"])?)?;
+    let expected_recovered: [u8; 32] = array(hex_field(
+        json,
+        &["expected", "recovered_secret_ristretto"],
+    )?)?;
 
     let secret = AdaptorSecret::from_ristretto_bytes(adaptor_secret_bytes)
-        .map_err(|e| format!("invalid adaptor secret: {:?}", e))?;
-    let t_point = cync_adaptor_point(&secret).map_err(|e| format!("cync_adaptor_point: {:?}", e))?;
+        .map_err(|e| format!("invalid adaptor secret: {e:?}"))?;
+    let t_point = cync_adaptor_point(&secret).map_err(|e| format!("cync_adaptor_point: {e:?}"))?;
     if t_point != expected_t_point {
         return Err(format!("{}: t_point mismatch", vec_path.display()));
     }
 
-    let (adaptor_sig, signer_pub) = cync_create_pre_sig(&signer_sk_bytes, &msg, &t_point, &nonce_bytes)
-        .map_err(|e| format!("cync_create_pre_sig: {:?}", e))?;
+    let (adaptor_sig, signer_pub) =
+        cync_create_pre_sig(&signer_sk_bytes, &msg, &t_point, &nonce_bytes)
+            .map_err(|e| format!("cync_create_pre_sig: {e:?}"))?;
 
     if adaptor_sig.r_point != expected_r_point {
-        return Err(format!("{}: ristretto r_point mismatch", vec_path.display()));
+        return Err(format!(
+            "{}: ristretto r_point mismatch",
+            vec_path.display()
+        ));
     }
     if adaptor_sig.s_pre != expected_s_pre {
         return Err(format!("{}: ristretto s_pre mismatch", vec_path.display()));
     }
     if signer_pub != expected_signer_pub {
-        return Err(format!("{}: ristretto signer_pub mismatch", vec_path.display()));
+        return Err(format!(
+            "{}: ristretto signer_pub mismatch",
+            vec_path.display()
+        ));
     }
 
     let final_sig = cync_decrypt_adaptor(&adaptor_sig, &secret, &t_point)
-        .map_err(|e| format!("cync_decrypt_adaptor: {:?}", e))?;
+        .map_err(|e| format!("cync_decrypt_adaptor: {e:?}"))?;
     if final_sig.to_vec() != expected_final_sig {
-        return Err(format!("{}: ristretto final_sig mismatch", vec_path.display()));
+        return Err(format!(
+            "{}: ristretto final_sig mismatch",
+            vec_path.display()
+        ));
     }
     let recovered = cync_recover_secret(&adaptor_sig, &final_sig)
-        .map_err(|e| format!("cync_recover_secret: {:?}", e))?;
+        .map_err(|e| format!("cync_recover_secret: {e:?}"))?;
     if recovered.ristretto_bytes() != expected_recovered {
-        return Err(format!("{}: ristretto recovered mismatch", vec_path.display()));
+        return Err(format!(
+            "{}: ristretto recovered mismatch",
+            vec_path.display()
+        ));
     }
     Ok(())
 }
 
 fn run_dleq(vec_path: &Path, json: &Value) -> Result<(), String> {
-    let adaptor_secret_bytes: [u8; 32] = array(hex_field(json, &["inputs", "adaptor_secret_ristretto"])?)?;
+    let adaptor_secret_bytes: [u8; 32] =
+        array(hex_field(json, &["inputs", "adaptor_secret_ristretto"])?)?;
     let nonce_k_bytes: [u8; 32] = array(hex_field(json, &["inputs", "nonce_k_ristretto"])?)?;
 
     let expected_t_btc: [u8; 33] = array(hex_field(json, &["expected", "t_btc_compressed"])?)?;
@@ -218,20 +248,22 @@ fn run_dleq(vec_path: &Path, json: &Value) -> Result<(), String> {
     let expected_s_cync = hex_field(json, &["expected", "proof_s_cync"])?;
 
     let secret = AdaptorSecret::from_ristretto_bytes(adaptor_secret_bytes)
-        .map_err(|e| format!("adaptor secret: {:?}", e))?;
+        .map_err(|e| format!("adaptor secret: {e:?}"))?;
     let secp = Secp256k1::new();
-    let t_sk = SecretKey::from_slice(&secret.secp256k1_bytes()).map_err(|e| format!("t_sk: {}", e))?;
+    let t_sk =
+        SecretKey::from_slice(&secret.secp256k1_bytes()).map_err(|e| format!("t_sk: {e}"))?;
     let t_btc_bytes = PublicKey::from_secret_key(&secp, &t_sk).serialize();
     if t_btc_bytes != expected_t_btc {
         return Err(format!("{}: t_btc mismatch", vec_path.display()));
     }
-    let t_cync_bytes = cync_adaptor_point(&secret).map_err(|e| format!("cync_adaptor_point: {:?}", e))?;
+    let t_cync_bytes =
+        cync_adaptor_point(&secret).map_err(|e| format!("cync_adaptor_point: {e:?}"))?;
     if t_cync_bytes != expected_t_cync {
         return Err(format!("{}: t_cync mismatch", vec_path.display()));
     }
 
     let proof = prove_cross_curve(&secret, &t_btc_bytes, &t_cync_bytes, &nonce_k_bytes)
-        .map_err(|e| format!("prove_cross_curve: {:?}", e))?;
+        .map_err(|e| format!("prove_cross_curve: {e:?}"))?;
 
     if proof.a_btc.to_vec() != expected_a_btc {
         return Err(format!("{}: dleq a_btc mismatch", vec_path.display()));
@@ -275,9 +307,8 @@ fn external_vectors_match_byte_for_byte() {
 
     if vector_files.is_empty() {
         eprintln!(
-            "external_vectors: no vendor vector files found under {:?} \
+            "external_vectors: no vendor vector files found under {VENDOR_ROOTS:?} \
              — scaffolding present, import not yet done.",
-            VENDOR_ROOTS,
         );
         return;
     }
@@ -306,7 +337,10 @@ fn external_vectors_match_byte_for_byte() {
         ran += 1;
     }
 
-    eprintln!("external_vectors: ran {ran} vectors from {} files", vector_files.len());
+    eprintln!(
+        "external_vectors: ran {ran} vectors from {} files",
+        vector_files.len()
+    );
 
     if !failures.is_empty() {
         panic!(

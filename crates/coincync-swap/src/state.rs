@@ -280,7 +280,7 @@ impl SwapStore {
             version: u32,
         }
         let v: VersionOnly = serde_json::from_slice(&buf)?;
-        if v.version < STATE_VERSION || v.version > STATE_VERSION {
+        if v.version != STATE_VERSION {
             return Err(StateError::UnsupportedVersion {
                 file_version: v.version,
                 supported: STATE_VERSION,
@@ -301,7 +301,12 @@ impl SwapStore {
 
         // Constant-time hex comparison — defends against any future
         // hex-string equality timing oracle in serde / our parser.
-        if recomputed.as_bytes().ct_eq(envelope.hmac.as_bytes()).unwrap_u8() != 1 {
+        if recomputed
+            .as_bytes()
+            .ct_eq(envelope.hmac.as_bytes())
+            .unwrap_u8()
+            != 1
+        {
             return Err(StateError::IntegrityFailure);
         }
 
@@ -396,7 +401,7 @@ fn compute_hmac_hex(key: &[u8; HMAC_KEY_LEN], body_bytes: &[u8]) -> String {
     let result = mac.finalize().into_bytes();
     let mut hex_out = String::with_capacity(HMAC_KEY_LEN * 2);
     for b in result.iter() {
-        hex_out.push_str(&format!("{:02x}", b));
+        hex_out.push_str(&format!("{b:02x}"));
     }
     hex_out
 }
@@ -435,8 +440,8 @@ mod tests {
             btc_timeout_blocks: 100,
             alice_cync_address: "alice".into(),
             bob_btc_address: "bob".into(),
-cync_network: "regtest".to_string(),
-btc_network: "regtest".to_string(),
+            cync_network: "regtest".to_string(),
+            btc_network: "regtest".to_string(),
         }
     }
 
@@ -691,7 +696,10 @@ btc_network: "regtest".to_string(),
         let err = store.load().unwrap_err();
         assert!(matches!(
             err,
-            StateError::UnsupportedVersion { file_version: 1, .. }
+            StateError::UnsupportedVersion {
+                file_version: 1,
+                ..
+            }
         ));
     }
 

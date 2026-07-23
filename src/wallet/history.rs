@@ -2,9 +2,9 @@
 //!
 //! Stores and manages wallet transaction history with full metadata.
 
-use serde::{Deserialize, Serialize};
-use crate::primitives::{Hash, Amount};
+use crate::primitives::{Amount, Hash};
 use crate::wallet::SubaddressIndex;
+use serde::{Deserialize, Serialize};
 
 /// Transaction direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +65,6 @@ impl std::fmt::Display for TxStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionRecord {
     // === Essential Fields ===
-
     /// Transaction hash (unique identifier)
     pub tx_hash: Hash,
 
@@ -82,7 +81,6 @@ pub struct TransactionRecord {
     pub status: TxStatus,
 
     // === Context Fields ===
-
     /// Block height where transaction was included (0 if pending)
     pub block_height: u64,
 
@@ -105,7 +103,6 @@ pub struct TransactionRecord {
     pub unlock_height: u64,
 
     // === Internal Fields ===
-
     /// Output indices in this transaction that belong to us
     pub output_indices: Vec<u8>,
 
@@ -196,11 +193,8 @@ impl TransactionRecord {
     /// Update status based on current blockchain state
     pub fn update_status(&mut self, current_height: u64) {
         let confirmations = self.confirmations(current_height);
-        self.status = TxStatus::from_confirmations(
-            confirmations,
-            self.unlock_height,
-            current_height,
-        );
+        self.status =
+            TxStatus::from_confirmations(confirmations, self.unlock_height, current_height);
     }
 
     /// Check if outputs are spendable
@@ -262,7 +256,11 @@ impl TransactionHistory {
     /// Add a transaction record, merging output indices if the same tx_hash
     /// and direction already exists (e.g., a tx sending to two of our subaddresses).
     pub fn add(&mut self, record: TransactionRecord) {
-        if let Some(existing) = self.records.iter_mut().find(|r| r.tx_hash == record.tx_hash && r.direction == record.direction) {
+        if let Some(existing) = self
+            .records
+            .iter_mut()
+            .find(|r| r.tx_hash == record.tx_hash && r.direction == record.direction)
+        {
             // Merge: add only new output indices and accumulate amount once
             let mut has_new_index = false;
             for idx in &record.output_indices {
@@ -297,7 +295,10 @@ impl TransactionHistory {
 
     /// Get records filtered by direction
     pub fn by_direction(&self, direction: TxDirection) -> Vec<&TransactionRecord> {
-        self.records.iter().filter(|r| r.direction == direction).collect()
+        self.records
+            .iter()
+            .filter(|r| r.direction == direction)
+            .collect()
     }
 
     /// Get incoming transactions
@@ -312,7 +313,10 @@ impl TransactionHistory {
 
     /// Get pending transactions
     pub fn pending(&self) -> Vec<&TransactionRecord> {
-        self.records.iter().filter(|r| r.status == TxStatus::Pending).collect()
+        self.records
+            .iter()
+            .filter(|r| r.status == TxStatus::Pending)
+            .collect()
     }
 
     /// Get recent transactions (sorted by timestamp, newest first)
@@ -324,12 +328,16 @@ impl TransactionHistory {
 
     /// Get transactions since a specific timestamp
     pub fn since(&self, timestamp: u64) -> Vec<&TransactionRecord> {
-        self.records.iter().filter(|r| r.timestamp >= timestamp).collect()
+        self.records
+            .iter()
+            .filter(|r| r.timestamp >= timestamp)
+            .collect()
     }
 
     /// Get transactions in a block range
     pub fn in_block_range(&self, start: u64, end: u64) -> Vec<&TransactionRecord> {
-        self.records.iter()
+        self.records
+            .iter()
             .filter(|r| r.block_height >= start && r.block_height <= end)
             .collect()
     }
@@ -356,9 +364,8 @@ impl TransactionHistory {
         use std::collections::HashSet;
         let affected: HashSet<Hash> = outputs.iter().map(|(h, _)| *h).collect();
         let before = self.records.len();
-        self.records.retain(|r| {
-            !(r.direction == TxDirection::Incoming && affected.contains(&r.tx_hash))
-        });
+        self.records
+            .retain(|r| !(r.direction == TxDirection::Incoming && affected.contains(&r.tx_hash)));
         before - self.records.len()
     }
 
@@ -476,7 +483,9 @@ impl TransactionHistory {
     pub fn total_received(&self) -> Amount {
         self.incoming()
             .iter()
-            .fold(Amount::from_atomic(0), |acc, r| acc.saturating_add(r.amount))
+            .fold(Amount::from_atomic(0), |acc, r| {
+                acc.saturating_add(r.amount)
+            })
     }
 
     /// Total sent amount (including fees)
@@ -533,8 +542,8 @@ mod tests {
         // this is 100 + 10 = 110. Mainnet (HARDFORK_HEIGHT=0) it's 100 + 100 = 200.
         // Computing from the helper keeps the test correct on both feature
         // configurations and on whatever activation height we eventually set.
-        let expected_unlock = block_height
-            + crate::constants::min_output_age_at_height(block_height);
+        let expected_unlock =
+            block_height + crate::constants::min_output_age_at_height(block_height);
         assert_eq!(record.unlock_height, expected_unlock);
         assert!(!record.spent);
     }
@@ -544,7 +553,7 @@ mod tests {
         let record = TransactionRecord::outgoing(
             test_hash(),
             Amount::from_atomic(500_000_000_000), // 0.5 CYNC
-            Amount::from_atomic(3_000_000), // fee
+            Amount::from_atomic(3_000_000),       // fee
             100,
             1700000000,
         );
@@ -631,13 +640,27 @@ mod tests {
         let sent_tx = Hash::from_bytes([0xCC; 32]);
 
         history.add(TransactionRecord::incoming(
-            orphan_tx, Amount::from_atomic(1000), 100, 1700000000, 0, None,
+            orphan_tx,
+            Amount::from_atomic(1000),
+            100,
+            1700000000,
+            0,
+            None,
         ));
         history.add(TransactionRecord::incoming(
-            canonical_tx, Amount::from_atomic(2000), 90, 1700000000, 0, None,
+            canonical_tx,
+            Amount::from_atomic(2000),
+            90,
+            1700000000,
+            0,
+            None,
         ));
         history.add(TransactionRecord::outgoing(
-            sent_tx, Amount::from_atomic(500), Amount::from_atomic(10), 95, 1700000000,
+            sent_tx,
+            Amount::from_atomic(500),
+            Amount::from_atomic(10),
+            95,
+            1700000000,
         ));
         assert_eq!(history.count(), 3);
 
@@ -656,17 +679,12 @@ mod tests {
     fn test_remove_incoming_outputs_dedupes_by_tx_hash() {
         let mut history = TransactionHistory::new();
         let tx = Hash::from_bytes([0xAA; 32]);
-        let mut r = TransactionRecord::incoming(
-            tx, Amount::from_atomic(1000), 100, 1700000000, 0, None,
-        );
+        let mut r =
+            TransactionRecord::incoming(tx, Amount::from_atomic(1000), 100, 1700000000, 0, None);
         r.output_indices = vec![0, 1, 2];
         history.add(r);
 
-        let dropped = history.remove_incoming_outputs(&[
-            (tx, 0),
-            (tx, 1),
-            (tx, 2),
-        ]);
+        let dropped = history.remove_incoming_outputs(&[(tx, 0), (tx, 1), (tx, 2)]);
         assert_eq!(dropped, 1);
         assert!(history.get(&tx).is_none());
     }
@@ -679,7 +697,12 @@ mod tests {
         let mut history = TransactionHistory::new();
         let tx = Hash::from_bytes([0xAA; 32]);
         history.add(TransactionRecord::incoming(
-            tx, Amount::from_atomic(1000), 100, 1700000000, 0, None,
+            tx,
+            Amount::from_atomic(1000),
+            100,
+            1700000000,
+            0,
+            None,
         ));
         assert_eq!(history.remove_incoming_outputs(&[(tx, 0)]), 1);
         assert_eq!(history.remove_incoming_outputs(&[(tx, 0)]), 0);
@@ -695,11 +718,19 @@ mod tests {
         let tx_high = Hash::from_bytes([0x02; 32]);
 
         let mut r_low = TransactionRecord::outgoing(
-            tx_low, Amount::from_atomic(500), Amount::from_atomic(10), 90, 1700000000,
+            tx_low,
+            Amount::from_atomic(500),
+            Amount::from_atomic(10),
+            90,
+            1700000000,
         );
         r_low.status = TxStatus::Confirmed;
         let mut r_high = TransactionRecord::outgoing(
-            tx_high, Amount::from_atomic(700), Amount::from_atomic(10), 105, 1700000000,
+            tx_high,
+            Amount::from_atomic(700),
+            Amount::from_atomic(10),
+            105,
+            1700000000,
         );
         r_high.status = TxStatus::Confirmed;
         history.add(r_low);
@@ -724,9 +755,8 @@ mod tests {
     fn test_revert_outgoing_does_not_touch_incoming() {
         let mut history = TransactionHistory::new();
         let tx = Hash::from_bytes([0x03; 32]);
-        let mut r = TransactionRecord::incoming(
-            tx, Amount::from_atomic(1000), 105, 1700000000, 0, None,
-        );
+        let mut r =
+            TransactionRecord::incoming(tx, Amount::from_atomic(1000), 105, 1700000000, 0, None);
         r.status = TxStatus::Confirmed;
         history.add(r);
 

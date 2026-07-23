@@ -7,8 +7,8 @@
 //!
 //! All tests MUST pass before mainnet launch.
 
-use coincync::primitives::{Hash, KeyImage, PublicKey, SecretKey};
 use coincync::crypto::SecretScalar;
+use coincync::primitives::{Hash, KeyImage, PublicKey, SecretKey};
 use tempfile::tempdir;
 
 // =============================================================================
@@ -33,10 +33,16 @@ mod double_spend_tests {
         assert!(spent_images.insert(ki1), "First spend should succeed");
 
         // Second different key image should succeed
-        assert!(spent_images.insert(ki2), "Different key image should succeed");
+        assert!(
+            spent_images.insert(ki2),
+            "Different key image should succeed"
+        );
 
         // Duplicate should fail (double-spend attempt)
-        assert!(!spent_images.insert(ki3), "Duplicate key image must be rejected");
+        assert!(
+            !spent_images.insert(ki3),
+            "Duplicate key image must be rejected"
+        );
     }
 
     /// Test: Key image bytes are deterministic
@@ -47,8 +53,11 @@ mod double_spend_tests {
         let ki1 = KeyImage::from_bytes(bytes);
         let ki2 = KeyImage::from_bytes(bytes);
 
-        assert_eq!(ki1.as_bytes(), ki2.as_bytes(),
-            "Same bytes must produce identical key images");
+        assert_eq!(
+            ki1.as_bytes(),
+            ki2.as_bytes(),
+            "Same bytes must produce identical key images"
+        );
     }
 
     /// Test: Different key images are distinct
@@ -57,8 +66,11 @@ mod double_spend_tests {
         let ki1 = KeyImage::from_bytes([1u8; 32]);
         let ki2 = KeyImage::from_bytes([2u8; 32]);
 
-        assert_ne!(ki1.as_bytes(), ki2.as_bytes(),
-            "Different bytes must produce different key images");
+        assert_ne!(
+            ki1.as_bytes(),
+            ki2.as_bytes(),
+            "Different bytes must produce different key images"
+        );
     }
 
     /// Test: Key image collision resistance
@@ -96,8 +108,10 @@ mod double_spend_tests {
 
         // Double-spend attempt
         let double_spend = KeyImage::from_bytes([0u8; 32]);
-        assert!(!spent_tracker.insert(double_spend),
-            "Double-spend must be rejected");
+        assert!(
+            !spent_tracker.insert(double_spend),
+            "Double-spend must be rejected"
+        );
     }
 }
 
@@ -107,7 +121,7 @@ mod double_spend_tests {
 
 mod subaddress_tests {
     use super::*;
-    use coincync::wallet::{Wallet, SubaddressManager, SubaddressIndex};
+    use coincync::wallet::{SubaddressIndex, SubaddressManager, Wallet};
 
     /// Test: SubaddressIndex construction
     #[test]
@@ -159,12 +173,8 @@ mod subaddress_tests {
         let view_public = PublicKey::from_bytes(view_scalar.to_public().to_bytes());
 
         // Create two managers with same keys
-        let mut manager1 = SubaddressManager::new(
-            view_secret.clone(), spend_public, view_public
-        );
-        let mut manager2 = SubaddressManager::new(
-            view_secret, spend_public, view_public
-        );
+        let mut manager1 = SubaddressManager::new(view_secret.clone(), spend_public, view_public);
+        let mut manager2 = SubaddressManager::new(view_secret, spend_public, view_public);
 
         // Generate same index
         let idx = SubaddressIndex::new(0, 42);
@@ -175,8 +185,11 @@ mod subaddress_tests {
         let sub1 = manager1.get(idx).unwrap();
         let sub2 = manager2.get(idx).unwrap();
 
-        assert_eq!(sub1.spend_public.as_bytes(), sub2.spend_public.as_bytes(),
-            "Same keys and index must produce same subaddress");
+        assert_eq!(
+            sub1.spend_public.as_bytes(),
+            sub2.spend_public.as_bytes(),
+            "Same keys and index must produce same subaddress"
+        );
     }
 
     /// Test: Labels can be set
@@ -206,11 +219,8 @@ mod subaddress_tests {
         let path = dir.path().join("test_wallet.cync");
 
         // Create wallet
-        let (wallet, mnemonic) = Wallet::create(
-            path.clone(),
-            Some("test_password"),
-            "testnet"
-        ).unwrap();
+        let (wallet, mnemonic) =
+            Wallet::create(path.clone(), Some("test_password"), "testnet").unwrap();
 
         // Mnemonic should be 24 words
         assert!(!mnemonic.is_empty());
@@ -228,11 +238,8 @@ mod subaddress_tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wrong_pw_test.cync");
 
-        let (wallet, _) = Wallet::create(
-            path.clone(),
-            Some("correct_password"),
-            "testnet"
-        ).unwrap();
+        let (wallet, _) =
+            Wallet::create(path.clone(), Some("correct_password"), "testnet").unwrap();
         drop(wallet);
 
         let mut wallet = Wallet::open(path).unwrap();
@@ -273,7 +280,11 @@ mod subaddress_tests {
         println!("Generated 1,000 subaddresses in {:?}", elapsed);
 
         // Should complete in reasonable time
-        assert!(elapsed.as_secs() < 5, "Subaddress generation too slow: {:?}", elapsed);
+        assert!(
+            elapsed.as_secs() < 5,
+            "Subaddress generation too slow: {:?}",
+            elapsed
+        );
 
         // Verify count
         assert!(manager.count() >= 1_000);
@@ -304,14 +315,21 @@ mod crypto_tests {
         let hash1 = hash_data(b"data1");
         let hash2 = hash_data(b"data2");
 
-        assert_ne!(hash1, hash2, "Different data should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different data should produce different hashes"
+        );
     }
 
     /// Test: Hash handles empty input
     #[test]
     fn test_hash_empty() {
         let hash = hash_data(b"");
-        assert_ne!(hash, Hash::zero(), "Empty data should produce non-zero hash");
+        assert_ne!(
+            hash,
+            Hash::zero(),
+            "Empty data should produce non-zero hash"
+        );
     }
 
     /// Test: SecretScalar is properly random
@@ -321,8 +339,11 @@ mod crypto_tests {
         let s2 = SecretScalar::random(&mut rand::rngs::OsRng);
 
         // Extremely unlikely to be equal
-        assert_ne!(s1.to_bytes(), s2.to_bytes(),
-            "Random scalars should be unique");
+        assert_ne!(
+            s1.to_bytes(),
+            s2.to_bytes(),
+            "Random scalars should be unique"
+        );
     }
 
     /// Test: Public key derivation is deterministic
@@ -333,8 +354,11 @@ mod crypto_tests {
         let pub1 = secret.to_public();
         let pub2 = secret.to_public();
 
-        assert_eq!(pub1.to_bytes(), pub2.to_bytes(),
-            "Same secret should produce same public key");
+        assert_eq!(
+            pub1.to_bytes(),
+            pub2.to_bytes(),
+            "Same secret should produce same public key"
+        );
     }
 }
 
@@ -387,7 +411,10 @@ mod amount_tests {
 
         // Adding to max should be handled
         let result = max.as_atomic().checked_add(1);
-        assert!(result.is_none() || result.unwrap() == 0, "Should handle overflow");
+        assert!(
+            result.is_none() || result.unwrap() == 0,
+            "Should handle overflow"
+        );
     }
 
     /// Test: Zero amount
@@ -412,9 +439,7 @@ mod emission_tests {
         let heights = vec![0u64, 1, 100, 10_000, 1_000_000];
 
         for height in heights {
-            let result = std::panic::catch_unwind(|| {
-                calculate_block_reward(height)
-            });
+            let result = std::panic::catch_unwind(|| calculate_block_reward(height));
 
             match result {
                 // `as_atomic()` returns u64, so "non-negative" is a type-level
@@ -436,7 +461,9 @@ mod emission_tests {
         let reward_100k = calculate_block_reward(100_000);
 
         // Later rewards should be less than or equal to earlier ones
-        assert!(reward_100k.as_atomic() <= reward_0.as_atomic(),
-            "Emission should decrease over time");
+        assert!(
+            reward_100k.as_atomic() <= reward_0.as_atomic(),
+            "Emission should decrease over time"
+        );
     }
 }

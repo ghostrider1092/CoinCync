@@ -98,11 +98,7 @@ pub trait ChainAdapter: Send + Sync + 'static {
     /// `TickResult::Err(TickError::Other("chain has no cheap PoW
     /// header check".into()))` — RescueTick will treat that as
     /// "unable to verify, refuse to feed."
-    fn verify_peer_header_pow(
-        &self,
-        peer: &FleetPeer,
-        height: u64,
-    ) -> TickResult<bool>;
+    fn verify_peer_header_pow(&self, peer: &FleetPeer, height: u64) -> TickResult<bool>;
 
     // ─── Chaindata snapshot / restore (RescueTick) ─────────────────
 
@@ -139,10 +135,7 @@ pub trait ChainAdapter: Send + Sync + 'static {
     /// chaindata fails validation, the receiver keeps its pre-swap
     /// state (renamed to `testnet.stalled-<timestamp>/` per the
     /// runbook).
-    fn apply_chaindata(
-        &self,
-        source: &std::path::Path,
-    ) -> TickResult<()>;
+    fn apply_chaindata(&self, source: &std::path::Path) -> TickResult<()>;
 
     // ─── Propagation (PropagationTick) ─────────────────────────────
 
@@ -151,11 +144,7 @@ pub trait ChainAdapter: Send + Sync + 'static {
     /// PropagationTick uses this after detecting a peer that said
     /// `NotFound` for a block it should have. Never re-broadcasts
     /// blocks the local node hasn't fully validated.
-    fn rebroadcast_block(
-        &self,
-        block_id: &Self::BlockId,
-        to: &Self::PeerId,
-    ) -> TickResult<()>;
+    fn rebroadcast_block(&self, block_id: &Self::BlockId, to: &Self::PeerId) -> TickResult<()>;
 
     // ─── Health metrics ────────────────────────────────────────────
 

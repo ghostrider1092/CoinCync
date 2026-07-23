@@ -1,6 +1,6 @@
 use coincync::crypto::{
-    create_balance_proof, verify_balance_proof,
-    PedersenCommitment, BlindingFactor, DisclosureBalanceProof,
+    create_balance_proof, verify_balance_proof, BlindingFactor, DisclosureBalanceProof,
+    PedersenCommitment,
 };
 use rand::rngs::OsRng;
 
@@ -20,8 +20,11 @@ fn main() {
     let decoded: DisclosureBalanceProof = serde_json::from_slice(&bytes).unwrap();
     let ok = verify_balance_proof(&decoded).expect("verify");
     assert!(ok);
-    println!("VALID round-trip balance proof: threshold={}, original_commitment={}",
-        decoded.threshold, hex::encode(decoded.original_commitment));
+    println!(
+        "VALID round-trip balance proof: threshold={}, original_commitment={}",
+        decoded.threshold,
+        hex::encode(decoded.original_commitment)
+    );
 
     // Bad threshold (above value) should fail at create-time
     let bad = create_balance_proof(value, &blinding, &commitment, value + 1);

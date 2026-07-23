@@ -45,11 +45,10 @@ use tracing::{info, warn};
 
 use coincync::config::NetworkType;
 use coincync::consensus::{
-    bind_randomx_genesis_for_network, compute_full_anchor, BlockHeader, PowAlgorithm,
-    Block,
+    bind_randomx_genesis_for_network, compute_full_anchor, Block, BlockHeader, PowAlgorithm,
 };
 use coincync::crypto::{coinbase_stealth_address, BlindingFactor, PedersenCommitment};
-use coincync::primitives::{merkle_root, hash_domain, Address, Amount, Hash, PublicKey};
+use coincync::primitives::{hash_domain, merkle_root, Address, Amount, Hash, PublicKey};
 use coincync::transaction::{Transaction, TxOutput, TxType};
 
 use crate::daemon::DaemonClient;
@@ -152,7 +151,8 @@ pub async fn run_solo(
                     m.rpc_latency_ms
                         .store(latency_ms, std::sync::atomic::Ordering::Relaxed);
                     if let Some(age) = info.get("tip_age_secs").and_then(|v| v.as_u64()) {
-                        m.tip_age_secs.store(age, std::sync::atomic::Ordering::Relaxed);
+                        m.tip_age_secs
+                            .store(age, std::sync::atomic::Ordering::Relaxed);
                     }
                     // Network hashrate may show up under different keys
                     // depending on daemon version — try both.
@@ -222,10 +222,7 @@ pub async fn run_solo(
                             .get("tip_age_secs")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(u64::MAX);
-                        let peers = info
-                            .get("peer_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
+                        let peers = info.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0);
                         // BOTH conditions must hold. Empty mesh with
                         // synced=true is the false-positive case from
                         // 2026-06-28 — don't trust it. peer_count >= 3
@@ -262,10 +259,7 @@ pub async fn run_solo(
                         // block or two. peer_target==0 means "no peer height
                         // reported yet" → don't evaluate divergence (the
                         // peers>=3 gate covers the empty-mesh case).
-                        let local_height = info
-                            .get("height")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
+                        let local_height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
                         let peer_target = info
                             .get("peer_target_height")
                             .and_then(|v| v.as_u64())
@@ -289,13 +283,15 @@ pub async fn run_solo(
                         let reason = if !is_synced {
                             "is_synced=false".to_string()
                         } else if is_regtest {
-                            "OK (regtest: mesh/fork gates exempt for isolated rehearsal)".to_string()
+                            "OK (regtest: mesh/fork gates exempt for isolated rehearsal)"
+                                .to_string()
                         } else if peers < 3 {
-                            format!("peer_count={} (<3; mesh not established, possibly mid-restart)", peers)
+                            format!(
+                                "peer_count={peers} (<3; mesh not established, possibly mid-restart)"
+                            )
                         } else if diverged {
                             format!(
-                                "fork-divergence: local height {} runs >{} blocks ahead of best peer height {} — blocks not being adopted, likely a private fork",
-                                local_height, FORK_DIVERGENCE_MARGIN, peer_target
+                                "fork-divergence: local height {local_height} runs >{FORK_DIVERGENCE_MARGIN} blocks ahead of best peer height {peer_target} — blocks not being adopted, likely a private fork"
                             )
                         } else {
                             "OK".to_string()
@@ -316,7 +312,7 @@ pub async fn run_solo(
                         );
                         cached_synced = false;
                         last_sync_check = Some(Instant::now());
-                        (false, format!("get_info HTTP error: {}", e))
+                        (false, format!("get_info HTTP error: {e}"))
                     }
                 }
             } else {
@@ -384,7 +380,7 @@ pub async fn run_solo(
             m.current_template_height
                 .store(height, std::sync::atomic::Ordering::Relaxed);
         }
-        let target = header.target.clone();
+        let target = header.target;
         let input = HashInput {
             anchor: header.anchor,
             tx_root: header.tx_root,
@@ -398,21 +394,32 @@ pub async fn run_solo(
 
         // 5. Submit if found
         match result {
-            MineResult::Found { nonce: n, total_attempts, per_thread_hps } => {
+            MineResult::Found {
+                nonce: n,
+                total_attempts,
+                per_thread_hps,
+            } => {
                 header.nonce = n;
-                let block = Block { header, transactions: txs };
+                let block = Block {
+                    header,
+                    transactions: txs,
+                };
                 let block_bytes = borsh::to_vec(&block).context("serializing found block")?;
                 let block_hex = hex::encode(&block_bytes);
                 let elapsed = started.elapsed();
                 let hps = total_attempts as f64 / elapsed.as_secs_f64().max(0.001);
                 if let Some(m) = metrics.as_ref() {
-                    m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
-                    m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                    m.hashes_total
+                        .fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
+                    m.current_hashrate_hps
+                        .store(hps as u64, std::sync::atomic::Ordering::Relaxed);
                     m.record_hashrate_sample(hps as u64);
                     m.record_per_thread_hashrate(per_thread_hps);
-                    m.blocks_found_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    m.blocks_found_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let (hr_digits, hr_unit) = crate::tui_blockfont::format_hashrate(hps.round() as u64);
+                let (hr_digits, hr_unit) =
+                    crate::tui_blockfont::format_hashrate(hps.round() as u64);
                 info!(
                     height,
                     nonce = format!("{:#018x}", n),
@@ -426,7 +433,8 @@ pub async fn run_solo(
                     Ok(_) => {
                         blocks_found = blocks_found.saturating_add(1);
                         if let Some(m) = metrics.as_ref() {
-                            m.blocks_accepted_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            m.blocks_accepted_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // Record the find timestamp for the TUI's
                             // 24h timeline strip + ETA-since-last anchor.
                             let now = std::time::SystemTime::now()
@@ -439,22 +447,33 @@ pub async fn run_solo(
                     }
                     Err(e) => {
                         if let Some(m) = metrics.as_ref() {
-                            m.blocks_rejected_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            m.blocks_rejected_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                         warn!(error = %e, "orchestrator: block submit rejected (likely lost race)");
                     }
                 }
             }
-            MineResult::Timeout { total_attempts, per_thread_hps } => {
+            MineResult::Timeout {
+                total_attempts,
+                per_thread_hps,
+            } => {
                 let elapsed = started.elapsed().as_secs_f64();
-                let hps = if elapsed > 0.0 { total_attempts as f64 / elapsed } else { 0.0 };
+                let hps = if elapsed > 0.0 {
+                    total_attempts as f64 / elapsed
+                } else {
+                    0.0
+                };
                 if let Some(m) = metrics.as_ref() {
-                    m.hashes_total.fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
-                    m.current_hashrate_hps.store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                    m.hashes_total
+                        .fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
+                    m.current_hashrate_hps
+                        .store(hps as u64, std::sync::atomic::Ordering::Relaxed);
                     m.record_hashrate_sample(hps as u64);
                     m.record_per_thread_hashrate(per_thread_hps);
                 }
-                let (hr_digits, hr_unit) = crate::tui_blockfont::format_hashrate(hps.round() as u64);
+                let (hr_digits, hr_unit) =
+                    crate::tui_blockfont::format_hashrate(hps.round() as u64);
                 info!(
                     height,
                     attempts = total_attempts,
@@ -510,18 +529,18 @@ async fn mine_parallel(
     // computed at the end. The TUI's worker heatmap reads from these
     // (via metrics) to surface thermal throttling on individual cores.
     let n_threads = threads.max(1);
-    let per_thread_attempts: Vec<Arc<AtomicU64>> =
-        (0..n_threads).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let per_thread_attempts: Vec<Arc<AtomicU64>> = (0..n_threads)
+        .map(|_| Arc::new(AtomicU64::new(0)))
+        .collect();
     let (found_tx, mut found_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
 
     let slice = u64::MAX / n_threads as u64;
 
     let mut handles = Vec::with_capacity(n_threads);
-    for tid in 0..n_threads {
+    for (tid, thread_attempts) in per_thread_attempts.iter().enumerate() {
         let stop = stop.clone();
-        let my_attempts = per_thread_attempts[tid].clone();
+        let my_attempts = thread_attempts.clone();
         let found_tx = found_tx.clone();
-        let target = target.clone();
         let input = input.clone();
         let start_nonce = (tid as u64).saturating_mul(slice);
         let end_nonce = if tid + 1 == n_threads {
@@ -607,8 +626,15 @@ async fn mine_parallel(
         .collect();
 
     match outcome {
-        Ok(Some(n)) => MineResult::Found { nonce: n, total_attempts: total, per_thread_hps },
-        _ => MineResult::Timeout { total_attempts: total, per_thread_hps },
+        Ok(Some(n)) => MineResult::Found {
+            nonce: n,
+            total_attempts: total,
+            per_thread_hps,
+        },
+        _ => MineResult::Timeout {
+            total_attempts: total,
+            per_thread_hps,
+        },
     }
 }
 
@@ -650,8 +676,7 @@ fn build_header_from_template(
         .ok_or_else(|| anyhow!("template missing 'prev_hash'"))?;
     let timestamp = template["timestamp"]
         .as_i64()
-        .ok_or_else(|| anyhow!("template missing 'timestamp'"))?
-        as u64;
+        .ok_or_else(|| anyhow!("template missing 'timestamp'"))? as u64;
 
     let prev_hash = Hash::from_hex(prev_hash_hex)
         .ok_or_else(|| anyhow!("template prev_hash {prev_hash_hex} is not valid hex"))?;
@@ -749,10 +774,8 @@ fn calculate_claimable_fees(mempool_txs: &[Transaction]) -> u64 {
         .sum();
     let congestion_pct = (block_size as u128 * 100) / coincync::constants::MAX_BLOCK_SIZE as u128;
     let congested = congestion_pct >= coincync::constants::CONGESTION_THRESHOLD as u128;
-    let dist = coincync::consensus::fee_market::distribute_fee(
-        Amount::from_atomic(total_fees),
-        congested,
-    );
+    let dist =
+        coincync::consensus::fee_market::distribute_fee(Amount::from_atomic(total_fees), congested);
     dist.to_miner.as_atomic()
 }
 
@@ -867,7 +890,11 @@ mod tests {
         assert!(!fork_diverged(10_043, 10_042, FORK_DIVERGENCE_MARGIN));
         assert!(!fork_diverged(10_044, 10_042, FORK_DIVERGENCE_MARGIN));
         // Exactly at the margin boundary is still allowed (strictly-greater).
-        assert!(!fork_diverged(10_042 + FORK_DIVERGENCE_MARGIN, 10_042, FORK_DIVERGENCE_MARGIN));
+        assert!(!fork_diverged(
+            10_042 + FORK_DIVERGENCE_MARGIN,
+            10_042,
+            FORK_DIVERGENCE_MARGIN
+        ));
     }
 
     #[test]
@@ -876,7 +903,11 @@ mod tests {
         // peer, which stays put because it rejects our low-work blocks.
         assert!(fork_diverged(10_544, 10_042, FORK_DIVERGENCE_MARGIN));
         // One block past the margin is enough to trip.
-        assert!(fork_diverged(10_042 + FORK_DIVERGENCE_MARGIN + 1, 10_042, FORK_DIVERGENCE_MARGIN));
+        assert!(fork_diverged(
+            10_042 + FORK_DIVERGENCE_MARGIN + 1,
+            10_042,
+            FORK_DIVERGENCE_MARGIN
+        ));
     }
 
     #[test]

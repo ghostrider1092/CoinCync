@@ -143,6 +143,10 @@ mod tests {
         };
         let h1 = Hasher::new().hash(&input, 1).unwrap();
         let h2 = Hasher::new().hash(&input, 2).unwrap();
-        assert_ne!(h1.as_bytes(), h2.as_bytes(), "nonce must affect hash output");
+        assert_ne!(
+            h1.as_bytes(),
+            h2.as_bytes(),
+            "nonce must affect hash output"
+        );
     }
 }

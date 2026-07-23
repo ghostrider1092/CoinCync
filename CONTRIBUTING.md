@@ -125,7 +125,7 @@ Verify with `git log --show-signature` locally and the green "Verified" badge on
 
 Changes to files in `critical_files.lock` (Constitution, Bill of Rights, `src/constants.rs`, consensus modules, emission curve, etc.) require:
 
-1. **Refresh the lockfile.** Run `cargo run --bin update-critical-hashes` *only after* careful review. Commit the updated `critical_files.lock` alongside the code change.
+1. **Refresh the lockfile.** After careful review, run `COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes` (or set `COINCYNC_REGEN_LOCK=1` in your PowerShell session first). Commit the updated `critical_files.lock` alongside the code change.
 2. **Update protocol documentation** if the change is user-visible.
 3. **Add regression tests** that fail without the change and pass with it.
 4. **Maintainer review.** Two-of-N maintainer sign-offs for anything touching consensus rules; one for anything else in the lockfile (docs, constants).

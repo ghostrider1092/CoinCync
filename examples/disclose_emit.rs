@@ -1,6 +1,4 @@
-use coincync::crypto::{
-    create_balance_proof, PedersenCommitment, BlindingFactor,
-};
+use coincync::crypto::{create_balance_proof, BlindingFactor, PedersenCommitment};
 use rand::rngs::OsRng;
 
 fn main() {

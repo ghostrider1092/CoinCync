@@ -211,7 +211,7 @@ pinned by SHA-256 in `critical_files.lock`:
 `build.rs` recomputes each file's hash (line endings normalized, so Windows and
 Linux agree) at the start of **every** build. If any hash drifts, the build
 fails. Changing one of these files requires an explicit, reviewed refresh
-(`cargo run --bin update-critical-hashes`) — there is no way to alter the
+(`COINCYNC_REGEN_LOCK=1 cargo run --locked --bin update-critical-hashes`) — there is no way to alter the
 emission curve, the validation rules, or the Constitution itself *silently*. An
 accidental or malicious edit is caught at compile time, not at a fork.
 

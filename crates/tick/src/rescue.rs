@@ -142,7 +142,7 @@ impl Default for RescueConfig {
 /// - 0 = explorer (frontend, no p2p critical role)
 /// - 1 = relay (gossip redundancy, but not name-serving)
 /// - 2 = miner (block production — a stalled miner doesn't take down
-///       the mesh, so recovering it later is fine)
+///   the mesh, so recovering it later is fine)
 /// - 3 = seed (name-serving, most critical)
 /// - 5 = unknown role (last — safer default)
 ///
@@ -412,10 +412,9 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                     adapter,
                     TickNoticeKind::Alert,
                     Severity::Critical,
-                    format!(
-                        "candidate canonical failed PoW verify — refusing to feed. \
-                         1 host claimed a heavier chain but header PoW is INVALID"
-                    ),
+                    "candidate canonical failed PoW verify — refusing to feed. \
+                     1 host claimed a heavier chain but header PoW is INVALID"
+                        .to_string(),
                     3600,
                 );
                 return Ok(false);
@@ -428,7 +427,8 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                     adapter,
                     TickNoticeKind::Alert,
                     Severity::Warn,
-                    "unable to verify canonical PoW; refusing to feed until adapter recovers".into(),
+                    "unable to verify canonical PoW; refusing to feed until adapter recovers"
+                        .into(),
                     1800,
                 );
                 return Ok(false);
@@ -462,10 +462,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
             adapter,
             TickNoticeKind::Hunt,
             Severity::Critical,
-            format!(
-                "RescueTick engaging: 1 host feeding {} hosts on canonical fork",
-                stalled_count
-            ),
+            format!("RescueTick engaging: 1 host feeding {stalled_count} hosts on canonical fork"),
             2 * 3600,
         );
         Ok(true)
@@ -495,10 +492,10 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                     )
                 })?
         };
-        let dest = self.config.snapshot_dir.join(format!(
-            "rescue-{}.tgz",
-            self.now_secs()
-        ));
+        let dest = self
+            .config
+            .snapshot_dir
+            .join(format!("rescue-{}.tgz", self.now_secs()));
         let snapshot = adapter.snapshot_chaindata(Some(&canonical_peer), &dest)?;
 
         {
@@ -573,9 +570,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
             // is_synced + peer_count >= min AND tip_age < max.
             let gate_start = Instant::now();
             loop {
-                if gate_start.elapsed().as_secs()
-                    >= self.config.safety_gate_max_wait_secs
-                {
+                if gate_start.elapsed().as_secs() >= self.config.safety_gate_max_wait_secs {
                     // Give up on this host; emit a warning notice but
                     // continue with the rest. A slow host isn't worth
                     // blocking the whole recovery.
@@ -592,10 +587,8 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                 match adapter.probe_peer(&host) {
                     Ok(tip) => {
                         if tip.is_synced
-                            && tip.peer_count
-                                >= self.config.safety_gate_min_peer_count
-                            && tip.tip_age_secs
-                                <= self.config.safety_gate_max_tip_age_secs
+                            && tip.peer_count >= self.config.safety_gate_min_peer_count
+                            && tip.tip_age_secs <= self.config.safety_gate_max_tip_age_secs
                         {
                             break;
                         }
@@ -620,10 +613,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
                 adapter,
                 TickNoticeKind::Engaged,
                 Severity::Critical,
-                format!(
-                    "recovery in progress: {} hosts swapped, {} remaining",
-                    fed_count, remaining
-                ),
+                format!("recovery in progress: {fed_count} hosts swapped, {remaining} remaining"),
                 1800,
             );
         }
@@ -653,8 +643,7 @@ impl<A: ChainAdapter> TickBehavior<A> for RescueTick {
             TickNoticeKind::Recovered,
             Severity::Info,
             format!(
-                "fleet recovered to canonical chain — {} hosts swapped in {}s",
-                canonical_count, elapsed_secs
+                "fleet recovered to canonical chain — {canonical_count} hosts swapped in {elapsed_secs}s"
             ),
             24 * 3600,
         );
