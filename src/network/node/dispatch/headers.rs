@@ -118,9 +118,10 @@ pub(super) async fn handle_headers(
                 .unwrap_or(0);
 
             let mut sync_guard = sync.write().await;
-            if !sync_guard.validate_header_nonce(headers_msg.nonce) {
+            if !sync_guard.validate_header_nonce(headers_msg.nonce, &peer_id) {
                 debug!(
-                    "Ignoring Headers with unknown nonce={} from peer {:?} (crossed response)",
+                    "Ignoring Headers nonce={} from peer {:?}: not outstanding for this peer \
+                     (cross-peer, stale generation, or already consumed)",
                     headers_msg.nonce,
                     &peer_id[..4]
                 );

@@ -337,7 +337,7 @@ pub(super) async fn handle_verack(
     if peer_height > our_height {
         let locator = build_locator(our_height, |h| chain.get_block_hash(h));
         if !locator.is_empty() {
-            let nonce = sync.write().await.allocate_header_nonce();
+            let nonce = sync.write().await.allocate_header_nonce(peer_id);
             if let Ok(msg) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
                 if let Ok(data) = msg.to_bytes() {
                     // Clone before awaiting so a full queue cannot hold a DashMap shard lock.

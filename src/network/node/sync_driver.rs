@@ -563,7 +563,7 @@ async fn run_headers_tick(
         return;
     }
 
-    let nonce = sync.write().await.allocate_header_nonce();
+    let nonce = sync.write().await.allocate_header_nonce(peer_id);
     let Ok(message) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) else {
         return;
     };

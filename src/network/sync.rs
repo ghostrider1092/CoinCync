@@ -155,7 +155,16 @@ pub struct ChainSync {
     headers_request_time: Option<u64>,
     headers_received_this_cycle: bool,
     peer_heights: HashMap<PeerId, u64>,
-    pending_header_nonces: HashSet<u64>,
+    /// Outstanding GetHeaders nonces, bound to the peer the request was sent to
+    /// and the sync generation it was issued in. A Headers response is only
+    /// accepted if its nonce is present AND came from the same peer AND belongs
+    /// to the current generation — so a different peer cannot answer (or grief)
+    /// a request that was never sent to it (Jun #2 / cross-peer response).
+    pending_header_nonces: HashMap<u64, (PeerId, u64)>,
+    /// Bumped on every headers-request-cycle reset. Nonces allocated in a prior
+    /// generation are rejected even if their value collides — defence in depth
+    /// on top of the strict-monotonic `next_header_nonce`.
+    header_nonce_generation: u64,
     next_header_nonce: u64,
     orphans_per_peer: HashMap<PeerId, usize>,
     blocks_entered_at: Option<u64>,
@@ -232,7 +241,8 @@ impl ChainSync {
             best_known_difficulty: 0,
             local_total_difficulty: 0,
             peer_difficulty_seen_at: HashMap::new(),
-            pending_header_nonces: HashSet::new(),
+            pending_header_nonces: HashMap::new(),
+            header_nonce_generation: 0,
             next_header_nonce: 1,
             orphans_per_peer: HashMap::new(),
             blocks_entered_at: None,
@@ -1185,19 +1195,42 @@ impl ChainSync {
         self.last_sync_peer
     }
 
-    pub fn allocate_header_nonce(&mut self) -> u64 {
+    /// Allocate a fresh GetHeaders nonce bound to the peer the request is being
+    /// sent to. Callers MUST pass the exact peer the matching `get_headers`
+    /// message is delivered to — the nonce is only honoured back from that peer.
+    pub fn allocate_header_nonce(&mut self, peer: PeerId) -> u64 {
         let n = self.next_header_nonce;
         self.next_header_nonce += 1;
-        self.pending_header_nonces.insert(n);
+        self.pending_header_nonces
+            .insert(n, (peer, self.header_nonce_generation));
         n
     }
 
-    pub fn validate_header_nonce(&mut self, n: u64) -> bool {
-        // Phase D (audit fix): nonce 0 is never allocated (next_header_nonce
-        // starts at 1), so the old `if n == 0 { return true }` accepted
-        // unsolicited Headers, enabling eclipse attacks. Removing the exception
-        // enforces that every Headers response matches an outstanding request.
-        self.pending_header_nonces.remove(&n)
+    /// Validate a Headers response nonce against the outstanding request set.
+    ///
+    /// Returns true only if the nonce is outstanding AND was issued to exactly
+    /// `from_peer` AND belongs to the current generation. On a match the nonce
+    /// is consumed (single-use).
+    ///
+    /// Phase D (audit fix): nonce 0 is never allocated (next_header_nonce starts
+    /// at 1), so the old `if n == 0 { return true }` accepted unsolicited Headers,
+    /// enabling eclipse attacks. Every Headers response must match an outstanding
+    /// request.
+    ///
+    /// Jun #2 (cross-peer): a nonce sent to peer A must not be honoured from peer
+    /// B. On a peer/generation mismatch we return false WITHOUT consuming the
+    /// nonce, so a malicious peer cannot grief the legitimate peer's response by
+    /// racing it with the right nonce value.
+    pub fn validate_header_nonce(&mut self, n: u64, from_peer: &PeerId) -> bool {
+        match self.pending_header_nonces.get(&n) {
+            Some((peer, generation))
+                if peer == from_peer && *generation == self.header_nonce_generation =>
+            {
+                self.pending_header_nonces.remove(&n);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn mark_headers_requested(&mut self, now: u64) {
@@ -1237,8 +1270,16 @@ impl ChainSync {
         // headers-request cycle, so on cycle reset we can safely drop
         // every pending nonce — the next allocate_header_nonce() gets
         // a fresh strict-monotonic value.
+        //
+        // Jun #2: bump the generation first, then drop every entry that isn't
+        // in the new generation (i.e. all of them). This keeps memory bounded
+        // exactly as the old `.clear()` did, while making generation a real,
+        // testable guard: a Headers response that races this reset arrives with
+        // a now-stale generation and is rejected by `validate_header_nonce`.
         self.headers_request_time = None;
-        self.pending_header_nonces.clear();
+        self.header_nonce_generation = self.header_nonce_generation.wrapping_add(1);
+        self.pending_header_nonces
+            .retain(|_, (_, generation)| *generation == self.header_nonce_generation);
     }
     pub fn request_timeout(&self) -> u64 {
         self.request_timeout
@@ -1899,6 +1940,70 @@ mod tests {
                 bytes
             })
             .collect()
+    }
+
+    // ── Jun #2: header-nonce peer + generation binding ─────────────────
+
+    /// The happy path: a nonce issued to peer A is honoured back from peer A
+    /// exactly once, then consumed.
+    #[test]
+    fn header_nonce_matches_issuing_peer_once() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.allocate_header_nonce(peers[0]);
+        assert!(sync.validate_header_nonce(n, &peers[0]), "issuer must match");
+        assert!(
+            !sync.validate_header_nonce(n, &peers[0]),
+            "single-use: a consumed nonce must not validate twice"
+        );
+    }
+
+    /// Cross-peer: a nonce sent to peer A must NOT be honoured from peer B, and
+    /// the failed attempt must NOT consume it — peer A can still respond. This is
+    /// the core of the fix: a malicious peer can neither answer nor grief a
+    /// request that was never sent to it.
+    #[test]
+    fn header_nonce_rejects_cross_peer_without_consuming() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.allocate_header_nonce(peers[0]);
+
+        assert!(
+            !sync.validate_header_nonce(n, &peers[1]),
+            "a different peer must not satisfy the nonce"
+        );
+        assert!(
+            sync.validate_header_nonce(n, &peers[0]),
+            "the legitimate issuer's response must still be accepted after the cross-peer attempt"
+        );
+    }
+
+    /// Generation: a nonce that survives a headers-cycle reset (bumped
+    /// generation) is rejected even from the original peer — a response racing
+    /// the reset can't sneak in.
+    #[test]
+    fn header_nonce_rejected_after_generation_reset() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.allocate_header_nonce(peers[0]);
+        sync.reset_headers_timeout(); // bumps generation, drops the pending nonce
+        assert!(
+            !sync.validate_header_nonce(n, &peers[0]),
+            "a stale-generation nonce must be rejected"
+        );
+        // And a freshly allocated nonce in the new generation still works.
+        let n2 = sync.allocate_header_nonce(peers[0]);
+        assert!(sync.validate_header_nonce(n2, &peers[0]));
+    }
+
+    /// An unsolicited nonce (never allocated) is always rejected — no nonce-0 or
+    /// unknown-value exception.
+    #[test]
+    fn header_nonce_unsolicited_rejected() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        assert!(!sync.validate_header_nonce(0, &peers[0]));
+        assert!(!sync.validate_header_nonce(999_999, &peers[0]));
     }
 
     // ── Firework Phase 2 (V3 closure): work-triggered sync ──────────────
