@@ -36,7 +36,7 @@ build* — it does not mean a mainnet deployment exists yet.
 | **Stealth addresses** | `stealth.rs` | ECDH-derived one-time output keys — every output goes to a unique address. Includes subaddresses, audit keys, batch scanning. | ✅ Live |
 | **Scoped view keys** | `view_keys.rs` | Forward-secret view keys scoped by epoch / time-range / amount-cap / single-use (`ViewKeyScope`). Key bytes zeroized on drop, excluded from serialization. | ✅ Live |
 | **Encrypted memos** | `memo.rs` | ChaCha20-Poly1305 memos on outputs; ECDH key derivation; ≤256 bytes, enforced at consensus. | ✅ Live |
-| **Decoy selection** | `ring_selection.rs` | **Uniform** random decoy picking (deliberately *not* gamma-distributed — defeats output-age statistical deanonymization). | ✅ Live |
+| **Decoy selection** | `storage/utxos.rs` + `ring_selection.rs` | **Gamma** age-matched decoy selection at the source (population-wide, Monero-style fit), then uniform ring assembly. Hides recent spends — the common case — in a same-age crowd; large-ring/ZK upgrade closes the old-output tail (roadmap). | ✅ Live |
 | **Selective disclosure** | `disclosure.rs` | Non-interactive Fiat-Shamir proofs for voluntary compliance (prove balance ≥ X, ownership, source) without revealing the rest. | ✅ Live |
 | **Batch verification** | `batch_verify.rs`, `parallel_proofs.rs` | Parallel batch-verify of CLSAG / Bulletproofs — block-validation performance, not a privacy feature itself but part of the crypto path. | ✅ Live |
 | **CLSAG multisig** | `clsag_multisig.rs` | Multi-party CLSAG signing (pairs with the FROST coordinator work). | ✅ Live |
@@ -72,7 +72,7 @@ build* — it does not mean a mainnet deployment exists yet.
 A project shorthand; all seven are ✅ Live on testnet. They are not separate
 subsystems — they map onto the tables above:
 
-1. **Decoy defense** → `crypto/ring_selection.rs` (uniform selection)
+1. **Decoy defense** → `storage/utxos.rs` (gamma age-matching at the source) + `crypto/ring_selection.rs` (uniform ring assembly)
 2. **Encrypted memos** → `crypto/memo.rs`
 3. **Scoped view keys** → `crypto/view_keys.rs`
 4. **Deniable wallets** → `wallet/persistence.rs`

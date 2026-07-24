@@ -20,6 +20,22 @@ pub struct OutputRef {
 /// Output key for primary hashmap
 type OutputKey = (Hash, u8);
 
+/// Population-wide gamma decoy-age model (Monero's fit, Möser et al. 2018):
+/// `shape = 19.28`, `scale = 1/1.61 = 0.621`. A decoy's age in seconds is
+/// `exp(Gamma(shape, scale))`; dividing by the target block time gives an age in
+/// blocks, which is mapped to the nearest eligible output.
+///
+/// Decision (2026-07-24, owner + co-founder, with full knowledge of the
+/// 2026-07-02 uniform SEV-A it reverses): decoys follow the real-spend age law
+/// so the overwhelming common case — spending a *recent* output — is hidden in a
+/// same-age crowd. Accepted trade-off: a genuinely OLD real output is an age
+/// outlier in a recent-biased ring. The durable fix for that tail is a
+/// large-ring / zero-knowledge upgrade (long-term roadmap), not distribution
+/// tuning; population-wide gamma is the lesser of the two evils until then.
+pub const DECOY_GAMMA_SHAPE: f64 = 19.28;
+/// See [`DECOY_GAMMA_SHAPE`].
+pub const DECOY_GAMMA_SCALE: f64 = 0.621;
+
 /// UTXO set with height index for fast ring member selection
 ///
 /// Privacy coins need to quickly find random outputs within a height range
@@ -327,69 +343,50 @@ impl UtxoSet {
             .collect()
     }
 
-    /// Get random outputs for ring members (decoys) using UNIFORM selection.
+    /// Select `count` decoys for a ring, age-matched to the real-spend
+    /// distribution via a **population-wide gamma** law ([`DECOY_GAMMA_SHAPE`]).
     ///
-    /// Selects `count` random outputs from heights older than `min_age` blocks,
-    /// each with equal probability among all eligible outputs.
+    /// Excludes outputs younger than `min_age` and still-time-locked outputs;
+    /// among the eligible set, decoy ages follow the gamma model rather than
+    /// being uniform.
     ///
-    /// ## Privacy model — uniform, NOT gamma
+    /// ## Privacy model — gamma age-matching
     ///
-    /// AUDIT (2026-07-02): SEV-A fix. The prior implementation used a gamma
-    /// distribution with shape=19.28, scale=1/1.61 — the same parameter
-    /// values Monero defines as `GAMMA_SHAPE` and `GAMMA_SCALE` at
-    /// src/wallet/wallet2.cpp:146-147 in its current master source
-    /// (VERIFIED via direct fetch this session). A gamma-shaped decoy
-    /// distribution is the exact shape shown to enable ring-signature
-    /// deanonymization via output-age regression (Möser et al. 2018;
-    /// paper title UNVERIFIED this session — reader is directed to
-    /// the widely-cited Möser 2018 Monero traceability work).
-    /// That prior version's own
-    /// docstring even said the quiet part out loud:
+    /// Real spends are overwhelmingly *recent*. If decoys were drawn uniformly
+    /// across all history, the real (recent) input would be the young outlier in
+    /// its ring — the exact output-age regression the traceability literature
+    /// weaponises. Matching the decoys to the real-spend age law removes that
+    /// signal for the common case. This is Monero's approach and the same fit
+    /// (`shape = 19.28`, `scale = 1/1.61`).
     ///
-    /// ```text
-    /// Real spends are heavily biased toward recent outputs. If decoys
-    /// were uniformly random, attackers could identify the real spend
-    /// by its age.
-    /// ```
+    /// **Decision history.** A 2026-07-02 change had moved this path to uniform,
+    /// arguing uniform was the safer default. On 2026-07-24 the owner and
+    /// co-founder reversed that *with full knowledge of it*: population-wide
+    /// gamma protects the vast majority of (recent) spends, which uniform does
+    /// not. The accepted cost is the tail — a genuinely OLD real output is an age
+    /// outlier in a recent-biased ring. Closing that tail needs a large-ring /
+    /// zero-knowledge upgrade (roadmap), not distribution tuning; gamma is the
+    /// lesser of two evils until then.
     ///
-    /// The premise of that argument is exactly the attack the Möser paper
-    /// weaponizes — an observer measures the age-distribution of every
-    /// ring, spots the outlier when the real spend age doesn't match the
-    /// biased-toward-recent decoy pool, and deanonymizes.
+    /// Age-matching is applied **here at the source**, over the full eligible
+    /// age distribution — not in the ring assembler. A downstream shuffle over a
+    /// pre-sampled pool cannot reconstruct an age distribution the pool doesn't
+    /// already carry (the 2026-07-02 note made this point; it is applied here in
+    /// reverse). The ring assembler (`src/crypto/ring_selection.rs`) does uniform
+    /// final assembly so it does not double-bias the already-gamma pool.
     ///
-    /// CoinCync's constitutional Article III (Mandatory Privacy) and the
-    /// module-header comment in `src/crypto/ring_selection.rs` (L3–L22)
-    /// both explicitly commit to UNIFORM decoy selection as the privacy
-    /// differentiator vs. Monero. That module-level ring assembler
-    /// already does its own uniform shuffle, but the pool it received via
-    /// the wallet -> chain::get_decoy_outputs -> this function path was
-    /// gamma-biased BEFORE it reached the uniform shuffle. Shuffling a
-    /// pre-biased pool doesn't remove the bias; the age distribution is
-    /// baked in upstream. The ring_selection uniform shuffle was doing
-    /// exactly no privacy work.
-    ///
-    /// This implementation uses a Fisher-Yates partial shuffle with
-    /// `rng.gen_range` (rejection-sampled, no modulo bias — matches the
-    /// 2026-07-01 ring_selection.rs Fisher-Yates fix) so every eligible
-    /// output has EXACTLY equal probability of appearing in the returned
-    /// set. The observer gets zero information from the age distribution.
-    ///
-    /// Prior art on why uniform beats gamma for privacy:
+    /// Prior art (these papers motivate age-matching — real and decoy ages must
+    /// be statistically indistinguishable, which uniform selection fails):
     ///   - Miller et al. 2017 "Empirical Analysis of Traceability in the
-    ///     Monero Blockchain" — ring members must have indistinguishable
-    ///     age from the real spend.
-    ///   - Möser et al. 2018 — quantifies the attack; 85%+ accuracy
-    ///     identifying real spends in Monero rings.
+    ///     Monero Blockchain".
+    ///   - Möser et al. 2018 — ~85%+ real-spend identification on *early,
+    ///     pre-gamma* Monero rings; gamma was the fix.
     ///   - Yu et al. 2019 "New Empirical Traceability Analysis of
-    ///     CryptoNote-Style Blockchains" — 0-mixin heuristic + age.
-    ///   - MRL uniform-selection recommendation.
+    ///     CryptoNote-Style Blockchains".
     ///
-    /// If the network needs age-mimicry in the FUTURE (attacker-model
-    /// changes), the right fix is to sample decoys with an age
-    /// distribution that matches the real spend's OWN age distribution,
-    /// not the population-wide gamma. That requires knowing the real
-    /// spend's age at ring-build time and adjusting per-ring, which is
-    /// a per-tx-context algorithm, not a chain-wide constant.
+    /// A stronger model still would match each ring to its *own* real output's
+    /// age rather than the population-wide law; that is per-tx context, deferred
+    /// with the large-ring/ZK work.
     pub fn select_decoys<R: rand::Rng>(
         &self,
         current_height: u64,
@@ -398,31 +395,131 @@ impl UtxoSet {
         rng: &mut R,
     ) -> Vec<&OutputRef> {
         let max_height = current_height.saturating_sub(min_age);
+        // Gamma age-matching happens HERE, over the entire eligible age
+        // distribution (the whole UTXO set), because a population-wide age law
+        // needs the whole distribution — a downstream shuffle over a
+        // pre-sampled pool cannot reconstruct it (that was the 2026-07-02
+        // finding, now applied in reverse). See DECOY_GAMMA_SHAPE.
+        self.gamma_select_decoys(current_height, max_height, count, rng)
+    }
 
-        // Get all eligible outputs (exclude time-locked outputs that haven't
-        // unlocked). The eligible pool is what a uniform draw is over.
-        let mut eligible: Vec<&OutputRef> = self
-            .outputs_in_range(0, max_height)
-            .into_iter()
-            .filter(|o| o.output.lock_height.map_or(true, |lh| current_height >= lh))
-            .collect();
+    /// Draw `count` distinct decoys whose ages follow the population-wide gamma
+    /// law ([`DECOY_GAMMA_SHAPE`]).
+    ///
+    /// For each decoy: sample an age, map it to a target height, then take the
+    /// nearest eligible untaken output via the height index — O(log n) per
+    /// decoy, never a linear scan over the UTXO set. Among outputs sharing the
+    /// chosen height, one is picked uniformly at random. Falls back to a uniform
+    /// target height only if the gamma distribution is degenerate.
+    fn gamma_select_decoys<R: rand::Rng>(
+        &self,
+        current_height: u64,
+        max_height: u64,
+        count: usize,
+        rng: &mut R,
+    ) -> Vec<&OutputRef> {
+        use rand_distr::{Distribution, Gamma};
+        let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE).ok();
+        let block_time = crate::constants::TARGET_BLOCK_TIME.max(1) as f64;
+        let lo = self.height_index.keys().next().copied().unwrap_or(0);
+        let hi = self
+            .height_index
+            .range(..=max_height)
+            .next_back()
+            .map(|(h, _)| *h)
+            .unwrap_or(max_height);
 
-        if eligible.len() <= count {
-            return eligible;
+        let mut taken: HashSet<OutputKey> = HashSet::new();
+        let mut chosen: Vec<&OutputRef> = Vec::with_capacity(count);
+        // Bounded attempts guarantee termination when the eligible set is
+        // smaller than `count` (pick_near_height returns None once exhausted).
+        let max_attempts = count.saturating_mul(4).saturating_add(8);
+        let mut attempts = 0usize;
+        while chosen.len() < count && attempts < max_attempts {
+            attempts += 1;
+            let target = match &gamma {
+                Some(g) => {
+                    let age_blocks = (g.sample(rng).exp() / block_time) as u64;
+                    current_height.saturating_sub(age_blocks).min(max_height)
+                }
+                None if hi > lo => rng.gen_range(lo..=hi),
+                None => lo,
+            };
+            match self.pick_near_height(target, max_height, current_height, &taken, rng) {
+                Some(oref) => {
+                    taken.insert((oref.tx_hash, oref.index));
+                    chosen.push(oref);
+                }
+                None => break, // eligible set exhausted
+            }
         }
+        chosen
+    }
 
-        // Fisher-Yates partial shuffle: draws the first `count` uniformly at
-        // random from `eligible`. `gen_range(0..=i)` uses rejection sampling
-        // in the rand crate — no modulo bias. Matches the pattern used in
-        // src/crypto/ring_selection.rs (2026-07-01 audit fix). Complexity is
-        // O(count), which is what we want vs the O(n) full shuffle.
-        let last = eligible.len() - 1;
-        for i in 0..count {
-            let j = rng.gen_range(i..=last);
-            eligible.swap(i, j);
+    /// Nearest eligible, untaken output to `target`, scanning the height index
+    /// outward in both directions. `None` only when every eligible output is
+    /// already taken.
+    fn pick_near_height<R: rand::Rng>(
+        &self,
+        target: u64,
+        max_height: u64,
+        current_height: u64,
+        taken: &HashSet<OutputKey>,
+        rng: &mut R,
+    ) -> Option<&OutputRef> {
+        let capped = target.min(max_height);
+        let mut below = self.height_index.range(..=capped).rev();
+        let mut above = self.height_index.range(capped.saturating_add(1)..=max_height);
+        let mut lo = below.next();
+        let mut hi = above.next();
+        loop {
+            let use_below = match (lo, hi) {
+                (Some((lh, _)), Some((hh, _))) => target.abs_diff(*lh) <= hh.abs_diff(target),
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => return None,
+            };
+            let (_h, keys) = if use_below { lo.unwrap() } else { hi.unwrap() };
+            if let Some(oref) = self.eligible_untaken_at(keys, current_height, taken, rng) {
+                return Some(oref);
+            }
+            if use_below {
+                lo = below.next();
+            } else {
+                hi = above.next();
+            }
         }
-        eligible.truncate(count);
-        eligible
+    }
+
+    /// A uniformly-random eligible, untaken output among `keys` at one height
+    /// (reservoir sampling), or `None` if none qualify.
+    fn eligible_untaken_at<R: rand::Rng>(
+        &self,
+        keys: &BTreeSet<OutputKey>,
+        current_height: u64,
+        taken: &HashSet<OutputKey>,
+        rng: &mut R,
+    ) -> Option<&OutputRef> {
+        let mut pick: Option<&OutputRef> = None;
+        let mut seen = 0u32;
+        for key in keys {
+            if taken.contains(key) {
+                continue;
+            }
+            if let Some(oref) = self.outputs.get(key) {
+                let unlocked = oref
+                    .output
+                    .lock_height
+                    .map_or(true, |lh| current_height >= lh);
+                if unlocked {
+                    seen += 1;
+                    if rng.gen_range(0..seen) == 0 {
+                        pick = Some(oref);
+                    }
+                }
+            }
+        }
+        pick
     }
 
     /// Select decoys with additional constraints for better privacy
@@ -904,36 +1001,25 @@ mod tests {
         }
     }
 
-    /// REGRESSION (2026-07-02): assert decoy age distribution is UNIFORM,
-    /// not gamma-biased-toward-recent.
+    /// REGRESSION (2026-07-24): assert decoy age distribution is GAMMA
+    /// (recent-biased), matching the real-spend age law — NOT uniform.
     ///
-    /// This is the test that would have caught the pre-2026-07-02 SEV-A
-    /// (gamma decoy bias — Möser 2018 shape). Prior to the fix,
-    /// `select_decoys` drew from `Gamma::new(19.28, 1/1.61)` which biases
-    /// heavily toward RECENT heights (per the pre-fix docstring's own
-    /// admission). Under gamma, of 10000 decoys drawn from a 1000-block
-    /// pool, ~90% would land in the newest ~200 blocks. Under uniform,
-    /// ~90% would land across the full range with each of the 10 equal-
-    /// sized age buckets receiving ~10% (± sampling noise).
-    ///
-    /// The test asserts the "10 equal buckets, each within [7%, 13%]"
-    /// property, which fails on gamma with overwhelming probability
-    /// (buckets 0..7 would get ~0%; buckets 8-9 would get ~50%+ each).
-    /// The 7-13% band is wide enough that legitimate uniform noise
-    /// passes and gamma fails deterministically.
+    /// Reverses the 2026-07-02 uniform assertion (owner + co-founder decision,
+    /// with full knowledge of that SEV-A). Over a pool much larger than the
+    /// gamma's ~1300-block median age, decoys concentrate in the newest age
+    /// bucket, whereas a uniform selector would put ~10% in every bucket. The
+    /// gamma's long upper tail clamps onto the oldest available output, so the
+    /// oldest bucket is non-empty — the signature is "newest bucket dominates",
+    /// not "oldest empty".
     #[test]
-    fn test_decoy_selection_is_uniform_not_gamma() {
+    fn test_decoy_selection_is_gamma_recent_biased() {
         let mut utxos = UtxoSet::new();
         let mut rng = rand::thread_rng();
 
-        // Build a 1000-block eligible pool with one UNIQUE output per height.
-        // min_age is 0 so every one is eligible. The uniqueness matters: the
-        // shared make_test_output helper uses idx-derived hashes, so if we
-        // fed `h % 256` we'd overwrite entries (256 keys, 4 heights each,
-        // only the last stick — verified by pre-fix test failure). Build a
-        // per-height 32-byte hash directly so each add_output is a distinct
-        // (hash, 0) key.
-        for h in 0..1_000u64 {
+        // Pool spanning 30k blocks (>> the gamma median age) so the recency
+        // bias is visible in the newest bucket. One unique output per height.
+        let n = 30_000u64;
+        for h in 0..n {
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&h.to_le_bytes());
             let hash = Hash::from_bytes(hash_bytes);
@@ -949,43 +1035,36 @@ mod tests {
             utxos.add_output(hash, 0, output, h);
         }
 
-        // Draw 10_000 decoys total (in batches, since each call returns
-        // deduped-within-batch results). 100 calls of 100 gives us the
-        // sample size we need for the distribution assertion.
-        let mut age_histogram = [0u32; 10];
-        let calls = 100;
-        let per_call = 100;
-        for _ in 0..calls {
-            let decoys = utxos.select_decoys(1_000, 0, per_call, &mut rng);
-            for d in decoys {
-                // Bucket by age: 0 = newest 100 blocks, 9 = oldest 100 blocks.
-                // current_height is 1000; height h has age (1000 - h). Bucket
-                // is age / 100, clamped to 0..=9.
-                let age = 1_000 - d.height;
-                let bucket = ((age / 100) as usize).min(9);
-                age_histogram[bucket] += 1;
+        let bucket = n / 10; // 3000 blocks per age bucket
+        let mut hist = [0u32; 10];
+        for _ in 0..20 {
+            for d in utxos.select_decoys(n, 0, 100, &mut rng) {
+                let age = n - d.height;
+                hist[((age / bucket) as usize).min(9)] += 1;
             }
         }
-
-        let total: u32 = age_histogram.iter().sum();
+        let total: u32 = hist.iter().sum();
         assert!(total > 0, "must have drawn at least some decoys");
+        let frac = |b: usize| hist[b] as f64 / total as f64;
 
-        // Uniform expectation: each of the 10 buckets gets 10% of the mass.
-        // Allow a wide band [7%, 13%] — passes uniform noise, fails gamma.
-        // Note: bucket 0 corresponds to age 0..100 which includes the tip
-        // side of the pool; under gamma this would be >50%, under uniform
-        // it's ~10%.
-        for (b, &count) in age_histogram.iter().enumerate() {
-            let frac = count as f64 / total as f64;
-            assert!(
-                frac >= 0.07 && frac <= 0.13,
-                "bucket {} has {:.1}% of the mass — outside the uniform [7%, 13%] band. \
-                 Full histogram: {:?}. If this fails, decoy selection has regressed to a \
-                 non-uniform distribution (e.g. gamma bias toward recent).",
-                b,
-                frac * 100.0,
-                age_histogram,
-            );
-        }
+        // Gamma signature: the newest age bucket carries the bulk of the mass...
+        assert!(
+            frac(0) > 0.40,
+            "gamma: newest age bucket should dominate, got {:.1}% (hist {:?})",
+            frac(0) * 100.0,
+            hist,
+        );
+        // ...far more than the oldest (uniform would make these ~equal at 10%)...
+        assert!(
+            frac(0) > 2.0 * frac(9),
+            "gamma: newest must exceed oldest by a wide margin (hist {:?})",
+            hist,
+        );
+        // ...and the distribution is concentrated, not flat (anti-uniform).
+        assert!(
+            frac(0) > 3.0 * frac(5),
+            "gamma: mass must concentrate at recent ages, not spread uniformly (hist {:?})",
+            hist,
+        );
     }
 }

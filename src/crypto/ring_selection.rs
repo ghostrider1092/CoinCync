@@ -1,24 +1,32 @@
 //! # Ring Member Selection for CoinCync 1.0
 //!
-//! Decoy selection using UNIFORM distribution for maximum privacy.
+//! This module is the ring **assembler**: given a candidate decoy pool it
+//! chooses the final ring members and the real output's position, drawing
+//! **uniformly from the pool it is given**.
 //!
-//! CoinCync deliberately uses uniform random selection instead of Monero's
-//! gamma distribution. Gamma selection leaks information because researchers
-//! can statistically identify the real spend by its age pattern. Uniform
-//! selection gives zero signal — every ring member is equally likely to be
-//! real, regardless of age. This defeats the #1 academic deanonymization
-//! attack on ring signatures (see Miller et al. 2017, Möser et al. 2018).
+//! The age distribution that actually hides the real spend is applied
+//! **upstream at the source** (`src/storage/utxos.rs::select_decoys`), which
+//! age-matches decoys to the real-spend law via a population-wide **gamma**
+//! distribution (`DECOY_GAMMA_SHAPE`). Real spends are overwhelmingly recent,
+//! so uniform selection over all history would leave the recent real input as
+//! the young outlier in its ring — the output-age regression attack in the
+//! traceability literature (Miller et al. 2017, Möser et al. 2018). Age-matching
+//! removes that signal for the common case.
 //!
-//! The 4th Amendment protects against unreasonable searches. Statistical
-//! deanonymization of ring signatures IS an unreasonable search of private
-//! financial records. Uniform decoy selection is CoinCync's technical
-//! enforcement of this constitutional protection.
-//! This prevents statistical analysis attacks on ring signatures.
+//! This assembler therefore draws uniformly *from the already-gamma-shaped
+//! pool*. Re-imposing a distribution here would double-bias it, and shuffling a
+//! pool cannot add an age distribution the pool does not already carry. See the
+//! decision history in `src/storage/utxos.rs::select_decoys` (uniform on
+//! 2026-07-02, reversed to gamma 2026-07-24 by owner + co-founder).
 //!
-//! ## Why This Matters
-//! If we pick decoys uniformly at random, an attacker can observe that
-//! real spends tend to use newer outputs. By matching this distribution
-//! for decoys, we make real and fake indistinguishable.
+//! ## Constitutional note
+//!
+//! Article III (Mandatory Privacy): statistical deanonymization of ring
+//! signatures is an unreasonable search of private financial records, and decoy
+//! age-matching is the technical enforcement of that protection. The accepted
+//! residual — a genuinely old real output remains an age outlier — is closed
+//! only by the long-term large-ring / zero-knowledge upgrade, not by decoy
+//! tuning.
 
 use crate::error::{Error, Result};
 use crate::primitives::PublicKey;
