@@ -167,20 +167,27 @@ pub(super) async fn handle_inv_block(
                 );
                 let locator = build_locator(our_height, |h| chain.get_block_hash(h));
                 if !locator.is_empty() {
-                    let nonce = sync.write().await.allocate_header_nonce(peer_id);
-                    if let Ok(msg) =
-                        Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce)
-                    {
-                        if let Ok(data) = msg.to_bytes() {
-                            // Clone before awaiting so a full queue cannot hold a map guard.
-                            let sender = senders.get(&peer_id).map(|s| s.value().clone());
-                            if let Some(sender) = sender {
-                                let _ = sender.send(data).await;
-                                debug!(
+                    let now = chrono::Utc::now().timestamp() as u64;
+                    if let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) {
+                        let sent = match Message::get_headers_with_nonce(
+                            magic,
+                            locator,
+                            Hash::zero(),
+                            nonce,
+                        ) {
+                            Ok(message) => match message.to_bytes() {
+                                Ok(data) => send_to_peer(senders, &peer_id, data).await,
+                                Err(_) => false,
+                            },
+                            Err(_) => false,
+                        };
+                        if sent {
+                            debug!(
                                 "InvBlock during IBD: sent GetHeaders nonce={} to peer {:?} to refresh tip (our_h={})",
                                 nonce, &peer_id[..4], our_height
                             );
-                            }
+                        } else {
+                            sync.write().await.cancel_headers_request(nonce, &peer_id);
                         }
                     }
                 }

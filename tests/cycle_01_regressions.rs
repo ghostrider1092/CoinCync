@@ -139,21 +139,21 @@ fn regression_finding_03_headers_pending_state_machine() {
         "fresh Sync should report no pending request"
     );
 
-    // After mark_headers_requested, the gate must report pending.
-    sync.mark_headers_requested(1_000);
+    let peer = [1u8; 32];
+    let nonce = sync.begin_headers_request(peer, 1_000).unwrap();
     assert!(
         sync.headers_request_pending(),
-        "Finding #3 regression: after mark_headers_requested, \
+        "Finding #3 regression: after begin_headers_request, \
          headers_request_pending must report true. Without this, \
          the IBD loop would issue a fresh request every tick (~4 Hz \
          hammer)."
     );
 
-    // mark_headers_requested is idempotent — only sets the timestamp
-    // if currently None. This pins the FIRST request's time so the
-    // 60-s timeout runs off it, not the latest one.
-    sync.mark_headers_requested(2_000);
+    // A second issuance path cannot replace the first request or move its
+    // timeout forward.
+    assert!(sync.begin_headers_request([2u8; 32], 2_000).is_none());
     assert!(sync.headers_request_pending());
+    assert!(sync.headers_timed_out(1_061));
 
     // After explicit reset (the normal path: EMERGENCY-TIER-3 OR the
     // 60-s timeout firing), the gate must allow a new request.
@@ -165,6 +165,7 @@ fn regression_finding_03_headers_pending_state_machine() {
          this, EMERGENCY-TIER-3 recovery fires but has no effect — \
          the original trap shape."
     );
+    assert!(!sync.validate_header_nonce(nonce, &peer));
 }
 
 #[test]

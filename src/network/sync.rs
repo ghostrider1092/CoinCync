@@ -1195,15 +1195,36 @@ impl ChainSync {
         self.last_sync_peer
     }
 
-    /// Allocate a fresh GetHeaders nonce bound to the peer the request is being
-    /// sent to. Callers MUST pass the exact peer the matching `get_headers`
-    /// message is delivered to — the nonce is only honoured back from that peer.
-    pub fn allocate_header_nonce(&mut self, peer: PeerId) -> u64 {
+    /// Begin the single global GetHeaders request cycle.
+    ///
+    /// Every issuance path must use this method. Returning `None` means another
+    /// peer already owns the in-flight cycle, so callers must not send a second
+    /// request that could later invalidate the first response.
+    pub fn begin_headers_request(&mut self, peer: PeerId, now: u64) -> Option<u64> {
+        if self.headers_request_time.is_some() {
+            return None;
+        }
         let n = self.next_header_nonce;
         self.next_header_nonce += 1;
         self.pending_header_nonces
             .insert(n, (peer, self.header_nonce_generation));
-        n
+        self.headers_request_time = Some(now);
+        Some(n)
+    }
+
+    /// Roll back a request that could not be serialized or delivered.
+    pub fn cancel_headers_request(&mut self, n: u64, peer: &PeerId) -> bool {
+        let matches =
+            self.pending_header_nonces
+                .get(&n)
+                .is_some_and(|(pending_peer, generation)| {
+                    pending_peer == peer && *generation == self.header_nonce_generation
+                });
+        if matches {
+            self.pending_header_nonces.remove(&n);
+            self.headers_request_time = None;
+        }
+        matches
     }
 
     /// Validate a Headers response nonce against the outstanding request set.
@@ -1227,15 +1248,10 @@ impl ChainSync {
                 if peer == from_peer && *generation == self.header_nonce_generation =>
             {
                 self.pending_header_nonces.remove(&n);
+                self.headers_request_time = None;
                 true
             }
             _ => false,
-        }
-    }
-
-    pub fn mark_headers_requested(&mut self, now: u64) {
-        if self.headers_request_time.is_none() {
-            self.headers_request_time = Some(now);
         }
     }
 
@@ -1268,7 +1284,7 @@ impl ChainSync {
         // (validate_header_nonce removes on RESPONSE, but a timed-out
         // request never got a response). Nonces are single-use per
         // headers-request cycle, so on cycle reset we can safely drop
-        // every pending nonce — the next allocate_header_nonce() gets
+        // every pending nonce — the next begin_headers_request() gets
         // a fresh strict-monotonic value.
         //
         // Jun #2: bump the generation first, then drop every entry that isn't
@@ -1278,8 +1294,7 @@ impl ChainSync {
         // a now-stale generation and is rejected by `validate_header_nonce`.
         self.headers_request_time = None;
         self.header_nonce_generation = self.header_nonce_generation.wrapping_add(1);
-        self.pending_header_nonces
-            .retain(|_, (_, generation)| *generation == self.header_nonce_generation);
+        self.pending_header_nonces.clear();
     }
     pub fn request_timeout(&self) -> u64 {
         self.request_timeout
@@ -1950,8 +1965,13 @@ mod tests {
     fn header_nonce_matches_issuing_peer_once() {
         let peers = peer_pool();
         let mut sync = ChainSync::new(100, Hash::zero());
-        let n = sync.allocate_header_nonce(peers[0]);
-        assert!(sync.validate_header_nonce(n, &peers[0]), "issuer must match");
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
+        assert!(sync.headers_request_pending());
+        assert!(
+            sync.validate_header_nonce(n, &peers[0]),
+            "issuer must match"
+        );
+        assert!(!sync.headers_request_pending());
         assert!(
             !sync.validate_header_nonce(n, &peers[0]),
             "single-use: a consumed nonce must not validate twice"
@@ -1966,11 +1986,15 @@ mod tests {
     fn header_nonce_rejects_cross_peer_without_consuming() {
         let peers = peer_pool();
         let mut sync = ChainSync::new(100, Hash::zero());
-        let n = sync.allocate_header_nonce(peers[0]);
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
 
         assert!(
             !sync.validate_header_nonce(n, &peers[1]),
             "a different peer must not satisfy the nonce"
+        );
+        assert!(
+            sync.begin_headers_request(peers[1], 101).is_none(),
+            "a second peer must not create a competing global request cycle"
         );
         assert!(
             sync.validate_header_nonce(n, &peers[0]),
@@ -1985,15 +2009,29 @@ mod tests {
     fn header_nonce_rejected_after_generation_reset() {
         let peers = peer_pool();
         let mut sync = ChainSync::new(100, Hash::zero());
-        let n = sync.allocate_header_nonce(peers[0]);
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
+        assert!(sync.headers_timed_out(161));
         sync.reset_headers_timeout(); // bumps generation, drops the pending nonce
         assert!(
             !sync.validate_header_nonce(n, &peers[0]),
             "a stale-generation nonce must be rejected"
         );
-        // And a freshly allocated nonce in the new generation still works.
-        let n2 = sync.allocate_header_nonce(peers[0]);
-        assert!(sync.validate_header_nonce(n2, &peers[0]));
+        // A retry can move to another peer in the new generation.
+        let n2 = sync.begin_headers_request(peers[1], 162).unwrap();
+        assert_ne!(n, n2);
+        assert!(sync.validate_header_nonce(n2, &peers[1]));
+    }
+
+    #[test]
+    fn header_nonce_cancelled_send_allows_immediate_retry() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
+
+        assert!(sync.cancel_headers_request(n, &peers[0]));
+        assert!(!sync.headers_request_pending());
+        assert!(!sync.validate_header_nonce(n, &peers[0]));
+        assert!(sync.begin_headers_request(peers[1], 101).is_some());
     }
 
     /// An unsolicited nonce (never allocated) is always rejected — no nonce-0 or

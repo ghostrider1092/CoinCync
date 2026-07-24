@@ -160,7 +160,6 @@ pub(super) async fn handle_headers(
             let hashes: Vec<Hash> = headers_msg.headers.iter().map(|h| h.hash()).collect();
             sync_guard.update_peer_height(max_header_height);
             sync_guard.update_peer_height_for(peer_id, max_header_height);
-            sync_guard.reset_headers_timeout();
             debug!(
                 "Accepted Headers nonce={} count={} max_height={} from peer {:?}",
                 headers_msg.nonce,

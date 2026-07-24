@@ -15,6 +15,7 @@ use super::super::peer::{PeerId, PeerInfo, PeerState};
 use super::super::protocol::{Message, MessageType};
 use super::super::scoring::PeerScorer;
 use super::super::sync::{build_locator, ChainSync, SyncState};
+use super::broadcast::send_to_peer;
 use super::peer_manager::pick_scored_peer;
 use super::runtime::wait_for_shutdown;
 
@@ -563,19 +564,21 @@ async fn run_headers_tick(
         return;
     }
 
-    let nonce = sync.write().await.allocate_header_nonce(peer_id);
-    let Ok(message) = Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) else {
+    let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) else {
         return;
     };
-    let Ok(data) = message.to_bytes() else {
-        return;
+    let sent = match Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
+        Ok(message) => match message.to_bytes() {
+            Ok(data) => send_to_peer(senders, &peer_id, data).await,
+            Err(_) => false,
+        },
+        Err(_) => false,
     };
-    let Some(sender) = senders.get(&peer_id).map(|entry| entry.value().clone()) else {
+    if !sent {
+        sync.write().await.cancel_headers_request(nonce, &peer_id);
         return;
-    };
+    }
 
-    let _ = sender.send(data).await;
-    sync.write().await.mark_headers_requested(now);
     info!(
         "[IBD] GetHeaders nonce={} sent to peer {:?} (our_height={}, state={:?})",
         nonce,
