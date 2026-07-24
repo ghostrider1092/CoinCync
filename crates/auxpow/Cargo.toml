@@ -1,0 +1,34 @@
+[package]
+name         = "auxpow"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+license      = "MIT"
+description  = "Direction-agnostic merge-mining (AuxPoW) commitment primitive for CoinCync. Merkle-branch verification + merge-mining tag parsing that connect a child block hash to a parent block's coinbase, independent of any specific parent/child chain. See docs/design/auxpow-governed-merge-mining.md."
+
+# Phase 1 of the governed merge-mining rollout: the commitment primitive
+# ONLY. Pure types + Merkle + tag parsing + serialization + property tests.
+# It deliberately does NOT verify parent proof-of-work (that is the
+# consensus-integration phase, needs RandomX + a parent header format) and
+# is NOT wired into CoinCync consensus. Nothing here touches a hash-locked
+# consensus file.
+[lib]
+name = "auxpow"
+path = "src/lib.rs"
+
+[dependencies]
+# Wire serialization for the AuxPow proof + Merkle branch, matching the
+# borsh usage across the workspace.
+borsh     = { version = "1", features = ["derive"] }
+# Default node hasher used by tests + the reference aux-tree combiner.
+# The core fold logic is generic over the combine function, so the
+# consensus integration can inject blake3 (aux side) and the parent's
+# tree hash (coinbase side) without changing this crate.
+blake3    = "1"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
+
+[lints.rust]
+unsafe_code = "forbid"

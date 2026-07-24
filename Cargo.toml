@@ -1,5 +1,5 @@
 [workspace]
-members  = [".", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/tick"]
+members  = [".", "crates/auxpow", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/tick"]
 # crates/cynchub: CIP-002 skeleton (post-mainnet merge-mined liquidity layer).
 # Doesn't define the workspace's "randomx"/"testnet" features, so workspace-
 # wide builds with --features error on its Cargo.toml. Build standalone:
