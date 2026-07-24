@@ -892,6 +892,174 @@ impl DisclosureProof {
 }
 
 // =============================================================================
+// CHAIN ANCHORING
+// =============================================================================
+//
+// The `verify_*` functions above prove only that a disclosure proof is
+// *internally consistent*: the range-proof math holds, the Schnorr signature
+// verifies, the homomorphic sum balances. Every one of them reads the on-chain
+// reference (`original_commitment`, `stealth_address`, the output commitments)
+// from data the PROVER supplied. That is sufficient to prove "I know a secret
+// for this commitment/key", but NOT "this commitment/key is a real, unspent
+// output on the CoinCync chain" (issues #252 / #253, junbyjun1238).
+//
+// A prover can hand you a fully-valid `OwnershipProof` for a stealth key they
+// genuinely control that was never mined, or a `BalanceProof` over a commitment
+// they invented. The offline verifiers return `true` for all of these.
+//
+// The `*_anchored` functions below close that gap. They take a `ChainAnchor` —
+// the real on-chain output, resolved by the verifier from THEIR OWN trusted
+// chain view — and enforce that the proof's self-declared reference matches it.
+//
+// Where the anchor comes from is load-bearing for privacy. CoinCync exposes no
+// "does output (tx_hash, index) exist" RPC by design (surveillance resistance),
+// so the anchor MUST come from:
+//   - the verifier's own full-node UTXO set (`UtxoDb::get_output` / `is_spent`), or
+//   - a block/transaction the verifier obtained and hash-checked themselves.
+// It must NEVER be self-supplied by the prover, and asking a *remote* node for
+// the specific output leaks which outputs the verifier cares about — callers
+// that anchor against a remote source must warn the operator (see the wallet
+// CLI's `disclose verify-*` commands).
+
+/// A real on-chain output, resolved from the verifier's own trusted chain view,
+/// used to anchor a disclosure proof to actual chain state.
+///
+/// Both fields come from the same `TxOutput` at the referenced `(tx_hash,
+/// output_index)`: `commitment` is `TxOutput::commitment`, `stealth_address` is
+/// `TxOutput::stealth_address.as_bytes()`. Construct it from the verifier's own
+/// UTXO set or a hash-checked transaction — never from prover-supplied data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainAnchor {
+    /// The on-chain Pedersen commitment for the referenced output.
+    pub commitment: [u8; 32],
+    /// The on-chain stealth (one-time) address for the referenced output.
+    pub stealth_address: [u8; 32],
+}
+
+impl ChainAnchor {
+    /// Build an anchor from a referenced output's on-chain commitment and
+    /// stealth address.
+    pub fn new(commitment: [u8; 32], stealth_address: [u8; 32]) -> Self {
+        Self {
+            commitment,
+            stealth_address,
+        }
+    }
+}
+
+/// Outcome of an anchored disclosure-proof check. Distinguishing the two failure
+/// modes matters: a forged/malformed proof is a different thing to report than a
+/// cryptographically-sound proof that simply doesn't correspond to the on-chain
+/// output it claims.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorVerdict {
+    /// The proof's cryptography holds AND it binds to the supplied on-chain output.
+    Valid,
+    /// The proof's cryptography is malformed or forged — it fails even offline.
+    CryptoInvalid,
+    /// The cryptography is sound, but the on-chain reference the prover declared
+    /// does not match the trusted on-chain output. The proof is unanchored: it
+    /// proves knowledge of a secret for *some* commitment/key, not the one on chain.
+    AnchorMismatch,
+}
+
+impl AnchorVerdict {
+    /// True only for [`AnchorVerdict::Valid`].
+    pub fn is_valid(self) -> bool {
+        matches!(self, AnchorVerdict::Valid)
+    }
+}
+
+/// Verify a balance proof AND that its commitment is the one on chain.
+///
+/// `expected_commitment` is the referenced output's real on-chain
+/// `TxOutput::commitment`, resolved by the verifier from their own chain view.
+/// Returns [`AnchorVerdict::AnchorMismatch`] when the proof is cryptographically
+/// valid but was built over a different commitment than the on-chain output.
+pub fn verify_balance_proof_anchored(
+    proof: &BalanceProof,
+    expected_commitment: &[u8; 32],
+) -> Result<AnchorVerdict> {
+    if !verify_balance_proof(proof)? {
+        return Ok(AnchorVerdict::CryptoInvalid);
+    }
+    // Commitments are public on-chain values; a plain compare is correct here
+    // (no secret-dependent branch).
+    if proof.original_commitment != *expected_commitment {
+        return Ok(AnchorVerdict::AnchorMismatch);
+    }
+    Ok(AnchorVerdict::Valid)
+}
+
+/// Verify an ownership proof AND that its stealth address is the one on chain.
+///
+/// The caller resolves `anchor` for the proof's own `(tx_hash, output_index)`:
+/// look up that output in the trusted chain view and pass its real
+/// `stealth_address`. A cryptographically-valid proof whose declared stealth
+/// address is not the on-chain one yields [`AnchorVerdict::AnchorMismatch`].
+pub fn verify_ownership_proof_anchored(
+    proof: &OwnershipProof,
+    anchor: &ChainAnchor,
+) -> Result<AnchorVerdict> {
+    if !verify_ownership_proof(proof)? {
+        return Ok(AnchorVerdict::CryptoInvalid);
+    }
+    if *proof.stealth_address.as_bytes() != anchor.stealth_address {
+        return Ok(AnchorVerdict::AnchorMismatch);
+    }
+    Ok(AnchorVerdict::Valid)
+}
+
+/// Verify a sum proof against on-chain outputs resolved from its `output_refs`.
+///
+/// `anchors[i]` is the trusted on-chain output for `proof.output_refs[i]`, in the
+/// same order. This is the anchored form of [`verify_sum_proof`]: instead of the
+/// caller passing bare commitments (whose provenance is unchecked), they pass the
+/// resolved on-chain anchors and the ref/anchor counts must line up.
+pub fn verify_sum_proof_anchored(
+    proof: &SumProof,
+    anchors: &[ChainAnchor],
+) -> Result<AnchorVerdict> {
+    if anchors.len() != proof.output_refs.len() {
+        return Ok(AnchorVerdict::AnchorMismatch);
+    }
+    let mut commitments = Vec::with_capacity(anchors.len());
+    for anchor in anchors {
+        match PedersenCommitment::from_bytes_checked(anchor.commitment) {
+            Some(c) => commitments.push(c),
+            // An anchor that isn't a valid curve point can't be a real on-chain
+            // commitment — treat it as a mismatch, not a crypto forgery.
+            None => return Ok(AnchorVerdict::AnchorMismatch),
+        }
+    }
+    if verify_sum_proof(proof, &commitments)? {
+        Ok(AnchorVerdict::Valid)
+    } else {
+        Ok(AnchorVerdict::AnchorMismatch)
+    }
+}
+
+/// Verify a source proof AND that its key image is actually spent on chain.
+///
+/// `key_image_spent_on_chain` is resolved by the caller from their own chain view
+/// (`UtxoDb::is_spent`). A cryptographically-valid proof for a key image that
+/// does not appear in the chain's spent set yields [`AnchorVerdict::AnchorMismatch`]:
+/// the prover proved they *could* generate that key image, not that it was ever
+/// used to spend a real output.
+pub fn verify_source_proof_anchored(
+    proof: &SourceProof,
+    key_image_spent_on_chain: bool,
+) -> Result<AnchorVerdict> {
+    if !verify_source_proof(proof)? {
+        return Ok(AnchorVerdict::CryptoInvalid);
+    }
+    if !key_image_spent_on_chain {
+        return Ok(AnchorVerdict::AnchorMismatch);
+    }
+    Ok(AnchorVerdict::Valid)
+}
+
+// =============================================================================
 // TESTS
 // =============================================================================
 
@@ -1194,5 +1362,144 @@ mod tests {
             DisclosureProof::from_ownership(&ownership, "valid", Some(future_ts)).unwrap();
         assert!(!valid_container.is_expired());
         assert!(valid_container.verify().unwrap());
+    }
+
+    // ---- Chain anchoring (issues #252 / #253) ----
+
+    #[test]
+    fn test_balance_anchored_valid() {
+        let value = 1_000_000u64;
+        let blinding = BlindingFactor::random(&mut OsRng);
+        let commitment = PedersenCommitment::commit(value, &blinding);
+        let proof = create_balance_proof(value, &blinding, &commitment, 500_000).unwrap();
+
+        // Anchor: the on-chain output's real commitment == the one in the proof.
+        let verdict = verify_balance_proof_anchored(&proof, &commitment.to_bytes()).unwrap();
+        assert_eq!(verdict, AnchorVerdict::Valid);
+        assert!(verdict.is_valid());
+    }
+
+    #[test]
+    fn test_balance_anchored_mismatch_is_the_253_attack() {
+        // The prover commits to a value they do NOT hold on chain and produces a
+        // perfectly valid range proof over it. Offline verification says "valid".
+        let value = 5_000_000u64;
+        let blinding = BlindingFactor::random(&mut OsRng);
+        let invented = PedersenCommitment::commit(value, &blinding);
+        let proof = create_balance_proof(value, &blinding, &invented, 1_000_000).unwrap();
+        assert!(verify_balance_proof(&proof).unwrap(), "offline still passes");
+
+        // But the real on-chain output has a different commitment. Anchoring
+        // rejects the proof as unanchored — this is the #253 fix.
+        let on_chain = PedersenCommitment::commit(42, &BlindingFactor::random(&mut OsRng));
+        let verdict = verify_balance_proof_anchored(&proof, &on_chain.to_bytes()).unwrap();
+        assert_eq!(verdict, AnchorVerdict::AnchorMismatch);
+        assert!(!verdict.is_valid());
+    }
+
+    #[test]
+    fn test_balance_anchored_crypto_invalid() {
+        let value = 1_000_000u64;
+        let blinding = BlindingFactor::random(&mut OsRng);
+        let commitment = PedersenCommitment::commit(value, &blinding);
+        let mut proof = create_balance_proof(value, &blinding, &commitment, 500_000).unwrap();
+        // Corrupt the range proof so the crypto itself fails.
+        let fake = PedersenCommitment::commit(9, &BlindingFactor::random(&mut OsRng));
+        proof.original_commitment = fake.to_bytes();
+        let verdict = verify_balance_proof_anchored(&proof, &fake.to_bytes()).unwrap();
+        // Even though the anchor now matches the (tampered) commitment, the
+        // Schnorr/range math no longer holds → CryptoInvalid takes precedence.
+        assert_eq!(verdict, AnchorVerdict::CryptoInvalid);
+    }
+
+    #[test]
+    fn test_ownership_anchored_valid() {
+        let (sk, pk) = make_test_keys();
+        let tx_hash = Hash::from_bytes([7u8; 32]);
+        let proof = create_ownership_proof(&tx_hash, 2, &pk, &sk, b"audit").unwrap();
+
+        let anchor = ChainAnchor::new([0u8; 32], *pk.as_bytes());
+        let verdict = verify_ownership_proof_anchored(&proof, &anchor).unwrap();
+        assert_eq!(verdict, AnchorVerdict::Valid);
+    }
+
+    #[test]
+    fn test_ownership_anchored_mismatch_is_the_253_attack() {
+        // Prover controls key K and makes a valid ownership proof binding K to
+        // (tx_hash, idx). Offline verification passes.
+        let (sk, pk) = make_test_keys();
+        let tx_hash = Hash::from_bytes([7u8; 32]);
+        let proof = create_ownership_proof(&tx_hash, 2, &pk, &sk, b"audit").unwrap();
+        assert!(verify_ownership_proof(&proof).unwrap(), "offline still passes");
+
+        // But the real on-chain output at (tx_hash, idx) has a DIFFERENT stealth
+        // address. The prover never owned that output. Anchoring rejects it.
+        let (_other_sk, other_pk) = make_test_keys();
+        let anchor = ChainAnchor::new([0u8; 32], *other_pk.as_bytes());
+        let verdict = verify_ownership_proof_anchored(&proof, &anchor).unwrap();
+        assert_eq!(verdict, AnchorVerdict::AnchorMismatch);
+    }
+
+    #[test]
+    fn test_sum_anchored_valid_and_mismatch() {
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let b2 = BlindingFactor::random(&mut OsRng);
+        let (v1, v2) = (100_000u64, 250_000u64);
+        let c1 = PedersenCommitment::commit(v1, &b1);
+        let c2 = PedersenCommitment::commit(v2, &b2);
+        let outputs = vec![
+            (v1, b1, Hash::from_bytes([1u8; 32]), 0u8),
+            (v2, b2, Hash::from_bytes([2u8; 32]), 1u8),
+        ];
+        let proof = create_sum_proof(&outputs, (0, 100)).unwrap();
+
+        // Correct anchors → Valid.
+        let anchors = vec![
+            ChainAnchor::new(c1.to_bytes(), [0u8; 32]),
+            ChainAnchor::new(c2.to_bytes(), [0u8; 32]),
+        ];
+        assert_eq!(
+            verify_sum_proof_anchored(&proof, &anchors).unwrap(),
+            AnchorVerdict::Valid
+        );
+
+        // Wrong count → AnchorMismatch.
+        assert_eq!(
+            verify_sum_proof_anchored(&proof, &anchors[..1]).unwrap(),
+            AnchorVerdict::AnchorMismatch
+        );
+
+        // Right count, one wrong on-chain commitment → AnchorMismatch.
+        let wrong = PedersenCommitment::commit(999, &BlindingFactor::random(&mut OsRng));
+        let bad_anchors = vec![
+            ChainAnchor::new(c1.to_bytes(), [0u8; 32]),
+            ChainAnchor::new(wrong.to_bytes(), [0u8; 32]),
+        ];
+        assert_eq!(
+            verify_sum_proof_anchored(&proof, &bad_anchors).unwrap(),
+            AnchorVerdict::AnchorMismatch
+        );
+    }
+
+    #[test]
+    fn test_source_anchored_valid_and_mismatch() {
+        let secret = CurveSecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let ki = CurveKeyImage::from_secret(&secret);
+        let sk = SecretKey::from_bytes(secret.to_bytes());
+        let pk = PublicKey::from_bytes(public.to_bytes());
+        let proof = create_source_proof(&sk, &pk, &ki, b"compliance").unwrap();
+
+        // Key image is in the chain's spent set → Valid.
+        assert_eq!(
+            verify_source_proof_anchored(&proof, true).unwrap(),
+            AnchorVerdict::Valid
+        );
+        // Key image was never actually spent on chain → AnchorMismatch: the
+        // prover proved they *could* generate it, not that a real spend used it.
+        assert_eq!(
+            verify_source_proof_anchored(&proof, false).unwrap(),
+            AnchorVerdict::AnchorMismatch
+        );
     }
 }

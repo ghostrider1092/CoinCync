@@ -148,9 +148,11 @@ pub use parallel_proofs::{
 // despite zero references from the consensus / mempool / RPC layers.
 pub use disclosure::{
     create_balance_proof, create_ownership_proof, create_source_proof, create_sum_proof,
-    verify_balance_proof, verify_ownership_proof, verify_source_proof, verify_sum_proof,
-    BalanceProof as DisclosureBalanceProof, DisclosureProof, DisclosureType,
-    OutputRef as DisclosureOutputRef, OwnershipProof, SourceProof, SumProof,
+    verify_balance_proof, verify_balance_proof_anchored, verify_ownership_proof,
+    verify_ownership_proof_anchored, verify_source_proof, verify_source_proof_anchored,
+    verify_sum_proof, verify_sum_proof_anchored, AnchorVerdict, BalanceProof as DisclosureBalanceProof,
+    ChainAnchor, DisclosureProof, DisclosureType, OutputRef as DisclosureOutputRef, OwnershipProof,
+    SourceProof, SumProof,
 };
 
 pub use memo::{decrypt_memo, encrypt_memo, MAX_ENCRYPTED_MEMO_SIZE, MAX_MEMO_SIZE, MEMO_OVERHEAD};

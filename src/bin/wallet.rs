@@ -387,16 +387,38 @@ enum DiscloseAction {
     },
     /// Verify a hex-encoded balance proof. No wallet keys needed —
     /// anyone can verify.
+    ///
+    /// Without `--anchor-tx`, this checks only the range-proof math over the
+    /// prover-supplied commitment (NOT proof of on-chain funds). Pass
+    /// `--anchor-tx <hash>` and `--anchor-output-index <n>` to also verify the
+    /// commitment matches that real on-chain output (queried via `--node`).
     VerifyBalance {
         #[arg(long)]
         proof: String,
+        /// On-chain tx hash (hex) whose output the proof should match. When
+        /// set with `--anchor-output-index`, upgrades the check to chain-anchored.
+        #[arg(long)]
+        anchor_tx: Option<String>,
+        /// Index of the output within `--anchor-tx` to anchor against.
+        #[arg(long)]
+        anchor_output_index: Option<u8>,
     },
     /// Verify a hex-encoded ownership proof. The wallet owner
     /// produces the OwnershipProof out-of-band; the auditor
     /// pastes the proof here.
+    ///
+    /// Without `--anchor`, this checks only the Schnorr signature over the
+    /// prover-declared (stealth_address, tx_hash, output_index) — NOT proof of
+    /// real on-chain funds. Pass `--anchor` to also confirm the on-chain output
+    /// at the proof's own (tx_hash, output_index) has that stealth address
+    /// (queried via `--node`).
     VerifyOwnership {
         #[arg(long)]
         proof: String,
+        /// Anchor the proof against the on-chain output at its declared
+        /// (tx_hash, output_index), fetched from `--node`.
+        #[arg(long)]
+        anchor: bool,
     },
     /// Export a time-scoped view key: a read-only key that decrypts only
     /// outputs in blocks [--from-height, --to-height]. Discloses your
@@ -597,7 +619,13 @@ async fn main() {
                 utxo_index,
                 threshold,
             } => cmd_disclose_balance(&wallet_path, password, utxo_index, threshold).await,
-            DiscloseAction::VerifyBalance { proof } => cmd_disclose_verify_balance(&proof).await,
+            DiscloseAction::VerifyBalance {
+                proof,
+                anchor_tx,
+                anchor_output_index,
+            } => {
+                cmd_disclose_verify_balance(&proof, &cli.node, anchor_tx, anchor_output_index).await
+            }
             DiscloseAction::ScopedViewKey {
                 password,
                 from_height,
@@ -606,8 +634,8 @@ async fn main() {
             DiscloseAction::ScanScoped { view_key } => {
                 cmd_disclose_scan_scoped(&view_key, &cli.node).await
             }
-            DiscloseAction::VerifyOwnership { proof } => {
-                cmd_disclose_verify_ownership(&proof).await
+            DiscloseAction::VerifyOwnership { proof, anchor } => {
+                cmd_disclose_verify_ownership(&proof, &cli.node, anchor).await
             }
         },
         Command::ShowMemo {
@@ -2475,22 +2503,89 @@ async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(),
     Ok(())
 }
 
-async fn cmd_disclose_verify_balance(proof_hex: &str) -> Result<(), String> {
-    use coincync::crypto::{verify_balance_proof, DisclosureBalanceProof as BalanceProof};
+/// Parse a required 32-byte hex field from an RPC output object.
+fn anchor_hex32(out: &serde_json::Value, field: &str) -> Result<[u8; 32], String> {
+    let s = out
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("rpc output missing '{}' — node may be on an older build", field))?;
+    let raw = hex::decode(s).map_err(|e| format!("bad hex for '{}': {}", field, e))?;
+    if raw.len() != 32 {
+        return Err(format!("'{}' must be 32 bytes, got {}", field, raw.len()));
+    }
+    let mut b = [0u8; 32];
+    b.copy_from_slice(&raw);
+    Ok(b)
+}
+
+/// Resolve a referenced output's on-chain (commitment, stealth_address) from a
+/// node, for anchoring a disclosure proof.
+///
+/// PRIVACY: querying a node for a specific transaction reveals to that node that
+/// you care about it. CoinCync exposes no bulk output-lookup RPC by design, so
+/// there is no way to anchor without a targeted query — anchor against YOUR OWN
+/// node, never a stranger's, or the anchoring itself leaks your interest.
+async fn fetch_chain_anchor(
+    node: &str,
+    tx_hash_hex: &str,
+    output_index: u8,
+) -> Result<coincync::crypto::ChainAnchor, String> {
+    let wanted = tx_hash_hex.trim_start_matches("0x").to_lowercase();
+    eprintln!("⚠ PRIVACY: anchoring queries {node} for tx {}…", &wanted[..wanted.len().min(16)]);
+    eprintln!("  That node now knows you care about this output. Only anchor");
+    eprintln!("  against a node you run — a remote node's answer leaks your interest.");
+
+    let resp = rpc_call(node, "get_transaction", serde_json::json!([wanted]))
+        .await
+        .map_err(|e| format!("rpc get_transaction: {}", e))?;
+
+    // Confirm the node returned the tx we asked for — never anchor against a
+    // substituted transaction.
+    let returned = resp
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if returned != wanted {
+        return Err(format!(
+            "node returned tx {returned} but we asked for {wanted} — refusing to anchor"
+        ));
+    }
+
+    let outputs = resp
+        .get("outputs")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "rpc response missing 'outputs' array".to_string())?;
+    let out = outputs.get(output_index as usize).ok_or_else(|| {
+        format!(
+            "output_index {} out of range (tx has {} outputs)",
+            output_index,
+            outputs.len()
+        )
+    })?;
+
+    Ok(coincync::crypto::ChainAnchor::new(
+        anchor_hex32(out, "commitment")?,
+        anchor_hex32(out, "stealth_address")?,
+    ))
+}
+
+async fn cmd_disclose_verify_balance(
+    proof_hex: &str,
+    node: &str,
+    anchor_tx: Option<String>,
+    anchor_output_index: Option<u8>,
+) -> Result<(), String> {
+    use coincync::crypto::{
+        verify_balance_proof, verify_balance_proof_anchored, AnchorVerdict,
+        DisclosureBalanceProof as BalanceProof,
+    };
 
     let bytes = hex::decode(proof_hex).map_err(|e| format!("invalid proof hex: {}", e))?;
     let proof: BalanceProof =
         serde_json::from_slice(&bytes).map_err(|e| format!("decode BalanceProof: {}", e))?;
 
-    let ok = verify_balance_proof(&proof).map_err(|e| format!("verify_balance_proof: {}", e))?;
-
-    if ok {
-        // Honesty (issue #253): this only checks the range-proof math over a
-        // caller-supplied commitment. It does NOT confirm the commitment
-        // exists in the chain's UTXO set, so it is NOT evidence of on-chain
-        // funds — anyone can commit to any amount and produce a valid range
-        // proof. Label the crypto result plainly and never imply funds.
-        println!("CRYPTOGRAPHICALLY VALID — range proof well-formed");
+    let print_details = || {
         println!(
             "  threshold:   {} atomic (≈ {:.4} CYNC)",
             proof.threshold,
@@ -2498,62 +2593,155 @@ async fn cmd_disclose_verify_balance(proof_hex: &str) -> Result<(), String> {
         );
         println!("  timestamp:   {} (unix epoch seconds)", proof.timestamp);
         println!("  commitment:  {}", hex::encode(proof.original_commitment));
-        println!();
-        println!(
-            "The prover knows a value ≥ {} atomic for this commitment,",
-            proof.threshold
-        );
-        println!("without revealing the actual value.");
-        println!();
-        println!("⚠ NOT ANCHORED TO CHAIN: this does not prove the commitment");
-        println!("  corresponds to a real, unspent on-chain output. It is not");
-        println!("  proof-of-funds on its own — verify the commitment against a");
-        println!("  trusted node's UTXO set before relying on it.");
-        Ok(())
-    } else {
-        Err("INVALID: proof verification failed".into())
+    };
+
+    match (anchor_tx, anchor_output_index) {
+        // ── Chain-anchored path ─────────────────────────────────────────
+        (Some(tx), Some(idx)) => {
+            let anchor = fetch_chain_anchor(node, &tx, idx).await?;
+            let verdict = verify_balance_proof_anchored(&proof, &anchor.commitment)
+                .map_err(|e| format!("verify_balance_proof_anchored: {}", e))?;
+            match verdict {
+                AnchorVerdict::Valid => {
+                    println!("ANCHORED + VALID — range proof holds AND the commitment is on chain");
+                    print_details();
+                    println!("  anchored to: tx {}… output {}", &tx[..tx.len().min(16)], idx);
+                    println!();
+                    println!(
+                        "The prover knows a value ≥ {} atomic for a real on-chain output.",
+                        proof.threshold
+                    );
+                    Ok(())
+                }
+                AnchorVerdict::AnchorMismatch => Err(format!(
+                    "ANCHOR MISMATCH: the range proof is well-formed but its commitment does \
+                     NOT match on-chain output (tx {}… output {}). The proof is over a \
+                     commitment that is not that output — not proof of those funds.",
+                    &tx[..tx.len().min(16)],
+                    idx
+                )),
+                AnchorVerdict::CryptoInvalid => {
+                    Err("INVALID: range proof verification failed".into())
+                }
+            }
+        }
+        // A half-specified anchor is a usage error — fail loudly rather than
+        // silently falling back to the unanchored (weaker) check.
+        (Some(_), None) | (None, Some(_)) => {
+            Err("anchoring needs BOTH --anchor-tx and --anchor-output-index".into())
+        }
+        // ── Offline path (unchanged behaviour) ──────────────────────────
+        (None, None) => {
+            let ok =
+                verify_balance_proof(&proof).map_err(|e| format!("verify_balance_proof: {}", e))?;
+            if ok {
+                // Honesty (issue #253): this only checks the range-proof math over a
+                // caller-supplied commitment. It does NOT confirm the commitment
+                // exists in the chain's UTXO set, so it is NOT evidence of on-chain
+                // funds — anyone can commit to any amount and produce a valid range
+                // proof. Label the crypto result plainly and never imply funds.
+                println!("CRYPTOGRAPHICALLY VALID — range proof well-formed");
+                print_details();
+                println!();
+                println!(
+                    "The prover knows a value ≥ {} atomic for this commitment,",
+                    proof.threshold
+                );
+                println!("without revealing the actual value.");
+                println!();
+                println!("⚠ NOT ANCHORED TO CHAIN: this does not prove the commitment");
+                println!("  corresponds to a real, unspent on-chain output. It is not");
+                println!("  proof-of-funds on its own. Re-run with --anchor-tx <hash>");
+                println!("  --anchor-output-index <n> to verify it against your node.");
+                Ok(())
+            } else {
+                Err("INVALID: proof verification failed".into())
+            }
+        }
     }
 }
 
-async fn cmd_disclose_verify_ownership(proof_hex: &str) -> Result<(), String> {
-    use coincync::crypto::{verify_ownership_proof, OwnershipProof};
+async fn cmd_disclose_verify_ownership(
+    proof_hex: &str,
+    node: &str,
+    anchor: bool,
+) -> Result<(), String> {
+    use coincync::crypto::{
+        verify_ownership_proof, verify_ownership_proof_anchored, AnchorVerdict, OwnershipProof,
+    };
 
     let bytes = hex::decode(proof_hex).map_err(|e| format!("invalid proof hex: {}", e))?;
     let proof: OwnershipProof =
         serde_json::from_slice(&bytes).map_err(|e| format!("decode OwnershipProof: {}", e))?;
 
-    let ok =
-        verify_ownership_proof(&proof).map_err(|e| format!("verify_ownership_proof: {}", e))?;
-
-    if ok {
-        // Honesty (issue #253): verify_ownership_proof only checks the
-        // Schnorr signature over the (stealth_address, tx_hash, output_index)
-        // the prover chose. It does NOT query the chain to confirm that
-        // output exists, is unspent, or that its on-chain stealth address
-        // matches. So this proves "I know the key for this self-declared
-        // output", not "I control real on-chain funds". Report accordingly.
-        println!("CRYPTOGRAPHICALLY VALID — ownership signature well-formed");
-        println!(
-            "  tx_hash:        {}",
-            hex::encode(proof.tx_hash.as_bytes())
-        );
+    let print_details = || {
+        println!("  tx_hash:        {}", hex::encode(proof.tx_hash.as_bytes()));
         println!("  output_index:   {}", proof.output_index);
         println!(
             "  stealth_addr:   {}",
             hex::encode(proof.stealth_address.as_bytes())
         );
-        println!();
-        println!("The prover knows the secret key for the stealth address above,");
-        println!("bound to the referenced output and message.");
-        println!();
-        println!("⚠ NOT ANCHORED TO CHAIN: this does not confirm the referenced");
-        println!("  output exists, is unspent, or that its on-chain stealth");
-        println!("  address matches. It is not proof the prover controls real");
-        println!("  funds — check (tx_hash, output_index) against a trusted");
-        println!("  node's UTXO set before relying on it.");
-        Ok(())
+    };
+
+    if anchor {
+        // ── Chain-anchored path ─────────────────────────────────────────
+        // The proof carries its own (tx_hash, output_index); resolve that exact
+        // output from the node and confirm the stealth address matches.
+        let tx_hex = hex::encode(proof.tx_hash.as_bytes());
+        let chain_anchor = fetch_chain_anchor(node, &tx_hex, proof.output_index).await?;
+        let verdict = verify_ownership_proof_anchored(&proof, &chain_anchor)
+            .map_err(|e| format!("verify_ownership_proof_anchored: {}", e))?;
+        match verdict {
+            AnchorVerdict::Valid => {
+                println!(
+                    "ANCHORED + VALID — signature holds AND matches the on-chain output"
+                );
+                print_details();
+                println!();
+                println!(
+                    "The prover controls the on-chain stealth address at (tx_hash, output_index)."
+                );
+                println!();
+                println!("⚠ Existence ≠ unspent: this confirms the output exists with this");
+                println!("  stealth address, not that it is currently unspent. Check the key");
+                println!("  image against your node's spent set for spend status.");
+                Ok(())
+            }
+            AnchorVerdict::AnchorMismatch => Err(
+                "ANCHOR MISMATCH: the signature is well-formed but the on-chain output at the \
+                 declared (tx_hash, output_index) has a DIFFERENT stealth address. The prover \
+                 signed for an output they do not own on chain."
+                    .into(),
+            ),
+            AnchorVerdict::CryptoInvalid => {
+                Err("INVALID: ownership signature verification failed".into())
+            }
+        }
     } else {
-        Err("INVALID: proof verification failed".into())
+        // ── Offline path (unchanged behaviour) ──────────────────────────
+        let ok = verify_ownership_proof(&proof)
+            .map_err(|e| format!("verify_ownership_proof: {}", e))?;
+        if ok {
+            // Honesty (issue #253): verify_ownership_proof only checks the
+            // Schnorr signature over the (stealth_address, tx_hash, output_index)
+            // the prover chose. It does NOT query the chain to confirm that
+            // output exists, is unspent, or that its on-chain stealth address
+            // matches. So this proves "I know the key for this self-declared
+            // output", not "I control real on-chain funds". Report accordingly.
+            println!("CRYPTOGRAPHICALLY VALID — ownership signature well-formed");
+            print_details();
+            println!();
+            println!("The prover knows the secret key for the stealth address above,");
+            println!("bound to the referenced output and message.");
+            println!();
+            println!("⚠ NOT ANCHORED TO CHAIN: this does not confirm the referenced");
+            println!("  output exists, is unspent, or that its on-chain stealth");
+            println!("  address matches. Re-run with --anchor to verify it against");
+            println!("  your node before relying on it.");
+            Ok(())
+        } else {
+            Err("INVALID: proof verification failed".into())
+        }
     }
 }
 
