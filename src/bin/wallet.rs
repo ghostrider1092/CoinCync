@@ -2505,10 +2505,12 @@ async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(),
 
 /// Parse a required 32-byte hex field from an RPC output object.
 fn anchor_hex32(out: &serde_json::Value, field: &str) -> Result<[u8; 32], String> {
-    let s = out
-        .get(field)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("rpc output missing '{}' — node may be on an older build", field))?;
+    let s = out.get(field).and_then(|v| v.as_str()).ok_or_else(|| {
+        format!(
+            "rpc output missing '{}' — node may be on an older build",
+            field
+        )
+    })?;
     let raw = hex::decode(s).map_err(|e| format!("bad hex for '{}': {}", field, e))?;
     if raw.len() != 32 {
         return Err(format!("'{}' must be 32 bytes, got {}", field, raw.len()));
@@ -2531,7 +2533,14 @@ async fn fetch_chain_anchor(
     output_index: u8,
 ) -> Result<coincync::crypto::ChainAnchor, String> {
     let wanted = tx_hash_hex.trim_start_matches("0x").to_lowercase();
-    eprintln!("⚠ PRIVACY: anchoring queries {node} for tx {}…", &wanted[..wanted.len().min(16)]);
+    let tx_hash_bytes =
+        hex::decode(&wanted).map_err(|e| format!("invalid anchor tx hash: {}", e))?;
+    let tx_hash = coincync::primitives::Hash::from_slice(&tx_hash_bytes)
+        .ok_or_else(|| "anchor tx hash must be exactly 32 bytes".to_string())?;
+    eprintln!(
+        "⚠ PRIVACY: anchoring queries {node} for tx {}…",
+        &wanted[..wanted.len().min(16)]
+    );
     eprintln!("  That node now knows you care about this output. Only anchor");
     eprintln!("  against a node you run — a remote node's answer leaks your interest.");
 
@@ -2563,10 +2572,19 @@ async fn fetch_chain_anchor(
             outputs.len()
         )
     })?;
+    let block_height = resp
+        .get("block_height")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| "rpc response missing canonical block_height".to_string())?;
 
     Ok(coincync::crypto::ChainAnchor::new(
+        coincync::crypto::DisclosureOutputRef {
+            tx_hash,
+            output_index,
+        },
         anchor_hex32(out, "commitment")?,
         anchor_hex32(out, "stealth_address")?,
+        block_height,
     ))
 }
 
@@ -2599,17 +2617,25 @@ async fn cmd_disclose_verify_balance(
         // ── Chain-anchored path ─────────────────────────────────────────
         (Some(tx), Some(idx)) => {
             let anchor = fetch_chain_anchor(node, &tx, idx).await?;
-            let verdict = verify_balance_proof_anchored(&proof, &anchor.commitment)
+            let verdict = verify_balance_proof_anchored(&proof, &anchor)
                 .map_err(|e| format!("verify_balance_proof_anchored: {}", e))?;
             match verdict {
                 AnchorVerdict::Valid => {
                     println!("ANCHORED + VALID — range proof holds AND the commitment is on chain");
                     print_details();
-                    println!("  anchored to: tx {}… output {}", &tx[..tx.len().min(16)], idx);
+                    println!(
+                        "  anchored to: tx {}… output {}",
+                        &tx[..tx.len().min(16)],
+                        idx
+                    );
                     println!();
                     println!(
-                        "The prover knows a value ≥ {} atomic for a real on-chain output.",
+                        "The prover knows a value ≥ {} atomic for a historical on-chain output.",
                         proof.threshold
+                    );
+                    println!(
+                        "This does NOT prove the output is currently unspent; ring signatures hide \
+                         which member was spent."
                     );
                     Ok(())
                 }
@@ -2650,8 +2676,9 @@ async fn cmd_disclose_verify_balance(
                 println!("without revealing the actual value.");
                 println!();
                 println!("⚠ NOT ANCHORED TO CHAIN: this does not prove the commitment");
-                println!("  corresponds to a real, unspent on-chain output. It is not");
-                println!("  proof-of-funds on its own. Re-run with --anchor-tx <hash>");
+                println!("  corresponds to any real on-chain output. Even when anchored,");
+                println!("  it is not proof of current unspent funds. Re-run with");
+                println!("  --anchor-tx <hash>");
                 println!("  --anchor-output-index <n> to verify it against your node.");
                 Ok(())
             } else {
@@ -2675,7 +2702,10 @@ async fn cmd_disclose_verify_ownership(
         serde_json::from_slice(&bytes).map_err(|e| format!("decode OwnershipProof: {}", e))?;
 
     let print_details = || {
-        println!("  tx_hash:        {}", hex::encode(proof.tx_hash.as_bytes()));
+        println!(
+            "  tx_hash:        {}",
+            hex::encode(proof.tx_hash.as_bytes())
+        );
         println!("  output_index:   {}", proof.output_index);
         println!(
             "  stealth_addr:   {}",
@@ -2693,9 +2723,7 @@ async fn cmd_disclose_verify_ownership(
             .map_err(|e| format!("verify_ownership_proof_anchored: {}", e))?;
         match verdict {
             AnchorVerdict::Valid => {
-                println!(
-                    "ANCHORED + VALID — signature holds AND matches the on-chain output"
-                );
+                println!("ANCHORED + VALID — signature holds AND matches the on-chain output");
                 print_details();
                 println!();
                 println!(
@@ -2719,8 +2747,8 @@ async fn cmd_disclose_verify_ownership(
         }
     } else {
         // ── Offline path (unchanged behaviour) ──────────────────────────
-        let ok = verify_ownership_proof(&proof)
-            .map_err(|e| format!("verify_ownership_proof: {}", e))?;
+        let ok =
+            verify_ownership_proof(&proof).map_err(|e| format!("verify_ownership_proof: {}", e))?;
         if ok {
             // Honesty (issue #253): verify_ownership_proof only checks the
             // Schnorr signature over the (stealth_address, tx_hash, output_index)

@@ -17,6 +17,7 @@ use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
+use std::collections::HashSet;
 use zeroize::Zeroize;
 
 use crate::crypto::{
@@ -48,7 +49,9 @@ pub enum DisclosureType {
 }
 
 /// Reference to an on-chain output
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct OutputRef {
     pub tx_hash: Hash,
     pub output_index: u8,
@@ -429,6 +432,8 @@ pub fn verify_ownership_proof(proof: &OwnershipProof) -> Result<bool> {
 /// isn't — this is a disclosure proof, not a ZK proof).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SumProof {
+    /// Sum-proof transcript version.
+    pub version: u8,
     /// The claimed total amount
     pub claimed_total: u64,
     /// References to the on-chain outputs included in the sum
@@ -441,6 +446,53 @@ pub struct SumProof {
     pub timestamp: u64,
     /// Domain-separated challenge hash (binds all proof fields)
     pub challenge: Hash,
+}
+
+const SUM_PROOF_VERSION: u8 = 2;
+
+fn sum_output_refs_are_unique(output_refs: &[OutputRef]) -> bool {
+    let mut seen = HashSet::with_capacity(output_refs.len());
+    output_refs
+        .iter()
+        .all(|output_ref| seen.insert((output_ref.tx_hash, output_ref.output_index)))
+}
+
+fn sum_proof_challenge(
+    version: u8,
+    claimed_total: u64,
+    output_refs: &[OutputRef],
+    sum_blinding: &[u8; 32],
+    height_range: (u64, u64),
+    timestamp: u64,
+) -> Hash {
+    let mut transcript = Vec::with_capacity(65 + output_refs.len() * 33);
+    transcript.push(version);
+    transcript.extend_from_slice(&claimed_total.to_le_bytes());
+    transcript.extend_from_slice(sum_blinding);
+    transcript.extend_from_slice(&(output_refs.len() as u32).to_le_bytes());
+    for output_ref in output_refs {
+        transcript.extend_from_slice(output_ref.tx_hash.as_bytes());
+        transcript.push(output_ref.output_index);
+    }
+    transcript.extend_from_slice(&height_range.0.to_le_bytes());
+    transcript.extend_from_slice(&height_range.1.to_le_bytes());
+    transcript.extend_from_slice(&timestamp.to_le_bytes());
+    hash_domain(b"COINCYNC_SUM_PROOF_v2", &transcript)
+}
+
+fn sum_proof_transcript_is_valid(proof: &SumProof) -> bool {
+    proof.version == SUM_PROOF_VERSION
+        && proof.height_range.0 <= proof.height_range.1
+        && sum_output_refs_are_unique(&proof.output_refs)
+        && proof.challenge
+            == sum_proof_challenge(
+                proof.version,
+                proof.claimed_total,
+                &proof.output_refs,
+                &proof.sum_blinding,
+                proof.height_range,
+                proof.timestamp,
+            )
 }
 
 /// Create a proof of total received amount.
@@ -456,6 +508,9 @@ pub fn create_sum_proof(
         return Err(Error::CryptoError(
             "Cannot create sum proof with no outputs".into(),
         ));
+    }
+    if height_range.0 > height_range.1 {
+        return Err(Error::CryptoError("Invalid sum-proof height range".into()));
     }
 
     // Compute total and combined blinding
@@ -473,30 +528,33 @@ pub fn create_sum_proof(
             output_index: *idx,
         });
     }
+    if !sum_output_refs_are_unique(&output_refs) {
+        return Err(Error::CryptoError(
+            "A sum proof cannot include the same output more than once".into(),
+        ));
+    }
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    // Challenge: binds all fields together to prevent tampering
-    let challenge = hash_domain(
-        b"COINCYNC_SUM_PROOF_v1",
-        &[
-            &total.to_le_bytes()[..],
-            &blinding_sum.to_bytes()[..],
-            &height_range.0.to_le_bytes(),
-            &height_range.1.to_le_bytes(),
-            &timestamp.to_le_bytes(),
-            &(outputs.len() as u32).to_le_bytes(),
-        ]
-        .concat(),
+    let version = SUM_PROOF_VERSION;
+    let sum_blinding = blinding_sum.to_bytes();
+    let challenge = sum_proof_challenge(
+        version,
+        total,
+        &output_refs,
+        &sum_blinding,
+        height_range,
+        timestamp,
     );
 
     Ok(SumProof {
+        version,
         claimed_total: total,
         output_refs,
-        sum_blinding: blinding_sum.to_bytes(),
+        sum_blinding,
         height_range,
         timestamp,
         challenge,
@@ -524,25 +582,11 @@ pub fn verify_sum_proof(
     if on_chain_commitments.is_empty() {
         return Ok(false);
     }
-
-    // Verify challenge hash integrity
-    let blinding = BlindingFactor::from_bytes(proof.sum_blinding);
-    let expected_challenge = hash_domain(
-        b"COINCYNC_SUM_PROOF_v1",
-        &[
-            &proof.claimed_total.to_le_bytes()[..],
-            &proof.sum_blinding[..],
-            &proof.height_range.0.to_le_bytes(),
-            &proof.height_range.1.to_le_bytes(),
-            &proof.timestamp.to_le_bytes(),
-            &(proof.output_refs.len() as u32).to_le_bytes(),
-        ]
-        .concat(),
-    );
-
-    if proof.challenge != expected_challenge {
+    if !sum_proof_transcript_is_valid(proof) {
         return Ok(false);
     }
+
+    let blinding = BlindingFactor::from_bytes(proof.sum_blinding);
 
     // Sum all on-chain commitments: sum(C_i)
     // Use curve25519-dalek-ng (same library as PedersenCommitment internals)
@@ -900,8 +944,8 @@ impl DisclosureProof {
 // verifies, the homomorphic sum balances. Every one of them reads the on-chain
 // reference (`original_commitment`, `stealth_address`, the output commitments)
 // from data the PROVER supplied. That is sufficient to prove "I know a secret
-// for this commitment/key", but NOT "this commitment/key is a real, unspent
-// output on the CoinCync chain" (issues #252 / #253, junbyjun1238).
+// for this commitment/key", but NOT "this commitment/key is a real output in
+// CoinCync's canonical chain history" (issues #252 / #253, junbyjun1238).
 //
 // A prover can hand you a fully-valid `OwnershipProof` for a stealth key they
 // genuinely control that was never mined, or a `BalanceProof` over a commitment
@@ -911,10 +955,8 @@ impl DisclosureProof {
 // the real on-chain output, resolved by the verifier from THEIR OWN trusted
 // chain view — and enforce that the proof's self-declared reference matches it.
 //
-// Where the anchor comes from is load-bearing for privacy. CoinCync exposes no
-// "does output (tx_hash, index) exist" RPC by design (surveillance resistance),
-// so the anchor MUST come from:
-//   - the verifier's own full-node UTXO set (`UtxoDb::get_output` / `is_spent`), or
+// Where the anchor comes from is load-bearing for privacy. It MUST come from:
+//   - the verifier's own full-node canonical chain view, or
 //   - a block/transaction the verifier obtained and hash-checked themselves.
 // It must NEVER be self-supplied by the prover, and asking a *remote* node for
 // the specific output leaks which outputs the verifier cares about — callers
@@ -924,25 +966,35 @@ impl DisclosureProof {
 /// A real on-chain output, resolved from the verifier's own trusted chain view,
 /// used to anchor a disclosure proof to actual chain state.
 ///
-/// Both fields come from the same `TxOutput` at the referenced `(tx_hash,
+/// All fields come from the same `TxOutput` at the referenced `(tx_hash,
 /// output_index)`: `commitment` is `TxOutput::commitment`, `stealth_address` is
 /// `TxOutput::stealth_address.as_bytes()`. Construct it from the verifier's own
-/// UTXO set or a hash-checked transaction — never from prover-supplied data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// chain view — never from prover-supplied data.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainAnchor {
+    /// The exact output this anchor was resolved from.
+    pub output_ref: OutputRef,
     /// The on-chain Pedersen commitment for the referenced output.
     pub commitment: [u8; 32],
     /// The on-chain stealth (one-time) address for the referenced output.
     pub stealth_address: [u8; 32],
+    /// Canonical-chain height containing the output.
+    pub block_height: u64,
 }
 
 impl ChainAnchor {
-    /// Build an anchor from a referenced output's on-chain commitment and
-    /// stealth address.
-    pub fn new(commitment: [u8; 32], stealth_address: [u8; 32]) -> Self {
+    /// Build an anchor from one output resolved through a trusted chain view.
+    pub fn new(
+        output_ref: OutputRef,
+        commitment: [u8; 32],
+        stealth_address: [u8; 32],
+        block_height: u64,
+    ) -> Self {
         Self {
+            output_ref,
             commitment,
             stealth_address,
+            block_height,
         }
     }
 }
@@ -970,22 +1022,22 @@ impl AnchorVerdict {
     }
 }
 
-/// Verify a balance proof AND that its commitment is the one on chain.
+/// Verify a balance proof against an output in canonical chain history.
 ///
-/// `expected_commitment` is the referenced output's real on-chain
-/// `TxOutput::commitment`, resolved by the verifier from their own chain view.
 /// Returns [`AnchorVerdict::AnchorMismatch`] when the proof is cryptographically
-/// valid but was built over a different commitment than the on-chain output.
+/// valid but the commitment differs from the referenced output. Ring signatures
+/// hide which member was spent, so this deliberately makes no unspentness claim.
 pub fn verify_balance_proof_anchored(
     proof: &BalanceProof,
-    expected_commitment: &[u8; 32],
+    anchor: &ChainAnchor,
 ) -> Result<AnchorVerdict> {
-    if !verify_balance_proof(proof)? {
-        return Ok(AnchorVerdict::CryptoInvalid);
+    match verify_balance_proof(proof) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return Ok(AnchorVerdict::CryptoInvalid),
     }
     // Commitments are public on-chain values; a plain compare is correct here
     // (no secret-dependent branch).
-    if proof.original_commitment != *expected_commitment {
+    if proof.original_commitment != anchor.commitment {
         return Ok(AnchorVerdict::AnchorMismatch);
     }
     Ok(AnchorVerdict::Valid)
@@ -1001,10 +1053,17 @@ pub fn verify_ownership_proof_anchored(
     proof: &OwnershipProof,
     anchor: &ChainAnchor,
 ) -> Result<AnchorVerdict> {
-    if !verify_ownership_proof(proof)? {
-        return Ok(AnchorVerdict::CryptoInvalid);
+    match verify_ownership_proof(proof) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return Ok(AnchorVerdict::CryptoInvalid),
     }
-    if *proof.stealth_address.as_bytes() != anchor.stealth_address {
+    let proof_output_ref = OutputRef {
+        tx_hash: proof.tx_hash,
+        output_index: proof.output_index,
+    };
+    if proof_output_ref != anchor.output_ref
+        || *proof.stealth_address.as_bytes() != anchor.stealth_address
+    {
         return Ok(AnchorVerdict::AnchorMismatch);
     }
     Ok(AnchorVerdict::Valid)
@@ -1012,19 +1071,29 @@ pub fn verify_ownership_proof_anchored(
 
 /// Verify a sum proof against on-chain outputs resolved from its `output_refs`.
 ///
-/// `anchors[i]` is the trusted on-chain output for `proof.output_refs[i]`, in the
-/// same order. This is the anchored form of [`verify_sum_proof`]: instead of the
-/// caller passing bare commitments (whose provenance is unchecked), they pass the
-/// resolved on-chain anchors and the ref/anchor counts must line up.
-pub fn verify_sum_proof_anchored(
+/// Each anchor must carry the exact [`OutputRef`] it was independently resolved
+/// from. References must be unique and every anchor height must fall within the
+/// proof's declared range.
+pub fn verify_sum_proof_anchored<F>(
     proof: &SumProof,
-    anchors: &[ChainAnchor],
-) -> Result<AnchorVerdict> {
-    if anchors.len() != proof.output_refs.len() {
-        return Ok(AnchorVerdict::AnchorMismatch);
+    mut resolve_anchor: F,
+) -> Result<AnchorVerdict>
+where
+    F: FnMut(&OutputRef) -> Result<Option<ChainAnchor>>,
+{
+    if !sum_proof_transcript_is_valid(proof) {
+        return Ok(AnchorVerdict::CryptoInvalid);
     }
-    let mut commitments = Vec::with_capacity(anchors.len());
-    for anchor in anchors {
+    let mut commitments = Vec::with_capacity(proof.output_refs.len());
+    for output_ref in &proof.output_refs {
+        let Some(anchor) = resolve_anchor(output_ref)? else {
+            return Ok(AnchorVerdict::AnchorMismatch);
+        };
+        if output_ref != &anchor.output_ref
+            || !(proof.height_range.0..=proof.height_range.1).contains(&anchor.block_height)
+        {
+            return Ok(AnchorVerdict::AnchorMismatch);
+        }
         match PedersenCommitment::from_bytes_checked(anchor.commitment) {
             Some(c) => commitments.push(c),
             // An anchor that isn't a valid curve point can't be a real on-chain
@@ -1032,10 +1101,10 @@ pub fn verify_sum_proof_anchored(
             None => return Ok(AnchorVerdict::AnchorMismatch),
         }
     }
-    if verify_sum_proof(proof, &commitments)? {
-        Ok(AnchorVerdict::Valid)
-    } else {
-        Ok(AnchorVerdict::AnchorMismatch)
+    match verify_sum_proof(proof, &commitments) {
+        Ok(true) => Ok(AnchorVerdict::Valid),
+        Ok(false) => Ok(AnchorVerdict::AnchorMismatch),
+        Err(_) => Ok(AnchorVerdict::CryptoInvalid),
     }
 }
 
@@ -1050,8 +1119,9 @@ pub fn verify_source_proof_anchored(
     proof: &SourceProof,
     key_image_spent_on_chain: bool,
 ) -> Result<AnchorVerdict> {
-    if !verify_source_proof(proof)? {
-        return Ok(AnchorVerdict::CryptoInvalid);
+    match verify_source_proof(proof) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return Ok(AnchorVerdict::CryptoInvalid),
     }
     if !key_image_spent_on_chain {
         return Ok(AnchorVerdict::AnchorMismatch);
@@ -1366,6 +1436,34 @@ mod tests {
 
     // ---- Chain anchoring (issues #252 / #253) ----
 
+    fn test_chain_anchor(
+        tx_hash: Hash,
+        output_index: u8,
+        commitment: [u8; 32],
+        stealth_address: [u8; 32],
+        block_height: u64,
+    ) -> ChainAnchor {
+        ChainAnchor::new(
+            OutputRef {
+                tx_hash,
+                output_index,
+            },
+            commitment,
+            stealth_address,
+            block_height,
+        )
+    }
+
+    fn resolve_test_anchor(
+        anchors: &[ChainAnchor],
+        output_ref: &OutputRef,
+    ) -> Result<Option<ChainAnchor>> {
+        Ok(anchors
+            .iter()
+            .find(|anchor| &anchor.output_ref == output_ref)
+            .cloned())
+    }
+
     #[test]
     fn test_balance_anchored_valid() {
         let value = 1_000_000u64;
@@ -1374,7 +1472,14 @@ mod tests {
         let proof = create_balance_proof(value, &blinding, &commitment, 500_000).unwrap();
 
         // Anchor: the on-chain output's real commitment == the one in the proof.
-        let verdict = verify_balance_proof_anchored(&proof, &commitment.to_bytes()).unwrap();
+        let anchor = test_chain_anchor(
+            Hash::from_bytes([1u8; 32]),
+            0,
+            commitment.to_bytes(),
+            [0u8; 32],
+            10,
+        );
+        let verdict = verify_balance_proof_anchored(&proof, &anchor).unwrap();
         assert_eq!(verdict, AnchorVerdict::Valid);
         assert!(verdict.is_valid());
     }
@@ -1387,12 +1492,22 @@ mod tests {
         let blinding = BlindingFactor::random(&mut OsRng);
         let invented = PedersenCommitment::commit(value, &blinding);
         let proof = create_balance_proof(value, &blinding, &invented, 1_000_000).unwrap();
-        assert!(verify_balance_proof(&proof).unwrap(), "offline still passes");
+        assert!(
+            verify_balance_proof(&proof).unwrap(),
+            "offline still passes"
+        );
 
         // But the real on-chain output has a different commitment. Anchoring
         // rejects the proof as unanchored — this is the #253 fix.
         let on_chain = PedersenCommitment::commit(42, &BlindingFactor::random(&mut OsRng));
-        let verdict = verify_balance_proof_anchored(&proof, &on_chain.to_bytes()).unwrap();
+        let anchor = test_chain_anchor(
+            Hash::from_bytes([1u8; 32]),
+            0,
+            on_chain.to_bytes(),
+            [0u8; 32],
+            10,
+        );
+        let verdict = verify_balance_proof_anchored(&proof, &anchor).unwrap();
         assert_eq!(verdict, AnchorVerdict::AnchorMismatch);
         assert!(!verdict.is_valid());
     }
@@ -1406,7 +1521,14 @@ mod tests {
         // Corrupt the range proof so the crypto itself fails.
         let fake = PedersenCommitment::commit(9, &BlindingFactor::random(&mut OsRng));
         proof.original_commitment = fake.to_bytes();
-        let verdict = verify_balance_proof_anchored(&proof, &fake.to_bytes()).unwrap();
+        let anchor = test_chain_anchor(
+            Hash::from_bytes([1u8; 32]),
+            0,
+            fake.to_bytes(),
+            [0u8; 32],
+            10,
+        );
+        let verdict = verify_balance_proof_anchored(&proof, &anchor).unwrap();
         // Even though the anchor now matches the (tampered) commitment, the
         // Schnorr/range math no longer holds → CryptoInvalid takes precedence.
         assert_eq!(verdict, AnchorVerdict::CryptoInvalid);
@@ -1418,7 +1540,7 @@ mod tests {
         let tx_hash = Hash::from_bytes([7u8; 32]);
         let proof = create_ownership_proof(&tx_hash, 2, &pk, &sk, b"audit").unwrap();
 
-        let anchor = ChainAnchor::new([0u8; 32], *pk.as_bytes());
+        let anchor = test_chain_anchor(tx_hash, 2, [0u8; 32], *pk.as_bytes(), 10);
         let verdict = verify_ownership_proof_anchored(&proof, &anchor).unwrap();
         assert_eq!(verdict, AnchorVerdict::Valid);
     }
@@ -1430,14 +1552,30 @@ mod tests {
         let (sk, pk) = make_test_keys();
         let tx_hash = Hash::from_bytes([7u8; 32]);
         let proof = create_ownership_proof(&tx_hash, 2, &pk, &sk, b"audit").unwrap();
-        assert!(verify_ownership_proof(&proof).unwrap(), "offline still passes");
+        assert!(
+            verify_ownership_proof(&proof).unwrap(),
+            "offline still passes"
+        );
 
         // But the real on-chain output at (tx_hash, idx) has a DIFFERENT stealth
         // address. The prover never owned that output. Anchoring rejects it.
         let (_other_sk, other_pk) = make_test_keys();
-        let anchor = ChainAnchor::new([0u8; 32], *other_pk.as_bytes());
+        let anchor = test_chain_anchor(tx_hash, 2, [0u8; 32], *other_pk.as_bytes(), 10);
         let verdict = verify_ownership_proof_anchored(&proof, &anchor).unwrap();
         assert_eq!(verdict, AnchorVerdict::AnchorMismatch);
+    }
+
+    #[test]
+    fn test_ownership_anchored_rejects_wrong_output_ref() {
+        let (sk, pk) = make_test_keys();
+        let tx_hash = Hash::from_bytes([7u8; 32]);
+        let proof = create_ownership_proof(&tx_hash, 2, &pk, &sk, b"audit").unwrap();
+        let anchor = test_chain_anchor(tx_hash, 3, [0u8; 32], *pk.as_bytes(), 10);
+
+        assert_eq!(
+            verify_ownership_proof_anchored(&proof, &anchor).unwrap(),
+            AnchorVerdict::AnchorMismatch
+        );
     }
 
     #[test]
@@ -1455,29 +1593,99 @@ mod tests {
 
         // Correct anchors → Valid.
         let anchors = vec![
-            ChainAnchor::new(c1.to_bytes(), [0u8; 32]),
-            ChainAnchor::new(c2.to_bytes(), [0u8; 32]),
+            test_chain_anchor(outputs[0].2, outputs[0].3, c1.to_bytes(), [0u8; 32], 10),
+            test_chain_anchor(outputs[1].2, outputs[1].3, c2.to_bytes(), [0u8; 32], 20),
         ];
         assert_eq!(
-            verify_sum_proof_anchored(&proof, &anchors).unwrap(),
+            verify_sum_proof_anchored(&proof, |output_ref| {
+                resolve_test_anchor(&anchors, output_ref)
+            })
+            .unwrap(),
             AnchorVerdict::Valid
         );
 
-        // Wrong count → AnchorMismatch.
+        // A missing independently-resolved reference is an anchor mismatch.
         assert_eq!(
-            verify_sum_proof_anchored(&proof, &anchors[..1]).unwrap(),
+            verify_sum_proof_anchored(&proof, |output_ref| {
+                resolve_test_anchor(&anchors[..1], output_ref)
+            })
+            .unwrap(),
             AnchorVerdict::AnchorMismatch
         );
 
         // Right count, one wrong on-chain commitment → AnchorMismatch.
         let wrong = PedersenCommitment::commit(999, &BlindingFactor::random(&mut OsRng));
         let bad_anchors = vec![
-            ChainAnchor::new(c1.to_bytes(), [0u8; 32]),
-            ChainAnchor::new(wrong.to_bytes(), [0u8; 32]),
+            test_chain_anchor(outputs[0].2, outputs[0].3, c1.to_bytes(), [0u8; 32], 10),
+            test_chain_anchor(outputs[1].2, outputs[1].3, wrong.to_bytes(), [0u8; 32], 20),
         ];
         assert_eq!(
-            verify_sum_proof_anchored(&proof, &bad_anchors).unwrap(),
+            verify_sum_proof_anchored(&proof, |output_ref| {
+                resolve_test_anchor(&bad_anchors, output_ref)
+            })
+            .unwrap(),
             AnchorVerdict::AnchorMismatch
+        );
+
+        let mut swapped = anchors.clone();
+        swapped.swap(0, 1);
+        assert_eq!(
+            verify_sum_proof_anchored(&proof, |output_ref| {
+                resolve_test_anchor(&swapped, output_ref)
+            })
+            .unwrap(),
+            AnchorVerdict::Valid
+        );
+
+        let mut wrong_height = anchors;
+        wrong_height[0].block_height = 101;
+        assert_eq!(
+            verify_sum_proof_anchored(&proof, |output_ref| {
+                resolve_test_anchor(&wrong_height, output_ref)
+            })
+            .unwrap(),
+            AnchorVerdict::AnchorMismatch
+        );
+    }
+
+    #[test]
+    fn test_sum_proof_rejects_duplicate_outputs_and_ref_tampering() {
+        let blinding = BlindingFactor::random(&mut OsRng);
+        let tx_hash = Hash::from_bytes([1u8; 32]);
+        let duplicate_outputs = vec![
+            (100_000u64, blinding.clone(), tx_hash, 0u8),
+            (100_000u64, blinding.clone(), tx_hash, 0u8),
+        ];
+        assert!(create_sum_proof(&duplicate_outputs, (0, 100)).is_err());
+
+        let proof = create_sum_proof(&duplicate_outputs[..1], (0, 100)).unwrap();
+        let commitment = PedersenCommitment::commit(100_000, &blinding);
+        let mut duplicated = proof.clone();
+        duplicated.claimed_total = 200_000;
+        duplicated
+            .output_refs
+            .push(duplicated.output_refs[0].clone());
+        duplicated.sum_blinding = blinding.add(&blinding).to_bytes();
+        duplicated.challenge = sum_proof_challenge(
+            duplicated.version,
+            duplicated.claimed_total,
+            &duplicated.output_refs,
+            &duplicated.sum_blinding,
+            duplicated.height_range,
+            duplicated.timestamp,
+        );
+        assert!(!verify_sum_proof(&duplicated, &[commitment, commitment]).unwrap());
+
+        let mut tampered = proof.clone();
+        tampered.output_refs[0].output_index = 1;
+        assert!(!verify_sum_proof(&tampered, &[commitment]).unwrap());
+        let anchor = test_chain_anchor(tx_hash, 1, commitment.to_bytes(), [0u8; 32], 10);
+        assert_eq!(
+            verify_sum_proof_anchored(&tampered, |output_ref| {
+                resolve_test_anchor(std::slice::from_ref(&anchor), output_ref)
+            })
+            .unwrap(),
+            AnchorVerdict::CryptoInvalid
         );
     }
 
