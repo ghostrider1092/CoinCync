@@ -151,3 +151,12 @@ deploy/ops/template-check.sh
 # source control. README.md alongside is fine to commit.
 /coincync-wallet/src-tauri/resources/binaries/*.exe
 /coincync-wallet/src-tauri/resources/binaries/*-linux-x86_64
+
+# ── Local build/output scratch (never committed) ───────────────────
+/out/
+
+# ── Local operator scripts + node data (never committed) ───────────
+cf-ddns.ps1
+start-seed.ps1
+/seed-data/
+/regtest-node/
