@@ -1,77 +1,256 @@
-# CoinCync 1.0
+# CoinCync
 
-**Privacy money that requires no permission.**
+Copyright (c) 2025-2026, The CoinCync Project
 
-A proof-of-work cryptocurrency with mandatory privacy at the consensus layer, an auditable supply curve, and constitutional protections against admin authority, federations, governance tokens, and compliance hooks.
+**Privacy money that requires no permission.** A fair-launch, RandomX
+CPU-mined cryptocurrency with mandatory privacy at the consensus layer, an
+auditable capped supply, and a hash-locked constitution that even its authors
+cannot quietly change.
 
-Privacy is built as **Concentric Privacy** — independent, layered defenses (transaction · linkability · network · operational), each guarding a different attack surface, arranged so that no single break exposes the whole. Consensus is fail-operational; privacy is fail-closed.
+## Table of Contents
 
-**Status:** Public testnet · **[v1.0.12](https://github.com/ghostrider1092/Coincync-Testnet-/releases/tag/v1.0.12)** — current release · hard-fork rules activate at testnet h=13,000
-**Network:** 9-host Vultr fleet (3 seeds + explorer + 2 miners + 2 relays + api), single operator
-**Mainnet:** **targeted 2026-10-01** (gated on schema-versioning + cyncswap audit; both in flight)
-**Live chain:** [api.coincync.network/rpc/testnet](https://api.coincync.network/rpc/testnet) (`get_info` JSON-RPC) · [explorer.coincync.network](https://explorer.coincync.network)
-**Discord:** [join](https://discord.gg/5tYNSCsqzy) — **actively looking for community testnet miners**, see [run-a-testnet-miner](#run-a-testnet-miner) below
+- [Development resources](#development-resources)
+- [Vulnerability response](#vulnerability-response)
+- [Research and design](#research-and-design)
+- [Announcements](#announcements)
+- [Introduction](#introduction)
+- [About this project](#about-this-project)
+- [Supporting the project](#supporting-the-project)
+- [License](#license)
+- [Contributing](#contributing)
+- [Scheduled software/network upgrades](#scheduled-softwarenetwork-upgrades)
+- [Release staging schedule and protocol](#release-staging-schedule-and-protocol)
+- [Compiling CoinCync from source](#compiling-coincync-from-source)
+  - [Dependencies](#dependencies)
+  - [Reproducible builds](#reproducible-builds)
+- [Installing CoinCync from a release](#installing-coincync-from-a-release)
+- [Running coincync-node](#running-coincync-node)
+- [Running a miner](#running-a-miner)
+- [Using Tor](#using-tor)
+- [Storage and sync](#storage-and-sync)
+- [Debugging](#debugging)
+- [Known issues](#known-issues)
 
----
+## Development resources
 
-## 👋 Looking for community testnet miners
+- Web: [coincync.network](https://coincync.network)
+- Explorer: [explorer.coincync.network](https://explorer.coincync.network)
+- Live chain (JSON-RPC): [api.coincync.network/rpc/testnet](https://api.coincync.network/rpc/testnet)
+- Discord: [join](https://discord.gg/5tYNSCsqzy) — the primary place for development discussion and coordination
+- Security: `CyncLabs@proton.me`
 
-Right now I (ghostrider1092) operate **100% of the testnet hashrate** on a single Vultr box. Every restart for maintenance produces a publicly visible chain stall. **One additional miner anywhere in the world eliminates this single-point-of-failure entirely** — ASERT self-adjusts difficulty so a 100 H/s miner alongside the existing ~500 H/s is genuinely useful, not redundant.
+CoinCync is developed openly. Because it is a small, security-critical project,
+the Discord `#dev` channel is the best way to stay current on best practices and
+in-flight protocol work before integrating against the network — the same
+reasoning Monero applies to its `#monero-dev` channel. `#dev` is about CoinCync
+protocol development; for help *using* CoinCync, use the general channels.
 
-You don't need a big box. A $5/mo VPS with 4 GB RAM and 2 vCPU works. Setup takes ~15 minutes once you have a binary. See [run-a-testnet-miner](#run-a-testnet-miner) below or DM me on Discord.
+## Vulnerability response
 
----
+CoinCync follows a responsible-disclosure process documented in
+[SECURITY.md](SECURITY.md). Report vulnerabilities privately to
+`CyncLabs@proton.me` — please do not open a public issue for a security bug.
 
-## Project state
+The codebase is fuzzed with `cargo-fuzz` and checked under the Miri interpreter
+for undefined behavior on suitable pure-Rust components. The disclosure SLA
+(24-hour first response) is in [MAINTAINERS.md](MAINTAINERS.md).
 
-CoinCync is **early-stage infrastructure software on public testnet**. Honest read of what works and what doesn't:
+## Research and design
 
-**What's solid:**
+Protocol changes go through the **CoinCync Improvement Proposal (CIP)** process
+(see [CONTRIBUTING.md](CONTRIBUTING.md#cip-process--for-protocol-changes)).
+Design documents, threat models, and privacy analyses live under [docs/](docs/):
 
-- Full node + wallet + CPU miner ship clean and run continuously across the fleet
-- All 22 privacy features active in production: CLSAG ring signatures, Bulletproofs+, stealth addresses, Dandelion++, Noise XX, cover traffic, view tags, encrypted memos, FROST multi-sig, dead-man's-switch, auto-churn
-- Reproducible Docker builds; consensus-critical files protected by SHA-256 lockfile
-- Prometheus `/metrics` endpoint with hot-path histograms
-- 80-entry hardcoded testnet checkpoint list for long-range-attack defense
+- [docs/architecture/PRIVACY.md](docs/architecture/PRIVACY.md) — the privacy model
+- [docs/PRIVACY_FEATURES.md](docs/PRIVACY_FEATURES.md) — per-feature detail with file:line citations
+- [docs/security/reorg-defense.md](docs/security/reorg-defense.md) — reorg + finality defenses
+- [docs/cip/](docs/cip/) — improvement proposals
+- [CONSTITUTION.md](CONSTITUTION.md) and [docs/BILL_OF_RIGHTS.md](docs/BILL_OF_RIGHTS.md) — the hash-locked guarantees
 
-**What's not yet enabled:**
+Outside researchers are welcome; reach out on Discord `#research` before
+duplicating known work.
 
-- Phase-2 shielded modules (Orchard / Lelantus Spark / MimbleWimble kernels) — storage-side rewind machinery shipped feature-gated; trees remain `None` at chain construction until a future activation hard fork
-- CYNC↔BTC atomic swaps — state machine + handshake + persistence shipped; real adaptor-signature crypto pending the audit window
-- CIP-009.D rolling soft-finality — machinery shipped behind `rolling-finality` feature flag, default OFF; activation at testnet height 50,000
+## Announcements
 
-**What's known rough:**
+Critical announcements (releases, network upgrades, security advisories) are
+posted in Discord and attached to GitHub releases. Node and miner operators
+should watch releases and upgrade when a network upgrade is scheduled.
 
-- 8/8 fleet nodes hosted on a single cloud provider (Vultr), though across multiple regions — correlated provider failure mode acknowledged, mitigated by inviting community operators on different providers (see [Run a testnet miner](#run-a-testnet-miner))
-- **Single-miner network** today (100% of hashrate is on one box). Every restart for maintenance produces a publicly visible chain stall. This is the single biggest pre-mainnet issue and the reason we're actively recruiting community miners
-- Test coverage is high (700+ tests) but several integration tests assume specific fleet state
-- Wallet UX is mid-refactor; some pages still feel utilitarian
-- Active PR review queue (typically 5–10 PRs open against `main` at any moment) — review queue, not technical debt
+## Introduction
 
-Use at your own risk. Testnet coins have no real value. Mainnet binaries are not yet a live public network.
+CoinCync is a private, permissionless, fairly launched proof-of-work
+cryptocurrency. You are your own bank, you control your funds, and your
+transactions are private by default — no one can trace them unless you choose to
+disclose.
 
----
+**Privacy.** Privacy is mandatory and enforced at the consensus layer, not an
+opt-in wallet setting. It is built as *Concentric Privacy* — independent, layered
+defenses across the transaction, linkability, network, and operational surfaces —
+so that no single break exposes the whole. CLSAG ring signatures (ring size 16),
+Bulletproofs+ confidential amounts, stealth addresses, and view tags hide sender,
+amount, and recipient on-chain.
 
-## Quick Start
+**Security.** Every transaction is secured by a distributed proof-of-work
+consensus network. Wallets are protected by an encrypted seed; a leaked wallet
+file is useless without the passphrase.
+
+**Untraceability.** Ring signatures give each spend a set of decoys drawn from an
+age-matched distribution, so a real spend is statistically indistinguishable from
+its ring members.
+
+**Decentralization.** CoinCync mines with **RandomX**, so validation and mining
+run on ordinary consumer CPUs — no ASICs, no specialized hardware. Anyone can run
+the node software, validate the chain, and mine on equal terms.
+
+**Constitutional guarantees.** The [Constitution](CONSTITUTION.md) forbids
+premine, dev tax, founder allocation, admin authority, surveillance hooks, and
+external-chain trust — and it is **hash-locked into the build**, so these
+guarantees cannot be quietly changed later. Supply is capped at 100,000,000 CYNC
+on an auditable emission curve.
+
+## About this project
+
+This is the reference implementation of CoinCync, written in Rust. It is open
+source and free to use under the terms in [LICENSE](LICENSE). Anyone may build an
+alternative implementation that is compatible with the protocol and network.
+
+As with most development projects, the `main` branch on the repository is the
+staging area for the latest changes. Changes are developed in feature branches,
+submitted as pull requests, and reviewed before merging. For production use,
+prefer a tagged release over `main` for stability.
+
+Contributions are welcome — see [Contributing](#contributing) below.
+
+## Supporting the project
+
+CoinCync takes **no dev tax, has no premine, and holds no founder allocation** —
+these are constitutional and hash-locked, so there is no insider stake and users
+are never anyone's exit liquidity. The project is sustained instead by:
+
+- **Public-interest grants** (e.g. NLnet / NGI0) that fund audits and development.
+- **Voluntary community crowdfunding** on a transparent, per-initiative basis.
+- **Founders and contributors mining on equal terms**, like everyone else.
+
+The most valuable thing you can contribute is not money: **run a node, run a
+miner, review pull requests, or operate an independent seed.** A network with
+many independent operators is worth more than any donation.
+
+## License
+
+See [LICENSE](LICENSE).
+
+## Contributing
+
+If you'd like to help, see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Small, self-contained fixes can be submitted directly as pull requests to `main`.
+Protocol-affecting changes must go through the [CIP process](docs/cip/). Note
+that `main` is protected: all changes land via reviewed pull requests.
+
+## Scheduled software/network upgrades
+
+CoinCync uses scheduled hard-fork network upgrades to introduce consensus
+changes. Operators should run current versions and upgrade before a scheduled
+upgrade height. Consensus-critical files are protected by a SHA-256 lockfile, so
+consensus changes are explicit and reviewable.
+
+Dates use YYYY-MM-DD. "Minimum" is the version that follows the new consensus
+rules. The table below reflects the **testnet** schedule; the mainnet schedule is
+finalized before genesis.
+
+| Network | Height | Date | Change | Minimum version |
+|---|---|---|---|---|
+| Testnet | 13,000 | — | Hard-fork rules activation | v1.0.12 |
+| Testnet | 50,000 | — | CIP-011 rolling soft-finality (behind `rolling-finality`) | TBD |
+| Mainnet | genesis | 2026-10-01 (target) | Genesis; full ruleset from block 0 | TBD |
+
+Values marked TBD/— are not finalized as of this revision.
+
+## Release staging schedule and protocol
+
+Approximately before a scheduled network upgrade, a release branch is cut from
+`main` with the new version tag. Bug-fix PRs target both `main` and the release
+branch; large features and optimizations target `main` only. The release version
+in `Cargo.toml` is bumped to match the tag before tagging.
+
+## Compiling CoinCync from source
+
+CoinCync is a Rust workspace built with Cargo.
+
+### Dependencies
+
+| Dependency | Min. version | Purpose |
+|---|---|---|
+| Rust toolchain (rustc + cargo) | 1.88.0 | build |
+| A C/C++ toolchain (gcc/clang) | any | compiles the RandomX backend |
+| CMake | 3.10 | RandomX build |
+| Git | any | source checkout |
+
+Install the Rust toolchain via [rustup](https://rustup.rs), then the platform C
+toolchain (`build-essential cmake` on Debian/Ubuntu; `base-devel cmake` on Arch;
+`gcc gcc-c++ cmake` on Fedora; Xcode command-line tools + `cmake` on macOS).
+
+**Clone and build:**
 
 ```bash
-# Download the v1.0.11.7 testnet release (Linux x86_64 binary)
-wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/download/v1.0.11.7-testnet/coincync-node-linux-x86_64-v1.0.11.7-testnet
-chmod +x coincync-node-linux-x86_64-v1.0.11.7-testnet
-mv coincync-node-linux-x86_64-v1.0.11.7-testnet coincync-node
+git clone https://github.com/Coincync-sys/Coincync-Testnet-.git coincync
+cd coincync
+cargo build --release --features randomx
+```
 
-# Run a node (binds 0.0.0.0:28080 P2P, 127.0.0.1:28081 RPC)
-# Default bootstrap uses seed1/2/3.coincync.network — DNS is live.
+The resulting binaries are in `target/release/`:
+
+- `coincync-node` — full node
+- `coincync-wallet` — CLI wallet
+- `coincync-rig` — CPU miner
+
+**Run the tests:**
+
+```bash
+cargo test --workspace
+```
+
+RandomX needs ~2 GB of RAM resident for its dataset; allow ~2 GB per parallel
+build thread when using `cargo build -j<N>`.
+
+### Reproducible builds
+
+Production Linux binaries are produced by a reproducible Docker build so anyone
+can independently reproduce the release artifacts from a recorded revision. See
+`Dockerfile` and the build scripts under `scripts/` / `deploy/`.
+
+## Installing CoinCync from a release
+
+Prebuilt Linux x86_64 binaries are attached to each release (node, wallet, and
+miner). Download, make executable, and place on your `PATH`:
+
+```bash
+wget <release-url>/coincync-node
+chmod +x coincync-node
 ./coincync-node --network testnet
+```
 
-# Verify it's syncing (in another shell, ~60s later):
+Always prefer a tagged release over a source build of `main` for production use.
+
+## Running coincync-node
+
+Run a node on the public testnet (binds `0.0.0.0:28080` P2P, `127.0.0.1:28081`
+RPC). Default bootstrap uses the DNS seeds `seed1/2/3.coincync.network`:
+
+```bash
+./coincync-node --network testnet
+```
+
+Verify it is syncing (from another shell, ~60s later):
+
+```bash
 curl -s http://127.0.0.1:28081/rpc/testnet \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}'
-# Expect: peer_count >= 3, height climbing toward current tip (~3200+)
+# Expect: peer_count >= 3, height climbing toward the current tip
 ```
 
-If DNS fails on your network (some ISPs/resolvers block it), the binary falls back to hardcoded IPs automatically. As a belt-and-suspenders, you can pass them explicitly:
+If DNS is blocked on your network, the binary falls back to hardcoded seed IPs
+automatically; you can also pass them explicitly:
 
 ```bash
 ./coincync-node --network testnet \
@@ -82,167 +261,79 @@ If DNS fails on your network (some ISPs/resolvers block it), the binary falls ba
   --addnode 173.199.93.21:28080
 ```
 
-Full walkthrough: [docs/src/getting-started/build.md](docs/src/getting-started/build.md).
+`--addnode` accepts either `IP:port` or a `hostname:port`; hostname resolution is
+refused under `--proxy`/`--tor` to avoid a DNS leak.
 
----
+To run detached, use `--detach` (and `--log-file`). List all options with
+`./coincync-node --help`.
 
-## Run a testnet miner
+## Running a miner
 
-This is the most useful thing you can do for the project right now. Same setup as a node, plus the `coincync-rig` binary.
+The most useful thing you can do for the network is run a miner. Same setup as a
+node, plus the `coincync-rig` binary.
 
-**Hardware:** 4 GB RAM minimum (RandomX dataset needs 2 GB resident), 2 CPU cores recommended. A $5-10/mo VPS works; we use Vultr but anything reachable on the internet is fine.
-
-**Setup:**
+**Hardware:** 4 GB RAM minimum (RandomX dataset needs ~2 GB resident), 2 CPU
+cores recommended. A $5–10/mo VPS or a spare home machine works.
 
 ```bash
-# 1. Generate a fresh wallet for mining payouts (run from any machine that has the wallet binary)
+# 1. Generate a payout wallet
 ./coincync-wallet --wallet ~/.coincync/wallets/miner.wallet create --password YOUR_PASSWORD
 ./coincync-wallet --wallet ~/.coincync/wallets/miner.wallet address --password YOUR_PASSWORD
-# Save the tCYNC... address — that's where your block rewards land.
+# Save the tCYNC... (testnet) address — block rewards land there.
 
-# 2. On the miner box: get the rig binary (release attaches both coincync-node and coincync-rig)
-wget https://github.com/ghostrider1092/Coincync-Testnet-/releases/latest/download/coincync-rig
-
-# 3. Run the rig pointing at your local node + payout address
+# 2. Point the rig at your local node + payout address
 ./coincync-rig run-solo \
   --node http://127.0.0.1:28081 \
   --address tCYNC_YOUR_ADDRESS_HERE \
   --threads 0   # 0 = auto-detect CPU count
 ```
 
-**Verify it's mining:** `journalctl -u coincync-rig` (or wherever you run it) should show `BLOCK FOUND, submitting` periodically. At current network difficulty + your hashrate, blocks land every few minutes to few hours depending on hashrate ratio.
+`coincync-rig` logs `BLOCK FOUND, submitting` when it solves a block. Say hi in
+Discord `#mining` once you're up so operators can prioritize your node.
 
-**Talk to us in Discord** once you're up — `#mining` channel, ping ghostrider1092. We'll add your node's IP to the fleet's `--addnode` lists so the mesh prioritizes you, and your miner address goes into the operator memory.
+## Using Tor
 
----
+CoinCync supports routing peer-to-peer traffic over a SOCKS proxy / Tor. Start
+the node with `--proxy <ip:port>` (and `--tor` for onion routing). Under a proxy,
+`--addnode` will not perform plaintext DNS resolution, and the node avoids
+leaking your interest in specific peers or transactions. See the network privacy
+docs for the full Dandelion++ + Noise-XX + cover-traffic model.
 
-## How it works
+## Storage and sync
 
-CoinCync ships **22 mandatory privacy features across 4 layers**. None are opt-in; the protocol rejects transactions that try to bypass them.
+CoinCync is a young chain, so full history is small. Fresh nodes sync from the
+seeds and cross-check a hardcoded consensus-checkpoint list for long-range-attack
+defense. Light-wallet sync downloads compact block digests and scans locally, so
+the node never answers "does this specific output exist" — a surveillance-
+resistance property (there is deliberately no balance-lookup RPC).
 
-| Layer | Surface | Highlights |
-| --- | --- | --- |
-| L1 Cryptographic | Every transaction | CLSAG Ring-16 ¹, stealth addresses, Pedersen commitments, Bulletproofs+, view tags |
-| L2 Network | Every packet | Dandelion++ stem/fluff, Noise XX P2P, jitter + size-normalisation + constant-rate cover traffic |
-| L3 Wallet | User-side | Uniform decoy selection, time-scoped view keys, plausible deniability, auto-churn, dead-man's switch, FROST multi-sig |
-| L4 Constitutional | Compile-time | Mandatory privacy, no surveillance hooks, no balance-lookup RPC, 4th Amendment enforcement |
+## Debugging
 
-Full per-feature detail (with file:line citations + status): [docs/PRIVACY_FEATURES.md](docs/PRIVACY_FEATURES.md).
+First, ensure you are running the latest build from the repository.
 
-¹ For the first 10,000 blocks of any network, ring size is 11 (the constitutional `BOOTSTRAP_MIN_RING_SIZE` — a young chain doesn't have enough on-chain outputs to form a 16-member anonymity set without decoy reuse). Snaps to Ring-16 at height 10,000. [`scripts/verify-privacy.ps1`](scripts/verify-privacy.ps1) is height-aware.
+- Set `RUST_BACKTRACE=1` (or `full`) for a backtrace on panic.
+- Increase log verbosity with `--log-level` / `RUST_LOG`.
+- For a running systemd service, inspect logs with `journalctl -u coincync-node`.
+- For crashes, run under `gdb --args ./coincync-node ...` and `bt`, or enable
+  core dumps with `ulimit -c unlimited`.
+- Build with debug assertions for extra checks: `cargo build` (debug profile).
 
----
+## Known issues
 
-## Testnet
+CoinCync is **early-stage infrastructure software on public testnet.** Honest
+current state:
 
-Three DNS-resolved seed nodes (all listening on port 28080):
+- **Single-miner network.** Today most testnet hashrate is on one operator's
+  box; every maintenance restart produces a visible chain stall. This is the
+  biggest pre-mainnet issue and the reason we actively recruit community miners.
+- **Provider concentration.** Fleet nodes are hosted across regions of a single
+  cloud provider; we mitigate by inviting independent operators on other
+  providers.
+- **Phase-2 modules feature-gated.** Shielded modules (Orchard / Lelantus Spark /
+  MimbleWimble kernels) and rolling soft-finality ship behind feature flags,
+  off by default until a future activation.
+- **Atomic swaps in progress.** CYNC↔BTC atomic-swap machinery is shipped; the
+  real adaptor-signature crypto is pending its audit window.
+- **Wallet UX** is mid-refactor; some flows are still utilitarian.
 
-| Hostname | IP | Region |
-|---|---|---|
-| `seed1.coincync.network` | `66.135.23.193` | Vultr — NJ |
-| `seed2.coincync.network` | `140.82.57.168` | Vultr — Atlanta |
-| `seed3.coincync.network` | `45.32.251.6` | Vultr — Tokyo |
-
-Plus `explorer.coincync.network` (`207.148.6.50`) and `173.199.93.21` (current miner box) for additional redundancy. All in the binary's hardcoded fallback list — if DNS fails for any reason, the node falls back to these IPs automatically.
-
-Auto-discovered when you run `coincync-node --network testnet` — no `--addnode` flags required. See [Quick Start](#quick-start) above for the explicit-IP belt-and-suspenders form if you want to bypass DNS entirely.
-
-**Community-run seeds welcome** — DM in Discord first so we can coordinate (add your IP to the fleet's `--addnode` lists, mention you in this README, etc.).
-
----
-
-## Monetary policy
-
-- **Supply cap:** 100,000,000 CYNC (asymptotic, never reached)
-- **Block time:** 120 seconds
-- **Genesis reward:** ~50 CYNC/block, decaying
-- **Tail emission:** 0.6 CYNC/block, perpetual
-- **Fee burn:** 30% normal, 50% congested
-- **Dev tax:** 0% (constitutional prohibition — Article II)
-
----
-
-## Versioning
-
-`v1.0.x-testnet` releases are the stable codebase for the pre-mainnet testnet. Breaking consensus changes during this sequence are coordinated via documented hard forks (e.g., the v1.0.12 fork at testnet h=13_000 tightens `encrypted_amount`, per-output size caps, stealth-address dedup, and ring-size enforcement) so node operators have explicit activation-height-gated upgrade windows. v1.0 mainnet ships **October 1, 2026** — at that point the codebase is frozen against breaking changes per strict SemVer. Anything that requires a breaking change post-mainnet becomes v2.0.
-
-**Tag-cut discipline:**
-
-- Every release passes through a release candidate (`v1.0.X-rcN-testnet`) before the headline tag, with at least 24-72h of soak before promotion. This is what saved the v1.0.9 release from a Windows-only-binaries regression (the auto-publish workflow was added after).
-- Pre-release qualifiers (`-testnet`, `-pre-audit`, `-rcN`) are SemVer-compliant and signal what's NOT yet finished. Read them as load-bearing, not decoration.
-- A tag without a qualifier means "audited, mainnet-ready, no known regressions." We don't have one of those yet.
-
----
-
-## Security
-
-- Comprehensive test suite (700+ tests) including historical attack reproductions
-- Hybrid reorg defense — Tier 1 (Nakamoto longest-chain ≤10 deep) + Tier 2 (MESS exponential cost 11-100 deep) + Tier 3 (hard cap, currently 1000 on testnet)
-- Hardcoded checkpoint list (80 entries, h=50..4000 step 50) for long-range-attack defense
-- Chain verification — Bitcoin Core `verifychain`-style consistency check on startup
-- Per-CIP consensus specifications targeted at audit firms
-- NLnet (NGI0 Commons Fund) grant application in flight; once approved, the funded audit will be a Cypher Stack / OSTIF / Teserakt scope
-
-Vulnerability disclosure: [SECURITY.md](SECURITY.md).
-
----
-
-## Building from source
-
-```bash
-# Requirements: Rust 1.75+, cmake, clang
-cargo build --release --features "randomx testnet"
-
-# Run tests
-cargo test --release --features "randomx testnet"
-
-# Reproducible Docker build (byte-identical binaries on the same host CPU arch)
-bash scripts/build-in-docker.sh
-```
-
----
-
-## Workspace structure
-
-Cargo workspace. Root crate is the node + wallet + miner; sister crates ship privacy-adjacent infrastructure gated behind feature flags.
-
-| Crate | Purpose | Status |
-| --- | --- | --- |
-| (root) | Node, wallet CLI, mining rig, FROST/swap state machines | Production-ready, public testnet |
-| `crates/bridge` | Cross-stack byte-only types | Stable |
-| `crates/coincync-rig` | RandomX CPU miner (`run-solo` + `bench`) | Production-ready |
-| `crates/coincync-faucet` | Testnet faucet service | Deployed |
-| `crates/coincync-frost-coordinator` | FROST M-of-N signing relay (CIP-008) | State machine, auth, persistence, WSS server, operator CLI all shipped. Ships `coord` + `coord-cli` binaries. |
-| `crates/coincync-rolling-finality` | Miner-signed soft-finality (CIP-009.D) | State machine, ed25519 verifier, wire codec all shipped. `validate_block` integration shipped behind `rolling-finality` cargo feature (default OFF). Activates per CIP-011 schedule. |
-| `crates/coincync-swap` | CYNC↔BTC atomic swap (CIP-001) | State machine + handshake + persistence shipped. Real adaptor signatures + BTC RPC client queued for audit window. NLnet-funded. |
-
-Each multi-phase crate's `tests/` directory composes every layer in a focused integration test — see [`tests/README.md`](tests/README.md) for the catalog.
-
----
-
-## Documentation
-
-- [Getting started](docs/src/getting-started/build.md)
-- [Consensus specification](docs/src/protocol/consensus.md)
-- [Privacy model](docs/src/protocol/privacy-model.md)
-- [Privacy features (per-feature detail)](docs/PRIVACY_FEATURES.md)
-- [Node operations](docs/src/operations/deployment.md)
-- [API reference](docs/API.md)
-- [Constitution](CONSTITUTION.md) — the 19-article + 15-rights compile-time-enforced posture
-- [CIP register](docs/cip/) — 12 CIPs covering atomic swap, reorg defense, rolling finality, FROST, hard-fork activation policy
-- [Blockchain roadmap](docs/BLOCKCHAIN_ROADMAP.md) — forward-looking, organized by release phase
-- [Operational runbooks](docs/operations/) — incident response, status page design, reproducible builds, continuous fuzzing, DNS failover, checkpoint procedure
-
----
-
-## Manifesto
-
-> Privacy money that doesn't depend on permission to participate. CYNC↔BTC atomic swaps are a constitutional mainnet-launch commitment, not a roadmap item to be deferred. Whether this combination works is what testnet and mainnet are for.
->
-> *Privacy money that requires no permission.*
-
----
-
-## License
-
-MIT
+Use at your own risk. Testnet coins have no value; mainnet is not yet live.
