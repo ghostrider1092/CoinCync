@@ -1558,8 +1558,8 @@ pub async fn start_rpc_server(
                     ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
                 })?;
             let capped = count.min(256); // sanity cap
-                                         // Layer 2: up to 256 output records scanned from the chain DB
-                                         // with age filtering; wrap in block_in_place.
+                                         // Layer 2: the in-memory canonical UTXO index applies
+                                         // the V1 age policy; wrap the scan in block_in_place.
             let decoys =
                 tokio::task::block_in_place(|| state.chain.get_decoy_outputs(capped, min_age));
             let encoded: Vec<Value> = decoys

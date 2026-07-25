@@ -61,7 +61,7 @@ analytics firm.
 | "How much was sent?" | Pedersen commitments — output amounts are never plaintext. Bulletproofs+ range proofs prove the amount is in `[0, 2^64)` without revealing it. |
 | "Are these two outputs to the same user?" | One-time stealth derivation per output; identical recipient produces uncorrelated stealth addresses across txs. |
 | "Is this a payment or self-transfer?" | Uniform 2-in/2-out tx shape post-activation: every Transfer looks structurally identical. |
-| "Did this user spend output X?" | Decoy selection via gamma distribution — the spender's real input is statistically indistinguishable from decoys with realistic age profile. |
+| "Did this user spend output X?" | Ring signatures hide the real input among decoys. The V1 log-gamma bootstrap profile reduces the obvious young-input signal, but does not guarantee statistical indistinguishability for every spend age. |
 | "What's the recipient's wallet doing?" | View tags allow scanning without revealing match-or-not in tx structure; encrypted memos require the recipient's view key. |
 
 **What does NOT defend against:**

@@ -3292,8 +3292,8 @@ impl Blockchain {
     pub fn get_decoy_outputs(&self, count: usize, min_age: u64) -> Vec<DecoyOutput> {
         let inner = self.inner.read();
         let current_height = inner.tip.height;
-        // SECURITY: ring decoy selection — OsRng, not thread_rng. See the
-        // matching comment in db::utxos::select_decoys.
+        // SECURITY: ring decoy selection uses OsRng and the canonical V1
+        // policy in storage::UtxoSet::select_decoys.
         let mut rng = rand::rngs::OsRng;
         inner
             .utxos

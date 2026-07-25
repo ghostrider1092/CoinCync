@@ -244,7 +244,6 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     "get_asset_info",
     "list_assets",
     "get_asset_balance",
-    "get_random_outputs",
     "get_output_digests",
     "get_sync_checkpoints",
 ];
