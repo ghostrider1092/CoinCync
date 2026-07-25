@@ -14,11 +14,17 @@ name: Fuzz
 #     cargo +nightly fuzz run <target> <path/to/crash-file>
 
 on:
-  pull_request:
+  # 2026-07-25: removed the `pull_request:` trigger. On a private repo it ran
+  # the ~26-min per-target fuzz build on EVERY pull request — including every
+  # automated dependency-bump PR — which exhausts the limited free Actions
+  # minutes. Fuzz now runs on merges to main, on a weekly schedule, and on
+  # manual dispatch. Deep accumulation still uses scripts/fuzz-overnight.sh.
   push:
     branches:
       - main
       - master
+  schedule:
+    - cron: "0 6 * * 0" # Sundays 06:00 UTC
   workflow_dispatch:
 
 concurrency:
