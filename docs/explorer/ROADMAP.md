@@ -109,8 +109,9 @@ the node already serves but the explorer doesn't call.
    value high; reinforces "everyone's transactions look the same."
    **M**, high educational value.
 2. **Random outputs visualizer** — `get_random_outputs`. Interactive
-   demo of how decoy selection draws from the UTXO set. Pairs with the
-   uniform-decoy-selection privacy innovation. **M**.
+   demo of how decoy selection draws from the UTXO set. To reflect real
+   selection it should draw via `get_decoys` (the gamma age-matched path),
+   not raw uniform — see docs/architecture/decoy-selection-policy.md. **M**.
 3. **Real fleet health page** — replace the current `health` tab
    implementation with one driven by `get_health` against each fleet
    node. The RPC method exists; the health page currently fans out to

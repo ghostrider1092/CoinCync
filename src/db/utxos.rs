@@ -377,18 +377,24 @@ impl UtxoDb {
         Ok(outputs)
     }
 
-    /// Get random outputs for ring members using UNIFORM selection.
+    /// Raw uniform random outputs — NOT the authoritative decoy selector.
     ///
-    /// AUDIT (2026-07-02): SEV-A companion to the storage/utxos.rs::select_decoys
-    /// gamma → uniform fix. This is the RocksDB-backed sibling exposed via the
-    /// RPC method `get_random_outputs` (see rpc/rest.rs L251 allow-list). Prior
-    /// implementation used the same gamma(19.28, 1/1.61) shape that Möser et
-    /// al. 2018 showed enables ring-signature deanonymization via output-age
-    /// regression. The SECURITY(M-3) comment on the previous version claimed
-    /// gamma was PROTECTIVE — that was wrong. Uniform is what CoinCync's
-    /// constitutional Article III and the ring_selection.rs module design
-    /// call for. See storage/utxos.rs::select_decoys for the full audit
-    /// rationale + prior-art citations.
+    /// The authoritative decoy path is **gamma age-matched** selection in
+    /// `storage::UtxoSet::select_decoys` (served to wallets via the `get_decoys`
+    /// RPC). See `docs/architecture/decoy-selection-policy.md`. Wallets build
+    /// rings from `get_decoys` — both `wallet/churn.rs` and `bin/wallet.rs` do.
+    ///
+    /// This RocksDB sibling backs the separate `get_random_outputs` RPC (see
+    /// rpc/rest.rs allow-list) and returns a UNIFORM raw sample. It has **no
+    /// in-repo consumer for ring construction and MUST NOT be used to select
+    /// ring decoys**, because it does not apply the age model the policy
+    /// requires. If retained, it should be routed through the gamma selector or
+    /// deprecated (tracked as a decoy-policy follow-up).
+    ///
+    /// History: this path briefly used gamma(19.28, 1/1.61); a 2026-07-02 change
+    /// moved both siblings to uniform; the 2026-07-24 decision restored gamma as
+    /// the authoritative model at the storage selector — this sibling was left
+    /// uniform and is flagged here for reconciliation.
     ///
     /// Implementation: two-phase. First a bounded number of attempts randomly
     /// pick a height uniformly across [min_height, max_height], then pick an
