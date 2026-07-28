@@ -181,19 +181,11 @@ impl SubaddressManager {
     /// the next allocator hit. Build the buffer explicitly and
     /// wipe before scope-exit.
     fn derive_scalar(&self, index: SubaddressIndex) -> SecretScalar {
-        let mut input = Vec::with_capacity(32 + 8 + 8);
-        input.extend_from_slice(self.view_secret.as_bytes());
-        input.extend_from_slice(&index.account.to_le_bytes());
-        input.extend_from_slice(&index.index.to_le_bytes());
-
-        let hash = hash_domain(b"COINCYNC_SUBADDR_v1", &input);
-        // R-85: wipe the heap buffer (contains view_secret bytes)
-        // before it goes out of scope.
-        {
-            use zeroize::Zeroize;
-            input.zeroize();
-        }
-        SecretScalar::from_bytes(*hash.as_bytes())
+        // Single canonical, account-aware derivation — shared byte-for-byte
+        // with the audit / view-key scan path via `crypto::subaddress_scalar`,
+        // so the two paths' keys always match (Jun #26). Formerly this was a
+        // duplicated inline formula that diverged from the audit path.
+        crate::crypto::subaddress_scalar(&self.view_secret, index.account, index.index)
     }
 
     /// Generate a subaddress at a specific index
@@ -616,5 +608,34 @@ mod tests {
             bytes_0_1, bytes_1_1,
             "Account 0 index 1 must differ from account 1 index 1"
         );
+    }
+
+    /// Jun #26: the wallet (`SubaddressManager`) and the audit / view-key path
+    /// (`crypto::Subaddress::generate`) must derive **identical** subaddress
+    /// keys for the same `(account, index)`. Before the unification the two used
+    /// incompatible formulas, so an auditor's key could not scan any wallet
+    /// subaddress. This locks the fix.
+    #[test]
+    fn test_wallet_and_audit_derivation_match() {
+        let (_, spend_public, view_secret, view_public) = generate_test_keys();
+        let mut manager = SubaddressManager::new(view_secret.clone(), spend_public, view_public);
+
+        for &(account, index) in &[(0u32, 1u32), (0, 5), (1, 0), (1, 7), (3, 2)] {
+            let wallet_spend: Vec<u8> = manager
+                .generate_at(SubaddressIndex::new(account, index))
+                .unwrap()
+                .spend_public
+                .as_bytes()
+                .to_vec();
+            let audit_spend =
+                crate::crypto::Subaddress::generate(&spend_public, &view_secret, account, index)
+                    .unwrap()
+                    .spend_public;
+            assert_eq!(
+                wallet_spend,
+                audit_spend.as_bytes().to_vec(),
+                "wallet vs audit subaddress key mismatch at (account={account}, index={index})"
+            );
+        }
     }
 }

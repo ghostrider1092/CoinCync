@@ -61,7 +61,7 @@
 use super::curve::{hash_to_scalar, PublicPoint, SecretScalar};
 use super::secure::ct_eq;
 use crate::error::{Error, Result};
-use crate::primitives::{hash_data, Address, PublicKey, SecretKey};
+use crate::primitives::{hash_data, hash_domain, Address, PublicKey, SecretKey};
 use crate::wallet::KeyEpoch;
 use borsh::{BorshDeserialize, BorshSerialize};
 use rand::{CryptoRng, RngCore};
@@ -455,7 +455,9 @@ pub struct ScanResult {
 /// but all can be scanned with a single view key.
 #[derive(Clone)]
 pub struct Subaddress {
-    /// Subaddress index
+    /// Account index (0 = main account)
+    pub account: u32,
+    /// Subaddress index within the account
     pub index: u32,
     /// Derived spend public key for this subaddress
     pub spend_public: PublicKey,
@@ -463,10 +465,33 @@ pub struct Subaddress {
     pub view_public: PublicKey,
 }
 
+/// Canonical subaddress key-offset scalar `m`, **account-aware** and
+/// domain-separated. This is the single source of truth for subaddress
+/// derivation — the wallet (`wallet::SubaddressManager`) and the audit /
+/// view-key scan path (`AuditKey`) both derive through this function, so their
+/// keys always match (Jun #26; previously the two paths used incompatible
+/// formulas and the audit key could not scan any wallet subaddress).
+///
+/// `m = hash_domain("COINCYNC_SUBADDR_v1", view_secret ‖ account_le ‖ index_le)`
+/// and `subaddress_spend = spend_public + m·G`.
+///
+/// Byte-for-byte identical to the wallet's prior `derive_scalar`, so existing
+/// wallet subaddresses are unchanged; only the audit path is corrected to match.
+pub fn subaddress_scalar(view_secret: &SecretKey, account: u32, index: u32) -> SecretScalar {
+    let mut input = Vec::with_capacity(32 + 4 + 4);
+    input.extend_from_slice(view_secret.as_bytes());
+    input.extend_from_slice(&account.to_le_bytes());
+    input.extend_from_slice(&index.to_le_bytes());
+    let hash = hash_domain(b"COINCYNC_SUBADDR_v1", &input);
+    // The buffer holds raw view_secret bytes — wipe before it drops.
+    input.zeroize();
+    SecretScalar::from_bytes(*hash.as_bytes())
+}
+
 impl Subaddress {
-    /// Generate a subaddress from wallet keys.
+    /// Generate a subaddress from wallet keys, account-aware.
     ///
-    /// `subaddress_spend = spend_public + H(view_secret || "CYNC1_SUBADDR_v1" || index) * G`
+    /// `subaddress_spend = spend_public + subaddress_scalar(view, account, index)·G`
     ///
     /// AUDIT (R-10 fix, 2026-07-02): the pre-fix code built the hash
     /// input with `Vec::extend_from_slice(view_secret.as_bytes())`,
@@ -492,38 +517,36 @@ impl Subaddress {
     ///     regenerate. Documented in the release notes for the
     ///     tag that ships this change.
     /// Follows Zcash ZIP 32 §5 and Bitcoin BIP 43 patterns.
-    pub fn generate(spend_public: &PublicKey, view_secret: &SecretKey, index: u32) -> Result<Self> {
+    pub fn generate(
+        spend_public: &PublicKey,
+        view_secret: &SecretKey,
+        account: u32,
+        index: u32,
+    ) -> Result<Self> {
         let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
         let view_public = view_scalar.to_public();
 
         let spend_point = PublicPoint::from_bytes(*spend_public.as_bytes())
             .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key".into()))?;
 
-        // R-10 + R-11: build the buffer with the versioned domain
-        // separator, hash, then zeroize BEFORE dropping.
-        let mut data = Vec::with_capacity(32 + 16 + 4);
-        data.extend_from_slice(view_secret.as_bytes());
-        data.extend_from_slice(b"CYNC1_SUBADDR_v1");
-        data.extend_from_slice(&index.to_le_bytes());
-        let sub_scalar = hash_to_scalar(&data);
-        // R-10: wipe the buffer (contains view_secret bytes) before
-        // it goes out of scope.
-        data.zeroize();
-        let sub_point = SecretScalar::from_scalar(sub_scalar).to_public();
+        // Single canonical, account-aware, domain-separated derivation shared
+        // with the wallet — see `subaddress_scalar` (zeroizes internally).
+        let sub_point = subaddress_scalar(view_secret, account, index).to_public();
 
-        // subaddress_spend = spend_public + H(...) * G
+        // subaddress_spend = spend_public + m·G
         let subaddr_spend_point = spend_point.add(&sub_point);
 
         Ok(Subaddress {
+            account,
             index,
             spend_public: PublicKey::from_bytes(subaddr_spend_point.to_bytes()),
             view_public: PublicKey::from_bytes(view_public.to_bytes()),
         })
     }
 
-    /// Generate from KeyEpoch
-    pub fn from_epoch(keys: &KeyEpoch, index: u32) -> Result<Self> {
-        Self::generate(&keys.spend_public, &keys.view_secret, index)
+    /// Generate from KeyEpoch (account-aware).
+    pub fn from_epoch(keys: &KeyEpoch, account: u32, index: u32) -> Result<Self> {
+        Self::generate(&keys.spend_public, &keys.view_secret, account, index)
     }
 
     /// Create RecipientKeys for scanning this subaddress
@@ -574,7 +597,9 @@ impl SubaddressManager {
     /// Get or generate a specific subaddress
     pub fn get_or_generate(&mut self, index: u32) -> Result<&Subaddress> {
         if !self.generated.contains_key(&index) {
-            let subaddr = Subaddress::generate(&self.spend_public, &self.view_secret, index)?;
+            // Flat legacy manager — account 0. Account-aware generation lives in
+            // `wallet::SubaddressManager`; both derive via `subaddress_scalar`.
+            let subaddr = Subaddress::generate(&self.spend_public, &self.view_secret, 0, index)?;
             self.generated.insert(index, subaddr);
         }
         // safe: we just inserted above if missing
@@ -769,7 +794,12 @@ impl AuditKey {
                 if i == 0 {
                     continue;
                 }
-                let subaddr = Subaddress::generate(&self.spend_public, &self.view_secret, i)?;
+                // Account 0 range (the current audit scan dimension). Now uses
+                // the SAME account-aware `subaddress_scalar` as the wallet, so
+                // the derived keys finally match — previously this path used an
+                // incompatible flat formula and detected nothing (Jun #26).
+                // Multi-account audit range is a scoped follow-up.
+                let subaddr = Subaddress::generate(&self.spend_public, &self.view_secret, 0, i)?;
                 let sub_recipient = RecipientKeys::new(&self.view_secret, &subaddr.spend_public)?;
                 scanner.add_subaddress(i, sub_recipient);
             }
@@ -1297,7 +1327,7 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, view_public) = generate_ec_keypair();
 
-        let sub = Subaddress::generate(&spend_public, &view_secret, 0).unwrap();
+        let sub = Subaddress::generate(&spend_public, &view_secret, 0, 0).unwrap();
 
         // Subaddress should have different spend key
         assert_ne!(sub.spend_public.as_bytes(), spend_public.as_bytes());
@@ -1474,9 +1504,9 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, _view_public) = generate_ec_keypair();
 
-        let sub0 = Subaddress::generate(&spend_public, &view_secret, 0).unwrap();
-        let sub1 = Subaddress::generate(&spend_public, &view_secret, 1).unwrap();
-        let sub2 = Subaddress::generate(&spend_public, &view_secret, 2).unwrap();
+        let sub0 = Subaddress::generate(&spend_public, &view_secret, 0, 0).unwrap();
+        let sub1 = Subaddress::generate(&spend_public, &view_secret, 0, 1).unwrap();
+        let sub2 = Subaddress::generate(&spend_public, &view_secret, 0, 2).unwrap();
 
         assert_ne!(sub0.spend_public.as_bytes(), sub1.spend_public.as_bytes());
         assert_ne!(sub1.spend_public.as_bytes(), sub2.spend_public.as_bytes());

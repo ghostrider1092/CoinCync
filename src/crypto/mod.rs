@@ -76,6 +76,7 @@ pub use stealth::{
     is_output_ours,
     is_output_ours_with_epoch,
     scan_outputs,
+    subaddress_scalar,
     AuditKey,
     AuditKeyExport,
     IndexedOutput,

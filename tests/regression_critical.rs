@@ -351,7 +351,7 @@ fn test_regression_subaddress_scanner_detection() {
 
     // Generate a subaddress
     let subaddr =
-        Subaddress::generate(&spend_pk, &view_sk, 0).expect("subaddress generation must succeed");
+        Subaddress::generate(&spend_pk, &view_sk, 0, 0).expect("subaddress generation must succeed");
 
     // Create a stealth address targeting the SUBADDRESS (not the primary address)
     let output_idx = 0u8;
@@ -384,7 +384,7 @@ fn test_regression_subaddress_scanner_detection() {
 
     // Verify multiple subaddresses are all independently detectable
     for idx in 1..5u32 {
-        let sub = Subaddress::generate(&spend_pk, &view_sk, idx).expect("subaddress generation");
+        let sub = Subaddress::generate(&spend_pk, &view_sk, 0, idx).expect("subaddress generation");
         let (sub_stealth, _) =
             generate_stealth_address_checked(&sub.spend_public, &view_pk, output_idx, &mut OsRng)
                 .expect("test fixtures pass valid curve points");
