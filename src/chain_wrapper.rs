@@ -54,7 +54,8 @@ impl Blockchain {
     }
 
     fn begin_state_update(&self) -> StateUpdate<'_> {
-        self.state_updates_in_progress.fetch_add(1, Ordering::AcqRel);
+        self.state_updates_in_progress
+            .fetch_add(1, Ordering::AcqRel);
         StateUpdate { chain: self }
     }
 
@@ -82,12 +83,7 @@ impl Blockchain {
         self.inner.load_from_database()
     }
 
-    pub fn restore_state(
-        &self,
-        height: u64,
-        tip_hash: Hash,
-        total_difficulty: u128,
-    ) -> Result<()> {
+    pub fn restore_state(&self, height: u64, tip_hash: Hash, total_difficulty: u128) -> Result<()> {
         let _update = self.begin_state_update();
         self.inner.restore_state(height, tip_hash, total_difficulty)
     }
@@ -128,7 +124,9 @@ impl Blockchain {
         tokio::task::spawn_blocking(move || self.process_block(block))
             .await
             .map_err(|error| {
-                Error::Internal(format!("spawn_blocking join error in process_block: {error}"))
+                Error::Internal(format!(
+                    "spawn_blocking join error in process_block: {error}"
+                ))
             })?
     }
 

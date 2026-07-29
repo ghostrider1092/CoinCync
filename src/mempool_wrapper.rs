@@ -141,11 +141,9 @@ impl SharedMempool {
         max_size: usize,
         max_count: usize,
     ) -> Vec<Transaction> {
-        tokio::task::spawn_blocking(move || {
-            self.inner.get_block_transactions(max_size, max_count)
-        })
-        .await
-        .unwrap_or_default()
+        tokio::task::spawn_blocking(move || self.inner.get_block_transactions(max_size, max_count))
+            .await
+            .unwrap_or_default()
     }
 }
 
@@ -180,8 +178,7 @@ impl Default for SharedMempool {
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_stable_admission, AdmissionAttempt, GenerationSource,
-        MAX_CHAIN_GENERATION_ATTEMPTS,
+        retry_stable_admission, AdmissionAttempt, GenerationSource, MAX_CHAIN_GENERATION_ATTEMPTS,
     };
     use crate::error::Result;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

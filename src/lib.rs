@@ -36,16 +36,16 @@ pub mod consensus;
 pub mod emission;
 
 // ── Chain state ─────────────────────────────────────────────
-#[doc(hidden)]
-#[path = "chain.rs"]
-pub mod chain_impl;
 #[path = "chain_wrapper.rs"]
 pub mod chain;
 #[doc(hidden)]
-#[path = "mempool.rs"]
-pub mod mempool_impl;
+#[path = "chain.rs"]
+pub mod chain_impl;
 #[path = "mempool_wrapper.rs"]
 pub mod mempool;
+#[doc(hidden)]
+#[path = "mempool.rs"]
+pub mod mempool_impl;
 pub mod metrics;
 
 // ── Crypto + wallet ─────────────────────────────────────────
