@@ -362,6 +362,10 @@ impl BlockchainInner {
 pub struct Blockchain {
     /// Internal mutable state protected by RwLock
     inner: RwLock<BlockchainInner>,
+    /// Monotonic marker for canonical-state changes observed by mempool admission.
+    state_generation: std::sync::atomic::AtomicU64,
+    /// Non-zero while one or more canonical-state updates are in progress.
+    state_updates_in_progress: std::sync::atomic::AtomicU32,
     /// Database reference (optional)
     db: Option<Arc<Database>>,
     /// Runtime network type — determines genesis, reorg depth, seed nodes
@@ -401,6 +405,21 @@ pub struct Blockchain {
     pub rolling_finality: Option<Arc<crate::consensus::rolling_finality::RollingFinality>>,
 }
 
+struct StateUpdate<'a> {
+    chain: &'a Blockchain,
+}
+
+impl Drop for StateUpdate<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        self.chain.state_generation.fetch_add(1, Ordering::Release);
+        self.chain
+            .state_updates_in_progress
+            .fetch_sub(1, Ordering::Release);
+    }
+}
+
 /// Extract stats snapshot for structured logging without holding lock in tracing macro.
 fn inner_stats_for_log(inner: &RwLock<BlockchainInner>) -> (u128, String) {
     let guard = inner.read();
@@ -435,6 +454,8 @@ impl Blockchain {
                 utxos: UtxoSet::new(),
                 events: std::collections::VecDeque::with_capacity(MAX_CHAIN_EVENTS),
             }),
+            state_generation: std::sync::atomic::AtomicU64::new(0),
+            state_updates_in_progress: std::sync::atomic::AtomicU32::new(0),
             db: None,
             network,
             synced: std::sync::atomic::AtomicBool::new(true),
@@ -475,6 +496,8 @@ impl Blockchain {
                 },
                 events: std::collections::VecDeque::with_capacity(MAX_CHAIN_EVENTS),
             }),
+            state_generation: std::sync::atomic::AtomicU64::new(0),
+            state_updates_in_progress: std::sync::atomic::AtomicU32::new(0),
             db: Some(db),
             network,
             synced: std::sync::atomic::AtomicBool::new(true),
@@ -671,6 +694,7 @@ impl Blockchain {
 
     /// Initialize genesis block
     pub fn init_genesis(&self) -> Result<Hash> {
+        let _state_update = self.begin_state_update();
         let genesis = create_genesis_block_for(self.network);
         let hash = genesis.hash();
 
@@ -774,6 +798,7 @@ impl Blockchain {
 
     /// Genesis initialization requires an explicit fresh-database result.
     pub fn load_from_database_with_outcome(&self) -> Result<ChainLoadOutcome> {
+        let _state_update = self.begin_state_update();
         if let Some(ref db) = self.db {
             let state = match db.state.get_state()? {
                 Some(state) => state,
@@ -1406,6 +1431,7 @@ impl Blockchain {
 
     /// Restore state from database
     pub fn restore_state(&self, height: u64, tip_hash: Hash, total_difficulty: u128) -> Result<()> {
+        let _state_update = self.begin_state_update();
         {
             let mut inner = self.inner.write();
             inner.tip.height = height;
@@ -1424,6 +1450,7 @@ impl Blockchain {
     /// Returns the list of non-coinbase transactions from disconnected blocks
     /// (for mempool restoration).
     pub fn rollback_to_height(&self, target_height: u64) -> Result<Vec<Transaction>> {
+        let _state_update = self.begin_state_update();
         let current_height = self.height();
         if target_height >= current_height {
             return Ok(Vec::new());
@@ -1672,6 +1699,7 @@ impl Blockchain {
 
     /// Add block to chain
     pub fn add_block(&self, block: Block) -> Result<BlockStatus> {
+        let _state_update = self.begin_state_update();
         let hash = block.hash();
 
         // Check if already known
@@ -3666,6 +3694,23 @@ impl Blockchain {
 // atomic refcount bump only.
 
 impl Blockchain {
+    fn begin_state_update(&self) -> StateUpdate<'_> {
+        self.state_updates_in_progress
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        StateUpdate { chain: self }
+    }
+
+    /// Return the current generation only while canonical chain state is stable.
+    pub fn stable_generation(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+
+        if self.state_updates_in_progress.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let generation = self.state_generation.load(Ordering::Acquire);
+        (self.state_updates_in_progress.load(Ordering::Acquire) == 0).then_some(generation)
+    }
+
     /// Async wrapper around [`Blockchain::add_block`]. Runs full block
     /// validation + DB write on `tokio::task::spawn_blocking`.
     pub async fn add_block_async(self: Arc<Self>, block: Block) -> Result<BlockStatus> {
@@ -3749,6 +3794,37 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
 impl Default for Blockchain {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::Blockchain;
+
+    #[test]
+    fn generation_is_unavailable_until_all_updates_finish() {
+        let chain = Blockchain::new();
+        let initial = chain.stable_generation().expect("new chain is stable");
+        let first = chain.begin_state_update();
+        let second = chain.begin_state_update();
+
+        assert_eq!(chain.stable_generation(), None);
+        drop(first);
+        assert_eq!(chain.stable_generation(), None);
+        drop(second);
+        assert_eq!(chain.stable_generation(), Some(initial + 2));
+    }
+
+    #[test]
+    fn database_load_path_advances_generation() {
+        let chain = Blockchain::new();
+        let initial = chain.stable_generation().expect("new chain is stable");
+
+        chain
+            .load_from_database_with_outcome()
+            .expect("fresh in-memory chain loads");
+
+        assert_eq!(chain.stable_generation(), Some(initial + 1));
     }
 }
 
