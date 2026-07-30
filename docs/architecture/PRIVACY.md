@@ -262,9 +262,12 @@ Don't add other exemptions.
 decoys from the chain's UTXO history to mix with the real input. The
 on-chain record can't distinguish real from decoy.
 
-**Spec.** Gamma distribution shape=19.28, scale=0.621 — matches Monero's
-empirical real-spend distribution (Möser et al. 2018). Implementation
-in `crypto::RingSelector` via temporal binning.
+**Spec.** CoinCync V1 uses a log-gamma bootstrap profile with shape=19.28
+and scale=1/1.61. `storage::UtxoSet::select_decoys` conditions samples on
+the eligible canonical-chain age window and maps them to target block
+heights. `crypto::RingSelector` only assembles the already-shaped pool
+uniformly. This height mapping is not claimed to reproduce Monero's
+cumulative-output-index picker or an empirical CoinCync spend-age fit.
 
 **Constants.**
 
@@ -647,7 +650,8 @@ check:
    an arbitrary point (otherwise H = k·G for unknown k is a trapdoor)
 5. RNG sources for nonces are `OsRng`, never `thread_rng` (the latter is
    seeded from `OsRng` but is reused across threads — privacy signal)
-6. Ring decoy selection passes the gamma-distribution test fixture
+6. Ring decoy selection passes the fixed-seed conditioned-distribution,
+   minimum-age, sparse/locked, and reorg fixtures
 7. The mempool ADD path and the SHADOW-EVICT path run identical
    validators (Invariant 1)
 8. The wallet selection path enforces uniform shape when

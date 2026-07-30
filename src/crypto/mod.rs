@@ -116,11 +116,9 @@ pub use secure::{
 };
 
 // `ring_selection` is consumed by the wallet's send path
-// (`src/wallet/send.rs::select_ring_decoys`) which delegates UNIFORM
-// (Fisher-Yates) decoy selection. Prior comment here said "gamma-
-// distribution" — that was stale after the Wave 15 gamma→uniform
-// migration and is now corrected. See `ring_selection.rs` module
-// docstring (L3-22) for the Möser-2018 rationale behind the switch.
+// (`src/wallet/send.rs::select_ring_decoys`). It uniformly assembles a ring
+// from the candidate pool; `storage::UtxoSet::select_decoys` owns the V1
+// log-gamma target-age policy that shapes that pool.
 // Do NOT prune these re-exports — their absence from the
 // `src/consensus/` grep is expected since consensus code verifies
 // rings, doesn't select them.

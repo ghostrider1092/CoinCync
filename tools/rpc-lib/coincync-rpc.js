@@ -109,7 +109,8 @@ class CoinCyncRPC {
   }
 
   // ─── Privacy ───
-  async getRandomOutputs(count = 11) { return this._call('get_random_outputs', [count]); }
+  async getDecoys(count = 11, minAge = 0) { return this._call('get_decoys', [count, minAge]); }
+  async getRandomOutputs(count = 11) { return this.getDecoys(count, 0); }
 
   // ─── Faucet ───
   async faucetRequest(address) { return this._call('faucet_request', [address]); }

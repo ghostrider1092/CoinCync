@@ -4,20 +4,19 @@
 //! chooses the final ring members and the real output's position, drawing
 //! **uniformly from the pool it is given**.
 //!
-//! The age distribution that actually hides the real spend is applied
-//! **upstream at the source** (`src/storage/utxos.rs::select_decoys`), which
-//! age-matches decoys to the real-spend law via a population-wide **gamma**
-//! distribution (`DECOY_GAMMA_SHAPE`). Real spends are overwhelmingly recent,
-//! so uniform selection over all history would leave the recent real input as
-//! the young outlier in its ring — the output-age regression attack in the
-//! traceability literature (Miller et al. 2017, Möser et al. 2018). Age-matching
-//! removes that signal for the common case.
+//! The network age policy is applied **upstream at the source**
+//! (`src/storage/utxos.rs::select_decoys`), which
+//! applies CoinCync's V1 log-gamma target-height policy
+//! (`DECOY_GAMMA_SHAPE`). Real spends are often recent, so uniform selection
+//! over all history can leave a recent real input as the young outlier in its
+//! ring. The V1 profile is a bootstrap policy; it is not presented as an
+//! empirical fit to CoinCync spends or as implementation-equivalent to Monero's
+//! cumulative-output-index picker.
 //!
 //! This assembler therefore draws uniformly *from the already-gamma-shaped
 //! pool*. Re-imposing a distribution here would double-bias it, and shuffling a
 //! pool cannot add an age distribution the pool does not already carry. See the
-//! decision history in `src/storage/utxos.rs::select_decoys` (uniform on
-//! 2026-07-02, reversed to gamma 2026-07-24 by owner + co-founder).
+//! mapping contract in `src/storage/utxos.rs::select_decoys`.
 //!
 //! ## Constitutional note
 //!
@@ -111,7 +110,7 @@ pub struct RingSelectionStats {
     pub age_distribution: [u32; 10],
 }
 
-/// Select ring members using UNIFORM decoy selection over the eligible pool.
+/// Assemble ring members uniformly from an upstream policy-shaped candidate pool.
 pub struct RingSelector {
     config: RingSelectionConfig,
 }
@@ -240,8 +239,9 @@ impl RingSelector {
             });
         }
 
-        // Sampling indices preserves a uniform distribution without allocating
-        // and shuffling a second vector proportional to the eligible pool.
+        // The upstream UTXO selector owns the age distribution. Sampling indices
+        // uniformly here only assembles the final ring without double-biasing
+        // that policy-shaped pool.
         let selected_decoys: Vec<OutputRef<'a>> = index::sample(rng, eligible.len(), decoy_count)
             .iter()
             .map(|i| *eligible[i])
@@ -352,20 +352,10 @@ impl RingSelector {
             }
         }
 
-        // AUDIT (2026-07-01): removed the `distribution_score` computation
-        // and the `... && distribution_score > 0.5` gate. `score_distribution`
-        // (see below) was inherited from the pre-2026-06-03 gamma-selection
-        // era and grades toward a "more recent than old" pattern. That is
-        // the OPPOSITE of what CoinCync's uniform decoy selection produces:
-        // uniform selection over a wide-age pool yields ~equal mass across
-        // buckets, so `score_distribution` returns ~0.5, and the gate then
-        // flags every correctly-uniform ring as `is_valid = false`. The
-        // dead-gamma logic contradicted the design comment at the top of
-        // this file (see the 4th-Amendment / Möser-attack rationale).
-        //
-        // `is_valid` now reflects only the checks that are consistent with
-        // uniform selection: no per-ring issues (empty ring, duplicate
-        // commitments) and no z-score outlier on the real output's age.
+        // Distribution conformance cannot be judged from one assembled ring:
+        // the upstream candidate pool already carries the network age policy.
+        // `is_valid` therefore reflects only per-ring structural checks and
+        // whether the real output is an obvious age outlier.
         // `distribution_score` stays at its Default (0.0) so serialized
         // reports keep the same field shape.
         report.is_valid = report.issues.is_empty();
@@ -388,16 +378,8 @@ impl RingSelector {
         variance
     }
 
-    // AUDIT (2026-07-01): removed `score_distribution`. Original body scored
-    // rings toward a gamma-style "more recent than old" pattern inherited
-    // from the pre-2026-06-03 gamma-selection code. That grading rejects
-    // exactly the uniform distribution CoinCync now targets by design. The
-    // only caller was the `is_valid` gate above, which has also been
-    // reworked to not depend on any distribution-shape heuristic.
-    // Restoring a shape check for the uniform era would need a chi-squared
-    // or KS test against the eligible pool's age histogram, not a hand-
-    // tuned recent/old cutoff — out of scope for this pass, and unused
-    // anyway (no external consumer reads `distribution_score`).
+    // Distribution validation belongs in multi-sample policy tests against the
+    // canonical UTXO selector, not in a single-ring quality heuristic.
 }
 
 /// Ring quality audit report
@@ -518,10 +500,9 @@ mod tests {
     }
 
     #[test]
-    fn test_distribution_is_uniform() {
-        // Privacy Innovation #1 (Decoy Aging Defense): selection uses UNIFORM
-        // distribution so chain-analysis heuristics assuming recency bias
-        // cannot narrow the real spend.
+    fn test_ring_assembly_is_uniform_over_supplied_pool() {
+        // The assembler must not add another age bias to the upstream
+        // policy-shaped candidate pool.
         let selector = RingSelector::with_ring_size(11);
         let current_height = 200_000;
 
@@ -552,12 +533,12 @@ mod tests {
                 }
             }
         }
-        // Uniform: ~10% of decoys in the most recent 10% of range.
-        // Allow 5-20% for randomness. Must NOT show gamma-style bias (>25%).
+        // A uniform assembler sees ~10% of this synthetic pool in its newest
+        // 10%. A second gamma pass here would push this above the wide bound.
         let recent_ratio = recent as f64 / total_decoys as f64;
         assert!(
             recent_ratio < 0.25,
-            "Uniform should NOT bias recent: got {:.2}%",
+            "ring assembly added an age bias: got {:.2}% recent",
             recent_ratio * 100.0
         );
     }
