@@ -394,17 +394,42 @@ impl UtxoSet {
             return Vec::new();
         }
         let max_height = current_height - min_age;
-        let eligible: Vec<&OutputRef> = self
-            .outputs_in_range(0, max_height)
-            .into_iter()
-            .filter(|output| Self::is_decoy_eligible(output, current_height, exclude_tx))
-            .collect();
-        if eligible.len() <= count {
-            return eligible;
+        // Collect at most count + 1 eligible outputs. Public get_decoys calls
+        // are capped at 256, so an abundant UTXO set must not be materialized
+        // and scanned in full before the ordered-index seeks below.
+        let mut prefix = Vec::with_capacity(count.saturating_add(1));
+        'heights: for (_, keys) in self.height_index.range(..=max_height) {
+            for key in keys {
+                if let Some(output) = self.outputs.get(key) {
+                    if Self::is_decoy_eligible(output, current_height, exclude_tx) {
+                        prefix.push(output);
+                        if prefix.len() > count {
+                            break 'heights;
+                        }
+                    }
+                }
+            }
+        }
+        if prefix.len() <= count {
+            return prefix;
         }
 
-        let youngest_height = eligible.iter().map(|output| output.height).max().unwrap();
-        let oldest_height = eligible.iter().map(|output| output.height).min().unwrap();
+        let oldest_height = prefix[0].height;
+        let youngest_height = self
+            .height_index
+            .range(..=max_height)
+            .rev()
+            .find_map(|(_, keys)| {
+                keys.iter().find_map(|key| {
+                    self.outputs
+                        .get(key)
+                        .filter(|output| {
+                            Self::is_decoy_eligible(output, current_height, exclude_tx)
+                        })
+                        .map(|output| output.height)
+                })
+            })
+            .expect("count + 1 eligible outputs imply a youngest eligible height");
         let youngest_age = current_height - youngest_height;
         let oldest_age = current_height - oldest_height;
         let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE)
