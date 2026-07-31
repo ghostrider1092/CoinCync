@@ -191,9 +191,8 @@ pub enum MessageType {
 
     // ── Traffic shaping (4th Amendment defense) ─────────────────────
     /// Dummy cover-traffic packet from the constant-rate padding loop.
-    /// Receiver silently discards. Payload is random bytes sized to one
-    /// of the standard TLS frame sizes so an observer can't distinguish
-    /// real traffic from cover.
+    /// Receiver silently discards. The per-connection framer normalizes
+    /// it to the same size buckets used for real traffic.
     ///
     /// Replaces the `PADDING_MAGIC` (0xDEADBEEF) hack that bypassed the
     /// framer entirely — that scheme was wired in tests but never
@@ -314,9 +313,7 @@ impl MessageType {
             MessageType::AnchorRequest => 1024,  // 1 KB
             MessageType::AnchorResponse => 1024, // 1 KB
 
-            // Traffic-shaping cover packet: bounded to the largest standard
-            // padded frame (MAX_PADDED_SIZE in traffic_shaping.rs is 4096).
-            // We accept up to 8 KB to leave headroom for the framer header.
+            // Traffic-shaping cover packet: logical payload before framing.
             MessageType::Padding => 8 * 1024,
         }
     }

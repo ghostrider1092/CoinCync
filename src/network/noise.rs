@@ -24,7 +24,9 @@ const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const ANCHOR_SIGN_DOMAIN: &[u8] = b"coincync/anchor-sign/v1";
 
 /// Maximum plaintext payload per Noise transport message.
-const MAX_NOISE_PAYLOAD: usize = 65519;
+pub(crate) const NOISE_TAG_SIZE: usize = 16;
+pub(crate) const NOISE_LENGTH_PREFIX_SIZE: usize = 2;
+pub(crate) const MAX_NOISE_PAYLOAD: usize = u16::MAX as usize - NOISE_TAG_SIZE;
 
 /// Noise handshake timeout in seconds.
 pub const NOISE_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
@@ -479,7 +481,7 @@ impl NoiseTransport {
         if plaintext.len() > MAX_NOISE_PAYLOAD {
             return Err(Error::NoiseDecryptionFailed("message too large".into()));
         }
-        let mut buf = vec![0u8; plaintext.len() + 16]; // payload + tag
+        let mut buf = vec![0u8; plaintext.len() + NOISE_TAG_SIZE];
         let len = self
             .state
             .write_message(plaintext, &mut buf)
@@ -503,10 +505,10 @@ impl NoiseTransport {
         reader: &mut R,
     ) -> Result<Vec<u8>> {
         // Read 2-byte length prefix
-        let mut len_buf = [0u8; 2];
+        let mut len_buf = [0u8; NOISE_LENGTH_PREFIX_SIZE];
         reader.read_exact(&mut len_buf).await?;
         let ct_len = u16::from_be_bytes(len_buf) as usize;
-        if ct_len > MAX_NOISE_PAYLOAD + 16 {
+        if ct_len > MAX_NOISE_PAYLOAD + NOISE_TAG_SIZE {
             return Err(Error::NoiseDecryptionFailed("frame too large".into()));
         }
         // Read ciphertext
@@ -546,7 +548,7 @@ impl NoiseSendState {
             return Err(Error::NoiseDecryptionFailed("message too large".into()));
         }
         let mut state = self.state.lock().await;
-        let mut buf = vec![0u8; plaintext.len() + 16];
+        let mut buf = vec![0u8; plaintext.len() + NOISE_TAG_SIZE];
         let len = state
             .write_message(plaintext, &mut buf)
             .map_err(|e| Error::NoiseDecryptionFailed(format!("encrypt: {e}")))?;
@@ -566,10 +568,10 @@ impl NoiseSendState {
 impl NoiseRecvState {
     /// Read and decrypt a message.
     pub async fn read_encrypted<R: AsyncRead + Unpin>(&self, reader: &mut R) -> Result<Vec<u8>> {
-        let mut len_buf = [0u8; 2];
+        let mut len_buf = [0u8; NOISE_LENGTH_PREFIX_SIZE];
         reader.read_exact(&mut len_buf).await?;
         let ct_len = u16::from_be_bytes(len_buf) as usize;
-        if ct_len > MAX_NOISE_PAYLOAD + 16 {
+        if ct_len > MAX_NOISE_PAYLOAD + NOISE_TAG_SIZE {
             return Err(Error::NoiseDecryptionFailed("frame too large".into()));
         }
         let mut ct = vec![0u8; ct_len];

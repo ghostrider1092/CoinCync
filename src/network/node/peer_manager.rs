@@ -20,6 +20,7 @@ use super::super::peer::{generate_peer_id, PeerId, PeerInfo, PeerState};
 use super::super::relay_score::RelayScoreMap;
 use super::super::scoring::{OrphanFloodTracker, PeerScorer};
 use super::super::sync::ChainSync;
+use super::super::traffic_shaping::TrafficShaper;
 use super::chain_state::ChainStateReader;
 use super::connection::handle_connection;
 use super::constants::{CONNECT_TIMEOUT, MAX_INBOUND};
@@ -55,6 +56,7 @@ struct OutboundAttempt {
     identity: Arc<NodeIdentity>,
     encryption: P2PEncryptionConfig,
     tracker: Arc<ConnectionTracker>,
+    traffic_shaper: Arc<TrafficShaper>,
     outbound_slot: Arc<OutboundSubnetSlot>,
     magic: [u8; 4],
     our_nonce: u64,
@@ -70,6 +72,7 @@ pub(super) struct AcceptorContext {
     pub scorer: Arc<RwLock<PeerScorer>>,
     pub identity: Arc<NodeIdentity>,
     pub relay_scores: Arc<RwLock<RelayScoreMap>>,
+    pub traffic_shaper: Arc<TrafficShaper>,
     pub encryption: P2PEncryptionConfig,
     pub onion_only: bool,
     pub magic: [u8; 4],
@@ -91,6 +94,7 @@ pub(super) fn spawn_listener_acceptor(
         scorer: acceptor_scorer,
         identity: acceptor_identity,
         relay_scores: acceptor_relay_scores,
+        traffic_shaper: acceptor_traffic_shaper,
         encryption: acceptor_encryption,
         onion_only,
         magic,
@@ -214,6 +218,7 @@ pub(super) fn spawn_listener_acceptor(
                     let addr_clone = addr;
                     let conn_identity = acceptor_identity.clone();
                     let conn_encryption = acceptor_encryption.clone();
+                    let conn_traffic_shaper = Arc::clone(&acceptor_traffic_shaper);
 
                     connections.spawn(async move {
                         let result = handle_connection(
@@ -231,6 +236,7 @@ pub(super) fn spawn_listener_acceptor(
                             tracker.clone(),
                             conn_identity,
                             conn_encryption,
+                            conn_traffic_shaper,
                             None, // inbound — no per-/16 slot to track
                         )
                         .await;
@@ -269,6 +275,7 @@ pub(super) struct OutboundContext {
     pub encryption: P2PEncryptionConfig,
     pub listen_port: u16,
     pub tracker: Arc<ConnectionTracker>,
+    pub traffic_shaper: Arc<TrafficShaper>,
     pub data_dir: PathBuf,
     pub max_outbound: usize,
     pub magic: [u8; 4],
@@ -294,6 +301,7 @@ pub(super) fn spawn_outbound_connector(
         encryption: connector_encryption,
         listen_port: connector_listen_port,
         tracker: connector_tracker,
+        traffic_shaper: connector_traffic_shaper,
         data_dir: connector_data_dir,
         max_outbound,
         magic,
@@ -489,6 +497,7 @@ pub(super) fn spawn_outbound_connector(
                     identity: connector_identity.clone(),
                     encryption: connector_encryption.clone(),
                     tracker: connector_tracker.clone(),
+                    traffic_shaper: Arc::clone(&connector_traffic_shaper),
                     outbound_slot,
                     magic,
                     our_nonce,
@@ -588,6 +597,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         identity,
         encryption,
         tracker,
+        traffic_shaper,
         outbound_slot,
         magic,
         our_nonce,
@@ -611,6 +621,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
                 tracker,
                 identity,
                 encryption,
+                traffic_shaper,
                 Some(outbound_slot),
             )
             .await;
