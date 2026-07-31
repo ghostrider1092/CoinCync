@@ -22,7 +22,8 @@
 
 use crate::error::{Error, Result};
 use crate::network::connection_tracker::{ConnectionTracker, MemoryReservation};
-use crate::network::protocol::{MessageHeader, MAX_MESSAGE_SIZE};
+use crate::network::protocol::{MessageHeader, MessageType, MAX_MESSAGE_SIZE};
+use crate::network::traffic_shaping::TrafficShaper;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
@@ -69,12 +70,22 @@ pub struct MessageFramer<R, W> {
     reading_payload: bool,
     tracker: Option<Arc<ConnectionTracker>>,
     reservation: Option<MemoryReservation>,
+    traffic_shaper: Option<Arc<TrafficShaper>>,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
     /// Create a new message framer
     pub fn new(reader: R, writer: W, magic: [u8; 4]) -> Self {
-        Self::with_tracker(reader, writer, magic, None)
+        Self::with_tracker(reader, writer, magic, None, None)
+    }
+
+    pub fn new_normalized(
+        reader: R,
+        writer: W,
+        magic: [u8; 4],
+        traffic_shaper: Arc<TrafficShaper>,
+    ) -> Self {
+        Self::with_tracker(reader, writer, magic, None, Some(traffic_shaper))
     }
 
     pub(crate) fn new_budgeted(
@@ -82,8 +93,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
         writer: W,
         magic: [u8; 4],
         tracker: Arc<ConnectionTracker>,
+        traffic_shaper: Arc<TrafficShaper>,
     ) -> Self {
-        Self::with_tracker(reader, writer, magic, Some(tracker))
+        Self::with_tracker(reader, writer, magic, Some(tracker), Some(traffic_shaper))
     }
 
     fn with_tracker(
@@ -91,6 +103,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
         writer: W,
         magic: [u8; 4],
         tracker: Option<Arc<ConnectionTracker>>,
+        traffic_shaper: Option<Arc<TrafficShaper>>,
     ) -> Self {
         MessageFramer {
             reader: BufReader::new(reader),
@@ -102,6 +115,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
             reading_payload: false,
             tracker,
             reservation: None,
+            traffic_shaper,
         }
     }
 
@@ -137,33 +151,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
                     // Parse header
                     let header = self.parse_header()?;
 
-                    // Validate magic
-                    if header.magic != self.magic {
-                        self.header_buf.clear();
-                        return Err(Error::ProtocolError("invalid magic".into()));
-                    }
-
-                    // Validate length against global limit
-                    if header.length as usize > MAX_MESSAGE_SIZE {
-                        return Err(Error::MessageTooLarge);
-                    }
-
-                    // SECURITY (H15-FIX): Per-command size limit enforcement.
-                    // Each message type has its own max size to prevent oversized
-                    // payloads for small message types (e.g., 16MB "Ping").
-                    if let Ok(msg_type) =
-                        crate::network::protocol::MessageType::try_from(header.msg_type)
-                    {
-                        let type_limit = msg_type.max_size();
-                        if header.length as usize > type_limit {
-                            tracing::warn!(
-                                "Message type {:?} exceeds per-type limit: {} > {}",
-                                msg_type,
-                                header.length,
-                                type_limit
-                            );
-                            return Err(Error::MessageTooLarge);
-                        }
+                    if let Err(error) = self.validate_wire_header(&header) {
+                        self.reset_read_state();
+                        return Err(error);
                     }
 
                     self.expected_len = header.length as usize;
@@ -207,22 +197,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
 
                 // Check if we have complete payload
                 if self.payload_buf.len() >= self.expected_len {
-                    // Verify checksum
                     let header = self.parse_header()?;
-                    if !header.verify_checksum(&self.payload_buf[..self.expected_len]) {
-                        return Err(Error::InvalidMessage("checksum mismatch".into()));
-                    }
-
-                    // Extract message
                     let msg_type = header.msg_type;
-                    let payload = std::mem::take(&mut self.payload_buf);
+                    let wire_payload = std::mem::take(&mut self.payload_buf);
+                    let payload = self.decode_payload(&header, &wire_payload);
+                    self.reset_read_state();
 
-                    // Reset state for next message
-                    self.header_buf.clear();
-                    self.reading_payload = false;
-                    self.expected_len = 0;
-
-                    return Ok((msg_type, payload));
+                    return Ok((msg_type, payload?));
                 }
             }
         }
@@ -323,41 +304,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
         // (On a resumed call where reading_payload is already true, we've
         // already validated the header on the prior call.)
         if !self.reading_payload {
-            if header.magic != self.magic {
-                // SECURITY: invalid magic is the textbook scan/probe signature
-                // (HTTP GET, TLS hello, kid-script port-scanners). At `warn`
-                // level with a full hex-dump it floods operator logs every
-                // time a port scan runs against the public P2P port. Drop to
-                // `debug` so it's still capturable for investigation but
-                // doesn't dominate steady-state log output. Connection close
-                // alone (returned via Err below) is the operator-visible
-                // signal.
-                tracing::debug!(
-                    "framing: invalid magic, got_header_buf={} expected_magic={}",
-                    hex::encode(&self.header_buf[..]),
-                    hex::encode(self.magic)
-                );
-                self.header_buf.clear();
-                return Err(Error::ProtocolError("invalid magic".into()));
-            }
-            if header.length as usize > MAX_MESSAGE_SIZE {
-                self.header_buf.clear();
-                return Err(Error::MessageTooLarge);
-            }
-
-            // SECURITY (H15-FIX): Per-command size limit enforcement
-            if let Ok(msg_type) = crate::network::protocol::MessageType::try_from(header.msg_type) {
-                let type_limit = msg_type.max_size();
-                if header.length as usize > type_limit {
-                    tracing::warn!(
-                        "Message type {:?} exceeds per-type limit: {} > {}",
-                        msg_type,
-                        header.length,
-                        type_limit
-                    );
-                    self.header_buf.clear();
-                    return Err(Error::MessageTooLarge);
-                }
+            if let Err(error) = self.validate_wire_header(&header) {
+                self.reset_read_state();
+                return Err(error);
             }
 
             self.expected_len = header.length as usize;
@@ -394,20 +343,15 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
             self.payload_buf.extend_from_slice(&buf[..n]);
         }
 
-        // Verify checksum
-        if !header.verify_checksum(&self.payload_buf) {
-            self.reset_read_state();
-            return Err(Error::InvalidMessage("checksum mismatch".into()));
-        }
-
         let msg_type = header.msg_type;
-        let payload = std::mem::take(&mut self.payload_buf);
+        let wire_payload = std::mem::take(&mut self.payload_buf);
+        let payload = self.decode_payload(&header, &wire_payload);
         let reservation = self.reservation.take();
         self.reset_read_state();
 
         Ok(FramedMessage {
             msg_type,
-            payload,
+            payload: payload?,
             reservation,
         })
     }
@@ -416,6 +360,87 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
     pub async fn read_message_timeout(&mut self) -> Result<(u8, Vec<u8>)> {
         self.read_message_with_inactivity_timeout(DEFAULT_READ_TIMEOUT)
             .await
+    }
+
+    fn normalization_enabled(&self) -> bool {
+        self.traffic_shaper
+            .as_ref()
+            .is_some_and(|shaper| shaper.normalization_enabled())
+    }
+
+    fn wire_payload_limit(&self, logical_limit: usize) -> usize {
+        if self.normalization_enabled() {
+            TrafficShaper::normalized_payload_limit(logical_limit, HEADER_SIZE)
+        } else {
+            logical_limit
+        }
+    }
+
+    fn validate_wire_header(&self, header: &MessageHeader) -> Result<()> {
+        if header.magic != self.magic {
+            tracing::debug!(
+                "framing: invalid magic, got_header_buf={} expected_magic={}",
+                hex::encode(&self.header_buf[..]),
+                hex::encode(self.magic)
+            );
+            return Err(Error::ProtocolError("invalid magic".into()));
+        }
+
+        let wire_len = header.length as usize;
+        if wire_len > self.wire_payload_limit(MAX_MESSAGE_SIZE) {
+            return Err(Error::MessageTooLarge);
+        }
+        if self.normalization_enabled()
+            && !TrafficShaper::is_normalized_payload_size(wire_len, HEADER_SIZE)
+        {
+            return Err(Error::InvalidMessage(
+                "non-canonical normalized frame size".into(),
+            ));
+        }
+
+        if let Ok(msg_type) = MessageType::try_from(header.msg_type) {
+            let type_limit = self.wire_payload_limit(msg_type.max_size());
+            if wire_len > type_limit {
+                tracing::warn!(
+                    "Message type {:?} exceeds wire limit: {} > {}",
+                    msg_type,
+                    wire_len,
+                    type_limit
+                );
+                return Err(Error::MessageTooLarge);
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_payload(&self, header: &MessageHeader, wire_payload: &[u8]) -> Result<Vec<u8>> {
+        if !header.verify_checksum(wire_payload) {
+            return Err(Error::InvalidMessage("checksum mismatch".into()));
+        }
+
+        let payload = if self.normalization_enabled() {
+            TrafficShaper::denormalize(wire_payload)
+                .ok_or_else(|| Error::InvalidMessage("invalid normalized payload".into()))?
+        } else {
+            wire_payload.to_vec()
+        };
+
+        if payload.len() > MAX_MESSAGE_SIZE {
+            return Err(Error::MessageTooLarge);
+        }
+        if let Ok(msg_type) = MessageType::try_from(header.msg_type) {
+            let type_limit = msg_type.max_size();
+            if payload.len() > type_limit {
+                tracing::warn!(
+                    "Message type {:?} exceeds semantic limit: {} > {}",
+                    msg_type,
+                    payload.len(),
+                    type_limit
+                );
+                return Err(Error::MessageTooLarge);
+            }
+        }
+        Ok(payload)
     }
 
     fn reset_read_state(&mut self) {
@@ -457,10 +482,20 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
 
     /// Write a complete message to the stream
     pub async fn write_message(&mut self, msg_type: u8, payload: &[u8]) -> Result<()> {
-        use crate::network::protocol::MessageType;
-
-        // Create header
-        let header = MessageHeader::new(self.magic, MessageType::try_from(msg_type)?, payload);
+        let msg_type = MessageType::try_from(msg_type)?;
+        if payload.len() > MAX_MESSAGE_SIZE || payload.len() > msg_type.max_size() {
+            return Err(Error::MessageTooLarge);
+        }
+        if self.normalization_enabled() {
+            if let Some(shaper) = &self.traffic_shaper {
+                shaper.record_shaped_packet();
+            }
+        }
+        let wire_payload = self.traffic_shaper.as_ref().map_or_else(
+            || payload.to_vec(),
+            |shaper| shaper.normalize_size_with_overhead(payload, HEADER_SIZE),
+        );
+        let header = MessageHeader::new(self.magic, msg_type, &wire_payload);
 
         // Serialize header
         let header_bytes =
@@ -472,7 +507,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
             .await
             .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
         self.writer
-            .write_all(payload)
+            .write_all(&wire_payload)
             .await
             .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
         self.writer
@@ -637,6 +672,12 @@ mod tests {
             .unwrap()
     }
 
+    fn unnormalized_shaper() -> Arc<TrafficShaper> {
+        let shaper = Arc::new(TrafficShaper::default_enabled());
+        shaper.set_enabled(false);
+        shaper
+    }
+
     #[test]
     fn test_rate_limiter() {
         let mut limiter = RateLimiter::new(1000);
@@ -691,7 +732,13 @@ mod tests {
         let tracker = Arc::new(ConnectionTracker::new(4));
         let (mut peer, local) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(local);
-        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        let mut framer = MessageFramer::new_budgeted(
+            reader,
+            writer,
+            magic,
+            tracker.clone(),
+            unnormalized_shaper(),
+        );
         peer.write_all(&wire_message(magic, &[1, 2, 3, 4]))
             .await
             .unwrap();
@@ -708,7 +755,13 @@ mod tests {
         let tracker = Arc::new(ConnectionTracker::new(3));
         let (mut peer, local) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(local);
-        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        let mut framer = MessageFramer::new_budgeted(
+            reader,
+            writer,
+            magic,
+            tracker.clone(),
+            unnormalized_shaper(),
+        );
         peer.write_all(&wire_message(magic, &[1, 2, 3, 4]))
             .await
             .unwrap();
@@ -726,7 +779,13 @@ mod tests {
         let wire = wire_message(magic, &[1, 2, 3, 4]);
         let (mut peer, local) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(local);
-        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        let mut framer = MessageFramer::new_budgeted(
+            reader,
+            writer,
+            magic,
+            tracker.clone(),
+            unnormalized_shaper(),
+        );
         peer.write_all(&wire[..HEADER_SIZE + 2]).await.unwrap();
         assert!(tokio::time::timeout(
             Duration::from_millis(50),
@@ -750,7 +809,13 @@ mod tests {
         *wire.last_mut().unwrap() ^= 0xff;
         let (mut peer, local) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(local);
-        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        let mut framer = MessageFramer::new_budgeted(
+            reader,
+            writer,
+            magic,
+            tracker.clone(),
+            unnormalized_shaper(),
+        );
         peer.write_all(&wire).await.unwrap();
         assert!(matches!(
             framer.read_budgeted_message_timeout().await,
@@ -765,7 +830,13 @@ mod tests {
         let tracker = Arc::new(ConnectionTracker::new(0));
         let (mut peer, local) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(local);
-        let mut framer = MessageFramer::new_budgeted(reader, writer, magic, tracker.clone());
+        let mut framer = MessageFramer::new_budgeted(
+            reader,
+            writer,
+            magic,
+            tracker.clone(),
+            unnormalized_shaper(),
+        );
         peer.write_all(&wire_message(magic, &[])).await.unwrap();
         let message = framer.read_budgeted_message_timeout().await.unwrap();
         assert!(message.payload.is_empty());
@@ -782,5 +853,71 @@ mod tests {
         let (msg_type, payload) = framer.read_message_timeout().await.unwrap();
         assert_eq!(msg_type, MessageType::Blocks as u8);
         assert_eq!(payload, vec![7]);
+    }
+
+    #[tokio::test]
+    async fn normalized_framers_round_trip_payload() {
+        let magic = [1, 2, 3, 4];
+        let shaper = Arc::new(TrafficShaper::default_enabled());
+        let (left, right) = tokio::io::duplex(4096);
+        let (left_reader, left_writer) = tokio::io::split(left);
+        let (right_reader, right_writer) = tokio::io::split(right);
+        let mut sender =
+            MessageFramer::new_normalized(left_reader, left_writer, magic, Arc::clone(&shaper));
+        let mut receiver = MessageFramer::new_normalized(right_reader, right_writer, magic, shaper);
+        let payload = vec![0x5a; 333];
+
+        let (sent, received) = tokio::join!(
+            sender.write_message(MessageType::Txs as u8, &payload),
+            receiver.read_message_timeout(),
+        );
+
+        sent.unwrap();
+        let (msg_type, recovered) = received.unwrap();
+        assert_eq!(msg_type, MessageType::Txs as u8);
+        assert_eq!(recovered, payload);
+    }
+
+    #[tokio::test]
+    async fn normalized_reader_enforces_semantic_type_limit() {
+        let magic = [1, 2, 3, 4];
+        let shaper = Arc::new(TrafficShaper::default_enabled());
+        let oversized_ping = vec![0x5a; MessageType::Ping.max_size() + 1];
+        let wire_payload = shaper.normalize_size_with_overhead(&oversized_ping, HEADER_SIZE);
+        let wire = Message::new(magic, MessageType::Ping, wire_payload)
+            .to_bytes()
+            .unwrap();
+        let (mut peer, local) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_normalized(reader, writer, magic, shaper);
+
+        peer.write_all(&wire).await.unwrap();
+        assert!(matches!(
+            framer.read_message_timeout().await,
+            Err(Error::MessageTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn normalized_reader_rejects_unmarked_payload() {
+        let magic = [1, 2, 3, 4];
+        let raw_payload = vec![0x5a; 256 - HEADER_SIZE];
+        let wire = Message::new(magic, MessageType::Blocks, raw_payload)
+            .to_bytes()
+            .unwrap();
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_normalized(
+            reader,
+            writer,
+            magic,
+            Arc::new(TrafficShaper::default_enabled()),
+        );
+
+        peer.write_all(&wire).await.unwrap();
+        assert!(matches!(
+            framer.read_message_timeout().await,
+            Err(Error::InvalidMessage(_))
+        ));
     }
 }

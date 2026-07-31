@@ -21,6 +21,7 @@
 //!
 //! Network metadata is an "effect" — traffic analysis is a search.
 
+use crate::colony::stick_insect::{padded_len, SIZE_BUCKETS};
 use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -33,13 +34,8 @@ use tracing::{debug, trace};
 // Constants
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Standard TLS record sizes used for normalization. Real TLS traffic
-/// clusters around these sizes, so our padded packets blend in.
-const STANDARD_SIZES: [usize; 5] = [256, 512, 1024, 2048, 4096];
-
-/// Maximum packet size — anything larger gets sent as-is (already a
-/// full-sized frame and can't be hidden further).
-const MAX_PADDED_SIZE: usize = 4096;
+pub(crate) const NORMALIZATION_PREFIX_SIZE: usize = 4;
+const NORMALIZED_LENGTH_FLAG: u32 = 1 << 31;
 
 /// Default interval between padding packets (milliseconds).
 const DEFAULT_PADDING_INTERVAL_MS: u64 = 500;
@@ -134,6 +130,14 @@ impl TrafficShaper {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn normalization_enabled(&self) -> bool {
+        self.config.normalize_enabled && self.is_enabled()
+    }
+
+    pub(crate) fn record_shaped_packet(&self) {
+        self.packets_shaped.fetch_add(1, Ordering::Relaxed);
+    }
+
     // ─── Packet size normalization ──────────────────────────────────
 
     /// Pad `data` to the nearest standard TLS frame size.
@@ -141,20 +145,29 @@ impl TrafficShaper {
     /// The padding uses random bytes (not zeros) so compressed/encrypted
     /// views of the padding look like payload data.
     pub fn normalize_size(&self, data: &[u8]) -> Vec<u8> {
-        if !self.config.normalize_enabled || !self.is_enabled() {
+        self.normalize_size_with_overhead(data, 0)
+    }
+
+    pub(crate) fn normalize_size_with_overhead(
+        &self,
+        data: &[u8],
+        outer_overhead: usize,
+    ) -> Vec<u8> {
+        if !self.normalization_enabled() {
             return data.to_vec();
         }
 
         let raw_len = data.len();
-        let target_size = Self::nearest_standard_size(raw_len);
+        if raw_len > u32::MAX as usize || raw_len >= NORMALIZED_LENGTH_FLAG as usize {
+            return data.to_vec();
+        }
+        let encoded_len = raw_len.saturating_add(NORMALIZATION_PREFIX_SIZE);
+        let target_total = padded_len(outer_overhead.saturating_add(encoded_len));
+        let target_size = target_total.saturating_sub(outer_overhead).max(encoded_len);
 
         let mut padded = Vec::with_capacity(target_size);
-        // 4-byte length prefix (original length, little-endian) so the
-        // receiver knows where real data ends and padding begins.
-        if raw_len > u32::MAX as usize {
-            return data.to_vec(); // too large to encode length; pass through unshaped
-        }
-        padded.extend_from_slice(&(raw_len as u32).to_le_bytes());
+        let encoded_length = (raw_len as u32) | NORMALIZED_LENGTH_FLAG;
+        padded.extend_from_slice(&encoded_length.to_le_bytes());
         padded.extend_from_slice(data);
 
         // Fill remaining space with random bytes.
@@ -171,27 +184,52 @@ impl TrafficShaper {
 
     /// Strip normalization padding and recover the original payload.
     pub fn denormalize(data: &[u8]) -> Option<Vec<u8>> {
-        if data.len() < 4 {
+        if data.len() < NORMALIZATION_PREFIX_SIZE {
             return None;
         }
-        let orig_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if orig_len + 4 > data.len() {
+        let encoded_length = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if encoded_length & NORMALIZED_LENGTH_FLAG == 0 {
             return None;
         }
-        Some(data[4..4 + orig_len].to_vec())
+        let orig_len = (encoded_length & !NORMALIZED_LENGTH_FLAG) as usize;
+        let payload_end = NORMALIZATION_PREFIX_SIZE.checked_add(orig_len)?;
+        if payload_end > data.len() {
+            return None;
+        }
+        Some(data[NORMALIZATION_PREFIX_SIZE..payload_end].to_vec())
     }
 
-    /// Find the smallest standard size that fits `len` bytes plus the
-    /// 4-byte length prefix.
-    fn nearest_standard_size(len: usize) -> usize {
-        let needed = len + 4; // +4 for length prefix
-        for &size in &STANDARD_SIZES {
-            if size >= needed {
-                return size;
-            }
-        }
-        // Larger than any standard size — round up to nearest 4096 multiple.
-        ((needed + MAX_PADDED_SIZE - 1) / MAX_PADDED_SIZE) * MAX_PADDED_SIZE
+    pub(crate) fn normalized_payload_limit(logical_limit: usize, outer_overhead: usize) -> usize {
+        let needed = outer_overhead
+            .saturating_add(NORMALIZATION_PREFIX_SIZE)
+            .saturating_add(logical_limit);
+        padded_len(needed).saturating_sub(outer_overhead)
+    }
+
+    pub(crate) fn is_normalized_payload_size(payload_len: usize, outer_overhead: usize) -> bool {
+        let total = match payload_len.checked_add(outer_overhead) {
+            Some(total) => total,
+            None => return false,
+        };
+        SIZE_BUCKETS.contains(&total)
+            || total
+                .checked_rem(SIZE_BUCKETS[SIZE_BUCKETS.len() - 1])
+                .is_some_and(|remainder| remainder == 0)
+    }
+
+    pub(crate) fn max_normalizable_input(
+        max_output_payload: usize,
+        outer_overhead: usize,
+    ) -> Option<usize> {
+        let max_total = max_output_payload.checked_add(outer_overhead)?;
+        let bucket = SIZE_BUCKETS
+            .iter()
+            .rev()
+            .copied()
+            .find(|bucket| *bucket <= max_total)?;
+        bucket
+            .checked_sub(outer_overhead)?
+            .checked_sub(NORMALIZATION_PREFIX_SIZE)
     }
 
     // ─── Timing jitter ─────────────────────────────────────────────
@@ -227,26 +265,18 @@ impl TrafficShaper {
 
     // ─── Padding (constant-rate cover traffic) ─────────────────────
 
-    /// Generate a dummy padding packet that peers will discard.
+    /// Generate a dummy padding message that peers will discard.
     ///
-    /// Returns a fully framed `Message` (magic + header + random payload)
-    /// using `MessageType::Padding`. The total wire size is one of the
-    /// standard TLS frame sizes so the packet is indistinguishable from
-    /// a real shaped message on the wire.
+    /// Returns a framed logical message with a small random payload. The
+    /// per-connection framer applies the same size normalization used for
+    /// every other message.
     ///
     /// Pass the live network magic the node is configured with — the
     /// receiver's framer rejects messages whose magic doesn't match.
     pub fn generate_padding_packet(magic: [u8; 4]) -> Vec<u8> {
-        use super::framing::HEADER_SIZE;
         use super::protocol::{Message, MessageType};
         let mut rng = rand::thread_rng();
-        let size_idx = rng.gen_range(0..STANDARD_SIZES.len());
-        let total_size = STANDARD_SIZES[size_idx];
-        // Reserve space for the framer header (magic + length + msg_type).
-        // The random-bytes payload makes up the difference so the wire
-        // packet still matches one of the standard sizes.
-        let payload_size = total_size.saturating_sub(HEADER_SIZE);
-        let mut payload = vec![0u8; payload_size];
+        let mut payload = vec![0u8; 32];
         rng.fill(&mut payload[..]);
         Message::new(magic, MessageType::Padding, payload)
             .to_bytes()
@@ -592,12 +622,10 @@ mod tests {
         let original = b"hello world this is a test message";
         let normalized = shaper.normalize_size(original);
 
-        // Must be one of the standard sizes
-        assert!(
-            STANDARD_SIZES.contains(&normalized.len()) || normalized.len() % MAX_PADDED_SIZE == 0,
-            "normalized size {} is not standard",
-            normalized.len()
-        );
+        assert!(TrafficShaper::is_normalized_payload_size(
+            normalized.len(),
+            0
+        ));
 
         // Must round-trip
         let recovered = TrafficShaper::denormalize(&normalized).unwrap();
@@ -610,10 +638,39 @@ mod tests {
         let original = vec![0xAB; 5000]; // Bigger than any standard size
         let normalized = shaper.normalize_size(&original);
         assert!(normalized.len() >= original.len() + 4);
-        assert_eq!(normalized.len() % MAX_PADDED_SIZE, 0);
+        assert!(TrafficShaper::is_normalized_payload_size(
+            normalized.len(),
+            0
+        ));
 
         let recovered = TrafficShaper::denormalize(&normalized).unwrap();
         assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn normalization_accounts_for_outer_overhead() {
+        let shaper = TrafficShaper::default_enabled();
+        let original = vec![0x42; 250];
+        let normalized =
+            shaper.normalize_size_with_overhead(&original, super::super::framing::HEADER_SIZE);
+        assert!(TrafficShaper::is_normalized_payload_size(
+            normalized.len(),
+            super::super::framing::HEADER_SIZE,
+        ));
+        assert_eq!(TrafficShaper::denormalize(&normalized).unwrap(), original);
+    }
+
+    #[test]
+    fn denormalize_rejects_unmarked_payload() {
+        assert!(TrafficShaper::denormalize(&[0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn noise_record_input_fits_largest_bucket() {
+        assert_eq!(
+            TrafficShaper::max_normalizable_input(65_519, 18),
+            Some(65_514)
+        );
     }
 
     #[test]
@@ -634,11 +691,7 @@ mod tests {
             "msg_type byte must be MessageType::Padding ({})",
             super::super::protocol::MessageType::Padding as u8,
         );
-        assert!(
-            STANDARD_SIZES.contains(&packet.len()),
-            "packet size {} not in STANDARD_SIZES",
-            packet.len(),
-        );
+        assert_eq!(packet.len(), super::super::framing::HEADER_SIZE + 32);
     }
 
     #[test]
@@ -662,15 +715,15 @@ mod tests {
     }
 
     #[test]
-    fn nearest_size_picks_smallest_fit() {
+    fn normalized_limit_picks_smallest_fit() {
         // 10 bytes + 4 prefix = 14 → 256
-        assert_eq!(TrafficShaper::nearest_standard_size(10), 256);
+        assert_eq!(TrafficShaper::normalized_payload_limit(10, 0), 256);
         // 250 bytes + 4 = 254 → 256
-        assert_eq!(TrafficShaper::nearest_standard_size(250), 256);
+        assert_eq!(TrafficShaper::normalized_payload_limit(250, 0), 256);
         // 253 bytes + 4 = 257 → 512
-        assert_eq!(TrafficShaper::nearest_standard_size(253), 512);
+        assert_eq!(TrafficShaper::normalized_payload_limit(253, 0), 512);
         // 1020 bytes + 4 = 1024 → 1024
-        assert_eq!(TrafficShaper::nearest_standard_size(1020), 1024);
+        assert_eq!(TrafficShaper::normalized_payload_limit(1020, 0), 1024);
     }
 
     #[test]
