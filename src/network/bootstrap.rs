@@ -3,7 +3,7 @@
 //! DNS seeds, peer discovery, and network bootstrapping.
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -273,6 +273,9 @@ struct PeerAddressSerde {
 /// (could be a host that came back after maintenance).
 const FAILURE_PURGE_THRESHOLD: u32 = 5;
 
+/// Maximum number of failed addresses retained in one retry cycle.
+const MAX_TRIED: usize = 5_000;
+
 /// Address manager for peer discovery
 pub struct AddressManager {
     /// Known addresses
@@ -281,6 +284,8 @@ pub struct AddressManager {
     known_addrs: HashSet<SocketAddr>,
     /// Tried addresses (failed connections)
     tried: HashSet<SocketAddr>,
+    /// Tried addresses ordered from least to most recently failed.
+    tried_order: VecDeque<SocketAddr>,
     /// Self-addresses (detected via nonce match) — never connect to these
     self_addresses: HashSet<SocketAddr>,
     /// ANCHORS (Bitcoin Core model): our known-good outbound peers from the
@@ -303,6 +308,7 @@ impl AddressManager {
             addresses: Vec::new(),
             known_addrs: HashSet::new(),
             tried: HashSet::new(),
+            tried_order: VecDeque::new(),
             self_addresses: HashSet::new(),
             anchors: Vec::new(),
             failures: HashMap::new(),
@@ -406,7 +412,7 @@ impl AddressManager {
                 "All {} addresses tried, clearing tried set to retry",
                 self.tried.len()
             );
-            self.tried.clear();
+            self.clear_tried();
             // Return first address after clearing
             return self.addresses.first().map(|a| a.addr);
         }
@@ -426,14 +432,18 @@ impl AddressManager {
     /// address can be re-added via gossip later (could be a host coming back
     /// after maintenance), at which point the failure count starts fresh.
     pub fn mark_tried(&mut self, addr: SocketAddr) {
-        const MAX_TRIED: usize = 5_000;
-        if self.tried.len() >= MAX_TRIED {
-            // Evict an arbitrary entry to make room
-            if let Some(&oldest) = self.tried.iter().next() {
-                self.tried.remove(&oldest);
-            }
+        if !self.tried.insert(addr) {
+            self.tried_order.retain(|candidate| *candidate != addr);
         }
-        self.tried.insert(addr);
+        self.tried_order.push_back(addr);
+
+        if self.tried.len() > MAX_TRIED {
+            let oldest = self
+                .tried_order
+                .pop_front()
+                .expect("tried order contains every tried address");
+            self.tried.remove(&oldest);
+        }
 
         // Bump per-address failure count; purge if we've crossed the threshold.
         let count = self
@@ -450,6 +460,7 @@ impl AddressManager {
             self.addresses.retain(|a| a.addr != addr);
             self.known_addrs.remove(&addr);
             self.tried.remove(&addr);
+            self.tried_order.retain(|candidate| *candidate != addr);
             self.failures.remove(&addr);
         }
     }
@@ -457,6 +468,7 @@ impl AddressManager {
     /// Mark an address as successful
     pub fn mark_success(&mut self, addr: SocketAddr) {
         self.tried.remove(&addr);
+        self.tried_order.retain(|candidate| *candidate != addr);
         // Reset failure count — a successful connect proves the address is alive.
         self.failures.remove(&addr);
 
@@ -469,6 +481,7 @@ impl AddressManager {
     /// Clear tried addresses (for retry)
     pub fn clear_tried(&mut self) {
         self.tried.clear();
+        self.tried_order.clear();
     }
 
     /// Firework / Veil: mark an address as Noise-capable (SERVICES_NOISE).
@@ -681,6 +694,37 @@ mod tests {
         }
 
         assert_eq!(mgr.len(), 5);
+    }
+
+    #[test]
+    fn tried_eviction_follows_recent_failure_order() {
+        let mut mgr = AddressManager::new(MAX_TRIED + 1);
+        let max_port = u16::try_from(MAX_TRIED).expect("MAX_TRIED fits in a port number");
+        let addr = |port| SocketAddr::from(([192, 0, 2, 1], port));
+
+        for port in 1..=max_port {
+            mgr.mark_tried(addr(port));
+        }
+
+        let first = addr(1);
+        let second = addr(2);
+        mgr.mark_tried(first);
+        assert_eq!(mgr.tried.len(), MAX_TRIED);
+
+        let newest = addr(max_port + 1);
+        mgr.mark_tried(newest);
+
+        assert!(mgr.tried.contains(&first));
+        assert!(!mgr.tried.contains(&second));
+        assert!(mgr.tried.contains(&newest));
+        assert_eq!(mgr.tried.len(), MAX_TRIED);
+
+        mgr.mark_success(first);
+        assert!(!mgr.tried_order.contains(&first));
+
+        mgr.clear_tried();
+        assert!(mgr.tried.is_empty());
+        assert!(mgr.tried_order.is_empty());
     }
 
     /// Self-address guard (2026-07-08 self-dial incident): once an address
