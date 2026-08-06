@@ -47,14 +47,17 @@ async function lookupAddress() {
   const el=$('addr-lookup-input');const res=$('addr-lookup-result');
   if(!el||!res)return;
   const q=el.value.trim();
-  if(!q||q.length<16){res.innerHTML='<span style="color:#EF4444">Enter a public key (32-byte hex)</span>';return;}
-  res.innerHTML='<span style="color:var(--t3)">Searching...</span>';
-  const decoys=await rpc('get_decoys',[256,0]);
-  if(!decoys||!decoys.decoys){res.innerHTML='<span style="color:#EF4444">RPC error</span>';return;}
-  const matches=decoys.decoys.filter(d=>d.public_key.startsWith(q.slice(0,16)));
-  if(matches.length===0){res.innerHTML='<span style="color:var(--t3)">No outputs found for this key</span>';return;}
-  res.innerHTML=`<div style="color:var(--ac2);margin-bottom:8px">${matches.length} output(s) found</div>`+
-    matches.map(m=>`<div style="font-family:var(--mono);font-size:10px;padding:4px 0;border-bottom:1px solid var(--b)">pubkey: ${m.public_key.slice(0,24)}... · height: ${m.height}</div>`).join('');
+  if(!q||q.length<16){res.innerHTML='<span style="color:#EF4444">Enter an output public-key prefix (hex)</span>';return;}
+  res.innerHTML='<span style="color:var(--t3)">Sampling canonical outputs...</span>';
+  const sample=await loadCanonicalOutputSample(256);
+  if(!sample){res.innerHTML='<span style="color:#EF4444">Locator RPC error or stale snapshot</span>';return;}
+  const matches=sample.outputs.filter(output=>output.public_key.startsWith(q.slice(0,16)));
+  if(matches.length===0){
+    res.innerHTML=`<span style="color:var(--t3)">No match in this ${num(sample.sampled)}-output sample (${num(sample.total)} catalogued total)</span>`;
+    return;
+  }
+  res.innerHTML=`<div style="color:var(--ac2);margin-bottom:8px">${matches.length} matching output(s) in a ${num(sample.sampled)}-output sample</div>`+
+    matches.map(output=>`<div style="font-family:var(--mono);font-size:10px;padding:4px 0;border-bottom:1px solid var(--b)">pubkey: ${output.public_key.slice(0,24)}... · height: ${output.height}</div>`).join('');
 }
 
 //

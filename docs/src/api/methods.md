@@ -71,8 +71,7 @@ Hardening posture fields in `get_info` / `get_blockchain_info`:
 
 ### `get_blockchain_info`  *(public)*
 
-Same idea as `get_info` but with extra accounting fields (`total_supply`, `total_difficulty`).
-Both aggregates are decimal strings so clients can preserve their full u128 values.
+Same idea as `get_info` but with extra accounting fields (`total_supply`, `total_difficulty`). Both aggregates are decimal strings so clients can preserve their full u128 values.
 
 ### `get_network_info`  *(public)*
 
@@ -168,7 +167,6 @@ Recent reorgs, fork detections, rejects, and checkpoints. Server-capped to 500 e
       "outputs": 1,
       "fee":     0
     }
-    /* ... */
   ],
   "bytes": "<hex of borsh-serialized block>"
 }
@@ -184,11 +182,7 @@ Reserved in the REST allowlist for future implementation. Currently returns `Met
 
 ### `get_transaction`  *(public, NotImplemented stub)*
 
-Currently returns `-32601 Method not found` with a labelled message:
-
-> `get_transaction is not yet wired in P0: a txid → (block, index) lookup index lands in P1 alongside the wallet RPC. See chain::Blockchain — there is no tx index today, so this method cannot be satisfied without a full chain scan.`
-
-This is intentional. The REST allowlist still includes the method so the explorer's search bar gets a labelled error rather than a generic 403, but the implementation is honest about not being wired yet.
+Currently returns `-32601 Method not found` with a labelled message explaining that the txid-to-block index is not wired yet. The REST allowlist still includes the method so the explorer receives a labelled error rather than a generic 403.
 
 ### `submit_block`  *(local only)*
 
@@ -196,7 +190,7 @@ This is intentional. The REST allowlist still includes the method so the explore
 
 **Returns:** `{ "accepted": true, "hash": "..." }` or `{ "error": "..." }`.
 
-Used by the standalone `coincync-miner` to submit found blocks. **Blocked from the public REST proxy.**
+Used by the standalone miner. **Blocked from the public REST proxy.**
 
 ### `send_raw_transaction`  *(local only)*
 
@@ -223,50 +217,17 @@ The mempool runs the same crypto verifiers consensus does — no fast path. **Bl
 
 ### `get_mining_live`  *(local only — fingerprint-leak risk)*
 
-Returns the running miner state. **Deliberately blocked from the public REST proxy** because it would let observers fingerprint the miner's hashrate / hardware. Available only on the local jsonrpsee endpoint.
-
-```json
-{
-  "is_mining":        false,
-  "hashrate":         0.0,
-  "hashes_total":     0,
-  "blocks_found":     0,
-  "algorithm":        0,
-  "algorithm_name":   "RandomX",
-  "mining_height":    12346,
-  "target_hex":       "",
-  "best_hash_hex":    "",
-  /* ... */
-}
-```
-
-A node that isn't mining (just running as a relay) honestly returns `is_mining: false` with zeroed fields.
+Returns the running miner state. **Deliberately blocked from the public REST proxy** because it would let observers fingerprint the miner's hashrate or hardware. A node that is not mining returns `is_mining: false` with zeroed fields.
 
 ## Privacy stores
 
 ### `get_privacy_stats`  *(public)*
 
-Aggregate Phase 2 store snapshot. Pre-activation, all roots are zero and all sizes are 0 — it's the same payload, just a baseline. Public testnet is currently in this pre-activation mode.
-
-```json
-{
-  "shielded_root":            "00000000...",
-  "shielded_tree_size":       0,
-  "spark_root":               "00000000...",
-  "spark_accumulator_size":   0,
-  "mw_kernel_root":           "00000000...",
-  "mw_kernels_kept":          0,
-  "mw_pending_candidates":    0,
-  "mw_bytes_saved":           0,
-  "mw_compression":           0.0,
-  "mandatory_confidential":   true,
-  "mandatory_stealth":        true
-}
-```
+Aggregate Phase 2 store snapshot. Pre-activation, all roots are zero and all sizes are 0 — it is the same payload, just a baseline.
 
 ### `get_shielded_anchor`, `get_spark_anchor`  *(public)*
 
-Returns the current Merkle root that a light wallet should anchor its spend proofs against. Pre-activation, returns the zero anchor.
+Return the current Merkle root that a light wallet should anchor its spend proofs against. Pre-activation, they return the zero anchor.
 
 ### `is_nullifier_spent`, `is_spark_serial_spent`  *(public)*
 
@@ -274,29 +235,55 @@ Returns the current Merkle root that a light wallet should anchor its spend proo
 
 **Returns:** `{ "spent": true|false, "height": u64|null }`.
 
-Required for recipient-side "is this coin still spendable" checks in light wallets. Public because nullifier sets are public chain state by design.
+Required for recipient-side spendability checks in light wallets. Public because nullifier sets are public chain state by design.
 
-### `get_decoys`  *(public)*
+### `get_decoy_distribution`  *(public)*
 
-Selects decoy outputs for ring-signature construction. **Params:** `[count: u32, max_height: u64]`. Returns a list of `(tx_hash, output_index, public_key, commitment)` tuples sampled by the age-weighted decoy selector.
+Returns a snapshot-bound catalog of output counts. The node does not sample outputs and receives no wallet-specific seed.
+
+**Params:** none.
+
+**Returns:**
+
+```json
+{
+  "snapshot_height": 12345,
+  "snapshot_hash": "26ec6abd...",
+  "policy_version": 1,
+  "heights": [
+    { "height": 0, "count": 1 },
+    { "height": 1, "count": 3 }
+  ]
+}
+```
+
+Wallets apply the versioned age distribution locally and construct one shuffled covered request that includes every selected real-input locator.
+
+### `get_outputs_by_locators`  *(public)*
+
+Resolves canonical `(height, ordinal)` output locators against a supplied snapshot.
+
+**Params:** `[snapshot_height: u64, snapshot_hash: hash, policy_version: u16, locators: OutputLocator[]]`.
+
+The request is capped at 256 locators and must be duplicate-free. Unknown policy versions, stale or non-canonical snapshots, missing heights, and out-of-range ordinals reject the entire request. Successful responses preserve request order and repeat the supplied snapshot metadata.
+
+Each output includes `locator`, `public_key`, `commitment`, `height`, `is_coinbase`, and `lock_height`.
+
+### `get_decoys`  *(deprecated; not public)*
+
+The node-selected decoy-pool method is removed from the public REST allowlist. Direct JSON-RPC calls return a stable deprecation error. Wallets and explorer clients must use the two locator RPCs above and must not fall back to `get_decoys` after any snapshot or allocation failure.
 
 ## Asset queries (permanently NotImplemented)
 
 ### `get_asset_info`  *(public, NotImplemented stub)*
 
-Returns `-32601 Method not found` with the labelled message:
+Returns a labelled `-32601 Method not found`: CoinCync 1.0 has no confidential-asset layer. This is permanent, not deferred.
 
-> `get_asset_info is not implemented: CoinCync 1.0 has no confidential-asset layer (the asset stack was removed in the 2.0 → 1.0 trim). Single-asset CYNC only.`
+## Chain Verification Methods
 
-This is **permanent**, not deferred. CoinCync 1.0 stripped the confidential-asset machinery. Single-asset CYNC only. The endpoint is allowlisted in REST so the explorer's search bar gets a labelled error rather than a 403 when someone types something that isn't a block hash, txid, or height.
-
-## Chain Verification Methods (added v1.0.0-testnet)
-
-These support `scripts/coincync-verify-chain.sh` — a 5-level chain validation tool.
+These support `scripts/coincync-verify-chain.sh`.
 
 ### `get_expected_reward`
-
-Returns the expected block reward at a given height per the emission curve.
 
 | | |
 | --- | --- |
@@ -306,17 +293,13 @@ Returns the expected block reward at a given height per the emission curve.
 
 ### `verify_keyimage_uniqueness`
 
-Scans the entire chain for duplicate key images (global double-spend check).
-
 | | |
 | --- | --- |
-| Params | `[]` (no params) |
+| Params | `[]` |
 | Returns | `{ valid, duplicates, duplicate_images, total_checked }` |
 | Access | Public |
 
 ### `check_zero_commitments_in_range`
-
-Detects zero commitments and zero stealth addresses (burning bug — H-19).
 
 | | |
 | --- | --- |
@@ -326,8 +309,6 @@ Detects zero commitments and zero stealth addresses (burning bug — H-19).
 
 ### `verify_signatures_in_range`
 
-Re-verifies every CLSAG ring signature in a block range.
-
 | | |
 | --- | --- |
 | Params | `[start_height: u64, end_height: u64]` |
@@ -335,8 +316,6 @@ Re-verifies every CLSAG ring signature in a block range.
 | Access | Public |
 
 ### `verify_range_proofs_in_range`
-
-Re-verifies every Bulletproofs+ range proof in a block range.
 
 | | |
 | --- | --- |
@@ -346,8 +325,6 @@ Re-verifies every Bulletproofs+ range proof in a block range.
 
 ### `verify_commitment_balance_in_range`
 
-Verifies Pedersen commitment balance for every transaction (no money printing).
-
 | | |
 | --- | --- |
 | Params | `[start_height: u64, end_height: u64]` |
@@ -355,8 +332,6 @@ Verifies Pedersen commitment balance for every transaction (no money printing).
 | Access | Public |
 
 ### `full_chain_audit`
-
-Runs all verification checks in one call. Merkle roots, rewards, structural validation, CLSAG, range proofs, and balance — everything.
 
 | | |
 | --- | --- |
@@ -368,4 +343,4 @@ Runs all verification checks in one call. Merkle roots, rewards, structural vali
 
 - [JSON-RPC 2.0](./json-rpc.md) — the protocol envelope
 - [REST endpoints](./rest.md) — the higher-level wrapper
-- `src/rpc/server.rs` — the canonical method registrations (this page is generated from reading that file by hand; if it diverges, the source is correct)
+- `src/rpc/server.rs` — the canonical method registrations; if this page diverges, the source is correct
