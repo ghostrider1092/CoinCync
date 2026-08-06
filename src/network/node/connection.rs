@@ -12,14 +12,37 @@ use crate::primitives::Hash;
 
 use super::super::connection_tracker::{ConnectionTracker, OutboundSubnetSlot};
 use super::super::framing::{MessageFramer, HEADER_SIZE};
-use super::super::noise::{self, NodeIdentity, NoiseRecvState, NoiseSendState, NoiseTransport};
+use super::super::noise::{
+    self, NodeIdentity, NoiseRecvState, NoiseSendState, NoiseTransport, MAX_NOISE_PAYLOAD,
+    NOISE_LENGTH_PREFIX_SIZE, NOISE_TAG_SIZE,
+};
 use super::super::peer::{PeerId, PeerInfo};
 use super::super::protocol::{Message, MessageType};
+use super::super::traffic_shaping::TrafficShaper;
 use super::constants::PEER_QUEUE_SIZE;
 use super::types::NodeEvent;
 use super::PeerMessage;
 
 struct AbortOnDrop(JoinHandle<()>);
+
+const NOISE_WIRE_OVERHEAD: usize = NOISE_LENGTH_PREFIX_SIZE + NOISE_TAG_SIZE;
+
+fn normalize_noise_record(traffic_shaper: &TrafficShaper, plaintext: &[u8]) -> Vec<u8> {
+    traffic_shaper.normalize_size_with_overhead(plaintext, NOISE_WIRE_OVERHEAD)
+}
+
+fn denormalize_noise_record(traffic_shaper: &TrafficShaper, record: Vec<u8>) -> Result<Vec<u8>> {
+    if !traffic_shaper.normalization_enabled() {
+        return Ok(record);
+    }
+    if !TrafficShaper::is_normalized_payload_size(record.len(), NOISE_WIRE_OVERHEAD) {
+        return Err(Error::InvalidMessage(
+            "non-canonical normalized Noise record size".into(),
+        ));
+    }
+    TrafficShaper::denormalize(&record)
+        .ok_or_else(|| Error::InvalidMessage("invalid normalized Noise record".into()))
+}
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -41,13 +64,24 @@ async fn noise_bridge(
     tcp_writer: tokio::net::tcp::OwnedWriteHalf,
     from_app: tokio::io::DuplexStream, // plaintext from MessageFramer
     to_app: tokio::io::DuplexStream,   // plaintext to MessageFramer
+    traffic_shaper: Arc<TrafficShaper>,
 ) {
     // Split the transport into send and recv halves so each direction can
     // run in its own task without interfering with the other's nonce state.
     let (send_state, recv_state) = transport.split_into_send_recv();
     let mut directions = JoinSet::new();
-    directions.spawn(noise_bridge_reader(recv_state, tcp_reader, to_app));
-    directions.spawn(noise_bridge_writer(send_state, tcp_writer, from_app));
+    directions.spawn(noise_bridge_reader(
+        recv_state,
+        tcp_reader,
+        to_app,
+        Arc::clone(&traffic_shaper),
+    ));
+    directions.spawn(noise_bridge_writer(
+        send_state,
+        tcp_writer,
+        from_app,
+        traffic_shaper,
+    ));
 
     // Neither direction can make useful progress once its counterpart exits.
     let _ = directions.join_next().await;
@@ -59,10 +93,11 @@ async fn noise_bridge_reader(
     state: NoiseRecvState,
     mut tcp_reader: tokio::net::tcp::OwnedReadHalf,
     mut to_app: tokio::io::DuplexStream,
+    traffic_shaper: Arc<TrafficShaper>,
 ) {
     use tokio::io::AsyncWriteExt;
     loop {
-        let plaintext = {
+        let record = {
             match state.read_encrypted(&mut tcp_reader).await {
                 Ok(pt) => pt,
                 Err(e) => {
@@ -78,6 +113,13 @@ async fn noise_bridge_reader(
                 }
             }
         };
+        let plaintext = match denormalize_noise_record(&traffic_shaper, record) {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                warn!("Noise bridge reader: {}", error);
+                return;
+            }
+        };
         if to_app.write_all(&plaintext).await.is_err() {
             return;
         }
@@ -87,24 +129,66 @@ async fn noise_bridge_reader(
     }
 }
 
-async fn noise_bridge_writer(
+async fn noise_bridge_writer<W, R>(
     state: NoiseSendState,
-    mut tcp_writer: tokio::net::tcp::OwnedWriteHalf,
-    mut from_app: tokio::io::DuplexStream,
-) {
+    mut tcp_writer: W,
+    mut from_app: R,
+    traffic_shaper: Arc<TrafficShaper>,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
     use tokio::io::AsyncReadExt;
-    let mut app_buf = vec![0u8; 65519];
+    let Some(max_input) =
+        TrafficShaper::max_normalizable_input(MAX_NOISE_PAYLOAD, NOISE_WIRE_OVERHEAD)
+    else {
+        warn!("Noise bridge writer: no valid normalization bucket");
+        return;
+    };
     loop {
-        match from_app.read(&mut app_buf).await {
-            Ok(0) => return,
-            Ok(n) => {
-                if let Err(e) = state.write_encrypted(&mut tcp_writer, &app_buf[..n]).await {
-                    warn!("Noise bridge writer: {}", e);
+        let mut header = [0u8; HEADER_SIZE];
+        if let Err(error) = from_app.read_exact(&mut header).await {
+            if error.kind() != std::io::ErrorKind::UnexpectedEof {
+                warn!("Noise bridge writer: {}", error);
+            }
+            return;
+        }
+        let payload_len = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
+        let max_payload = if traffic_shaper.normalization_enabled() {
+            TrafficShaper::normalized_payload_limit(
+                crate::network::protocol::MAX_MESSAGE_SIZE,
+                HEADER_SIZE,
+            )
+        } else {
+            crate::network::protocol::MAX_MESSAGE_SIZE
+        };
+        if payload_len > max_payload {
+            warn!("Noise bridge writer: frame payload too large");
+            return;
+        }
+
+        let mut remaining = payload_len;
+        let mut first_record = true;
+        while first_record || remaining > 0 {
+            let mut plaintext = Vec::with_capacity(max_input);
+            if first_record {
+                plaintext.extend_from_slice(&header);
+                first_record = false;
+            }
+            let to_read = remaining.min(max_input.saturating_sub(plaintext.len()));
+            if to_read > 0 {
+                let start = plaintext.len();
+                plaintext.resize(start + to_read, 0);
+                if let Err(error) = from_app.read_exact(&mut plaintext[start..]).await {
+                    warn!("Noise bridge writer: {}", error);
                     return;
                 }
+                remaining -= to_read;
             }
-            Err(e) => {
-                warn!("Noise bridge: app read error: {}", e);
+
+            let record = normalize_noise_record(&traffic_shaper, &plaintext);
+            if let Err(error) = state.write_encrypted(&mut tcp_writer, &record).await {
+                warn!("Noise bridge writer: {}", error);
                 return;
             }
         }
@@ -158,6 +242,7 @@ pub(super) async fn handle_connection(
     conn_tracker: Arc<ConnectionTracker>,
     identity: Arc<NodeIdentity>,
     encryption_config: crate::config::P2PEncryptionConfig,
+    traffic_shaper: Arc<TrafficShaper>,
     // Per-/16 outbound slot for eclipse defense. Some for outbound
     // dials (acquired by the connector before spawn), None for
     // inbound accepts. We move it into the PeerInfo entry below
@@ -308,6 +393,7 @@ pub(super) async fn handle_connection(
             tcp_writer,
             bridge_read,
             bridge_write,
+            Arc::clone(&traffic_shaper),
         ));
 
         (Box::new(app_read), Box::new(app_write), Some(handle))
@@ -317,7 +403,8 @@ pub(super) async fn handle_connection(
     };
     let _noise_bridge_guard = noise_bridge_handle.map(AbortOnDrop);
 
-    let mut framer = MessageFramer::new_budgeted(app_reader, app_writer, magic, conn_tracker);
+    let mut framer =
+        MessageFramer::new_budgeted(app_reader, app_writer, magic, conn_tracker, traffic_shaper);
 
     // Per-peer rate limiter to prevent abuse
 
@@ -440,6 +527,7 @@ pub(super) async fn handle_connection(
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn peer(peer_id: PeerId) -> PeerInfo {
         let addr: SocketAddr = "127.0.0.1:28080".parse().unwrap();
@@ -524,5 +612,67 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn noise_record_rejects_noncanonical_wire_size() {
+        let shaper = TrafficShaper::default_enabled();
+        let record = shaper.normalize_size(b"wrong overhead");
+        assert!(denormalize_noise_record(&shaper, record).is_err());
+    }
+
+    #[tokio::test]
+    async fn normalized_noise_record_round_trip_uses_bucket_size() {
+        let client_identity = Arc::new(NodeIdentity::generate());
+        let server_identity = Arc::new(NodeIdentity::generate());
+        let (mut client_handshake, mut server_handshake) = tokio::io::duplex(8192);
+        let (client_result, server_result) = tokio::join!(
+            noise::perform_noise_handshake(&mut client_handshake, client_identity, true),
+            noise::perform_noise_handshake(&mut server_handshake, server_identity, false),
+        );
+        let (client_transport, _) = client_result.unwrap();
+        let (server_transport, _) = server_result.unwrap();
+        let (client_send, _) = client_transport.split_into_send_recv();
+        let (_, server_recv) = server_transport.split_into_send_recv();
+        let shaper = Arc::new(TrafficShaper::default_enabled());
+        let logical_payload = vec![0x6d; 777];
+        let framed_payload = shaper.normalize_size_with_overhead(&logical_payload, HEADER_SIZE);
+        let plaintext = Message::new([1, 2, 3, 4], MessageType::Blocks, framed_payload)
+            .to_bytes()
+            .unwrap();
+
+        let (encrypted_writer, mut encrypted_reader) = tokio::io::duplex(4096);
+        let (mut app_writer, app_reader) = tokio::io::duplex(4096);
+        let writer_task = tokio::spawn(noise_bridge_writer(
+            client_send,
+            encrypted_writer,
+            app_reader,
+            Arc::clone(&shaper),
+        ));
+        app_writer.write_all(&plaintext).await.unwrap();
+        let mut length_prefix = [0u8; 2];
+        encrypted_reader
+            .read_exact(&mut length_prefix)
+            .await
+            .unwrap();
+        let ciphertext_len = u16::from_be_bytes(length_prefix) as usize;
+        let mut ciphertext = vec![0u8; ciphertext_len];
+        encrypted_reader.read_exact(&mut ciphertext).await.unwrap();
+        let wire_len = length_prefix.len() + ciphertext.len();
+        assert!(
+            crate::colony::stick_insect::SIZE_BUCKETS.contains(&wire_len)
+                || wire_len
+                    % crate::colony::stick_insect::SIZE_BUCKETS
+                        [crate::colony::stick_insect::SIZE_BUCKETS.len() - 1]
+                    == 0
+        );
+
+        let (mut feed_writer, mut feed_reader) = tokio::io::duplex(4096);
+        feed_writer.write_all(&length_prefix).await.unwrap();
+        feed_writer.write_all(&ciphertext).await.unwrap();
+        let decrypted = server_recv.read_encrypted(&mut feed_reader).await.unwrap();
+        let recovered = denormalize_noise_record(&shaper, decrypted).unwrap();
+        assert_eq!(recovered, plaintext);
+        writer_task.abort();
     }
 }

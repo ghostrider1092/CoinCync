@@ -31,6 +31,46 @@ impl ShadowEvictChain for crate::chain::Blockchain {
     }
 }
 
+const MAX_CHAIN_GENERATION_ATTEMPTS: usize = 4;
+
+trait GenerationSource {
+    fn stable_generation(&self) -> Option<u64>;
+}
+
+impl GenerationSource for crate::chain::Blockchain {
+    fn stable_generation(&self) -> Option<u64> {
+        crate::chain::Blockchain::stable_generation(self)
+    }
+}
+
+enum AdmissionAttempt<T> {
+    Retry,
+    Complete(Result<T>),
+}
+
+fn retry_stable_admission<C, F, T>(chain: &C, mut attempt: F) -> Result<T>
+where
+    C: GenerationSource,
+    F: FnMut(u64) -> AdmissionAttempt<T>,
+{
+    for _ in 0..MAX_CHAIN_GENERATION_ATTEMPTS {
+        let Some(generation) = chain.stable_generation() else {
+            std::thread::yield_now();
+            continue;
+        };
+
+        match attempt(generation) {
+            AdmissionAttempt::Retry => std::thread::yield_now(),
+            AdmissionAttempt::Complete(result) => return result,
+        }
+    }
+
+    Err(Error::InvalidState(format!(
+        "chain state changed during mempool admission after {} attempts; retry submission",
+        MAX_CHAIN_GENERATION_ATTEMPTS
+    )))
+}
+
 // ── Fee estimation ──────────────────────────────────────────────────────────
 
 /// Mempool fee percentile snapshot for fee estimation.
@@ -1286,8 +1326,33 @@ impl SharedMempool {
         // tx passes accept, it cannot evict for a chain-state reason
         // (only for true state churn AFTER acceptance, e.g. its real
         // input getting spent in a competing tx that landed first).
-        chain.validate_transaction(&tx)?;
-        self.write_lock().add(tx)
+        let mut pending = Some(tx);
+        retry_stable_admission(chain.as_ref(), |generation| {
+            let Some(tx) = pending.as_ref() else {
+                return AdmissionAttempt::Complete(Err(Error::Internal(
+                    "transaction consumed before mempool admission completed".into(),
+                )));
+            };
+            let validation = chain.validate_transaction(tx);
+
+            // Do not acquire the chain lock while holding the mempool lock.
+            // The final generation check is atomic and remains under this write
+            // lock, so any later canonical update must run cleanup after insert.
+            let mut mempool = self.write_lock();
+            if chain.stable_generation() != Some(generation) {
+                return AdmissionAttempt::Retry;
+            }
+            if let Err(error) = validation {
+                return AdmissionAttempt::Complete(Err(error));
+            }
+
+            let Some(tx) = pending.take() else {
+                return AdmissionAttempt::Complete(Err(Error::Internal(
+                    "transaction consumed before mempool admission completed".into(),
+                )));
+            };
+            AdmissionAttempt::Complete(mempool.add(tx))
+        })
     }
 
     /// Re-admit transactions that were mined in blocks that just got
@@ -1510,6 +1575,86 @@ impl SharedMempool {
         tokio::task::spawn_blocking(move || self.get_block_transactions(max_size, max_count))
             .await
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::{
+        retry_stable_admission, AdmissionAttempt, GenerationSource, MAX_CHAIN_GENERATION_ATTEMPTS,
+    };
+    use crate::error::Result;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    #[derive(Default)]
+    struct FakeChain {
+        generation: AtomicU64,
+        updating: AtomicBool,
+    }
+
+    impl GenerationSource for FakeChain {
+        fn stable_generation(&self) -> Option<u64> {
+            if self.updating.load(Ordering::Acquire) {
+                return None;
+            }
+            let generation = self.generation.load(Ordering::Acquire);
+            (!self.updating.load(Ordering::Acquire)).then_some(generation)
+        }
+    }
+
+    #[test]
+    fn retries_when_generation_changes_before_commit() {
+        let chain = Arc::new(FakeChain::default());
+        let validation_ready = Arc::new(Barrier::new(2));
+        let update_done = Arc::new(Barrier::new(2));
+
+        let update_chain = Arc::clone(&chain);
+        let update_ready = Arc::clone(&validation_ready);
+        let update_complete = Arc::clone(&update_done);
+        let updater = std::thread::spawn(move || {
+            update_ready.wait();
+            update_chain.updating.store(true, Ordering::Release);
+            update_chain.generation.fetch_add(1, Ordering::AcqRel);
+            update_chain.updating.store(false, Ordering::Release);
+            update_complete.wait();
+        });
+
+        let attempts = AtomicUsize::new(0);
+        let committed_generation = AtomicU64::new(u64::MAX);
+        let result: Result<()> = retry_stable_admission(chain.as_ref(), |generation| {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                validation_ready.wait();
+                update_done.wait();
+            }
+            if chain.stable_generation() != Some(generation) {
+                return AdmissionAttempt::Retry;
+            }
+            committed_generation.store(generation, Ordering::SeqCst);
+            AdmissionAttempt::Complete(Ok(()))
+        });
+
+        updater.join().expect("updater thread panicked");
+        result.expect("admission should succeed after retry");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(committed_generation.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn generation_retries_are_bounded() {
+        let chain = FakeChain::default();
+        let attempts = AtomicUsize::new(0);
+        let result: Result<()> = retry_stable_admission(&chain, |_generation| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            chain.generation.fetch_add(1, Ordering::AcqRel);
+            AdmissionAttempt::Retry
+        });
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            MAX_CHAIN_GENERATION_ATTEMPTS
+        );
+        assert!(matches!(result, Err(crate::error::Error::InvalidState(_))));
     }
 }
 

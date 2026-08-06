@@ -200,9 +200,13 @@ class CoinCyncRPC:
         return self._call("get_asset_balance", [asset_id, api_key or self.api_key])
 
     # ─── Privacy ───
+    def get_decoys(self, count: int = 11, min_age: int = 0) -> Dict:
+        """Get policy-shaped outputs for ring signature decoys."""
+        return self._call("get_decoys", [count, min_age])
+
     def get_random_outputs(self, count: int = 11) -> Dict:
-        """Get random outputs for ring signature decoys."""
-        return self._call("get_random_outputs", [count])
+        """Backward-compatible alias for the policy-shaped decoy endpoint."""
+        return self.get_decoys(count, 0)
 
     # ─── Faucet ───
     def faucet_request(self, address: str) -> Dict:
