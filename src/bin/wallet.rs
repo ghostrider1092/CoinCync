@@ -1269,8 +1269,9 @@ async fn cmd_send(
     recovery_timeout: Option<u64>,
     node: &str,
 ) -> Result<(), String> {
+    use coincync::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
     use coincync::primitives::{Amount, PublicKey};
-    use coincync::transaction::DecoyOutput;
+    use coincync::wallet::decoy_selection::{allocate_unique_rings, build_covered_request};
     use coincync::wallet::{KeyEpoch, Wallet};
 
     // Parse recipient keys
@@ -1315,64 +1316,21 @@ async fn cmd_send(
         .cloned()
         .ok_or_else(|| "wallet has no current key epoch".to_string())?;
 
-    // Query chain tip for fee calculation + decoy sampling
-    let info = rpc_get_info(node)
-        .await
-        .map_err(|e| format!("rpc get_info: {}", e))?;
-    let current_height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    // Fetch decoys from the node.
-    //
-    // 2026-06-07: `min_age` was hardcoded to 0, which let the wallet pick
-    // immature coinbase outputs as decoys. The consensus validator rejects
-    // any ring containing a coinbase younger than
-    // `min_output_age_at_height(current_height)` (10 pre-fork, 100 after
-    // MIN_OUTPUT_AGE_HARDFORK_HEIGHT). The tx would pass mempool admission
-    // (crypto-only check) and then get evicted seconds later when shadow-
-    // evict ran the full validator. Asking the node to filter at fetch
-    // time avoids the eviction class entirely — only mature outputs reach
-    // the wallet's decoy pool.
-    let ring_size = 16usize;
-    let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
-    let decoys_json = rpc_call(
-        node,
-        "get_decoys",
-        serde_json::json!([ring_size * 8, min_decoy_age]),
+    let snapshot: DecoyDistributionSnapshot = serde_json::from_value(
+        rpc_call(node, "get_decoy_distribution", serde_json::json!([]))
+            .await
+            .map_err(|e| format!("rpc get_decoy_distribution: {}", e))?,
     )
-    .await
-    .map_err(|e| format!("rpc get_decoys: {}", e))?;
-    let decoys_arr = decoys_json
-        .get("decoys")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut decoy_pool: Vec<DecoyOutput> = Vec::with_capacity(decoys_arr.len());
-    for d in &decoys_arr {
-        let pk_hex = d.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
-        let commit_hex = d.get("commitment").and_then(|v| v.as_str()).unwrap_or("");
-        let height = d.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-        if let (Ok(pk_b), Ok(c_b)) = (hex::decode(pk_hex), hex::decode(commit_hex)) {
-            if pk_b.len() == 32 && c_b.len() == 32 {
-                let mut pk_arr = [0u8; 32];
-                let mut c_arr = [0u8; 32];
-                pk_arr.copy_from_slice(&pk_b);
-                c_arr.copy_from_slice(&c_b);
-                decoy_pool.push(DecoyOutput {
-                    public_key: PublicKey::from_bytes(pk_arr),
-                    commitment: c_arr,
-                    height,
-                });
-            }
-        }
-    }
+    .map_err(|e| format!("decode decoy distribution: {}", e))?;
+    let current_height = snapshot.snapshot_height.saturating_add(1);
+    let ring_size = coincync::constants::ring_size_at_height(current_height);
+    let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
 
     println!("Building transaction:");
     println!("  Recipient spend: {}", &to_spend_hex[..16]);
     println!("  Recipient view:  {}", &to_view_hex[..16]);
     println!("  Amount:          {} atomic", amount);
     println!("  Height:          {}", current_height);
-    println!("  Decoy pool:      {}", decoy_pool.len());
     println!("  Fee multiplier:  {}", fee_multiplier);
 
     // Build recipients list. Default: single recipient + change. With --split-output:
@@ -1460,18 +1418,55 @@ async fn cmd_send(
     // clone is the structural cost of using SharedWallet.
     let balance_snapshot = wallet.balance();
     let mut rng = rand::rngs::OsRng;
-    let tx = coincync::wallet::send::create_privacy_transaction_with_options(
+    let prepared = coincync::wallet::send::prepare_privacy_transaction_with_options(
         &balance_snapshot,
         &recipients,
         &keys,
-        &decoy_pool,
         current_height,
+        ring_size,
         fee_multiplier,
         memo_bytes.as_deref(),
         extra_bytes,
         &mut rng,
     )
     .map_err(|e| format!("create_privacy_transaction: {}", e))?;
+    let real_outputs = prepared.real_outputs();
+    let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator).collect();
+    let requested = build_covered_request(
+        &snapshot,
+        &real_locators,
+        prepared.ring_size(),
+        min_decoy_age,
+        &mut rng,
+    )
+    .map_err(|e| format!("build covered decoy request: {}", e))?;
+    let resolved: ResolvedDecoySnapshot = serde_json::from_value(
+        rpc_call(
+            node,
+            "get_outputs_by_locators",
+            serde_json::json!([
+                snapshot.snapshot_height,
+                snapshot.snapshot_hash,
+                snapshot.policy_version,
+                &requested,
+            ]),
+        )
+        .await
+        .map_err(|e| format!("rpc get_outputs_by_locators: {}", e))?,
+    )
+    .map_err(|e| format!("decode resolved decoys: {}", e))?;
+    let rings = allocate_unique_rings(
+        &snapshot,
+        &requested,
+        &resolved,
+        &real_outputs,
+        prepared.ring_size(),
+        min_decoy_age,
+        &mut rng,
+    )
+    .map_err(|e| format!("allocate transaction rings: {}", e))?;
+    let tx = coincync::wallet::send::build_prepared_privacy_transaction(prepared, rings, &mut rng)
+        .map_err(|e| format!("create_privacy_transaction: {}", e))?;
 
     let tx_hash = tx.hash();
 

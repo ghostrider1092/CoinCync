@@ -3,7 +3,7 @@
 use crate::db::{Database, OutputIndexEntry};
 use crate::decoy::{HeightOutputCount, OutputLocator, ResolvedDecoyOutput};
 use crate::error::{Error, Result};
-use crate::primitives::{Hash, KeyImage};
+use crate::primitives::{Hash, KeyImage, PublicKey};
 use crate::transaction::TxOutput;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -22,26 +22,13 @@ pub struct OutputRef {
 /// Output key for primary hashmap
 type OutputKey = (Hash, u8);
 
-/// CoinCync V1 log-gamma decoy-age bootstrap profile.
-///
-/// The numerical fit starts from Monero's public parameters, but CoinCync maps
-/// sampled age to canonical block height rather than claiming implementation
-/// equivalence with Monero's cumulative-output-index picker. A decoy's age in
-/// seconds is `exp(Gamma(shape, scale))`; dividing by the target block time
-/// gives a target age in blocks.
-///
-/// Policy decision (2026-07-24): use the public log-gamma fit as a bootstrap
-/// profile instead of uniform history-wide selection. This is not claimed to
-/// be an empirical CoinCync spend-age fit; changing it requires a versioned
-/// rollout and independent distribution review.
-pub const DECOY_GAMMA_SHAPE: f64 = 19.28;
-/// See [`DECOY_GAMMA_SHAPE`].
-pub const DECOY_GAMMA_SCALE: f64 = 1.0 / 1.61;
-/// Maximum attempts to draw an age inside the eligible canonical-chain window.
-///
-/// Exhaustion fails closed by returning fewer candidates; callers already
-/// reject pools that cannot fill the required ring.
-const DECOY_GAMMA_MAX_RESAMPLES: usize = 128;
+struct LocatorOutput {
+    public_key: PublicKey,
+    commitment: [u8; 32],
+    height: u64,
+    is_coinbase: bool,
+    lock_height: Option<u64>,
+}
 
 /// UTXO set with height index for fast ring member selection
 ///
@@ -76,6 +63,10 @@ pub struct UtxoSet {
     /// Height index: height -> set of output keys at that height
     /// Using BTreeMap for ordered iteration by height
     height_index: BTreeMap<u64, BTreeSet<OutputKey>>,
+    /// Canonical all-output catalog. Entries survive spends so `(height,
+    /// ordinal)` remains stable and are removed only when their block disconnects.
+    locator_index: BTreeMap<u64, BTreeSet<OutputKey>>,
+    locator_outputs: HashMap<OutputKey, LocatorOutput>,
     /// Stealth address index: stealth_address_bytes -> output key
     /// Used for ring member validation and coinbase maturity checks (CRIT-5, HIGH-4)
     stealth_index: HashMap<[u8; 32], OutputKey>,
@@ -106,6 +97,8 @@ impl UtxoSet {
             outputs: HashMap::new(),
             key_images: HashSet::new(),
             height_index: BTreeMap::new(),
+            locator_index: BTreeMap::new(),
+            locator_outputs: HashMap::new(),
             stealth_index: HashMap::new(),
             output_index: HashMap::new(),
             db: None,
@@ -130,6 +123,7 @@ impl UtxoSet {
     ) {
         let key = (tx_hash, index);
         let stealth_addr = *output.stealth_address.as_bytes();
+        let public_key = output.stealth_address;
         let commitment = output.commitment;
         let lock_height = output.lock_height;
         let output_ref = OutputRef {
@@ -148,6 +142,21 @@ impl UtxoSet {
             .entry(height)
             .or_insert_with(BTreeSet::new)
             .insert(key);
+
+        self.locator_index
+            .entry(height)
+            .or_insert_with(BTreeSet::new)
+            .insert(key);
+        self.locator_outputs.insert(
+            key,
+            LocatorOutput {
+                public_key,
+                commitment,
+                height,
+                is_coinbase,
+                lock_height,
+            },
+        );
 
         // Add to stealth address index (CRIT-5, HIGH-4)
         // Use or_insert to keep the OLDEST output per stealth_address.
@@ -289,7 +298,17 @@ impl UtxoSet {
     /// reindex will re-derive the on-disk state from the chain).
     pub fn remove_output(&mut self, tx_hash: &Hash, index: u8) -> Option<OutputRef> {
         let key = (*tx_hash, index);
-        if let Some(output_ref) = self.outputs.remove(&key) {
+        let locator_output = self.locator_outputs.remove(&key);
+        if let Some(output) = locator_output.as_ref() {
+            if let Some(set) = self.locator_index.get_mut(&output.height) {
+                set.remove(&key);
+                if set.is_empty() {
+                    self.locator_index.remove(&output.height);
+                }
+            }
+        }
+        let output_ref = self.outputs.remove(&key);
+        if let Some(output_ref) = output_ref.as_ref() {
             // Remove from height index
             if let Some(set) = self.height_index.get_mut(&output_ref.height) {
                 set.remove(&key);
@@ -297,8 +316,16 @@ impl UtxoSet {
                     self.height_index.remove(&output_ref.height);
                 }
             }
-            // Remove from stealth index
-            let stealth_addr = *output_ref.output.stealth_address.as_bytes();
+        }
+        let stealth_addr = output_ref
+            .as_ref()
+            .map(|output| *output.output.stealth_address.as_bytes())
+            .or_else(|| {
+                locator_output
+                    .as_ref()
+                    .map(|output| *output.public_key.as_bytes())
+            });
+        if let Some(stealth_addr) = stealth_addr {
             self.stealth_index.remove(&stealth_addr);
             // Remove from permanent output index (reorg only)
             self.output_index.remove(&stealth_addr);
@@ -325,10 +352,8 @@ impl UtxoSet {
             // separately in reorg_disconnects_total so monitors that need
             // "current load" can compute it from the difference.
             self.reorg_disconnects_total = self.reorg_disconnects_total.saturating_add(1);
-            Some(output_ref)
-        } else {
-            None
         }
+        output_ref
     }
 
     /// Remove a key image (used during block disconnection to un-mark as spent)
@@ -351,7 +376,7 @@ impl UtxoSet {
     }
 
     pub fn output_distribution(&self, up_to_height: u64) -> Vec<HeightOutputCount> {
-        self.height_index
+        self.locator_index
             .range(..=up_to_height)
             .map(|(height, keys)| HeightOutputCount {
                 height: *height,
@@ -375,7 +400,7 @@ impl UtxoSet {
                 )));
             }
 
-            let keys = self.height_index.get(&locator.height).ok_or_else(|| {
+            let keys = self.locator_index.get(&locator.height).ok_or_else(|| {
                 Error::InvalidState(format!(
                     "output locator references unknown height {}",
                     locator.height
@@ -389,7 +414,7 @@ impl UtxoSet {
                     keys.len()
                 ))
             })?;
-            let output_ref = self.outputs.get(key).ok_or_else(|| {
+            let output_ref = self.locator_outputs.get(key).ok_or_else(|| {
                 Error::InvalidState(format!(
                     "output locator at height {} ordinal {} has no canonical output",
                     locator.height, locator.ordinal
@@ -398,244 +423,15 @@ impl UtxoSet {
 
             resolved.push(ResolvedDecoyOutput {
                 locator: *locator,
-                public_key: output_ref.output.stealth_address,
-                commitment: output_ref.output.commitment,
+                public_key: output_ref.public_key,
+                commitment: output_ref.commitment,
                 height: output_ref.height,
                 is_coinbase: output_ref.is_coinbase,
-                lock_height: output_ref.output.lock_height,
+                lock_height: output_ref.lock_height,
             });
         }
 
         Ok(resolved)
-    }
-
-    /// Select `count` decoys using CoinCync's V1 log-gamma target-age policy.
-    ///
-    /// Excludes outputs younger than `min_age` and still-time-locked outputs;
-    /// among the eligible canonical-chain set, target ages follow the gamma
-    /// model rather than being uniform. Samples outside the eligible age window
-    /// are rejected instead of being clamped onto its youngest or oldest edge.
-    ///
-    /// ## Mapping contract
-    ///
-    /// A sampled age in seconds is converted to a target canonical height using
-    /// [`crate::constants::TARGET_BLOCK_TIME`]. The nearest eligible height is
-    /// chosen, with random tie-breaking, and one output at that height is chosen
-    /// uniformly. This is CoinCync's height-age bootstrap mapping; it is not
-    /// presented as equivalent to Monero's cumulative-output-index mapping.
-    ///
-    /// Selection reads `height_index`, which is updated by the same add/remove
-    /// paths used for block connection and reorganization rollback. Orphaned
-    /// outputs therefore leave the eligible set when their block disconnects.
-    ///
-    /// If bounded rejection sampling cannot produce an age in the eligible
-    /// window, this returns fewer outputs rather than silently falling back to a
-    /// different distribution. Transaction builders reject undersized pools.
-    pub fn select_decoys<R: rand::Rng>(
-        &self,
-        current_height: u64,
-        min_age: u64,
-        count: usize,
-        rng: &mut R,
-    ) -> Vec<&OutputRef> {
-        self.gamma_select_decoys(current_height, min_age, count, None, rng)
-    }
-
-    fn gamma_select_decoys<R: rand::Rng>(
-        &self,
-        current_height: u64,
-        min_age: u64,
-        count: usize,
-        exclude_tx: Option<&Hash>,
-        rng: &mut R,
-    ) -> Vec<&OutputRef> {
-        use rand_distr::{Distribution, Gamma};
-
-        if count == 0 || current_height < min_age {
-            return Vec::new();
-        }
-        let max_height = current_height - min_age;
-        // Collect at most count + 1 eligible outputs. Public get_decoys calls
-        // are capped at 256, so an abundant UTXO set must not be materialized
-        // and scanned in full before the ordered-index seeks below.
-        let mut prefix = Vec::with_capacity(count.saturating_add(1));
-        'heights: for (_, keys) in self.height_index.range(..=max_height) {
-            for key in keys {
-                if let Some(output) = self.outputs.get(key) {
-                    if Self::is_decoy_eligible(output, current_height, exclude_tx) {
-                        prefix.push(output);
-                        if prefix.len() > count {
-                            break 'heights;
-                        }
-                    }
-                }
-            }
-        }
-        if prefix.len() <= count {
-            return prefix;
-        }
-
-        let oldest_height = prefix[0].height;
-        let youngest_height = self
-            .height_index
-            .range(..=max_height)
-            .rev()
-            .find_map(|(_, keys)| {
-                keys.iter().find_map(|key| {
-                    self.outputs
-                        .get(key)
-                        .filter(|output| {
-                            Self::is_decoy_eligible(output, current_height, exclude_tx)
-                        })
-                        .map(|output| output.height)
-                })
-            })
-            .expect("count + 1 eligible outputs imply a youngest eligible height");
-        let youngest_age = current_height - youngest_height;
-        let oldest_age = current_height - oldest_height;
-        let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE)
-            .expect("fixed positive gamma policy parameters");
-        let block_time = crate::constants::TARGET_BLOCK_TIME.max(1) as f64;
-
-        let mut taken: HashSet<OutputKey> = HashSet::new();
-        let mut chosen: Vec<&OutputRef> = Vec::with_capacity(count);
-        while chosen.len() < count {
-            let sampled_age = (0..DECOY_GAMMA_MAX_RESAMPLES).find_map(|_| {
-                let age_seconds = gamma.sample(rng).exp();
-                if !age_seconds.is_finite() {
-                    return None;
-                }
-                let age_blocks = (age_seconds / block_time) as u64;
-                (youngest_age..=oldest_age)
-                    .contains(&age_blocks)
-                    .then_some(age_blocks)
-            });
-            let Some(age_blocks) = sampled_age else {
-                break;
-            };
-            let target_height = current_height - age_blocks;
-            match self.pick_near_height(
-                target_height,
-                max_height,
-                current_height,
-                exclude_tx,
-                &taken,
-                rng,
-            ) {
-                Some(oref) => {
-                    taken.insert((oref.tx_hash, oref.index));
-                    chosen.push(oref);
-                }
-                None => break,
-            }
-        }
-        chosen
-    }
-
-    fn is_decoy_eligible(
-        output: &OutputRef,
-        current_height: u64,
-        exclude_tx: Option<&Hash>,
-    ) -> bool {
-        exclude_tx != Some(&output.tx_hash)
-            && output
-                .output
-                .lock_height
-                .map_or(true, |height| current_height >= height)
-    }
-
-    /// Find the nearest eligible untaken output to `target`.
-    ///
-    /// The ordered-index seek is logarithmic, but sparse/locked/depleted ranges
-    /// can require scanning additional heights and outputs. Equal-distance
-    /// heights are selected randomly so the mapping has no systematic old-side
-    /// tie bias.
-    fn pick_near_height<R: rand::Rng>(
-        &self,
-        target: u64,
-        max_height: u64,
-        current_height: u64,
-        exclude_tx: Option<&Hash>,
-        taken: &HashSet<OutputKey>,
-        rng: &mut R,
-    ) -> Option<&OutputRef> {
-        let capped = target.min(max_height);
-        let mut below = self.height_index.range(..=capped).rev();
-        let mut above = self
-            .height_index
-            .range(capped..=max_height)
-            .filter(|(height, _)| **height > capped);
-        let mut lo = below.next();
-        let mut hi = above.next();
-        loop {
-            let use_below = match (lo, hi) {
-                (Some((lh, _)), Some((hh, _))) => {
-                    let below_distance = target.abs_diff(*lh);
-                    let above_distance = hh.abs_diff(target);
-                    below_distance < above_distance
-                        || (below_distance == above_distance && rng.gen_bool(0.5))
-                }
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => return None,
-            };
-            let (_h, keys) = if use_below { lo.unwrap() } else { hi.unwrap() };
-            if let Some(oref) =
-                self.eligible_untaken_at(keys, current_height, exclude_tx, taken, rng)
-            {
-                return Some(oref);
-            }
-            if use_below {
-                lo = below.next();
-            } else {
-                hi = above.next();
-            }
-        }
-    }
-
-    /// A uniformly-random eligible, untaken output among `keys` at one height
-    /// (reservoir sampling), or `None` if none qualify.
-    fn eligible_untaken_at<R: rand::Rng>(
-        &self,
-        keys: &BTreeSet<OutputKey>,
-        current_height: u64,
-        exclude_tx: Option<&Hash>,
-        taken: &HashSet<OutputKey>,
-        rng: &mut R,
-    ) -> Option<&OutputRef> {
-        let mut pick: Option<&OutputRef> = None;
-        let mut seen = 0u64;
-        for key in keys {
-            if taken.contains(key) {
-                continue;
-            }
-            if let Some(oref) = self.outputs.get(key) {
-                if Self::is_decoy_eligible(oref, current_height, exclude_tx) {
-                    seen += 1;
-                    if rng.gen_range(0..seen) == 0 {
-                        pick = Some(oref);
-                    }
-                }
-            }
-        }
-        pick
-    }
-
-    /// Select decoys with an optional transaction exclusion.
-    ///
-    /// This uses exactly the same V1 target-age policy as [`Self::select_decoys`].
-    /// It does not promise artificial height diversity or a fixed recent/old
-    /// mixture; `exclude_tx` only prevents outputs from that transaction from
-    /// being selected.
-    pub fn select_decoys_constrained<R: rand::Rng>(
-        &self,
-        current_height: u64,
-        min_age: u64,
-        count: usize,
-        exclude_tx: Option<&Hash>,
-        rng: &mut R,
-    ) -> Vec<&OutputRef> {
-        self.gamma_select_decoys(current_height, min_age, count, exclude_tx, rng)
     }
 
     /// Get height range statistics
@@ -981,9 +777,6 @@ mod tests {
     use super::*;
     use crate::decoy::OutputLocator;
     use crate::primitives::PublicKey;
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
-    use rand_distr::{Distribution, Gamma};
 
     fn make_test_output(id: u64, lock_height: Option<u64>) -> (Hash, TxOutput) {
         let mut bytes = [0u8; 32];
@@ -1013,10 +806,6 @@ mod tests {
         hash
     }
 
-    fn quantile(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
-        sorted[(sorted.len() - 1) * numerator / denominator]
-    }
-
     #[test]
     fn test_height_index() {
         let mut utxos = UtxoSet::new();
@@ -1034,178 +823,37 @@ mod tests {
     }
 
     #[test]
-    fn test_decoy_selection() {
-        let mut utxos = UtxoSet::new();
-        let mut rng = ChaCha20Rng::seed_from_u64(1);
-
-        for h in 0..100u64 {
-            add_test_output(&mut utxos, h, h, None);
-        }
-
-        let decoys = utxos.select_decoys(100, 10, 11, &mut rng);
-        assert_eq!(decoys.len(), 11);
-        for d in decoys {
-            assert!(d.height <= 90);
-        }
-
-        assert!(utxos.select_decoys(5, 10, 1, &mut rng).is_empty());
-        assert!(utxos.select_decoys(100, 10, 0, &mut rng).is_empty());
-    }
-
-    #[test]
-    fn gamma_selection_matches_conditioned_target_quantiles() {
-        let mut utxos = UtxoSet::new();
-        let n = 30_000u64;
-        for h in 0..n {
-            add_test_output(&mut utxos, h, h, None);
-        }
-
-        let min_age = 100u64;
-        let mut selection_rng = ChaCha20Rng::seed_from_u64(2);
-        let mut observed = Vec::with_capacity(2_000);
-        for _ in 0..125 {
-            let decoys = utxos.select_decoys(n, min_age, 16, &mut selection_rng);
-            assert_eq!(decoys.len(), 16);
-            observed.extend(decoys.into_iter().map(|output| n - output.height));
-        }
-
-        let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE).unwrap();
-        let block_time = crate::constants::TARGET_BLOCK_TIME as f64;
-        let mut target_rng = ChaCha20Rng::seed_from_u64(3);
-        let mut expected = Vec::with_capacity(observed.len());
-        while expected.len() < observed.len() {
-            let age = (gamma.sample(&mut target_rng).exp() / block_time) as u64;
-            if (min_age..=n).contains(&age) {
-                expected.push(age);
-            }
-        }
-
-        observed.sort_unstable();
-        expected.sort_unstable();
-        for (numerator, denominator) in [(1, 10), (1, 2), (9, 10)] {
-            let actual = quantile(&observed, numerator, denominator) as f64;
-            let target = quantile(&expected, numerator, denominator) as f64;
-            let log_distance = (actual.ln() - target.ln()).abs();
-            assert!(
-                log_distance < 0.20,
-                "{numerator}/{denominator} quantile diverged: actual={actual}, target={target}"
-            );
-        }
-    }
-
-    #[test]
-    fn min_age_is_conditioned_without_boundary_spike() {
-        let mut utxos = UtxoSet::new();
-        let current_height = 10_000u64;
-        let min_age = 100u64;
-        for height in 0..current_height {
-            add_test_output(&mut utxos, height, height, None);
-        }
-
-        let mut boundary_hits = 0usize;
-        for seed in 0..2_000u64 {
-            let mut rng = ChaCha20Rng::seed_from_u64(seed);
-            let selected = utxos.select_decoys(current_height, min_age, 1, &mut rng);
-            assert_eq!(selected.len(), 1);
-            let age = current_height - selected[0].height;
-            assert!(age >= min_age);
-            boundary_hits += usize::from(age == min_age);
-        }
-        assert!(
-            boundary_hits < 20,
-            "minimum-age boundary accumulated {boundary_hits}/2000 selections"
-        );
-    }
-
-    #[test]
-    fn sparse_locked_pool_returns_exact_eligible_count() {
-        let mut utxos = UtxoSet::new();
-        add_test_output(&mut utxos, 1, 100, None);
-        let locked = add_test_output(&mut utxos, 2, 1_000, Some(5_001));
-        add_test_output(&mut utxos, 3, 2_500, None);
-        add_test_output(&mut utxos, 4, 4_000, None);
-
-        let mut rng = ChaCha20Rng::seed_from_u64(4);
-        let selected = utxos.select_decoys(5_000, 100, 3, &mut rng);
-        assert_eq!(selected.len(), 3);
-        assert!(selected.iter().all(|output| output.tx_hash != locked));
-    }
-
-    #[test]
-    fn exhausted_truncated_sampler_fails_closed_without_uniform_fallback() {
-        let mut utxos = UtxoSet::new();
-        add_test_output(&mut utxos, 1, 0, None);
-        add_test_output(&mut utxos, 2, 0, None);
-
-        let current_height = u64::MAX / 2;
-        let mut rng = ChaCha20Rng::seed_from_u64(41);
-        let selected = utxos.select_decoys(current_height, current_height, 1, &mut rng);
-        assert!(selected.is_empty());
-    }
-
-    #[test]
-    fn target_height_mapping_is_stable_with_uneven_output_counts() {
-        let mut sparse = UtxoSet::new();
-        let mut dense = UtxoSet::new();
-        for (id, height) in [(1, 1_000), (2, 4_000)] {
-            add_test_output(&mut sparse, id, height, None);
-            add_test_output(&mut dense, id, height, None);
-        }
-        for id in 10..110 {
-            add_test_output(&mut dense, id, 4_000, None);
-        }
-
-        for seed in 0..256u64 {
-            let mut sparse_rng = ChaCha20Rng::seed_from_u64(seed);
-            let mut dense_rng = ChaCha20Rng::seed_from_u64(seed);
-            let sparse_height = sparse.select_decoys(5_000, 100, 1, &mut sparse_rng)[0].height;
-            let dense_height = dense.select_decoys(5_000, 100, 1, &mut dense_rng)[0].height;
-            assert_eq!(sparse_height, dense_height);
-        }
-    }
-
-    #[test]
-    fn constrained_selection_uses_same_policy_and_excludes_transaction() {
-        let mut utxos = UtxoSet::new();
-        let excluded = add_test_output(&mut utxos, 1, 100, None);
-        for id in 2..20 {
-            add_test_output(&mut utxos, id, id * 100, None);
-        }
-
-        let mut rng = ChaCha20Rng::seed_from_u64(5);
-        let selected = utxos.select_decoys_constrained(2_000, 0, 10, Some(&excluded), &mut rng);
-        assert_eq!(selected.len(), 10);
-        assert!(selected.iter().all(|output| output.tx_hash != excluded));
-    }
-
-    #[test]
     fn reorg_batches_replace_orphaned_outputs_in_decoy_catalog() {
         let mut utxos = UtxoSet::new();
         let (old_hash, old_output) = make_test_output(1, None);
+        let old_public_key = old_output.stealth_address;
         let mut connect_old = UtxoBatch::new();
         connect_old.add_output(old_hash, 0, old_output.clone(), 100);
         utxos.apply_batch(connect_old);
 
-        let mut rng = ChaCha20Rng::seed_from_u64(6);
+        let locator = OutputLocator {
+            height: 100,
+            ordinal: 0,
+        };
         assert_eq!(
-            utxos.select_decoys(200, 0, 10, &mut rng)[0].tx_hash,
-            old_hash
+            utxos.resolve_output_locators(&[locator]).unwrap()[0].public_key,
+            old_public_key
         );
 
         let mut disconnect_old = UtxoBatch::new();
         disconnect_old.remove_output(old_hash, 0);
         utxos.apply_batch(disconnect_old);
-        assert!(utxos.select_decoys(200, 0, 10, &mut rng).is_empty());
+        assert!(utxos.resolve_output_locators(&[locator]).is_err());
 
         let (new_hash, new_output) = make_test_output(2, None);
+        let new_public_key = new_output.stealth_address;
         let mut connect_new = UtxoBatch::new();
         connect_new.add_output(new_hash, 0, new_output, 100);
         utxos.apply_batch(connect_new);
 
-        let selected = utxos.select_decoys(200, 0, 10, &mut rng);
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].tx_hash, new_hash);
-        assert_ne!(selected[0].tx_hash, old_hash);
+        let resolved = utxos.resolve_output_locators(&[locator]).unwrap();
+        assert_eq!(resolved[0].public_key, new_public_key);
+        assert_ne!(resolved[0].public_key, old_public_key);
     }
 
     #[test]
@@ -1249,6 +897,30 @@ mod tests {
             .collect();
 
         assert_eq!(left_keys, right_keys);
+    }
+
+    #[test]
+    fn canonical_locators_survive_output_spends() {
+        let mut utxos = UtxoSet::new();
+        let first = add_test_output(&mut utxos, 1, 40, None);
+        add_test_output(&mut utxos, 2, 40, None);
+        let locators = [
+            OutputLocator {
+                height: 40,
+                ordinal: 0,
+            },
+            OutputLocator {
+                height: 40,
+                ordinal: 1,
+            },
+        ];
+        let before = utxos.resolve_output_locators(&locators).unwrap();
+
+        assert!(utxos.spend_output(first, 0, KeyImage::from_bytes([9; 32])));
+
+        let after = utxos.resolve_output_locators(&locators).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(utxos.output_distribution(40)[0].count, 2);
     }
 
     #[test]

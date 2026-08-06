@@ -312,8 +312,9 @@ impl ChurnEngine {
     /// Opens the wallet, picks a random amount, builds a self-send
     /// transaction, and submits it to the node.
     async fn execute_churn(&self) -> Result<u64, String> {
+        use crate::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
         use crate::primitives::Amount;
-        use crate::transaction::DecoyOutput;
+        use crate::wallet::decoy_selection::{allocate_unique_rings, build_covered_request};
         use crate::wallet::{KeyEpoch, Wallet};
 
         // Open and unlock wallet
@@ -328,10 +329,16 @@ impl ChurnEngine {
             .cloned()
             .ok_or_else(|| "wallet has no current key epoch".to_string())?;
 
-        // Query chain state first — the mature-spendable set and the real
-        // per-tx capacity below both depend on the current height.
-        let info = rpc_call_simple(&self.config.node_url, "get_info").await?;
-        let current_height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+        let snapshot: DecoyDistributionSnapshot = serde_json::from_value(
+            rpc_call(
+                &self.config.node_url,
+                "get_decoy_distribution",
+                serde_json::json!([]),
+            )
+            .await?,
+        )
+        .map_err(|e| format!("decode decoy distribution: {}", e))?;
+        let current_height = snapshot.snapshot_height.saturating_add(1);
         let min_age = crate::constants::min_output_age_at_height(current_height);
 
         // Pick the churn amount against what a single tx can ACTUALLY spend.
@@ -375,55 +382,6 @@ impl ChurnEngine {
             two_input_cap, churn_amount, "churn: building self-send"
         );
 
-        // Fetch decoys.
-        //
-        // min_age MUST be the consensus output-age floor, not 0. A ring member
-        // that references an immature coinbase output (age < the floor) makes
-        // the whole tx invalid — the node rejects it with "ring member
-        // references immature coinbase output". Passing 0 here let the node
-        // return recent (immature) coinbase outputs as decoys, so churn txs
-        // failed intermittently on any chain with recent coinbases (and *every*
-        // time on a coinbase-dense chain). This mirrors the 2026-06-07 fix in
-        // `bin/wallet.rs` (min_age 0 → `min_output_age_at_height`) that was
-        // never propagated to auto-churn.
-        let ring_size = 16usize;
-        let min_decoy_age = crate::constants::min_output_age_at_height(current_height);
-        let decoys_json = rpc_call(
-            &self.config.node_url,
-            "get_decoys",
-            serde_json::json!([ring_size * 8, min_decoy_age]),
-        )
-        .await?;
-        let decoys_arr = decoys_json
-            .get("decoys")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut decoy_pool: Vec<DecoyOutput> = Vec::with_capacity(decoys_arr.len());
-        for d in &decoys_arr {
-            let pk_hex = d.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
-            let commit_hex = d.get("commitment").and_then(|v| v.as_str()).unwrap_or("");
-            let height = d.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-            if let (Ok(pk_b), Ok(c_b)) = (hex::decode(pk_hex), hex::decode(commit_hex)) {
-                if pk_b.len() == 32 && c_b.len() == 32 {
-                    let mut pk_arr = [0u8; 32];
-                    let mut c_arr = [0u8; 32];
-                    pk_arr.copy_from_slice(&pk_b);
-                    c_arr.copy_from_slice(&c_b);
-                    decoy_pool.push(DecoyOutput {
-                        public_key: crate::primitives::PublicKey::from_bytes(pk_arr),
-                        commitment: c_arr,
-                        height,
-                    });
-                }
-            }
-        }
-
-        if decoy_pool.is_empty() {
-            return Err("no decoys available for churn ring".into());
-        }
-
         // Build self-send: recipient is our OWN public keys
         let recipients = vec![(
             keys.spend_public,
@@ -432,16 +390,55 @@ impl ChurnEngine {
         )];
 
         let mut rng = rand::rngs::OsRng;
-        let tx = crate::wallet::send::create_privacy_transaction_with_fee(
+        let ring_size = crate::constants::ring_size_at_height(current_height);
+        let prepared = crate::wallet::send::prepare_privacy_transaction_with_options(
             &balance,
             &recipients,
             &keys,
-            &decoy_pool,
             current_height,
-            1.0, // standard fee — using zero would be a fingerprint
+            ring_size,
+            1.0,
+            None,
+            Vec::new(),
             &mut rng,
         )
         .map_err(|e| format!("build churn tx: {}", e))?;
+        let real_outputs = prepared.real_outputs();
+        let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator).collect();
+        let requested = build_covered_request(
+            &snapshot,
+            &real_locators,
+            prepared.ring_size(),
+            min_age,
+            &mut rng,
+        )
+        .map_err(|e| format!("build covered decoy request: {}", e))?;
+        let resolved: ResolvedDecoySnapshot = serde_json::from_value(
+            rpc_call(
+                &self.config.node_url,
+                "get_outputs_by_locators",
+                serde_json::json!([
+                    snapshot.snapshot_height,
+                    snapshot.snapshot_hash,
+                    snapshot.policy_version,
+                    &requested,
+                ]),
+            )
+            .await?,
+        )
+        .map_err(|e| format!("decode resolved decoys: {}", e))?;
+        let rings = allocate_unique_rings(
+            &snapshot,
+            &requested,
+            &resolved,
+            &real_outputs,
+            prepared.ring_size(),
+            min_age,
+            &mut rng,
+        )
+        .map_err(|e| format!("allocate churn rings: {}", e))?;
+        let tx = crate::wallet::send::build_prepared_privacy_transaction(prepared, rings, &mut rng)
+            .map_err(|e| format!("build churn tx: {}", e))?;
 
         let tx_hash = tx.hash();
         let tx_bytes = borsh::to_vec(&tx).map_err(|e| format!("serialize: {}", e))?;
@@ -541,10 +538,6 @@ async fn rpc_call(
     json.get("result")
         .cloned()
         .ok_or_else(|| "rpc response missing result".into())
-}
-
-async fn rpc_call_simple(node: &str, method: &str) -> Result<serde_json::Value, String> {
-    rpc_call(node, method, serde_json::json!([])).await
 }
 
 fn unix_now() -> u64 {

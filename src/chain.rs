@@ -16,7 +16,7 @@ use crate::emission::calculate_block_reward;
 use crate::error::{Error, Result};
 use crate::primitives::{Hash, KeyImage};
 use crate::storage::UtxoSet;
-use crate::transaction::{DecoyOutput, Transaction};
+use crate::transaction::Transaction;
 
 /// Auto-checkpoint interval: record a checkpoint every N blocks
 /// Checkpoint interval: every 5 blocks (~10 minutes at 120s block time).
@@ -3377,28 +3377,6 @@ impl Blockchain {
         } else {
             false
         }
-    }
-
-    /// Get decoy outputs for ring signatures
-    ///
-    /// Selects random outputs from the UTXO set to use as ring members,
-    /// providing unlinkability for the real input being spent.
-    pub fn get_decoy_outputs(&self, count: usize, min_age: u64) -> Vec<DecoyOutput> {
-        let inner = self.inner.read();
-        let current_height = inner.tip.height;
-        // SECURITY: ring decoy selection uses OsRng and the canonical V1
-        // policy in storage::UtxoSet::select_decoys.
-        let mut rng = rand::rngs::OsRng;
-        inner
-            .utxos
-            .select_decoys(current_height, min_age, count, &mut rng)
-            .into_iter()
-            .map(|oref| DecoyOutput {
-                public_key: oref.output.stealth_address,
-                commitment: oref.output.commitment,
-                height: oref.height,
-            })
-            .collect()
     }
 
     /// Get target height (for sync progress, updated by P2P layer)

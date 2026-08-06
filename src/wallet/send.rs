@@ -13,16 +13,80 @@ use crate::constants::{
     UNIFORM_TX_SHAPE_HEIGHT,
 };
 use crate::crypto::{
-    compute_one_time_secret, BlindingFactor, OutputRef as RingOutputRef, RingSelectionConfig,
-    RingSelectionPool, RingSelector, StealthAddress,
+    compute_one_time_secret, BlindingFactor, OutputRef as RingOutputRef, PedersenCommitment,
+    RingSelectionConfig, RingSelectionPool, RingSelector, StealthAddress,
 };
 use crate::error::{Error, Result};
 use crate::primitives::{Address, Amount, PublicKey};
 use crate::transaction::{
     DecoyOutput, Recipient, SpendableInput, Transaction, TransactionBuilder, TxType,
 };
+use crate::wallet::decoy_selection::{AllocatedRing, RealOutputIdentity};
 
 use rand::{seq::SliceRandom, CryptoRng, Rng, RngCore};
+
+#[derive(Clone)]
+struct PreparedInput {
+    input: SpendableInput,
+    real_output: RealOutputIdentity,
+}
+
+pub struct PreparedPrivacyTransaction {
+    inputs: Vec<PreparedInput>,
+    recipients: Vec<(PublicKey, PublicKey, Amount)>,
+    change_amount: u64,
+    estimated_fee: Amount,
+    current_height: u64,
+    uniform: bool,
+    drip_pair: bool,
+    spend_public: PublicKey,
+    view_public: PublicKey,
+    memo: Option<Vec<u8>>,
+    extra: Vec<u8>,
+    ring_size: usize,
+}
+
+impl PreparedPrivacyTransaction {
+    pub fn real_outputs(&self) -> Vec<RealOutputIdentity> {
+        self.inputs.iter().map(|input| input.real_output).collect()
+    }
+
+    pub fn ring_size(&self) -> usize {
+        self.ring_size
+    }
+
+    pub fn input_count(&self) -> usize {
+        self.inputs.len()
+    }
+}
+
+pub struct PreparedVestingTransaction {
+    inputs: Vec<PreparedInput>,
+    recipient_spend: PublicKey,
+    recipient_view: PublicKey,
+    amount: Amount,
+    unlock_height: u64,
+    change_amount: u64,
+    estimated_fee: Amount,
+    current_height: u64,
+    spend_public: PublicKey,
+    view_public: PublicKey,
+    ring_size: usize,
+}
+
+impl PreparedVestingTransaction {
+    pub fn real_outputs(&self) -> Vec<RealOutputIdentity> {
+        self.inputs.iter().map(|input| input.real_output).collect()
+    }
+
+    pub fn ring_size(&self) -> usize {
+        self.ring_size
+    }
+
+    pub fn input_count(&self) -> usize {
+        self.inputs.len()
+    }
+}
 
 /// AUDIT (R-105 note, 2026-07-03): `COINCYNC_WALLET_ALLOW_WEAK_PRIVACY`
 /// is an ENVIRONMENT VARIABLE that disables the strict-privacy policy
@@ -610,6 +674,218 @@ pub fn create_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     builder.build(rng)
 }
 
+pub fn prepare_privacy_transaction_with_options<R: RngCore + CryptoRng>(
+    balance: &Balance,
+    recipients: &[(PublicKey, PublicKey, Amount)],
+    keys: &KeyEpoch,
+    current_height: u64,
+    ring_size: usize,
+    fee_multiplier: f64,
+    memo: Option<&[u8]>,
+    extra: Vec<u8>,
+    rng: &mut R,
+) -> Result<PreparedPrivacyTransaction> {
+    if ring_size < 2 {
+        return Err(Error::InvalidRingSize {
+            expected: 2,
+            got: ring_size,
+        });
+    }
+    let min_age = min_output_age_at_height(current_height);
+    let total_send: Amount = recipients.iter().map(|(_, _, amount)| *amount).sum();
+    let available = balance.spendable(current_height, min_age);
+    let uniform = current_height >= UNIFORM_TX_SHAPE_HEIGHT;
+    let drip_pair = uniform
+        && recipients.len() == STANDARD_OUTPUT_COUNT
+        && recipients.windows(2).all(|pair| {
+            pair[0].0.as_bytes() == pair[1].0.as_bytes()
+                && pair[0].1.as_bytes() == pair[1].1.as_bytes()
+        });
+    if uniform && recipients.len() > 1 && !drip_pair {
+        return Err(Error::InvalidState(
+            "Post-activation transfers must have one recipient or a same-address drip pair".into(),
+        ));
+    }
+
+    let input_count_estimate = if uniform { STANDARD_INPUT_COUNT } else { 1 };
+    let output_count = if uniform {
+        STANDARD_OUTPUT_COUNT
+    } else {
+        recipients.len() + 3
+    };
+    let multiplier = if fee_multiplier.is_nan() {
+        1.0
+    } else {
+        fee_multiplier
+    };
+    let multiplier_x100 = (multiplier.max(1.0) * 100.0).min(10_000.0) as u64;
+    let initial_fee = Amount::from_atomic(
+        (estimate_tx_size(input_count_estimate, output_count, ring_size) as u64)
+            .saturating_mul(MIN_FEE_PER_BYTE)
+            .saturating_mul(multiplier_x100)
+            / 100,
+    );
+    let initial_needed = total_send.saturating_add(initial_fee);
+    if available < initial_needed {
+        if balance.total() >= initial_needed {
+            let pending_utxos: Vec<&UTXO> = balance
+                .unspent_utxos()
+                .into_iter()
+                .filter(|utxo| current_height < utxo.height.saturating_add(min_age))
+                .collect();
+            let pending_atomic = pending_utxos
+                .iter()
+                .map(|utxo| utxo.amount.as_atomic())
+                .sum();
+            let latest_pending_height = pending_utxos
+                .iter()
+                .map(|utxo| utxo.height)
+                .max()
+                .unwrap_or(current_height);
+            let blocks_to_wait = latest_pending_height
+                .saturating_add(min_age)
+                .saturating_sub(current_height);
+            return Err(Error::BalancePendingMaturity {
+                spendable_atomic: available.as_atomic(),
+                pending_atomic,
+                pending_utxos: pending_utxos.len(),
+                need_atomic: initial_needed.as_atomic(),
+                blocks_to_wait,
+                seconds_to_wait: blocks_to_wait.saturating_mul(crate::constants::TARGET_BLOCK_TIME),
+            });
+        }
+        return Err(Error::InsufficientBalance {
+            have: available.as_atomic(),
+            need: initial_needed.as_atomic(),
+        });
+    }
+
+    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
+    let mut selected = if uniform {
+        select_utxos_uniform(&utxos, initial_needed, rng)?
+    } else {
+        select_utxos(&utxos, initial_needed, CoinSelection::OldestFirst, rng)?
+    };
+    let estimated_fee = Amount::from_atomic(
+        (estimate_tx_size(selected.len(), output_count, ring_size) as u64)
+            .saturating_mul(MIN_FEE_PER_BYTE)
+            .saturating_mul(multiplier_x100)
+            / 100,
+    );
+    let total_needed = total_send.saturating_add(estimated_fee);
+    if selected.iter().map(|utxo| utxo.amount).sum::<Amount>() < total_needed {
+        selected = if uniform {
+            select_utxos_uniform(&utxos, total_needed, rng)?
+        } else {
+            select_utxos(&utxos, total_needed, CoinSelection::OldestFirst, rng)?
+        };
+    }
+    let input_sum: Amount = selected.iter().map(|utxo| utxo.amount).sum();
+    if input_sum < total_needed {
+        return Err(Error::InsufficientBalance {
+            have: input_sum.as_atomic(),
+            need: total_needed.as_atomic(),
+        });
+    }
+
+    Ok(PreparedPrivacyTransaction {
+        inputs: selected
+            .into_iter()
+            .map(|utxo| prepare_input(utxo, keys))
+            .collect::<Result<_>>()?,
+        recipients: recipients.to_vec(),
+        change_amount: input_sum
+            .as_atomic()
+            .saturating_sub(total_needed.as_atomic()),
+        estimated_fee,
+        current_height,
+        uniform,
+        drip_pair,
+        spend_public: keys.spend_public,
+        view_public: keys.view_public,
+        memo: memo.map(ToOwned::to_owned),
+        extra,
+        ring_size,
+    })
+}
+
+pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
+    prepared: PreparedPrivacyTransaction,
+    rings: Vec<AllocatedRing>,
+    rng: &mut R,
+) -> Result<Transaction> {
+    let PreparedPrivacyTransaction {
+        inputs,
+        recipients,
+        change_amount,
+        estimated_fee,
+        current_height,
+        uniform,
+        drip_pair,
+        spend_public,
+        view_public,
+        memo,
+        extra,
+        ring_size,
+    } = prepared;
+    let mut builder = TransactionBuilder::transfer().with_target_height(current_height);
+    if let Some(memo) = memo.as_deref() {
+        builder = builder.with_memo(memo);
+    }
+    if !extra.is_empty() {
+        builder = builder.with_extra(extra);
+    }
+    add_prepared_inputs(&mut builder, inputs, rings, ring_size)?;
+    for (index, (spend_public, view_public, amount)) in recipients.iter().enumerate() {
+        builder.add_output(
+            &Recipient {
+                spend_public: *spend_public,
+                view_public: *view_public,
+                amount: *amount,
+                lock_height: None,
+            },
+            index as u8,
+            rng,
+        )?;
+    }
+    let final_fee = if uniform {
+        if drip_pair {
+            Amount::from_atomic(estimated_fee.as_atomic().saturating_add(change_amount))
+        } else if change_amount >= MIN_OUTPUT_AMOUNT {
+            builder.add_change(
+                &spend_public,
+                &view_public,
+                Amount::from_atomic(change_amount),
+                recipients.len() as u8,
+                rng,
+            )?;
+            estimated_fee
+        } else {
+            let _ = builder.add_dummy_output(rng);
+            Amount::from_atomic(estimated_fee.as_atomic().saturating_add(change_amount))
+        }
+    } else {
+        let fee = if change_amount >= MIN_OUTPUT_AMOUNT {
+            builder.add_change(
+                &spend_public,
+                &view_public,
+                Amount::from_atomic(change_amount),
+                recipients.len() as u8,
+                rng,
+            )?;
+            estimated_fee
+        } else {
+            Amount::from_atomic(estimated_fee.as_atomic().saturating_add(change_amount))
+        };
+        for _ in 0..rng.gen_range(0..=2usize) {
+            let _ = builder.add_dummy_output(rng);
+        }
+        fee
+    };
+    builder.set_fee(final_fee);
+    builder.build(rng)
+}
+
 /// Create a privacy transaction with a time lock on the recipient output.
 ///
 /// The recipient cannot spend the output until `unlock_height` is reached.
@@ -734,6 +1010,170 @@ pub fn create_vesting_transaction<R: RngCore + CryptoRng>(
 
     builder.set_fee(final_fee);
     builder.build(rng)
+}
+
+pub fn prepare_vesting_transaction<R: RngCore + CryptoRng>(
+    balance: &Balance,
+    recipient_spend: PublicKey,
+    recipient_view: PublicKey,
+    amount: Amount,
+    unlock_height: u64,
+    keys: &KeyEpoch,
+    current_height: u64,
+    ring_size: usize,
+    rng: &mut R,
+) -> Result<PreparedVestingTransaction> {
+    if ring_size < 2 {
+        return Err(Error::InvalidRingSize {
+            expected: 2,
+            got: ring_size,
+        });
+    }
+    let min_age = min_output_age_at_height(current_height);
+    let available = balance.spendable(current_height, min_age);
+    let initial_fee =
+        Amount::from_atomic(estimate_tx_size(1, 4, ring_size) as u64 * MIN_FEE_PER_BYTE);
+    let total_needed = amount.saturating_add(initial_fee);
+    if available < total_needed {
+        return Err(Error::InsufficientBalance {
+            have: available.as_atomic(),
+            need: total_needed.as_atomic(),
+        });
+    }
+    let utxos: Vec<&UTXO> = balance.available_utxos(current_height, min_age);
+    let selected = select_utxos(&utxos, total_needed, CoinSelection::OldestFirst, rng)?;
+    let estimated_fee = Amount::from_atomic(
+        estimate_tx_size(selected.len(), 4, ring_size) as u64 * MIN_FEE_PER_BYTE,
+    );
+    let input_sum: Amount = selected.iter().map(|utxo| utxo.amount).sum();
+    let output_total = amount.as_atomic().saturating_add(estimated_fee.as_atomic());
+    if input_sum.as_atomic() < output_total {
+        return Err(Error::InsufficientBalance {
+            have: input_sum.as_atomic(),
+            need: output_total,
+        });
+    }
+
+    Ok(PreparedVestingTransaction {
+        inputs: selected
+            .into_iter()
+            .map(|utxo| prepare_input(utxo, keys))
+            .collect::<Result<_>>()?,
+        recipient_spend,
+        recipient_view,
+        amount,
+        unlock_height,
+        change_amount: input_sum.as_atomic().saturating_sub(output_total),
+        estimated_fee,
+        current_height,
+        spend_public: keys.spend_public,
+        view_public: keys.view_public,
+        ring_size,
+    })
+}
+
+pub fn build_prepared_vesting_transaction<R: RngCore + CryptoRng>(
+    prepared: PreparedVestingTransaction,
+    rings: Vec<AllocatedRing>,
+    rng: &mut R,
+) -> Result<Transaction> {
+    let PreparedVestingTransaction {
+        inputs,
+        recipient_spend,
+        recipient_view,
+        amount,
+        unlock_height,
+        change_amount,
+        estimated_fee,
+        current_height,
+        spend_public,
+        view_public,
+        ring_size,
+    } = prepared;
+    let mut builder = TransactionBuilder::transfer().with_target_height(current_height);
+    add_prepared_inputs(&mut builder, inputs, rings, ring_size)?;
+    builder.add_output(
+        &Recipient {
+            spend_public: recipient_spend,
+            view_public: recipient_view,
+            amount,
+            lock_height: Some(unlock_height),
+        },
+        0,
+        rng,
+    )?;
+    let final_fee = if change_amount >= MIN_OUTPUT_AMOUNT {
+        builder.add_change(
+            &spend_public,
+            &view_public,
+            Amount::from_atomic(change_amount),
+            1,
+            rng,
+        )?;
+        estimated_fee
+    } else {
+        Amount::from_atomic(estimated_fee.as_atomic().saturating_add(change_amount))
+    };
+    for _ in 0..rng.gen_range(0..=2usize) {
+        let _ = builder.add_dummy_output(rng);
+    }
+    builder.set_fee(final_fee);
+    builder.build(rng)
+}
+
+fn prepare_input(utxo: &UTXO, keys: &KeyEpoch) -> Result<PreparedInput> {
+    let locator = utxo
+        .output_locator
+        .ok_or_else(|| Error::InvalidState("wallet output has no canonical locator".into()))?;
+    let stealth = StealthAddress {
+        public_key: utxo.tx_public_key,
+        tx_public_key: utxo.tx_public_key,
+    };
+    let one_time_secret = compute_one_time_secret(
+        &stealth,
+        &keys.view_secret,
+        &keys.spend_secret,
+        utxo.output_index,
+    )?;
+    let blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);
+    Ok(PreparedInput {
+        real_output: RealOutputIdentity {
+            locator,
+            public_key: one_time_secret.public_key(),
+            commitment: PedersenCommitment::commit(utxo.amount.as_atomic(), &blinding).to_bytes(),
+        },
+        input: SpendableInput {
+            tx_hash: utxo.tx_hash,
+            output_index: utxo.output_index,
+            amount: utxo.amount,
+            one_time_secret,
+            blinding,
+            height: utxo.height,
+        },
+    })
+}
+
+fn add_prepared_inputs(
+    builder: &mut TransactionBuilder,
+    inputs: Vec<PreparedInput>,
+    rings: Vec<AllocatedRing>,
+    ring_size: usize,
+) -> Result<()> {
+    if inputs.len() != rings.len() {
+        return Err(Error::InvalidState(
+            "ring allocation does not match selected inputs".into(),
+        ));
+    }
+    for (prepared, ring) in inputs.into_iter().zip(rings) {
+        if ring.decoys.len() + 1 != ring_size {
+            return Err(Error::InvalidRingSize {
+                expected: ring_size,
+                got: ring.decoys.len() + 1,
+            });
+        }
+        builder.add_input(prepared.input, ring.decoys, ring.real_position)?;
+    }
+    Ok(())
 }
 
 /// Create a churn transaction (self-send) for graph analysis resistance
