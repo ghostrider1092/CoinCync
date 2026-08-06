@@ -1,6 +1,8 @@
 //! UTXO set storage with height indexing for fast decoy selection
 
 use crate::db::{Database, OutputIndexEntry};
+use crate::decoy::{HeightOutputCount, OutputLocator, ResolvedDecoyOutput};
+use crate::error::{Error, Result};
 use crate::primitives::{Hash, KeyImage};
 use crate::transaction::TxOutput;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -346,6 +348,65 @@ impl UtxoSet {
             .flat_map(|(_, keys)| keys.iter())
             .filter_map(|key| self.outputs.get(key))
             .collect()
+    }
+
+    pub fn output_distribution(&self, up_to_height: u64) -> Vec<HeightOutputCount> {
+        self.height_index
+            .range(..=up_to_height)
+            .map(|(height, keys)| HeightOutputCount {
+                height: *height,
+                count: keys.len() as u32,
+            })
+            .collect()
+    }
+
+    pub fn resolve_output_locators(
+        &self,
+        locators: &[OutputLocator],
+    ) -> Result<Vec<ResolvedDecoyOutput>> {
+        let mut seen = HashSet::with_capacity(locators.len());
+        let mut resolved = Vec::with_capacity(locators.len());
+
+        for locator in locators {
+            if !seen.insert(*locator) {
+                return Err(Error::InvalidState(format!(
+                    "duplicate output locator at height {} ordinal {}",
+                    locator.height, locator.ordinal
+                )));
+            }
+
+            let keys = self.height_index.get(&locator.height).ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "output locator references unknown height {}",
+                    locator.height
+                ))
+            })?;
+            let key = keys.iter().nth(locator.ordinal as usize).ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "output locator ordinal {} is outside height {} bucket of {} outputs",
+                    locator.ordinal,
+                    locator.height,
+                    keys.len()
+                ))
+            })?;
+            let output_ref = self.outputs.get(key).ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "output locator at height {} ordinal {} has no canonical output",
+                    locator.height, locator.ordinal
+                ))
+            })?;
+
+            resolved.push(ResolvedDecoyOutput {
+                locator: *locator,
+                public_key: output_ref.output.stealth_address,
+                commitment: output_ref.output.commitment,
+                height: output_ref.height,
+                is_coinbase: output_ref.is_coinbase,
+                lock_height: output_ref.output.lock_height,
+            });
+        }
+
+        Ok(resolved)
     }
 
     /// Select `count` decoys using CoinCync's V1 log-gamma target-age policy.
@@ -918,6 +979,7 @@ impl UtxoSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decoy::OutputLocator;
     use crate::primitives::PublicKey;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -1144,5 +1206,78 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].tx_hash, new_hash);
         assert_ne!(selected[0].tx_hash, old_hash);
+    }
+
+    #[test]
+    fn canonical_locators_ignore_insertion_order() {
+        let mut left = UtxoSet::new();
+        let mut right = UtxoSet::new();
+        let outputs = [
+            make_test_output(3, None),
+            make_test_output(1, None),
+            make_test_output(2, None),
+        ];
+
+        for (hash, output) in outputs.iter().cloned() {
+            left.add_output(hash, 0, output, 40);
+        }
+        for (hash, output) in outputs.iter().cloned().rev() {
+            right.add_output(hash, 0, output, 40);
+        }
+
+        let locators = [
+            OutputLocator {
+                height: 40,
+                ordinal: 0,
+            },
+            OutputLocator {
+                height: 40,
+                ordinal: 2,
+            },
+        ];
+        let left_keys: Vec<_> = left
+            .resolve_output_locators(&locators)
+            .unwrap()
+            .into_iter()
+            .map(|output| output.public_key)
+            .collect();
+        let right_keys: Vec<_> = right
+            .resolve_output_locators(&locators)
+            .unwrap()
+            .into_iter()
+            .map(|output| output.public_key)
+            .collect();
+
+        assert_eq!(left_keys, right_keys);
+    }
+
+    #[test]
+    fn locator_resolution_rejects_out_of_range_ordinal() {
+        let mut utxos = UtxoSet::new();
+        add_test_output(&mut utxos, 1, 40, None);
+
+        let result = utxos.resolve_output_locators(&[OutputLocator {
+            height: 40,
+            ordinal: 1,
+        }]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn output_distribution_is_height_sorted_and_bounded() {
+        let mut utxos = UtxoSet::new();
+        add_test_output(&mut utxos, 1, 20, None);
+        add_test_output(&mut utxos, 2, 10, None);
+        add_test_output(&mut utxos, 3, 20, None);
+        add_test_output(&mut utxos, 4, 30, None);
+
+        let distribution = utxos.output_distribution(20);
+
+        assert_eq!(distribution.len(), 2);
+        assert_eq!(distribution[0].height, 10);
+        assert_eq!(distribution[0].count, 1);
+        assert_eq!(distribution[1].height, 20);
+        assert_eq!(distribution[1].count, 2);
     }
 }
