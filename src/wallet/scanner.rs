@@ -1456,7 +1456,10 @@ impl BackgroundScanner {
                 // SECURITY (H19-FIX): Propagate subaddress index from scanner.
                 // Previously always set to None, losing subaddress association
                 // and making it impossible to track per-subaddress balances.
-                // OwnedOutput stores minor index only; account is implicit.
+                // #26 follow-up: also persist the ACCOUNT (was dropped here), so
+                // a multi-account wallet knows the full (account, index) an output
+                // was received on and can spend from the right subaddress.
+                subaddress_account: decrypted.subaddress_index.map(|(account, _index)| account),
                 subaddress_index: decrypted.subaddress_index.map(|(_account, index)| index),
             };
 

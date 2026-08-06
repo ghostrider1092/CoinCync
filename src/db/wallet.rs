@@ -33,8 +33,14 @@ pub struct OwnedOutput {
     pub spent_by: Option<Hash>,
     /// If spent, the block height
     pub spent_at_height: Option<u64>,
-    /// Subaddress index (if using subaddresses)
+    /// Subaddress index within the account (if using subaddresses)
     pub subaddress_index: Option<u32>,
+    /// Account the subaddress belongs to (#26 follow-up). `None` for the main
+    /// account / main address. Together with `subaddress_index` this is the
+    /// full `(account, index)` the output was received on — needed to spend
+    /// from the correct subaddress in a multi-account wallet. Old records
+    /// persisted before this field decode via the legacy path with `None`.
+    pub subaddress_account: Option<u32>,
 }
 
 impl OwnedOutput {
@@ -46,6 +52,57 @@ impl OwnedOutput {
     /// Check if output is spendable (confirmed and not spent)
     pub fn is_spendable(&self, current_height: u64, confirmations: u64) -> bool {
         !self.spent && current_height >= self.height + confirmations
+    }
+}
+
+/// Legacy on-disk layout of [`OwnedOutput`], as written before the
+/// `subaddress_account` field (#26 follow-up) was added. Field order and types
+/// are identical to `OwnedOutput` minus that trailing field. Used only by
+/// [`deserialize_owned_output`] to read records from older builds (and to
+/// synthesize a legacy record in the migration test).
+#[derive(BorshSerialize, BorshDeserialize)]
+struct OwnedOutputLegacy {
+    tx_hash: Hash,
+    output_index: u8,
+    output: TxOutput,
+    amount: Option<u64>,
+    height: u64,
+    block_hash: Hash,
+    timestamp: u64,
+    spent: bool,
+    spent_by: Option<Hash>,
+    spent_at_height: Option<u64>,
+    subaddress_index: Option<u32>,
+}
+
+/// Deserialize an [`OwnedOutput`], tolerating records written before the
+/// `subaddress_account` field existed.
+///
+/// The current layout is tried first. borsh requires full byte consumption, so
+/// a legacy record (which ends after `subaddress_index`) fails the new decode
+/// when it reaches the trailing `subaddress_account` — we then fall back to the
+/// legacy layout and default `subaddress_account = None`. The record is upgraded
+/// to the new layout the next time it is written (`add_output` / `mark_spent`).
+fn deserialize_owned_output(bytes: &[u8]) -> Result<OwnedOutput> {
+    match deserialize::<OwnedOutput>(bytes) {
+        Ok(o) => Ok(o),
+        Err(_) => {
+            let legacy: OwnedOutputLegacy = deserialize(bytes)?;
+            Ok(OwnedOutput {
+                tx_hash: legacy.tx_hash,
+                output_index: legacy.output_index,
+                output: legacy.output,
+                amount: legacy.amount,
+                height: legacy.height,
+                block_hash: legacy.block_hash,
+                timestamp: legacy.timestamp,
+                spent: legacy.spent,
+                spent_by: legacy.spent_by,
+                spent_at_height: legacy.spent_at_height,
+                subaddress_index: legacy.subaddress_index,
+                subaddress_account: None,
+            })
+        }
     }
 }
 
@@ -216,7 +273,7 @@ impl WalletDb {
         let key = Self::make_output_key(tx_hash, index);
         match self.outputs.get(&key) {
             Ok(Some(data)) => {
-                let output: OwnedOutput = deserialize(&data)?;
+                let output: OwnedOutput = deserialize_owned_output(&data)?;
                 Ok(Some(output))
             }
             Ok(None) => Ok(None),
@@ -272,7 +329,7 @@ impl WalletDb {
             .get(&key)
             .map_err(|e| Error::DatabaseError(e.to_string()))?
         {
-            let mut output: OwnedOutput = deserialize(&data)?;
+            let mut output: OwnedOutput = deserialize_owned_output(&data)?;
 
             if output.spent {
                 return Ok(false); // Already spent
@@ -341,7 +398,7 @@ impl WalletDb {
                 .get(&key)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?
             {
-                let output: OwnedOutput = deserialize(&data)?;
+                let output: OwnedOutput = deserialize_owned_output(&data)?;
                 if !output.spent {
                     outputs.push(output);
                 }
@@ -359,7 +416,7 @@ impl WalletDb {
 
         for result in self.outputs.iter() {
             let (_, data) = result.map_err(|e| Error::DatabaseError(e.to_string()))?;
-            let output: OwnedOutput = deserialize(&data)?;
+            let output: OwnedOutput = deserialize_owned_output(&data)?;
             outputs.push(output);
         }
 
@@ -664,6 +721,7 @@ mod tests {
             spent_by: None,
             spent_at_height: None,
             subaddress_index: None,
+            subaddress_account: None,
         };
 
         wallet_db.add_output(&output).unwrap();
@@ -681,6 +739,50 @@ mod tests {
 
         let unspent = wallet_db.get_unspent_outputs().unwrap();
         assert_eq!(unspent.len(), 0);
+    }
+
+    #[test]
+    fn legacy_owned_output_migrates_with_none_account() {
+        // #26 follow-up: a record written before `subaddress_account` existed
+        // must still load, defaulting the account to None; new records round-trip.
+        let legacy = OwnedOutputLegacy {
+            tx_hash: Hash::from_bytes([1u8; 32]),
+            output_index: 0,
+            output: TxOutput {
+                stealth_address: PublicKey::from_bytes([2u8; 32]),
+                tx_public_key: PublicKey::from_bytes([3u8; 32]),
+                commitment: [4u8; 32],
+                encrypted_amount: vec![0u8; 8],
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            },
+            amount: Some(42),
+            height: 100,
+            block_hash: Hash::from_bytes([5u8; 32]),
+            timestamp: 123,
+            spent: false,
+            spent_by: None,
+            spent_at_height: None,
+            subaddress_index: Some(3),
+        };
+        // Old on-disk bytes decode via the legacy fallback → account None.
+        let old_bytes = serialize(&legacy).unwrap();
+        let migrated = deserialize_owned_output(&old_bytes).unwrap();
+        assert_eq!(migrated.subaddress_index, Some(3));
+        assert_eq!(
+            migrated.subaddress_account, None,
+            "legacy record must default account to None"
+        );
+        assert_eq!(migrated.amount, Some(42));
+
+        // A new-format record (account set) round-trips through the same reader.
+        let mut modern = migrated;
+        modern.subaddress_account = Some(2);
+        let new_bytes = serialize(&modern).unwrap();
+        let rt = deserialize_owned_output(&new_bytes).unwrap();
+        assert_eq!(rt.subaddress_account, Some(2));
+        assert_eq!(rt.subaddress_index, Some(3));
     }
 
     #[test]

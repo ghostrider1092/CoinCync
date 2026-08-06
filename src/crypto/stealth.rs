@@ -356,8 +356,9 @@ impl RecipientKeys {
 /// ```
 pub struct ViewOnlyScanner {
     keys: RecipientKeys,
-    /// Optional: subaddresses to scan
-    subaddresses: Vec<(u32, RecipientKeys)>,
+    /// Subaddresses to scan, keyed by (account, index) so multi-account
+    /// audit scans don't collide across accounts (#26 follow-up).
+    subaddresses: Vec<(u32, u32, RecipientKeys)>,
 }
 
 impl ViewOnlyScanner {
@@ -374,9 +375,9 @@ impl ViewOnlyScanner {
         Self::new(&keys.view_secret, &keys.spend_public)
     }
 
-    /// Add a subaddress to scan
-    pub fn add_subaddress(&mut self, index: u32, subaddress_keys: RecipientKeys) {
-        self.subaddresses.push((index, subaddress_keys));
+    /// Add a subaddress to scan, tagged with its (account, index).
+    pub fn add_subaddress(&mut self, account: u32, index: u32, subaddress_keys: RecipientKeys) {
+        self.subaddresses.push((account, index, subaddress_keys));
     }
 
     /// Scan outputs and return information about owned outputs
@@ -389,6 +390,7 @@ impl ViewOnlyScanner {
                 results.push(ScanResult {
                     output_index: i,
                     stealth: output.stealth,
+                    subaddress_account: None,
                     subaddress_index: None,
                     amount: output.amount,
                 });
@@ -396,11 +398,12 @@ impl ViewOnlyScanner {
             }
 
             // Check subaddresses
-            for (sub_idx, sub_keys) in &self.subaddresses {
+            for (sub_acct, sub_idx, sub_keys) in &self.subaddresses {
                 if sub_keys.owns(&output.stealth, output.output_idx) {
                     results.push(ScanResult {
                         output_index: i,
                         stealth: output.stealth,
+                        subaddress_account: Some(*sub_acct),
                         subaddress_index: Some(*sub_idx),
                         amount: output.amount,
                     });
@@ -418,7 +421,7 @@ impl ViewOnlyScanner {
             if self.keys.owns(stealth, *idx) {
                 return true;
             }
-            for (_, sub_keys) in &self.subaddresses {
+            for (_, _, sub_keys) in &self.subaddresses {
                 if sub_keys.owns(stealth, *idx) {
                     return true;
                 }
@@ -441,6 +444,10 @@ pub struct ScanOutput {
 pub struct ScanResult {
     pub output_index: usize,
     pub stealth: StealthAddress,
+    /// Account the matched subaddress belongs to. `None` for a main-address
+    /// match. Added for multi-account audit scans (#26 follow-up); pairs with
+    /// `subaddress_index`.
+    pub subaddress_account: Option<u32>,
     pub subaddress_index: Option<u32>,
     pub amount: Option<u64>,
 }
@@ -720,6 +727,12 @@ pub struct AuditKey {
     /// outputs to subaddresses ARE detected. `None` = main-address-only
     /// audit (backward-compatible with pre-fix export bundles).
     subaddress_max_index: Option<u32>,
+    /// #26 follow-up: highest ACCOUNT to enumerate during the scan. `None` =
+    /// account 0 only (the R-9 single-account behaviour). When set alongside
+    /// `subaddress_max_index`, `to_scanner()` sweeps the full
+    /// (0..=max_account, 0..=max_index) grid so multi-account wallets audit
+    /// completely. Pass the wallet's highest account from its subaddress book.
+    subaddress_max_account: Option<u32>,
 }
 
 impl AuditKey {
@@ -731,6 +744,7 @@ impl AuditKey {
             start_height: None,
             end_height: None,
             subaddress_max_index: None,
+            subaddress_max_account: None,
         }
     }
 
@@ -751,6 +765,15 @@ impl AuditKey {
     /// wallet's `highest_index` from its subaddress book.
     pub fn with_subaddress_max_index(mut self, max_index: u32) -> Self {
         self.subaddress_max_index = Some(max_index);
+        self
+    }
+
+    /// #26 follow-up: enumerate accounts `0..=max_account` during the scan
+    /// (paired with [`with_subaddress_max_index`](Self::with_subaddress_max_index)).
+    /// Pass the wallet's highest account from its subaddress book. Left unset,
+    /// the scan covers account 0 only (backward-compatible).
+    pub fn with_subaddress_max_account(mut self, max_account: u32) -> Self {
+        self.subaddress_max_account = Some(max_account);
         self
     }
 
@@ -788,20 +811,27 @@ impl AuditKey {
     pub fn to_scanner(&self) -> Result<ViewOnlyScanner> {
         let mut scanner = ViewOnlyScanner::new(&self.view_secret, &self.spend_public)?;
         if let Some(max_index) = self.subaddress_max_index {
-            for i in 0..=max_index {
-                // Skip index 0 = main address (already registered
-                // by ViewOnlyScanner::new via the main spend_public).
-                if i == 0 {
-                    continue;
+            // #26 follow-up: sweep the full (account, index) grid. When
+            // `subaddress_max_account` is unset we default to account 0 only —
+            // the R-9 single-account behaviour — so existing audit bundles are
+            // unchanged. All derivations go through the wallet-shared
+            // `subaddress_scalar`, so audit keys match the wallet's.
+            let max_account = self.subaddress_max_account.unwrap_or(0);
+            for account in 0..=max_account {
+                for i in 0..=max_index {
+                    // (account 0, index 0) is the main address, already
+                    // registered by ViewOnlyScanner::new. Every other pair —
+                    // including account>0 index 0 (an account's own main
+                    // subaddress) — is a distinct key we must enumerate.
+                    if account == 0 && i == 0 {
+                        continue;
+                    }
+                    let subaddr =
+                        Subaddress::generate(&self.spend_public, &self.view_secret, account, i)?;
+                    let sub_recipient =
+                        RecipientKeys::new(&self.view_secret, &subaddr.spend_public)?;
+                    scanner.add_subaddress(account, i, sub_recipient);
                 }
-                // Account 0 range (the current audit scan dimension). Now uses
-                // the SAME account-aware `subaddress_scalar` as the wallet, so
-                // the derived keys finally match — previously this path used an
-                // incompatible flat formula and detected nothing (Jun #26).
-                // Multi-account audit range is a scoped follow-up.
-                let subaddr = Subaddress::generate(&self.spend_public, &self.view_secret, 0, i)?;
-                let sub_recipient = RecipientKeys::new(&self.view_secret, &subaddr.spend_public)?;
-                scanner.add_subaddress(i, sub_recipient);
             }
         }
         Ok(scanner)
@@ -820,6 +850,7 @@ impl AuditKey {
             start_height: self.start_height,
             end_height: self.end_height,
             subaddress_max_index: self.subaddress_max_index,
+            subaddress_max_account: self.subaddress_max_account,
         }
     }
 
@@ -845,6 +876,7 @@ impl AuditKey {
             start_height: export.start_height,
             end_height: export.end_height,
             subaddress_max_index: export.subaddress_max_index,
+            subaddress_max_account: export.subaddress_max_account,
         })
     }
 }
@@ -863,6 +895,10 @@ pub struct AuditKeyExport {
     pub end_height: Option<u64>,
     #[serde(default)]
     pub subaddress_max_index: Option<u32>,
+    /// #26 follow-up: highest account to sweep. Older exports without this
+    /// field decode as None (serde default) → account-0-only, backward-compat.
+    #[serde(default)]
+    pub subaddress_max_account: Option<u32>,
 }
 
 // ============================================================================
@@ -1354,6 +1390,43 @@ mod tests {
         let results = scanner.scan(&outputs);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].amount, Some(100));
+    }
+
+    #[test]
+    fn audit_key_multi_account_scan_finds_nonzero_account_subaddress() {
+        // #26 follow-up: an AuditKey with a multi-account range must detect an
+        // output sent to a subaddress on a NON-ZERO account, and report the
+        // correct (account, index).
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, _view_public) = generate_ec_keypair();
+
+        // Wallet receives at subaddress (account = 2, index = 3).
+        let sub = Subaddress::generate(&spend_public, &view_secret, 2, 3).unwrap();
+        let (stealth, _) =
+            generate_stealth_address(&sub.spend_public, &sub.view_public, 0, &mut OsRng);
+        let outputs = vec![ScanOutput {
+            stealth,
+            output_idx: 0,
+            amount: Some(100),
+        }];
+
+        // Multi-account audit range covers (0..=3, 0..=5) → finds it.
+        let audit = AuditKey::new(view_secret.clone(), spend_public)
+            .with_subaddress_max_index(5)
+            .with_subaddress_max_account(3);
+        let results = audit.to_scanner().unwrap().scan(&outputs);
+        assert_eq!(results.len(), 1, "multi-account scan must find the output");
+        assert_eq!(results[0].subaddress_account, Some(2));
+        assert_eq!(results[0].subaddress_index, Some(3));
+
+        // Account-0-only range (no with_subaddress_max_account) must MISS it —
+        // proving the account dimension is real, not cosmetic.
+        let audit_acct0 = AuditKey::new(view_secret, spend_public).with_subaddress_max_index(5);
+        let results0 = audit_acct0.to_scanner().unwrap().scan(&outputs);
+        assert!(
+            results0.is_empty(),
+            "account-0-only scan must miss an account-2 subaddress"
+        );
     }
 
     #[test]
