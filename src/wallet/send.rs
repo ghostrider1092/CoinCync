@@ -1292,6 +1292,7 @@ mod tests {
         UTXO {
             tx_hash: crate::primitives::Hash::from_bytes([idx; 32]),
             output_index: idx,
+            output_locator: None,
             amount: Amount::from_atomic(amount),
             height: 100,
             key_image: crate::primitives::KeyImage::from_bytes([idx; 32]),

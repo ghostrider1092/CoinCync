@@ -1610,6 +1610,7 @@ mod tests {
         wallet.balance.add_utxo(UTXO {
             tx_hash: Hash::from_bytes([1u8; 32]),
             output_index: 0,
+            output_locator: None,
             amount: Amount::from_atomic(1_000_000),
             height: 42,
             key_image: KeyImage::from_bytes([3u8; 32]),

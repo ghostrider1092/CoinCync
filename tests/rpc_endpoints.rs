@@ -125,6 +125,22 @@ async fn start_test_server(port: u16) -> (String, coincync::rpc::RpcServer) {
     (format!("http://127.0.0.1:{}", port), server)
 }
 
+async fn start_initialized_test_server(port: u16) -> (String, coincync::rpc::RpcServer) {
+    let shared_chain: SharedBlockchain = Arc::new(Blockchain::new());
+    shared_chain.init_genesis().expect("initialize genesis");
+    let shared_mempool = SharedMempool::new();
+    let config = RpcConfig {
+        listen_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+        network_name: "testnet".to_string(),
+        ..Default::default()
+    };
+    let server = start_rpc_server(shared_chain, shared_mempool, None, config)
+        .await
+        .expect("start RPC server");
+    sleep(Duration::from_millis(100)).await;
+    (format!("http://127.0.0.1:{port}"), server)
+}
+
 /// Helper: start server with an explicit blockchain network.
 async fn start_test_server_for_network(
     port: u16,
@@ -529,13 +545,54 @@ async fn rpc_get_transaction_missing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rpc_get_decoys_returns_result() {
+async fn rpc_get_decoys_returns_deprecation_error() {
     let (url, _server) = start_test_server(19124).await;
     let resp = rpc_call(&url, "get_decoys", json!([16, 0])).await;
     assert!(
-        resp.get("result").is_some(),
-        "get_decoys must return result: {}",
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("deprecated"),
+        "get_decoys must return a stable deprecation error: {}",
         resp
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_decoy_locators_are_bound_to_snapshot() {
+    let (url, _server) = start_initialized_test_server(19224).await;
+    let distribution = rpc_call(&url, "get_decoy_distribution", json!([])).await;
+    let snapshot = &distribution["result"];
+    assert_eq!(snapshot["policy_version"], 1);
+    assert!(!snapshot["heights"].as_array().unwrap().is_empty());
+
+    let resolved = rpc_call(
+        &url,
+        "get_outputs_by_locators",
+        json!([
+            snapshot["snapshot_height"],
+            snapshot["snapshot_hash"],
+            snapshot["policy_version"],
+            [{"height": 0, "ordinal": 0}]
+        ]),
+    )
+    .await;
+    assert_eq!(resolved["result"]["outputs"].as_array().unwrap().len(), 1);
+
+    let stale = rpc_call(
+        &url,
+        "get_outputs_by_locators",
+        json!([
+            0,
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            1,
+            []
+        ]),
+    )
+    .await;
+    assert!(
+        stale.get("error").is_some(),
+        "fabricated snapshot must fail: {stale}"
     );
 }
 

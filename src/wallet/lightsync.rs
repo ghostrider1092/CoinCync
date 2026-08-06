@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::consensus::Block;
 use crate::crypto::{is_output_ours, BlindingFactor, PublicPoint, SecretScalar, StealthAddress};
+use crate::decoy::canonical_output_locators;
 use crate::primitives::{hash_domain, Hash, PublicKey, SecretKey};
 use crate::transaction::TxOutput;
 use crate::wallet::scanner::{DecryptedOutput, ScanKeys};
@@ -420,6 +421,7 @@ impl LightWalletSync {
                 return Some(DecryptedOutput {
                     tx_hash: output.tx_hash,
                     output_index: output.output_index,
+                    output_locator: None,
                     output: tx_output,
                     amount,
                     blinding_factor,
@@ -436,6 +438,13 @@ impl LightWalletSync {
     /// Scan a single block digest for owned outputs
     pub fn scan_digest(&mut self, digest: &BlockDigest) -> Vec<DecryptedOutput> {
         let mut found = Vec::new();
+        let locators = canonical_output_locators(
+            digest.height,
+            digest
+                .outputs
+                .iter()
+                .map(|output| (output.tx_hash, output.output_index)),
+        );
 
         self.stats.digests_scanned += 1;
         self.stats.bytes_processed += digest.estimated_size() as u64;
@@ -456,7 +465,10 @@ impl LightWalletSync {
                 self.stats.view_tag_matches += 1;
             }
 
-            if let Some(decrypted) = self.scan_output_digest(output) {
+            if let Some(mut decrypted) = self.scan_output_digest(output) {
+                decrypted.output_locator = locators
+                    .get(&(output.tx_hash, output.output_index))
+                    .copied();
                 self.stats.outputs_found += 1;
                 self.stats.total_amount += decrypted.amount as u128;
                 found.push(decrypted);
@@ -477,8 +489,18 @@ impl LightWalletSync {
             .par_iter()
             .map(|digest| {
                 let mut found = Vec::new();
+                let locators = canonical_output_locators(
+                    digest.height,
+                    digest
+                        .outputs
+                        .iter()
+                        .map(|output| (output.tx_hash, output.output_index)),
+                );
                 for output in &digest.outputs {
-                    if let Some(decrypted) = scan_output_digest_with_keys(output, &keys) {
+                    if let Some(mut decrypted) = scan_output_digest_with_keys(output, &keys) {
+                        decrypted.output_locator = locators
+                            .get(&(output.tx_hash, output.output_index))
+                            .copied();
                         found.push(decrypted);
                     }
                 }
@@ -610,6 +632,7 @@ fn scan_output_digest_with_keys(
             return Some(DecryptedOutput {
                 tx_hash: output.tx_hash,
                 output_index: output.output_index,
+                output_locator: None,
                 output: tx_output,
                 amount,
                 blinding_factor,
@@ -879,6 +902,13 @@ mod tests {
         let found = sync.scan_digest(&digest);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].amount, amount);
+        assert_eq!(
+            found[0].output_locator,
+            Some(crate::decoy::OutputLocator {
+                height: 1,
+                ordinal: 0,
+            })
+        );
     }
 
     #[test]
@@ -980,6 +1010,7 @@ mod tests {
 
         let total: u64 = found.iter().map(|o| o.amount).sum();
         assert_eq!(total, expected_total);
+        assert!(found.iter().all(|output| output.output_locator.is_some()));
     }
 
     #[test]

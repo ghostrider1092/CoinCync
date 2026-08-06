@@ -7,6 +7,7 @@
 //! were all single-asset against `AssetId::native()`, so they degenerate
 //! to the plain `total` / `spendable` / `available_utxos` helpers.
 
+use crate::decoy::OutputLocator;
 use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,8 @@ use std::collections::HashMap;
 pub struct UTXO {
     pub tx_hash: Hash,
     pub output_index: u8,
+    #[serde(default)]
+    pub output_locator: Option<OutputLocator>,
     pub amount: Amount,
     pub height: u64,
     pub key_image: KeyImage,
@@ -53,6 +56,7 @@ impl std::fmt::Debug for UTXO {
         f.debug_struct("UTXO")
             .field("tx_hash", &self.tx_hash)
             .field("output_index", &self.output_index)
+            .field("output_locator", &self.output_locator)
             .field("amount", &self.amount)
             .field("height", &self.height)
             .field("key_image", &self.key_image)
@@ -436,6 +440,7 @@ mod tests {
         UTXO {
             tx_hash: Hash::from_bytes([0u8; 32]),
             output_index: 0,
+            output_locator: None,
             amount: Amount::from_atomic(amount),
             height,
             key_image: KeyImage::from_bytes([0u8; 32]),
@@ -501,12 +506,21 @@ mod tests {
         assert_eq!(balance.spendable(100, 0), Amount::from_atomic(2000));
     }
 
+    #[test]
+    fn legacy_utxo_json_loads_without_locator() {
+        let mut value = serde_json::to_value(make_utxo(10, 7, false)).unwrap();
+        value.as_object_mut().unwrap().remove("output_locator");
+        let utxo: UTXO = serde_json::from_value(value).unwrap();
+        assert_eq!(utxo.output_locator, None);
+    }
+
     // === Reservation tests (Item 1: in-flight UTXO tracking) ==========
 
     fn make_utxo_at_idx(amount: u64, height: u64, idx: u8) -> UTXO {
         UTXO {
             tx_hash: Hash::from_bytes([idx; 32]),
             output_index: idx,
+            output_locator: None,
             amount: Amount::from_atomic(amount),
             height,
             key_image: KeyImage::from_bytes([idx; 32]),

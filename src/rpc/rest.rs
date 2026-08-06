@@ -227,8 +227,9 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     // "is this coin spent" checks in light wallets).
     "is_nullifier_spent",
     "is_spark_serial_spent",
-    // Decoy selection for wallet spend construction.
-    "get_decoys",
+    // Snapshot-bound output catalog used by wallet-owned decoy selection.
+    "get_decoy_distribution",
+    "get_outputs_by_locators",
     // ── Forward-compat reservations (P1+ — not yet registered) ─
     // Keeping these in the allowlist so the REST proxy doesn't
     // need to be re-edited when the P1 wallet wiring lands.
@@ -1899,5 +1900,8 @@ mod tests {
         assert!(!RPC_ALLOWED_METHODS.contains(&"transfer"));
         assert!(!RPC_ALLOWED_METHODS.contains(&"get_mining_live"));
         assert!(!RPC_ALLOWED_METHODS.contains(&"get_metrics"));
+        assert!(!RPC_ALLOWED_METHODS.contains(&"get_decoys"));
+        assert!(RPC_ALLOWED_METHODS.contains(&"get_decoy_distribution"));
+        assert!(RPC_ALLOWED_METHODS.contains(&"get_outputs_by_locators"));
     }
 }

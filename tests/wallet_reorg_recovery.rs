@@ -30,6 +30,7 @@ fn make_utxo(seed: u8, height: u64, amount: u64) -> UTXO {
     UTXO {
         tx_hash: Hash::from_bytes([seed; 32]),
         output_index: 0,
+        output_locator: None,
         amount: Amount::from_atomic(amount),
         height,
         key_image: KeyImage::from_bytes([seed; 32]),
