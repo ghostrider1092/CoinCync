@@ -1200,7 +1200,12 @@ impl Blockchain {
     /// Used by the miner to pre-validate mempool txs before including in blocks.
     pub fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
         let inner = self.inner.read();
-        crate::consensus::validate_transaction(tx, &inner.utxos, inner.tip.height + 1)
+        crate::consensus::validate_transaction_for_network(
+            tx,
+            &inner.utxos,
+            inner.tip.height + 1,
+            self.network,
+        )
     }
 
     /// Get current difficulty
