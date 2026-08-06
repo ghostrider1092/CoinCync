@@ -10,6 +10,12 @@ use rand::{CryptoRng, Rng, RngCore};
 use rand_distr::{Distribution, Gamma};
 use std::collections::HashSet;
 
+// TODO(wallet decoy integration):
+// - Remove the legacy decoy-pool wrappers after all callers use covered allocation.
+// - Replace the Explorer's remaining `get_decoys` calls with the locator RPCs.
+// - Apply any small corrections found during integration verification.
+// Remove this entire TODO block after every item above is complete.
+
 pub const COVERED_LOOKUP_SIZE: usize = 128;
 pub const DECOY_GAMMA_SHAPE: f64 = 19.28;
 pub const DECOY_GAMMA_SCALE: f64 = 1.0 / 1.61;
