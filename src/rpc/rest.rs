@@ -1034,8 +1034,24 @@ async fn search(
 async fn get_network(
     State(st): State<RestState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let overview = jsonrpc_call(&st, "get_network_overview", Value::Array(vec![])).await?;
-    Ok(Json(overview))
+    // The explorer's vital-signs panel wants health / status / decay clock /
+    // zombie detection / anonymity set — all carried by `get_info`. There is no
+    // `get_network_overview` RPC method (calling it returned -32601 → the route
+    // 500'd), so we curate a subset from `get_info`. We deliberately omit
+    // `effective_ring_size` — the ring-size correlator that `/api/v1/status` also
+    // withholds; `anonymity_set` is already published via `/api/v1/anonymity`, so
+    // surfacing it here introduces no new leak.
+    let info = jsonrpc_call(&st, "get_info", Value::Array(vec![])).await?;
+    Ok(Json(serde_json::json!({
+        "network": info["network"],
+        "height": info["height"],
+        "difficulty": info["difficulty"],
+        "status": info["status"],
+        "health_score": info["health_score"],
+        "has_zombies": info["has_zombies"],
+        "tip_age_secs": info["tip_age_secs"],
+        "anonymity_set": info["anonymity_set"],
+    })))
 }
 
 /// GET /api/v1/anonymity — anonymity set metrics
