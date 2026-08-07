@@ -1,13 +1,12 @@
-use crate::decoy::{
-    DecoyDistributionSnapshot, HeightOutputCount, OutputLocator, ResolvedDecoySnapshot,
-    DECOY_LOCATOR_POLICY_VERSION,
-};
-use crate::error::{Error, Result};
+use crate::decoy::OutputLocator;
 use crate::primitives::PublicKey;
 use crate::transaction::DecoyOutput;
-use rand::seq::SliceRandom;
-use rand::{CryptoRng, Rng, RngCore};
+
+#[cfg(test)]
+use crate::decoy::{DecoyDistributionSnapshot, HeightOutputCount, ResolvedDecoySnapshot};
+#[cfg(test)]
 use rand_distr::{Distribution, Gamma};
+#[cfg(test)]
 use std::collections::HashSet;
 
 pub const COVERED_LOOKUP_SIZE: usize = 128;
@@ -28,12 +27,14 @@ pub struct RealOutputIdentity {
     pub commitment: [u8; 32],
 }
 
+mod allocation;
+mod sampling;
+mod snapshot;
+mod validation;
 
-// These implementation fragments share this module's private scope. Keeping
-// sampling, response validation, and allocation separate makes the privacy
-// boundaries easier to audit without widening helper visibility.
-include!("decoy_selection/sampling_and_validation.rs");
-include!("decoy_selection/allocation_and_helpers.rs");
+pub use allocation::allocate_unique_rings;
+pub use sampling::{build_covered_request, sample_candidate_locators};
+pub use validation::validate_covered_response;
 
 #[cfg(test)]
 mod tests;

@@ -1,3 +1,16 @@
+use super::snapshot::{
+    eligible_heights, locator_is_in, snapshot_spend_height, validate_policy_version,
+};
+use super::{
+    COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE, DECOY_GAMMA_SHAPE,
+};
+use crate::decoy::{DecoyDistributionSnapshot, HeightOutputCount, OutputLocator};
+use crate::error::{Error, Result};
+use rand::seq::SliceRandom;
+use rand::{CryptoRng, Rng, RngCore};
+use rand_distr::{Distribution, Gamma};
+use std::collections::HashSet;
+
 pub fn sample_candidate_locators<R: Rng + ?Sized>(
     snapshot: &DecoyDistributionSnapshot,
     min_age: u64,
@@ -5,17 +18,13 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
     excluded: &HashSet<OutputLocator>,
     rng: &mut R,
 ) -> Result<Vec<OutputLocator>> {
-    if snapshot.policy_version != DECOY_LOCATOR_POLICY_VERSION {
-        return Err(Error::InvalidState(format!(
-            "unsupported decoy locator policy version {}",
-            snapshot.policy_version
-        )));
-    }
     if count == 0 {
+        validate_policy_version(snapshot)?;
         return Ok(Vec::new());
     }
-    let spend_height = snapshot_spend_height(snapshot)?;
+
     let eligible = eligible_heights(snapshot, min_age)?;
+    let spend_height = snapshot_spend_height(snapshot)?;
     let available = eligible
         .iter()
         .map(|height| height.count as usize)
@@ -26,6 +35,7 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
                 .filter(|locator| locator_is_in(locator, &eligible))
                 .count(),
         );
+
     if available < count {
         return Err(Error::InsufficientDecoys {
             available,
@@ -46,8 +56,8 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
             .collect());
     }
 
-    let youngest_age = spend_height - eligible.last().unwrap().height;
-    let oldest_age = spend_height - eligible.first().unwrap().height;
+    let youngest_age = spend_height - eligible.last().expect("eligible pool is non-empty").height;
+    let oldest_age = spend_height - eligible.first().expect("eligible pool is non-empty").height;
     let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE)
         .expect("fixed positive gamma policy parameters");
     let block_time = crate::constants::TARGET_BLOCK_TIME.max(1) as f64;
@@ -94,12 +104,6 @@ pub fn build_covered_request<R: RngCore + CryptoRng + ?Sized>(
     min_age: u64,
     rng: &mut R,
 ) -> Result<Vec<OutputLocator>> {
-    if snapshot.policy_version != DECOY_LOCATOR_POLICY_VERSION {
-        return Err(Error::InvalidState(format!(
-            "unsupported decoy locator policy version {}",
-            snapshot.policy_version
-        )));
-    }
     let excluded: HashSet<_> = real_locators.iter().copied().collect();
     if excluded.len() != real_locators.len() {
         return Err(Error::InvalidParams("duplicate real output locator".into()));
@@ -110,6 +114,7 @@ pub fn build_covered_request<R: RngCore + CryptoRng + ?Sized>(
             got: ring_size,
         });
     }
+
     let required_slots = real_locators
         .len()
         .checked_mul(ring_size)
@@ -144,53 +149,60 @@ pub fn build_covered_request<R: RngCore + CryptoRng + ?Sized>(
     Ok(request)
 }
 
-pub fn validate_covered_response(
-    snapshot: &DecoyDistributionSnapshot,
-    requested: &[OutputLocator],
-    response: &ResolvedDecoySnapshot,
-) -> Result<()> {
-    if snapshot.policy_version != DECOY_LOCATOR_POLICY_VERSION {
-        return Err(Error::InvalidState(format!(
-            "unsupported decoy locator policy version {}",
-            snapshot.policy_version
-        )));
-    }
-    if response.snapshot_height != snapshot.snapshot_height
-        || response.snapshot_hash != snapshot.snapshot_hash
-        || response.policy_version != snapshot.policy_version
-    {
-        return Err(Error::InvalidState(
-            "decoy response snapshot metadata mismatch".into(),
-        ));
-    }
-    if response.outputs.len() != requested.len() {
-        return Err(Error::InvalidState(format!(
-            "decoy response returned {} outputs for {} locators",
-            response.outputs.len(),
-            requested.len()
-        )));
-    }
-    if requested.iter().copied().collect::<HashSet<_>>().len() != requested.len() {
-        return Err(Error::InvalidState(
-            "covered request contains duplicate locators".into(),
-        ));
-    }
-    let all_heights = eligible_heights(snapshot, 0)?;
-    if requested
-        .iter()
-        .any(|locator| !locator_is_in(locator, &all_heights))
-    {
-        return Err(Error::InvalidState(
-            "covered request contains a locator outside the decoy snapshot".into(),
-        ));
-    }
-    for (locator, output) in requested.iter().zip(&response.outputs) {
-        if output.locator != *locator || output.height != locator.height {
-            return Err(Error::InvalidState(
-                "decoy response does not preserve requested locator order".into(),
-            ));
+fn pick_nearest_locator<R: Rng + ?Sized>(
+    target: u64,
+    heights: &[HeightOutputCount],
+    excluded: &HashSet<OutputLocator>,
+    selected: &HashSet<OutputLocator>,
+    rng: &mut R,
+) -> Option<OutputLocator> {
+    let split = heights.partition_point(|height| height.height <= target);
+    let mut lower = split.checked_sub(1);
+    let mut upper = split;
+
+    loop {
+        let take_lower = match (lower, heights.get(upper)) {
+            (Some(low), Some(high)) => {
+                let low_distance = target.abs_diff(heights[low].height);
+                let high_distance = high.height.abs_diff(target);
+                low_distance < high_distance || (low_distance == high_distance && rng.gen_bool(0.5))
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        let index = if take_lower { lower? } else { upper };
+        if let Some(locator) = pick_ordinal(&heights[index], excluded, selected, rng) {
+            return Some(locator);
+        }
+        if take_lower {
+            lower = index.checked_sub(1);
+        } else {
+            upper += 1;
         }
     }
-    Ok(())
 }
 
+fn pick_ordinal<R: Rng + ?Sized>(
+    height: &HeightOutputCount,
+    excluded: &HashSet<OutputLocator>,
+    selected: &HashSet<OutputLocator>,
+    rng: &mut R,
+) -> Option<OutputLocator> {
+    for _ in 0..DECOY_GAMMA_MAX_RESAMPLES {
+        let locator = OutputLocator {
+            height: height.height,
+            ordinal: rng.gen_range(0..height.count),
+        };
+        if !excluded.contains(&locator) && !selected.contains(&locator) {
+            return Some(locator);
+        }
+    }
+
+    (0..height.count)
+        .map(|ordinal| OutputLocator {
+            height: height.height,
+            ordinal,
+        })
+        .find(|locator| !excluded.contains(locator) && !selected.contains(locator))
+}
