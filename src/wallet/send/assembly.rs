@@ -1,6 +1,6 @@
+use super::super::decoy_selection::AllocatedRings;
 use super::inputs::add_prepared_inputs;
 use super::types::{PreparedPrivacyTransaction, TransferShape};
-use super::super::decoy_selection::AllocatedRing;
 use crate::constants::MIN_OUTPUT_AMOUNT;
 use crate::error::Result;
 use crate::primitives::Amount;
@@ -9,7 +9,7 @@ use rand::{CryptoRng, Rng, RngCore};
 
 pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
     prepared: PreparedPrivacyTransaction,
-    rings: Vec<AllocatedRing>,
+    rings: AllocatedRings,
     rng: &mut R,
 ) -> Result<Transaction> {
     let PreparedPrivacyTransaction {

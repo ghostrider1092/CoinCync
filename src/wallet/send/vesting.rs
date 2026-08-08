@@ -1,11 +1,11 @@
+use super::super::decoy_selection::AllocatedRings;
+use super::super::{Balance, KeyEpoch, UTXO};
 use super::fee::estimate_tx_size;
 use super::inputs::{add_prepared_inputs, prepare_input};
 use super::selection::{ensure_spendable, select_utxos};
 use super::types::{
     CoinSelection, Payment, PreparedVestingTransaction, SpendContext, VestingRequest,
 };
-use super::super::decoy_selection::AllocatedRing;
-use super::super::{Balance, KeyEpoch, UTXO};
 use crate::constants::{MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT};
 use crate::error::Result;
 use crate::primitives::{Amount, PublicKey};
@@ -98,7 +98,7 @@ pub fn prepare_vesting<R: RngCore + CryptoRng>(
 
 pub fn build_prepared_vesting_transaction<R: RngCore + CryptoRng>(
     prepared: PreparedVestingTransaction,
-    rings: Vec<AllocatedRing>,
+    rings: AllocatedRings,
     rng: &mut R,
 ) -> Result<Transaction> {
     let PreparedVestingTransaction {

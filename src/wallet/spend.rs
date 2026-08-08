@@ -3,21 +3,23 @@
 //! This module owns the application-level sequence shared by interactive sends
 //! and auto-churn:
 //!
-//! 1. bind a spend to one decoy-distribution snapshot,
-//! 2. select inputs and build one covered locator request,
+//! 1. bind a spend to one validated decoy-distribution snapshot,
+//! 2. select inputs and build one typed covered locator request,
 //! 3. resolve and validate the covered response,
 //! 4. allocate transaction-wide unique rings and sign,
 //! 5. reserve inputs before broadcast, and
 //! 6. apply accepted/rejected/unknown submission semantics consistently.
 
-use super::decoy_selection::{allocate_unique_rings, build_covered_request};
+use super::decoy_selection::{
+    allocate_unique_rings, build_covered_request, validate_covered_response,
+    ValidatedDecoySnapshot,
+};
 use super::node_rpc::{NodeRpcClient, SubmissionOutcome};
 use super::send::{
     build_prepared_privacy_transaction, prepare_privacy_transaction, Payment, SendRequest,
     SpendContext,
 };
 use super::{Balance, KeyEpoch, Wallet};
-use crate::decoy::DecoyDistributionSnapshot;
 use crate::error::{Error, Result};
 use crate::primitives::Hash;
 use crate::transaction::Transaction;
@@ -72,11 +74,12 @@ impl SpendIntent {
 
 /// Snapshot and consensus context shared by every step of one build attempt.
 ///
-/// A session is intentionally not constructible by callers.  It can only be
-/// obtained from [`SpendCoordinator::begin`], which keeps the target height,
-/// ring size, maturity floor and decoy snapshot from drifting apart.
+/// A session is intentionally not constructible by callers. It can only be
+/// obtained from [`SpendCoordinator::begin`], which validates the distribution
+/// once and keeps the target height, ring size, maturity floor and snapshot
+/// identity from drifting apart.
 pub struct SpendSession {
-    snapshot: DecoyDistributionSnapshot,
+    snapshot: ValidatedDecoySnapshot,
     context: SpendContext,
 }
 
@@ -118,7 +121,7 @@ pub enum SpendSubmission {
     Accepted {
         tx_hash: Hash,
         /// The node accepted the transaction, but persisting the local spent
-        /// state failed.  The pre-submit reservation remains durable and a
+        /// state failed. The pre-submit reservation remains durable and a
         /// subsequent scan can reconcile the wallet safely.
         wallet_save_error: Option<String>,
     },
@@ -127,7 +130,7 @@ pub enum SpendSubmission {
         reason: String,
         released_reservations: usize,
         /// A failed save can leave the old durable reservation in place until
-        /// it expires.  This is inconvenient but safe and must be surfaced.
+        /// it expires. This is inconvenient but safe and must be surfaced.
         wallet_save_error: Option<String>,
     },
     Unknown {
@@ -158,17 +161,12 @@ impl SpendCoordinator {
         &self.rpc
     }
 
-    /// Start one snapshot-bound build attempt.
+    /// Start one validated, snapshot-bound build attempt.
     pub async fn begin(&self) -> Result<SpendSession> {
-        let snapshot = self.rpc.decoy_distribution().await?;
-        let target_height = snapshot.snapshot_height.checked_add(1).ok_or_else(|| {
-            Error::InvalidState("decoy snapshot height cannot advance to a spend height".into())
-        })?;
+        let snapshot = ValidatedDecoySnapshot::try_from(self.rpc.decoy_distribution().await?)?;
+        let context = SpendContext::for_target_height(snapshot.spend_height());
 
-        Ok(SpendSession {
-            snapshot,
-            context: SpendContext::for_target_height(target_height),
-        })
+        Ok(SpendSession { snapshot, context })
     }
 
     /// Select inputs, perform the one covered lookup and build a signed
@@ -193,28 +191,18 @@ impl SpendCoordinator {
         let real_outputs = prepared.real_outputs();
         let real_locators = real_outputs
             .iter()
-            .map(|output| output.locator)
+            .map(|output| output.locator())
             .collect::<Vec<_>>();
-        let requested = build_covered_request(
+        let request = build_covered_request(
             &session.snapshot,
             &real_locators,
             prepared.ring_size(),
             session.context.min_output_age(),
             rng,
         )?;
-        let resolved = self
-            .rpc
-            .resolve_outputs(&session.snapshot, &requested)
-            .await?;
-        let rings = allocate_unique_rings(
-            &session.snapshot,
-            &requested,
-            &resolved,
-            &real_outputs,
-            prepared.ring_size(),
-            session.context.min_output_age(),
-            rng,
-        )?;
+        let response = self.rpc.resolve_outputs(&request).await?;
+        let response = validate_covered_response(request, response)?;
+        let rings = allocate_unique_rings(response, &real_outputs, rng)?;
         let transaction = build_prepared_privacy_transaction(prepared, rings, rng)?;
 
         Ok(BuiltSpend {
@@ -225,8 +213,8 @@ impl SpendCoordinator {
 
     /// Reserve, persist, submit and reconcile one signed transaction.
     ///
-    /// Reservations are written before bytes leave the process.  They are
-    /// released only after a definitive rejection.  An indeterminate network
+    /// Reservations are written before bytes leave the process. They are
+    /// released only after a definitive rejection. An indeterminate network
     /// result keeps the reservation because the node may already have the tx.
     pub async fn submit_reserved(
         &self,
@@ -238,9 +226,9 @@ impl SpendCoordinator {
             transaction,
             target_height,
         } = built;
-        // Serialize before creating a durable reservation.  If encoding
-        // fails, no bytes can have left the process and the inputs remain
-        // immediately selectable.
+        // Serialize before creating a durable reservation. If encoding fails,
+        // no bytes can have left the process and the inputs remain immediately
+        // selectable.
         let encoded_transaction = NodeRpcClient::encode_transaction(&transaction)?;
         let tx_hash = transaction.hash();
         let key_images = transaction.key_images();

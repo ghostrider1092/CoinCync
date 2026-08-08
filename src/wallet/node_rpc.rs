@@ -1,11 +1,12 @@
 //! Typed JSON-RPC access used by wallet spend flows.
 //!
 //! The wallet CLI and auto-churn previously maintained separate ad-hoc
-//! clients with different timeouts and authentication behaviour.  This
-//! module keeps transport policy in one place and exposes only the methods
-//! required to build and submit a wallet-owned-decoy transaction.
+//! clients with different timeouts and authentication behaviour. This module
+//! keeps transport policy in one place and exposes only the methods required
+//! to build and submit a wallet-owned-decoy transaction.
 
-use crate::decoy::{DecoyDistributionSnapshot, OutputLocator, ResolvedDecoySnapshot};
+use super::decoy_selection::CoveredRequest;
+use crate::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
 use crate::error::{Error, Result};
 use crate::transaction::Transaction;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -20,7 +21,7 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// Result of asking a node to accept a transaction.
 ///
 /// `Unknown` is intentionally distinct from `Rejected`: a transport failure
-/// may happen after the node received the bytes.  Callers must keep input
+/// may happen after the node received the bytes. Callers must keep input
 /// reservations for that case rather than making the inputs immediately
 /// selectable again.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,25 +83,26 @@ impl NodeRpcClient {
         self.call_typed("get_decoy_distribution", json!([])).await
     }
 
-    /// Resolve one covered locator set against the supplied snapshot.
+    /// Resolve one typed covered request against the snapshot it was built
+    /// from. Callers cannot accidentally pair locators with other metadata.
     pub async fn resolve_outputs(
         &self,
-        snapshot: &DecoyDistributionSnapshot,
-        locators: &[OutputLocator],
+        request: &CoveredRequest,
     ) -> Result<ResolvedDecoySnapshot> {
+        let snapshot = request.snapshot_id();
         self.call_typed(
             "get_outputs_by_locators",
             json!([
-                snapshot.snapshot_height,
-                snapshot.snapshot_hash,
-                snapshot.policy_version,
-                locators,
+                snapshot.height(),
+                snapshot.hash(),
+                snapshot.policy_version(),
+                request.locators(),
             ]),
         )
         .await
     }
 
-    /// Serialize before reserving wallet inputs.  A local encoding failure is
+    /// Serialize before reserving wallet inputs. A local encoding failure is
     /// definitive: no request can have reached the node, so callers must not
     /// create an in-flight reservation for it.
     pub(crate) fn encode_transaction(transaction: &Transaction) -> Result<String> {
@@ -112,23 +114,15 @@ impl NodeRpcClient {
 
     /// Submit already-encoded transaction bytes while preserving the
     /// distinction between a definitive node rejection and an indeterminate
-    /// transport failure.
+    /// transport or response failure.
     pub(crate) async fn submit_encoded_transaction(
         &self,
         transaction_hex: &str,
     ) -> SubmissionOutcome {
-        match self
-            .call_value("send_raw_transaction", json!([transaction_hex]))
-            .await
-        {
-            Ok(result) if submission_was_accepted(&result) => SubmissionOutcome::Accepted,
-            Ok(result) => SubmissionOutcome::Rejected {
-                reason: submission_rejection_reason(&result),
-            },
-            Err(error) => SubmissionOutcome::Unknown {
-                reason: error.to_string(),
-            },
-        }
+        classify_submission_result(
+            self.call_value("send_raw_transaction", json!([transaction_hex]))
+                .await,
+        )
     }
 
     /// Convenience entry point for callers that do not manage wallet input
@@ -176,7 +170,7 @@ impl NodeRpcClient {
             .map_err(|error| RpcCallError::Protocol(format!("invalid JSON response: {error}")))?;
 
         if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
-            return Err(RpcCallError::Remote(error.to_string()));
+            return Err(RpcCallError::Remote(remote_error_reason(error)));
         }
         if !status.is_success() {
             return Err(RpcCallError::Protocol(format!(
@@ -189,6 +183,29 @@ impl NodeRpcClient {
             .cloned()
             .ok_or_else(|| RpcCallError::Protocol("response missing result".into()))
     }
+}
+
+fn classify_submission_result(
+    result: std::result::Result<Value, RpcCallError>,
+) -> SubmissionOutcome {
+    match result {
+        Ok(result) if submission_was_accepted(&result) => SubmissionOutcome::Accepted,
+        Ok(result) => SubmissionOutcome::Rejected {
+            reason: submission_rejection_reason(&result),
+        },
+        Err(RpcCallError::Remote(reason)) => SubmissionOutcome::Rejected { reason },
+        Err(error) => SubmissionOutcome::Unknown {
+            reason: error.to_string(),
+        },
+    }
+}
+
+fn remote_error_reason(error: &Value) -> String {
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| error.to_string())
 }
 
 fn submission_was_accepted(result: &Value) -> bool {
@@ -248,13 +265,35 @@ mod tests {
     }
 
     #[test]
-    fn submission_outcomes_keep_unknown_distinct_from_rejected() {
-        assert_ne!(
+    fn remote_error_reason_prefers_the_json_rpc_message() {
+        assert_eq!(
+            remote_error_reason(&json!({"code": -32002, "message": "tx rejected"})),
+            "tx rejected"
+        );
+    }
+
+    #[test]
+    fn remote_submission_error_is_a_definitive_rejection() {
+        assert_eq!(
+            classify_submission_result(Err(RpcCallError::Remote("tx rejected".into()))),
             SubmissionOutcome::Rejected {
-                reason: "policy".into(),
-            },
+                reason: "tx rejected".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn transport_and_protocol_failures_keep_submission_unknown() {
+        assert_eq!(
+            classify_submission_result(Err(RpcCallError::Transport("timeout".into()))),
             SubmissionOutcome::Unknown {
-                reason: "timeout".into(),
+                reason: "transport failure: timeout".into(),
+            }
+        );
+        assert_eq!(
+            classify_submission_result(Err(RpcCallError::Protocol("bad json".into()))),
+            SubmissionOutcome::Unknown {
+                reason: "protocol failure: bad json".into(),
             }
         );
     }

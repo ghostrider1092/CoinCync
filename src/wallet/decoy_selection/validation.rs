@@ -1,52 +1,58 @@
-use super::snapshot::{eligible_heights, locator_is_in};
-use crate::decoy::{DecoyDistributionSnapshot, OutputLocator, ResolvedDecoySnapshot};
-use crate::error::{Error, Result};
-use std::collections::HashSet;
+use super::error::{DecoySelectionError, DecoySelectionResult};
+use super::types::{CoveredRequest, SnapshotId, ValidatedCoveredResponse};
+use crate::decoy::ResolvedDecoySnapshot;
+use std::collections::HashMap;
 
 pub fn validate_covered_response(
-    snapshot: &DecoyDistributionSnapshot,
-    requested: &[OutputLocator],
-    response: &ResolvedDecoySnapshot,
-) -> Result<()> {
-    let all_heights = eligible_heights(snapshot, 0)?;
-
-    if response.snapshot_height != snapshot.snapshot_height
-        || response.snapshot_hash != snapshot.snapshot_hash
-        || response.policy_version != snapshot.policy_version
-    {
-        return Err(Error::InvalidState(
-            "decoy response snapshot metadata mismatch".into(),
-        ));
-    }
-    if response.outputs.len() != requested.len() {
-        return Err(Error::InvalidState(format!(
-            "decoy response returned {} outputs for {} locators",
-            response.outputs.len(),
-            requested.len()
-        )));
-    }
-    if requested.iter().copied().collect::<HashSet<_>>().len() != requested.len() {
-        return Err(Error::InvalidState(
-            "covered request contains duplicate locators".into(),
-        ));
+    request: CoveredRequest,
+    response: ResolvedDecoySnapshot,
+) -> DecoySelectionResult<ValidatedCoveredResponse> {
+    let expected_snapshot = request.snapshot_id();
+    let received_snapshot = SnapshotId::from_response(&response);
+    if received_snapshot != expected_snapshot {
+        return Err(DecoySelectionError::ResponseSnapshotMismatch {
+            expected_height: expected_snapshot.height(),
+            got_height: received_snapshot.height(),
+            expected_policy_version: expected_snapshot.policy_version(),
+            got_policy_version: received_snapshot.policy_version(),
+            hash_matches: expected_snapshot.hash() == received_snapshot.hash(),
+        });
     }
 
-    if requested
+    if response.outputs.len() != request.locators().len() {
+        return Err(DecoySelectionError::ResponseLengthMismatch {
+            expected: request.locators().len(),
+            got: response.outputs.len(),
+        });
+    }
+
+    let mut output_index = HashMap::with_capacity(response.outputs.len());
+    for (index, (expected, output)) in request
+        .locators()
         .iter()
-        .any(|locator| !locator_is_in(locator, &all_heights))
+        .zip(&response.outputs)
+        .enumerate()
     {
-        return Err(Error::InvalidState(
-            "covered request contains a locator outside the decoy snapshot".into(),
-        ));
-    }
-
-    for (locator, output) in requested.iter().zip(&response.outputs) {
-        if output.locator != *locator || output.height != locator.height {
-            return Err(Error::InvalidState(
-                "decoy response does not preserve requested locator order".into(),
-            ));
+        if output.locator != *expected {
+            return Err(DecoySelectionError::ResponseLocatorMismatch {
+                index,
+                expected: *expected,
+                got: output.locator,
+            });
         }
+        if output.height != expected.height {
+            return Err(DecoySelectionError::ResponseHeightMismatch {
+                locator: *expected,
+                output_height: output.height,
+            });
+        }
+        let previous = output_index.insert(*expected, index);
+        debug_assert!(previous.is_none(), "covered request locators are unique");
     }
 
-    Ok(())
+    Ok(ValidatedCoveredResponse::new(
+        request,
+        response.outputs,
+        output_index,
+    ))
 }

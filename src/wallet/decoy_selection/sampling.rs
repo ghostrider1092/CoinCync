@@ -1,43 +1,35 @@
-use super::snapshot::{
-    eligible_heights, locator_is_in, snapshot_spend_height, validate_policy_version,
-};
+use super::error::{DecoySelectionError, DecoySelectionResult};
+use super::types::{CoveredRequest, RingPolicy, ValidatedDecoySnapshot};
 use super::{
-    COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE, DECOY_GAMMA_SHAPE,
+    COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE,
+    DECOY_GAMMA_SHAPE,
 };
-use crate::decoy::{DecoyDistributionSnapshot, HeightOutputCount, OutputLocator};
-use crate::error::{Error, Result};
+use crate::decoy::{HeightOutputCount, OutputLocator};
 use rand::seq::SliceRandom;
 use rand::{CryptoRng, Rng, RngCore};
 use rand_distr::{Distribution, Gamma};
 use std::collections::HashSet;
 
 pub fn sample_candidate_locators<R: Rng + ?Sized>(
-    snapshot: &DecoyDistributionSnapshot,
+    snapshot: &ValidatedDecoySnapshot,
     min_age: u64,
     count: usize,
     excluded: &HashSet<OutputLocator>,
     rng: &mut R,
-) -> Result<Vec<OutputLocator>> {
+) -> DecoySelectionResult<Vec<OutputLocator>> {
     if count == 0 {
-        validate_policy_version(snapshot)?;
         return Ok(Vec::new());
     }
 
-    let eligible = eligible_heights(snapshot, min_age)?;
-    let spend_height = snapshot_spend_height(snapshot)?;
-    let available = eligible
-        .iter()
-        .map(|height| height.count as usize)
-        .sum::<usize>()
-        .saturating_sub(
-            excluded
-                .iter()
-                .filter(|locator| locator_is_in(locator, &eligible))
-                .count(),
-        );
-
+    let eligible = snapshot.eligible_heights(min_age);
+    let available = snapshot.eligible_output_count(min_age).saturating_sub(
+        excluded
+            .iter()
+            .filter(|locator| locator_is_in(locator, eligible))
+            .count(),
+    );
     if available < count {
-        return Err(Error::InsufficientDecoys {
+        return Err(DecoySelectionError::InsufficientDecoys {
             available,
             needed: count,
         });
@@ -56,6 +48,7 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
             .collect());
     }
 
+    let spend_height = snapshot.spend_height();
     let youngest_age = spend_height - eligible.last().expect("eligible pool is non-empty").height;
     let oldest_age = spend_height - eligible.first().expect("eligible pool is non-empty").height;
     let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE)
@@ -76,16 +69,16 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
                 .then_some(blocks)
         });
         let Some(age) = sampled_age else {
-            return Err(Error::InsufficientDecoys {
+            return Err(DecoySelectionError::InsufficientDecoys {
                 available: result.len(),
                 needed: count,
             });
         };
         let target_height = spend_height - age;
         let Some(locator) =
-            pick_nearest_locator(target_height, &eligible, excluded, &selected, rng)
+            pick_nearest_locator(target_height, eligible, excluded, &selected, rng)
         else {
-            return Err(Error::InsufficientDecoys {
+            return Err(DecoySelectionError::InsufficientDecoys {
                 available: result.len(),
                 needed: count,
             });
@@ -98,55 +91,66 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
 }
 
 pub fn build_covered_request<R: RngCore + CryptoRng + ?Sized>(
-    snapshot: &DecoyDistributionSnapshot,
+    snapshot: &ValidatedDecoySnapshot,
     real_locators: &[OutputLocator],
     ring_size: usize,
     min_age: u64,
     rng: &mut R,
-) -> Result<Vec<OutputLocator>> {
-    let excluded: HashSet<_> = real_locators.iter().copied().collect();
-    if excluded.len() != real_locators.len() {
-        return Err(Error::InvalidParams("duplicate real output locator".into()));
+) -> DecoySelectionResult<CoveredRequest> {
+    if real_locators.is_empty() {
+        return Err(DecoySelectionError::MissingRealOutputs);
     }
-    if ring_size < 2 {
-        return Err(Error::InvalidRingSize {
-            expected: 2,
-            got: ring_size,
-        });
+    let policy = RingPolicy::try_new(ring_size, min_age)?;
+
+    let mut excluded = HashSet::with_capacity(real_locators.len());
+    for locator in real_locators {
+        if !excluded.insert(*locator) {
+            return Err(DecoySelectionError::DuplicateRealLocator(*locator));
+        }
+        if !snapshot.contains_locator(locator) {
+            return Err(DecoySelectionError::RealLocatorOutsideSnapshot(*locator));
+        }
     }
 
     let required_slots = real_locators
         .len()
         .checked_mul(ring_size)
-        .ok_or_else(|| Error::InvalidParams("covered lookup size overflow".into()))?;
+        .ok_or(DecoySelectionError::CoveredLookupSizeOverflow {
+            input_count: real_locators.len(),
+            ring_size,
+        })?;
     if required_slots > COVERED_LOOKUP_SIZE {
-        return Err(Error::InvalidParams(format!(
-            "{} inputs with ring size {} exceed covered lookup size {COVERED_LOOKUP_SIZE}",
-            real_locators.len(),
-            ring_size
-        )));
+        return Err(DecoySelectionError::CoveredLookupCapacityExceeded {
+            input_count: real_locators.len(),
+            ring_size,
+            required_slots,
+            capacity: COVERED_LOOKUP_SIZE,
+        });
     }
 
-    let all_heights = eligible_heights(snapshot, 0)?;
-    if real_locators
-        .iter()
-        .any(|locator| !locator_is_in(locator, &all_heights))
-    {
-        return Err(Error::InvalidState(
-            "real output locator is not present in the decoy snapshot".into(),
-        ));
-    }
-
-    let mut request = real_locators.to_vec();
-    request.extend(sample_candidate_locators(
+    let mut locators = real_locators.to_vec();
+    locators.extend(sample_candidate_locators(
         snapshot,
         min_age,
-        COVERED_LOOKUP_SIZE - request.len(),
+        COVERED_LOOKUP_SIZE - locators.len(),
         &excluded,
         rng,
     )?);
-    request.shuffle(rng);
-    Ok(request)
+    locators.shuffle(rng);
+
+    Ok(CoveredRequest::new(
+        snapshot,
+        policy,
+        real_locators.to_vec(),
+        locators,
+    ))
+}
+
+fn locator_is_in(locator: &OutputLocator, heights: &[HeightOutputCount]) -> bool {
+    heights
+        .binary_search_by_key(&locator.height, |height| height.height)
+        .ok()
+        .is_some_and(|index| locator.ordinal < heights[index].count)
 }
 
 fn pick_nearest_locator<R: Rng + ?Sized>(

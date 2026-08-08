@@ -1,10 +1,11 @@
-use super::super::decoy_selection::{AllocatedRing, RealOutputIdentity};
+use super::super::decoy_selection::{
+    AllocatedRings, DecoySelectionError, RealOutputIdentity,
+};
 use super::super::{KeyEpoch, UTXO};
 use super::types::PreparedInput;
 use crate::crypto::{compute_one_time_secret, BlindingFactor, PedersenCommitment, StealthAddress};
 use crate::error::{Error, Result};
 use crate::transaction::{SpendableInput, TransactionBuilder};
-use std::collections::HashSet;
 
 pub(super) fn prepare_input(utxo: &UTXO, keys: &KeyEpoch) -> Result<PreparedInput> {
     let locator = utxo.output_locator.ok_or_else(|| {
@@ -26,11 +27,11 @@ pub(super) fn prepare_input(utxo: &UTXO, keys: &KeyEpoch) -> Result<PreparedInpu
     let blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);
 
     Ok(PreparedInput {
-        real_output: RealOutputIdentity {
+        real_output: RealOutputIdentity::new(
             locator,
-            public_key: one_time_secret.public_key(),
-            commitment: PedersenCommitment::commit(utxo.amount.as_atomic(), &blinding).to_bytes(),
-        },
+            one_time_secret.public_key(),
+            PedersenCommitment::commit(utxo.amount.as_atomic(), &blinding).to_bytes(),
+        ),
         input: SpendableInput {
             tx_hash: utxo.tx_hash,
             output_index: utxo.output_index,
@@ -45,48 +46,34 @@ pub(super) fn prepare_input(utxo: &UTXO, keys: &KeyEpoch) -> Result<PreparedInpu
 pub(super) fn add_prepared_inputs(
     builder: &mut TransactionBuilder,
     inputs: Vec<PreparedInput>,
-    rings: Vec<AllocatedRing>,
-    ring_size: usize,
+    rings: AllocatedRings,
+    expected_ring_size: usize,
 ) -> Result<()> {
     if inputs.len() != rings.len() {
-        return Err(Error::InvalidState(
-            "ring allocation does not match selected inputs".into(),
-        ));
+        return Err(DecoySelectionError::RingCountMismatch {
+            expected: inputs.len(),
+            got: rings.len(),
+        }
+        .into());
+    }
+    if rings.ring_size() != expected_ring_size {
+        return Err(DecoySelectionError::RingSizeMismatch {
+            expected: expected_ring_size,
+            got: rings.ring_size(),
+        }
+        .into());
+    }
+    if !inputs
+        .iter()
+        .map(|prepared| prepared.real_output)
+        .eq(rings.real_outputs().iter().copied())
+    {
+        return Err(DecoySelectionError::RingInputMismatch.into());
     }
 
-    let real_public_keys: HashSet<_> = inputs
-        .iter()
-        .map(|prepared| *prepared.real_output.public_key.as_bytes())
-        .collect();
-    let mut decoy_public_keys = HashSet::new();
-
     for (prepared, ring) in inputs.into_iter().zip(rings) {
-        if ring.decoys.len() + 1 != ring_size {
-            return Err(Error::InvalidRingSize {
-                expected: ring_size,
-                got: ring.decoys.len() + 1,
-            });
-        }
-        if ring.real_position >= ring_size {
-            return Err(Error::InvalidState(format!(
-                "real position {} is outside ring size {}",
-                ring.real_position, ring_size
-            )));
-        }
-        for decoy in &ring.decoys {
-            let key = *decoy.public_key.as_bytes();
-            if real_public_keys.contains(&key) {
-                return Err(Error::InvalidState(
-                    "allocated decoy duplicates a transaction real output".into(),
-                ));
-            }
-            if !decoy_public_keys.insert(key) {
-                return Err(Error::InvalidState(
-                    "allocated decoy is reused across transaction inputs".into(),
-                ));
-            }
-        }
-        builder.add_input(prepared.input, ring.decoys, ring.real_position)?;
+        let (decoys, real_position) = ring.into_parts();
+        builder.add_input(prepared.input, decoys, real_position)?;
     }
 
     Ok(())
