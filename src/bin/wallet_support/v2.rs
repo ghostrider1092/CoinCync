@@ -177,7 +177,7 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     let mut rng = rand::rngs::OsRng;
     let built = coordinator
         .build_privacy_transaction(
-            &session,
+            session,
             wallet.balance_ref(),
             &keys,
             intent,
@@ -187,10 +187,8 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         .map_err(|error| format!("build privacy transaction: {error}"))?;
 
     let transaction = built.transaction();
-    let tx_hash = transaction.hash();
-    let tx_size = borsh::to_vec(transaction)
-        .map_err(|error| format!("serialize transaction: {error}"))?
-        .len();
+    let tx_hash = built.tx_hash();
+    let tx_size = built.serialized_size();
 
     println!();
     println!("Built tx:");
@@ -207,27 +205,25 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         .await
         .map_err(|error| format!("submit transaction: {error}"))?
     {
-        SpendSubmission::Accepted {
+        SpendSubmission::MempoolAccepted {
             tx_hash,
-            wallet_save_error,
+            retained_reservations,
+            reservation_expires_at,
         } => {
             println!("  OK: tx {} accepted by mempool.", hex::encode(tx_hash.as_bytes()));
-            if let Some(error) = wallet_save_error {
-                eprintln!(
-                    "  WARN: accepted, but the spent-state save failed: {}. \
-                     The durable pre-submit reservation remains; run `wallet scan` to reconcile.",
-                    error
-                );
-            }
+            println!(
+                "  Inputs: {} reservation(s) retained until confirmation (expiry height {}).",
+                retained_reservations, reservation_expires_at
+            );
             Ok(())
         }
         SpendSubmission::Rejected {
             tx_hash,
             reason,
             released_reservations,
-            wallet_save_error,
+            reservation_release_save_error,
         } => {
-            let persistence_note = wallet_save_error
+            let persistence_note = reservation_release_save_error
                 .map(|error| {
                     format!(
                         "; reservation release was not persisted ({error}), so it may remain until expiry"
@@ -242,12 +238,18 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
                 persistence_note
             ))
         }
-        SpendSubmission::Unknown { tx_hash, reason } => Err(format!(
-            "submission status for {} is unknown: {}. The input reservation was retained and \
-             auto-expires after {} blocks if the transaction did not land",
+        SpendSubmission::Unknown {
+            tx_hash,
+            reason,
+            retained_reservations,
+            reservation_expires_at,
+        } => Err(format!(
+            "submission status for {} is unknown: {}. {} input reservation(s) were retained and \
+             expire at height {} if the transaction did not land",
             hex::encode(tx_hash.as_bytes()),
             reason,
-            coincync::wallet::balance::RESERVATION_EXPIRY_BLOCKS
+            retained_reservations,
+            reservation_expires_at
         )),
     }
 }

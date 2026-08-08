@@ -4,7 +4,7 @@ use crate::constants::{
     UNIFORM_TX_SHAPE_HEIGHT,
 };
 use crate::error::{Error, Result};
-use crate::primitives::{Amount, PublicKey};
+use crate::primitives::{Amount, Hash, PublicKey};
 use crate::transaction::SpendableInput;
 
 #[derive(Clone, Copy)]
@@ -146,6 +146,12 @@ pub(super) struct PreparedInput {
     pub(super) real_output: RealOutputIdentity,
 }
 
+impl PreparedInput {
+    fn wallet_output_key(&self) -> (Hash, u8) {
+        (self.input.tx_hash, self.input.output_index)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TransferShape {
     Legacy,
@@ -196,6 +202,13 @@ pub struct PreparedPrivacyTransaction {
 impl PreparedPrivacyTransaction {
     pub fn real_outputs(&self) -> Vec<RealOutputIdentity> {
         self.inputs.iter().map(|input| input.real_output).collect()
+    }
+
+    pub(crate) fn selected_output_keys(&self) -> Vec<(Hash, u8)> {
+        self.inputs
+            .iter()
+            .map(PreparedInput::wallet_output_key)
+            .collect()
     }
 
     pub fn ring_size(&self) -> usize {

@@ -268,12 +268,12 @@ impl ChurnEngine {
         let mut rng = rand::rngs::OsRng;
         let built = self
             .coordinator
-            .build_privacy_transaction(&session, balance, &keys, intent, &mut rng)
+            .build_privacy_transaction(session, balance, &keys, intent, &mut rng)
             .await
             .map_err(|error| format!("build churn transaction: {error}"))?;
 
         debug!(
-            hash = %hex::encode(built.transaction().hash().as_bytes()),
+            hash = %hex::encode(built.tx_hash().as_bytes()),
             inputs = built.transaction().inputs.len(),
             outputs = built.transaction().outputs.len(),
             amount = churn_amount,
@@ -286,32 +286,27 @@ impl ChurnEngine {
             .await
             .map_err(|error| format!("submit churn transaction: {error}"))?
         {
-            SpendSubmission::Accepted {
+            SpendSubmission::MempoolAccepted {
                 tx_hash,
-                wallet_save_error,
+                retained_reservations,
+                reservation_expires_at,
             } => {
-                if let Some(error) = wallet_save_error {
-                    warn!(
-                        tx_hash = %hex::encode(tx_hash.as_bytes()),
-                        error = %error,
-                        "churn accepted, but wallet state was not persisted"
-                    );
-                } else {
-                    info!(
-                        target: "wallet::churn::R89",
-                        tx_hash = %hex::encode(tx_hash.as_bytes()),
-                        "R-89: churn spend-marking durable on disk"
-                    );
-                }
+                info!(
+                    target: "wallet::churn",
+                    tx_hash = %hex::encode(tx_hash.as_bytes()),
+                    retained_reservations,
+                    reservation_expires_at,
+                    "churn accepted; inputs remain reserved pending confirmation"
+                );
                 Ok(churn_amount)
             }
             SpendSubmission::Rejected {
                 tx_hash,
                 reason,
                 released_reservations,
-                wallet_save_error,
+                reservation_release_save_error,
             } => {
-                let persistence_note = wallet_save_error
+                let persistence_note = reservation_release_save_error
                     .map(|error| format!("; reservation release was not persisted: {error}"))
                     .unwrap_or_default();
                 Err(format!(
@@ -322,10 +317,17 @@ impl ChurnEngine {
                     persistence_note
                 ))
             }
-            SpendSubmission::Unknown { tx_hash, reason } => Err(format!(
-                "churn submission status for {} is unknown: {}; input reservation retained",
+            SpendSubmission::Unknown {
+                tx_hash,
+                reason,
+                retained_reservations,
+                reservation_expires_at,
+            } => Err(format!(
+                "churn submission status for {} is unknown: {}; {} input reservation(s) retained until height {}",
                 hex::encode(tx_hash.as_bytes()),
-                reason
+                reason,
+                retained_reservations,
+                reservation_expires_at
             )),
         }
     }
