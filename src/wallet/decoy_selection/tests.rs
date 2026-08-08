@@ -112,7 +112,7 @@ fn gamma_sampling_is_conditioned_and_unique() {
         );
     }
 
-    let gamma = Gamma::new(DECOY_GAMMM_SHAPE, DECOY_GAMMA_SCALE).unwrap();
+    let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE).unwrap();
     let block_time = crate::constants::TARGET_BLOCK_TIME as f64;
     let mut target_rng = ChaCha20Rng::seed_from_u64(3);
     let mut expected = Vec::with_capacity(observed.len());

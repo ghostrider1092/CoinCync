@@ -1271,7 +1271,10 @@ async fn cmd_send(
 ) -> Result<(), String> {
     use coincync::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
     use coincync::primitives::{Amount, PublicKey};
-    use coincync::wallet::decoy_selection::{allocate_unique_rings, build_covered_request};
+    use coincync::wallet::decoy_selection::{
+        allocate_unique_rings, build_covered_request, validate_covered_response,
+        ValidatedDecoySnapshot,
+    };
     use coincync::wallet::{KeyEpoch, Wallet};
 
     // Parse recipient keys
@@ -1322,7 +1325,9 @@ async fn cmd_send(
             .map_err(|e| format!("rpc get_decoy_distribution: {}", e))?,
     )
     .map_err(|e| format!("decode decoy distribution: {}", e))?;
-    let current_height = snapshot.snapshot_height.saturating_add(1);
+    let snapshot = ValidatedDecoySnapshot::try_from(snapshot)
+        .map_err(|e| format!("validate decoy distribution: {}", e))?;
+    let current_height = snapshot.spend_height();
     let ring_size = coincync::constants::ring_size_at_height(current_height);
     let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
 
@@ -1431,7 +1436,7 @@ async fn cmd_send(
     )
     .map_err(|e| format!("create_privacy_transaction: {}", e))?;
     let real_outputs = prepared.real_outputs();
-    let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator).collect();
+    let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator()).collect();
     let requested = build_covered_request(
         &snapshot,
         &real_locators,
@@ -1445,26 +1450,20 @@ async fn cmd_send(
             node,
             "get_outputs_by_locators",
             serde_json::json!([
-                snapshot.snapshot_height,
-                snapshot.snapshot_hash,
-                snapshot.policy_version,
-                &requested,
+                snapshot.snapshot_id().height(),
+                snapshot.snapshot_id().hash(),
+                snapshot.snapshot_id().policy_version(),
+                requested.locators(),
             ]),
         )
         .await
         .map_err(|e| format!("rpc get_outputs_by_locators: {}", e))?,
     )
     .map_err(|e| format!("decode resolved decoys: {}", e))?;
-    let rings = allocate_unique_rings(
-        &snapshot,
-        &requested,
-        &resolved,
-        &real_outputs,
-        prepared.ring_size(),
-        min_decoy_age,
-        &mut rng,
-    )
-    .map_err(|e| format!("allocate transaction rings: {}", e))?;
+    let resolved = validate_covered_response(requested, resolved)
+        .map_err(|e| format!("validate resolved decoys: {}", e))?;
+    let rings = allocate_unique_rings(resolved, &real_outputs, &mut rng)
+        .map_err(|e| format!("allocate transaction rings: {}", e))?;
     let tx = coincync::wallet::send::build_prepared_privacy_transaction(prepared, rings, &mut rng)
         .map_err(|e| format!("create_privacy_transaction: {}", e))?;
 

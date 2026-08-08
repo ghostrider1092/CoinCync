@@ -72,6 +72,14 @@ function _sameRpcValue(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function _normalizeCommitment(commitment) {
+  if (!Array.isArray(commitment) || commitment.length !== 32 ||
+      !commitment.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+    return null;
+  }
+  return commitment.map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 function _sampleOutputLocators(heights, requested) {
   const buckets = [];
   let total = 0;
@@ -143,14 +151,16 @@ async function loadCanonicalOutputSample(requested = 256) {
     for (let i = 0; i < chunk.length; i++) {
       const expected = chunk[i];
       const output = resolved.outputs[i];
+      const commitment = _normalizeCommitment(output?.commitment);
       if (!output || !output.locator ||
           Number(output.locator.height) !== expected.height ||
           Number(output.locator.ordinal) !== expected.ordinal ||
           Number(output.height) !== expected.height ||
           typeof output.public_key !== 'string' || output.public_key.length !== 64 ||
-          typeof output.commitment !== 'string' || output.commitment.length !== 64) {
+          !commitment) {
         return null;
       }
+      output.commitment = commitment;
     }
     outputs.push(...resolved.outputs);
   }

@@ -1409,8 +1409,10 @@ impl SharedWallet {
             .current()
             .ok_or(Error::WalletLocked)?;
 
-        let snapshot = chain.decoy_distribution_snapshot();
-        let current_height = snapshot.snapshot_height.saturating_add(1);
+        let snapshot = super::decoy_selection::ValidatedDecoySnapshot::try_from(
+            chain.decoy_distribution_snapshot(),
+        )?;
+        let current_height = snapshot.spend_height();
 
         // Convert recipients to the format needed by create_privacy_transaction
         let privacy_recipients: Vec<(
@@ -1437,7 +1439,7 @@ impl SharedWallet {
             &mut rng,
         )?;
         let real_outputs = prepared.real_outputs();
-        let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator).collect();
+        let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator()).collect();
         let requested = super::decoy_selection::build_covered_request(
             &snapshot,
             &real_locators,
@@ -1446,20 +1448,14 @@ impl SharedWallet {
             &mut rng,
         )?;
         let resolved = chain.resolve_decoy_snapshot(
-            snapshot.snapshot_height,
-            snapshot.snapshot_hash,
-            snapshot.policy_version,
-            &requested,
+            snapshot.snapshot_id().height(),
+            snapshot.snapshot_id().hash(),
+            snapshot.snapshot_id().policy_version(),
+            requested.locators(),
         )?;
-        let rings = super::decoy_selection::allocate_unique_rings(
-            &snapshot,
-            &requested,
-            &resolved,
-            &real_outputs,
-            prepared.ring_size(),
-            min_age,
-            &mut rng,
-        )?;
+        let resolved = super::decoy_selection::validate_covered_response(requested, resolved)?;
+        let rings =
+            super::decoy_selection::allocate_unique_rings(resolved, &real_outputs, &mut rng)?;
         super::send::build_prepared_privacy_transaction(prepared, rings, &mut rng)
     }
 
@@ -1491,8 +1487,10 @@ impl SharedWallet {
             .current()
             .ok_or(Error::WalletLocked)?;
 
-        let snapshot = chain.decoy_distribution_snapshot();
-        let current_height = snapshot.snapshot_height.saturating_add(1);
+        let snapshot = super::decoy_selection::ValidatedDecoySnapshot::try_from(
+            chain.decoy_distribution_snapshot(),
+        )?;
+        let current_height = snapshot.spend_height();
         let ring_size = crate::constants::ring_size_at_height(current_height);
         let min_age = crate::constants::min_output_age_at_height(current_height);
         let mut rng = rand::rngs::OsRng;
@@ -1508,7 +1506,7 @@ impl SharedWallet {
             &mut rng,
         )?;
         let real_outputs = prepared.real_outputs();
-        let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator).collect();
+        let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator()).collect();
         let requested = super::decoy_selection::build_covered_request(
             &snapshot,
             &real_locators,
@@ -1517,20 +1515,14 @@ impl SharedWallet {
             &mut rng,
         )?;
         let resolved = chain.resolve_decoy_snapshot(
-            snapshot.snapshot_height,
-            snapshot.snapshot_hash,
-            snapshot.policy_version,
-            &requested,
+            snapshot.snapshot_id().height(),
+            snapshot.snapshot_id().hash(),
+            snapshot.snapshot_id().policy_version(),
+            requested.locators(),
         )?;
-        let rings = super::decoy_selection::allocate_unique_rings(
-            &snapshot,
-            &requested,
-            &resolved,
-            &real_outputs,
-            prepared.ring_size(),
-            min_age,
-            &mut rng,
-        )?;
+        let resolved = super::decoy_selection::validate_covered_response(requested, resolved)?;
+        let rings =
+            super::decoy_selection::allocate_unique_rings(resolved, &real_outputs, &mut rng)?;
         super::send::build_prepared_vesting_transaction(prepared, rings, &mut rng)
     }
 }
