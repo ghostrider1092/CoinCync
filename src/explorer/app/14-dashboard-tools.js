@@ -59,42 +59,158 @@ function renderPropagationChart() {
 }
 
 //
+// CANONICAL OUTPUT SAMPLING
+//
+// Explorer analytics used to call the deprecated node-selected `get_decoys`
+// method. Resolve a deterministic, evenly-spaced sample from the snapshot-bound
+// locator catalog instead. Each resolver call stays within the node's 256-item
+// limit, and every batch is bound to the same canonical snapshot.
+const EXPLORER_LOCATOR_REQUEST_LIMIT = 256;
+const EXPLORER_OUTPUT_SAMPLE_MAX = 1024;
+
+function _sameRpcValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function _normalizeCommitment(commitment) {
+  if (!Array.isArray(commitment) || commitment.length !== 32 ||
+      !commitment.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+    return null;
+  }
+  return commitment.map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function _sampleOutputLocators(heights, requested) {
+  const buckets = [];
+  let total = 0;
+  let previousHeight = -1;
+
+  for (const entry of heights || []) {
+    const height = Number(entry?.height);
+    const count = Number(entry?.count);
+    if (!Number.isSafeInteger(height) || height < 0 || height <= previousHeight ||
+        !Number.isSafeInteger(count) || count <= 0) {
+      return null;
+    }
+    if (!Number.isSafeInteger(total + count)) return null;
+    buckets.push({ height, count });
+    total += count;
+    previousHeight = height;
+  }
+
+  const wanted = Math.min(
+    Math.max(0, Math.floor(Number(requested) || 0)),
+    EXPLORER_OUTPUT_SAMPLE_MAX,
+    total
+  );
+  if (wanted === 0) return { locators: [], total };
+
+  const locators = [];
+  let bucketIndex = 0;
+  let bucketStart = 0;
+  for (let i = 0; i < wanted; i++) {
+    const target = Math.floor(((i + 0.5) * total) / wanted);
+    while (bucketIndex < buckets.length &&
+           target >= bucketStart + buckets[bucketIndex].count) {
+      bucketStart += buckets[bucketIndex].count;
+      bucketIndex++;
+    }
+    if (bucketIndex >= buckets.length) return null;
+    const bucket = buckets[bucketIndex];
+    locators.push({ height: bucket.height, ordinal: target - bucketStart });
+  }
+
+  return { locators, total };
+}
+
+async function loadCanonicalOutputSample(requested = 256) {
+  const snapshot = await rpc('get_decoy_distribution');
+  if (!snapshot || !Array.isArray(snapshot.heights)) return null;
+
+  const sampled = _sampleOutputLocators(snapshot.heights, requested);
+  if (!sampled) return null;
+
+  const outputs = [];
+  for (let start = 0; start < sampled.locators.length; start += EXPLORER_LOCATOR_REQUEST_LIMIT) {
+    const chunk = sampled.locators.slice(start, start + EXPLORER_LOCATOR_REQUEST_LIMIT);
+    const resolved = await rpc('get_outputs_by_locators', [
+      snapshot.snapshot_height,
+      snapshot.snapshot_hash,
+      snapshot.policy_version,
+      chunk,
+    ]);
+    if (!resolved ||
+        resolved.snapshot_height !== snapshot.snapshot_height ||
+        resolved.policy_version !== snapshot.policy_version ||
+        !_sameRpcValue(resolved.snapshot_hash, snapshot.snapshot_hash) ||
+        !Array.isArray(resolved.outputs) ||
+        resolved.outputs.length !== chunk.length) {
+      return null;
+    }
+
+    for (let i = 0; i < chunk.length; i++) {
+      const expected = chunk[i];
+      const output = resolved.outputs[i];
+      const commitment = _normalizeCommitment(output?.commitment);
+      if (!output || !output.locator ||
+          Number(output.locator.height) !== expected.height ||
+          Number(output.locator.ordinal) !== expected.ordinal ||
+          Number(output.height) !== expected.height ||
+          typeof output.public_key !== 'string' || output.public_key.length !== 64 ||
+          !commitment) {
+        return null;
+      }
+      output.commitment = commitment;
+    }
+    outputs.push(...resolved.outputs);
+  }
+
+  return { snapshot, outputs, sampled: outputs.length, total: sampled.total };
+}
+
+//
 // ADDRESS BALANCE LOOKUP (#32)
 //
 async function lookupBalance() {
   const el = $('balance-lookup-input'); const res = $('balance-lookup-result');
   if (!el || !res) return;
   const pubkey = el.value.trim();
-  if (!pubkey || pubkey.length < 16) { res.innerHTML = '<span style="color:#EF4444">Enter a spend public key (hex)</span>'; return; }
-  res.innerHTML = '<span style="color:var(--t3)">Scanning chain for outputs...</span>';
-  const decoys = await rpc('get_decoys', [1000, 0]);
-  if (!decoys || !decoys.decoys) { res.innerHTML = '<span style="color:#EF4444">RPC error</span>'; return; }
-  const owned = decoys.decoys.filter(d => d.public_key.startsWith(pubkey.slice(0, 32)));
-  if (owned.length === 0) { res.innerHTML = '<span style="color:var(--t3)">No outputs found (note: amounts are hidden by Pedersen commitments)</span>'; return; }
-  res.innerHTML = `<div style="color:var(--ac2);margin-bottom:8px">${owned.length} output(s) found for this key</div>
-    <div style="font-size:10px;color:var(--t3);margin-bottom:8px">Amounts are hidden — only the private view key holder can see balances</div>` +
-    owned.slice(0, 20).map(o => `<div style="font-family:var(--mono);font-size:10px;padding:3px 0;border-bottom:1px solid var(--b)">
-      height=${o.height} · commitment=${o.commitment.slice(0, 16)}... · <span style="color:var(--ac2)">amount: ████</span>
+  if (!pubkey || pubkey.length < 16) { res.innerHTML = '<span style="color:#EF4444">Enter an output public-key prefix (hex)</span>'; return; }
+  res.innerHTML = '<span style="color:var(--t3)">Sampling the canonical output catalog...</span>';
+  const sample = await loadCanonicalOutputSample(1000);
+  if (!sample) { res.innerHTML = '<span style="color:#EF4444">Locator RPC error or stale snapshot</span>'; return; }
+  const owned = sample.outputs.filter(output => output.public_key.startsWith(pubkey.slice(0, 32)));
+  if (owned.length === 0) {
+    res.innerHTML = `<span style="color:var(--t3)">No matching output in this ${num(sample.sampled)}-output sample (${num(sample.total)} catalogued total). Amounts remain hidden.</span>`;
+    return;
+  }
+  res.innerHTML = `<div style="color:var(--ac2);margin-bottom:8px">${owned.length} matching output(s) in a ${num(sample.sampled)}-output sample</div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:8px">This is a public-key sample, not an address balance lookup. Amounts are hidden.</div>` +
+    owned.slice(0, 20).map(output => `<div style="font-family:var(--mono);font-size:10px;padding:3px 0;border-bottom:1px solid var(--b)">
+      height=${output.height} · commitment=${output.commitment.slice(0, 16)}... · <span style="color:var(--ac2)">amount: ████</span>
     </div>`).join('');
 }
 
 //
-// RICH LIST (#34) — shows output count per unique key (not amounts, those are hidden)
+// RICH LIST (#34) — sampled output-key frequency, never balances
 //
 async function renderRichList() {
   const el = $('rich-list-body'); if (!el) return;
   el.innerHTML = '<div style="color:var(--t3);font-size:11px">Loading...</div>';
-  const decoys = await rpc('get_decoys', [1000, 0]);
-  if (!decoys || !decoys.decoys) { el.innerHTML = '<div style="color:#EF4444">RPC error</div>'; return; }
+  const sample = await loadCanonicalOutputSample(1000);
+  if (!sample) { el.innerHTML = '<div style="color:#EF4444">Locator RPC error or stale snapshot</div>'; return; }
   const counts = {};
-  decoys.decoys.forEach(d => { const k = d.public_key.slice(0, 16); counts[k] = (counts[k] || 0) + 1; });
+  sample.outputs.forEach(output => {
+    const key = output.public_key.slice(0, 16);
+    counts[key] = (counts[key] || 0) + 1;
+  });
   const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 20);
-  el.innerHTML = sorted.map((r, i) =>
+  el.innerHTML = sorted.map((row, i) =>
     `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--b);font-family:var(--mono);font-size:11px">
-      <span style="color:${i < 3 ? 'var(--ac2)' : 'var(--t2)'}">#${i + 1} ${r[0]}...</span>
-      <span>${r[1]} outputs · <span style="color:var(--ac2)">balance: ████</span></span>
+      <span style="color:${i < 3 ? 'var(--ac2)' : 'var(--t2)'}">#${i + 1} ${row[0]}...</span>
+      <span>${row[1]} sampled outputs · <span style="color:var(--ac2)">balance: ████</span></span>
     </div>`).join('') +
-    '<div style="font-size:9px;color:var(--t3);margin-top:8px;text-align:center">Amounts hidden by Pedersen commitments — only output counts are public</div>';
+    `<div style="font-size:9px;color:var(--t3);margin-top:8px;text-align:center">Evenly spaced sample: ${num(sample.sampled)} of ${num(sample.total)} canonical outputs. Amounts are never exposed.</div>`;
 }
 
 //

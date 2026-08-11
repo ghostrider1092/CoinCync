@@ -1,155 +1,235 @@
 # Decoy-Selection Policy
 
-**Status:** Authoritative policy · **Scope:** ring-member (decoy) selection for
-CoinCync transactions · **Owner decision:** 2026-07-24 (owner + co-founder)
+**Status:** Authoritative policy
+**Scope:** CLSAG ring-member selection for CoinCync wallets
+**Policy version:** [`DECOY_LOCATOR_POLICY_VERSION`](../../src/decoy.rs)
 
-> **This document is the single source of truth for decoy selection.** Wallets,
-> tests, tooling, and other docs MUST defer to it. Where it names a concrete
-> parameter, the **code constant is authoritative** and this doc points at it —
-> numbers are not duplicated here, so they cannot drift. If code and this policy
-> disagree, that is a bug in one of them; open an issue rather than guessing.
->
-> Addresses [issue #24](../../README.md) — "Specify and unify the mainnet
-> decoy-selection policy."
+> This document is the single source of truth for decoy selection. Wallets,
+> tests, tooling, and other documentation must follow the code boundaries and
+> failure rules below. Concrete constants remain authoritative in code.
 
 ---
 
 ## 1. Policy in one paragraph
 
-Every non-coinbase input is signed in a ring of size
-[`RING_SIZE`](../../src/constants.rs) (bootstrap floor
-[`BOOTSTRAP_MIN_RING_SIZE`](../../src/constants.rs)). The real spend is hidden
-among decoys whose **ages follow a population-wide gamma law** matched to the
-real-spend age distribution (Möser et al. 2018), so a chain analyst cannot pick
-the real member out by its age. The gamma shaping is applied **once, at the
-source**, over the whole eligible UTXO set; the ring assembler then draws
-**uniformly** from that already-shaped pool. Selection is a **pure, stateless
-function of the current UTXO set**, so it is automatically correct across
-reorganizations.
+The wallet, not the serving node, chooses decoys. It first selects the real
+inputs, samples canonical output locators locally with the configured log-gamma
+age profile, mixes every real locator into one shuffled fixed-size covered
+lookup, and resolves that locator set against a snapshot-bound RPC response. The
+wallet validates the entire response and assigns decoys without reuse across the
+transaction. A stale snapshot, malformed response, missing locator, or
+insufficient eligible pool aborts the spend without retry or legacy fallback.
 
 ---
 
-## 2. Where the policy lives (the anti-drift map)
+## 2. Ownership boundaries
 
-There is exactly **one** place age-shaping happens and **one** place the ring is
-assembled. Everything else consumes these.
-
-| Concern | Authoritative code | Role |
+| Concern | Authoritative code | Responsibility |
 |---|---|---|
-| **Age shaping (the gamma)** | [`storage::UtxoSet::select_decoys`](../../src/storage/utxos.rs) | Draws decoys from the full eligible set with gamma-distributed ages. **This is where the privacy comes from.** |
-| Gamma parameters | [`DECOY_GAMMA_SHAPE`, `DECOY_GAMMA_SCALE`](../../src/storage/utxos.rs) | shape + scale constants |
-| Node entry point | [`chain::get_decoy_outputs`](../../src/chain.rs) → the `get_decoys` RPC | Serves the shaped pool to wallets |
-| **Ring assembly** | [`crypto::RingSelector::select_decoys`](../../src/crypto/ring_selection.rs) | Picks final members + the real position, **uniformly, from the pool it is given** |
-| Ring size / age floor | [`RING_SIZE`, `BOOTSTRAP_MIN_RING_SIZE`, `min_output_age_at_height`](../../src/constants.rs) | consensus parameters |
+| Canonical locator and RPC types | [`src/decoy.rs`](../../src/decoy.rs) | Defines `(height, ordinal)`, snapshot metadata, and resolved-output records. |
+| Canonical output catalog | [`storage::UtxoSet`](../../src/storage/utxos.rs) | Stores per-height output order and resolves locators. It does not choose decoys. |
+| Snapshot binding | [`chain::Blockchain`](../../src/chain.rs) | Produces the current distribution snapshot and rejects a locator lookup if the snapshot block is no longer canonical. |
+| Public RPC methods | [`src/rpc/server.rs`](../../src/rpc/server.rs) | Exposes `get_decoy_distribution` and `get_outputs_by_locators`. |
+| Age shaping and covered lookup | [`wallet::decoy_selection`](../../src/wallet/decoy_selection.rs) | Owns gamma sampling, minimum-age conditioning, request construction, response validation, and transaction-wide allocation. |
+| Input/fee preparation and final signing | [`wallet::send`](../../src/wallet/send.rs) | Selects inputs before lookup, then consumes already allocated rings without reselecting inputs or resampling a shared pool. |
+| Ring size and maturity floor | [`src/constants.rs`](../../src/constants.rs) | Supplies consensus-coupled ring size and `min_output_age_at_height`. |
 
-**Rule:** the assembler must **not** re-impose an age distribution — that would
-double-bias an already-shaped pool. Its uniform draw is correct *because* the
-pool is already gamma-shaped upstream.
-
----
-
-## 3. The model, and why the bias is at the source
-
-Real spends are overwhelmingly *recent* — people move coins days or weeks after
-receiving them. If decoys were drawn uniformly over all history, a young real
-input would be the obvious age outlier in its ring (Miller et al. 2017; Möser et
-al. 2018 measured ~85% real-spend identification on early, pre-gamma Monero).
-Matching decoy ages to the real-spend law removes that signal.
-
-A decoy's age is drawn as `age_seconds = exp(Gamma(shape, scale))`, converted to
-blocks via [`TARGET_BLOCK_TIME`](../../src/constants.rs), and mapped to the
-nearest eligible output through the height index (O(log n), no linear scan).
-
-**Why at the source, not in the assembler:** a population-wide age law needs the
-*whole* age distribution to sample from. A downstream shuffle over a pre-sampled
-candidate pool cannot reconstruct a distribution the pool does not already carry.
-(This is the exact point the 2026-07-02 note made when arguing the *opposite*
-direction; it is applied here in reverse.) So shaping happens once, over the full
-UTXO set, and the assembler stays uniform.
+The node supplies deterministic public chain data only. It must not supply
+wallet-specific randomness or a preselected candidate pool.
 
 ---
 
-## 4. Eligibility
+## 3. Canonical output locators
 
-An output is an eligible decoy iff, at the spending height, all hold:
+An output locator is:
 
-1. **Age ≥ minimum** — older than `min_output_age_at_height(height)` blocks
-   ([`constants.rs`](../../src/constants.rs)). This is a consensus-relevant
-   maturity floor, not just a heuristic.
-2. **Unlocked** — any `lock_height` has passed.
-3. **Distinct** — the real output is excluded, and duplicates are not offered.
+```text
+(height: u64, ordinal: u32)
+```
 
-Coinbase-maturity and ring-member-validity (including references to
-already-spent outputs via the permanent output index) are enforced separately at
-[`consensus/validation`](../../src/consensus/validation.rs) — selection produces
-candidates; consensus validates them.
+For a canonical block, `ordinal` is the position of the output's
+`(transaction_hash, transaction_output_index)` key after those keys are sorted
+lexicographically. The order is therefore independent of hash-map insertion or
+iteration order.
 
-## 5. Correctness across reorganizations
+A locator is valid only while the block at `height` remains canonical. A reorg
+that replaces that block invalidates the old locator even when the replacement
+block contains the same number of outputs.
 
-Jun #24 requires the policy to remain correct across reorgs. It does, **by
-construction**:
+The node keeps a canonical all-output locator catalog. Entries remain available
+after an output is spent because spent outputs are still valid ring members;
+they are removed when the creating block is disconnected by a reorg. Wallets
+store the locator on each owned UTXO. Older sidecars deserialize the field as
+missing, but a selected UTXO without a locator cannot be spent: the user must run
+a full rescan so canonical locators are reconstructed without revealing owned
+outputs through a separate lookup.
 
-- **Selection is stateless.** `select_decoys` is a pure function of `(current
-  height, live UTXO set, RNG)`. There is **no persisted decoy-selection cache or
-  index** anywhere (verified: no `decoy_*` persisted state), so there is nothing
-  that could diverge across restart or reorg paths — the recurring failure mode
-  behind the earlier `total_difficulty` divergence class.
-- **It reads only live state.** The `height_index` and `outputs` maps are updated
-  atomically on connect/disconnect (`apply_batch` / disconnect on reorg), so a
-  selection always reflects the current tip. Outputs disconnected by a reorg
-  simply stop being eligible.
-- **Ring *validity* after a reorg** is a consensus concern, not a selection one:
-  a ring built against outputs that a later reorg removes is validated against
-  the permanent output index ([`storage::UtxoSet`](../../src/storage/utxos.rs)),
-  which retains entries across spends and is only pruned on reorg. Selection does
-  not need reorg-specific logic because it never persists a decision.
+---
 
-**Invariant:** the same `(height, UTXO set)` always yields the same *distribution*
-of decoys (not the same sample — the RNG differs), and never references state
-that outlives a reorg.
+## 4. RPC contracts
 
-## 6. Threat model and the accepted trade-off
+### `get_decoy_distribution`
 
-- **Defends against:** output-age regression — an analyst measuring the age
-  profile of each ring to find the real spend. Gamma-matched decoys deny that
-  signal for the common case.
-- **Accepted residual (explicit):** a genuinely *old* real output is an age
-  outlier in a recent-biased ring. Population-wide gamma protects the vast
-  majority of (recent) spends at the cost of this tail. This is a deliberate
-  "lesser of two evils" choice; see §8.
-- **Not in scope here:** sender/receiver/amount hiding (CLSAG, stealth
-  addresses, Bulletproofs+), network-layer linkability (Dandelion++, Noise). See
-  [PRIVACY.md](PRIVACY.md).
+Returns a snapshot containing:
 
-## 7. Decision history
+- `snapshot_height`;
+- the canonical `snapshot_hash` at that height;
+- `policy_version`;
+- strictly increasing non-empty `(height, output_count)` buckets through the
+  snapshot height.
 
-- **≤ 2026-07-01** — gamma-based selection (pre-existing).
-- **2026-07-02** — moved to uniform selection at both layers (logged as SEV-A;
-  argued uniform was the safer default; a regression test asserted uniform).
-- **2026-07-24** — owner + co-founder reversed to gamma **with full knowledge of
-  the 2026-07-02 decision**, applied at the source with uniform assembly, and
-  flipped the regression test to assert the gamma recency signature. This
-  document is the unified policy that reversal produced.
+The response contains counts only. It does not choose outputs.
 
-## 8. Roadmap — closing the tail
+### `get_outputs_by_locators`
 
-The old-output residual (§6) is not closed by tuning the distribution; it is
-closed by a larger anonymity set. The long-term direction (grand-roadmap, not
-scheduled) is a major upgrade that grows the effective ring from
-[`RING_SIZE`](../../src/constants.rs) into the thousands via zero-knowledge
-membership proofs (in the spirit of Lelantus Spark / zk-SNARK set membership),
-at which point per-output age ceases to be a distinguishing signal at all. Until
-then, population-wide gamma is the policy.
+Accepts:
 
-## 9. Conformance checklist for changes
+```text
+[snapshot_height, snapshot_hash, policy_version, locators]
+```
 
-Any change touching decoy selection MUST:
+The locator list must be duplicate-free and contains at most 256 entries. The
+node verifies that the supplied snapshot block is still canonical, resolves
+all locators or none, preserves request order, and returns the same snapshot
+metadata with each output's public key, commitment, creation height, coinbase
+flag, and optional lock height.
 
-- keep shaping in `storage::UtxoSet::select_decoys` and assembly uniform in
-  `RingSelector` — do not move the bias into the assembler;
-- keep selection a pure function of the live UTXO set — introduce **no** persisted
-  selection state;
-- update the gamma regression test
-  ([`test_decoy_selection_is_gamma_recent_biased`](../../src/storage/utxos.rs)) if
-  the distribution changes, and keep it asserting the intended shape;
-- update **this document** in the same change, since it is the source of truth.
+Ordinary extension above the snapshot does not invalidate it. Replacement of
+the snapshot block does.
+
+`get_decoys` is deprecated and absent from the public REST allowlist. Wallets
+and explorer tooling must not fall back to it.
+
+---
+
+## 5. Wallet selection flow
+
+1. Obtain one distribution snapshot.
+2. Compute the transaction height as `snapshot_height + 1`, then derive the
+   consensus ring size and minimum output age for that height.
+3. Prepare the transaction. Input selection, amount checks, and fee estimation
+   happen before any locator lookup. Every selected real UTXO must already carry
+   a canonical locator.
+4. Sample candidate locators locally using the wallet-owned log-gamma policy.
+   Exclude every real locator and sample without replacement.
+5. Add every real locator, fill the request to
+   [`COVERED_LOOKUP_SIZE`](../../src/wallet/decoy_selection.rs), and shuffle the
+   complete list.
+6. Make exactly one `get_outputs_by_locators` call for the send attempt.
+7. Verify policy version, snapshot height and hash, response cardinality,
+   locator validity, request order, and each real output's public key and
+   commitment.
+8. Remove real outputs from the candidate set. Exclude outputs that are too
+   young or still locked at the transaction height, and deduplicate public keys.
+9. Shuffle the eligible candidates and allocate `ring_size - 1` decoys per
+   input without reuse anywhere else in the transaction. Choose each real
+   position independently and uniformly.
+10. Build and sign from the prepared inputs and allocated rings. The build step
+    must not reselect inputs or choose different decoys.
+
+Every final ring member, including every real member, is therefore contained in
+the node-observed covered request. The old candidate-set subtraction attack has
+no outside-the-request real member to identify.
+
+---
+
+## 6. Gamma age policy
+
+The wallet module is the single source of truth for:
+
+- [`DECOY_GAMMA_SHAPE`](../../src/wallet/decoy_selection.rs);
+- [`DECOY_GAMMA_SCALE`](../../src/wallet/decoy_selection.rs);
+- bounded age resampling;
+- conversion from sampled seconds to blocks using
+  [`TARGET_BLOCK_TIME`](../../src/constants.rs);
+- nearest non-empty-height selection;
+- fixed covered-request size.
+
+A sampled age is measured at the transaction height (`snapshot_height + 1`),
+not at the snapshot block itself. This keeps wallet eligibility aligned with
+`min_output_age_at_height(current_height)` and avoids rejecting the newest output
+that has just reached the age floor.
+
+The policy starts from the public log-gamma fit used as CoinCync's bootstrap
+profile. It is not claimed to be an empirical fit to CoinCync spends. Changing
+its parameters or mapping requires a versioned policy rollout and independent
+distribution review.
+
+---
+
+## 7. Eligibility and uniqueness
+
+A resolved output may be used as a decoy only when all of the following hold at
+the transaction height:
+
+1. its age meets `min_output_age_at_height`;
+2. its optional `lock_height` has passed;
+3. its locator is not one of the transaction's real locators;
+4. its public key is not a real input key and has not already been selected;
+5. it came from the single validated covered response.
+
+Decoys are unique across all inputs in one transaction, not merely within each
+ring. Consensus still independently verifies ring-member existence, maturity,
+locks, signatures, and commitments.
+
+---
+
+## 8. Fail-closed behavior
+
+The wallet aborts without a second covered lookup when any of these occur:
+
+- unsupported locator policy version;
+- malformed or non-monotonic distribution buckets;
+- duplicate or out-of-range real locator;
+- too many inputs for the fixed covered request;
+- stale snapshot hash;
+- partial, reordered, or metadata-mismatched response;
+- a real locator resolving to a different public key or commitment;
+- too few eligible unique candidates.
+
+There is no uniform-selection fallback, partial-response reuse, silent input
+reselection, retry with the same real locators, or `get_decoys` fallback.
+Repeated covered requests would make request-intersection analysis possible, so
+a failed send attempt discards the snapshot and candidate set.
+
+---
+
+## 9. Reorganizations and storage semantics
+
+A normal chain extension leaves a snapshot valid. A reorg that replaces its
+anchor block makes resolution fail before the wallet accepts output data. The
+wallet synchronizes and the user retries with a fresh snapshot.
+
+Wallet rewind removes owned outputs from disconnected blocks; replacement scans
+compute new locators. Outputs below the fork retain their locators because the
+canonical prefix is unchanged.
+
+`UtxoSet::apply_batch` is sequential in memory while readers are excluded by the
+chain write lock. It is not a transactional, panic-rollback boundary. Documentation
+and reviews must not describe it as atomically recoverable across a panic.
+
+---
+
+## 10. Residual privacy limits
+
+The resolving node sees a timestamped 128-output superset and may correlate it
+with a later transaction. The design removes the deterministic set-difference
+leak; it does not provide private information retrieval. Statistical spend-age
+heuristics inherent to ring signatures also remain. Running a local node and
+using privacy-preserving network transport are still preferable.
+
+---
+
+## 11. Conformance checklist
+
+A decoy-selection change must preserve all of the following:
+
+- wallet-owned randomness and gamma sampling;
+- one snapshot-bound covered lookup containing every real locator;
+- exact response validation with no fallback;
+- transaction-wide decoy uniqueness;
+- minimum-age evaluation at `snapshot_height + 1`;
+- deterministic canonical locator ordering and reorg removal;
+- focused tests for distribution conditioning, locator bounds, stale/malformed
+  responses, and multi-input uniqueness;
+- removal of stale `get_decoys` callers and documentation in the same change.

@@ -68,9 +68,12 @@ The `POST /rpc` proxy enforces a read-only allowlist over the underlying jsonrps
 - `get_privacy_stats`, `get_shielded_anchor`, `get_spark_anchor`
 - `get_block_by_height`, `get_block`, `get_block_range`
 - `get_peers`, `get_mempool_info`
-- `is_nullifier_spent`, `is_spark_serial_spent`, `get_decoys`
+- `is_nullifier_spent`, `is_spark_serial_spent`
+- `get_decoy_distribution`, `get_outputs_by_locators`
 - `get_transaction`, `get_asset_info` (both currently `NotImplemented` stubs)
 - Forward-compat reservations: `health`, `rpc.discover`, `get_block_count`, etc.
+
+`get_decoys` is deliberately absent. Direct JSON-RPC calls receive a stable deprecation error so old clients cannot silently continue node-owned decoy selection.
 
 **Blocked (write or sensitive):**
 

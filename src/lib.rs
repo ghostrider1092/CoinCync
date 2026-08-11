@@ -11,7 +11,7 @@
 // as `error[E0275]: overflow evaluating the requirement`; the compiler
 // itself suggests this fix. Remove once tari_bulletproofs_plus 0.5+
 // is adopted (blocked on utoipa-swagger-ui 9.0.2 compat).
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 #![doc = "CoinCync 1.0 — compliant privacy cryptocurrency with CPU-only proof of work."]
 
 // ── Foundation ──────────────────────────────────────────────
@@ -28,6 +28,7 @@ mod kani_proofs;
 pub mod prelude;
 
 // ── Primitives + types ──────────────────────────────────────
+pub mod decoy;
 pub mod primitives;
 pub mod transaction;
 

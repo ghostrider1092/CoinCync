@@ -11,6 +11,7 @@ use crate::crypto::{
     is_output_ours, BlindingFactor, PedersenCommitment, PublicPoint, SecretScalar, StealthAddress,
 };
 use crate::db::{OwnedOutput, ScanState, WalletDb};
+use crate::decoy::{canonical_output_locators, OutputLocator};
 use crate::error::Result;
 use crate::primitives::{hash_domain, Hash, KeyImage, PublicKey, SecretKey};
 use crate::transaction::{Transaction, TxOutput, TxType};
@@ -240,6 +241,8 @@ pub struct DecryptedOutput {
     pub tx_hash: Hash,
     /// Output index
     pub output_index: u8,
+    /// Canonical output location when the enclosing block is known.
+    pub output_locator: Option<OutputLocator>,
     /// The raw output
     pub output: TxOutput,
     /// Decrypted amount
@@ -262,6 +265,7 @@ impl std::fmt::Debug for DecryptedOutput {
         f.debug_struct("DecryptedOutput")
             .field("tx_hash", &self.tx_hash)
             .field("output_index", &self.output_index)
+            .field("output_locator", &self.output_locator)
             .field("amount", &"[REDACTED]")
             .field("shared_secret", &"[REDACTED]")
             .field("key_epoch", &self.key_epoch)
@@ -651,6 +655,7 @@ impl WalletScanner {
                     return Some(DecryptedOutput {
                         tx_hash,
                         output_index,
+                        output_locator: None,
                         output: output.clone(),
                         amount,
                         blinding_factor: BlindingFactor::zero(),
@@ -681,6 +686,7 @@ impl WalletScanner {
                     return Some(DecryptedOutput {
                         tx_hash,
                         output_index,
+                        output_locator: None,
                         output: output.clone(),
                         amount,
                         blinding_factor: BlindingFactor::zero(),
@@ -794,6 +800,7 @@ impl WalletScanner {
                 return Some(DecryptedOutput {
                     tx_hash,
                     output_index,
+                    output_locator: None,
                     output: output.clone(),
                     amount,
                     blinding_factor,
@@ -898,9 +905,24 @@ impl WalletScanner {
         );
         self.stats.blocks_scanned += 1;
 
+        let locators = canonical_output_locators(
+            height,
+            block.transactions.iter().flat_map(|tx| {
+                let tx_hash = tx.hash();
+                tx.outputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, _)| u8::try_from(index).ok().map(|i| (tx_hash, i)))
+            }),
+        );
         let mut all_found = Vec::new();
         for tx in &block.transactions {
-            let found = self.scan_transaction(tx);
+            let mut found = self.scan_transaction(tx);
+            for output in &mut found {
+                output.output_locator = locators
+                    .get(&(output.tx_hash, output.output_index))
+                    .copied();
+            }
             all_found.extend(found);
         }
 
@@ -1011,7 +1033,15 @@ impl WalletScanner {
             .par_iter()
             .map(|block| {
                 let mut block_results = Vec::new();
-                let _block_hash = block.hash();
+                let locators = canonical_output_locators(
+                    block.height(),
+                    block.transactions.iter().flat_map(|tx| {
+                        let tx_hash = tx.hash();
+                        tx.outputs.iter().enumerate().filter_map(move |(index, _)| {
+                            u8::try_from(index).ok().map(|i| (tx_hash, i))
+                        })
+                    }),
+                );
 
                 // Scan all transactions (coinbase is first tx)
                 for tx in &block.transactions {
@@ -1022,9 +1052,10 @@ impl WalletScanner {
                         if idx > 255 {
                             break;
                         }
-                        if let Some(decrypted) =
+                        if let Some(mut decrypted) =
                             scan_output_with_keys(output, idx as u8, tx_hash, &keys, is_coinbase)
                         {
+                            decrypted.output_locator = locators.get(&(tx_hash, idx as u8)).copied();
                             block_results.push(decrypted);
                         }
                     }
@@ -1098,6 +1129,7 @@ fn scan_output_with_keys(
                 return Some(DecryptedOutput {
                     tx_hash,
                     output_index,
+                    output_locator: None,
                     output: output.clone(),
                     amount,
                     blinding_factor: BlindingFactor::zero(),
@@ -1130,6 +1162,7 @@ fn scan_output_with_keys(
                 return Some(DecryptedOutput {
                     tx_hash,
                     output_index,
+                    output_locator: None,
                     output: output.clone(),
                     amount,
                     blinding_factor: BlindingFactor::zero(),
@@ -1218,6 +1251,7 @@ fn scan_output_with_keys(
             return Some(DecryptedOutput {
                 tx_hash,
                 output_index,
+                output_locator: None,
                 output: output.clone(),
                 amount,
                 blinding_factor,
@@ -1682,6 +1716,7 @@ pub fn decrypted_to_utxo(
     Ok(crate::wallet::balance::UTXO {
         tx_hash: decrypted.tx_hash,
         output_index: decrypted.output_index,
+        output_locator: decrypted.output_locator,
         amount: Amount::from_atomic(decrypted.amount),
         height,
         key_image,
@@ -2373,6 +2408,22 @@ mod tests {
             "Bob should find 1 output (the transfer)"
         );
         assert_eq!(bob_found[0].amount, send_amount);
+        let expected_locators = canonical_output_locators(
+            10,
+            block.transactions.iter().flat_map(|tx| {
+                let tx_hash = tx.hash();
+                tx.outputs
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, _)| (tx_hash, index as u8))
+            }),
+        );
+        assert_eq!(
+            bob_found[0].output_locator,
+            expected_locators
+                .get(&(bob_found[0].tx_hash, bob_found[0].output_index))
+                .copied()
+        );
     }
 
     /// Ghost-balance defense for the parallel scan path.

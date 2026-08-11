@@ -26,8 +26,10 @@
 //! to the finding doc for context. Coverage upgrades (to real
 //! integration tests) are tracked in the v1.0.13 ROADMAP.
 
+use coincync::constants::{min_output_age_at_height, MIN_OUTPUT_AGE_HARDFORK_HEIGHT};
 use coincync::network::sync::ChainSync;
 use coincync::prelude::Hash;
+use coincync::wallet::send::SpendContext;
 
 // ── Finding #1 — silent mempool eviction ────────────────────────────
 //
@@ -53,40 +55,46 @@ fn regression_finding_01_mempool_calls_full_validator_at_admission() {
     // The fix is: add_with_chain calls `chain.validate_transaction(&tx)`
     // BEFORE the inner `add`. Without this, height-gated rules are
     // missed at admission and the tx is silently evicted later.
-    // The fix's exact sequence: validator call immediately followed by
-    // the inner add. Searching for this multi-line substring pins the
-    // ordering inside add_with_chain specifically, without confusing
-    // `self.write_lock().add(tx)` calls elsewhere in mempool.rs (e.g.
-    // re-admission paths, async wrappers).
+    // Generation-aware admission may check the chain generation and the
+    // validation result before insertion. Pin both operations to
+    // add_with_chain and verify that full validation still precedes add.
     let mempool_rs = include_str!("../src/mempool.rs");
-    let fix_sequence = "chain.validate_transaction(&tx)?;\n        self.write_lock().add(tx)";
+    let add_with_chain = mempool_rs
+        .split_once("pub fn add_with_chain(")
+        .map(|(_, tail)| tail)
+        .and_then(|tail| {
+            tail.split_once("/// Re-admit transactions")
+                .map(|(body, _)| body)
+        })
+        .expect("SharedMempool::add_with_chain source must remain present");
+    let validation = add_with_chain
+        .find("chain.validate_transaction(tx)")
+        .expect("add_with_chain must run full chain validation");
+    let insertion = add_with_chain
+        .find("mempool.add(tx)")
+        .expect("add_with_chain must insert the validated transaction");
     assert!(
-        mempool_rs.contains(fix_sequence),
-        "Finding #1 regression: Mempool::add_with_chain must have \
-         `chain.validate_transaction(&tx)?;` followed immediately by \
-         `self.write_lock().add(tx)`. Either the validator call was \
-         removed/reordered, or a separator was inserted between them \
-         that changed evaluation semantics. See \
+        validation < insertion,
+        "Finding #1 regression: Mempool::add_with_chain must validate \
+         the transaction against the chain before inserting it. See \
          docs/crucible/cycle-01/finding-01-silent-mempool-eviction.md."
     );
 }
 
 #[test]
-fn regression_finding_01_wallet_passes_min_age_to_get_decoys() {
-    // Companion to the mempool fix above. The wallet must pass
-    // `min_output_age_at_height(current_height)` (not 0) as the
-    // get_decoys RPC's min_age filter — without this, the wallet
-    // builds rings with immature coinbase decoys that pass the
-    // crypto check but fail the full validator.
-    let wallet_rs = include_str!("../src/bin/wallet.rs");
-    assert!(
-        wallet_rs.contains("min_output_age_at_height(current_height)"),
-        "Finding #1 regression: src/bin/wallet.rs must pass \
-         min_output_age_at_height(current_height) to get_decoys. \
-         Passing 0 (the original bug) caused every send on a fresh \
-         chain to silently evict. See \
-         docs/crucible/cycle-01/finding-01-silent-mempool-eviction.md"
-    );
+fn regression_finding_01_spend_context_preserves_target_height_min_age() {
+    // Decoy allocation receives its maturity floor from the spend context
+    // rather than the retired RPC. Verify the public context at the initial
+    // and activation heights so a zero or stale age cannot reach covered
+    // allocation.
+    for target_height in [0, MIN_OUTPUT_AGE_HARDFORK_HEIGHT] {
+        let context = SpendContext::for_target_height(target_height);
+        let expected_min_age = min_output_age_at_height(target_height);
+
+        assert_eq!(context.target_height(), target_height);
+        assert_eq!(context.min_output_age(), expected_min_age);
+        assert_ne!(context.min_output_age(), 0);
+    }
 }
 
 // ── Finding #2 — `--no-peers` silently kills `--addnode` ────────────

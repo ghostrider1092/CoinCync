@@ -9,14 +9,17 @@
 pub mod background_sync;
 pub mod balance;
 pub mod churn;
+pub mod decoy_selection;
 pub mod history;
 pub mod key_epoch;
 pub mod keys;
 pub mod mnemonic;
 pub mod multisig;
+pub mod node_rpc;
 pub mod persistence;
 pub mod scanner;
 pub mod send;
+pub mod spend;
 pub mod subaddress;
 pub mod wallet_keys;
 // `lightsync` is the SPV path. Network handler for `GetOutputDigests`

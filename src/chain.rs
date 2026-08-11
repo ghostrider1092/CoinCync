@@ -9,11 +9,14 @@ use std::sync::Arc;
 use crate::config::NetworkType;
 use crate::consensus::{calculate_difficulty, max_target, Block, DifficultyBlock};
 use crate::db::{ChainStateData, Database, OutputIndexEntry};
+use crate::decoy::{
+    DecoyDistributionSnapshot, OutputLocator, ResolvedDecoySnapshot, DECOY_LOCATOR_POLICY_VERSION,
+};
 use crate::emission::calculate_block_reward;
 use crate::error::{Error, Result};
 use crate::primitives::{Hash, KeyImage};
 use crate::storage::UtxoSet;
-use crate::transaction::{DecoyOutput, Transaction};
+use crate::transaction::Transaction;
 
 /// Auto-checkpoint interval: record a checkpoint every N blocks
 /// Checkpoint interval: every 5 blocks (~10 minutes at 120s block time).
@@ -1194,6 +1197,69 @@ impl Blockchain {
     /// Get the number of available (unspent) outputs in the UTXO set
     pub fn available_output_count(&self) -> usize {
         self.inner.read().utxos.output_count()
+    }
+
+    pub fn decoy_distribution_snapshot(&self) -> DecoyDistributionSnapshot {
+        let inner = self.inner.read();
+        DecoyDistributionSnapshot {
+            snapshot_height: inner.tip.height,
+            snapshot_hash: inner.tip.hash,
+            policy_version: DECOY_LOCATOR_POLICY_VERSION,
+            heights: inner.utxos.output_distribution(inner.tip.height),
+        }
+    }
+
+    pub fn resolve_decoy_snapshot(
+        &self,
+        snapshot_height: u64,
+        snapshot_hash: Hash,
+        policy_version: u16,
+        locators: &[OutputLocator],
+    ) -> Result<ResolvedDecoySnapshot> {
+        if policy_version != DECOY_LOCATOR_POLICY_VERSION {
+            return Err(Error::InvalidParams(format!(
+                "unsupported decoy locator policy version {policy_version}"
+            )));
+        }
+        if locators.len() > 256 {
+            return Err(Error::InvalidParams(
+                "decoy locator request exceeds 256 outputs".into(),
+            ));
+        }
+
+        let inner = self.inner.read();
+        if snapshot_height > inner.tip.height {
+            return Err(Error::InvalidState(format!(
+                "decoy snapshot height {snapshot_height} is above canonical tip {}",
+                inner.tip.height
+            )));
+        }
+        let canonical_hash = inner
+            .height_to_hash
+            .get(&snapshot_height)
+            .copied()
+            .or_else(|| {
+                self.db
+                    .as_ref()
+                    .and_then(|db| db.blocks.get_hash_by_height(snapshot_height).ok().flatten())
+            })
+            .ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "canonical block hash unavailable at height {snapshot_height}"
+                ))
+            })?;
+        if canonical_hash != snapshot_hash {
+            return Err(Error::InvalidState(format!(
+                "decoy snapshot hash mismatch at height {snapshot_height}"
+            )));
+        }
+
+        Ok(ResolvedDecoySnapshot {
+            snapshot_height,
+            snapshot_hash,
+            policy_version,
+            outputs: inner.utxos.resolve_output_locators(locators)?,
+        })
     }
 
     /// Validate a transaction against the current UTXO set
@@ -3316,28 +3382,6 @@ impl Blockchain {
         } else {
             false
         }
-    }
-
-    /// Get decoy outputs for ring signatures
-    ///
-    /// Selects random outputs from the UTXO set to use as ring members,
-    /// providing unlinkability for the real input being spent.
-    pub fn get_decoy_outputs(&self, count: usize, min_age: u64) -> Vec<DecoyOutput> {
-        let inner = self.inner.read();
-        let current_height = inner.tip.height;
-        // SECURITY: ring decoy selection uses OsRng and the canonical V1
-        // policy in storage::UtxoSet::select_decoys.
-        let mut rng = rand::rngs::OsRng;
-        inner
-            .utxos
-            .select_decoys(current_height, min_age, count, &mut rng)
-            .into_iter()
-            .map(|oref| DecoyOutput {
-                public_key: oref.output.stealth_address,
-                commitment: oref.output.commitment,
-                height: oref.height,
-            })
-            .collect()
     }
 
     /// Get target height (for sync progress, updated by P2P layer)

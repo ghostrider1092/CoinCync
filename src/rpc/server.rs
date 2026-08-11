@@ -32,9 +32,11 @@ use tower_http::validate_request::{ValidateRequest, ValidateRequestHeaderLayer};
 use tracing::{info, warn};
 
 use crate::chain::SharedBlockchain;
+use crate::decoy::OutputLocator;
 use crate::error::{Error, Result};
 use crate::mempool::SharedMempool;
 use crate::network::P2PNode;
+use crate::primitives::Hash;
 
 /// RPC server configuration.
 #[derive(Clone)]
@@ -1548,34 +1550,38 @@ pub async fn start_rpc_server(
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── get_decoys ────────────────────────────────────────────
-    // Wallet calls this when building a CLSAG ring signature to
-    // get decoy outputs for the ring. Params: (count, min_age).
+    // Deprecated node-selected decoy surface. Wallets construct covered,
+    // snapshot-bound locator requests through the replacement methods below.
     module
-        .register_method("get_decoys", |params, state, _ext| {
-            let (count, min_age): (usize, u64) =
-                params.parse().map_err(|e: ErrorObjectOwned| {
-                    ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-                })?;
-            let capped = count.min(256); // sanity cap
-                                         // Layer 2: the in-memory canonical UTXO index applies
-                                         // the V1 age policy; wrap the scan in block_in_place.
-            let decoys =
-                tokio::task::block_in_place(|| state.chain.get_decoy_outputs(capped, min_age));
-            let encoded: Vec<Value> = decoys
-                .iter()
-                .map(|d| {
-                    json!({
-                        "public_key": hex::encode(d.public_key.as_bytes()),
-                        "commitment": hex::encode(d.commitment),
-                        "height": d.height,
-                    })
-                })
-                .collect();
-            Ok::<_, ErrorObjectOwned>(json!({
-                "count": encoded.len(),
-                "decoys": encoded,
-            }))
+        .register_method("get_decoys", |_params, _state, _ext| {
+            Err::<Value, _>(ErrorObjectOwned::owned(
+                -32004,
+                "get_decoys is deprecated; use get_decoy_distribution and get_outputs_by_locators",
+                None::<()>,
+            ))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
+    module
+        .register_blocking_method("get_decoy_distribution", |_params, state, _ext| {
+            Ok::<_, ErrorObjectOwned>(state.chain.decoy_distribution_snapshot())
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
+    module
+        .register_blocking_method("get_outputs_by_locators", |params, state, _ext| {
+            let (snapshot_height, snapshot_hash, policy_version, locators): (
+                u64,
+                Hash,
+                u16,
+                Vec<OutputLocator>,
+            ) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("bad params: {e}"), None::<()>)
+            })?;
+            state
+                .chain
+                .resolve_decoy_snapshot(snapshot_height, snapshot_hash, policy_version, &locators)
+                .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
