@@ -95,6 +95,15 @@ impl BlockValidation {
     }
 }
 
+/// Returns whether the v1.0.12 tightening rules are active for a network and height.
+#[inline]
+pub const fn v1_0_12_rules_active(network: crate::config::NetworkType, height: u64) -> bool {
+    match network {
+        crate::config::NetworkType::Mainnet | crate::config::NetworkType::Regtest => true,
+        crate::config::NetworkType::Testnet => height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT,
+    }
+}
+
 /// Validate a block.
 ///
 /// If `checkpoint_height` is Some and the block height is at or below it,
@@ -181,6 +190,8 @@ pub fn validate_block_with_checkpoint_for_network(
     if !check_block_consensus_checkpoint(block, &mut result) {
         return Ok(result);
     }
+
+    let v1_0_12_active = v1_0_12_rules_active(expected_network, block.height());
 
     // Determine if we're in fast-sync mode (below checkpoint)
     let fast_sync_requested = checkpoint_height
@@ -383,7 +394,6 @@ pub fn validate_block_with_checkpoint_for_network(
             // accepted longer payloads and used only the first 8
             // bytes — bounded chain bloat that compounds across every
             // block forever. Tightened at HARD_FORK_V1_0_12_HEIGHT.
-            let v1_0_12_active = block.header.height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT;
             for (idx, output) in coinbase.outputs.iter().enumerate() {
                 // Extract declared amount from encrypted_amount field
                 // (coinbase uses plaintext amount since reward is public)
@@ -544,7 +554,7 @@ pub fn validate_block_with_checkpoint_for_network(
     // (effectively random); no honest block was ever produced with a
     // clash. Activation deferred until HARD_FORK_V1_0_12_HEIGHT is
     // set away from u64::MAX in a coordinated deploy.
-    if block.header.height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+    if v1_0_12_active {
         let mut seen_block_outputs = std::collections::HashSet::new();
         for (tx_idx, tx) in block.transactions.iter().enumerate() {
             for (out_idx, output) in tx.outputs.iter().enumerate() {
@@ -687,7 +697,8 @@ pub fn validate_block_with_checkpoint_for_network(
                     return Some((idx, "Multiple coinbase transactions".to_string()));
                 }
 
-                match validate_transaction(tx, utxos, block.height()) {
+                match validate_transaction_for_network(tx, utxos, block.height(), expected_network)
+                {
                     Ok(_) => None,
                     Err(e) => Some((idx, e.to_string())),
                 }
@@ -1197,6 +1208,22 @@ fn target_to_u128(bytes: &[u8; 32]) -> u128 {
     )
 )]
 pub fn validate_transaction(tx: &Transaction, utxos: &UtxoSet, current_height: u64) -> Result<()> {
+    #[cfg(feature = "testnet")]
+    let expected_network = crate::config::NetworkType::Testnet;
+    #[cfg(not(feature = "testnet"))]
+    let expected_network = crate::config::NetworkType::Mainnet;
+
+    validate_transaction_for_network(tx, utxos, current_height, expected_network)
+}
+
+/// Validate a transaction using the activation schedule for `expected_network`.
+pub fn validate_transaction_for_network(
+    tx: &Transaction,
+    utxos: &UtxoSet,
+    current_height: u64,
+    expected_network: crate::config::NetworkType,
+) -> Result<()> {
+    let v1_0_12_active = v1_0_12_rules_active(expected_network, current_height);
     // AUDIT (2026-06-30 H1): the previous single-function form was 640
     // lines and reviewer-hostile. Broken into named sub-checks. Evaluation
     // order and error types are BIT-IDENTICAL to the previous flow — this
@@ -1222,12 +1249,12 @@ pub fn validate_transaction(tx: &Transaction, utxos: &UtxoSet, current_height: u
     }
 
     check_tx_v2_activation(tx, current_height)?;
-    check_tx_input_output_counts(tx, current_height)?;
+    check_tx_input_output_counts(tx, v1_0_12_active)?;
     check_tx_io_ratio_legacy(tx)?;
     check_tx_uniform_shape(tx, current_height)?;
     check_tx_no_double_spend(tx, utxos)?;
-    check_tx_ring_members(tx, utxos, current_height)?;
-    check_tx_ring_size_and_unique_members(tx, utxos, current_height)?;
+    check_tx_ring_members(tx, utxos, current_height, v1_0_12_active)?;
+    check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
     check_tx_ring_signatures(tx)?;
     check_tx_range_proofs(tx, current_height)?;
     check_tx_balance_proof(tx)?;
@@ -1283,9 +1310,8 @@ fn check_tx_v2_activation(tx: &Transaction, current_height: u64) -> Result<()> {
 
 /// Non-empty inputs + outputs, both within `MAX_TX_INPUTS`/`MAX_TX_OUTPUTS`.
 ///
-/// `current_height` is used for the v1.0.12 audit-follow-up #4 fork gate
-/// on encrypted_amount + encrypted_memo per-output size checks.
-fn check_tx_input_output_counts(tx: &Transaction, current_height: u64) -> Result<()> {
+/// `v1_0_12_active` gates the encrypted_amount and encrypted_memo size checks.
+fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Result<()> {
     if tx.inputs.is_empty() {
         return Err(Error::InvalidInputCount {
             count: 0,
@@ -1314,7 +1340,7 @@ fn check_tx_input_output_counts(tx: &Transaction, current_height: u64) -> Result
     //
     // Strictly tightening: any tx valid under this check is also
     // valid under the pre-fork rule. Honest wallets unaffected.
-    if current_height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+    if v1_0_12_active {
         for (out_idx, output) in tx.outputs.iter().enumerate() {
             // v1.0.12 #3/8 (cf. commit 9c8633e7): encrypted_amount must be
             // exactly 8 bytes post-fork.
@@ -1542,7 +1568,12 @@ fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
 /// dup-stealth-address check on tx.outputs at the top of this function,
 /// since we already have (tx, utxos, current_height) in scope here. See
 /// the inline docstring below for the full rationale.
-fn check_tx_ring_members(tx: &Transaction, utxos: &UtxoSet, current_height: u64) -> Result<()> {
+fn check_tx_ring_members(
+    tx: &Transaction,
+    utxos: &UtxoSet,
+    current_height: u64,
+    v1_0_12_active: bool,
+) -> Result<()> {
     // v1.0.12 #5/8 (backport of v1.0.12-release 5aeb27dd): reject
     // duplicate stealth addresses across this tx's outputs AND
     // collisions with any existing on-chain output's stealth address.
@@ -1582,7 +1613,7 @@ fn check_tx_ring_members(tx: &Transaction, utxos: &UtxoSet, current_height: u64)
     // The cross-tx-WITHIN-BLOCK variant (two distinct txs in the same
     // block each creating an output with the same stealth address) is
     // covered by item #2/8 (commit 1cc2f1f4) at block-validation level.
-    if current_height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+    if v1_0_12_active {
         let mut seen_outputs_in_tx = std::collections::HashSet::with_capacity(tx.outputs.len());
         for (out_idx, output) in tx.outputs.iter().enumerate() {
             let addr_bytes = *output.stealth_address.as_bytes();
@@ -1761,6 +1792,7 @@ fn check_tx_ring_size_and_unique_members(
     tx: &Transaction,
     utxos: &UtxoSet,
     current_height: u64,
+    v1_0_12_active: bool,
 ) -> Result<()> {
     for (input_idx, input) in tx.inputs.iter().enumerate() {
         // v1.0.12 #6/8 (backport of v1.0.12-release 1d27d3c8): use
@@ -1816,7 +1848,7 @@ fn check_tx_ring_size_and_unique_members(
         // testnet has been lucky so far (no archival/pruned-node mix
         // observed live), but mainnet at launch would absolutely have
         // both. This must activate by mainnet GA (2026-10-01).
-        let available = if current_height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT {
+        let available = if v1_0_12_active {
             utxos.total_outputs_ever() as usize
         } else {
             utxos.output_count()
