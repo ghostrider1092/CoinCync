@@ -168,6 +168,14 @@ enum Command {
         /// you'll pay a large fee. Used by the testnet faucet's onboarding flow.
         #[arg(long, default_value = "false")]
         split_output: bool,
+        /// Mark the recipient as a subaddress. Subaddress outputs use tx pubkey
+        /// R = r*D_i so the recipient can detect/spend them against their
+        /// published view key C_i = a*D_i. Set this ONLY when `--to-view` is a
+        /// subaddress view key (C_i); a main-address send must leave it off
+        /// (default). Sending to a subaddress WITHOUT this flag produces an
+        /// output the recipient cannot detect or spend.
+        #[arg(long, default_value = "false")]
+        subaddress: bool,
         /// Optional plaintext memo (max 256 bytes). Encrypted on the
         /// first recipient output using the recipient's view key —
         /// only the recipient can decrypt. Useful for human-readable
@@ -526,6 +534,7 @@ async fn main() {
             amount,
             fee_multiplier,
             split_output,
+            subaddress,
             memo,
             recovery_address,
             recovery_timeout,
@@ -538,6 +547,7 @@ async fn main() {
                 amount,
                 fee_multiplier,
                 split_output,
+                subaddress,
                 memo,
                 recovery_address,
                 recovery_timeout,
@@ -1256,6 +1266,7 @@ async fn cmd_scan(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_send(
     path: &PathBuf,
     password: Option<String>,
@@ -1264,6 +1275,7 @@ async fn cmd_send(
     amount: u64,
     fee_multiplier: f64,
     split_output: bool,
+    is_subaddress: bool,
     memo: Option<String>,
     recovery_address_hex: Option<String>,
     recovery_timeout: Option<u64>,
@@ -1351,17 +1363,17 @@ async fn cmd_send(
             "  Drip-pair:       split {} -> {} + {} (both to recipient)",
             amount, half_a, half_b
         );
-        // Trailing `false` = main-address form (R = r*G). The legacy CLI takes
-        // raw spend/view hex, not a typed Address, so it cannot know whether a
-        // destination is a subaddress; it therefore supports main-address sends
-        // only. Send to subaddresses via the v2 CLI / wallet API (which parse a
-        // typed Address and set the subaddress flag).
+        // Trailing bool = subaddress flag (from --subaddress). When set, the
+        // destination is a subaddress (--to-view is C_i = a*D_i) and outputs use
+        // R = r*D_i so the recipient can detect/spend them; false = main address
+        // (R = r*G). The caller is responsible for setting it correctly since
+        // the CLI takes raw spend/view hex, not a typed Address.
         vec![
-            (to_spend, to_view, Amount::from_atomic(half_a), false),
-            (to_spend, to_view, Amount::from_atomic(half_b), false),
+            (to_spend, to_view, Amount::from_atomic(half_a), is_subaddress),
+            (to_spend, to_view, Amount::from_atomic(half_b), is_subaddress),
         ]
     } else {
-        vec![(to_spend, to_view, Amount::from_atomic(amount), false)]
+        vec![(to_spend, to_view, Amount::from_atomic(amount), is_subaddress)]
     };
 
     // Build the optional memo + recovery extra. Memo is bounded at 256

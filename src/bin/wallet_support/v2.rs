@@ -40,6 +40,7 @@ fn run_send_command_v2(cli: Cli) {
         amount,
         fee_multiplier,
         split_output,
+        subaddress,
         memo,
         recovery_address,
         recovery_timeout,
@@ -56,6 +57,7 @@ fn run_send_command_v2(cli: Cli) {
         amount,
         fee_multiplier,
         split_output,
+        subaddress,
         memo,
         recovery_address,
         recovery_timeout,
@@ -88,6 +90,7 @@ struct SendCommandArguments {
     amount: u64,
     fee_multiplier: f64,
     split_output: bool,
+    subaddress: bool,
     memo: Option<String>,
     recovery_address: Option<String>,
     recovery_timeout: Option<u64>,
@@ -103,6 +106,7 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         amount,
         fee_multiplier,
         split_output,
+        subaddress,
         memo,
         recovery_address: recovery_address_hex,
         recovery_timeout,
@@ -123,7 +127,7 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
             "--recovery-address and --recovery-timeout must be passed together".into(),
         );
     }
-    let payments = payments_v2(to_spend, to_view, amount, split_output);
+    let payments = payments_v2(to_spend, to_view, amount, split_output, subaddress);
     let extra = recovery_extra_v2(
         recovery_address_hex.as_deref(),
         recovery_timeout,
@@ -279,31 +283,27 @@ fn payments_v2(
     view_public: coincync::primitives::PublicKey,
     amount: u64,
     split_output: bool,
+    is_subaddress: bool,
 ) -> Vec<coincync::wallet::send::Payment> {
     use coincync::primitives::Amount;
     use coincync::wallet::send::Payment;
 
+    // `is_subaddress` marks the destination as a subaddress (--subaddress): the
+    // output then uses R = r*D_i so the recipient detects it against C_i = a*D_i.
     if split_output {
         let first = amount / 2 + amount % 2;
         let second = amount / 2;
         vec![
-            Payment::new(
-                spend_public,
-                view_public,
-                Amount::from_atomic(first),
-            ),
-            Payment::new(
-                spend_public,
-                view_public,
-                Amount::from_atomic(second),
-            ),
+            Payment::new(spend_public, view_public, Amount::from_atomic(first))
+                .with_subaddress(is_subaddress),
+            Payment::new(spend_public, view_public, Amount::from_atomic(second))
+                .with_subaddress(is_subaddress),
         ]
     } else {
-        vec![Payment::new(
-            spend_public,
-            view_public,
-            Amount::from_atomic(amount),
-        )]
+        vec![
+            Payment::new(spend_public, view_public, Amount::from_atomic(amount))
+                .with_subaddress(is_subaddress),
+        ]
     }
 }
 
