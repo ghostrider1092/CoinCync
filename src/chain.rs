@@ -2721,6 +2721,47 @@ impl Blockchain {
                             });
                     }
 
+                    // SECURITY (REORG-TIP-VALIDATE, 2026-08-13): re-validate the
+                    // triggering (fork-tip) block against the REORGED UTXO state,
+                    // exactly as each fork block was validated in the loop above.
+                    // The tip's only prior consensus validation (in `add_block`,
+                    // ~L1814) ran against the PRE-rewind MAIN-chain UTXO set, which
+                    // does not reflect the fork's spends. Without this re-check, a
+                    // tip that re-spends a key image already consumed by a fork
+                    // block is applied unchecked: `UtxoSet::apply_batch` silently
+                    // no-ops the duplicate key image (mark_key_image_spent returns
+                    // false, not an error) while STILL adding the tip's outputs —
+                    // minting coins from a single input (post-reorg double-spend /
+                    // inflation). We validate here, BEFORE the unconditional
+                    // rollback below, so a failure routes through the same
+                    // proven `reorg_error` cleanup that fork-block failures use.
+                    if reorg_error.is_none() {
+                        let tip_parent = inner.blocks.get(&block.header.prev_hash).cloned();
+                        match crate::consensus::validate_block_with_checkpoint_for_network(
+                            &block,
+                            tip_parent.as_ref(),
+                            &inner.utxos,
+                            None,
+                            self.network,
+                        ) {
+                            Ok(v) if v.valid => {}
+                            Ok(v) => {
+                                let errors = v.errors.join("; ");
+                                tracing::warn!(
+                                    "Reorg tip block {} rejected against reorged state: {}",
+                                    hash.to_hex(),
+                                    errors
+                                );
+                                reorg_error =
+                                    Some(format!("Invalid reorg tip block: {}", errors));
+                            }
+                            Err(e) => {
+                                reorg_error =
+                                    Some(format!("Reorg tip validation error: {}", e));
+                            }
+                        }
+                    }
+
                     // SECURITY (BUG-2/BUG-4): If fork validation failed, rollback to pre-reorg state.
                     // Without this, a failed reorg leaves the chain in a corrupted state:
                     // main-chain blocks disconnected but fork blocks not applied.
