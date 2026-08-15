@@ -874,18 +874,41 @@ fn check_block_privacy_policy(block: &Block, result: &mut BlockValidation) {
     }
 }
 
-/// H6 defense-in-depth: after year 12 (tail phase), the coinbase
-/// reward must not exceed `TAIL_EMISSION`. This is redundant with the
-/// emission curve calculation but catches any future emission-curve bug
-/// that returns too-high values in the tail phase.
+/// H6 defense-in-depth: bound the emission curve's output for this block's
+/// height within `[TAIL_EMISSION, calculate_block_reward(0)]`. This is
+/// redundant with the emission-curve calculation but catches a mis-calibrated
+/// curve:
+///   - a reward BELOW `TAIL_EMISSION` means the curve's tail floor regressed;
+///   - a reward ABOVE the height-0 reward means the curve returned an inflated
+///     value (the emission curve is monotonically non-increasing in height, so
+///     no legitimate reward ever exceeds the genesis reward).
+///
+/// BUGFIX (2026-08-13): the previous form rejected any block past
+/// `BLOCKS_PER_YEAR * 12` whose reward merely exceeded `TAIL_EMISSION`. That
+/// premise was false. The asymptotic curve `(cap - supply) / EMISSION_DIVISOR`
+/// does not decay to `TAIL_EMISSION` (0.6 CYNC) until supply ~= 98.8M CYNC
+/// (~height 8.8M, ~year 33), so from ~height 3.15M (~year 12) onward EVERY
+/// curve-correct block carries a reward > `TAIL_EMISSION` and was rejected — a
+/// permanent, network-wide chain halt. These bounds never reject a
+/// curve-correct reward while still catching a genuinely broken curve.
 fn check_block_tail_supply(block: &Block, expected_reward: Amount, result: &mut BlockValidation) {
-    if block.height() > crate::constants::BLOCKS_PER_YEAR * 12
-        && expected_reward.as_atomic() > crate::constants::TAIL_EMISSION
-    {
+    let reward = expected_reward.as_atomic();
+    if reward < crate::constants::TAIL_EMISSION {
         result.add_error(format!(
-            "Tail phase reward {} exceeds TAIL_EMISSION {} at height {}",
-            expected_reward.as_atomic(),
+            "Emission reward {} below tail floor {} at height {}",
+            reward,
             crate::constants::TAIL_EMISSION,
+            block.height()
+        ));
+    }
+    // The curve is monotonically non-increasing, so the height-0 reward is the
+    // absolute maximum any block may legitimately carry.
+    let genesis_reward = calculate_block_reward(0).as_atomic();
+    if reward > genesis_reward {
+        result.add_error(format!(
+            "Emission reward {} exceeds the height-0 maximum {} at height {} (emission curve must be non-increasing)",
+            reward,
+            genesis_reward,
             block.height()
         ));
     }
@@ -2498,6 +2521,75 @@ mod tests {
         {
             crate::mainnet::mainnet_genesis()
         }
+    }
+
+    fn block_at_height(height: u64) -> Block {
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height,
+            timestamp: 0,
+            prev_hash: Hash::zero(),
+            tx_root: Hash::zero(),
+            anchor: Hash::zero(),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: crate::primitives::PublicKey::from_bytes([0u8; 32]),
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        Block::new(header, vec![])
+    }
+
+    #[test]
+    fn tail_supply_gate_does_not_halt_after_year_12() {
+        // Regression (2026-08-13): the prior tail-supply gate rejected every
+        // curve-correct block past `BLOCKS_PER_YEAR * 12` whose reward exceeded
+        // TAIL_EMISSION. But the asymptotic curve does not decay to the tail
+        // floor until supply ~= 98.8M CYNC (~height 8.8M / ~year 33), so from
+        // ~height 3.15M (~year 12) on, every legitimate block carries a reward
+        // > TAIL_EMISSION and was rejected — a permanent chain halt.
+        let height = crate::constants::BLOCKS_PER_YEAR * 12 + 1;
+        let reward = calculate_block_reward(height);
+        assert!(
+            reward.as_atomic() > crate::constants::TAIL_EMISSION,
+            "precondition: curve reward at year-12 height {} is {} and must still exceed TAIL_EMISSION {} — this is exactly what the old gate wrongly rejected",
+            height,
+            reward.as_atomic(),
+            crate::constants::TAIL_EMISSION
+        );
+        let block = block_at_height(height);
+        let mut result = BlockValidation::ok();
+        check_block_tail_supply(&block, reward, &mut result);
+        assert!(
+            result.valid,
+            "curve-correct reward past year 12 must NOT be rejected (this was the chain-halt bug): {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn tail_supply_gate_rejects_out_of_band_rewards() {
+        let block = block_at_height(crate::constants::BLOCKS_PER_YEAR * 20);
+        // Below the tail floor => the curve's floor guarantee regressed.
+        let mut below = BlockValidation::ok();
+        check_block_tail_supply(
+            &block,
+            Amount::from_atomic(crate::constants::TAIL_EMISSION - 1),
+            &mut below,
+        );
+        assert!(!below.valid, "reward below the tail floor must be rejected");
+        // Above the height-0 maximum => an inflated (non-monotonic) curve.
+        let mut above = BlockValidation::ok();
+        let too_high = calculate_block_reward(0).as_atomic() + 1;
+        check_block_tail_supply(&block, Amount::from_atomic(too_high), &mut above);
+        assert!(
+            !above.valid,
+            "reward above the genesis maximum must be rejected"
+        );
     }
 
     #[test]
