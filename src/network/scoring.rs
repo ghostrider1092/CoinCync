@@ -641,13 +641,26 @@ impl PeerScore {
     pub fn record_empty_blocks_response(&mut self) {
         self.consecutive_empty_blocks = self.consecutive_empty_blocks.saturating_add(1);
         self.last_failure = Some(Instant::now());
-        // Modest reputation hit per empty reply; the harder consequence is
-        // the GetBlocks-selection ban below. -15 each so a normal "different
-        // fork" empty (1-2 of them) doesn't permanently demote a peer.
-        self.adjust_reputation(-15);
         if self.consecutive_empty_blocks >= EMPTY_BLOCKS_BAN_THRESHOLD {
             self.get_blocks_banned_until =
                 Some(Instant::now() + Duration::from_secs(EMPTY_BLOCKS_BAN_DURATION_SECS));
+            // ECLIPSE FIX (pre-mainnet review #4, 2026-08-13): charge reputation
+            // ONLY at/after the GetBlocks-ban threshold, never for the earlier
+            // empties. An empty `Blocks` reply is not provable misbehavior — an
+            // honest peer legitimately returns empty for hashes it doesn't have,
+            // and during IBD the requested hashes are frequently *speculative*
+            // (derived from ANOTHER peer's unvalidated headers and fanned across
+            // all peers by send_block_spans). The prior code charged -15 for
+            // EVERY empty, so a single peer feeding fabricated headers could
+            // drive honest bystanders past the -50 `should_ban` floor and out of
+            // the peer set — an eclipse vector. A peer that keeps replying empty
+            // even AFTER being de-prioritized for GetBlocks selection is
+            // genuinely unhelpful, so from the threshold on we do charge
+            // reputation (a pure-empty peer is still eventually disconnected).
+            // Honest peers reset `consecutive_empty_blocks` via
+            // `record_block_success` on any real delivery, so they effectively
+            // never reach this branch.
+            self.adjust_reputation(-15);
         }
     }
 
@@ -1157,6 +1170,48 @@ mod tests {
         assert!(
             score.get_blocks_banned_until.is_none(),
             "ban field cleared on expiry"
+        );
+    }
+
+    #[test]
+    fn sub_threshold_empty_blocks_do_not_erode_reputation() {
+        // ECLIPSE regression (pre-mainnet review #4): empty `Blocks` replies
+        // below the GetBlocks-ban threshold must NOT reduce reputation, so a
+        // peer fed speculative / fabricated hashes cannot be driven to the -50
+        // `should_ban` disconnect floor by empties alone. (Pre-fix: -15 per
+        // empty => 4 empties disconnected an honest bystander.)
+        let mut score = PeerScore::default();
+        let start_rep = score.reputation;
+        for _ in 0..(EMPTY_BLOCKS_BAN_THRESHOLD - 1) {
+            score.record_empty_blocks_response();
+        }
+        assert_eq!(
+            score.reputation, start_rep,
+            "sub-threshold empty replies must not erode reputation"
+        );
+        assert!(
+            !score.should_ban(),
+            "an honest peer must not be disconnect-eligible from empties alone"
+        );
+    }
+
+    #[test]
+    fn persistent_empty_only_peer_still_disconnects() {
+        // The eclipse fix must NOT let a peer that only ever sends empties evade
+        // consequences: past the ban threshold each further empty costs
+        // reputation, so a pure-empty peer is both GetBlocks-banned and
+        // eventually disconnect-eligible.
+        let mut score = PeerScore::default();
+        for _ in 0..40 {
+            score.record_empty_blocks_response();
+        }
+        assert!(
+            score.is_get_blocks_banned(),
+            "a pure-empty peer must be banned from GetBlocks selection"
+        );
+        assert!(
+            score.should_ban(),
+            "a peer that only ever sends empties must eventually be disconnect-eligible"
         );
     }
 
