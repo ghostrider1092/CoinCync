@@ -1351,12 +1351,17 @@ async fn cmd_send(
             "  Drip-pair:       split {} -> {} + {} (both to recipient)",
             amount, half_a, half_b
         );
+        // Trailing `false` = main-address form (R = r*G). The legacy CLI takes
+        // raw spend/view hex, not a typed Address, so it cannot know whether a
+        // destination is a subaddress; it therefore supports main-address sends
+        // only. Send to subaddresses via the v2 CLI / wallet API (which parse a
+        // typed Address and set the subaddress flag).
         vec![
-            (to_spend, to_view, Amount::from_atomic(half_a)),
-            (to_spend, to_view, Amount::from_atomic(half_b)),
+            (to_spend, to_view, Amount::from_atomic(half_a), false),
+            (to_spend, to_view, Amount::from_atomic(half_b), false),
         ]
     } else {
-        vec![(to_spend, to_view, Amount::from_atomic(amount))]
+        vec![(to_spend, to_view, Amount::from_atomic(amount), false)]
     };
 
     // Build the optional memo + recovery extra. Memo is bounded at 256

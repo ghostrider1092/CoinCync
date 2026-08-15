@@ -531,7 +531,6 @@ impl Subaddress {
         index: u32,
     ) -> Result<Self> {
         let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
-        let view_public = view_scalar.to_public();
 
         let spend_point = PublicPoint::from_bytes(*spend_public.as_bytes())
             .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key".into()))?;
@@ -540,14 +539,21 @@ impl Subaddress {
         // with the wallet — see `subaddress_scalar` (zeroizes internally).
         let sub_point = subaddress_scalar(view_secret, account, index).to_public();
 
-        // subaddress_spend = spend_public + m·G
+        // subaddress_spend = spend_public + m·G  (D_i)
         let subaddr_spend_point = spend_point.add(&sub_point);
+
+        // Subaddress view key C_i = a * D_i (NOT a*G). Distinct per subaddress,
+        // so published subaddresses are unlinkable to each other and to the main
+        // address; still scannable with the single view secret a because the
+        // sender sets R = r*D_i and the scanner computes a*R = r*(a*D_i) = r*C_i.
+        // See generate_stealth_address_checked_ext.
+        let subaddr_view_point = subaddr_spend_point.mul(&view_scalar);
 
         Ok(Subaddress {
             account,
             index,
             spend_public: PublicKey::from_bytes(subaddr_spend_point.to_bytes()),
-            view_public: PublicKey::from_bytes(view_public.to_bytes()),
+            view_public: PublicKey::from_bytes(subaddr_view_point.to_bytes()),
         })
     }
 
@@ -984,24 +990,70 @@ pub fn generate_stealth_address_for<R: RngCore + CryptoRng>(
     output_idx: u8,
     rng: &mut R,
 ) -> Result<(StealthAddress, SecretKey)> {
-    generate_stealth_address_checked(
+    // A typed Address carries its kind, so we can select the correct tx-pubkey
+    // form: subaddresses (view key C_i = a*D_i) require R = r*D_i so the
+    // recipient can detect/spend the output.
+    let is_subaddress =
+        recipient.address_type == crate::primitives::AddressType::Subaddress;
+    generate_stealth_address_checked_ext(
         &recipient.spend_public_key,
         &recipient.view_public_key,
         output_idx,
+        is_subaddress,
         rng,
     )
 }
 
-/// Generate a stealth address with proper error handling
+/// Generate a stealth address with proper error handling (main-address form,
+/// `R = r*G`). Thin wrapper over [`generate_stealth_address_checked_ext`] with
+/// `is_subaddress = false`, kept so existing callers are unchanged.
 pub fn generate_stealth_address_checked<R: RngCore + CryptoRng>(
     spend_pub: &PublicKey,
     view_pub: &PublicKey,
     output_idx: u8,
     rng: &mut R,
 ) -> Result<(StealthAddress, SecretKey)> {
+    generate_stealth_address_checked_ext(spend_pub, view_pub, output_idx, false, rng)
+}
+
+/// Generate a stealth address, choosing the transaction-public-key form by
+/// recipient type.
+///
+/// - MAIN address: `R = r*G`, and the recipient's ECDH shared secret is
+///   `a*R = r*(a*G) = r*A`.
+/// - SUBADDRESS (Monero-style): `R = r*D_i` (the subaddress spend key). A
+///   subaddress publishes `view_public = C_i = a*D_i`, so the sender's shared
+///   secret `r*C_i` equals the recipient's `a*R = a*(r*D_i) = r*(a*D_i) =
+///   r*C_i`. This lets every subaddress carry a DISTINCT published view key
+///   (unlinkable across subaddresses and from the main address) while remaining
+///   scannable with the single wallet view secret `a`.
+///
+/// The one-time output key `P = H(shared)*G + spend_pub` and every downstream
+/// ECDH-derived value (blinding, encrypted amount, view tag) depend only on
+/// `shared = r*view_pub`, so they stay consistent for both recipient types. The
+/// scanner is unchanged: it computes `a*R` and matches `P` against its spend
+/// keys, which works identically for `R = r*G` and `R = r*D_i`.
+pub fn generate_stealth_address_checked_ext<R: RngCore + CryptoRng>(
+    spend_pub: &PublicKey,
+    view_pub: &PublicKey,
+    output_idx: u8,
+    is_subaddress: bool,
+    rng: &mut R,
+) -> Result<(StealthAddress, SecretKey)> {
     // Generate random transaction secret
     let tx_secret = SecretScalar::random(rng);
-    let tx_public = tx_secret.to_public();
+
+    // Convert spend_public to curve point (with proper error)
+    let spend_point = PublicPoint::from_bytes(*spend_pub.as_bytes())
+        .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key".into()))?;
+
+    // Transaction public key R. Subaddress: R = r*D_i (spend key), so a*R
+    // matches the published C_i = a*D_i. Main address: R = r*G.
+    let tx_public = if is_subaddress {
+        spend_point.mul(&tx_secret)
+    } else {
+        tx_secret.to_public()
+    };
 
     // Convert view_public to curve point for ECDH (with proper error)
     let view_point = PublicPoint::from_bytes(*view_pub.as_bytes())
@@ -1015,10 +1067,6 @@ pub fn generate_stealth_address_checked<R: RngCore + CryptoRng>(
     let mut scalar_input = [shared_point.to_bytes().as_slice(), &[output_idx]].concat();
     let one_time_scalar = hash_to_scalar(&scalar_input);
     scalar_input.zeroize();
-
-    // Convert spend_public to curve point (with proper error)
-    let spend_point = PublicPoint::from_bytes(*spend_pub.as_bytes())
-        .ok_or_else(|| Error::InvalidPublicKey("invalid spend public key".into()))?;
 
     // One-time public key: P = H(shared) * G + spend_public
     let one_time_base = SecretScalar::from_scalar(one_time_scalar).to_public();
@@ -1363,13 +1411,95 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, view_public) = generate_ec_keypair();
 
-        let sub = Subaddress::generate(&spend_public, &view_secret, 0, 0).unwrap();
+        let sub = Subaddress::generate(&spend_public, &view_secret, 0, 1).unwrap();
 
-        // Subaddress should have different spend key
+        // Subaddress has a distinct spend key D_i = B + m*G ...
         assert_ne!(sub.spend_public.as_bytes(), spend_public.as_bytes());
 
-        // But same view key
-        assert_eq!(sub.view_public.as_bytes(), view_public.as_bytes());
+        // ... and a distinct view key C_i = a*D_i (NOT the main a*G). Publishing
+        // a*G on every subaddress made them linkable by a byte-compare of the
+        // address; C_i = a*D_i is per-subaddress and unlinkable (pre-mainnet
+        // review #3).
+        assert_ne!(
+            sub.view_public.as_bytes(),
+            view_public.as_bytes(),
+            "subaddress view key must be C_i = a*D_i, not the main a*G"
+        );
+    }
+
+    #[test]
+    fn subaddress_view_keys_are_unlinkable_and_output_is_detectable() {
+        // Pre-mainnet review #3: subaddresses used to publish the same view key
+        // (a*G) as the main address, so two subaddresses of one wallet were
+        // linkable by comparing their published view keys. They now publish
+        // C_i = a*D_i, and the sender uses R = r*D_i so the wallet still detects
+        // them with its single view secret a.
+        let (_b, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+
+        let sub1 = Subaddress::generate(&spend_public, &view_secret, 0, 1).unwrap();
+        let sub2 = Subaddress::generate(&spend_public, &view_secret, 0, 2).unwrap();
+
+        // Unlinkability: distinct view keys, and neither equals the main a*G.
+        assert_ne!(
+            sub1.view_public.as_bytes(),
+            sub2.view_public.as_bytes(),
+            "two subaddresses must have distinct view keys"
+        );
+        assert_ne!(sub1.view_public.as_bytes(), view_public.as_bytes());
+        assert_ne!(sub2.view_public.as_bytes(), view_public.as_bytes());
+
+        // Round-trip: a payment to sub1 (R = r*D_1) is detectable by the wallet
+        // scanning with view secret a against sub1's spend key D_1 ...
+        let (stealth, _tx_secret) = generate_stealth_address_checked_ext(
+            &sub1.spend_public,
+            &sub1.view_public,
+            0,
+            true, // subaddress recipient => R = r*D_1
+            &mut OsRng,
+        )
+        .unwrap();
+        assert!(
+            is_output_ours(&stealth, &view_secret, &sub1.spend_public, 0),
+            "wallet must detect its own subaddress output"
+        );
+
+        // ... and it is NOT mis-attributed to a different subaddress.
+        assert!(
+            !is_output_ours(&stealth, &view_secret, &sub2.spend_public, 0),
+            "a sub1 output must not be detected as sub2's"
+        );
+    }
+
+    #[test]
+    fn generate_stealth_address_for_selects_form_by_address_type() {
+        // The typed-Address send path must pick R = r*D_i for a Subaddress
+        // Address (so the recipient detects it against C_i = a*D_i) and R = r*G
+        // for a Standard address. This is the decision point threaded through
+        // the wallet send path (Address.address_type -> is_subaddress).
+        use crate::primitives::{Address, AddressType, Network};
+
+        let (_b, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+
+        // Subaddress (D_i, C_i = a*D_i) as a typed Subaddress Address.
+        let sub = Subaddress::generate(&spend_public, &view_secret, 0, 7).unwrap();
+        let mut sub_addr = Address::new(Network::Testnet, sub.spend_public, sub.view_public);
+        sub_addr.address_type = AddressType::Subaddress;
+        let (stealth, _) = generate_stealth_address_for(&sub_addr, 0, &mut OsRng).unwrap();
+        assert!(
+            is_output_ours(&stealth, &view_secret, &sub.spend_public, 0),
+            "subaddress output via generate_stealth_address_for must be detectable at D_i"
+        );
+
+        // Standard (main) address still round-trips with R = r*G.
+        let main_addr = Address::new(Network::Testnet, spend_public, view_public);
+        assert_eq!(main_addr.address_type, AddressType::Standard);
+        let (main_stealth, _) = generate_stealth_address_for(&main_addr, 0, &mut OsRng).unwrap();
+        assert!(
+            is_output_ours(&main_stealth, &view_secret, &spend_public, 0),
+            "main-address output must still be detectable"
+        );
     }
 
     #[test]
@@ -1400,10 +1530,18 @@ mod tests {
         let (_spend_secret, spend_public) = generate_ec_keypair();
         let (view_secret, _view_public) = generate_ec_keypair();
 
-        // Wallet receives at subaddress (account = 2, index = 3).
+        // Wallet receives at subaddress (account = 2, index = 3). A subaddress
+        // output uses R = r*D_i so the wallet detects it against C_i = a*D_i
+        // (see generate_stealth_address_checked_ext).
         let sub = Subaddress::generate(&spend_public, &view_secret, 2, 3).unwrap();
-        let (stealth, _) =
-            generate_stealth_address(&sub.spend_public, &sub.view_public, 0, &mut OsRng);
+        let (stealth, _) = generate_stealth_address_checked_ext(
+            &sub.spend_public,
+            &sub.view_public,
+            0,
+            true,
+            &mut OsRng,
+        )
+        .unwrap();
         let outputs = vec![ScanOutput {
             stealth,
             output_idx: 0,

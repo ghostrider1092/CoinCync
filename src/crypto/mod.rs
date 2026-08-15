@@ -71,6 +71,7 @@ pub use stealth::{
     coinbase_stealth_address,
     compute_one_time_secret,
     generate_stealth_address_checked,
+    generate_stealth_address_checked_ext,
     generate_stealth_address_for,
     generate_stealth_outputs,
     is_output_ours,

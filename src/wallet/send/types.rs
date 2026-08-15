@@ -12,6 +12,13 @@ pub struct Payment {
     pub spend_public: PublicKey,
     pub view_public: PublicKey,
     pub amount: Amount,
+    /// Whether the destination is a subaddress. Subaddress outputs use tx
+    /// pubkey R = r*D_i so the recipient can detect them against their published
+    /// view key C_i = a*D_i. MUST be `true` for a subaddress destination or the
+    /// funds are undetectable/unspendable by the recipient. Defaults to `false`
+    /// (main address) via `new`/`From`; set from `Address.address_type ==
+    /// Subaddress` at the send entry point (see `new_subaddress`/`with_subaddress`).
+    pub is_subaddress: bool,
 }
 
 impl Payment {
@@ -20,7 +27,28 @@ impl Payment {
             spend_public,
             view_public,
             amount,
+            is_subaddress: false,
         }
+    }
+
+    /// Construct a payment to a SUBADDRESS destination (uses R = r*D_i).
+    pub fn new_subaddress(
+        spend_public: PublicKey,
+        view_public: PublicKey,
+        amount: Amount,
+    ) -> Self {
+        Self {
+            spend_public,
+            view_public,
+            amount,
+            is_subaddress: true,
+        }
+    }
+
+    /// Set the subaddress flag from `Address.address_type == Subaddress`.
+    pub fn with_subaddress(mut self, is_subaddress: bool) -> Self {
+        self.is_subaddress = is_subaddress;
+        self
     }
 
     pub(super) fn has_same_destination(self, other: Self) -> bool {

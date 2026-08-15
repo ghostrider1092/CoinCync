@@ -36,7 +36,7 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
     add_prepared_inputs(&mut builder, inputs, rings, context.ring_size())?;
 
     for (index, payment) in payments.iter().enumerate() {
-        builder.add_output(
+        builder.add_output_ext(
             &Recipient {
                 spend_public: payment.spend_public,
                 view_public: payment.view_public,
@@ -44,6 +44,7 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
                 lock_height: None,
             },
             index as u8,
+            payment.is_subaddress,
             rng,
         )?;
     }

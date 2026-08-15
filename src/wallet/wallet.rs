@@ -1414,14 +1414,25 @@ impl SharedWallet {
         )?;
         let current_height = snapshot.spend_height();
 
-        // Convert recipients to the format needed by create_privacy_transaction
+        // Convert recipients to the format needed by create_privacy_transaction.
+        // The trailing bool carries whether the destination is a subaddress, so
+        // the sender uses R = r*D_i for it (else the recipient cannot detect or
+        // spend the output). Derived from the parsed Address's type.
         let privacy_recipients: Vec<(
             crate::primitives::PublicKey,
             crate::primitives::PublicKey,
             Amount,
+            bool,
         )> = recipients
             .iter()
-            .map(|(addr, amount)| (addr.spend_public_key, addr.view_public_key, *amount))
+            .map(|(addr, amount)| {
+                (
+                    addr.spend_public_key,
+                    addr.view_public_key,
+                    *amount,
+                    addr.address_type == crate::primitives::AddressType::Subaddress,
+                )
+            })
             .collect();
 
         let ring_size = crate::constants::ring_size_at_height(current_height);
