@@ -393,7 +393,11 @@ impl P2PNode {
 
     /// Add a seed/manual peer address
     pub async fn add_seed_address(&self, addr: std::net::SocketAddr) {
-        self.addresses.write().await.add(PeerAddress::new(addr));
+        // --addnode peers are MANUAL: prioritized in the outbound dialer and
+        // exempt from failure-purge (see AddressManager::add_manual). Plain
+        // `add` left them at the mercy of the last_seen sort, where a stale
+        // seed set could starve them out entirely.
+        self.addresses.write().await.add_manual(addr);
     }
 
     /// Get connection tracker statistics

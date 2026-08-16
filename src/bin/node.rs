@@ -872,6 +872,19 @@ async fn start_node(
         p2p_config.max_outbound = extra_peers.len().max(1);
     }
 
+    // Regtest is an isolated, single-machine network: it must never contact
+    // the public production DNS seeds. Querying them pulls real testnet peers
+    // into the address book (breaking test isolation + leaking queries to
+    // public infra) and, because those addresses crowd the last_seen sort,
+    // starves manual --addnode peers out of the outbound dialer (observed
+    // 2026-08-16: 0 outbound for 90s+ against an up --addnode peer). The other
+    // seed path (dns_seeds::resolve_seeds_inner) already returns none for
+    // Regtest; mirror that here for the bootstrap discovery loop.
+    if matches!(network, Network::Regtest) {
+        p2p_config.bootstrap.dns_seeds.clear();
+        p2p_config.bootstrap.seed_nodes.clear();
+    }
+
     // --proxy / --tor / --onion-only wire-up.
     //
     // Resolution order (CLI flags only — config-file path lands separately):

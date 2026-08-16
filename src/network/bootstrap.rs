@@ -298,6 +298,13 @@ pub struct AddressManager {
     /// Per-address consecutive-failure count. Resets on `mark_success`;
     /// purges address from pool when it crosses `FAILURE_PURGE_THRESHOLD`.
     failures: HashMap<SocketAddr, u32>,
+    /// MANUAL peers (operator --addnode). Dialed with PRIORITY in `get_next`
+    /// — ahead of anchors and the discovered book — and NEVER purged by the
+    /// failure-count logic. Without this, a large or stale seed set crowds
+    /// the last_seen sort and starves the operator's explicit peer out of the
+    /// outbound dialer (observed 2026-08-16: 0 outbound for 90s+ against an up
+    /// --addnode peer). Mirrors Bitcoin Core's -addnode/-connect priority.
+    manual: HashSet<SocketAddr>,
     /// Maximum addresses to store
     max_addresses: usize,
 }
@@ -312,8 +319,19 @@ impl AddressManager {
             self_addresses: HashSet::new(),
             anchors: Vec::new(),
             failures: HashMap::new(),
+            manual: HashSet::new(),
             max_addresses,
         }
+    }
+
+    /// Register a manually-configured (--addnode) peer. Manual peers are
+    /// dialed with priority in `get_next` and are exempt from failure-count
+    /// purging — the operator explicitly wants a connection to this address,
+    /// so we keep trying it across the tried/backoff cycle rather than letting
+    /// discovered seeds crowd it out.
+    pub fn add_manual(&mut self, addr: SocketAddr) {
+        self.manual.insert(addr);
+        self.add(PeerAddress::new(addr));
     }
 
     /// Install the persisted anchor peers (loaded from `anchors.json` on
@@ -381,8 +399,18 @@ impl AddressManager {
 
     /// Get next address to try connecting
     pub fn get_next(&mut self) -> Option<SocketAddr> {
-        // ANCHORS FIRST: dial our persisted known-good outbound peers before
-        // anything else. They were reachable last session, so reconnecting to
+        // MANUAL PEERS FIRST: operator --addnode peers are dialed ahead of
+        // anchors and the discovered book. Without this, a large or stale seed
+        // set crowds the last_seen sort and the manual peer never gets its turn
+        // (observed 2026-08-16: 0 outbound for 90s+ against an up peer). Skipped
+        // once tried this cycle; re-prioritized when the tried set clears.
+        for a in &self.manual {
+            if !self.tried.contains(a) && !self.self_addresses.contains(a) {
+                return Some(*a);
+            }
+        }
+        // ANCHORS NEXT: dial our persisted known-good outbound peers before
+        // the general book. They were reachable last session, so reconnecting to
         // them re-establishes a working mesh immediately after a restart
         // instead of cold-dialing the whole address book (which churns on
         // self-dials and dead/non-p2p hosts). Skipped once tried this cycle;
@@ -451,7 +479,10 @@ impl AddressManager {
             .entry(addr)
             .and_modify(|c| *c += 1)
             .or_insert(1);
-        if *count >= FAILURE_PURGE_THRESHOLD {
+        // Manual (--addnode) peers are never purged: the operator explicitly
+        // wants this address, so a temporarily-down manual peer must remain
+        // dialable when it comes back rather than being dropped from the pool.
+        if *count >= FAILURE_PURGE_THRESHOLD && !self.manual.contains(&addr) {
             tracing::debug!(
                 "AddressManager: purging {} after {} consecutive failures",
                 addr,
@@ -682,6 +713,52 @@ mod tests {
 
         let next = mgr.get_next();
         assert!(next.is_some());
+    }
+
+    #[test]
+    fn manual_peer_is_dialed_before_discovered_addresses() {
+        let mut mgr = AddressManager::new(100);
+        // A pile of discovered addresses with recent last_seen — they would
+        // otherwise sort to the front of get_next's last_seen ordering.
+        for i in 1..=10u8 {
+            let mut pa = PeerAddress::new(format!("198.51.100.{i}:29999").parse().unwrap());
+            pa.last_seen = 1_000_000 + i as u64;
+            mgr.add(pa);
+        }
+        let manual: SocketAddr = "203.0.113.7:29105".parse().unwrap();
+        mgr.add_manual(manual);
+        // The first address handed to the dialer must be the manual peer,
+        // regardless of the discovered addresses' recency (P-2 regression).
+        assert_eq!(mgr.get_next(), Some(manual));
+    }
+
+    #[test]
+    fn manual_peer_survives_failure_purge() {
+        let mut mgr = AddressManager::new(100);
+        let manual: SocketAddr = "203.0.113.7:29105".parse().unwrap();
+        mgr.add_manual(manual);
+        // Fail it well past the purge threshold that would drop a discovered
+        // address from the pool entirely.
+        for _ in 0..(FAILURE_PURGE_THRESHOLD + 3) {
+            mgr.mark_tried(manual);
+        }
+        assert_eq!(mgr.len(), 1, "manual peer must never be purged");
+        // Once the tried set clears, it is dialable again.
+        mgr.clear_tried();
+        assert_eq!(mgr.get_next(), Some(manual));
+    }
+
+    #[test]
+    fn discovered_peer_is_purged_after_threshold() {
+        // Control for the test above: a NON-manual address IS purged, proving
+        // the exemption is what keeps the manual one alive.
+        let mut mgr = AddressManager::new(100);
+        let discovered: SocketAddr = "198.51.100.9:29999".parse().unwrap();
+        mgr.add(PeerAddress::new(discovered));
+        for _ in 0..FAILURE_PURGE_THRESHOLD {
+            mgr.mark_tried(discovered);
+        }
+        assert_eq!(mgr.len(), 0, "discovered peer should be purged at threshold");
     }
 
     #[test]
