@@ -1364,6 +1364,39 @@ impl Blockchain {
     }
 
     /// Get block by hash
+    /// Median-Time-Past of the 11 blocks preceding `prev_hash` ON ITS OWN
+    /// CHAIN — walking the actual parent lineage via `prev_hash`, not the
+    /// active chain by height. Returns `None` if fewer than 11 ancestors are
+    /// reachable (caller then skips the MTP rule, matching the historical
+    /// genesis-window behaviour).
+    ///
+    /// REORG-CORRECTNESS (R-1): validating a competing-fork block against the
+    /// active chain's timestamps at those heights wrongly rejected valid
+    /// heavier forks whose near-fork blocks predated the active chain's MTP —
+    /// and banned the honest peer serving them (InvalidBlockPoW). For a
+    /// main-chain block the parent lineage IS the by-height ancestry, so this
+    /// is behaviour-identical on the common path. `get_block` resolves both
+    /// in-memory side-chain blocks and DB-backed ancestors.
+    fn median_time_past_of_lineage(&self, prev_hash: Hash) -> Option<u64> {
+        let mut timestamps: Vec<u64> = Vec::with_capacity(11);
+        let mut cursor = prev_hash;
+        for _ in 0..11 {
+            match self.get_block(&cursor) {
+                Some(ancestor) => {
+                    timestamps.push(ancestor.header.timestamp);
+                    cursor = ancestor.header.prev_hash;
+                }
+                None => break,
+            }
+        }
+        if timestamps.len() >= 11 {
+            timestamps.sort_unstable();
+            Some(timestamps[timestamps.len() / 2])
+        } else {
+            None
+        }
+    }
+
     pub fn get_block(&self, hash: &Hash) -> Option<Block> {
         // Try in-memory first
         {
@@ -1905,24 +1938,25 @@ impl Blockchain {
         }
 
         // SECURITY: Median-Time-Past (MTP) validation.
-        // Block timestamp must be greater than the median of the last 11 blocks.
-        // This prevents miners from backdating blocks to manipulate difficulty.
+        // Block timestamp must be greater than the median of the 11 blocks
+        // that PRECEDE it ON ITS OWN CHAIN. This prevents miners from
+        // backdating blocks to manipulate difficulty.
+        //
+        // REORG-CORRECTNESS: we walk the block's ACTUAL parent lineage via
+        // `prev_hash`, not the active chain by height. Reading by height was
+        // wrong for a competing-fork block — it computed the median from
+        // unrelated main-chain timestamps at those heights, so a valid
+        // heavier fork whose near-fork blocks predated the active chain's MTP
+        // was rejected AND the honest peer serving it was banned
+        // (InvalidBlockPoW), blocking legitimate reorgs and risking permanent
+        // self-isolation of a drifted node. For a main-chain block the parent
+        // lineage IS the by-height ancestry, so this is behaviour-identical
+        // on the common path. Mirrors the fork-aware difficulty window below.
         if block.header.height >= 11 {
-            let mut timestamps: Vec<u64> = Vec::with_capacity(11);
-            for h in (block.header.height.saturating_sub(11)..block.header.height).rev() {
-                if let Some(ancestor) = self.get_block_by_height(h) {
-                    timestamps.push(ancestor.header.timestamp);
-                }
-                if timestamps.len() >= 11 {
-                    break;
-                }
-            }
-            if timestamps.len() >= 11 {
-                timestamps.sort_unstable();
-                let mtp = timestamps[timestamps.len() / 2];
+            if let Some(mtp) = self.median_time_past_of_lineage(block.header.prev_hash) {
                 if block.header.timestamp <= mtp {
                     return Ok(BlockStatus::Invalid(format!(
-                        "Block timestamp {} is not greater than median-time-past {} (median of last 11 blocks)",
+                        "Block timestamp {} is not greater than median-time-past {} (median of last 11 blocks on its own chain)",
                         block.header.timestamp, mtp
                     )));
                 }
@@ -4146,6 +4180,80 @@ mod tests {
         // A missing block yields None (caller keeps stored value, never a
         // wrong partial sum).
         assert_eq!(chain.recompute_total_difficulty(99), None);
+    }
+
+    #[test]
+    fn mtp_uses_fork_lineage_not_active_chain_by_height() {
+        // R-1 regression: Median-Time-Past for a competing-fork block must be
+        // computed from the FORK's own ancestors (walk prev_hash), not the
+        // active chain's blocks at those heights. Before the fix, a valid
+        // heavier fork whose near-fork blocks predated the active chain's MTP
+        // was rejected as InvalidBlockPoW and the honest peer serving it was
+        // banned — blocking legitimate reorgs (observed live 2026-08-16).
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let genesis = chain.get_block_by_height(0).expect("genesis present");
+
+        let mk = |prev: Hash, height: u64, ts: u64, nonce: u64| -> Block {
+            let mut b = genesis.clone();
+            b.header.height = height;
+            b.header.prev_hash = prev;
+            b.header.timestamp = ts;
+            b.header.nonce = nonce;
+            b
+        };
+
+        // ACTIVE main chain h1..=14 with LATE timestamps (100_000 + h*100).
+        let mut prev = genesis.hash();
+        for h in 1..=14u64 {
+            let b = mk(prev, h, 100_000 + h * 100, 5000 + h);
+            let hash = b.hash();
+            {
+                let mut inner = chain.inner.write();
+                inner.blocks.insert(hash, b.clone());
+                inner.height_to_hash.insert(h, hash);
+            }
+            prev = hash;
+        }
+
+        // Competing FORK from genesis, h1..=13, with EARLY timestamps
+        // (1_000 + h*10) and distinct nonces so the hashes don't collide with
+        // the active chain. Stored as a side chain (no height_to_hash).
+        let mut fprev = genesis.hash();
+        let mut fork_h13 = genesis.hash();
+        for h in 1..=13u64 {
+            let b = mk(fprev, h, 1_000 + h * 10, 9000 + h);
+            let hash = b.hash();
+            {
+                let mut inner = chain.inner.write();
+                inner.blocks.insert(hash, b.clone());
+            }
+            fprev = hash;
+            fork_h13 = hash;
+        }
+
+        // MTP for a hypothetical fork block at h14 (parent = fork h13). The 11
+        // ancestors are fork h3..=13 (early); the median is fork h8 = 1_080.
+        let mtp = chain
+            .median_time_past_of_lineage(fork_h13)
+            .expect(">=11 fork ancestors present");
+        assert_eq!(mtp, 1_000 + 8 * 10, "MTP must be the fork lineage median");
+        assert!(
+            mtp < 100_000,
+            "MTP must come from the fork lineage, not the active chain's late timestamps"
+        );
+
+        // Control: MTP off the ACTIVE tip (h14's parent = active h13) uses the
+        // late active timestamps — median of active h3..=13 = active h8.
+        let active_h13 = chain.get_block_by_height(13).unwrap().hash();
+        let mtp_active = chain
+            .median_time_past_of_lineage(active_h13)
+            .expect(">=11 active ancestors present");
+        assert_eq!(mtp_active, 100_000 + 8 * 100, "active-chain MTP median");
+        assert!(
+            mtp_active > mtp,
+            "the two lineages must yield different MTPs — proving lineage-awareness"
+        );
     }
 
     #[test]
