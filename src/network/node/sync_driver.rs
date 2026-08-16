@@ -656,6 +656,24 @@ async fn send_block_spans(
     now: u64,
     local_height: u64,
 ) -> usize {
+    // P-3 fix (2026-08-16): only request blocks from peers strictly AHEAD of
+    // our tip. A peer at or below our height cannot serve the blocks we're
+    // missing; the old code split the request span across ALL live peers by
+    // index and ignored `peer_height`, so in a relay topology a same-height
+    // stuck follower received half the gap (e.g. the one block that would
+    // cascade-connect the orphan stash), answered empty, and IBD wedged
+    // permanently — no recovery tier cleared it. Bitcoin Core likewise only
+    // downloads from peers whose announced chain extends beyond ours.
+    let ahead: Vec<(PeerId, u64)> = peers
+        .iter()
+        .copied()
+        .filter(|(_, h)| *h > local_height)
+        .collect();
+    if ahead.is_empty() {
+        return 0;
+    }
+    let peers = &ahead[..];
+
     let span_size = hashes.len().div_ceil(peers.len());
     let mut total_sent = 0usize;
     let mut failed = Vec::new();
