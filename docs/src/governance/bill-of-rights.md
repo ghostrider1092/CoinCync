@@ -43,7 +43,7 @@ Privacy is not opt-in. There is no transparent mode. There is no reduced-privacy
 
 Every person has the right to independently verify the total supply of CYNC at any block height without trusting any third party — not the developers, not the foundation, not any exchange.
 
-The Pedersen commitment accumulator built into the CoinCync protocol allows any person to confirm that no coins were created outside the emission schedule, that no transaction created coins from nothing, and that the total supply matches the expected emission at the current block height.
+The CoinCync protocol lets any person confirm — without trusting anyone — that no coins were created outside the emission schedule, that no transaction created coins from nothing, and that the total supply matches the expected emission at the current block height. This holds because coinbase issuance is transparent (zero-blinding) and consensus-checked to equal the schedule, every transaction is proven to balance, and every ring member references a real prior output; total supply therefore provably equals the summed deterministic emission, recomputable by anyone via the `get_supply_info` / `/api/v1/emission` endpoints.
 
 The supply is not something you are asked to trust. It is something you can prove.
 

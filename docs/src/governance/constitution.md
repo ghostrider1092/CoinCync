@@ -137,13 +137,19 @@ Despite mandatory privacy, anyone can mathematically verify — without trusting
 3. No double-spend has ever occurred on the chain
 4. The total supply at any block height matches the expected emission
 
-This is achieved through the Pedersen commitment accumulator — a cryptographic structure embedded in every node that proves supply integrity without revealing individual transaction amounts. Every node validates this accumulator on every block. A block that fails this check is rejected by the entire network.
+This is achieved not by trusting anyone, but by the structure of the protocol itself:
+
+- **Coinbase outputs are transparent** (zero blinding factor), so every block's newly minted supply is public and is checked to equal the scheduled emission exactly.
+- **Every transaction is proven to balance** (inputs = outputs + fee) using Pedersen commitments, Bulletproofs+ range proofs (amounts bound to `[0, 2^64)`), and CLSAG signatures — so no transaction can create value.
+- **Every ring member references a real prior on-chain output**, so an input cannot be fabricated to conjure value.
+
+Together these make the total supply at any height provably equal to the summed deterministic emission — a value anyone can recompute independently (from the published emission parameters, or via the `get_supply_info` / `/api/v1/emission` endpoints) and compare. Any block that violates these rules is rejected by the entire network. A full per-block Pedersen supply-commitment accumulator (a single-value proof) is a planned enhancement; the guarantees above already prevent hidden inflation without it.
 
 Privacy and auditability are not in conflict. CoinCync proves both simultaneously. This is the answer to every critic who says privacy coins cannot be trusted. The math is open. Anyone can check it.
 
-**Enforcement:** Protocol-enforced. Pedersen accumulator validated on every block by every node.
+**Enforcement:** Protocol-enforced. Every node independently validates, on every block, the transparent coinbase amount, every transaction's balance + range proofs, and ring-member existence.
 
-**Code enforcement:** Bulletproofs+ range proofs ( `bulletproofs` / `tari_bulletproofs_plus` crates) enforce amounts ≥ 0 and ≤ `2^64`, mathematically preventing hidden inflation. The Pedersen commitment math in `src/crypto/` + `src/consensus/validation.rs` is what allows every node to verify total supply without seeing individual amounts.
+**Code enforcement:** Bulletproofs+ range proofs (`bulletproofs` / `tari_bulletproofs_plus`) bound amounts to `[0, 2^64)`; the coinbase-reward check and balance check in `src/consensus/validation.rs` (with zero-blinding transparent coinbase) prevent any block or transaction from creating value beyond the scheduled emission; `check_tx_ring_members` ties every spent input to a real prior output. The Pedersen commitment math in `src/crypto/` lets every node verify these without seeing individual amounts.
 
 ---
 
