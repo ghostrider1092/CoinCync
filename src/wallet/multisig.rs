@@ -205,9 +205,15 @@ pub fn signing_round1(share: &KeyShare) -> Result<(Round1Output, Round1Secret)> 
 /// Round 2: Produce a signature share.
 /// Each signer calls this with their key share, their round1 secret,
 /// all participants' round1 commitments, and the message to sign.
+/// SECURITY: takes `secret` BY VALUE so a set of Round-1 nonces can only be
+/// consumed once. FROST/Schnorr nonces are single-use — signing two different
+/// messages with the same nonces lets anyone who sees both signature shares
+/// recover the participant's key share (RFC 9591). Consuming the `Round1Secret`
+/// here drops (and zeroizes) the nonces on return, so a second `signing_round2`
+/// with the same secret is a compile-time move error rather than a key leak.
 pub fn signing_round2(
     share: &KeyShare,
-    secret: &Round1Secret,
+    secret: Round1Secret,
     all_commitments: &[Round1Output],
     message: &[u8],
 ) -> Result<Round2Output> {
@@ -522,11 +528,11 @@ mod tests {
         let (r1_out_2, r1_secret_2) = signing_round1(&keygen.shares[1]).unwrap();
         let all_commitments = vec![r1_out_1.clone(), r1_out_2.clone()];
 
-        // 3. Participants 1 and 2 do round 2
+        // 3. Participants 1 and 2 do round 2 (nonces consumed by value)
         let r2_out_1 =
-            signing_round2(&keygen.shares[0], &r1_secret_1, &all_commitments, message).unwrap();
+            signing_round2(&keygen.shares[0], r1_secret_1, &all_commitments, message).unwrap();
         let r2_out_2 =
-            signing_round2(&keygen.shares[1], &r1_secret_2, &all_commitments, message).unwrap();
+            signing_round2(&keygen.shares[1], r1_secret_2, &all_commitments, message).unwrap();
         let all_shares = vec![r2_out_1, r2_out_2];
 
         // 4. Aggregate into final signature
