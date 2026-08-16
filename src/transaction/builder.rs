@@ -16,6 +16,7 @@ use crate::crypto::{
     // Encrypted memos
     encrypt_memo,
     generate_stealth_address_checked,
+    generate_stealth_address_checked_ext,
     BlindingFactor,
     // CLSAG ring signatures (EC-based, replacing hash-based)
     ClsagRingMember,
@@ -305,11 +306,26 @@ impl TransactionBuilder {
         self.add_input_at_position(input, decoys, real_position)
     }
 
-    /// Add an output to the transaction
+    /// Add an output to the transaction (main-address recipient, R = r*G).
     pub fn add_output<R: RngCore + CryptoRng>(
         &mut self,
         recipient: &Recipient,
         output_index: u8,
+        rng: &mut R,
+    ) -> Result<&mut Self> {
+        self.add_output_ext(recipient, output_index, false, rng)
+    }
+
+    /// Add an output, choosing the stealth transaction-public-key form by
+    /// recipient type. `is_subaddress = true` uses R = r*D_i so a subaddress
+    /// recipient (published view key C_i = a*D_i) can detect and spend the
+    /// output; `false` uses R = r*G for a main address. MUST be `true` for a
+    /// subaddress recipient, or the output is undetectable/unspendable by them.
+    pub fn add_output_ext<R: RngCore + CryptoRng>(
+        &mut self,
+        recipient: &Recipient,
+        output_index: u8,
+        is_subaddress: bool,
         rng: &mut R,
     ) -> Result<&mut Self> {
         if self.outputs.len() >= MAX_TX_OUTPUTS {
@@ -329,10 +345,11 @@ impl TransactionBuilder {
         // SECURITY (A6-STEALTH): Use checked version that returns Result instead of
         // panicking on invalid public keys. Prevents node crash from malformed
         // addresses submitted via RPC.
-        let (stealth, tx_secret) = generate_stealth_address_checked(
+        let (stealth, tx_secret) = generate_stealth_address_checked_ext(
             &recipient.spend_public,
             &recipient.view_public,
             output_index,
+            is_subaddress,
             rng,
         )?;
 

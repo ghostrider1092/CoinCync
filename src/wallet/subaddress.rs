@@ -3,18 +3,21 @@
 //! Subaddresses allow generating unlimited receiving addresses from a single wallet.
 //! Each subaddress has:
 //! - Unique spend public key (derived deterministically)
-//! - Shared view key (same as main wallet)
+//! - Per-subaddress view key `C_i = a*D_i` (unlinkable across subaddresses)
 //!
 //! ## Derivation Scheme
 //!
 //! For subaddress at (account=i, index=j):
 //! ```text
-//! m = H("COINCYNC_SUBADDR_v1" || view_secret || i || j)
-//! subaddress_spend_public = m*G + spend_public
+//! m   = H("COINCYNC_SUBADDR_v1" || view_secret || i || j)
+//! D_i = m*G + spend_public            (subaddress spend key)
+//! C_i = view_secret * D_i             (subaddress view key)
 //! ```
 //!
-//! The view key remains the same, allowing the wallet to scan for all
-//! subaddresses with a single view key.
+//! Each subaddress publishes a DISTINCT view key `C_i = a*D_i`, so subaddresses
+//! are unlinkable to each other and to the main address. The wallet still scans
+//! for all of them with the single view secret `a`: a payment to a subaddress
+//! uses tx pubkey `R = r*D_i`, and the scanner computes `a*R = r*C_i`.
 //!
 //! ## Security
 //!
@@ -219,10 +222,19 @@ impl SubaddressManager {
         let subaddr_spend_point = spend_point.add(&m_point);
         let subaddr_spend_public = PublicKey::from_bytes(subaddr_spend_point.to_bytes());
 
+        // Subaddress view key C_i = a * D_i (NOT the main a*G), so two
+        // subaddresses of one wallet are unlinkable by their published view
+        // keys. Still scannable with the single view secret a: the sender sets
+        // R = r*D_i (crypto::generate_stealth_address_checked_ext) and the
+        // scanner computes a*R = r*(a*D_i) = r*C_i (pre-mainnet review #3).
+        let view_scalar = SecretScalar::from_bytes(*self.view_secret.as_bytes());
+        let subaddr_view_public =
+            PublicKey::from_bytes(subaddr_spend_point.mul(&view_scalar).to_bytes());
+
         let subaddress = Subaddress {
             index,
             spend_public: subaddr_spend_public,
-            view_public: self.view_public,
+            view_public: subaddr_view_public,
             label: String::new(),
             used: false,
         };
@@ -463,8 +475,11 @@ mod tests {
         // Subaddresses should have different spend keys
         assert_ne!(sub1_spend.as_bytes(), sub2_spend.as_bytes());
 
-        // But same view key
-        assert_eq!(sub1_view.as_bytes(), sub2_view.as_bytes());
+        // ...and distinct view keys C_i = a*D_i (unlinkable). Previously all
+        // subaddresses shared the main a*G view key, which made two subaddresses
+        // of one wallet linkable by a byte-compare (pre-mainnet review #3).
+        assert_ne!(sub1_view.as_bytes(), sub2_view.as_bytes());
+        assert_ne!(sub1_view.as_bytes(), view_public.as_bytes());
     }
 
     #[test]

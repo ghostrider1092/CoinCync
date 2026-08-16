@@ -17,7 +17,12 @@ const LEGACY_OUTPUT_PADDING: usize = 3;
 /// [`prepare_privacy_transaction`].
 pub fn prepare_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     balance: &Balance,
-    recipients: &[(PublicKey, PublicKey, Amount)],
+    // (spend_public, view_public, amount, is_subaddress). The trailing bool
+    // MUST be true when the destination is a subaddress (Address.address_type
+    // == Subaddress): subaddress outputs use tx pubkey R = r*D_i so the
+    // recipient can detect/spend them against their view key C_i = a*D_i.
+    // Getting it wrong makes the payment unspendable by the recipient.
+    recipients: &[(PublicKey, PublicKey, Amount, bool)],
     keys: &KeyEpoch,
     current_height: u64,
     ring_size: usize,
@@ -27,7 +32,12 @@ pub fn prepare_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> Result<PreparedPrivacyTransaction> {
     let context = SpendContext::with_ring_size(current_height, ring_size)?;
-    let payments = recipients.iter().copied().map(Payment::from).collect();
+    let payments = recipients
+        .iter()
+        .map(|&(spend, view, amount, is_subaddress)| {
+            Payment::new(spend, view, amount).with_subaddress(is_subaddress)
+        })
+        .collect();
     let request = SendRequest::new(payments, context)
         .with_fee_multiplier(fee_multiplier)
         .with_memo(memo.map(ToOwned::to_owned))
