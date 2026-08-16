@@ -24,28 +24,53 @@ Ten articles follow. Each one is a wall. None of them have doors.
 
 ---
 
-## Article I — Fixed Supply
+## Article I — Transparent Emission, No Hidden Inflation
 
-The total supply of CYNC shall never exceed **250,000,000** coins. This limit is absolute. It is not subject to amendment, emergency override, governance vote, or any other mechanism.
+CYNC issuance is defined entirely in code and is fully public. No entity — no
+developer, no foundation, no majority of miners — can create coins outside this
+schedule, and no coins can ever be created secretly. What is fixed is not a
+maximum number of coins; it is the **emission function itself**, which cannot be
+changed to mint coins arbitrarily, discretionarily, or covertly.
 
-The emission schedule is defined in code and enforced by every node on the network. No entity — no developer, no foundation, no majority of miners — can create coins beyond this limit. The network itself will reject any block that does.
+**The emission schedule.** Each block pays
+`reward = max( TAIL_EMISSION, (TOTAL_SUPPLY_TARGET − already_mined) × COIN / EMISSION_DIVISOR )`,
+with `TOTAL_SUPPLY_TARGET = 100,000,000 CYNC`, `EMISSION_DIVISOR = 2,000,000`,
+and `TAIL_EMISSION = 0.6 CYNC`. The reward decays smoothly toward the
+100,000,000 asymptote (no halvings, no eras), then continues at the fixed
+0.6 CYNC/block tail in perpetuity.
 
-A tail emission exists to sustain mining security after the primary distribution ends. It is not additional supply. The 250,000,000 coin cap is absolute and includes all tail emission across the full lifetime of the chain. The tail emission rate shall not exceed a level that would cause total supply to approach the cap before the theoretical end of the emission schedule.
+**100,000,000 is an asymptote, not a hard cap.** The issuance curve *approaches*
+100,000,000 CYNC; the perpetual tail then carries total supply past it over the
+long term. This is deliberate — a small, fixed, perpetual security subsidy so
+mining stays viable forever rather than facing a fee-only security cliff. The
+guarantee is transparency and immutability of the *schedule*, not a ceiling on
+the coin count.
 
-Anyone can verify the current supply at any time using the Pedersen commitment accumulator built into every node. If the mathematics do not confirm the supply, the chain is invalid. Trust the math, not the announcement.
+**No hidden inflation — and anyone can verify it.** Coinbase outputs use a zero
+blinding factor, so every block's minted amount is public and is checked to
+equal the scheduled reward *exactly*. Every transaction is cryptographically
+proven to balance (inputs = outputs + fee), and every ring member must reference
+a real prior on-chain output, so no transaction can conjure value. Together
+these mean the total supply at any height provably equals the sum of the
+deterministic emission — a number anyone can recompute independently and compare
+against what any node reports. If the mathematics do not confirm the supply, the
+chain is invalid. Trust the math, not the announcement.
 
-**Enforcement:** Protocol-enforced. Every node independently validates supply on every block.
+**Enforcement:** Protocol-enforced. Every node independently validates, on every
+block, that the coinbase pays exactly the scheduled reward and that no
+transaction creates value.
 
 **Code enforcement:** Compile-time assertions in `src/constants.rs`:
 
 ```rust
-const _: () = assert!(TOTAL_SUPPLY_TARGET == 250_000_000,
-    "UNCONSTITUTIONAL: Article I — Supply cap must be exactly 250,000,000 CYNC");
-const _: () = assert!(MAX_SUPPLY == 250_000_000u128 * COIN as u128,
-    "UNCONSTITUTIONAL: Article I — MAX_SUPPLY atomic-unit value must match 250M cap");
+const _: () = assert!(TOTAL_SUPPLY_TARGET == 100_000_000,
+    "UNCONSTITUTIONAL: Article I — Supply target must be exactly 100,000,000 CYNC");
+const _: () = assert!(MAX_SUPPLY == 100_000_000u128 * COIN as u128,
+    "UNCONSTITUTIONAL: Article I — MAX_SUPPLY atomic-unit value must match the 100M target");
 ```
 
-Any attempt to ship a binary with a different cap fails the build. See [Emission curve](../protocol/emission.md) for the exact mountain curve that stays below the cap across the chain's lifetime.
+Any attempt to ship a binary with a different emission target fails the build.
+See [Emission curve](../protocol/emission.md) for the exact curve.
 
 ---
 
