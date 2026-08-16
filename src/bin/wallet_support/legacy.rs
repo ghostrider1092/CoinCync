@@ -603,16 +603,35 @@ async fn main() {
             key_shares,
             message,
         } => cmd_multisig_aggregate(&commitments, &shares, &key_shares, &message).await,
-        Command::Subaddress { action } => match action {
-            SubaddressAction::List { password } => {
-                cmd_subaddress_list(&wallet_path, password, network).await
+        Command::Subaddress { action } => {
+            // W-1 launch-safety gate (2026-08-16): subaddress-received funds are
+            // currently UNSPENDABLE — the spend-side one-time-secret / key-image
+            // derivation omits the per-subaddress offset m_i, so coins sent to a
+            // subaddress can be detected but never spent. Disable subaddresses on
+            // mainnet until the fix ships with a verified receive->spend
+            // round-trip test. Kept enabled on testnet/regtest so the fix can be
+            // developed and tested there. See project_full_audit_2026-08-16 (W-1).
+            if matches!(network, Network::Mainnet) {
+                Err(
+                    "subaddresses are disabled on mainnet in this release: \
+                     funds received at a subaddress would be permanently unspendable. \
+                     Use your main address (`address` command). Subaddresses remain \
+                     available on testnet/regtest."
+                        .to_string(),
+                )
+            } else {
+                match action {
+                    SubaddressAction::List { password } => {
+                        cmd_subaddress_list(&wallet_path, password, network).await
+                    }
+                    SubaddressAction::Create {
+                        password,
+                        account,
+                        label,
+                    } => cmd_subaddress_create(&wallet_path, password, account, label, network).await,
+                }
             }
-            SubaddressAction::Create {
-                password,
-                account,
-                label,
-            } => cmd_subaddress_create(&wallet_path, password, account, label, network).await,
-        },
+        }
         Command::Disclose { action } => match action {
             DiscloseAction::Balance {
                 password,
