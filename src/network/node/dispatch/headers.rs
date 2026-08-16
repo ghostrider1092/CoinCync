@@ -128,21 +128,53 @@ pub(super) async fn handle_headers(
                 return Ok(());
             }
 
-            // A forged anchor is cheap to identify before it can occupy the
-            // attributed pending-header pool.
-            let bad_anchor_at = headers_msg.headers.iter().enumerate().find_map(|(i, hdr)| {
+            // Reject any header not backed by REAL proof-of-work before it can
+            // occupy the attributed pending-header pool. Previously only the VDF
+            // anchor was verified; a header with a correct anchor but a nonce
+            // that never meets the claimed target (no RandomX work done) was
+            // accepted, letting a peer advertise a fabricated chain to inflate
+            // its peer-height / bias fork-choice and drive wasteful block
+            // requests (eclipse / DoS assist). We now enforce the SAME PoW
+            // invariants the block path does (dispatch/chain.rs handle_blocks):
+            // non-degenerate target, honest VDF anchor, and pow_hash <= target.
+            // Genesis (height 0) carries no PoW and is validated as a hardcoded
+            // checkpoint, so it is exempt. The RandomX hash is ~1000x cheaper
+            // than the anchor VDF this loop already computes, so this adds no
+            // meaningful cost; `find_map` still short-circuits on the first bad
+            // header.
+            let bad_pow_at = headers_msg.headers.iter().enumerate().find_map(|(i, hdr)| {
+                if hdr.height == 0 {
+                    return None;
+                }
+                // A degenerate target (all-0xFF / all-0) gates no work.
+                let tb = hdr.target.as_bytes();
+                if tb.iter().all(|&b| b == 0xFF) || tb.iter().all(|&b| b == 0) {
+                    return Some(i);
+                }
+                // The VDF anchor must be the honest one for this header.
                 match crate::consensus::pow::compute_full_anchor(
                     &hdr.prev_hash,
                     hdr.height,
                     hdr.timestamp,
                 ) {
-                    Ok(anchor) if anchor.mixed_hash == hdr.anchor => None,
+                    Ok(anchor) if anchor.mixed_hash == hdr.anchor => {}
+                    _ => return Some(i),
+                }
+                // The RandomX PoW hash must actually satisfy the claimed target.
+                match crate::consensus::compute_pow_hash(
+                    crate::consensus::PowAlgorithm::from_index(hdr.algorithm),
+                    &hdr.anchor,
+                    hdr.nonce,
+                    &hdr.tx_root,
+                    hdr.height,
+                ) {
+                    Ok(pow) if pow.meets_difficulty(&hdr.target) => None,
                     _ => Some(i),
                 }
             });
-            if let Some(idx) = bad_anchor_at {
+            if let Some(idx) = bad_pow_at {
                 warn!(
-                    "Headers pre-PoW reject: header[{}] anchor mismatch from peer {:?} \
+                    "Headers PoW reject: header[{}] failed anchor/target/pow from peer {:?} \
                  (h={}). Dropping batch + scoring peer.",
                     idx,
                     &peer_id[..4],
@@ -151,7 +183,7 @@ pub(super) async fn handle_headers(
                 drop(sync_guard);
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr).record_misbehavior(
-                        crate::network::scoring::MisbehaviorType::ProtocolViolation,
+                        crate::network::scoring::MisbehaviorType::InvalidBlockPoW,
                     );
                 }
                 return Ok(());
