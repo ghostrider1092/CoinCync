@@ -1229,6 +1229,19 @@ async fn get_emission(
     let to = query.to.unwrap_or(chain_height).min(chain_height);
     let step = query.step.unwrap_or(1).max(1);
 
+    // Reject an inverted range explicitly. `to - from` would underflow when
+    // `from > to` (`to` is clamped to chain_height, `from` is not): in release
+    // it wraps to a huge value (caught below by MAX_EMISSION_POINTS), in debug
+    // it panics. Fail cleanly instead.
+    if from > to {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Invalid range: from ({}) > to ({})", from, to),
+            })),
+        ));
+    }
+
     // Clamp to prevent CPU abuse
     let total_points = if step > 0 { (to - from) / step + 1 } else { 1 };
     if total_points > MAX_EMISSION_POINTS {
