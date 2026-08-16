@@ -2026,27 +2026,40 @@ pub async fn start_rpc_server(
     // Params: optional [stride: u64] — emit one checkpoint every
     // `stride` blocks. Default 10000 (~14 days at 120s).
     module.register_method("get_sync_checkpoints", |params, state, _ext| {
-        let stride: u64 = params.parse::<(u64,)>().map(|(s,)| s).unwrap_or(10_000);
-        let stride = stride.max(1).min(50_000);
+        let requested: u64 = params.parse::<(u64,)>().map(|(s,)| s).unwrap_or(10_000);
         let chain_height = state.chain.height();
-        let mut checkpoints = Vec::new();
-        let mut h = stride;
-        while h <= chain_height {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                let block_hash = block.hash();
-                let cp = crate::wallet::lightsync::SyncCheckpoint::new(
-                    h,
-                    block_hash,
-                    0, // total_outputs not tracked at this layer
-                    crate::primitives::Hash::default(), // utxo_hash deferred to Gap 2
-                );
-                checkpoints.push(cp);
+        // SECURITY (DoS): bound the work regardless of the requested stride.
+        // This method is in the REST allowlist (reachable UNAUTHENTICATED via
+        // POST /rpc), so a `stride=1` request must not force O(chain_height) DB
+        // reads + a chain_height-sized Vec — that scales attacker damage with
+        // chain height. Floor the stride so the loop yields at most
+        // MAX_CHECKPOINTS entries; the actual stride used is returned to the
+        // caller. Also run the synchronous DB scan under block_in_place so it
+        // can't monopolize a tokio worker (matches the other DB-scan handlers).
+        const MAX_CHECKPOINTS: u64 = 512;
+        let min_stride = chain_height.div_ceil(MAX_CHECKPOINTS).max(1);
+        let stride = requested.max(min_stride).min(50_000);
+        let checkpoints = tokio::task::block_in_place(|| {
+            let mut checkpoints = Vec::new();
+            let mut h = stride;
+            while h <= chain_height {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    let block_hash = block.hash();
+                    let cp = crate::wallet::lightsync::SyncCheckpoint::new(
+                        h,
+                        block_hash,
+                        0, // total_outputs not tracked at this layer
+                        crate::primitives::Hash::default(), // utxo_hash deferred to Gap 2
+                    );
+                    checkpoints.push(cp);
+                }
+                h = match h.checked_add(stride) {
+                    Some(next) => next,
+                    None => break,
+                };
             }
-            h = match h.checked_add(stride) {
-                Some(next) => next,
-                None => break,
-            };
-        }
+            checkpoints
+        });
         Ok::<_, ErrorObjectOwned>(json!({
             "stride": stride,
             "chain_height": chain_height,

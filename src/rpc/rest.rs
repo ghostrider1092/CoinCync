@@ -1229,6 +1229,19 @@ async fn get_emission(
     let to = query.to.unwrap_or(chain_height).min(chain_height);
     let step = query.step.unwrap_or(1).max(1);
 
+    // Reject an inverted range explicitly. `to - from` would underflow when
+    // `from > to` (`to` is clamped to chain_height, `from` is not): in release
+    // it wraps to a huge value (caught below by MAX_EMISSION_POINTS), in debug
+    // it panics. Fail cleanly instead.
+    if from > to {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Invalid range: from ({}) > to ({})", from, to),
+            })),
+        ));
+    }
+
     // Clamp to prevent CPU abuse
     let total_points = if step > 0 { (to - from) / step + 1 } else { 1 };
     if total_points > MAX_EMISSION_POINTS {
@@ -1243,38 +1256,28 @@ async fn get_emission(
     // Get supply info for the supply cap
     let supply = jsonrpc_call(&st, "get_supply_info", Value::Array(vec![])).await?;
 
-    // Build data points by querying block rewards at each height
-    // We use the emission curve directly rather than fetching blocks
+    // Build data points from the closed-form emission curve.
+    //
+    // R-2 fix: the previous code fanned out one internal `get_block_by_height`
+    // RPC call PER data point — up to MAX_EMISSION_POINTS (1000) round-trips per
+    // request, an amplification-DoS. `calculate_block_reward(h)` is a pure
+    // deterministic function of height and IS the per-block reward the chain
+    // uses, so we compute it directly (no block fetch, works for any height).
     let mut points = Vec::with_capacity(total_points as usize);
     let mut cumulative: u64 = 0;
 
-    // For efficiency, we approximate cumulative supply from block rewards.
-    // The real cumulative is tracked by the chain, but computing it per-step
-    // from the emission curve gives the explorer what it needs for charting.
     let mut h = from;
     while h <= to {
-        // Fetch block reward at this height from the RPC
-        // (returns the reward from the emission curve, not the actual mined block)
-        if let Ok(block) = jsonrpc_call(
-            &st,
-            "get_block_by_height",
-            Value::Array(vec![Value::Number(h.into())]),
-        )
-        .await
-        {
-            let reward = block["reward"].as_u64().unwrap_or(0);
-            cumulative += reward * step; // Approximate: assume reward is constant within step
-            points.push(serde_json::json!({
-                "height": h,
-                "reward": reward,
-                "cumulative_approx": cumulative,
-            }));
-        } else {
-            // Block doesn't exist yet (future height) — just report the emission curve
-            // We can't call get_block_by_height for unmined blocks, so skip
-            break;
-        }
-        h += step;
+        let reward = crate::emission::calculate_block_reward(h).as_atomic();
+        // Approximate cumulative over the step (reward ~constant within a step);
+        // saturating so an extreme range can't panic/wrap the accumulator.
+        cumulative = cumulative.saturating_add(reward.saturating_mul(step));
+        points.push(serde_json::json!({
+            "height": h,
+            "reward": reward,
+            "cumulative_approx": cumulative,
+        }));
+        h = h.saturating_add(step);
     }
 
     Ok(Json(serde_json::json!({

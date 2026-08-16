@@ -266,7 +266,9 @@ impl LightWalletServer {
             ));
         }
         let chain_height = self.chain.height();
-        let end_height = (req.start_height + max_blocks).min(chain_height);
+        // saturating: start_height is caller-controlled; a plain `+` wraps in
+        // release / panics in debug on overflow (R-4).
+        let end_height = req.start_height.saturating_add(max_blocks).min(chain_height);
 
         let mut detected = Vec::new();
         let mut blocks_scanned = 0u64;
@@ -350,7 +352,7 @@ impl LightWalletServer {
     /// Get output digests for a block range (for wallets that want to
     /// scan client-side but need the compact data).
     pub fn get_digests(&self, start: u64, end: u64) -> Vec<BlockDigest> {
-        let end = end.min(start + 100); // cap at 100 blocks per request
+        let end = end.min(start.saturating_add(100)); // cap at 100 blocks per request (R-4: saturating)
         let mut digests = Vec::new();
         for h in start..=end {
             if let Some(block) = self.chain.get_block_by_height(h) {
