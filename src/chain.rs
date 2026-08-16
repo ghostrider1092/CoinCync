@@ -3237,7 +3237,11 @@ impl Blockchain {
                 // write guard would deadlock it under parking_lot's
                 // non-re-entrant RwLock).
                 {
-                    let _reorg_commit_guard = self.inner.write();
+                    // Bound (not `_`-prefixed) because we READ through it below:
+                    // any `self.<method>()` that re-locks `self.inner` while this
+                    // write guard is held self-deadlocks under parking_lot's
+                    // non-re-entrant RwLock. Read shared state via the guard.
+                    let reorg_commit_guard = self.inner.write();
                     if let Some(ref db) = self.db {
                         // 1. Collect output_index removals (disconnected blocks)
                         let mut oi_removals: Vec<[u8; 32]> = Vec::new();
@@ -3312,7 +3316,13 @@ impl Blockchain {
                             tip_hash: hash,
                             height: new_tip_height,
                             total_difficulty: fork_cumulative,
-                            total_supply: self.stats().total_supply,
+                            // Read supply through the held write guard, NOT
+                            // self.stats() — the latter takes self.inner.read()
+                            // and would self-deadlock against this write guard
+                            // (parking_lot RwLock is not re-entrant), freezing
+                            // the node on EVERY successful reorg. The value is
+                            // identical: stats() clones inner.stats.
+                            total_supply: reorg_commit_guard.stats.total_supply,
                             total_burned: 0,
                             last_checkpoint,
                         };
