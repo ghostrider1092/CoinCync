@@ -34,7 +34,7 @@ numbers without sources are a scam signal.
 
 | Field | Value | Source |
 |---|---|---|
-| Total supply cap | 100,000,000 CYNC (asymptotic, never reached) | [src/constants.rs:774](../../src/constants.rs#L774), Constitution Article I |
+| Supply model | 100,000,000 CYNC is the **issuance-curve asymptote** (not a hard cap). Tail emission (0.6 CYNC/block, perpetual) continues after the curve floors, so total supply crosses ~100M long-term and grows slowly forever. | [src/constants.rs:774](../../src/constants.rs#L774), Constitution Article I |
 | Genesis premine | **0 CYNC** | enforced by absence of premine code; reviewer can verify by reading `src/emission/curve.rs` and `src/genesis.rs` |
 | Developer tax | **0% (compile-time enforced)** | `DEV_TAX_PERCENT = 0` at [src/constants.rs:810](../../src/constants.rs#L810); Article II compile assertion at line 811 |
 | Foundation reserve | **None** | no foundation entity exists; see §6 |

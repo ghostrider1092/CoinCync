@@ -41,13 +41,13 @@ Adversary classes explicitly **out of scope** — this Constitution cannot defen
 
 ## Article I — Fixed Supply
 
-The total supply of CYNC shall never exceed **100,000,000** coins. This limit is asymptotic — the emission curve approaches but never reaches it. It is not subject to amendment, emergency override, governance vote, or any other mechanism.
+**100,000,000 CYNC is the asymptote of the issuance curve — not a hard cap.** The curve approaches 100,000,000 but never reaches it on its own; the perpetual tail emission (below) then continues, so total *emitted* supply grows past 100,000,000 over the long term. What is immutable is the emission *function itself* — not subject to amendment, emergency override, governance vote, or any other mechanism.
 
 The emission is determined by one formula: `reward = max(0.6 CYNC, (100M - already_mined) / 2,000,000)`. No eras. No halvings. Every coin mined makes the next one slightly harder to earn. The network itself will reject any block that violates this formula.
 
-A tail emission of 0.6 CYNC per block exists to sustain mining security perpetually. A 30% fee burn offsets this emission — when transaction fees exceed ~2 CYNC per block, the chain becomes deflationary. The 100,000,000 coin cap is the mathematical ceiling; actual circulating supply will stabilize below it.
+A tail emission of 0.6 CYNC per block exists to sustain mining security perpetually. A 30% fee burn destroys part of every transaction fee, offsetting the tail; whether net circulating supply stabilizes near, below, or above 100,000,000 depends on long-term fee volume — it is deterministic and fully public either way, never a hidden or discretionary quantity. CoinCync's guarantee is not a fixed coin count; it is a fixed, transparent, verifiable emission schedule.
 
-Anyone can verify the current supply at any time using the Pedersen commitment accumulator built into every node. If the mathematics do not confirm the supply, the chain is invalid. Trust the math, not the announcement.
+Anyone can verify the current supply at any time: coinbase issuance is transparent (zero blinding) and consensus-checked to equal the schedule on every block, every transaction is proven to balance, and every ring member references a real prior output — so total supply provably equals the summed deterministic emission. Recompute it independently (from the emission parameters, or the `get_supply_info` / `/api/v1/emission` endpoints) and compare. If the mathematics do not confirm the supply, the chain is invalid. Trust the math, not the announcement.
 
 **Enforcement:** Protocol-enforced. Every node independently validates supply on every block.
 
@@ -91,11 +91,11 @@ Despite mandatory privacy, anyone can mathematically verify — without trusting
 3. No double-spend has ever occurred on the chain
 4. The total supply at any block height matches the expected emission
 
-This is achieved through the Pedersen commitment accumulator — a cryptographic structure embedded in every node that proves supply integrity without revealing individual transaction amounts. Every node validates this accumulator on every block. A block that fails this check is rejected by the entire network.
+This is achieved not by trusting anyone, but by the structure of the protocol itself: coinbase outputs are transparent (zero blinding factor), so every block's newly minted supply is public and is checked to equal the scheduled emission exactly; every transaction is cryptographically proven to balance (inputs = outputs + fee) via Pedersen commitments and Bulletproofs+ range proofs, so no transaction can create value; and every ring member must reference a real prior on-chain output, so an input cannot be fabricated. Together these make the total supply at any height provably equal to the summed deterministic emission — recomputable by anyone (from the published emission parameters, or the `get_supply_info` / `/api/v1/emission` endpoints) and comparable against what any node reports. Any block violating these rules is rejected by the entire network. (A single-value per-block Pedersen supply-commitment accumulator is a planned enhancement; the guarantees above already prevent hidden inflation without it.)
 
 Privacy and auditability are not in conflict. CoinCync proves both simultaneously. This is the answer to every critic who says privacy coins cannot be trusted. The math is open. Anyone can check it.
 
-**Enforcement:** Protocol-enforced. Pedersen accumulator validated on every block by every node.
+**Enforcement:** Protocol-enforced. Every node independently validates, on every block, the transparent coinbase amount, every transaction's balance + range proofs, and ring-member existence.
 
 ## Article V — Open Mining
 

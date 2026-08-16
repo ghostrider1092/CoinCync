@@ -81,7 +81,7 @@ The Phase 2 roots (`spark_set_root`, `mw_kernel_root`) are hashed **unconditiona
 Current live status: public testnet is still pre-activation, so both roots are
 expected to remain zero in valid blocks.
 
-The `supply_commitment` field is what lets [Article IV (Auditable Integrity)](../governance/constitution.md#article-iv--auditable-integrity) work. Each block commits to the running Pedersen-accumulator supply, so any node can verify the total in-circulation CYNC matches the emission schedule without seeing individual transaction amounts.
+The `supply_commitment` header field is **currently a reserved placeholder (all zeros)** — a full per-block Pedersen supply-commitment accumulator is a planned enhancement, not yet wired in. It does **not** yet enforce supply. Today, [Article IV (Auditable Integrity)](../governance/constitution.md#article-iv--auditable-integrity) is upheld by the actual validation rules below: transparent (zero-blinding) coinbase checked to equal the scheduled reward, balance + range proofs on every transaction, and ring-member existence — which together make total supply provably equal to the summed deterministic emission (recomputable via `get_supply_info` / `/api/v1/emission`).
 
 ## Validation rules
 
@@ -96,7 +96,7 @@ The `supply_commitment` field is what lets [Article IV (Auditable Integrity)](..
 7. **Coinbase** — first transaction must be a `Coinbase` type, must have zero inputs, must pay the correct mountain-curve reward to `header.miner_pubkey`.
 8. **Per-transaction validation** — every non-coinbase tx is run through `validate_transaction`, which calls into the same crypto verifiers the mempool uses (`verify_ring_signature`, `verify_output_range_proofs`, `verify_balance_proof`).
 9. **No double-spend** — every key image in the block must be unique within the block AND not already spent in chain history.
-10. **Supply commitment** — `header.supply_commitment` matches the running Pedersen accumulator after applying this block's coinbase + fee-burn deltas. This is what enforces [Article I (Fixed Supply)](../governance/constitution.md#article-i--fixed-supply) — a block that claims to mint more than the emission schedule allows fails the accumulator check.
+10. **Coinbase / supply integrity** — the coinbase output amount (transparent, zero-blinding) must equal `calculate_block_reward(height)` exactly, and every transaction must balance (inputs = outputs + fee) with valid range proofs and real ring members. Together these enforce [Article I](../governance/constitution.md#article-i--transparent-emission-no-hidden-inflation): a block that mints more than the schedule allows, or a tx that creates value, is rejected. (`header.supply_commitment` is a reserved zero placeholder today — the single-value Pedersen supply accumulator is a planned enhancement and is not yet validated.)
 11. **Block size cap** — total serialized size ≤ `MAX_BLOCK_SIZE` (2 MB).
 
 Failing any check returns `BlockValidation { valid: false, errors: [...] }` and the block is rejected.

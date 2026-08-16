@@ -130,8 +130,11 @@ No figure here is approximated.
 
 ### 6.2 Supply and emission
 
-- **Maximum supply:** **100,000,000 CYNC** (`MAX_SUPPLY`, `TOTAL_SUPPLY_TARGET`),
-  to 12 decimal places (1 CYNC = 10¹² atomic units, `ATOMIC_UNITS`).
+- **Supply asymptote:** **100,000,000 CYNC** (`MAX_SUPPLY`, `TOTAL_SUPPLY_TARGET`),
+  to 12 decimal places (1 CYNC = 10¹² atomic units, `ATOMIC_UNITS`). This is the
+  asymptote the *issuance curve* approaches — **not a hard cap on total supply**:
+  the perpetual tail emission (below) continues after the curve floors, so total
+  supply crosses ~100M over the long term and then grows slowly without bound.
 - **Emission curve:** smooth and **halving-free**. Each block pays
   `reward = max( TAIL_EMISSION, (100,000,000 − already_mined) × COIN /
   EMISSION_DIVISOR )` with `EMISSION_DIVISOR = 2,000,000`. Because the reward is
