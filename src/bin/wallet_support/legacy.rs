@@ -1836,6 +1836,8 @@ async fn cmd_multisig_round1(share_file: &str, output: &str) -> Result<(), Strin
 
     println!("  Commitment: {} (share this with other signers)", output);
     println!("  Nonces:     {} (SECRET — keep for round 2)", nonce_file);
+    println!("  SINGLE-USE: these nonces sign exactly ONE message. round2 deletes");
+    println!("  them after signing; never reuse a nonce file for a second message.");
     Ok(())
 }
 
@@ -1881,13 +1883,32 @@ async fn cmd_multisig_round2(
         nonces,
     };
 
-    let sig_share = multisig::signing_round2(&share, &secret, &commitments, &message)
+    let sig_share = multisig::signing_round2(&share, secret, &commitments, &message)
         .map_err(|e| format!("round2: {}", e))?;
+
+    // SECURITY: consume the round-1 nonces now that a signature share exists.
+    // FROST/Schnorr nonces are single-use — signing a second (different)
+    // message with the same nonces lets anyone who sees both signature shares
+    // recover this participant's key share (RFC 9591). Best-effort overwrite so
+    // the raw nonce bytes don't linger, then remove so a re-run of round2
+    // cannot reload and reuse them (a re-run now fails "read nonces", which is
+    // the intended single-use behavior).
+    if let Ok(len) = std::fs::metadata(nonce_file).map(|m| m.len()) {
+        let _ = std::fs::write(nonce_file, vec![0u8; len as usize]);
+    }
+    if let Err(e) = std::fs::remove_file(nonce_file) {
+        eprintln!(
+            "  WARNING: could not delete nonce file {} ({}). DELETE IT MANUALLY NOW — \
+             reusing these nonces to sign another message would leak your key share.",
+            nonce_file, e
+        );
+    }
 
     let json = serde_json::to_string_pretty(&sig_share).map_err(|e| format!("serialize: {}", e))?;
     std::fs::write(output, &json).map_err(|e| format!("write: {}", e))?;
 
     println!("  Signature share: {} (send to coordinator)", output);
+    println!("  Round-1 nonces consumed + deleted (single-use — do not re-run round2 with them).");
     Ok(())
 }
 
