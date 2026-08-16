@@ -32,7 +32,7 @@ Keep that as the source of truth; do not edit numbers here directly.
 | Hash algorithm | RandomX |
 | Block time | 120 seconds |
 | Block reward (initial) | 50 CYNC, asymptotic curve |
-| Max supply | 100,000,000 CYNC (asymptotic, never reached) |
+| Supply model | 100,000,000 CYNC = issuance-curve asymptote (not a hard cap); perpetual 0.6 CYNC/block tail emission carries total supply past 100M long-term |
 | Total supply at genesis | 0 CYNC (no premine) |
 | Premine | None — compile-time enforced (Article II) |
 | ICO / IDO / private sale | None |
@@ -66,8 +66,10 @@ Keep that as the source of truth; do not edit numbers here directly.
 > developer tax with a compile-time assertion (Article II) — any
 > build that violates this fails to compile.
 >
-> **Capped supply.** 100,000,000 CYNC asymptotic cap, approached but
-> never reached, plus a 0.6 CYNC/block tail emission. 30% of all
+> **Supply model.** The issuance curve asymptotically approaches
+> 100,000,000 CYNC; a perpetual 0.6 CYNC/block tail emission then
+> continues, so total supply crosses ~100M long-term and rises slowly
+> forever (100M is the curve's asymptote, not a hard cap). 30% of all
 > transaction fees are burned. No halvings.
 >
 > **Smooth emission.** Block reward decays smoothly with circulating
