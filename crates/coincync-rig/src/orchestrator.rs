@@ -703,7 +703,7 @@ fn build_header_from_template(
     let mempool_txs = parse_template_transactions(template);
 
     // Fee-burn split per Constitution Article II — congestion-aware.
-    let claimable_fees = calculate_claimable_fees(&mempool_txs);
+    let claimable_fees = calculate_claimable_fees(height, &mempool_txs);
     let coinbase = create_mining_coinbase_with_fees(
         height,
         miner_spend_pub,
@@ -763,10 +763,22 @@ fn parse_template_transactions(template: &Value) -> Vec<Transaction> {
 /// of the fee is burned; the miner only collects the un-burned share.
 /// Must match validator-side `validation.rs` exactly or the daemon
 /// rejects our coinbase.
-fn calculate_claimable_fees(mempool_txs: &[Transaction]) -> u64 {
+///
+/// The burn split only activates at `FEE_DISTRIBUTION_HEIGHT`. Before that
+/// height the validator lets the miner claim ALL fees (backward compatible;
+/// see `validation.rs` `max_coinbase`), so we must do the same here or the
+/// daemon rejects our coinbase for under-claiming the burned share. On
+/// mainnet `FEE_DISTRIBUTION_HEIGHT == 0`, so distribution is always active
+/// and this gate is a no-op; it only matters for the pre-activation window
+/// on testnet/regtest.
+fn calculate_claimable_fees(height: u64, mempool_txs: &[Transaction]) -> u64 {
     let total_fees: u64 = mempool_txs.iter().map(|tx| tx.fee.as_atomic()).sum();
     if total_fees == 0 {
         return 0;
+    }
+    if height < coincync::constants::FEE_DISTRIBUTION_HEIGHT {
+        // Pre-activation: miner claims the full fee, no burn.
+        return total_fees;
     }
     let block_size: usize = mempool_txs
         .iter()
@@ -915,5 +927,66 @@ mod tests {
         // Being behind the network is handled by is_synced, not this gate.
         assert!(!fork_diverged(10_000, 10_042, FORK_DIVERGENCE_MARGIN));
         assert!(!fork_diverged(10_042, 10_042, FORK_DIVERGENCE_MARGIN));
+    }
+
+    // Build a minimal non-coinbase tx carrying only a fee — enough for the
+    // fee-accounting path, which reads `tx.fee` and the serialized size.
+    fn tx_with_fee(fee: u64) -> coincync::transaction::Transaction {
+        use coincync::primitives::Amount;
+        use coincync::transaction::{Transaction, TxType};
+        Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    #[test]
+    fn claimable_fees_track_the_validator_activation_gate() {
+        use super::calculate_claimable_fees;
+        use coincync::constants::FEE_DISTRIBUTION_HEIGHT;
+        use coincync::primitives::Amount;
+
+        // No fees → nothing claimable, regardless of height.
+        assert_eq!(calculate_claimable_fees(FEE_DISTRIBUTION_HEIGHT, &[]), 0);
+        assert_eq!(calculate_claimable_fees(0, &[tx_with_fee(0)]), 0);
+
+        let fee = 7_160_000u64;
+        let txs = [tx_with_fee(fee)];
+
+        // At/after activation the burn split applies: the miner claims only
+        // `distribute_fee(...).to_miner`. A lone tiny tx is far from the
+        // congestion threshold, so the split is the non-congested one.
+        let expected_after = coincync::consensus::fee_market::distribute_fee(
+            Amount::from_atomic(fee),
+            false,
+        )
+        .to_miner
+        .as_atomic();
+        assert_eq!(
+            calculate_claimable_fees(FEE_DISTRIBUTION_HEIGHT, &txs),
+            expected_after,
+            "at/after activation the miner claims only the un-burned share"
+        );
+
+        // Before activation the validator lets the miner claim the WHOLE fee
+        // (backward compatible). This window only exists when the activation
+        // height is non-zero — i.e. testnet builds. On mainnet it is 0, so
+        // there is no pre-activation block to test and the split is always on.
+        if FEE_DISTRIBUTION_HEIGHT > 0 {
+            let before = calculate_claimable_fees(FEE_DISTRIBUTION_HEIGHT - 1, &txs);
+            assert_eq!(
+                before, fee,
+                "below activation the miner claims the full fee, no burn"
+            );
+            assert!(
+                before > expected_after,
+                "the burn split must reduce the miner's share once active"
+            );
+        }
     }
 }
