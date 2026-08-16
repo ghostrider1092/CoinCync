@@ -19,6 +19,17 @@ publish      = false
 name = "coincync-rig"
 path = "src/main.rs"
 
+[features]
+# Testnet consensus constants. Forwards to the parent crate's `testnet`
+# feature so a testnet/regtest miner links the SAME feature-gated
+# consensus values as the daemon it mines for — most importantly
+# `FEE_DISTRIBUTION_HEIGHT` (testnet 525 / mainnet 0), which controls when
+# the coinbase fee-burn split activates. Without a matching build the rig
+# would compute a coinbase the validator rejects for blocks below the
+# activation height. Build with `--features testnet` whenever the target
+# daemon is a testnet build; mainnet builds omit it (constants agree at 0).
+testnet = ["coincync/testnet"]
+
 [dependencies]
 # Reuse the parent crate's consensus types + hash function so we never
 # drift from the validator. If the validator ever changes the recipe,
