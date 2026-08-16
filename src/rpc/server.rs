@@ -975,6 +975,17 @@ pub async fn start_rpc_server(
                 "current_reward":     reward.as_atomic(),
                 "total_emitted":      supply_atomic_decimal(stats.total_supply),
                 "emission_phase":     phase.name(),
+                // Public emission parameters so anyone can independently
+                // recompute the schedule and confirm `total_emitted`. Emission
+                // is a deterministic function of height — no hidden and no
+                // discretionary issuance.
+                "emission_formula":   "reward(h) = max(tail_emission, (supply_target*coin - emitted) / emission_divisor)",
+                "supply_target_cync": crate::constants::TOTAL_SUPPLY_TARGET,
+                "emission_divisor":   crate::constants::EMISSION_DIVISOR,
+                "tail_emission_atomic": crate::constants::TAIL_EMISSION,
+                "coin":               crate::constants::COIN,
+                "supply_model":       "asymptotic issuance toward supply_target plus a perpetual fixed tail — not a hard cap; total supply exceeds supply_target long-term",
+                "verification_note":  "No hidden inflation: coinbase outputs are transparent (zero blinding) and consensus-checked to equal the scheduled reward exactly on every block; every transaction is cryptographically proven to balance (inputs = outputs + fee) and every ring member references a real prior on-chain output. total_emitted therefore provably equals the summed deterministic schedule — recompute it from the parameters above (or via /api/v1/emission) and compare against this value.",
             }))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
