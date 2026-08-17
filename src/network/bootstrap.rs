@@ -728,19 +728,18 @@ mod tests {
 
     #[test]
     fn test_bootstrap_config() {
-        // Phase A7-6 (audit fix): the previous version asserted exactly 3 seed
-        // nodes. The seed list grew to 5 (NYC, RIC, TOR, ATL, SFO) when more
-        // testnet infrastructure came online — the test was stale. Assert
-        // ranges instead of exact counts so future seed additions don't
-        // require touching this test.
+        // Assert ranges, not exact counts, so seed churn doesn't break the
+        // test. 2026-08-16: floor lowered from 3 to 1 — the Vultr testnet fleet
+        // was decommissioned (dead since 2026-07-27), leaving one stable public
+        // box until the fleet is re-provisioned. One live seed beats five dead.
         let config = BootstrapConfig::default();
         assert!(
             config.dns_seeds.len() >= 1,
             "must have at least one DNS seed"
         );
         assert!(
-            config.seed_nodes.len() >= 3,
-            "must have at least 3 seed nodes"
+            !config.seed_nodes.is_empty(),
+            "must have at least one seed node"
         );
         assert!(
             config.seed_nodes.len() <= 32,
