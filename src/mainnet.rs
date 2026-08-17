@@ -29,21 +29,26 @@ pub const MAINNET_DNS_SEEDS: &[&str] = &[
     "seed3.coincync.org",
 ];
 
-/// Mainnet hardcoded seed nodes
-/// These are the initial bootstrap nodes for mainnet peer discovery.
-/// Use `--peer <addr:port>` to connect to additional nodes manually.
-/// Use `--seed-node <addr:port>` to override these with your own seeds.
+/// Mainnet hardcoded seed nodes (fallback bootstrap).
 ///
-/// Mainnet seed nodes — populated from testnet fleet.
-/// L-6: These will be replaced with dedicated mainnet IPs before October 2026 launch.
-/// For now, they point to the existing infrastructure on mainnet ports.
+/// Primary peer discovery for mainnet is `MAINNET_DNS_SEEDS` below
+/// (seed1/2/3.coincync.org) — DNS lets the operator re-point the launch
+/// fleet without shipping a new binary, so volatile IPs never get baked
+/// into releases. This hardcoded list is only a fallback for when DNS is
+/// unreachable/blocked, and holds STABLE PUBLIC boxes only.
+///
+/// The residential home node is intentionally NOT listed here — it is
+/// reachable via DNS seed only (privacy + residential IPs are not stable).
+/// Append additional stable VPS IPs here as the launch fleet is provisioned.
+///
+/// Overrides: `--seed-node <addr:port>` replaces this list; `--peer
+/// <addr:port>` adds a manual peer on top.
+///
+/// 2026-08-16: dropped the decommissioned Vultr seed IPs (66.135.23.193 /
+/// 140.82.57.168 / 207.148.111.76 — dead since 2026-07-27) that would have
+/// shipped as dead mainnet bootstrap peers.
 pub const MAINNET_SEED_NODES: &[&str] = &[
-    // 2026-06-06: rewritten to the live Vultr fleet. Previous LON,
-    // SYD, NYC3, SFO, TOR entries referenced boxes that no longer
-    // exist. Re-populate pre-mainnet with the launch fleet.
-    "66.135.23.193:19080",  // seed1 — New York
-    "140.82.57.168:19080",  // seed2 — Amsterdam
-    "207.148.111.76:19080", // seed3 — Tokyo
+    "2.28.1.75:19080", // Hetzner (EU) — stable public seed
 ];
 
 /// Mainnet minimum ring size (same as testnet — constitutional minimum)
