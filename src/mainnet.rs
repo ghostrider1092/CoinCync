@@ -7,64 +7,17 @@ use crate::config::NetworkType;
 use crate::consensus::{Block, BlockHeader};
 use crate::primitives::{Amount, Hash, PublicKey};
 use crate::transaction::{Transaction, TxOutput, TxType};
-use std::net::SocketAddr;
 
-/// Mainnet network magic bytes ("CYNC")
-pub const MAINNET_MAGIC: [u8; 4] = [0x43, 0x59, 0x4E, 0x43];
-
-/// Mainnet default P2P port
-pub const MAINNET_P2P_PORT: u16 = 19080;
-
-/// Mainnet default RPC port
-pub const MAINNET_RPC_PORT: u16 = 19081;
-
-/// Mainnet address prefix
-pub const MAINNET_ADDRESS_PREFIX: &str = "CYNC";
-
-/// Mainnet DNS seeds
-/// Register A/AAAA records before launch.
-pub const MAINNET_DNS_SEEDS: &[&str] = &[
-    "seed1.coincync.org",
-    "seed2.coincync.org",
-    "seed3.coincync.org",
-];
-
-/// Mainnet hardcoded seed nodes (fallback bootstrap).
-///
-/// Primary peer discovery for mainnet is `MAINNET_DNS_SEEDS` below
-/// (seed1/2/3.coincync.org) — DNS lets the operator re-point the launch
-/// fleet without shipping a new binary, so volatile IPs never get baked
-/// into releases. This hardcoded list is only a fallback for when DNS is
-/// unreachable/blocked, and holds STABLE PUBLIC boxes only.
-///
-/// The residential home node is intentionally NOT listed here — it is
-/// reachable via DNS seed only (privacy + residential IPs are not stable).
-/// Append additional stable VPS IPs here as the launch fleet is provisioned.
-///
-/// Overrides: `--seed-node <addr:port>` replaces this list; `--peer
-/// <addr:port>` adds a manual peer on top.
-///
-/// 2026-08-16: dropped the decommissioned Vultr seed IPs (66.135.23.193 /
-/// 140.82.57.168 / 207.148.111.76 — dead since 2026-07-27) that would have
-/// shipped as dead mainnet bootstrap peers.
-pub const MAINNET_SEED_NODES: &[&str] = &[
-    "2.28.1.75:19080", // Hetzner (EU) — stable public seed
-];
-
-/// Mainnet minimum ring size (same as testnet — constitutional minimum)
-pub const MAINNET_MIN_RING_SIZE: usize = 11;
-
-/// Mainnet block time target — MUST equal the consensus `TARGET_BLOCK_TIME`
-/// (120s), which is what ASERT difficulty targets and what the emission
-/// schedule (`BLOCKS_PER_YEAR`) is built on. Same as testnet.
-///
-/// 2026-08-16 (M-1 fix): was a divergent literal `60`, contradicting the
-/// actual consensus target of 120s — the chain always produced 120s blocks
-/// regardless. Aliased to the single source of truth so nothing can drift.
-/// (A genuine 60s mainnet would be a consensus change to `TARGET_BLOCK_TIME`
-/// + an emission recalculation, not a value here — an owner decision, not a
-/// bug fix.)
-pub const MAINNET_BLOCK_TIME: u64 = crate::constants::TARGET_BLOCK_TIME;
+// NOTE (2026-08-16 dead-code sweep): removed the dead `MainnetConfig` struct
+// (+ `impl Default`, unit tests) and its supporting duplicate constants
+// (`MAINNET_MAGIC`, `MAINNET_P2P_PORT`, `MAINNET_RPC_PORT`,
+// `MAINNET_ADDRESS_PREFIX`, `MAINNET_DNS_SEEDS`, `MAINNET_SEED_NODES`,
+// `MAINNET_MIN_RING_SIZE`, `MAINNET_BLOCK_TIME`). Nothing constructed
+// `MainnetConfig` at runtime, and the constants shadowed the LIVE copies in
+// `constants.rs` / `network::dns_seeds` — an "operator edits the wrong file"
+// trap. The live sources of truth are `crate::constants::*` (magic/ports/
+// prefix/block-time/ring-size) and `network::dns_seeds::{MAINNET_DNS_SEEDS,
+// MAINNET_FALLBACK}` (seeds, consumed by `BootstrapConfig::for_network`).
 
 /// Mainnet initial difficulty.
 /// Higher than testnet to account for real mining hardware at launch.
@@ -112,40 +65,6 @@ pub const MAINNET_GENESIS_HASH: [u8; 32] = [
 // because that file is `critical_files.lock`-protected; the mainnet
 // removal alone eliminates the higher-risk "future code lands on the
 // mainnet path and picks the wrong constant" scenario.
-
-/// Mainnet configuration
-#[derive(Clone, Debug)]
-pub struct MainnetConfig {
-    pub network_magic: [u8; 4],
-    pub p2p_port: u16,
-    pub rpc_port: u16,
-    pub address_prefix: String,
-    pub min_ring_size: usize,
-    pub block_time: u64,
-    pub initial_difficulty: u64,
-    pub dns_seeds: Vec<String>,
-    pub seed_nodes: Vec<SocketAddr>,
-}
-
-impl Default for MainnetConfig {
-    fn default() -> Self {
-        let params = NetworkType::Mainnet.params();
-        MainnetConfig {
-            network_magic: params.magic,
-            p2p_port: params.p2p_port,
-            rpc_port: params.rpc_port,
-            address_prefix: params.address_prefix.to_string(),
-            min_ring_size: MAINNET_MIN_RING_SIZE,
-            block_time: MAINNET_BLOCK_TIME,
-            initial_difficulty: MAINNET_INITIAL_DIFFICULTY,
-            dns_seeds: MAINNET_DNS_SEEDS.iter().map(|s| s.to_string()).collect(),
-            seed_nodes: MAINNET_SEED_NODES
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect(),
-        }
-    }
-}
 
 /// Genesis block for mainnet
 pub fn mainnet_genesis() -> Block {
@@ -343,30 +262,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_mainnet_config_default() {
-        let config = MainnetConfig::default();
-        assert_eq!(config.p2p_port, 19080);
-        assert_eq!(config.rpc_port, 19081);
-        assert_eq!(config.min_ring_size, 11);
-        assert_eq!(config.initial_difficulty, 10_000);
-    }
-
-    #[test]
-    fn test_mainnet_seed_ips() {
-        // Verify seed nodes constant is defined (may be empty pre-launch)
-        // When populated, each should be a valid socket address
-        for seed in MAINNET_SEED_NODES {
-            assert!(
-                seed.parse::<std::net::SocketAddr>().is_ok(),
-                "Seed node '{}' is not a valid socket address",
-                seed
-            );
-        }
-        // DNS seeds should be non-empty
-        assert!(
-            !MAINNET_DNS_SEEDS.is_empty(),
-            "DNS seeds must be configured"
-        );
-    }
 }

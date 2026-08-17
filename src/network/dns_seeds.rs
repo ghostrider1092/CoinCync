@@ -6,11 +6,6 @@
 // `resolve_seeds()`. Keep the two in sync — a refactor that
 // de-duplicates them is a reasonable future cleanup.
 
-use crate::config::{Network, ProxyConfig};
-use crate::network::socks_dns;
-use std::net::SocketAddr;
-use std::time::Duration;
-
 // 2026-08-16: mainnet DNS seeds target coincync.ORG (the operator-controlled
 // domain) — the runtime queries THIS constant. Register seed1/2/3 A/AAAA
 // records under coincync.org before launch. (Testnet stays on .network below.)
@@ -111,98 +106,12 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     "2.28.1.75:28080", // Hetzner (EU) — stable public seed
 ];
 
-/// Resolve DNS seeds and return a deduplicated list of socket addresses.
-/// Falls back to hardcoded IPs if all DNS lookups fail.
-///
-/// This is the clearnet path — uses the OS resolver (which bypasses any
-/// SOCKS5 proxy). When a proxy is active, prefer
-/// [`resolve_seeds_with_proxy`] to avoid the DNS leak documented in
-/// [`crate::network::socks_dns`].
-pub async fn resolve_seeds(network: Network) -> Vec<SocketAddr> {
-    resolve_seeds_inner(network, None).await
-}
-
-/// Resolve DNS seeds, routing queries through `proxy` via DNS-over-TCP
-/// when the proxy is active. Falls back to hardcoded IPs when every
-/// SOCKS5 lookup fails.
-pub async fn resolve_seeds_with_proxy(
-    network: Network,
-    proxy: Option<&ProxyConfig>,
-) -> Vec<SocketAddr> {
-    resolve_seeds_inner(network, proxy).await
-}
-
-async fn resolve_seeds_inner(network: Network, proxy: Option<&ProxyConfig>) -> Vec<SocketAddr> {
-    let (seeds, fallback) = match network {
-        Network::Mainnet => (MAINNET_DNS_SEEDS, MAINNET_FALLBACK),
-        Network::Testnet => (TESTNET_DNS_SEEDS, TESTNET_FALLBACK),
-        Network::Regtest => return vec![],
-    };
-
-    let mut addrs: Vec<SocketAddr> = Vec::new();
-    let port = network.p2p_port();
-    let socks_timeout = Duration::from_secs(8);
-    let use_proxy_dns = proxy.map(|p| p.is_active()).unwrap_or(false);
-
-    for seed in seeds {
-        if use_proxy_dns {
-            let proxy = proxy.expect("use_proxy_dns implies Some(proxy)");
-            match socks_dns::resolve_via_socks5(seed, proxy, socks_timeout).await {
-                Ok(ips) => {
-                    tracing::debug!(
-                        "DNS seed {} resolved {} addr(s) via SOCKS5",
-                        seed,
-                        ips.len()
-                    );
-                    for ip in ips {
-                        addrs.push(SocketAddr::new(ip, port));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("SOCKS5 DNS seed {} failed: {}", seed, e);
-                }
-            }
-        } else {
-            let host = format!("{}:{}", seed, port);
-            match tokio::net::lookup_host(host).await {
-                Ok(resolved) => {
-                    let new: Vec<_> = resolved.collect();
-                    tracing::debug!("DNS seed {} resolved {} addr(s)", seed, new.len());
-                    addrs.extend(new);
-                }
-                Err(e) => {
-                    tracing::warn!("DNS seed {} failed: {}", seed, e);
-                }
-            }
-        }
-    }
-
-    // Deduplicate
-    addrs.sort_unstable();
-    addrs.dedup();
-
-    if addrs.is_empty() {
-        tracing::warn!("All DNS seeds failed — using hardcoded fallback nodes");
-        for addr_str in fallback {
-            match addr_str.parse::<SocketAddr>() {
-                Ok(addr) => addrs.push(addr),
-                Err(e) => tracing::warn!(
-                    fallback_entry = %addr_str,
-                    error = %e,
-                    "dns_seeds: hardcoded fallback entry failed to parse — operator should fix",
-                ),
-            }
-        }
-    }
-
-    tracing::info!(
-        "Resolved {} seed addresses for {} ({} DNS path)",
-        addrs.len(),
-        network,
-        if use_proxy_dns { "SOCKS5" } else { "OS" }
-    );
-    addrs
-}
+// NOTE (2026-08-16 dead-code sweep): removed `resolve_seeds`,
+// `resolve_seeds_with_proxy`, and `resolve_seeds_inner`. They were reachable
+// only via `bootstrap::initial_peers` (also removed this pass) — dead code.
+// The live seed-resolution path is `Bootstrapper::get_peers_with_proxy`, which
+// reads these constants through `BootstrapConfig::for_network`. The constants
+// below are KEPT because `for_network` (mainnet) and the tests consume them.
 
 #[cfg(test)]
 mod tests {

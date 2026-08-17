@@ -54,9 +54,7 @@ pub mod hardening;
 #[cfg(feature = "sketch-block-aggregation")]
 pub mod block_aggregation;
 
-pub use bootstrap::initial_peers;
 pub use dandelion::DandelionRouter;
-pub use dns_seeds::{resolve_seeds, resolve_seeds_with_proxy};
 pub use node::P2PNode;
 pub use peer::{generate_peer_id, PeerId, PeerInfo};
 pub use protocol::{MessageHeader, MessageType, MAX_MESSAGE_SIZE};

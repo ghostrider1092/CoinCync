@@ -406,9 +406,13 @@ pub struct P2PConfig {
 /// transitional compatibility on isolated networks.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct P2PEncryptionConfig {
-    /// Require encryption — reject peers that don't support Noise
-    /// Default: false (allow plaintext fallback during transition)
-    #[serde(default)]
+    /// Require encryption — reject peers that don't support Noise.
+    /// Default: true (matches the `Default` impl). Using `default_true` here
+    /// (not bare `#[serde(default)]`, which would deserialize to `false`)
+    /// ensures a PARTIAL `[p2p.encryption]` table that omits `required` does
+    /// not silently downgrade to plaintext-allowed. Operators must set
+    /// `required = false` explicitly to permit plaintext peers.
+    #[serde(default = "default_true")]
     pub required: bool,
 
     /// Prefer encryption — attempt Noise handshake before falling back
@@ -1187,6 +1191,19 @@ impl NodeConfig {
         // Database validation
         if self.database.cache_size_mb == 0 {
             errors.push("database cache_size_mb must be at least 1".to_string());
+        }
+
+        // Node-tier behavior is not yet implemented: `node_tier` is parsed for
+        // forward/serde compatibility but no code path acts on it, so a node
+        // configured as Personal or Network still runs full Archive behavior
+        // (full block history + validation). Warn so the operator isn't misled
+        // into thinking they've provisioned a lightweight node.
+        if self.node_tier != NodeTier::Archive {
+            tracing::warn!(
+                "node_tier = {:?} is configured, but tiered node behavior is not yet \
+                 implemented — this node runs as a full Archive node regardless.",
+                self.node_tier
+            );
         }
 
         // SECURITY (H-22): Warn about plaintext RPC credentials and non-localhost exposure
