@@ -4,7 +4,7 @@ Copyright (c) 2025-2026, The CoinCync Project
 
 **Privacy money that requires no permission.** A fair-launch, RandomX
 CPU-mined cryptocurrency with mandatory privacy at the consensus layer, an
-auditable capped supply, and a hash-locked constitution that even its authors
+auditable asymptotic supply, and a hash-locked constitution that even its authors
 cannot quietly change.
 
 ## Table of Contents
@@ -105,8 +105,9 @@ the node software, validate the chain, and mine on equal terms.
 **Constitutional guarantees.** The [Constitution](CONSTITUTION.md) forbids
 premine, dev tax, founder allocation, admin authority, surveillance hooks, and
 external-chain trust — and it is **hash-locked into the build**, so these
-guarantees cannot be quietly changed later. Supply is capped at 100,000,000 CYNC
-on an auditable emission curve.
+guarantees cannot be quietly changed later. Supply approaches an asymptote of
+100,000,000 CYNC on an auditable curve; a perpetual 0.6 CYNC/block tail emission
+continues past it.
 
 ## About this project
 
@@ -302,8 +303,9 @@ docs for the full Dandelion++ + Noise-XX + cover-traffic model.
 ## Storage and sync
 
 CoinCync is a young chain, so full history is small. Fresh nodes sync from the
-seeds and cross-check a hardcoded consensus-checkpoint list for long-range-attack
-defense. Light-wallet sync downloads compact block digests and scans locally, so
+seeds and cross-check node-local rolling checkpoints for long-range-attack
+defense; the hardcoded consensus-checkpoint table is populated post-launch
+(currently empty). Light-wallet sync downloads compact block digests and scans locally, so
 the node never answers "does this specific output exist" — a surveillance-
 resistance property (there is deliberately no balance-lookup RPC).
 

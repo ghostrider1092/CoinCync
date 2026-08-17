@@ -17,8 +17,8 @@ numbers without sources are a scam signal.
 | Field | Value | Source |
 |---|---|---|
 | Name | CoinCync | repository root |
-| Ticker | CYNC | [src/constants.rs:173](../../src/constants.rs#L173) |
-| Atomic unit divisor | 1,000,000,000,000 (12 decimals) | [src/constants.rs:166](../../src/constants.rs#L166) |
+| Ticker | CYNC | [src/constants.rs:250](../../src/constants.rs#L250) |
+| Atomic unit divisor | 1,000,000,000,000 (12 decimals) | [src/constants.rs:311](../../src/constants.rs#L311) |
 | Genesis date (target) | 2026-10-01 | [docs/launch/GENESIS-CEREMONY-PLAN.md](../launch/GENESIS-CEREMONY-PLAN.md) |
 | Network type | Layer-1, standalone | n/a |
 | Consensus | Proof-of-Work (RandomX) | [src/consensus/pow.rs](../../src/consensus/pow.rs) |
@@ -34,13 +34,13 @@ numbers without sources are a scam signal.
 
 | Field | Value | Source |
 |---|---|---|
-| Supply model | 100,000,000 CYNC is the **issuance-curve asymptote** (not a hard cap). Tail emission (0.6 CYNC/block, perpetual) continues after the curve floors, so total supply crosses ~100M long-term and grows slowly forever. | [src/constants.rs:774](../../src/constants.rs#L774), Constitution Article I |
-| Genesis premine | **0 CYNC** | enforced by absence of premine code; reviewer can verify by reading `src/emission/curve.rs` and `src/genesis.rs` |
-| Developer tax | **0% (compile-time enforced)** | `DEV_TAX_PERCENT = 0` at [src/constants.rs:810](../../src/constants.rs#L810); Article II compile assertion at line 811 |
+| Supply model | 100,000,000 CYNC is the **issuance-curve asymptote** (not a hard cap). Tail emission (0.6 CYNC/block, perpetual) continues after the curve floors, so total supply crosses ~100M long-term and grows slowly forever. | [src/constants.rs:884](../../src/constants.rs#L884), Constitution Article I |
+| Genesis premine | **0 CYNC** | enforced by absence of premine code; reviewer can verify by reading `src/emission/curve.rs` and `src/mainnet.rs` (+ `src/testnet.rs`) |
+| Developer tax | **0% (compile-time enforced)** | `DEV_TAX_PERCENT = 0` at [src/constants.rs:926](../../src/constants.rs#L926); Article II compile assertion at line 927 |
 | Foundation reserve | **None** | no foundation entity exists; see §6 |
 | Initial block reward | 50 CYNC | derived from `EMISSION_DIVISOR = 2_000_000` |
-| Emission curve | Smooth asymptotic (no halvings, no eras) | [src/constants.rs:776-786](../../src/constants.rs#L776-L786) |
-| Tail emission | 0.6 CYNC/block (forever, after curve falls below) | [src/constants.rs:803](../../src/constants.rs#L803) |
+| Emission curve | Smooth asymptotic (no halvings, no eras) | [src/constants.rs:886-896](../../src/constants.rs#L886-L896) |
+| Tail emission | 0.6 CYNC/block (forever, after curve falls below) | [src/constants.rs:869](../../src/constants.rs#L869) |
 | Fee burn | 30% of fees burned per block | (verify against [src/emission/curve.rs](../../src/emission/curve.rs)) |
 | Self-reported circulating supply URL | (post-launch — see SUBMISSION_KIT.md §3) | n/a |
 
@@ -87,8 +87,8 @@ Solo-mineability: yes. Reference miner shipped in the node binary.
 | Reproducible build | yes — [scripts/verify-reproducible-build.ps1](../../scripts/verify-reproducible-build.ps1) |
 | Critical-files integrity | SHA-256 lockfile at [critical_files.lock](../../critical_files.lock); enforced in `build.rs` |
 | Signed binaries | yes — SSH-signed commits + signed SHA256SUMS (see [docs/launch/v1.0.10-CHECKLIST.md](../launch/v1.0.10-CHECKLIST.md)) |
-| Fuzz suite | 27 cargo-fuzz targets in [fuzz/fuzz_targets/](../../fuzz/fuzz_targets/) |
-| Constitutional guards | compile-time assertions in [src/constants.rs:788+](../../src/constants.rs#L788) bind the binary to [CONSTITUTION.md](../../CONSTITUTION.md) |
+| Fuzz suite | 7 cargo-fuzz targets in [fuzz/fuzz_targets/](../../fuzz/fuzz_targets/) |
+| Constitutional guards | compile-time assertions in [src/constants.rs:899+](../../src/constants.rs#L899) bind the binary to [CONSTITUTION.md](../../CONSTITUTION.md) |
 
 ## 6. Team / legal entity
 

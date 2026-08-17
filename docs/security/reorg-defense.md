@@ -92,7 +92,7 @@ the absolute-finality backstop.
 
 ### Layer 4 — Per-node rolling checkpoints
 
-`CHECKPOINT_INTERVAL = 144` blocks (`src/constants.rs:157`, ≈ 5
+`CHECKPOINT_INTERVAL = 144` blocks (`src/constants.rs:234`, ≈ 5
 hours at 120 s). Each node records a checkpoint of its own canonical
 chain every interval (`db.state.add_checkpoint`, `src/chain.rs:505`
 for genesis). A reorg whose fork point is below the node's
@@ -103,8 +103,8 @@ reorganise regardless of work.
 
 ### Layer 5 — Hardcoded consensus checkpoints (CIP-009 "Path B")
 
-`CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])]` (`src/constants.rs:558`
-mainnet, `:568` testnet). A network-wide, release-shipped table of
+`CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])]` (`src/constants.rs:731`
+mainnet, `:741` testnet). A network-wide, release-shipped table of
 `(height, block_hash)` pairs; any block proposing a different hash
 at a checkpointed height is rejected. **The table is empty as of
 2026-05-08** on both networks — it is populated post-launch via the
@@ -113,7 +113,7 @@ release process (`scripts/update-checkpoints.sh`,
 checkpoints up to ≈ 2 weeks behind the tip. An empty table is a
 valid state: `expected_checkpoint_hash` returns `None` and the
 validator treats "no checkpoint here" as "accept any consistent
-block" (`src/constants.rs:583`). This is the layer CIP-009 decided
+block" (`src/constants.rs:756`). This is the layer CIP-009 decided
 to *add*; see §3.
 
 ### Layer 6 — Miner-signed rolling finality (CIP-009.D, queued)

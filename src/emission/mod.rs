@@ -1,6 +1,6 @@
 //! # Emission Module for CoinCync
 //!
-//! Asymptotic emission curve with 100M CYNC supply cap:
+//! Asymptotic emission curve; 100M CYNC is the asymptote (soft target), NOT a hard cap:
 //!     reward = max(0.6 CYNC, (100M - already_mined) / 2,000,000)
 //!
 //! No eras. No halvings. Smooth decay from 50 CYNC to 0.6 CYNC tail.

@@ -172,8 +172,8 @@ When the CYNC block satisfies CYNC's difficulty, the CyncHub block referenced in
 
 CyncHub has its own (lower) difficulty target; CYNC's PoW satisfies CyncHub's automatically since CYNC's target is harder.
 
-**Block time:** 60 seconds (matches CYNC; simplest possible — ≤1 CyncHub block per CYNC block).
-**Difficulty retarget:** every 144 blocks (≈2.4 hours).
+**Block time:** 120 seconds (matches CYNC; simplest possible — ≤1 CyncHub block per CYNC block).
+**Difficulty retarget:** every 144 blocks (≈4.8 hours).
 **No new mining algorithm.** Same RandomX hashrate, same hardware, same miners.
 
 **Reference miner support:** `coincync-rig` includes the CyncHub commitment in coinbase by default. Miners who *don't* include it forfeit CyncHub fee revenue — economic incentive to include it.

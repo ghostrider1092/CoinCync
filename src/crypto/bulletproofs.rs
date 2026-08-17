@@ -1,7 +1,8 @@
 //! # Bulletproofs Range Proofs
 //!
-//! Real Bulletproofs implementation for proving amounts are in valid range
-//! without revealing them. Uses the bulletproofs crate with Ristretto points.
+//! Bulletproofs+ (BP+) range proofs for proving amounts are in valid range
+//! without revealing them. Uses the tari_bulletproofs_plus crate; standard
+//! Bulletproofs are not used (BP+ active from genesis, BULLETPROOFS_PLUS_HEIGHT=0).
 //!
 //! ## Security Properties:
 //! - BlindingFactor is securely zeroized on drop using the zeroize crate

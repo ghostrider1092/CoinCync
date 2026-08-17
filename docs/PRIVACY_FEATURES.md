@@ -45,7 +45,7 @@ build* — it does not mean a mainnet deployment exists yet.
 
 | Feature | File | What it does | Status |
 |---|---|---|---|
-| **Dandelion++** | `dandelion.rs` | Stem/fluff transaction relay — stem phase hops through fixed per-epoch relay peers with Poisson delays + exponential embargo timers before fluff broadcast. Breaks "tx-submission IP → originator" linkage. | ✅ Live |
+| **Dandelion++** | `dandelion.rs` | Stem/fluff transaction relay — stem phase hops through fixed per-epoch relay peers with exponentially-distributed forward delays + exponential embargo timers before fluff broadcast. Breaks "tx-submission IP → originator" linkage. | ✅ Live |
 | **Traffic shaping** | `traffic_shaping.rs` | Three layers: constant-rate cover packets (`MessageType::Padding`), packet-size normalization to standard TLS frame sizes, and outbound timing jitter. Makes an idle node indistinguishable from an active one to a network observer. | ✅ Live |
 | **Noise XX encryption** | `noise.rs` | Authenticated + encrypted P2P links — no plaintext peer traffic. | ✅ Live |
 | **Peer scoring / Sybil defense** | `scoring.rs` | Scores and bans peers exhibiting isolation/stall patterns — protects the stem-phase relay relationships Dandelion++ depends on. | ✅ Live |
@@ -55,21 +55,24 @@ build* — it does not mean a mainnet deployment exists yet.
 | Feature | File | What it does | Status |
 |---|---|---|---|
 | **Mandatory privacy** | `privacy_policy.rs` | Consensus rule: rejects transparent transactions. Every non-coinbase tx must have hidden amounts (non-zero Pedersen commitments), hidden recipients (stealth/Spark addresses, never raw pubkeys), and ≥1 privacy-preserving input. No transparent escape hatch. | ✅ Live |
-| **Ring-size rules** | `constants.rs` + `validation.rs` | `RING_SIZE = 16`, `BOOTSTRAP_MIN_RING_SIZE = 11` (height < `BOOTSTRAP_CUTOVER_HEIGHT = 10 000`), `MAX_RING_SIZE = 32`. Enforced per-input in block validation. | ✅ Live |
+| **Ring-size rules** | `constants.rs` + `validation.rs` | `RING_SIZE = 16`, `BOOTSTRAP_MIN_RING_SIZE = 11` (height < 10 000, per `ring_size_at_height`), `MAX_RING_SIZE = 32`. Enforced per-input in block validation. | ✅ Live |
 
 ### 1.4 Wallet-level privacy — `src/wallet/`, `src/transaction/`
 
 | Feature | File | What it does | Status |
 |---|---|---|---|
 | **Auto-churn** | `wallet/churn.rs` | Wallet self-sends at Poisson-distributed intervals — fresh stealth address, full ring + decoys + range proof each time. Config-driven, **disabled by default**. | ✅ Live (opt-in) |
-| **Deniable wallets** | `wallet/persistence.rs` | Two-password plausible deniability — decoy + real data in one size-padded file (`[len][decoy][real]`); loading tries the password against both regions. | ✅ Live |
-| **Dead man's switch** | `transaction/recovery.rs` | Time-locked recovery metadata in the tx extra field (TLV, 42 B/output). After `timeout_blocks` (24 h – 2 y) a recovery address can sweep without the owner's spend key. Validated at consensus. | ✅ Live |
+| **Deniable wallets** | `wallet/persistence.rs` | Two-password plausible deniability (decoy + real region in one padded file). **`create_deniable_wallet` currently returns an error** — creation is disabled pending the C37/C38/C39 structural rewrite (silent `.hidden` leak, unused padding, write/cleanup race). Loading of already-created files still works. | ❌ Disabled |
+| **Dead man's switch** | `transaction/recovery.rs` | Time-locked recovery metadata in the tx extra field (TLV, 42 B/output). Only the TLV **metadata format** is validated (`validate_recovery_extra`, called from `transaction/validator.rs`); the recovery-sweep **authorization** path (letting a recovery address sweep without the owner's spend key) is NOT wired into consensus — dormant. | ⚠️ Inert |
 | **Wallet scanner** | `wallet/scanner.rs` | View-key chain scanning — ECDH stealth-address matching + commitment verification + subaddress derivation. | ✅ Live |
 | **Subaddresses** | `wallet/subaddress.rs`, `crypto/stealth.rs` | Unlinkable receive addresses from one key set — outputs across subaddresses don't correlate. | ✅ Live |
 
 ### 1.5 The "7 privacy innovations" — quick index
 
-A project shorthand; all seven are ✅ Live on testnet. They are not separate
+A project shorthand. Five of the seven are ✅ Live on testnet; **deniable
+wallets are ❌ disabled** (creation errors, pending the C37/C38/C39 rewrite) and
+the **dead man's switch is ⚠️ inert** (metadata format validated only, no
+consensus authorization path) — see the rows above. They are not separate
 subsystems — they map onto the tables above:
 
 1. **Decoy defense** → `storage/utxos.rs` (V1 log-gamma target-height policy) + `crypto/ring_selection.rs` (uniform ring assembly)
@@ -86,9 +89,10 @@ subsystems — they map onto the tables above:
 
 Verified state. The cryptographic primitives are **partially** in-tree —
 Lelantus Spark (`lelantus_spark.rs`, 917 lines), kernel offsets, and MW
-cut-through are real implementations. **But the shielded half is a green
-field**: `crates/orchard-side/src/` is an empty directory (no `Cargo.toml`, no
-`lib.rs`) — the Halo2 shielded action circuit doesn't exist in this repo yet.
+cut-through are real implementations. **The shielded half now has substantial
+code but is unwired**: `crates/orchard-side/src/` contains real modules
+(`lib.rs`, `action.rs`, `nullifier.rs`, `note.rs`, `commitment.rs`, `proof.rs`,
+`spend_key.rs`, …) but none of it is wired into consensus (Phase 2).
 And the `Transaction` type is ring-only — it has no fields or variants that
 can represent a shielded note, a Spark coin, or an MW kernel. Activating Phase
 2 therefore needs (a) writing the Halo2 circuit, (b) a hard-forking
@@ -122,7 +126,7 @@ flip on" inventory.
 
 | Gap | Status | Notes |
 |---|---|---|
-| **Tor / onion routing** | ❌ Not implemented | No SOCKS/Tor transport in `src/network/`. `THREAT_MODEL.md §2.2` names the "active cut-route adversary" as a non-defense and states the fix is "Tor or a similar anonymizing transport beneath CoinCync's P2P." Intended as a wallet default for mainnet. |
+| **Tor / onion routing** | ✅ Optional (SOCKS5/Tor) | Optional SOCKS5/Tor transport in `src/network/socks_dns.rs` + `proxy.rs`, driven by node flags `--proxy` / `--tor` / `--onion-only` (the latter accepts only `.onion` peers and disables clearnet DNS to avoid hostname leaks). Not on by default; `THREAT_MODEL.md §2.2` still names the "active cut-route adversary" as a residual concern when the transport is not enabled. |
 
 ---
 
@@ -145,10 +149,12 @@ The **active** privacy stack is Phase 1: ring signatures + confidential amounts
 + stealth addresses + the network layer (Dandelion++, traffic shaping, Noise),
 all enforced as *mandatory* at the consensus layer — there is no transparent
 transaction type, by design. The **7 "innovations"** are wallet- and
-crypto-level features layered on top, all live on testnet. **Phase 2** (Spark,
-cut-through, kernel offsets, the three privacy stores) is real code sitting
-in-tree but switched off — it activates through the CIP hard-fork process, not
-by default. The one honest gap is Tor support. When in doubt about whether
+crypto-level features layered on top; five are live on testnet, while deniable
+wallets are disabled (creation errors) and the dead man's switch is inert
+(metadata-only). **Phase 2** (Spark, cut-through, kernel offsets, the three
+privacy stores) is real code sitting in-tree but switched off — it activates
+through the CIP hard-fork process, not by default. Tor/onion routing is
+available as an optional SOCKS5 transport (off by default). When in doubt about whether
 something runs, check: is it behind a `sketch-*` Cargo feature, or constructed
 as `Option::None` in `chain.rs`? If yes to either — it's Phase 2, not live.
 

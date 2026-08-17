@@ -31,7 +31,7 @@ compile_error!(
 /// Protocol version
 pub const PROTOCOL_VERSION: u32 = 2;
 
-/// Target block time in seconds (2 minutes — mountain curve, 250M cap ~year 15).
+/// Target block time in seconds (2 minutes — mountain curve).
 pub const TARGET_BLOCK_TIME: u64 = 120;
 
 // Note: this file used to declare NUM_POW_ALGORITHMS and ALGO_WINDOW for
@@ -62,11 +62,11 @@ pub const MIN_TX_SIZE: usize = 100;
 pub const ASERT_HALFLIFE: u64 = 3600;
 
 /// Short window for difficulty adjustment (blocks)
-/// With 30 sec blocks: 8 blocks = 4 minutes
+/// With 120s blocks: 8 blocks = 16 minutes
 pub const DIFFICULTY_SHORT_WINDOW: u64 = 8;
 
 /// Long window for difficulty adjustment (blocks)
-/// With 30 sec blocks: 144 blocks = 72 minutes (~1.2 hours)
+/// With 120s blocks: 144 blocks = 288 minutes (~4.8 hours)
 pub const DIFFICULTY_LONG_WINDOW: u64 = 144;
 
 /// Weight for short window (70 out of 100)
@@ -79,7 +79,7 @@ pub const DIFFICULTY_LONG_WEIGHT: u64 = 30;
 pub const DIFFICULTY_WEIGHT_SCALE: u64 = 100;
 
 /// Blocks before triggering emergency difficulty drop
-/// With 30 sec blocks: 12 blocks = 6 minutes
+/// With 120s blocks: 12 blocks = 24 minutes
 pub const EMERGENCY_DIFFICULTY_BLOCKS: u64 = 12;
 
 /// Time multiplier for emergency detection
@@ -217,6 +217,11 @@ pub const MAX_OUTPUT_MEMO_SIZE: usize = 256;
 pub const MAX_FUTURE_TIMESTAMP: u64 = 60 * 10;
 
 /// How often a new RandomX key block is chosen (blocks).
+///
+/// UNUSED / dead duplicate: consensus does NOT read this constant. The live
+/// RandomX key-epoch value is `RANDOMX_KEY_EPOCH` in src/consensus/pow.rs
+/// (currently also 2048). This const is retained only to avoid churn; do not
+/// trust it as the authoritative epoch length — always defer to consensus::pow.
 pub const RANDOMX_KEY_INTERVAL: u64 = 2048;
 
 /// Standard ring size.
@@ -346,7 +351,7 @@ pub const TESTNET_ADDRESS_PREFIX: &str = "tCYNC";
 
 /// Minimum ring size for privacy
 /// Bootstrap minimum ring size — used when UTXO set is too small for full ring-16.
-/// After BOOTSTRAP_CUTOVER_HEIGHT (10,000 blocks), full RING_SIZE (16) is enforced.
+/// At/after height 10,000 (see `ring_size_at_height`), full RING_SIZE (16) is enforced.
 /// Named explicitly to distinguish from the post-bootstrap target.
 pub const BOOTSTRAP_MIN_RING_SIZE: usize = 11;
 
@@ -514,8 +519,8 @@ pub const FEE_MINER_NORMAL_PERCENT: u64 = 70;
 
 /// Burn fee percent under normal conditions.
 /// 30% of fees are permanently destroyed, reducing circulating supply.
-/// At tail emission (0.6 CYNC/block), if fees exceed ~0.86 CYNC/block
-/// the chain becomes deflationary.
+/// At tail emission (0.6 CYNC/block), if fees exceed ~2 CYNC/block
+/// (30% of fees burned must exceed the 0.6 tail) the chain becomes deflationary.
 pub const FEE_BURN_NORMAL_PERCENT: u64 = 30;
 
 /// Protocol fee — ZERO. Constitution Article II forbids dev tax.
@@ -1147,7 +1152,7 @@ pub fn burn_rate_at_height(height: u64) -> u64 {
 }
 
 /// Get supply cap burn rate in basis points.
-/// Increases as circulating supply approaches the 250M cap,
+/// Increases as circulating supply approaches the 100M asymptotic target,
 /// creating deflationary pressure near the supply ceiling.
 ///
 /// FORMAL VERIFICATION FIX: Thresholds lowered and rates increased to ensure

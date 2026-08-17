@@ -459,7 +459,7 @@ for cross-CGNAT testing.
 These are the next-gen privacy primitives, partially live on testnet
 and slated for full activation in later releases.
 
-### 4.1 Spark accumulator — `src/spark/`
+### 4.1 Spark accumulator — `src/crypto/lelantus_spark.rs`
 
 **What it does.** A Pedersen-style accumulator over output commitments.
 Spends from Spark don't reveal which output was consumed (much stronger
@@ -471,17 +471,19 @@ than ring signatures: anonymity set = entire pool, not 11-16 decoys).
 - A serial number (linkability anchor, plays the role of key image)
 - A range proof on the spent amount
 
-**Implementation status.** Live on testnet. Node startup log shows
-`Spark accumulator loaded (N coins)` — the pool is real, but the count
-is low because Spark txs are wallet-opt-in and most users still use
-ring CLSAG.
+**Implementation status.** Accumulator store loads for observation/stats
+only; Spark transactions are **NOT consensus-valid**. The primitive is
+feature-gated behind `sketch-lelantus-spark` (off in the default build) and
+activates in Phase 2 (CIP-005). Node startup may log
+`Spark accumulator loaded (N coins)`, but no Spark spend can be included in a
+block on the active chain.
 
 **Maintenance rule.** Spark accumulator state is **append-only**.
 Removing an entry requires a full hard fork (the accumulator root is in
 the block header). Don't add "prune old Spark entries" code without
 that.
 
-### 4.2 Mimblewimble kernels — `src/mw/`
+### 4.2 Mimblewimble kernels — `src/crypto/mw_cutthrough.rs`
 
 **What it does.** MW outputs aggregate at block time (cut-through):
 many txs in a block collapse to net inputs/outputs/kernels, dramatically
@@ -490,9 +492,10 @@ unlinking within a block.
 
 **Visible in logs as:** `Kernel store loaded`.
 
-**Implementation status.** Live but conservative; cut-through is run on
-candidate blocks before validation, savings reported in
-`cut_through_stats()`.
+**Implementation status.** Dormant / Phase 2. The cut-through engine is wired
+for stats only — `register_cut_through_candidate` has no callers, no kernels
+are produced (there is no MW transaction type), and `cut_through_stats()`
+reports on an empty pipeline. No MW aggregation happens on the active chain.
 
 **Maintenance rule.** Kernel validation is **layered separately** from
 CLSAG validation. Don't try to "unify the validators" — the math is

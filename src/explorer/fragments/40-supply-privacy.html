@@ -6,7 +6,7 @@
     <div class="info-box green">✓ Supply is cryptographically verifiable. Every CYNC traces to a coinbase tx. Zero premine. Zero dev tax. Formally verified with 13 property-based tests.</div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--b);border:1px solid var(--b);border-radius:12px;overflow:hidden;margin-bottom:20px">
       <div class="stat"><div class="label">Circulating</div><div class="val" id="sup-circ" style="color:var(--ac2)">—</div><div class="sub">CYNC mined</div></div>
-      <div class="stat"><div class="label">Max supply</div><div class="val">100M</div><div class="sub">CYNC cap</div></div>
+      <div class="stat"><div class="label">Supply target</div><div class="val">~100M</div><div class="sub">soft cap (asymptote) + 0.6/blk tail</div></div>
       <div class="stat"><div class="label">Emitted</div><div class="val" id="sup-pct">—%</div><div class="sub">of total</div></div>
       <div class="stat"><div class="label">Per block</div><div class="val" id="sup-reward">—</div><div class="sub">CYNC reward</div></div>
     </div>
@@ -16,7 +16,7 @@
         <div style="padding:20px">
           <div style="display:flex;justify-content:space-between;margin-bottom:8px">
             <span style="font-size:11px;color:var(--t3);font-family:var(--mono)">Mined so far</span>
-            <span class="hash" id="sup-label">— / 100,000,000 CYNC</span>
+            <span class="hash" id="sup-label">— / ~100,000,000 CYNC (asymptotic target)</span>
           </div>
           <div class="bar-bg"><div class="bar" id="sup-bar" style="width:0%"></div></div>
           <div style="margin-top:20px;display:flex;flex-direction:column;gap:8px">
@@ -39,7 +39,7 @@
     </div>
     <!-- Emission Curve Chart (#28) -->
     <div class="panel">
-      <div class="panel-head">Emission Curve — 100M CYNC supply over time</div>
+      <div class="panel-head">Emission Curve — asymptotic target ~100M CYNC (0.6/block tail continues past it)</div>
       <div class="chart-wrap" style="height:250px"><canvas id="emission-chart-canvas"></canvas></div>
     </div>
     <!-- Anonymity Set Growth (#29) -->

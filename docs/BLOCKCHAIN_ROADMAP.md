@@ -380,9 +380,9 @@ any, it's the wrong design.
 - **Locked files have hashes.** Consensus-critical files are listed
   in `critical_files.lock`; build fails if a hash drifts. Changing
   any of them requires explicit lockfile roll + review.
-- **Reproducible builds.** `scripts/build-in-docker.sh` produces
-  byte-identical binaries on the same host CPU architecture. Audit
-  trust starts here.
+- **Reproducible builds.** `scripts/build-in-docker.sh` targets
+  byte-identical output on the same host CPU architecture (sign-off
+  pending, item #13). Audit trust starts here.
 
 ## Adding a new consensus rule
 

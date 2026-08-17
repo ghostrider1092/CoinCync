@@ -151,8 +151,8 @@ defended by A but not by C, or vice versa.
 | Question they want to answer | Feature that defeats it |
 |---|---|
 | "Where did your money come from? Show me." | Time-scoped view keys — a user can disclose a view key that decrypts only outputs received in a specified epoch range. Older / future outputs remain private. The `epoch` parameter on `KeyEpoch` enforces this scoping. |
-| "Send me everything you own NOW." | Plausible-deniability wallets: the wallet binary supports decoy passwords that unlock a separate "deniable" wallet with its own (small, pre-arranged) balance. The adversary is shown a wallet that exists but doesn't reflect the user's full holdings. |
-| "Confirm you didn't move funds in the last hour." | Dead man's switch — the user can pre-set a recovery address that, after N blocks of inactivity, can sweep the wallet without the user's signing input. A user under coercion can simply stop signing; their funds get rescued automatically. (Caveat: needs a watchtower for full automation; see KNOWN_ISSUES.md item #11.) |
+| "Send me everything you own NOW." | Plausible-deniability wallets (decoy passwords unlocking a separate small "deniable" wallet). **Not a current defense: `create_deniable_wallet` is disabled and returns an error pending the C37/C38/C39 structural rewrite** — the design is documented but new deniable wallets cannot be created today. |
+| "Confirm you didn't move funds in the last hour." | Dead man's switch — the design lets a user pre-set a recovery address that, after N blocks of inactivity, can sweep the wallet without the user's signing input. **Currently only the TLV metadata format is validated; the recovery-sweep authorization is NOT implemented at consensus (dormant)** — so this is not yet an effective defense. (Also needs a watchtower for full automation; see KNOWN_ISSUES.md item #11.) |
 | "Sign this tx." | FROST multi-sig — a user can split signing authority M-of-N across geographically/legally separated parties. No single coerced signer can produce a valid signature. |
 
 **What does NOT defend against:**

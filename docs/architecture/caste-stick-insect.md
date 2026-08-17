@@ -4,7 +4,8 @@
 > [biomimetic suite](biomimetic.md). Code: `src/colony/stick_insect.rs`. Privacy caste.
 >
 > One-line: snap every node's **wire fingerprint** — user-agent, message sizes —
-> to one canonical form, so every CoinCync node looks byte-identical on the wire.
+> to a canonical form: it normalizes the user-agent and rounds message sizes into
+> fixed buckets so nodes are harder to fingerprint on the wire.
 > Uniformity is anonymity.
 
 ## The problem: a distinctive fingerprint is a handle

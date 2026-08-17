@@ -63,7 +63,7 @@ struct StemEntry {
     /// Whether we already forwarded this tx in the stem phase.
     forwarded: bool,
     /// SECURITY (H16-FIX): Randomized stem forwarding time. Tx is NOT forwarded
-    /// until `now >= forward_after`. Uses Poisson-distributed delay (mean 5s)
+    /// until `now >= forward_after`. Uses exponentially-distributed delay (mean 5s)
     /// like Monero's `CRYPTONOTE_DANDELIONPP_FLUSH_AVERAGE` (VERIFIED
     /// at src/cryptonote_config.h:113 in the Monero master read this
     /// session, `= 5` seconds average). Without this, all
@@ -488,7 +488,7 @@ impl DandelionRouter {
     }
 
     /// SECURITY (H16-FIX): Generate a random stem forwarding time using
-    /// Poisson-distributed delay. Like Monero's fluff_average (5s mean),
+    /// exponentially-distributed delay. Like Monero's fluff_average (5s mean),
     /// this prevents all stem txs from being forwarded on a fixed cadence.
     /// 95% of values fall between ~1-12s with the exponential distribution.
     fn random_forward_time(&self, now: u64) -> u64 {

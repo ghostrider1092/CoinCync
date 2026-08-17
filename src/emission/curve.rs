@@ -1,4 +1,4 @@
-//! Asymptotic emission curve — 100M CYNC supply cap.
+//! Asymptotic emission curve — 100M CYNC is the asymptote (soft target), NOT a hard cap.
 //!
 //! One line of code determines all of monetary policy:
 //!
@@ -8,7 +8,9 @@
 //!
 //! No eras. No halvings. No activation heights. Every coin that's mined
 //! makes the next one slightly harder to earn — the way scarcity should
-//! work. The curve asymptotically approaches 100M but never reaches it.
+//! work. 100M is the asymptote (soft target) of the issuance formula, NOT a
+//! hard cap: the perpetual 0.6 CYNC/block tail floor (`reward.max(TAIL_EMISSION)`)
+//! means total emitted supply crosses 100M and keeps growing past it forever.
 //!
 //! At day one: 50 CYNC/block.
 //! As supply grows, rewards decay smoothly.
