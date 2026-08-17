@@ -806,6 +806,46 @@ mod tests {
         hash
     }
 
+    // Regression for the ring-size determinism launch-blocker (2026-08-16):
+    // the consensus "available outputs" metric that feeds effective_ring_size
+    // MUST be independent of a node's reorg history, or two nodes on the same
+    // canonical tip can require different ring sizes and fork the chain.
+    #[test]
+    fn ring_size_availability_is_reorg_history_invariant() {
+        // Node A: synced 5 canonical outputs directly.
+        let mut a = UtxoSet::new();
+        for i in 0..5u64 {
+            add_test_output(&mut a, i, 1, None);
+        }
+
+        // Node B: same 5 canonical outputs, but it also saw 3 orphan outputs on
+        // a fork block that was later reorged away (added, then disconnected).
+        let mut b = UtxoSet::new();
+        for i in 0..5u64 {
+            add_test_output(&mut b, i, 1, None);
+        }
+        let orphans: Vec<Hash> = (100..103u64)
+            .map(|i| add_test_output(&mut b, i, 2, None))
+            .collect();
+        for h in &orphans {
+            b.remove_output(h, 0); // reorg disconnect
+        }
+
+        // The raw monotonic counter DIVERGES — this is the bug surface.
+        assert_ne!(a.total_outputs_ever(), b.total_outputs_ever());
+        // The fixed availability metric (ever - reorg_disconnects) is invariant.
+        let avail_a = a.total_outputs_ever().saturating_sub(a.reorg_disconnects_total());
+        let avail_b = b.total_outputs_ever().saturating_sub(b.reorg_disconnects_total());
+        assert_eq!(avail_a, 5, "node A canonical availability");
+        assert_eq!(avail_b, 5, "reorg history must not change availability");
+        // ...so both nodes require the SAME ring size for a block at this tip.
+        assert_eq!(
+            crate::constants::effective_ring_size(3, avail_a as usize),
+            crate::constants::effective_ring_size(3, avail_b as usize),
+            "two nodes on the same tip must require the same ring size",
+        );
+    }
+
     #[test]
     fn test_height_index() {
         let mut utxos = UtxoSet::new();

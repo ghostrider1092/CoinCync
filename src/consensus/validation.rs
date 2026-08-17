@@ -1872,7 +1872,22 @@ fn check_tx_ring_size_and_unique_members(
         // observed live), but mainnet at launch would absolutely have
         // both. This must activate by mainnet GA (2026-10-01).
         let available = if v1_0_12_active {
-            utxos.total_outputs_ever() as usize
+            // DETERMINISM (2026-08-16): total_outputs_ever is monotonic and is
+            // NOT decremented on reorg (utxos.rs "L2" design), so on its own it
+            // is PATH-DEPENDENT — two nodes on an identical canonical tip reached
+            // via different reorg histories hold different values. In the young-
+            // chain window (available < target) that feeds a different required
+            // ring size and would FORK the chain (same class as the fixed
+            // total_difficulty divergence). Subtracting reorg_disconnects_total
+            // yields canonical-outputs-ever (every orphaned add is matched by its
+            // disconnect), which is order-independent AND still pruned/archival-
+            // invariant — preserving the v1.0.12 intent without the reorg-history
+            // divergence. Once the chain matures (available >= target) the value
+            // saturates to the target either way, so this is behaviour-neutral
+            // outside the bootstrap window.
+            utxos
+                .total_outputs_ever()
+                .saturating_sub(utxos.reorg_disconnects_total()) as usize
         } else {
             utxos.output_count()
         };
