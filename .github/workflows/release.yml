@@ -29,6 +29,42 @@ permissions:
   attestations: write   # same
 
 jobs:
+  # Derive the consensus feature set from the tag. The `testnet` cargo
+  # feature is a COMPILE-TIME consensus switch (src/constants.rs: it flips
+  # FEE_DISTRIBUTION_HEIGHT, MIN_OUTPUT_AGE_HARDFORK_HEIGHT, and others to
+  # testnet values), so a mainnet binary MUST be built WITHOUT it. Convention:
+  # a tag containing "testnet" (e.g. v2.1.0-testnet) builds testnet binaries;
+  # any other tag (e.g. v2.0.0) builds MAINNET binaries. `randomx` is always on.
+  #
+  # NOTE (follow-up): the Linux build below goes through the reproducible
+  # Docker path, which currently builds DEFAULT features (= mainnet) and does
+  # not yet thread `testnet`. That is correct for mainnet releases; a future
+  # testnet release needs the feature threaded into scripts/build-in-docker.sh
+  # + docker/builder.Dockerfile (a Docker-validated change).
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      features: ${{ steps.feat.outputs.features }}
+      is_testnet: ${{ steps.feat.outputs.is_testnet }}
+    steps:
+      - name: Determine features from tag
+        id: feat
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            REF="${GITHUB_REF#refs/tags/}"
+          else
+            REF="${{ inputs.version }}"
+          fi
+          if printf '%s' "$REF" | grep -qi 'testnet'; then
+            echo "features=randomx testnet" >> "$GITHUB_OUTPUT"
+            echo "is_testnet=true" >> "$GITHUB_OUTPUT"
+            echo "Tag '$REF' → TESTNET binaries (--features 'randomx testnet')"
+          else
+            echo "features=randomx" >> "$GITHUB_OUTPUT"
+            echo "is_testnet=false" >> "$GITHUB_OUTPUT"
+            echo "Tag '$REF' → MAINNET binaries (--features 'randomx')"
+          fi
+
   # Linux release binaries build via the CANONICAL reproducible
   # Docker path (`scripts/build-in-docker.sh` → `docker/builder.Dockerfile`).
   # This closes the gap the Dockerfile header (lines 26-35 as of this
@@ -99,12 +135,13 @@ jobs:
           subject-path: coincync-linux-x86_64.tar.gz
 
   build-windows:
+    needs: prepare
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build coincync (node + wallet)
-        run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
+        run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
       - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
@@ -126,6 +163,7 @@ jobs:
           subject-path: coincync-windows-x64.tar.gz
 
   build-macos-intel:
+    needs: prepare
     runs-on: macos-13
     steps:
       - uses: actions/checkout@v7
@@ -133,7 +171,7 @@ jobs:
       - name: Install deps
         run: brew install cmake
       - name: Build coincync (node + wallet)
-        run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
+        run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
       - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
@@ -157,6 +195,7 @@ jobs:
           subject-path: coincync-macos-x64.tar.gz
 
   build-macos-arm:
+    needs: prepare
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
@@ -164,7 +203,7 @@ jobs:
       - name: Install deps
         run: brew install cmake
       - name: Build coincync (node + wallet)
-        run: cargo build --release --features "randomx testnet" --bin coincync-node --bin coincync-wallet
+        run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
       - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)

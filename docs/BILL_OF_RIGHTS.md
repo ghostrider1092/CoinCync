@@ -151,9 +151,9 @@ You will never wake to a chain that changed its rules overnight. Protocol change
 
 ## Right XIII -- The Right to Reproducible Software
 
-The binary you run can be rebuilt from public source by anyone who chooses to verify it. Releases are signed by multiple independent maintainers; no single key can ship software that runs on the network. Supply-chain attacks against the binary distribution are infeasible by construction, not by trust.
+The binary you run can be rebuilt from public source by anyone who chooses to verify it. Every release is produced by a reproducible build — the Linux binaries are byte-identical to what any community member gets from the same pinned build container at the same commit — carries a cryptographic build-provenance attestation binding the artifact to the exact source commit and build workflow, is published with SHA256 checksums, and is tagged with a signed Git tag. Anyone can independently reproduce the binaries, recompute the checksums, and verify the provenance without trusting the release author. Supply-chain attacks against the binary distribution are defeated by public verifiability, not by trust. (Threshold signing across multiple independent maintainer keys is a planned hardening enhancement, not yet in force.)
 
-**Enforcement:** Build pipeline. Multi-signature release gating. Open-source license guarantees the right to verify.
+**Enforcement:** Build pipeline. Reproducible builds + build-provenance attestation + signed release tags + published checksums, all publicly verifiable. Open-source license guarantees the right to verify.
 
 ## Right XIV -- The Right to Permanent Scarcity
 
