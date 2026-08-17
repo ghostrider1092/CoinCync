@@ -2105,7 +2105,11 @@ impl Blockchain {
                     inner.stats.tip_hash = hash;
                     inner.stats.total_difficulty += difficulty;
 
-                    // Track supply: new emission (net of burns) enters circulation
+                    // Track supply: total_supply is GROSS emission — the full
+                    // per-block reward is added; fee burns are NOT subtracted
+                    // here (total_burned is tracked separately). So total_supply
+                    // == sum of the deterministic emission schedule, which is
+                    // exactly what get_supply_info exposes as verifiable.
                     let emission = calculate_block_reward(block.header.height);
                     // AUDIT (2026-07-01): checked_add + panic for symmetry with the
                     // reorg-rollback path's checked_sub + panic (fixed same day).

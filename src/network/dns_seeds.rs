@@ -11,10 +11,13 @@ use crate::network::socks_dns;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+// 2026-08-16: mainnet DNS seeds target coincync.ORG (the operator-controlled
+// domain) — the runtime queries THIS constant. Register seed1/2/3 A/AAAA
+// records under coincync.org before launch. (Testnet stays on .network below.)
 pub const MAINNET_DNS_SEEDS: &[&str] = &[
-    "seed1.coincync.network",
-    "seed2.coincync.network",
-    "seed3.coincync.network",
+    "seed1.coincync.org",
+    "seed2.coincync.org",
+    "seed3.coincync.org",
 ];
 
 // Must match `TESTNET_DNS_SEEDS` in `src/testnet.rs` (Bootstrapper default).
@@ -38,11 +41,12 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
 /// Operator action required before mainnet launch: replace these with the
 /// actual mainnet seed IPs (see `docs/architecture/MAINNET_LAUNCH_CHECKLIST.md`).
 pub const MAINNET_FALLBACK: &[&str] = &[
-    // 2026-06-06: rewritten to the live Vultr fleet.
-    // 2026-06-21: 207.148.111.76 removed (decommissioned); 45.32.251.6 added.
-    "66.135.23.193:19080", // seed1
-    "140.82.57.168:19080", // seed2
-    "45.32.251.6:19080",   // seed3 (replaces dead 207.148.111.76)
+    // 2026-08-16: replaced the decommissioned Vultr testnet-fleet
+    // placeholders (66.135.23.193 / 140.82.57.168 / 45.32.251.6 — dead since
+    // 2026-07-27) that would otherwise ship as dead mainnet bootstrap peers.
+    // Append the launch VPS fleet here as it is provisioned. The residential
+    // home node stays DNS-only (privacy) and is intentionally NOT listed.
+    "2.28.1.75:19080", // Hetzner (EU) — stable public seed
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[

@@ -772,6 +772,11 @@ async fn start_node(
     // Build P2P node config from CLI overrides
     let mut p2p_config = P2PNodeConfig::default();
     p2p_config.magic = network.magic_bytes();
+    // P2PNodeConfig::default()'s bootstrap is the TESTNET seed set on :28080.
+    // Repopulate it for the runtime network so a --network mainnet node dials
+    // MAINNET seeds on :19080 (not dead testnet seeds it can never handshake).
+    // --no-peers / regtest clear this again below.
+    p2p_config.bootstrap = coincync::network::bootstrap::BootstrapConfig::for_network(network);
     p2p_config.data_dir = data_dir.clone();
     if let Some(bind) = &p2p_bind {
         if let Ok(addr) = bind.parse() {

@@ -48,6 +48,34 @@ impl Default for BootstrapConfig {
     }
 }
 
+impl BootstrapConfig {
+    /// Build the bootstrap config for a specific network.
+    ///
+    /// CORRECTNESS (mainnet launch-blocker): `Default` yields the TESTNET
+    /// seeds on the TESTNET port (28080). The node runtime MUST call this so a
+    /// `--network mainnet` node dials MAINNET seeds on the mainnet P2P port
+    /// (19080). Without it a mainnet node bootstraps against dead testnet
+    /// seed IPs on the wrong port (and would reject any that answer on a magic
+    /// mismatch), finding zero mainnet peers. Regtest gets an empty set (the
+    /// node clears bootstrap for regtest anyway).
+    pub fn for_network(network: crate::config::Network) -> Self {
+        use crate::config::Network;
+        use crate::network::dns_seeds::{MAINNET_DNS_SEEDS, MAINNET_FALLBACK};
+        let (dns_seeds, seed_nodes): (&[&str], &[&str]) = match network {
+            Network::Mainnet => (MAINNET_DNS_SEEDS, MAINNET_FALLBACK),
+            Network::Testnet => (TESTNET_DNS_SEEDS, TESTNET_SEED_NODES),
+            Network::Regtest => (&[], &[]),
+        };
+        BootstrapConfig {
+            dns_seeds: dns_seeds.iter().map(|s| s.to_string()).collect(),
+            seed_nodes: seed_nodes.iter().filter_map(|s| s.parse().ok()).collect(),
+            dns_timeout: Duration::from_secs(5),
+            max_addresses: 100,
+            p2p_port: network.p2p_port(),
+        }
+    }
+}
+
 /// Network bootstrapper
 pub struct Bootstrapper {
     config: BootstrapConfig,
@@ -668,6 +696,35 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_config_is_network_aware() {
+        use crate::config::Network;
+        // Mainnet must NOT inherit the testnet default (seeds on :28080).
+        let m = BootstrapConfig::for_network(Network::Mainnet);
+        assert_eq!(
+            m.p2p_port, 19080,
+            "mainnet bootstrap must use the mainnet P2P port"
+        );
+        assert!(!m.dns_seeds.is_empty(), "mainnet must have DNS seeds");
+        // Decommissioned Vultr IPs must never ship as mainnet seeds, and every
+        // hardcoded seed must be on the mainnet port.
+        let dead = ["66.135.23.193", "140.82.57.168", "207.148.111.76", "45.32.251.6"];
+        for s in &m.seed_nodes {
+            assert!(
+                !dead.contains(&s.ip().to_string().as_str()),
+                "dead Vultr IP {s} must not be a mainnet seed"
+            );
+            assert_eq!(s.port(), 19080, "mainnet seed {s} must be on :19080");
+        }
+        // Testnet path is unchanged from the historical default.
+        let t = BootstrapConfig::for_network(Network::Testnet);
+        assert_eq!(t.p2p_port, crate::testnet::TESTNET_P2P_PORT);
+        assert!(!t.seed_nodes.is_empty());
+        // Regtest does no seed bootstrap.
+        let r = BootstrapConfig::for_network(Network::Regtest);
+        assert!(r.dns_seeds.is_empty() && r.seed_nodes.is_empty());
+    }
 
     #[test]
     fn test_bootstrap_config() {

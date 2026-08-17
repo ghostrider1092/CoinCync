@@ -54,20 +54,22 @@ pub const MAINNET_SEED_NODES: &[&str] = &[
 /// Mainnet minimum ring size (same as testnet — constitutional minimum)
 pub const MAINNET_MIN_RING_SIZE: usize = 11;
 
-/// Mainnet block time target: 60 seconds.
-/// Slower than testnet (30s) for safety. Dogecoin uses a 60s target;
-/// the "proven safe by Dogecoin (10+ years)" durability characterisation
-/// is retained as a general reference — Dogecoin's specific parameter
-/// history was not re-verified against upstream Dogecoin source this
-/// session. Monero's block time is 120s (VERIFIED as
-/// `DIFFICULTY_TARGET_V2 = 120` at cryptonote_config.h:80 in the
-/// Monero master read this session), so 60s here is 2x faster.
-/// 10 confirmations = 10 minutes.
-pub const MAINNET_BLOCK_TIME: u64 = 60;
+/// Mainnet block time target — MUST equal the consensus `TARGET_BLOCK_TIME`
+/// (120s), which is what ASERT difficulty targets and what the emission
+/// schedule (`BLOCKS_PER_YEAR`) is built on. Same as testnet.
+///
+/// 2026-08-16 (M-1 fix): was a divergent literal `60`, contradicting the
+/// actual consensus target of 120s — the chain always produced 120s blocks
+/// regardless. Aliased to the single source of truth so nothing can drift.
+/// (A genuine 60s mainnet would be a consensus change to `TARGET_BLOCK_TIME`
+/// + an emission recalculation, not a value here — an owner decision, not a
+/// bug fix.)
+pub const MAINNET_BLOCK_TIME: u64 = crate::constants::TARGET_BLOCK_TIME;
 
 /// Mainnet initial difficulty.
 /// Higher than testnet to account for real mining hardware at launch.
-/// Targets ~30 second blocks with modest initial hashrate.
+/// ASERT converges toward the `TARGET_BLOCK_TIME` (120s) target regardless of
+/// this seed; a modest initial hashrate simply takes a few blocks to settle.
 pub const MAINNET_INITIAL_DIFFICULTY: u64 = 10_000;
 
 /// Hardcoded mainnet genesis hash.
