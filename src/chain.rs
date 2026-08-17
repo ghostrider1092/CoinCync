@@ -1850,36 +1850,26 @@ impl Blockchain {
         let tip_hash = self.tip_hash();
         let is_main_chain = parent_hash == tip_hash || block.header.height == 0;
 
-        // SECURITY: Enforce hardcoded + recorded checkpoints.
-        // If we know the hash at this height, reject blocks that don't match.
+        // SECURITY: Enforce hardcoded checkpoints (below).
         //
-        // DB-recorded checkpoints are only enforced once the block is at least
-        // RECENT_REORG_DEPTH blocks deep from the tip. This avoids the failure
-        // mode that broke the 2026-05-10 launch: every fleet box commits to
-        // its first-seen block at every height, so when 5 boxes get blocks
-        // from different peers concurrently they record 5 incompatible
-        // checkpoint sets and can never accept each other's blocks. By only
-        // enforcing once the block is deep enough that reorg is implausible,
-        // standard longest-chain fork resolution gets to run first and the
-        // fleet converges naturally.
-        const RECENT_REORG_DEPTH: u64 = 10;
-        let current_tip_height = self.height();
-        let too_recent_for_db_checkpoint =
-            block.header.height + RECENT_REORG_DEPTH > current_tip_height;
-        if let Some(ref db) = self.db {
-            if !too_recent_for_db_checkpoint {
-                if let Ok(Some(expected_hash)) = db.state.get_checkpoint(block.header.height) {
-                    if hash != expected_hash {
-                        return Ok(BlockStatus::Invalid(format!(
-                            "Checkpoint mismatch at height {}: expected {}, got {}",
-                            block.header.height,
-                            expected_hash.to_hex()[..16].to_string(),
-                            hash.to_hex()[..16].to_string(),
-                        )));
-                    }
-                }
-            }
-        }
+        // DETERMINISM (2026-08-16): the DB-recorded per-height checkpoint HASH
+        // gate that used to live here was REMOVED. `db.state.get_checkpoint(h)`
+        // records whichever block this node FIRST saw at height h, is written
+        // only on the linear extend path (chain.rs add_checkpoint) and is NEVER
+        // updated on reorg — so it is PATH-DEPENDENT: two honest nodes on the
+        // same canonical tip reached via different reorg histories recorded
+        // different hashes, and the stale orphaned hash would reject the
+        // network's true-canonical block on re-offer, partitioning the node.
+        // This is the mechanism that broke the 2026-05-10 launch (the
+        // RECENT_REORG_DEPTH=10 band-aid only narrowed the window). It is also
+        // REDUNDANT: deep-reorg finality is already enforced deterministically
+        // by the `fork_point < last_checkpoint` reorg reject (checkpoint HEIGHT
+        // is a pure function of tip height) plus the rollback floor, and by the
+        // hardcoded cross-node checkpoints below. Same divergence class as the
+        // fixed total_difficulty / total_outputs_ever bugs — removed at the root
+        // rather than band-aided. The get_checkpoint hashes are still recorded
+        // (harmless; available to RPC/telemetry) but no longer gate consensus.
+        //
         // Also check hardcoded checkpoints for the active runtime network.
         let hardcoded_checkpoint_match = match self.network {
             crate::config::NetworkType::Mainnet => {
