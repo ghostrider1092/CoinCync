@@ -104,11 +104,11 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     //   IPs" size claim was not re-measured this session and is dropped.
     // - **zebrad** DNS + hardcoded seeds pattern: not re-verified
     //   against Zebra source this session. Dropped.
-    "66.135.23.193:28080", // seed1 — Vultr
-    "140.82.57.168:28080", // seed2 — Vultr
-    "45.32.251.6:28080",   // seed3 — Vultr (replaces dead 207.148.111.76)
-    "207.148.6.50:28080",  // explorer — Vultr (deliberate exception, see comment)
-    "173.199.93.21:28080", // randomx — Vultr 4 vCPU / 7.2 GB (provisioned 2026-06-20)
+    // 2026-08-16: the Vultr fleet above was decommissioned (dead since
+    // 2026-07-27). Replaced with the current stable public box. Kept in sync
+    // with `testnet::TESTNET_SEED_NODES` (testnet_fallback_matches_seed_nodes).
+    // Append re-provisioned VPS boxes here; the home node stays DNS-only.
+    "2.28.1.75:28080", // Hetzner (EU) — stable public seed
 ];
 
 /// Resolve DNS seeds and return a deduplicated list of socket addresses.
@@ -267,12 +267,11 @@ mod tests {
             "TESTNET_FALLBACK must contain at least one entry — empty fallback means \
              DNS-failed bootstrap has no recovery path",
         );
-        assert!(
-            TESTNET_FALLBACK.len() >= 3,
-            "TESTNET_FALLBACK should have ≥3 entries for redundancy (one node down \
-             shouldn't strand new operators); current count: {}",
-            TESTNET_FALLBACK.len(),
-        );
+        // 2026-08-16: the ≥3-for-redundancy floor was dropped. The Vultr fleet
+        // was decommissioned (dead since 2026-07-27), leaving one stable public
+        // box; a single LIVE seed beats three dead ones. Re-raise this floor as
+        // the testnet fleet is re-provisioned (append boxes to TESTNET_FALLBACK
+        // + testnet::TESTNET_SEED_NODES, kept in sync by the test below).
     }
 
     /// TESTNET_FALLBACK must NOT contain known-dead IPs that bit us

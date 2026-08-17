@@ -52,25 +52,16 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
 /// see `docs/operations/api-role-architecture.md` for that node's
 /// migration to nginx-only.
 pub const TESTNET_SEED_NODES: &[&str] = &[
-    // 2026-06-21 refresh — see `src/network/dns_seeds.rs::TESTNET_FALLBACK`
-    // for the parallel list (which this MUST stay in sync with — the
-    // `testnet_fallback_matches_seed_nodes` test enforces this).
-    "66.135.23.193:28080", // seed1 — Vultr
-    "140.82.57.168:28080", // seed2 — Vultr
-    "45.32.251.6:28080",   // seed3 — Vultr (replaces dead 207.148.111.76)
-    "207.148.6.50:28080",  // explorer — Vultr (deliberate exception per dns_seeds.rs)
-    "173.199.93.21:28080", // randomx miner — Vultr (provisioned 2026-06-20)
-                           //
-                           // History:
-                           // - 2026-06-05: Vultr London (192.248.151.16) decommissioned (missed
-                           //   the 2026-06-04 testnet wipe, drifted onto pre-wipe chain at
-                           //   h=12,201 while live fleet was at ~2,200, poisoned the api-box's
-                           //   nginx backend, destroyed).
-                           // - 2026-06-18: original seed3 (207.148.111.76) decommissioned after
-                           //   host-key rotation issue; replaced by fresh box at 45.32.251.6.
-                           // - 2026-06-20: randomx miner (173.199.93.21) replaces destroyed
-                           //   149.248.37.11; added to seed list for the same reason explorer is:
-                           //   gives new operators an extra fallback IP for IBD bootstrap.
+    // 2026-08-16: the entire Vultr fleet (66.135.23.193 / 140.82.57.168 /
+    // 45.32.251.6 / 207.148.6.50 / 173.199.93.21 on :28080) was decommissioned
+    // — unreachable since 2026-07-27. Those dead seeds meant a fresh operator
+    // using defaults could not bootstrap at all. Replaced with the current
+    // stable public box. MUST stay in sync with
+    // `src/network/dns_seeds.rs::TESTNET_FALLBACK` (the
+    // `testnet_fallback_matches_seed_nodes` test enforces this). The home node
+    // is residential and stays DNS-only (privacy); append VPS boxes here as the
+    // testnet fleet is re-provisioned.
+    "2.28.1.75:28080", // Hetzner (EU) — stable public seed
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;
