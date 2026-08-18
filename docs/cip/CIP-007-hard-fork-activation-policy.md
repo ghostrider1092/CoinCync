@@ -42,7 +42,7 @@ do we ship a constant change like this?" — every chain needs one before
 it has its first contentious upgrade.
 
 CoinCync's constitutional structure already encodes most of the answer
-informally: the supply cap is immutable (Article I), other params can
+informally: the emission schedule is immutable (Article I), other params can
 move via constitutional amendment. This CIP turns "amend by some
 process" into a specific procedure.
 

@@ -370,6 +370,6 @@ The constitution is your defense against your own future maintainers being wrong
 - [`CONSTITUTION.md`](https://git.coincync.network/coincync/cync-protocol/blob/main/CONSTITUTION.md) — the authoritative source at the repository root
 - [Bill of Rights](./bill-of-rights.md) — the user-facing rights complement
 - [Disclaimer](./disclaimer.md) — what the project does and doesn't promise
-- [Emission curve](../protocol/emission.md) — the mountain curve that honors Article I
+- [Emission curve](../protocol/emission.md) — the geometric-decay curve (100M asymptote, 0.6 CYNC perpetual tail) that honors Article I
 - [Privacy model](../protocol/privacy-model.md) — the implementation of Article III
 - [Consensus & PoW](../protocol/consensus.md) — the implementation status of Article V

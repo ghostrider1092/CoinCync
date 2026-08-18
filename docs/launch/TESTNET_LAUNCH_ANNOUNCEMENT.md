@@ -17,7 +17,7 @@ Pick one or use all three depending on where you're posting. Edit freely; the go
 
 **Title:** *CoinCync Public Testnet Is Live*
 
-**Subtitle:** *A privacy-first, proof-of-work payments coin. RandomX. CLSAG ring signatures. Stealth addresses. 100M hard cap. 30% fee burn. Zero pre-mine. Zero developer tax.*
+**Subtitle:** *A privacy-first, proof-of-work payments coin. RandomX. CLSAG ring signatures. Stealth addresses. 100M asymptotic emission. 30% fee burn. Zero pre-mine. Zero developer tax.*
 
 ---
 
@@ -33,8 +33,8 @@ A 72-hour pre-launch soak completed cleanly: 864 sample-points per box across th
 
 - **Mandatory privacy.** Every transaction uses ring signatures, stealth addresses, Pedersen commitments, and Bulletproofs+. There is no transparent mode. There is no opt-in privacy tier. There is no reduced-privacy transaction class.
 - **CPU mining via RandomX.** No GPU advantage. No ASIC advantage. Anyone with a laptop CPU can mine and meaningfully contribute to network security.
-- **Hard cap of 100,000,000 CYNC.** The emission curve is asymptotic and locked at the protocol level. No mechanism exists to raise this.
-- **30% of every transaction fee burned permanently.** Captured by no one. Combined with the asymptotic cap, this makes CYNC structurally deflationary at any sustained level of network usage. Fees not burned go to miners as proof-of-work reward — no third destination is permitted.
+- **100,000,000 CYNC asymptote.** The emission curve approaches 100M as a soft target — not a hard cap. A perpetual 0.6 CYNC/block tail emission means total supply crosses 100M over the long term and keeps growing slowly. The emission formula is locked at the protocol level; no mechanism exists to alter it.
+- **30% of every transaction fee burned permanently.** Captured by no one. Bumps to 50% under congestion. Burning pushes net supply below the gross-emission curve — so CYNC becomes net-deflationary once sustained fees exceed the 0.6 CYNC/block tail (roughly >2 CYNC/block of fees), not automatically at any usage level. Fees not burned go to miners as proof-of-work reward — no third destination is permitted.
 - **Zero pre-mine. Zero developer tax. Zero foundation.** Every CYNC in existence was mined by someone who contributed proof-of-work to the network. No developer fund, no protocol-level treasury, no governance token.
 
 ### Constitutionally bound
@@ -111,7 +111,7 @@ WHAT TESTNET IS NOT
   ship later
 
 THE 30-SECOND VERSION
-• 100M hard cap, asymptotic emission
+• 100M asymptotic emission (soft target, not a hard cap; perpetual 0.6 tail)
 • 30% of every fee burned permanently — captured by no one
 • Zero pre-mine, zero dev tax, zero foundation
 • RandomX CPU mining (no GPU/ASIC)
@@ -140,9 +140,9 @@ you anything. Welcome.
 ```
 CoinCync public testnet is live.
 
-100M hard cap. 30% of every fee burned permanently. Zero pre-mine.
-Zero developer tax. RandomX CPU mining. Privacy on every transaction
-by default — no opt-in transparent mode.
+100M asymptotic emission (not a hard cap). 30% of every fee burned
+permanently. Zero pre-mine. Zero developer tax. RandomX CPU mining.
+Privacy on every transaction by default — no opt-in transparent mode.
 
 Constitution + Bill of Rights, compile-time enforced.
 
@@ -173,11 +173,13 @@ no reduced-privacy class. The privacy stack is the only stack.
 
 **3/**
 ```
-3/ Hard supply cap, structural deflation.
+3/ Asymptotic emission, fee burn.
 
-100M coin asymptotic cap, locked at the protocol level. 30% of every
-transaction fee permanently destroyed — captured by no one. No
-developer fund, no foundation, no governance token. Zero pre-mine.
+100M is the emission curve's asymptote (a soft target, not a hard
+cap), locked at the protocol level; a perpetual 0.6 CYNC/block tail
+carries total supply past it long-term. 30% of every transaction fee
+permanently destroyed — captured by no one. No developer fund, no
+foundation, no governance token. Zero pre-mine.
 ```
 
 **4/**
@@ -235,7 +237,7 @@ CoinCync is a privacy-first proof-of-work cryptocurrency in the Monero family. C
 Network type      : Privacy-by-default, mandatory shielding
 Mining algorithm  : RandomX (CPU only — no GPU/ASIC advantage)
 Block time target : 120 s
-Hard supply cap   : 100,000,000 CYNC (asymptotic)
+Supply asymptote  : 100,000,000 CYNC (soft target, not a hard cap)
 Atomic units/CYNC : 10^12
 Genesis reward    : ~50 CYNC
 Tail emission     : 0.6 CYNC/block (perpetual)
@@ -412,7 +414,7 @@ Monero deliberately doesn't bind itself with constitutional commitments. Its val
 - CLSAG-16 (11→16 bootstrap ramp at block 10,000)
 - Bulletproofs+, stealth addresses, Pedersen commitments
 - RandomX CPU PoW, 120s block time
-- 100M asymptotic hard cap, 0.6 CYNC tail emission
+- 100M asymptotic emission (soft target, not a hard cap), 0.6 CYNC perpetual tail emission
 - 30% fee burn (50% under congestion), 0% dev tax, 0 premine, no foundation
 - 7 additional privacy features beyond the Monero baseline (encrypted memos, scoped view keys, deniable wallets, traffic shaping, dead-man's switch, auto-churn, decoy defense)
 

@@ -44,7 +44,7 @@ Implementation:
 
 CoinCync uses **LWMA** (Linearly Weighted Moving Average) difficulty adjustment, the same algorithm Monero adopted in 2018. LWMA is responsive to short-term hashrate changes (better than Bitcoin's 2-week retarget), resistant to time-warp attacks, and produces stable block intervals.
 
-The target block time is fixed at **120 seconds** (`TARGET_BLOCK_TIME` in [`src/constants.rs`](../../../src/constants.rs)). 2-minute blocks align with the mountain emission curve and give LWMA enough samples to damp hashrate volatility without overcorrecting. The window over which LWMA averages is 60 blocks (~2 hours, one full VM-key epoch).
+The target block time is fixed at **120 seconds** (`TARGET_BLOCK_TIME` in [`src/constants.rs`](../../../src/constants.rs)). 2-minute blocks give LWMA enough samples to damp hashrate volatility without overcorrecting. The window over which LWMA averages is 60 blocks (~2 hours, one full VM-key epoch).
 
 Emergency difficulty adjustment triggers if block production stalls beyond `EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * TARGET_BLOCK_TIME` — this is the anti-wedge rule that prevents a 95% hashrate drop from leaving the chain stuck producing one block per day until the next LWMA window completes.
 
@@ -93,7 +93,7 @@ The `supply_commitment` header field is **currently a reserved placeholder (all 
 4. **PoW** — RandomX hash must meet `header.target`. Genesis (height 0) is exempt because the genesis block is a hardcoded constant, not mined.
 5. **Difficulty target** — `header.target` matches what LWMA computes for this height.
 6. **Mandatory privacy** — `enforce_privacy_policy` checks every non-coinbase tx has Pedersen-committed amounts, a stealth address, and at least one privacy-preserving input. Structural fast-fail before the expensive crypto verification at stage 8.
-7. **Coinbase** — first transaction must be a `Coinbase` type, must have zero inputs, must pay the correct mountain-curve reward to `header.miner_pubkey`.
+7. **Coinbase** — first transaction must be a `Coinbase` type, must have zero inputs, must pay the correct emission-curve reward (`base_reward_from_supply(cumulative_supply)`) to `header.miner_pubkey`.
 8. **Per-transaction validation** — every non-coinbase tx is run through `validate_transaction`, which calls into the same crypto verifiers the mempool uses (`verify_ring_signature`, `verify_output_range_proofs`, `verify_balance_proof`).
 9. **No double-spend** — every key image in the block must be unique within the block AND not already spent in chain history.
 10. **Coinbase / supply integrity** — the coinbase output amount (transparent, zero-blinding) must equal `calculate_block_reward(height)` exactly, and every transaction must balance (inputs = outputs + fee) with valid range proofs and real ring members. Together these enforce [Article I](../governance/constitution.md#article-i--transparent-emission-no-hidden-inflation): a block that mints more than the schedule allows, or a tx that creates value, is rejected. (`header.supply_commitment` is a reserved zero placeholder today — the single-value Pedersen supply accumulator is a planned enhancement and is not yet validated.)
@@ -151,6 +151,6 @@ Things that exist in other privacy coins but are deliberately out of scope for C
 ## Next reading
 
 - [Constitution Article V](../governance/constitution.md#article-v--open-mining) — the full RandomX-only rationale
-- [Emission curve](./emission.md) — the mountain curve, tail emission, 250M cap
+- [Emission curve](./emission.md) — the geometric-decay curve, 0.6 CYNC tail emission, 100M asymptote
 - [Transaction format](./transaction-format.md) — wire layout and signing hash construction
 - [Privacy model](./privacy-model.md) — what the cryptographic primitives actually protect

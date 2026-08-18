@@ -14,7 +14,7 @@ Terms used throughout the CoinCync documentation. Defined to be approximately co
 
 **Blinding factor.**  The random scalar `b` in a Pedersen commitment `C = a·G + b·H`. Without `b`, the commitment to amount `a` would be deterministic and an attacker could brute-force it. The blinding makes commitments hiding.
 
-**Block reward.**  The amount of CYNC paid out as the coinbase output of a new block. Computed from the [emission curve](./protocol/emission.md) — a **mountain curve** starting at 143 CYNC/block in year 0–1, decaying through anchor points at years 5 (86), 10 (28), and 13 (7), and flooring at the 1 CYNC/block tail from year 20 onward. Total supply is capped at 250,000,000 CYNC by [Constitution Article I](./governance/constitution.md#article-i--fixed-supply).
+**Block reward.**  The amount of CYNC paid out as the coinbase output of a new block. Computed from the [emission curve](./protocol/emission.md) — a smooth **geometric decay** (Monero-style, supply-proportional): `reward = max(TAIL_EMISSION, (100M·COIN − mined) / 2,000,000)`. It starts at **50 CYNC/block** at genesis, decays continuously as cumulative supply grows (25 CYNC at 50M mined, 12.5 CYNC at 75M), and floors at the **0.6 CYNC/block tail** once supply passes ~98.8M. 100,000,000 CYNC is the curve's **asymptote (soft target), not a hard cap** — the perpetual tail carries total emitted supply past 100M over the long term. Locked by [Constitution Article I](./governance/constitution.md#article-i--transparent-emission-no-hidden-inflation).
 
 **Bulletproofs+.**  A range-proof scheme that proves a committed amount falls in `[0, 2^64)` without revealing it. CoinCync uses Bulletproofs+ (the 2022 improvement on the original Bulletproofs), which is ~96 bytes shorter and ~10% faster to verify.
 
@@ -86,7 +86,7 @@ Terms used throughout the CoinCync documentation. Defined to be approximately co
 
 **Stealth address.**  A receiver-side address scheme where every payment to the same `(spend_pub, view_pub)` pair generates a fresh, unlinkable one-time output public key. Only the recipient (with their view key) can recognize that an output is theirs.
 
-**Tail emission.**  A constant block reward that kicks in after the early issuance phase ends, providing a permanent baseline mining incentive. CoinCync's tail is **1 CYNC/block** starting at year 20 (height ≈ 5,256,000). Tail issuance continues until the 250 M supply cap is reached — see [Emission curve → Supply cap interaction with the tail](./protocol/emission.md#supply-cap-interaction-with-the-tail).
+**Tail emission.**  A constant block reward floor that takes over once the geometric-decay curve would fall below it, providing a permanent baseline mining incentive. CoinCync's tail is **0.6 CYNC/block, in perpetuity** (`TAIL_EMISSION = 600_000_000_000` atomic) — it kicks in once cumulative supply passes ~98.8M CYNC, not at any fixed date or height. Because the tail never stops, total emitted supply crosses and grows past the 100M asymptote forever; 100M is a soft target, not a cap. See [Emission curve → 100M is an asymptote, not a hard cap](./protocol/emission.md#100m-is-an-asymptote-not-a-hard-cap).
 
 **Target block time.**  The intended interval between blocks. **120 seconds (2 minutes)** for CoinCync. The LWMA difficulty adjustment keeps actual intervals close to this target.
 
