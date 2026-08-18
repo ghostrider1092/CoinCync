@@ -139,6 +139,19 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     wallet
         .unlock(password.as_str())
         .map_err(|error| format!("unlock wallet: {error}"))?;
+    // W-1/W-B launch-safety: --subaddress sends are disabled on mainnet in this
+    // release. This raw-pubkey path bypasses Address parsing (where the mainnet
+    // subaddress gate lives), so it must be rejected here explicitly — a
+    // subaddress-received output is currently unspendable (spend path omits the
+    // per-subaddress offset). Available on testnet/regtest. See W-B / W-1.
+    if subaddress && wallet.network_name() == "mainnet" {
+        return Err(
+            "subaddresses are disabled on mainnet in this release (funds received \
+             at a subaddress would be permanently unspendable); omit --subaddress \
+             and send to a standard address"
+                .to_string(),
+        );
+    }
     let keys: KeyEpoch = wallet
         .current_keys()
         .cloned()

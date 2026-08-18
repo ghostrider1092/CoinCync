@@ -208,6 +208,26 @@ impl Address {
         let address_type = AddressType::from_byte(data[1])
             .ok_or_else(|| Error::InvalidAddress("bad type".into()))?;
 
+        // W-1/W-B launch-safety gate: subaddresses are DISABLED on mainnet in
+        // this release. Funds received at a subaddress are permanently
+        // unspendable (the spend-side one-time-secret / key-image derivation
+        // omits the per-subaddress offset m_i). Rejecting the type at the
+        // parse boundary closes the whole surface at once — no mainnet
+        // send-to-subaddress, core-send, or scan path can act on one, since
+        // every one of them routes address strings through here. Subaddresses
+        // remain available on testnet/regtest so the real spend-side fix can be
+        // developed + round-trip tested. See project_full_audit_2026-08-16 (W-1)
+        // and the sweep finding W-B (the prior legacy.rs generation-only gate
+        // did not cover send/parse). Remove this gate when the spend fix ships.
+        if network == Network::Mainnet && address_type == AddressType::Subaddress {
+            return Err(Error::InvalidAddress(
+                "subaddresses are disabled on mainnet in this release (funds \
+                 received at a subaddress would be permanently unspendable); \
+                 use a standard address"
+                    .into(),
+            ));
+        }
+
         // M-3 FIX: Reject oversized payloads — each address type has a fixed length
         // (including the 4-byte checksum already stripped into `bytes`).
         let expected_len = match address_type {

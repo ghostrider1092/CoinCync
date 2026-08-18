@@ -221,6 +221,11 @@ impl Wallet {
                 .unwrap_or(false)
     }
 
+    /// The wallet's network name ("mainnet" / "testnet" / "regtest").
+    pub fn network_name(&self) -> &str {
+        &self.network
+    }
+
     /// Restore wallet from mnemonic
     pub fn restore(
         path: PathBuf,
