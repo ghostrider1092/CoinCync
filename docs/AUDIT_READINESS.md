@@ -117,7 +117,10 @@ completed. (`11418320`, `105cc7a0`, `13a50c75`, `0ac53153`, `e1fcad5d`.)
 - **7 cargo-fuzz targets** (protocol/deserialization surface).
 - **Property tests** for determinism (reorg-history invariance), difficulty,
   amounts, addresses, hashes, keys, memos.
-- **Real-PoW E2E** reorg double-spend test (slow, `#[ignore]`).
+- **Real-PoW E2E** reorg double-spend test + a `total_difficulty`
+  history-independence test (extend matches the canonical `1 + Σ dft` formula;
+  a losing fork's work does not leak) (slow, `#[ignore]`,
+  `tests/reorg_double_spend_e2e.rs`).
 - **Independent review passes** this cycle: full-codebase audit, pre-mainnet
   review, P2P/reorg hunt, mainnet-surface audit, remote-DoS scan, determinism
   sweep, dead-code/wiring audit, docs-accuracy audit, and a final regression +
@@ -147,8 +150,12 @@ completed. (`11418320`, `105cc7a0`, `13a50c75`, `0ac53153`, `e1fcad5d`.)
   (empty), `insecure-fast-sync` (default off). None are on the live consensus
   path; each is a future-activation item that must be re-audited when wired.
 - **Not yet done:** external professional audit (this document exists to enable
-  it); a Chain-level `total_difficulty` reorg-fuzz (covered today by the E2E test
-  + self-heal); mainnet seed-fleet + DNS provisioning (operator infra).
+  it); mainnet seed-fleet + DNS provisioning (operator infra). The
+  `total_difficulty` determinism guard now has a dedicated E2E test (extend +
+  losing-fork invariance, above); the *reorg-recompute* leg is covered by the
+  reorg double-spend E2E + the recompute-on-load self-heal rather than a
+  standalone fuzz, since constructing a deterministic heavier fork at the
+  difficulty floor is timing/tiebreak-sensitive.
 
 See `CONSENSUS_SPEC.md` §8 for the full divergences/dormant list.
 
