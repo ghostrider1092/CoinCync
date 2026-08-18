@@ -322,15 +322,18 @@ where the code differs from a naive reading:
    `calculate_block_reward(height)` (an adaptive-step estimate of supply-at-
    height), not the exact per-block cumulative supply. Deterministic and
    fork-safe; the exact `base_reward_from_supply` is used for templates/display.
-3. **`MINER_SPLIT_PERCENT = 60` is unused** by `distribute_fee`, which uses the
-   `FEE_MINER/BURN_NORMAL/CONGESTED_PERCENT` (70/30, 50/50) constants. Divergent
-   constant; no behavioral effect.
+3. **Dead/divergent consensus constants removed (2026-08-17).**
+   `MINER_SPLIT_PERCENT` (unused; the fee split uses the
+   `FEE_MINER/BURN_NORMAL/CONGESTED_PERCENT` 70/30 · 50/50 constants),
+   `RANDOMX_KEY_INTERVAL` (dead duplicate of `consensus::pow::RANDOMX_KEY_EPOCH`),
+   and `MAX_FUTURE_TIMESTAMP` (unused; the future-block check uses
+   `MAX_TIMESTAMP_DRIFT`) were deleted from `constants.rs`, and `MTP_WINDOW` is
+   now wired into the MTP walk (previously a hardcoded `11`).
 4. **`total_burned` is not accumulated** into a persisted chain counter; burns
    are computed per-fee in `distribute_fee` but not summed into chain state.
    `total_supply` therefore tracks *gross* emission.
-5. **`MTP_WINDOW`, `MAX_FUTURE_TIMESTAMP`, `min_target()`** are defined but the
-   live code uses the literal `11`, `MAX_TIMESTAMP_DRIFT` (same value 600), and a
-   different path respectively. Cosmetic; values coincide.
+5. **`min_target()`** (`difficulty.rs`) is defined and re-exported but not read
+   by block validation. Cosmetic.
 6. **Dormant / feature-gated (inert in production):** rolling-finality
    (`#[cfg(feature="rolling-finality")]` + a `None` adapter), Phase-2 Spark & MW
    stores (`None` → rewind inert; header roots zero), the CIP-007 activation

@@ -1378,9 +1378,9 @@ impl Blockchain {
     /// is behaviour-identical on the common path. `get_block` resolves both
     /// in-memory side-chain blocks and DB-backed ancestors.
     fn median_time_past_of_lineage(&self, prev_hash: Hash) -> Option<u64> {
-        let mut timestamps: Vec<u64> = Vec::with_capacity(11);
+        let mut timestamps: Vec<u64> = Vec::with_capacity(crate::constants::MTP_WINDOW);
         let mut cursor = prev_hash;
-        for _ in 0..11 {
+        for _ in 0..crate::constants::MTP_WINDOW {
             match self.get_block(&cursor) {
                 Some(ancestor) => {
                     timestamps.push(ancestor.header.timestamp);
@@ -1389,7 +1389,7 @@ impl Blockchain {
                 None => break,
             }
         }
-        if timestamps.len() >= 11 {
+        if timestamps.len() >= crate::constants::MTP_WINDOW {
             timestamps.sort_unstable();
             Some(timestamps[timestamps.len() / 2])
         } else {

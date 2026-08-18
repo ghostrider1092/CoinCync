@@ -213,17 +213,6 @@ pub const HARD_FORK_V1_0_12_HEIGHT: u64 = 13_000;
 /// block-validation time too (see HARD_FORK_V1_0_12_HEIGHT).
 pub const MAX_OUTPUT_MEMO_SIZE: usize = 256;
 
-/// Maximum time in the future a block timestamp may claim (seconds).
-pub const MAX_FUTURE_TIMESTAMP: u64 = 60 * 10;
-
-/// How often a new RandomX key block is chosen (blocks).
-///
-/// UNUSED / dead duplicate: consensus does NOT read this constant. The live
-/// RandomX key-epoch value is `RANDOMX_KEY_EPOCH` in src/consensus/pow.rs
-/// (currently also 2048). This const is retained only to avoid churn; do not
-/// trust it as the authoritative epoch length — always defer to consensus::pow.
-pub const RANDOMX_KEY_INTERVAL: u64 = 2048;
-
 /// Standard ring size.
 pub const RING_SIZE: usize = 16;
 
@@ -873,9 +862,6 @@ pub const MAX_BURN_RATE: u64 = 5000; // 50%
 
 /// Activity window for adaptive emission (blocks)
 pub const ACTIVITY_WINDOW: u64 = 1000;
-
-/// Miner split percentage of fees (0-100)
-pub const MINER_SPLIT_PERCENT: u64 = 60;
 
 /// Total supply target: 100 million CYNC (in whole units, not atomic).
 /// The asymptotic emission curve approaches but never reaches this cap.
