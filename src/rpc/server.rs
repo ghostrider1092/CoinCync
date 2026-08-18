@@ -974,6 +974,16 @@ pub async fn start_rpc_server(
                 "height":             height,
                 "current_reward":     reward.as_atomic(),
                 "total_emitted":      supply_atomic_decimal(stats.total_supply),
+                // `total_emitted`/`total_supply` is GROSS emission (the summed
+                // deterministic schedule). `total_burned` is the cumulative fees
+                // provably burned by the fee-market split, and `circulating_supply`
+                // is the net in circulation = total_supply − total_burned.
+                "total_supply":       supply_atomic_decimal(stats.total_supply),
+                "total_burned":       supply_atomic_decimal(stats.total_burned),
+                "circulating_supply": supply_atomic_decimal(
+                    stats.total_supply.saturating_sub(stats.total_burned),
+                ),
+                "supply_note":        "total_supply/total_emitted is gross emission; circulating_supply is net of burned fees (total_supply − total_burned).",
                 "emission_phase":     phase.name(),
                 // Public emission parameters so anyone can independently
                 // recompute the schedule and confirm `total_emitted`. Emission

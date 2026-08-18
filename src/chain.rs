@@ -256,6 +256,15 @@ pub struct ChainStats {
     /// `checked_add` on block connect at ~18.4M CYNC cumulative (height ~408k).
     /// Individual `Amount`s stay `u64`; only this running total widened.
     pub total_supply: u128,
+    /// Cumulative burned fees, in atomic units.
+    ///
+    /// Telemetry counter (not a consensus value) maintained IN LOCKSTEP with
+    /// `total_supply`: it moves by `block_fee_burn(block)` at exactly the sites
+    /// where `total_supply` moves by the block's emission — `+=` on
+    /// apply/extend, `-=` on disconnect/rollback — so it is reorg-symmetric and
+    /// path-independent. `u128`, not `Amount` (`u64`), for headroom parity with
+    /// `total_supply`. `circulating = total_supply - total_burned`.
+    pub total_burned: u128,
     pub difficulty: u128,
     pub tip_hash: Hash,
     pub total_difficulty: u128,
@@ -731,6 +740,9 @@ impl Blockchain {
             inner.stats.total_transactions = genesis.transactions.len() as u64;
             inner.stats.tip_hash = hash;
             inner.stats.total_supply = calculate_block_reward(0).as_atomic() as u128;
+            // Genesis carries no fees (height 0 is below FEE_DISTRIBUTION_HEIGHT
+            // and has no non-coinbase txs), so the burn accumulator starts at 0.
+            inner.stats.total_burned = 0;
 
             // SECURITY (CC-001): Apply genesis block transactions to UTXO set
             let batch = UtxoSet::batch_from_block(0, &genesis.transactions);
@@ -846,6 +858,11 @@ impl Blockchain {
                         };
                         inner.stats.height = state.height;
                         inner.stats.total_supply = state.total_supply;
+                        // Load the persisted burn accumulator alongside supply.
+                        // ChainStateData.total_burned is `u64` on disk; the
+                        // in-memory accumulator is `u128` for parity with
+                        // total_supply — widen on load.
+                        inner.stats.total_burned = state.total_burned as u128;
                         inner.stats.tip_hash = state.tip_hash;
                         inner.stats.total_difficulty = state.total_difficulty;
                         // Sync stats.difficulty with the loaded tip. Without this,
@@ -1040,7 +1057,7 @@ impl Blockchain {
                             height: good_height,
                             total_difficulty: inner.stats.total_difficulty,
                             total_supply: inner.stats.total_supply,
-                            total_burned: 0,
+                            total_burned: inner.stats.total_burned as u64,
                             last_checkpoint,
                         };
                         if let Err(e) = db.state.save_state(&state) {
@@ -1611,6 +1628,17 @@ impl Blockchain {
                         }
                         // Subtract emission
                         let emission = calculate_block_reward(h);
+                        // Burn accumulator moves in lockstep with supply: the
+                        // block being disconnected is the one in the cache under
+                        // `oh` (its txs were just read above), so its fee-burn is
+                        // well-defined. Computed before the stat mutations so the
+                        // immutable borrow of `inner.blocks` is released first.
+                        let fee_burn = block_fee_burn(
+                            inner
+                                .blocks
+                                .get(&oh)
+                                .expect("disconnected block is in cache; its txs were just read"),
+                        );
                         // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                         //
                         // AUDIT (2026-07-02): third site of the self-defeating supply-
@@ -1640,6 +1668,21 @@ impl Blockchain {
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
                                     emission, inner.stats.total_supply
+                                )
+                            });
+                        // Mirror the supply subtract for the burn accumulator.
+                        inner.stats.total_burned = inner
+                            .stats
+                            .total_burned
+                            .checked_sub(fee_burn)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "CONSENSUS CORRUPTION: total_burned underflow on reorg \
+                                     rollback — tried to subtract fee_burn={} from \
+                                     total_burned={} at height being disconnected. Burn \
+                                     telemetry is unrecoverable; halting to preserve on-disk \
+                                     state. Restart re-derives it from the persisted chain.",
+                                    fee_burn, inner.stats.total_burned
                                 )
                             });
                     }
@@ -1735,7 +1778,7 @@ impl Blockchain {
                 tip_hash: inner.stats.tip_hash,
                 total_difficulty: inner.stats.total_difficulty,
                 total_supply: inner.stats.total_supply,
-                total_burned: 0,
+                total_burned: inner.stats.total_burned as u64,
                 last_checkpoint,
             };
             if let Err(e) = db.state.save_state(&state) {
@@ -2123,6 +2166,19 @@ impl Blockchain {
                                 emission, inner.stats.total_supply
                             )
                         });
+                    // Burn accumulator, in lockstep with the supply add above.
+                    inner.stats.total_burned = inner
+                        .stats
+                        .total_burned
+                        .checked_add(block_fee_burn(&block))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "CONSENSUS CORRUPTION: total_burned overflow on block \
+                                 connect — total_burned={} + this block's fee-burn \
+                                 exceeded u128. Halting for RocksDB flush + operator triage.",
+                                inner.stats.total_burned
+                            )
+                        });
 
                     // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
                     // CIP-009.D Interp-B contract: checkpoint each Phase-2
@@ -2234,7 +2290,7 @@ impl Blockchain {
                         height: block.header.height,
                         total_difficulty: stats.total_difficulty,
                         total_supply: stats.total_supply,
-                        total_burned: 0,
+                        total_burned: stats.total_burned as u64,
                         last_checkpoint: last_checkpoint_height,
                     };
                     db.state.save_state(&state)?;
@@ -2519,6 +2575,15 @@ impl Blockchain {
                                 disconnected_tx_lists.push(txs);
                                 // Subtract this block's emission from supply
                                 let emission = calculate_block_reward(h);
+                                // Burn accumulator, in lockstep with the supply
+                                // subtract below. The disconnected block is still
+                                // in the cache under `oh`; compute its fee-burn
+                                // before mutating stats to release the borrow.
+                                let fee_burn = block_fee_burn(
+                                    inner.blocks.get(&oh).expect(
+                                        "disconnected block is in cache; its txs were just read",
+                                    ),
+                                );
                                 // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                                 //
                                 // AUDIT (2026-07-01): the previous error arm zeroed the supply
@@ -2560,6 +2625,20 @@ impl Blockchain {
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
         emission, inner.stats.total_supply
+    )
+                                    });
+                                // Mirror the supply subtract for the burn accumulator.
+                                inner.stats.total_burned = inner
+                                    .stats
+                                    .total_burned
+                                    .checked_sub(fee_burn)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+        "CONSENSUS CORRUPTION: total_burned underflow on reorg rollback — \
+         tried to subtract fee_burn={} from total_burned={} at height being disconnected. \
+         Burn telemetry is unrecoverable; halting to preserve on-disk state. \
+         Restart re-derives it from the persisted chain.",
+        fee_burn, inner.stats.total_burned
     )
                                     });
                             }
@@ -2747,6 +2826,21 @@ impl Blockchain {
                                     emission, inner.stats.total_supply
                                 )
                             });
+                        // Burn accumulator, in lockstep with this fork block's
+                        // supply add above.
+                        inner.stats.total_burned = inner
+                            .stats
+                            .total_burned
+                            .checked_add(block_fee_burn(fork_block))
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "CONSENSUS CORRUPTION: total_burned overflow on reorg \
+                                     fork-block connect — total_burned={} + this block's \
+                                     fee-burn exceeded u128. Halting for RocksDB flush + \
+                                     operator triage.",
+                                    inner.stats.total_burned
+                                )
+                            });
                     }
 
                     // SECURITY (REORG-TIP-VALIDATE, 2026-08-13): re-validate the
@@ -2820,6 +2914,9 @@ impl Blockchain {
                                 self.rewind_phase2_stores(fork_block.header.height);
                                 // Subtract the emission we added for this fork block
                                 let emission = calculate_block_reward(fork_block.header.height);
+                                // Burn accumulator, in lockstep with the supply
+                                // subtract below (undoing this fork block's add).
+                                let fee_burn = block_fee_burn(fork_block);
                                 // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                                 //
                                 // AUDIT (2026-07-01): the previous error arm zeroed the supply
@@ -2861,6 +2958,20 @@ impl Blockchain {
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
         emission, inner.stats.total_supply
+    )
+                                    });
+                                // Mirror the supply subtract for the burn accumulator.
+                                inner.stats.total_burned = inner
+                                    .stats
+                                    .total_burned
+                                    .checked_sub(fee_burn)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+        "CONSENSUS CORRUPTION: total_burned underflow on failed-reorg rollback — \
+         tried to subtract fee_burn={} from total_burned={} for a fork block being undone. \
+         Burn telemetry is unrecoverable; halting to preserve on-disk state. \
+         Restart re-derives it from the persisted chain.",
+        fee_burn, inner.stats.total_burned
     )
                                     });
                             }
@@ -2982,6 +3093,9 @@ impl Blockchain {
                             // Inert while stores are None.
                             self.rewind_phase2_stores(fork_block.header.height);
                             let emission = calculate_block_reward(fork_block.header.height);
+                            // Burn accumulator, in lockstep with the supply
+                            // subtract below (undoing this fork block's add).
+                            let fee_burn = block_fee_burn(fork_block);
                             // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                             //
                             // AUDIT (2026-07-02): fourth (and final located) site of
@@ -3005,6 +3119,20 @@ impl Blockchain {
          chain will re-derive supply correctly. If this recurs on restart, the on-disk \
          chain state is corrupt and requires a reindex.",
         emission, inner.stats.total_supply
+    )
+                                });
+                            // Mirror the supply subtract for the burn accumulator.
+                            inner.stats.total_burned = inner
+                                .stats
+                                .total_burned
+                                .checked_sub(fee_burn)
+                                .unwrap_or_else(|| {
+                                    panic!(
+        "CONSENSUS CORRUPTION: total_burned underflow on failed-reorg rollback — \
+         tried to subtract fee_burn={} from total_burned={} at fork block being disconnected. \
+         Burn telemetry is unrecoverable; halting to preserve on-disk state. \
+         Restart re-derives it from the persisted chain.",
+        fee_burn, inner.stats.total_burned
     )
                                 });
                         }
@@ -3081,6 +3209,19 @@ impl Blockchain {
                                  this indicates a bug in calculate_block_reward or on-disk \
                                  corruption. Halting for RocksDB flush + operator triage.",
                                     tip_emission, inner.stats.total_supply
+                                )
+                            });
+                        // Burn accumulator, in lockstep with the tip supply add.
+                        inner.stats.total_burned = inner
+                            .stats
+                            .total_burned
+                            .checked_add(block_fee_burn(&block))
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "CONSENSUS CORRUPTION: total_burned overflow on reorg tip \
+                                     apply — total_burned={} + the tip block's fee-burn \
+                                     exceeded u128. Halting for RocksDB flush + operator triage.",
+                                    inner.stats.total_burned
                                 )
                             });
 
@@ -3316,8 +3457,11 @@ impl Blockchain {
                             // (parking_lot RwLock is not re-entrant), freezing
                             // the node on EVERY successful reorg. The value is
                             // identical: stats() clones inner.stats.
+                            // Read burn through the held write guard for the
+                            // same reason as total_supply above (self.stats()
+                            // would self-deadlock the parking_lot RwLock).
                             total_supply: reorg_commit_guard.stats.total_supply,
-                            total_burned: 0,
+                            total_burned: reorg_commit_guard.stats.total_burned as u64,
                             last_checkpoint,
                         };
                         let state_bytes = crate::db::serialize(&new_state)?;
@@ -3917,6 +4061,52 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
     // Work = 2^128 / target_value (using the top 128 bits of the 256-bit target).
     // This is equivalent to 2^256 / (target_value << 128), preserving the ratio.
     u128::MAX / target_value
+}
+
+/// Total fees BURNED by `block`, in atomic units.
+///
+/// Computed EXACTLY as the consensus validator computes the coinbase burn (see
+/// `src/consensus/validation.rs` `max_coinbase` / `distribute_fee`, ~L269-294),
+/// so the `total_burned` telemetry accumulator equals the coins consensus
+/// required this block to burn. This is the value `total_burned` moves by
+/// whenever the block is connected (`+=`) or disconnected (`-=`), maintained in
+/// lockstep with the block's emission in `total_supply`.
+///
+/// Mirror of validation.rs:
+///   * `total_fees` = Σ `fee` over NON-coinbase txs. `Amount`'s `Sum` impl is
+///     `saturating_add`, identical to the validator's
+///     `.skip(1).map(|tx| tx.fee).sum()` (first tx is the coinbase).
+///   * below `FEE_DISTRIBUTION_HEIGHT`, or zero fees → `0` (miner claims all
+///     fees), matching `block.height() >= FEE_DISTRIBUTION_HEIGHT
+///     && total_fees.as_atomic() > 0`.
+///   * `congestion_pct = (block.size() * 100) / MAX_BLOCK_SIZE` (integer),
+///     `congested = congestion_pct >= CONGESTION_THRESHOLD` — the same
+///     `size = block.size()` the validator uses.
+///   * burn = `distribute_fee(total_fees, congested).burned`.
+fn block_fee_burn(block: &Block) -> u128 {
+    let total_fees: crate::primitives::Amount = block
+        .transactions
+        .iter()
+        .filter(|tx| !tx.is_coinbase())
+        .map(|tx| tx.fee)
+        .sum();
+
+    // Below activation, or no fees: nothing burned — miner claims all fees.
+    if block.height() < crate::constants::FEE_DISTRIBUTION_HEIGHT
+        || total_fees.as_atomic() == 0
+    {
+        return 0;
+    }
+
+    // Integer congestion, mirroring validation.rs `max_coinbase` exactly.
+    let size = block.size();
+    let congestion_pct =
+        ((size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128) as u64;
+    let congested = congestion_pct >= crate::constants::CONGESTION_THRESHOLD;
+
+    crate::consensus::fee_market::distribute_fee(total_fees, congested)
+        .burned
+        .as_atomic() as u128
 }
 
 impl Default for Blockchain {
@@ -4603,5 +4793,163 @@ mod tests {
                 bit
             );
         }
+    }
+
+    // ── total_burned accumulator ──────────────────────────────────────
+    //
+    // `block_fee_burn` must equal the coins the consensus validator required
+    // to be burned (src/consensus/validation.rs `max_coinbase`), and the
+    // accumulator must be reorg-symmetric: `+=` on apply, `-=` on disconnect,
+    // landing at Σ over the NEW canonical chain independent of the reorg path.
+
+    /// A non-coinbase Transfer tx carrying `fee` atomic units. Only `fee`,
+    /// `tx_type` and serialized size are read by `block_fee_burn`.
+    fn burn_test_tx(fee: u64) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: crate::transaction::TxType::Transfer,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: Vec::new(),
+            extra: Vec::new(),
+        }
+    }
+
+    /// A small (non-congested) block at `height`, cloned from genesis, whose
+    /// non-coinbase txs carry `fees`. `nonce` keeps block hashes distinct.
+    fn burn_test_block(height: u64, nonce: u64, fees: &[u64]) -> Block {
+        let mut b = create_genesis_block();
+        assert!(
+            b.transactions[0].is_coinbase(),
+            "genesis first tx must be the coinbase"
+        );
+        b.header.height = height;
+        b.header.nonce = nonce;
+        let mut txs = vec![b.transactions[0].clone()];
+        for &f in fees {
+            txs.push(burn_test_tx(f));
+        }
+        b.transactions = txs;
+        b
+    }
+
+    #[test]
+    fn block_fee_burn_matches_validator_burn_split() {
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+
+        // Above activation, non-congested: burn == distribute_fee(Σfee,false).burned,
+        // exactly the value validation.rs `max_coinbase` withholds from the miner.
+        let fees = [1_000_000u64, 2_000_000u64];
+        let b = burn_test_block(act + 10, 1, &fees);
+        let total: u64 = fees.iter().sum();
+        let expected = crate::consensus::fee_market::distribute_fee(
+            crate::primitives::Amount::from_atomic(total),
+            false,
+        )
+        .burned
+        .as_atomic() as u128;
+        assert_eq!(block_fee_burn(&b), expected);
+        // Concrete: 3_000_000 fees × 30% normal burn = 900_000.
+        assert_eq!(block_fee_burn(&b), 900_000);
+
+        // Zero fees → nothing burned.
+        assert_eq!(block_fee_burn(&burn_test_block(act + 10, 2, &[])), 0);
+        assert_eq!(block_fee_burn(&burn_test_block(act + 10, 3, &[0])), 0);
+
+        // Below the activation height miners claim all fees, nothing burned
+        // (only reachable when activation > 0 — the testnet feature).
+        if act > 0 {
+            assert_eq!(block_fee_burn(&burn_test_block(act - 1, 4, &fees)), 0);
+        }
+    }
+
+    #[test]
+    fn total_burned_apply_disconnect_is_symmetric_and_reorg_correct() {
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        // Canonical chain A (2 blocks) vs a competing chain B (3 blocks), with
+        // DIFFERENT per-block fees so the two totals differ.
+        let a1 = burn_test_block(act + 1, 11, &[1_000_000]);
+        let a2 = burn_test_block(act + 2, 12, &[2_000_000]);
+        let b1 = burn_test_block(act + 1, 21, &[500_000]);
+        let b2 = burn_test_block(act + 2, 22, &[1_000_000]);
+        let b3 = burn_test_block(act + 3, 23, &[4_000_000]);
+
+        let sum = |bs: &[&Block]| -> u128 { bs.iter().map(|b| block_fee_burn(b)).sum() };
+
+        // Apply A the way every connect site does: += block_fee_burn.
+        let mut stats = ChainStats::default();
+        for blk in [&a1, &a2] {
+            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(blk)).unwrap();
+        }
+        assert_eq!(stats.total_burned, sum(&[&a1, &a2]));
+        assert!(stats.total_burned > 0, "chain A must burn something");
+
+        // Reorg: disconnect A in reverse order, then apply B — the exact
+        // -=/+= pattern wired at the reorg disconnect/apply sites.
+        for blk in [&a2, &a1] {
+            stats.total_burned = stats.total_burned.checked_sub(block_fee_burn(blk)).unwrap();
+        }
+        assert_eq!(
+            stats.total_burned, 0,
+            "apply-then-disconnect must return to the pre-apply value (+=/-= symmetry)"
+        );
+        for blk in [&b1, &b2, &b3] {
+            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(blk)).unwrap();
+        }
+        // Reorg-correct: total_burned == Σ burn over the NEW canonical chain,
+        // NOT path-dependent on the disconnected A branch.
+        let expected_b = sum(&[&b1, &b2, &b3]);
+        assert_eq!(stats.total_burned, expected_b);
+        assert_ne!(expected_b, sum(&[&a1, &a2]), "the two chains must differ");
+    }
+
+    #[test]
+    fn rollback_to_height_unwinds_total_burned_through_the_real_disconnect_site() {
+        // Authentic exercise of the real disconnect wiring (rollback_to_height):
+        // stage two fee-carrying blocks in the in-memory chain with the
+        // accumulator advanced exactly as the connect sites do, then roll back
+        // to genesis and assert total_burned returns to 0.
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        let h1 = act.max(1);
+        let h2 = h1 + 1;
+        let genesis_hash = chain.tip_hash();
+
+        let b1 = burn_test_block(h1, 31, &[3_000_000]);
+        let b2 = burn_test_block(h2, 32, &[5_000_000]);
+        let burn1 = block_fee_burn(&b1);
+        let burn2 = block_fee_burn(&b2);
+        assert!(burn1 > 0 && burn2 > 0, "staged blocks must burn fees");
+
+        {
+            let mut inner = chain.inner.write();
+            let h1h = b1.hash();
+            let h2h = b2.hash();
+            inner.blocks.insert(h1h, b1.clone());
+            inner.blocks.insert(h2h, b2.clone());
+            inner.height_to_hash.insert(h1, h1h);
+            inner.height_to_hash.insert(h2, h2h);
+            inner.tip.hash = h2h;
+            inner.tip.height = h2;
+            inner.stats.height = h2;
+            inner.stats.tip_hash = h2h;
+            // Advance the accumulators as the connect path would have. Ample
+            // supply headroom so the emission subtracts never underflow.
+            inner.stats.total_supply = u64::MAX as u128;
+            inner.stats.total_burned = burn1 + burn2;
+        }
+
+        assert_eq!(chain.stats().total_burned, burn1 + burn2);
+
+        // The real disconnect path runs block_fee_burn(-=) for h2 then h1.
+        chain.rollback_to_height(0).expect("rollback to genesis");
+
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
+        assert_eq!(
+            chain.stats().total_burned, 0,
+            "disconnecting every fee-carrying block returns total_burned to 0"
+        );
     }
 }
