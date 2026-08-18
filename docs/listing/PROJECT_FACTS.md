@@ -17,30 +17,30 @@ numbers without sources are a scam signal.
 | Field | Value | Source |
 |---|---|---|
 | Name | CoinCync | repository root |
-| Ticker | CYNC | [src/constants.rs:250](../../src/constants.rs#L250) |
-| Atomic unit divisor | 1,000,000,000,000 (12 decimals) | [src/constants.rs:311](../../src/constants.rs#L311) |
+| Ticker | CYNC | [src/constants.rs::COIN_TICKER](../../src/constants.rs) |
+| Atomic unit divisor | 1,000,000,000,000 (12 decimals) | [src/constants.rs::ATOMIC_UNITS](../../src/constants.rs) |
 | Genesis date (target) | 2026-10-01 | [docs/launch/GENESIS-CEREMONY-PLAN.md](../launch/GENESIS-CEREMONY-PLAN.md) |
 | Network type | Layer-1, standalone | n/a |
 | Consensus | Proof-of-Work (RandomX) | [src/consensus/pow.rs](../../src/consensus/pow.rs) |
-| Block time (target) | 120 seconds | [src/constants.rs:35](../../src/constants.rs#L35) |
-| Difficulty algorithm | ASERT-DAA (3600s halflife) | [src/constants.rs:62](../../src/constants.rs#L62), [src/consensus/difficulty.rs](../../src/consensus/difficulty.rs) |
-| Max block size | 2 MiB | [src/constants.rs:49](../../src/constants.rs#L49) |
-| Max txs per block | 5,000 | [src/constants.rs:52](../../src/constants.rs#L52) |
-| Default mainnet P2P port | 19080 | [src/constants.rs:106](../../src/constants.rs#L106) |
-| Default mainnet RPC port | 19081 | [src/constants.rs:109](../../src/constants.rs#L109) |
-| Protocol version | 2 | [src/constants.rs:32](../../src/constants.rs#L32) |
+| Block time (target) | 120 seconds | [src/constants.rs::TARGET_BLOCK_TIME](../../src/constants.rs) |
+| Difficulty algorithm | ASERT-DAA (3600s halflife) | [src/constants.rs::ASERT_HALFLIFE](../../src/constants.rs), [src/consensus/difficulty.rs](../../src/consensus/difficulty.rs) |
+| Max block size | 2 MiB | [src/constants.rs::MAX_BLOCK_SIZE](../../src/constants.rs) |
+| Max txs per block | 5,000 | [src/constants.rs::MAX_TXS_PER_BLOCK](../../src/constants.rs) |
+| Default mainnet P2P port | 19080 | [src/constants.rs::DEFAULT_P2P_PORT](../../src/constants.rs) |
+| Default mainnet RPC port | 19081 | [src/constants.rs::DEFAULT_RPC_PORT](../../src/constants.rs) |
+| Protocol version | 2 | [src/constants.rs::PROTOCOL_VERSION](../../src/constants.rs) |
 
 ## 2. Supply & emission
 
 | Field | Value | Source |
 |---|---|---|
-| Supply model | 100,000,000 CYNC is the **issuance-curve asymptote** (not a hard cap). Tail emission (0.6 CYNC/block, perpetual) continues after the curve floors, so total supply crosses ~100M long-term and grows slowly forever. | [src/constants.rs:884](../../src/constants.rs#L884), Constitution Article I |
+| Supply model | 100,000,000 CYNC is the **issuance-curve asymptote** (not a hard cap). Tail emission (0.6 CYNC/block, perpetual) continues after the curve floors, so total supply crosses ~100M long-term and grows slowly forever. | [src/constants.rs::TOTAL_SUPPLY_TARGET](../../src/constants.rs), Constitution Article I |
 | Genesis premine | **0 CYNC** | enforced by absence of premine code; reviewer can verify by reading `src/emission/curve.rs` and `src/mainnet.rs` (+ `src/testnet.rs`) |
-| Developer tax | **0% (compile-time enforced)** | `DEV_TAX_PERCENT = 0` at [src/constants.rs:926](../../src/constants.rs#L926); Article II compile assertion at line 927 |
+| Developer tax | **0% (compile-time enforced)** | `DEV_TAX_PERCENT = 0` at [src/constants.rs::DEV_TAX_PERCENT](../../src/constants.rs); Article II compile assertion (`const _: () = assert!(DEV_TAX_PERCENT == 0, …)`) immediately follows it |
 | Foundation reserve | **None** | no foundation entity exists; see §6 |
 | Initial block reward | 50 CYNC | derived from `EMISSION_DIVISOR = 2_000_000` |
-| Emission curve | Smooth asymptotic (no halvings, no eras) | [src/constants.rs:886-896](../../src/constants.rs#L886-L896) |
-| Tail emission | 0.6 CYNC/block (forever, after curve falls below) | [src/constants.rs:869](../../src/constants.rs#L869) |
+| Emission curve | Smooth asymptotic (no halvings, no eras) | [src/constants.rs::EMISSION_DIVISOR](../../src/constants.rs) |
+| Tail emission | 0.6 CYNC/block (forever, after curve falls below) | [src/constants.rs::TAIL_EMISSION](../../src/constants.rs) |
 | Fee burn | 30% of fees burned per block | (verify against [src/emission/curve.rs](../../src/emission/curve.rs)) |
 | Self-reported circulating supply URL | (post-launch — see SUBMISSION_KIT.md §3) | n/a |
 
@@ -88,7 +88,7 @@ Solo-mineability: yes. Reference miner shipped in the node binary.
 | Critical-files integrity | SHA-256 lockfile at [critical_files.lock](../../critical_files.lock); enforced in `build.rs` |
 | Signed binaries | yes — SSH-signed commits + signed SHA256SUMS (see [docs/launch/v1.0.10-CHECKLIST.md](../launch/v1.0.10-CHECKLIST.md)) |
 | Fuzz suite | 7 cargo-fuzz targets in [fuzz/fuzz_targets/](../../fuzz/fuzz_targets/) |
-| Constitutional guards | compile-time assertions in [src/constants.rs:899+](../../src/constants.rs#L899) bind the binary to [CONSTITUTION.md](../../CONSTITUTION.md) |
+| Constitutional guards | the compile-time `assert!` guards under the "CONSTITUTIONAL GUARDS" section of [src/constants.rs](../../src/constants.rs) bind the binary to [CONSTITUTION.md](../../CONSTITUTION.md) |
 
 ## 6. Team / legal entity
 

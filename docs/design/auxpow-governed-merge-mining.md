@@ -411,8 +411,9 @@ bounds the *adversarial case*.
 
 Layer B counts *classes*, not times, over the last `W` blocks — it does not
 depend on timestamps, so it cannot be gamed by timestamp manipulation (already
-bounded by `MAX_FUTURE_TIMESTAMP = 600` and median-time-past rules,
-[constants.rs:217](../../src/constants.rs)). Layer A inherits ASERT's existing
+bounded by `MAX_TIMESTAMP_DRIFT = 600` and median-time-past rules,
+[constants.rs::MAX_TIMESTAMP_DRIFT](../../src/constants.rs) and
+[constants.rs::MTP_WINDOW](../../src/constants.rs)). Layer A inherits ASERT's existing
 timestamp-manipulation resistance.
 
 ---
@@ -558,7 +559,7 @@ zero absolute-work over-crediting. Raising `κ` (with a correspondingly lower
 | A3 | **Seed grinding** — pick a favorable `parent_seed` | No weak RandomX seeds; seed choice can't lower work; seed is committed. (§6.3) |
 | A4 | **Aux-tag ambiguity / dual commitment** | Canonical tag position (`mergemining-strict`, already contemplated in `cynchub/mergemining.rs`); reject multiple/foreign tags. |
 | A5 | **Withholding aux budget** to starve honest merge-miners | Layer A lowers `D_x` when aux is scarce, inviting honest merge-miners; native chain proceeds regardless (native is the floor). |
-| A6 | **Timestamp manipulation** to skew difficulty/share | Share cap counts classes, not time (§5.3); ASERT + MTP + `MAX_FUTURE_TIMESTAMP` unchanged. |
+| A6 | **Timestamp manipulation** to skew difficulty/share | Share cap counts classes, not time (§5.3); ASERT + MTP + `MAX_TIMESTAMP_DRIFT` unchanged. |
 | A7 | **Valve-stuck-open bug** (impl risk) | Layer B is a *hard* invariant; add a consensus test that any window with aux `> ⌊ρ_max·W⌋` is rejected, and a fork-choice test that aux weight never exceeds `κ·Ŵ_n`. |
 
 ---

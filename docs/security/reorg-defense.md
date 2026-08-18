@@ -51,7 +51,7 @@ must satisfy **every active layer** to be accepted.
 
 ### Layer 1 — Tier-1 Nakamoto (depth ≤ 10)
 
-`REORG_UNCONDITIONAL_DEPTH = 10` (`src/chain.rs:77`). For reorgs at
+`REORG_UNCONDITIONAL_DEPTH = 10` (`src/chain.rs::REORG_UNCONDITIONAL_DEPTH`). For reorgs at
 depth 10 or shallower, the standard Nakamoto longest-(most-work)-
 chain rule applies unconditionally: the fork wins iff
 `fork_work > honest_work`. This is the normal-operation path —
@@ -60,7 +60,7 @@ resolve within a handful of blocks and must not be impeded.
 
 ### Layer 2 — Tier-2 MESS (depth 11–100, tip height ≥ 1000)
 
-`MESS_EXPONENT_DIVISOR = 20` (`src/chain.rs:82`). For reorgs deeper
+`MESS_EXPONENT_DIVISOR = 20` (`src/chain.rs::MESS_EXPONENT_DIVISOR`). For reorgs deeper
 than 10, the fork must demonstrate **exponentially** more cumulative
 work than the honest chain:
 
@@ -78,33 +78,34 @@ required_work = honest_work × 2^((depth − 10) / 20)
 This is Modified Exponential Subjective Scoring, the Ethereum
 Classic ECIP-1100 construction. The exponent is integer-divided
 (`(depth − 10) / 20`) and capped at 40 to prevent `u128` overflow
-(`src/chain.rs:140–143`); all arithmetic is integer — **no floats
+(the `capped_exponent` clamp in `src/chain.rs::evaluate_reorg_acceptability`);
+all arithmetic is integer — **no floats
 in consensus**. The implementing function is
-`evaluate_reorg_acceptability` (`src/chain.rs:99`), called from the
-reorg path at `src/chain.rs:1515`.
+`evaluate_reorg_acceptability` (`src/chain.rs::evaluate_reorg_acceptability`), called from the
+reorg path in `src/chain.rs::add_block`.
 
 ### Layer 3 — Tier-3 hard cap (depth > max)
 
 `max_reorg_depth()` returns **100 on mainnet, 1000 on
-testnet/regtest** (`src/chain.rs:32–45`). A reorg deeper than this
+testnet/regtest** (`src/chain.rs::max_reorg_depth_for`). A reorg deeper than this
 is rejected outright — no quantity of work can override it. This is
 the absolute-finality backstop.
 
 ### Layer 4 — Per-node rolling checkpoints
 
-`CHECKPOINT_INTERVAL = 144` blocks (`src/constants.rs:234`, ≈ 5
+`CHECKPOINT_INTERVAL = 144` blocks (`src/constants.rs::CHECKPOINT_INTERVAL`, ≈ 5
 hours at 120 s). Each node records a checkpoint of its own canonical
-chain every interval (`db.state.add_checkpoint`, `src/chain.rs:505`
-for genesis). A reorg whose fork point is below the node's
-`last_checkpoint` is rejected (`src/chain.rs:943`). This is a
+chain every interval (`db.state.add_checkpoint`, called during
+genesis initialization in `src/chain.rs`). A reorg whose fork point is below the node's
+`last_checkpoint` is rejected (`src/chain.rs::rollback_to_height`). This is a
 *local*, *subjective* finality layer — it does not require
 coordination, and it bounds how far back any single node will ever
 reorganise regardless of work.
 
 ### Layer 5 — Hardcoded consensus checkpoints (CIP-009 "Path B")
 
-`CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])]` (`src/constants.rs:731`
-mainnet, `:741` testnet). A network-wide, release-shipped table of
+`CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])]` (`src/constants.rs::CONSENSUS_CHECKPOINTS`,
+feature-gated mainnet and testnet variants). A network-wide, release-shipped table of
 `(height, block_hash)` pairs; any block proposing a different hash
 at a checkpointed height is rejected. **The table is empty as of
 2026-05-08** on both networks — it is populated post-launch via the
@@ -113,7 +114,7 @@ release process (`scripts/update-checkpoints.sh`,
 checkpoints up to ≈ 2 weeks behind the tip. An empty table is a
 valid state: `expected_checkpoint_hash` returns `None` and the
 validator treats "no checkpoint here" as "accept any consistent
-block" (`src/constants.rs:756`). This is the layer CIP-009 decided
+block" (`src/constants.rs::expected_checkpoint_hash`). This is the layer CIP-009 decided
 to *add*; see §3.
 
 ### Layer 6 — Miner-signed rolling finality (CIP-009.D, queued)
@@ -137,7 +138,7 @@ defends the chain *today*.
 Both are true once the framing is corrected. The 3-tier MESS hybrid
 (Layers 1–3) was the **original H-16 fix**, implemented before
 CIP-009 was written (session `63379c83`, the "H-16 FIX" comment
-block at `src/chain.rs:47`). CIP-009 was not deciding whether to
+block, the `HYBRID REORG DEFENSE (H-16 FIX)` banner in `src/chain.rs`). CIP-009 was not deciding whether to
 *keep* MESS — it was deciding what *additional* defense to **add**
 before mainnet. Its "Path A (MESS)" meant "add a *new, larger* MESS
 construction as the primary defense"; that was rejected as too much
@@ -156,7 +157,7 @@ of the whole defense.
 
 Also both true, for different senses of "closed". The *code* is
 closed: the 3-tier hybrid is implemented and carries 17 regression
-tests (`evaluate_reorg_acceptability` tests at `src/chain.rs:2520+`).
+tests (the `evaluate_reorg_acceptability` unit tests in `src/chain.rs`).
 What was **not** closed is the *design rationale documentation* —
 the artefact an auditor needs to evaluate whether the parameters are
 sound. That artefact is this document. With it written, the
@@ -166,7 +167,7 @@ campaign's item #3 is closed.
 
 CIP-009's problem statement asserts "the mainnet `MIN_OUTPUT_AGE` is
 set to 100 blocks (~3.3 hours)". **The code says `MIN_OUTPUT_AGE =
-10`** (`src/constants.rs:350`). The code is authoritative. CIP-009's
+10`** (`src/constants.rs::MIN_OUTPUT_AGE`). The code is authoritative. CIP-009's
 figure is either stale or was written against a planned value that
 did not ship.
 
@@ -221,7 +222,7 @@ The Tier-3 hard finality boundary. **Mainnet = 100** (≈ 3.3 hours at
 120 s): deep enough to absorb any partition a production network
 should realistically experience, shallow enough to strictly bound
 an attacker's reach — past 100 blocks, *no* work overrides the
-chain. The precedents in `src/chain.rs:68–72` are the argument: ETC
+chain. The precedents in the "Historical precedent" comment of the `src/chain.rs` reorg-defense banner are the argument: ETC
 (2019, 100+ block reorg, $1.1 M), Bitcoin Gold (2018, $18 M),
 Horizen (2018, $550 K) — all low-hashrate PoW chains with **no** hard
 cap. **Testnet = 1000** because testnet partitions during
@@ -234,7 +235,7 @@ reduces testnet's predictive value for mainnet behaviour.
 ### `BOOTSTRAP_MESS_HEIGHT = 1000`
 
 Below tip height 1000, Tier-2 MESS is **disabled** and the chain
-falls back to plain longest-chain (`src/chain.rs:127`). Reason: on a
+falls back to plain longest-chain (the bootstrap fallback in `src/chain.rs::evaluate_reorg_acceptability`). Reason: on a
 freshly-genesised chain, every node that boots independently mines
 its own height-1 at floor difficulty. If MESS were active from
 height 1, none of those parallel low-work forks could ever satisfy
@@ -248,7 +249,7 @@ bound an attacker during the bootstrap window.
 ### `CHECKPOINT_INTERVAL = 144`
 
 Per-node rolling-checkpoint cadence (≈ 5 hours at 120 s). The "C-5
-fix" comment at `src/chain.rs:20–24` records the history: this was
+fix" comment above `max_reorg_depth_for` in `src/chain.rs` records the history: this was
 **5** (≈ 10 minutes), which caused *permanent chain splits on any
 network partition longer than 10 minutes* — the checkpoint locked in
 before the partition could heal. Raised to 144 so the interval
@@ -271,7 +272,7 @@ RandomX's CPU-friendliness spreading hashpower thin. That makes the
 network's hashpower a **larger relative target**: an attacker does
 not need a fab or a warehouse of ASICs, only a credit card and a
 hashrate-rental marketplace (NiceHash and equivalents). The
-historical victims in `src/chain.rs:68–72` were all attacked exactly
+historical victims in the "Historical precedent" comment of the `src/chain.rs` reorg-defense banner were all attacked exactly
 this way. This is the adversary every layer in §2 is built against.
 
 ### 5.2 What each layer defends
