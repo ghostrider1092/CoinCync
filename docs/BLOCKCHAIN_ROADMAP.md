@@ -179,9 +179,12 @@ unrelated soak risk.
     mainnet enables CIP-009.D from genesis (with checkpoint signers
     elected) or ships it dormant and activates via CIP-007 later.
     Either is defensible; pick one before tag.
-13. **Reproducible Docker build sign-off** — **S**. Confirm byte-identical
-    output on the documented host arch, document the verifier workflow,
-    publish the SHA-256 set with the v1.0 release notes.
+13. **Reproducible Docker build sign-off** — **DONE (2026-08-17)**. Verified:
+    two independent from-scratch Docker builds (one `--no-cache`) of the same
+    commit produced byte-identical binaries — identical SHA-256 sums for all six
+    artifacts (coincync-node/-rig/-wallet, coord, coord-cli, cyncswap) on the
+    documented host arch. Verifier workflow: `bash scripts/build-in-docker.sh`
+    twice, `diff` the `out/SHA256SUMS`. Publish the SHA-256 set with the release.
 14. **Wallet v2 ships base-chain only** — **M**. Trade tab hidden behind
     a build flag for v1.0 (unhides in v1.1). Send, receive, history,
     addresses, mining, multi-sig all wired against live mainnet RPC.
@@ -380,9 +383,10 @@ any, it's the wrong design.
 - **Locked files have hashes.** Consensus-critical files are listed
   in `critical_files.lock`; build fails if a hash drifts. Changing
   any of them requires explicit lockfile roll + review.
-- **Reproducible builds.** `scripts/build-in-docker.sh` targets
-  byte-identical output on the same host CPU architecture (sign-off
-  pending, item #13). Audit trust starts here.
+- **Reproducible builds.** `scripts/build-in-docker.sh` produces
+  byte-identical output on the same host CPU architecture — **verified
+  2026-08-17** (item #13): two independent from-scratch builds gave
+  identical SHA-256 sums for all binaries. Audit trust starts here.
 
 ## Adding a new consensus rule
 
