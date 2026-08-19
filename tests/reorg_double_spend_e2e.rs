@@ -936,6 +936,24 @@ fn invalid_block_does_not_mutate_chain_state() {
         assert_unchanged("future-timestamp", is_rejected(&chain.add_block(bad)));
     }
 
+    // (5) WRONG DIFFICULTY TARGET — an easier target than the ASERT-expected
+    //     value (and below MIN_DIFFICULTY). PoW is valid for the easy target, but
+    //     consensus requires target == the expected difficulty.
+    {
+        let (cb, _) = build_coinbase(4, &spend_pub, &view_pub, 0);
+        let easy_target = Hash::from_difficulty(100); // < MIN_DIFFICULTY and != t4
+        let bad = mine_block(
+            &parent,
+            4,
+            base_ts + 4 * spacing,
+            easy_target,
+            vec![cb],
+            spend_pub,
+            magic,
+        );
+        assert_unchanged("wrong-difficulty-target", is_rejected(&chain.add_block(bad)));
+    }
+
     // Positive control: the CORRECT B4 is accepted and advances state by exactly
     // one block + its emission — proving the rejections weren't "reject
     // everything," and that a VALID block does mutate state as expected.
