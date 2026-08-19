@@ -1,6 +1,14 @@
 # L3 — Byzantine Discrete-Event Consensus Simulator (foundation)
 
-**Status:** designed, not yet built. Highest-value / largest-effort layer.
+**Status:** minimal deliverable BUILT + PASSING (`tests/sim_l3_consensus.rs`
+`honest_single_miner_safety_and_liveness`, real-PoW `#[ignore]`, ~84s) — seeded
+`StdRng`, `(time,seq)` `BinaryHeap` event queue, virtual clock, per-link
+delay + 10% duplication, deterministic per-node keys; SAFETY checked after every
+accepted block + LIVENESS asserted (3 nodes converge to the miner's tip at
+height 8). Uses `tests/common/mining.rs`. **Remaining:** the Byzantine behaviors
+(equivocation/withholding/invalid-spam/demon-timing) + a second miner — the
+`Behavior` enum and `broadcast()` seam are already stubbed for them.
+Highest-value / largest-effort layer.
 **Goal:** seeded, deterministic, replayable safety+liveness fuzzing of the
 consensus/fork-choice logic under Byzantine peers (equivocation, withholding,
 invalid-block spam, adversarial timing).
