@@ -768,3 +768,266 @@ fn total_difficulty_is_reorg_history_independent() {
         t_start.elapsed().as_secs_f64()
     );
 }
+
+// =============================================================================
+// Layer-2 STF property: ATOMICITY — an invalid block must not mutate chain state
+// =============================================================================
+
+/// A block rejected by consensus validation must leave chain state byte-identical
+/// (height, tip, total_supply, total_difficulty, total_burned). This is the
+/// invalid-block atomicity property — "invalid blocks never mutate state at all"
+/// — checked at the chain level against a real, PoW-mined chain. It is the STF
+/// complement to the reorg / mempool atomicity fixes, and a negative-vector
+/// suite: each variant corrupts exactly one thing (coinbase amount, PoW, merkle
+/// root, timestamp) and asserts BOTH rejection AND state invariance.
+#[test]
+#[ignore = "real-PoW mining, slow; run with --features testnet -- --ignored"]
+fn invalid_block_does_not_mutate_chain_state() {
+    std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+    coincync::consensus::bind_randomx_genesis_for_network(NetworkType::Testnet);
+
+    let chain = Blockchain::new();
+    chain.init_genesis().expect("genesis init");
+    let genesis = chain.get_block_by_height(0).expect("genesis block");
+    let magic = NetworkType::Testnet.magic_bytes();
+    chain
+        .restore_state(0, genesis.hash(), 1)
+        .expect("seed cumulative-work genesis base = 1");
+
+    let (_spend_sk, spend_pub) = generate_keypair();
+    let (_view_sk, view_pub) = generate_keypair();
+    let base_ts = genesis.header.timestamp;
+    let spacing = 3600u64;
+
+    // Build a short valid chain: genesis + B1..B3 (coinbase-only).
+    let mut parent = genesis.clone();
+    for h in 1..=3u64 {
+        let target = if h == 1 {
+            Hash::from_difficulty(500)
+        } else {
+            chain.next_target()
+        };
+        let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
+        let blk = mine_block(
+            &parent,
+            h,
+            base_ts + h * spacing,
+            target,
+            vec![cb],
+            spend_pub,
+            magic,
+        );
+        assert!(
+            matches!(
+                chain.add_block(blk.clone()).expect("add B*"),
+                BlockStatus::Accepted
+            ),
+            "B{h} must extend the chain"
+        );
+        parent = blk;
+    }
+    assert_eq!(chain.height(), 3, "tip must be B3");
+
+    // Snapshot pre-injection state.
+    let pre = chain.stats();
+    let pre_height = chain.height();
+    let pre_tip = chain.tip_hash();
+
+    // Assert the pool of consensus-state accessors is byte-identical to the snapshot.
+    let assert_unchanged = |label: &str, rejected: bool| {
+        assert!(rejected, "[{label}] expected rejection, block was accepted");
+        let now = chain.stats();
+        assert_eq!(chain.height(), pre_height, "[{label}] height changed");
+        assert_eq!(chain.tip_hash(), pre_tip, "[{label}] tip changed");
+        assert_eq!(
+            now.total_supply, pre.total_supply,
+            "[{label}] total_supply changed"
+        );
+        assert_eq!(
+            now.total_difficulty, pre.total_difficulty,
+            "[{label}] total_difficulty changed"
+        );
+        assert_eq!(
+            now.total_burned, pre.total_burned,
+            "[{label}] total_burned changed"
+        );
+    };
+
+    let t4 = chain.next_target();
+    let is_rejected = |r: &coincync::error::Result<BlockStatus>| {
+        matches!(r, Ok(BlockStatus::Invalid(_)) | Err(_))
+    };
+
+    // (1) INFLATED COINBASE — claim reward + a bogus "fee" with no fee txs in the
+    //     block, so the coinbase over-claims vs max_coinbase (= reward + 0).
+    {
+        let (bad_cb, _) = build_coinbase(4, &spend_pub, &view_pub, 5_000_000_000);
+        let bad = mine_block(
+            &parent,
+            4,
+            base_ts + 4 * spacing,
+            t4,
+            vec![bad_cb],
+            spend_pub,
+            magic,
+        );
+        assert_unchanged("inflated-coinbase", is_rejected(&chain.add_block(bad)));
+    }
+
+    // (2) BAD POW — a valid body with a nonce that does NOT meet the target. We
+    //     search for a definitively-failing nonce (the inverse of mining) so the
+    //     rejection is deterministic and not a ~1/500 coincidence at diff 500.
+    {
+        let (cb, _) = build_coinbase(4, &spend_pub, &view_pub, 0);
+        let good = mine_block(
+            &parent,
+            4,
+            base_ts + 4 * spacing,
+            t4,
+            vec![cb.clone()],
+            spend_pub,
+            magic,
+        );
+        let mut hdr = good.header.clone();
+        let mut bad_nonce = hdr.nonce.wrapping_add(1);
+        loop {
+            let pow =
+                compute_pow_hash(PowAlgorithm::RandomX, &hdr.anchor, bad_nonce, &hdr.tx_root, 4)
+                    .expect("pow hash");
+            if !pow.meets_difficulty(&t4) {
+                break;
+            }
+            bad_nonce = bad_nonce.wrapping_add(1);
+        }
+        hdr.nonce = bad_nonce;
+        let bad = Block::new(hdr, vec![cb]);
+        assert_unchanged("bad-pow", is_rejected(&chain.add_block(bad)));
+    }
+
+    // (3) BAD MERKLE ROOT — corrupt header.tx_root so it disagrees with the txs.
+    //     The merkle mismatch is guaranteed regardless of PoW.
+    {
+        let (cb, _) = build_coinbase(4, &spend_pub, &view_pub, 0);
+        let good = mine_block(
+            &parent,
+            4,
+            base_ts + 4 * spacing,
+            t4,
+            vec![cb.clone()],
+            spend_pub,
+            magic,
+        );
+        let mut hdr = good.header.clone();
+        hdr.tx_root = Hash::from_bytes([0xAB; 32]);
+        let bad = Block::new(hdr, vec![cb]);
+        assert_unchanged("bad-merkle-root", is_rejected(&chain.add_block(bad)));
+    }
+
+    // (4) FUTURE TIMESTAMP — mine a real block far beyond the future bound (now +
+    //     600s). Difficulty uses PAST timestamps, so t4 is still correct.
+    {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let future_ts = now_unix + 100_000;
+        let (cb, _) = build_coinbase(4, &spend_pub, &view_pub, 0);
+        let bad = mine_block(&parent, 4, future_ts, t4, vec![cb], spend_pub, magic);
+        assert_unchanged("future-timestamp", is_rejected(&chain.add_block(bad)));
+    }
+
+    // Positive control: the CORRECT B4 is accepted and advances state by exactly
+    // one block + its emission — proving the rejections weren't "reject
+    // everything," and that a VALID block does mutate state as expected.
+    {
+        let (cb, _) = build_coinbase(4, &spend_pub, &view_pub, 0);
+        let good = mine_block(
+            &parent,
+            4,
+            base_ts + 4 * spacing,
+            t4,
+            vec![cb],
+            spend_pub,
+            magic,
+        );
+        assert!(
+            matches!(
+                chain.add_block(good).expect("valid B4 add"),
+                BlockStatus::Accepted
+            ),
+            "valid B4 must be accepted"
+        );
+        assert_eq!(chain.height(), pre_height + 1, "valid B4 must advance height");
+        assert_eq!(
+            chain.stats().total_supply,
+            pre.total_supply + calculate_block_reward(4).as_atomic() as u128,
+            "valid B4 must add exactly its emission to total_supply"
+        );
+    }
+
+    println!("PASS invalid_block_does_not_mutate_chain_state");
+}
+
+// =============================================================================
+// Layer-2 STF property: SUPPLY CONSERVATION — supply grows by exactly the emission
+// =============================================================================
+
+/// `total_supply` must increase by EXACTLY `calculate_block_reward(h)` for each
+/// connected block h — never more (inflation) nor less (lost emission). Checked
+/// per-block over a real chain, this is the supply-conservation invariant.
+#[test]
+#[ignore = "real-PoW mining, slow; run with --features testnet -- --ignored"]
+fn total_supply_is_conserved_per_block() {
+    std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+    coincync::consensus::bind_randomx_genesis_for_network(NetworkType::Testnet);
+
+    let chain = Blockchain::new();
+    chain.init_genesis().expect("genesis init");
+    let genesis = chain.get_block_by_height(0).expect("genesis block");
+    let magic = NetworkType::Testnet.magic_bytes();
+    chain
+        .restore_state(0, genesis.hash(), 1)
+        .expect("seed base");
+
+    let (_s, spend_pub) = generate_keypair();
+    let (_v, view_pub) = generate_keypair();
+    let base_ts = genesis.header.timestamp;
+    let spacing = 3600u64;
+
+    let mut parent = genesis.clone();
+    let mut expected_supply = chain.stats().total_supply; // genesis baseline
+
+    for h in 1..=6u64 {
+        let target = if h == 1 {
+            Hash::from_difficulty(500)
+        } else {
+            chain.next_target()
+        };
+        let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
+        let blk = mine_block(
+            &parent,
+            h,
+            base_ts + h * spacing,
+            target,
+            vec![cb],
+            spend_pub,
+            magic,
+        );
+        assert!(
+            matches!(
+                chain.add_block(blk.clone()).expect("add"),
+                BlockStatus::Accepted
+            ),
+            "B{h} must be accepted"
+        );
+        expected_supply += calculate_block_reward(h).as_atomic() as u128;
+        assert_eq!(
+            chain.stats().total_supply,
+            expected_supply,
+            "total_supply must equal the running Σ emission through height {h}"
+        );
+        parent = blk;
+    }
+
+    println!("PASS total_supply_is_conserved_per_block (h1..6)");
+}
