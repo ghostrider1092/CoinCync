@@ -9,6 +9,42 @@ height 8). Uses `tests/common/mining.rs`. **Remaining:** the Byzantine behaviors
 (equivocation/withholding/invalid-spam/demon-timing) + a second miner — the
 `Behavior` enum and `broadcast()` seam are already stubbed for them.
 Highest-value / largest-effort layer.
+
+## FINDING (surfaced building the equivocation behavior) — equal-work fork returns Err(ReorgTooDeep)
+
+Building the equivocation test (a miner double-signs twin blocks at the same
+height) surfaced a **consensus-design inconsistency the codebase's own tests and
+comments disagree on**:
+
+- `evaluate_reorg_acceptability` unit tests (chain.rs:4551, 4615) assert an
+  equal-work reorg (`fork_work == honest_work`) → **Err** (Tier-1 and bootstrap
+  branches require strictly `fork_work > honest_work`).
+- The reorg E2E `restore_state(0, gh, 1)` rationale (reorg_double_spend_e2e.rs
+  :358-369) says an equal-work fork is "a true tie **broken by the hash rule**".
+- The live `take_fork` fork-choice (chain.rs ~2488) sets `take_fork=true` for an
+  equal-work fork whose tip hash is smaller (`fork_tip < current_tip`), enters
+  the reorg path, and `evaluate_reorg_acceptability` then rejects it →
+  `add_block` returns **`Err(ReorgTooDeep{depth:1,max:1000})`** for a VALID
+  equal-work fork block.
+
+**Severity: consensus-SAFE, error-classification wart.** The fork block IS
+persisted (`inner.blocks.insert` + `db.blocks.insert` run BEFORE the reorg eval),
+so it can still be extended and adopted later if its branch becomes strictly
+heavier — no fund/inflation/permanent-partition risk. But half of all equal-work
+forks (the smaller-hash ones) return `Err` instead of `Ok(AcceptedFork)`, which
+a caller reads as "bad block" → possible peer-scoring penalty for relaying a
+valid fork, and the block is not relayed onward via the normal accepted path.
+
+**Owner decision required (do NOT change consensus fork-choice unilaterally):**
+which is the intended equal-work semantics —
+(a) hash-rule tiebreak *reorg* (adopt smaller-hash equal-work tip; then
+    `evaluate_reorg_acceptability` Tier-1/bootstrap must allow `>=`), or
+(b) first-seen wins, equal-work never reorgs (Bitcoin-style; then `take_fork`
+    must NOT set true for equal work, and the equal-work fork returns
+    `Ok(AcceptedFork)`)?
+Either resolution makes equal-work forks return `AcceptedFork` not `Err`; the
+unit tests at 4551/4615 and the reorg-test comment must be reconciled to match.
+The equivocation sim test is the reproducer, deferred until this is decided.
 **Goal:** seeded, deterministic, replayable safety+liveness fuzzing of the
 consensus/fork-choice logic under Byzantine peers (equivocation, withholding,
 invalid-block spam, adversarial timing).
