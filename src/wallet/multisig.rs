@@ -1,6 +1,30 @@
 //! # FROST Multi-Signature Wallet
 //!
 //! M-of-N threshold signatures using FROST (RFC 9591) over ed25519.
+//!
+//! ## Custody model (read before advertising this as "non-custodial")
+//!
+//! Two live signing paths with DIFFERENT custody properties — do not conflate
+//! them in user-facing claims:
+//!
+//! - **Plain ed25519 (true FROST, RFC 9591)** — `signing_round1` /
+//!   `signing_round2` / `aggregate_signature`. Each participant produces a
+//!   partial signature from its own share; the group secret is NEVER
+//!   reconstructed, and the coordinator only relays partial signatures (holds no
+//!   secret material). Genuinely non-custodial. This is the path CIP-008's
+//!   "coordinator is untrusted / holds nothing" statements describe.
+//!
+//! - **RingCT / CLSAG privacy transactions** — the "Reconstruct-Sign-Zeroize"
+//!   model (see the CLSAG INTEGRATION section below and
+//!   [`reconstruct_group_secret`]). The signing party gathers M key shares and
+//!   reconstructs the FULL group secret in memory (Lagrange interpolation) to
+//!   produce a standard CLSAG signature, then zeroizes it. The key is never at
+//!   rest as a whole, but the signer TRANSIENTLY holds it during signing — so
+//!   this path is **not non-custodial at signing time**. It must NOT be
+//!   advertised as fully-distributed threshold signing until a true threshold
+//!   CLSAG (custom FROST ciphersuite, a v2 goal) replaces it. The wallet CLI
+//!   surfaces this to the operator at runtime. `clsag_multisig.rs` is the
+//!   design sketch for the future true-threshold path and is not wired.
 
 use frost_ed25519 as frost;
 use rand::rngs::OsRng;

@@ -109,6 +109,23 @@ In short: the coordinator is a relay. It holds nothing security-
 relevant. The worst outcome of a malicious coordinator is "session
 fails to complete." Funds are never at risk.
 
+### Scope: this trust model covers the FROST-ed25519 signing path
+
+The "coordinator holds nothing / is untrusted" guarantees above describe the
+true-FROST (RFC 9591) ed25519 flow, where partial signatures are aggregated and
+the group secret is **never reconstructed**.
+
+CoinCync's **RingCT / CLSAG privacy-transaction** multisig currently uses a
+different, honestly-disclosed model — "Reconstruct-Sign-Zeroize" (see
+`src/wallet/multisig.rs` and `reconstruct_group_secret`): the signing party
+gathers the M key shares and reconstructs the full group secret in memory to
+produce a standard CLSAG signature, then zeroizes it. The key is never at rest
+as a whole, but the signer **transiently holds it during signing**, so the
+privacy-spend path is *not* non-custodial at signing time. It must not be
+advertised as fully-distributed threshold signing until a true threshold-CLSAG
+ciphersuite (a v2 goal) replaces it; the wallet CLI surfaces this to the
+operator at signing time.
+
 ---
 
 ## Architecture
