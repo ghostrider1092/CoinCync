@@ -156,25 +156,37 @@ pub fn evaluate_reorg_acceptability(
         ));
     }
 
-    // Tier 1: Unconditional acceptance for shallow reorgs
+    // Tier 1: Unconditional acceptance for shallow reorgs.
+    //
+    // Accepts EQUAL work (`>=`), not only strictly-greater. The sole caller
+    // (add_block's take_fork) reaches here for an equal-work fork ONLY when the
+    // fork's tip hash is strictly SMALLER than the current tip — the
+    // deterministic hash-lex tiebreak (see the take_fork comment). That gate
+    // makes an equal-work reorg monotonic: a node only ever moves toward a
+    // smaller tip hash, so every honest node converges to the same tie-winning
+    // chain regardless of block arrival order (the point of the
+    // network-deterministic tiebreak). Deep equal-work reorgs are still rejected
+    // by the MESS tier below (only shallow ties resolve by hash).
     if depth <= REORG_UNCONDITIONAL_DEPTH {
-        if fork_work > honest_work {
+        if fork_work >= honest_work {
             return Ok(());
         } else {
             return Err(format!(
-                "Fork at depth {} has less work ({} <= {})",
+                "Fork at depth {} has less work ({} < {})",
                 depth, fork_work, honest_work
             ));
         }
     }
 
     // Bootstrap phase: skip Tier-2 MESS, fall back to plain longest-chain.
+    // Equal work (`>=`) is accepted for the same monotonic hash-tiebreak reason
+    // as Tier 1 above.
     if current_height < BOOTSTRAP_MESS_HEIGHT {
-        if fork_work > honest_work {
+        if fork_work >= honest_work {
             return Ok(());
         } else {
             return Err(format!(
-                "Fork at depth {} has less work ({} <= {}) (bootstrap phase, MESS disabled)",
+                "Fork at depth {} has less work ({} < {}) (bootstrap phase, MESS disabled)",
                 depth, fork_work, honest_work
             ));
         }
@@ -4543,12 +4555,17 @@ mod tests {
     }
 
     #[test]
-    fn test_reorg_acceptability_shallow_requires_more_work() {
-        // Shallow reorgs still require strict cumulative-work superiority.
+    fn test_reorg_acceptability_shallow_accepts_equal_or_more_work() {
+        // Shallow reorgs accept EQUAL-or-more work. The sole caller (take_fork)
+        // only reaches here for an equal-work fork when its tip hash wins the
+        // deterministic hash-lex tiebreak, so accepting equal work is the
+        // monotonic, network-deterministic convergence rule (all honest nodes
+        // pick the same tie-winner). Strictly-less work is still rejected.
         let h = BOOTSTRAP_MESS_HEIGHT + 1; // post-bootstrap, full rules apply
         let max = max_reorg_depth_for(NetworkType::Testnet);
         assert!(evaluate_reorg_acceptability(3, 101, 100, h, max).is_ok());
-        assert!(evaluate_reorg_acceptability(3, 100, 100, h, max).is_err());
+        assert!(evaluate_reorg_acceptability(3, 100, 100, h, max).is_ok()); // equal — hash-tiebreak
+        assert!(evaluate_reorg_acceptability(3, 99, 100, h, max).is_err()); // strictly less
     }
 
     #[test]
@@ -4611,8 +4628,10 @@ mod tests {
         // Depth 50 with only slightly-more work: rejected post-bootstrap,
         // accepted during bootstrap.
         assert!(evaluate_reorg_acceptability(50, 101, 100, bootstrap_h, max).is_ok());
-        // Equal work still loses (longest chain must strictly exceed).
-        let err = evaluate_reorg_acceptability(50, 100, 100, bootstrap_h, max).unwrap_err();
+        // Equal work is accepted during bootstrap too (same monotonic
+        // hash-tiebreak reason as Tier 1); strictly-less work still loses.
+        assert!(evaluate_reorg_acceptability(50, 100, 100, bootstrap_h, max).is_ok());
+        let err = evaluate_reorg_acceptability(50, 99, 100, bootstrap_h, max).unwrap_err();
         assert!(err.contains("bootstrap phase"));
         // Tier-3 hard cap still enforced during bootstrap.
         assert!(evaluate_reorg_acceptability(max + 1, u128::MAX, 1, bootstrap_h, max).is_err());

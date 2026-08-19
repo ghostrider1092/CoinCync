@@ -77,12 +77,20 @@ fn tier1_depth_10_is_unconditional() {
 }
 
 #[test]
-fn tier1_equal_work_rejected() {
-    // Equal work = no switch (defender advantage)
-    let result = evaluate_reorg_acceptability(5, 1000, 1000, POST_BOOTSTRAP, max_depth());
+fn tier1_equal_work_accepted_for_hash_tiebreak() {
+    // Shallow equal-work reorgs are ACCEPTED. The sole caller (add_block's
+    // take_fork) only reaches evaluate_reorg_acceptability with equal work when
+    // the fork's tip hash wins the deterministic hash-lex tiebreak, so accepting
+    // it converges every honest node to the same tie-winner regardless of block
+    // arrival order (network-deterministic fork choice). Strictly-less work is
+    // still rejected.
     assert!(
-        result.is_err(),
-        "Equal work must not trigger reorg (defender advantage)"
+        evaluate_reorg_acceptability(5, 1000, 1000, POST_BOOTSTRAP, max_depth()).is_ok(),
+        "Shallow equal-work reorg must be accepted (deterministic hash tiebreak)"
+    );
+    assert!(
+        evaluate_reorg_acceptability(5, 999, 1000, POST_BOOTSTRAP, max_depth()).is_err(),
+        "Strictly-less work must still be rejected"
     );
 }
 
