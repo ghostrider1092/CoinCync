@@ -1906,8 +1906,9 @@ impl Blockchain {
         // This is the mechanism that broke the 2026-05-10 launch (the
         // RECENT_REORG_DEPTH=10 band-aid only narrowed the window). It is also
         // REDUNDANT: deep-reorg finality is already enforced deterministically
-        // by the `fork_point < last_checkpoint` reorg reject (checkpoint HEIGHT
-        // is a pure function of tip height) plus the rollback floor, and by the
+        // by the `fork_point < finality_floor` reorg reject, where the floor is
+        // computed as a pure function of tip height (`tip - tip % INTERVAL`, see
+        // ~L2505 — NOT the stored last_checkpoint) plus the rollback floor, and by the
         // hardcoded cross-node checkpoints below. Same divergence class as the
         // fixed total_difficulty / total_outputs_ever bugs — removed at the root
         // rather than band-aided. The get_checkpoint hashes are still recorded
@@ -2246,9 +2247,32 @@ impl Blockchain {
                     }
                 }
 
-                // Update database height index (only after race check passes)
+                // Update database height index (only after race check passes).
+                //
+                // ATOMICITY (2026-08-18): the in-memory tip/stats/UTXO were already
+                // committed under the write lock above. A persistence failure here
+                // therefore cannot be a recoverable `?`-return — that would leave
+                // the in-memory chain one block ahead of durable state (the node
+                // would keep building on, and serve, a tip it never persisted). We
+                // halt instead, consistent with the supply-accumulator corruption
+                // handling above: the SIGTERM/SIGINT handler flushes RocksDB
+                // cleanly, and on restart the node re-syncs this single block from
+                // peers rather than running with in-memory ahead of disk.
                 if let Some(ref db) = self.db {
-                    db.blocks.set_height_hash(block.header.height, &hash)?;
+                    db.blocks
+                        .set_height_hash(block.header.height, &hash)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "CONSENSUS PERSISTENCE FAILURE: could not write the height \
+                                 index for block {} at height {}: {}. The in-memory tip has \
+                                 already advanced to this block; halting to preserve on-disk \
+                                 state (SIGTERM handler flushes RocksDB cleanly). Restart \
+                                 re-syncs this block from peers.",
+                                hash.to_hex(),
+                                block.header.height,
+                                e
+                            )
+                        });
 
                     // Auto-record checkpoint every CHECKPOINT_INTERVAL blocks
                     let mut last_checkpoint_height = 0u64;
@@ -2293,7 +2317,18 @@ impl Blockchain {
                         total_burned: stats.total_burned as u64,
                         last_checkpoint: last_checkpoint_height,
                     };
-                    db.state.save_state(&state)?;
+                    db.state.save_state(&state).unwrap_or_else(|e| {
+                        panic!(
+                            "CONSENSUS PERSISTENCE FAILURE: could not persist chain state at \
+                             height {} (tip {}): {}. In-memory supply/difficulty/tip have already \
+                             advanced; halting to preserve on-disk state (SIGTERM handler flushes \
+                             RocksDB cleanly) so restart re-derives consistently rather than \
+                             running with in-memory ahead of disk.",
+                            block.header.height,
+                            hash.to_hex(),
+                            e
+                        )
+                    });
                 }
 
                 // ── Phase 2 privacy store wire-up (P3d) ─────────────────
@@ -2499,26 +2534,46 @@ impl Blockchain {
                     }
                 }
 
-                // SECURITY: Reject reorgs that would revert past the last rolling
-                // checkpoint. This prevents long-range reorganization attacks where
-                // an attacker builds a hidden chain from far in the past.
-                if let Some(ref db) = self.db {
-                    let last_cp = db
-                        .state
-                        .get_state()
-                        .ok()
-                        .flatten()
-                        .map(|s| s.last_checkpoint)
-                        .unwrap_or(0);
-                    if last_cp > 0 && fork_point < last_cp {
+                // SECURITY + DETERMINISM (2026-08-18): Reject reorgs that would
+                // revert past the finality floor — the highest CHECKPOINT_INTERVAL
+                // boundary at or below the current canonical tip height. This
+                // prevents long-range reorganization from far in the past.
+                //
+                // The floor is computed as a PURE FUNCTION of tip height, NOT read
+                // from the persisted `last_checkpoint`. That stored value is
+                // advanced ONLY on the linear tip-extend path (at 144-multiple
+                // heights) and merely re-persisted unchanged on the reorg-commit
+                // path — so it was PATH-DEPENDENT: two honest nodes on the same
+                // canonical tip reached via different reorg histories held
+                // different `last_checkpoint` values, and could therefore split on
+                // a deep-reorg accept/reject (one rejects `fork_point < 288` while
+                // the other, whose stored value was stale at 144, accepts it).
+                // Same divergence class as the already-fixed total_difficulty /
+                // total_outputs_ever / self-checkpoint-hash bugs. This finally
+                // implements the property the hash-gate-removal comment (~L1896)
+                // already asserted — "checkpoint HEIGHT is a pure function of tip
+                // height" — which the stored accumulator never actually provided.
+                //
+                // On the linear path the stored value already equals this floor,
+                // so honest-majority behavior is unchanged; only stale-low
+                // reorg-path nodes are tightened up to the majority (the safe
+                // direction — it can only reject reorgs the majority also rejects,
+                // never accept ones they reject). `last_checkpoint` is still
+                // recorded for assume-valid IBD and telemetry; it just no longer
+                // gates consensus.
+                {
+                    let tip_height = self.inner.read().tip.height;
+                    let interval = crate::constants::CHECKPOINT_INTERVAL;
+                    let finality_floor = tip_height - (tip_height % interval);
+                    if finality_floor > 0 && fork_point < finality_floor {
                         tracing::error!(
-                            "Rejecting reorg: fork point {} is before last checkpoint at height {}",
+                            "Rejecting reorg: fork point {} is before finality floor at height {}",
                             fork_point,
-                            last_cp
+                            finality_floor
                         );
                         return Ok(BlockStatus::Invalid(format!(
                             "Reorg rejected: fork point {} is before checkpoint at height {}",
-                            fork_point, last_cp
+                            fork_point, finality_floor
                         )));
                     }
                 }
@@ -2884,6 +2939,12 @@ impl Blockchain {
                         }
                     }
 
+                    // Tracks whether the path-A rollback below actually ran, so the
+                    // triggering-block difficulty rollback (path B) can be gated on
+                    // it instead of on `inner.tip.hash != pre_reorg_tip.hash` — see
+                    // the fix note at path B.
+                    let mut rolled_back = false;
+
                     // SECURITY (BUG-2/BUG-4): If fork validation failed, rollback to pre-reorg state.
                     // Without this, a failed reorg leaves the chain in a corrupted state:
                     // main-chain blocks disconnected but fork blocks not applied.
@@ -3005,6 +3066,7 @@ impl Blockchain {
                         // Restore tip and stats
                         inner.tip = pre_reorg_tip.clone();
                         inner.stats = pre_reorg_stats.clone();
+                        rolled_back = true;
 
                         // Restore DB height mappings and remove stale fork entries
                         if let Some(ref db) = self.db {
@@ -3072,8 +3134,19 @@ impl Blockchain {
                         }
                     }
 
-                    // If triggering block validation also failed, rollback
-                    if reorg_error.is_some() && inner.tip.hash != pre_reorg_tip.hash {
+                    // If the triggering block's difficulty re-check failed, roll
+                    // back. BUG (2026-08-18): this was previously gated on
+                    // `inner.tip.hash != pre_reorg_tip.hash`, which is ALWAYS false
+                    // here — `inner.tip` is never advanced to the fork head before
+                    // this point (it is only set on success, or restored by path
+                    // A), so path B could never fire and a difficulty-recheck
+                    // failure left the reorg half-applied (main-chain blocks
+                    // disconnected, fork blocks connected, supply/burn/UTXO mutated
+                    // but never rolled back). Path A and path B are mutually
+                    // exclusive (the difficulty check just above runs only when
+                    // reorg_error was None at path A), so `!rolled_back` fires path
+                    // B exactly when path A did not.
+                    if reorg_error.is_some() && !rolled_back {
                         tracing::error!(
                             "Reorg tip validation failed — rolling back to pre-reorg state (tip={}, height={})",
                             pre_reorg_tip.hash.to_hex()[..16].to_string(),
