@@ -582,6 +582,18 @@ pub fn simple_ring_verify(
         return false;
     }
 
+    // SECURITY (R-1 parity): reject any identity ring member. An identity public
+    // key makes `c * P_i` vanish, enabling a forged ring signature. This mirrors
+    // the identity-member rejection in `clsag_verify` (the consensus verifier).
+    // `simple_ring_*` is not on the consensus path today; this keeps it sound if
+    // it is ever wired in.
+    if public_keys
+        .iter()
+        .any(|pk| pk.as_point() == &RistrettoPoint::identity())
+    {
+        return false;
+    }
+
     // Canonical scalar decode via PeerScalar (2026-07-02 structural
     // consolidation — sibling of the responses-path in the main verify).
     // Same filter_map-drops-silently vulnerability the primary verifier

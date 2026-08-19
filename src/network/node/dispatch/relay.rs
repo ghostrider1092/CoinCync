@@ -56,7 +56,11 @@ pub(super) async fn handle_inv_tx(
                 // they don't have).
                 let absence = tx_absence_cache.read();
                 for inv in &inv_msg.inventory {
-                    if !mempool.contains(&inv.hash) && !absence.is_known_absent(&inv.hash) {
+                    // N-1: absence is scoped to THIS peer — a NotFound from some
+                    // other peer must not stop us fetching what this peer offers.
+                    if !mempool.contains(&inv.hash)
+                        && !absence.is_known_absent(&peer_id, &inv.hash)
+                    {
                         needed.push(inv.hash);
                     }
                 }
@@ -124,7 +128,9 @@ pub(super) async fn handle_not_found(
         {
             let mut cache = tx_absence_cache.write();
             for h in nf.hashes {
-                cache.mark_absent(h);
+                // N-1: record absence scoped to the peer that reported it, so an
+                // unsolicited NotFound spray cannot suppress relay from others.
+                cache.mark_absent(peer_id, h);
             }
         }
         debug!(

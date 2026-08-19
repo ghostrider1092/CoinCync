@@ -626,6 +626,46 @@ impl Mempool {
                 return Err(self.reject(tx_hash, err));
             }
         }
+        // ATOMICITY (2026-08-18): decide admissibility BEFORE mutating anything.
+        // Previously the RBF removals below and the eviction loop ran first, and
+        // if room still could not be freed within MAX_EVICTION_ATTEMPTS the
+        // function returned Err(MempoolFull) — having ALREADY dropped the replaced
+        // tx AND up to MAX_EVICTION_ATTEMPTS valid, fee-paying txs, while
+        // signalling "nothing changed" to the caller via Err. That let an attacker
+        // evict up to 100 resident txs per oversized send at no cost, and left an
+        // RBF-replaced key image with no representative in the pool. We now
+        // simulate the eviction plan (RBF-freed space first, then lowest-fee-first
+        // — the same order the real loop below uses) and reject up-front if the tx
+        // still cannot fit, so a rejected admission leaves the mempool untouched.
+        const MAX_EVICTION_ATTEMPTS: usize = 100;
+        {
+            let replaced_freed: usize = to_replace
+                .iter()
+                .filter_map(|h| self.transactions.get(h).map(|e| e.size))
+                .sum();
+            let mut simulated = self.current_size.saturating_sub(replaced_freed);
+            if simulated + size > self.max_size {
+                let mut attempts = 0usize;
+                for (_, cand_hash) in self.by_fee.iter() {
+                    if simulated + size <= self.max_size || attempts >= MAX_EVICTION_ATTEMPTS {
+                        break;
+                    }
+                    if to_replace.contains(cand_hash) {
+                        continue; // already counted in replaced_freed above
+                    }
+                    if let Some(e) = self.transactions.get(cand_hash) {
+                        simulated = simulated.saturating_sub(e.size);
+                        attempts += 1;
+                    }
+                }
+                if simulated + size > self.max_size {
+                    // Cannot fit even after the full eviction budget → reject
+                    // before touching any state.
+                    return Err(self.reject(tx_hash, Error::MempoolFull));
+                }
+            }
+        }
+
         // Perform ALL replacements outside the borrow
         for old_hash in &to_replace {
             self.audit(AuditEvent::TxRemoved {
@@ -638,8 +678,8 @@ impl Mempool {
 
         // Evict if needed to make room
         // SECURITY: Limit eviction attempts to prevent infinite loop if eviction fails
+        // MAX_EVICTION_ATTEMPTS is declared with the admissibility pre-check above.
         let mut eviction_attempts = 0;
-        const MAX_EVICTION_ATTEMPTS: usize = 100;
         while self.current_size + size > self.max_size && !self.transactions.is_empty() {
             let prev_size = self.current_size;
             self.evict_lowest_fee();

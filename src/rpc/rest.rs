@@ -95,6 +95,7 @@ fn ws_per_ip_decrement(ip: &str) {
 const RPC_PROXY_MAX_REQ_PER_SEC: u32 = 60;
 const STATS_MAX_REQ_PER_SEC: u32 = 20;
 const EMISSION_MAX_REQ_PER_SEC: u32 = 20;
+const RECENT_MAX_REQ_PER_SEC: u32 = 20;
 
 static RPC_PROXY_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
 static RPC_PROXY_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -102,11 +103,19 @@ static STATS_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
 static STATS_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
 static EMISSION_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
 static EMISSION_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
+// N-2 (2026-08-18): the recent-blocks explorer endpoint fans out up to `limit`
+// (max 100) backend calls per request but was the only such endpoint with no
+// self-rate-limit. Give it the same global + per-IP fixed-window limiter as the
+// sibling stats/emission/rpc-proxy endpoints.
+static RECENT_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
+static RECENT_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
 static RPC_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 static STATS_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 static EMISSION_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+static RECENT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 // ─── Shared State ────────────────────────────────────────────────────────────
@@ -793,8 +802,18 @@ async fn get_block_transactions(
 /// The explorer home page uses this for the live block feed.
 async fn get_recent_blocks(
     State(st): State<RestState>,
+    headers: HeaderMap,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // N-2: rate-limit before the fan-out (up to `limit` backend calls/request).
+    let client_ip = client_ip_from_headers(&headers);
+    enforce_fixed_window_limit(
+        &RECENT_WINDOW_SEC,
+        &RECENT_WINDOW_COUNT,
+        RECENT_MAX_REQ_PER_SEC,
+    )?;
+    enforce_ip_fixed_window_limit(&RECENT_IP_WINDOW, &client_ip, RECENT_MAX_REQ_PER_SEC)?;
+
     // Get current chain height
     let info = jsonrpc_call(&st, "get_info", Value::Array(vec![])).await?;
     let chain_height = info["height"].as_u64().unwrap_or(0);
