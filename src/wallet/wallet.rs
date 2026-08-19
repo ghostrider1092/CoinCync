@@ -1606,6 +1606,8 @@ mod tests {
             amount_blinding_bytes: [7u8; 32],
             tx_public_key: PublicKey::from_bytes([2u8; 32]),
             lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
         });
         wallet.history.add(TransactionRecord::incoming(
             Hash::from_bytes([5u8; 32]),

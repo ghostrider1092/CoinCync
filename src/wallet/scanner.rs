@@ -1696,14 +1696,30 @@ pub fn decrypted_to_utxo(
     }
 
     // Compute the one-time spend secret for this output.
+    //
+    // W-A: for a subaddress output the one-time secret is
+    // `H(shared) + spend_secret + m(account,index)`, where `m` is the
+    // per-subaddress offset. `compute_subaddress_spend_secret` returns
+    // `spend_secret + m` for a subaddress and `spend_secret` unchanged for the
+    // main address, so main outputs stay byte-identical. Deriving the key image
+    // without the offset produces a wrong key image and the CLSAG spend would be
+    // rejected — subaddress-received funds would be unspendable.
     let stealth = StealthAddress {
         public_key: decrypted.output.stealth_address,
         tx_public_key: decrypted.output.tx_public_key,
     };
+    let effective_spend = match decrypted.subaddress_index {
+        Some((account, index)) => crate::wallet::subaddress::compute_subaddress_spend_secret(
+            spend_secret,
+            view_secret,
+            crate::wallet::subaddress::SubaddressIndex::new(account, index),
+        ),
+        None => spend_secret.clone(),
+    };
     let one_time_secret = crate::crypto::compute_one_time_secret(
         &stealth,
         view_secret,
-        spend_secret,
+        &effective_spend,
         decrypted.output_index,
     )?;
 
@@ -1724,6 +1740,8 @@ pub fn decrypted_to_utxo(
         amount_blinding_bytes: decrypted.blinding_factor.to_bytes(),
         tx_public_key: decrypted.output.tx_public_key,
         lock_height: decrypted.output.lock_height,
+        subaddress_account: decrypted.subaddress_index.map(|(a, _)| a),
+        subaddress_index: decrypted.subaddress_index.map(|(_, i)| i),
     })
 }
 
@@ -2290,6 +2308,116 @@ mod tests {
             found.len(),
             1,
             "Scanner should detect output sent to subaddress (0,2)"
+        );
+    }
+
+    /// W-A REGRESSION: subaddress-received funds must be SPENDABLE.
+    ///
+    /// A production subaddress output is `R = r*D_i`, `P = H(shared)*G + D_i`,
+    /// with `D_i = (b + m)*G`. The recipient's one-time secret must therefore be
+    /// `x = H(shared) + b + m` so that `x*G == P`. The bug: `decrypted_to_utxo`
+    /// derived the key image from the MAIN spend secret (`x = H(shared) + b`),
+    /// omitting the per-subaddress offset `m`, so `x*G == P - m*G != P` and the
+    /// key image was wrong — the CLSAG spend would be rejected (funds
+    /// unspendable). Fails on the pre-fix code, passes after threading the offset.
+    #[test]
+    fn subaddress_output_is_spendable_wa_regression() {
+        use crate::crypto::{
+            compute_one_time_secret, generate_stealth_address_checked_ext,
+            KeyImage as CurveKeyImage, PedersenCommitment,
+        };
+        use crate::wallet::subaddress::{
+            compute_subaddress_spend_secret, SubaddressIndex, SubaddressManager,
+        };
+        use rand::rngs::OsRng;
+
+        // Wallet keys.
+        let view_secret = SecretKey::generate(&mut OsRng);
+        let spend_secret = SecretKey::generate(&mut OsRng);
+        let view_public = view_secret.public_key();
+        let spend_public = spend_secret.public_key();
+
+        // Subaddress (0,1) => D_1 (spend). C_1 = a*D_1 (computed independently).
+        let mut mgr = SubaddressManager::new(
+            SecretKey::from_bytes(*view_secret.as_bytes()),
+            PublicKey::from_bytes(*spend_public.as_bytes()),
+            PublicKey::from_bytes(*view_public.as_bytes()),
+        );
+        let d1_bytes: [u8; 32] = *mgr
+            .generate_at(SubaddressIndex::new(0, 1))
+            .unwrap()
+            .spend_public
+            .as_bytes();
+        let d1 = PublicKey::from_bytes(d1_bytes);
+        let d1_point = PublicPoint::from_bytes(d1_bytes).unwrap();
+        let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
+        let c1 = PublicKey::from_bytes(d1_point.mul(&view_scalar).to_bytes());
+
+        // Sender builds the PRODUCTION subaddress output (R = r*D_1).
+        let (stealth, _tx_secret) =
+            generate_stealth_address_checked_ext(&d1, &c1, 0, true, &mut OsRng).unwrap();
+        let p = stealth.public_key;
+
+        // Independently compute the CORRECT one-time secret + key image.
+        let recipient_stealth = StealthAddress {
+            public_key: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+        };
+        let effective_spend = compute_subaddress_spend_secret(
+            &spend_secret,
+            &view_secret,
+            SubaddressIndex::new(0, 1),
+        );
+        let x_correct =
+            compute_one_time_secret(&recipient_stealth, &view_secret, &effective_spend, 0).unwrap();
+        // Necessary + sufficient spendability condition:
+        assert_eq!(
+            x_correct.public_key().as_bytes(),
+            p.as_bytes(),
+            "correct one-time secret must satisfy x*G == P (spendable)"
+        );
+        // The main-spend derivation must NOT reproduce P — that is the W-A bug:
+        let x_wrong =
+            compute_one_time_secret(&recipient_stealth, &view_secret, &spend_secret, 0).unwrap();
+        assert_ne!(
+            x_wrong.public_key().as_bytes(),
+            p.as_bytes(),
+            "main-spend derivation reproduces P — the W-A bug premise is broken"
+        );
+        let correct_ki =
+            CurveKeyImage::from_secret(&SecretScalar::from_bytes(*x_correct.as_bytes())).to_bytes();
+
+        // A DecryptedOutput carrying the (0,1) association, as the scanner records
+        // after detecting this output; run it through the real decrypted_to_utxo.
+        let commitment = PedersenCommitment::commit(1_000, &BlindingFactor::zero()).to_bytes();
+        let out = TxOutput {
+            stealth_address: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+            commitment,
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let decrypted = DecryptedOutput {
+            tx_hash: Hash::zero(),
+            output_index: 0,
+            output_locator: None,
+            output: out,
+            amount: 1_000,
+            blinding_factor: BlindingFactor::zero(),
+            shared_secret: [0u8; 32],
+            key_epoch: 0,
+            subaddress_index: Some((0, 1)),
+        };
+
+        let utxo = decrypted_to_utxo(&decrypted, &view_secret, &spend_secret, 1).unwrap();
+        // THE GATE: decrypted_to_utxo must derive the key image with the +m offset.
+        assert_eq!(
+            utxo.key_image.as_bytes(),
+            &correct_ki,
+            "decrypted_to_utxo must derive the subaddress key image with the \
+             per-subaddress offset m (W-A) — else the received funds are unspendable"
         );
     }
 

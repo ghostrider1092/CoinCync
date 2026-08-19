@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::crypto::{PublicPoint, SecretScalar};
-use crate::primitives::{hash_domain, Address, Network, PublicKey, SecretKey};
+use crate::primitives::{Address, Network, PublicKey, SecretKey};
 
 /// Maximum number of subaddresses per account (to prevent DoS).
 ///
@@ -409,19 +409,15 @@ pub fn compute_subaddress_spend_secret(
         return spend_secret.clone();
     }
 
-    // R-86 fix (2026-07-03): same view_secret concat-leak class as
-    // R-85 above. Build the buffer explicitly and wipe on scope exit.
-    let mut input = Vec::with_capacity(32 + 8 + 8);
-    input.extend_from_slice(view_secret.as_bytes());
-    input.extend_from_slice(&index.account.to_le_bytes());
-    input.extend_from_slice(&index.index.to_le_bytes());
-
-    let hash = hash_domain(b"COINCYNC_SUBADDR_v1", &input);
-    {
-        use zeroize::Zeroize;
-        input.zeroize();
-    }
-    let m = SecretScalar::from_bytes(*hash.as_bytes());
+    // W-A / single-source-of-truth (2026-08-18): derive the per-subaddress
+    // offset m via the SAME `crypto::subaddress_scalar` the D_i spend-pubkey
+    // derivation uses (`SubaddressManager::derive_scalar`). This previously
+    // inlined a second copy of the hash; if the two ever diverged, `x_i*G` would
+    // no longer equal `D_i` and every subaddress-received output would silently
+    // become unspendable. One function makes that impossible. (`subaddress_scalar`
+    // zeroizes its own view-secret buffer — the R-86 concat-leak fix is
+    // preserved inside it.)
+    let m = crate::crypto::subaddress_scalar(view_secret, index.account, index.index);
 
     // x_i = x + m
     let x = SecretScalar::from_bytes(*spend_secret.as_bytes());

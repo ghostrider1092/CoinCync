@@ -43,6 +43,8 @@ fn make_utxo(amount: u64, index: u8) -> UTXO {
         amount_blinding_bytes: [0u8; 32],
         tx_public_key: PublicKey::from_bytes([0u8; 32]),
         lock_height: None,
+        subaddress_account: None,
+        subaddress_index: None,
     }
 }
 

@@ -49,6 +49,18 @@ pub struct UTXO {
     /// Optional time lock: output cannot be spent until this block height.
     /// `None` means immediately spendable.
     pub lock_height: Option<u64>,
+    /// Subaddress the output was received on. `None` (or `Some(0)`) = the main
+    /// address. Required to reconstruct the one-time spend secret: a subaddress
+    /// output's secret is `H(shared) + spend_secret + m(account,index)` (the
+    /// per-subaddress offset), so spending without this offset yields a wrong
+    /// key image and the tx is rejected (W-A). Threaded from the scanner's
+    /// detected `(account,index)`. `#[serde(default)]` so pre-fix wallet
+    /// sidecars still load — they load as `None` and must be re-scanned before a
+    /// subaddress output can be spent.
+    #[serde(default)]
+    pub subaddress_account: Option<u32>,
+    #[serde(default)]
+    pub subaddress_index: Option<u32>,
 }
 
 impl std::fmt::Debug for UTXO {
@@ -64,6 +76,8 @@ impl std::fmt::Debug for UTXO {
             .field("amount_blinding_bytes", &"[REDACTED-32B]")
             .field("tx_public_key", &self.tx_public_key)
             .field("lock_height", &self.lock_height)
+            .field("subaddress_account", &self.subaddress_account)
+            .field("subaddress_index", &self.subaddress_index)
             .finish()
     }
 }
@@ -448,6 +462,8 @@ mod tests {
             amount_blinding_bytes: [0u8; 32],
             tx_public_key: PublicKey::from_bytes([0u8; 32]),
             lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
         }
     }
 
@@ -528,6 +544,8 @@ mod tests {
             amount_blinding_bytes: [0u8; 32],
             tx_public_key: PublicKey::from_bytes([0u8; 32]),
             lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
         }
     }
 

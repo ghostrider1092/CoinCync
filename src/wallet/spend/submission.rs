@@ -156,6 +156,8 @@ mod tests {
             amount_blinding_bytes: [0; 32],
             tx_public_key: PublicKey::from_bytes([id.wrapping_add(64); 32]),
             lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
         }
     }
 

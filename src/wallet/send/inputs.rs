@@ -18,10 +18,21 @@ pub(super) fn prepare_input(utxo: &UTXO, keys: &KeyEpoch) -> Result<PreparedInpu
         public_key: utxo.tx_public_key,
         tx_public_key: utxo.tx_public_key,
     };
+    // W-A: a subaddress output's one-time secret needs the per-subaddress offset
+    // m (H(shared) + spend_secret + m), threaded from the UTXO's recorded
+    // (account,index). Main outputs (subaddress fields None) stay byte-identical.
+    let effective_spend = match (utxo.subaddress_account, utxo.subaddress_index) {
+        (Some(account), Some(index)) => crate::wallet::subaddress::compute_subaddress_spend_secret(
+            &keys.spend_secret,
+            &keys.view_secret,
+            crate::wallet::subaddress::SubaddressIndex::new(account, index),
+        ),
+        _ => keys.spend_secret.clone(),
+    };
     let one_time_secret = compute_one_time_secret(
         &stealth,
         &keys.view_secret,
-        &keys.spend_secret,
+        &effective_spend,
         utxo.output_index,
     )?;
     let blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);

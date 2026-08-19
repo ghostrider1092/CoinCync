@@ -38,6 +38,8 @@ fn make_utxo(seed: u8, height: u64, amount: u64) -> UTXO {
         amount_blinding_bytes: [0u8; 32],
         tx_public_key: PublicKey::from_bytes([0u8; 32]),
         lock_height: None,
+        subaddress_account: None,
+        subaddress_index: None,
     }
 }
 
