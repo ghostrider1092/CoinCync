@@ -1001,6 +1001,13 @@ impl Blockchain {
         let cache_start = tip_height.saturating_sub(cache_depth);
 
         let mut prev_hash = Hash::zero(); // genesis prev_hash
+        // Reconstruct the block/tx counters from the actual persisted chain.
+        // ChainStateData does NOT persist total_blocks/total_transactions, so
+        // without this they reload as 0 and undercount forever after a restart
+        // (same "stats field not reconstructed on load" class as the difficulty=0
+        // fix above; surfaced by the L8 db-reopen determinism test 2026-08-18).
+        let mut blocks_applied: u64 = 0;
+        let mut txs_applied: u64 = 0;
         for height in 0..=tip_height {
             match db.blocks.get_by_height(height) {
                 Ok(Some(block)) => {
@@ -1095,6 +1102,12 @@ impl Blockchain {
                     let batch = UtxoSet::batch_from_block(height, &block.transactions);
                     inner.utxos.apply_batch(batch);
 
+                    // Count this successfully-applied block toward the
+                    // reconstructed counters (the truncation path `break`s above,
+                    // so post-corruption blocks are correctly excluded).
+                    blocks_applied += 1;
+                    txs_applied += block.transactions.len() as u64;
+
                     // Cache recent blocks in memory for fast access
                     if height >= cache_start {
                         inner.height_to_hash.insert(height, hash);
@@ -1118,6 +1131,12 @@ impl Blockchain {
                 }
             }
         }
+
+        // Reconstruct the counters ChainStateData does not persist, so RPC
+        // get_info / explorer totals are correct immediately after a restart
+        // instead of resetting to 0 (L8 db-reopen finding, 2026-08-18).
+        inner.stats.total_blocks = blocks_applied;
+        inner.stats.total_transactions = txs_applied;
 
         // Migration: if the persistent output_index sled tree is empty but we
         // have blocks, bulk-insert from the in-memory output_index that was
