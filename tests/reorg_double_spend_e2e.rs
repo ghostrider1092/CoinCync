@@ -1049,3 +1049,114 @@ fn total_supply_is_conserved_per_block() {
 
     println!("PASS total_supply_is_conserved_per_block (h1..6)");
 }
+
+// =============================================================================
+// Layer-8 (sync/replay) determinism: same blocks => byte-identical state
+// =============================================================================
+
+/// Two independent node instances that process the SAME block sequence must
+/// arrive at byte-identical accumulated consensus state (height, tip,
+/// total_supply, total_difficulty, total_burned, total_transactions). This is
+/// the "same input => same state" property a sync-from-genesis must satisfy, and
+/// a holistic check that no accumulated value is instance- or timing-dependent
+/// (the class behind the total_difficulty / last_checkpoint fixes). Chain A mines
+/// the blocks (slow); chain B replays the identical blocks with no re-mining —
+/// pure validate-and-apply — so any divergence is a determinism bug.
+#[test]
+#[ignore = "real-PoW mining, slow; run with --features testnet -- --ignored"]
+fn replay_of_same_blocks_produces_identical_state() {
+    std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+    coincync::consensus::bind_randomx_genesis_for_network(NetworkType::Testnet);
+
+    let magic = NetworkType::Testnet.magic_bytes();
+    let (_s, spend_pub) = generate_keypair();
+    let (_v, view_pub) = generate_keypair();
+
+    // ── Chain A: mine genesis + B1..B6 and collect the blocks ────────────────
+    let chain_a = Blockchain::new();
+    chain_a.init_genesis().expect("A genesis");
+    let genesis = chain_a.get_block_by_height(0).expect("A genesis block");
+    chain_a
+        .restore_state(0, genesis.hash(), 1)
+        .expect("A seed base");
+
+    let base_ts = genesis.header.timestamp;
+    let spacing = 3600u64;
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut parent = genesis.clone();
+    for h in 1..=6u64 {
+        let target = if h == 1 {
+            Hash::from_difficulty(500)
+        } else {
+            chain_a.next_target()
+        };
+        let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
+        let blk = mine_block(
+            &parent,
+            h,
+            base_ts + h * spacing,
+            target,
+            vec![cb],
+            spend_pub,
+            magic,
+        );
+        assert!(
+            matches!(
+                chain_a.add_block(blk.clone()).expect("A add"),
+                BlockStatus::Accepted
+            ),
+            "A: B{h} must be accepted"
+        );
+        blocks.push(blk.clone());
+        parent = blk;
+    }
+
+    let a = chain_a.stats();
+    let a_tip = chain_a.tip_hash();
+    let a_height = chain_a.height();
+
+    // ── Chain B: replay the SAME blocks into a fresh instance (no re-mining) ──
+    let chain_b = Blockchain::new();
+    chain_b.init_genesis().expect("B genesis");
+    let genesis_b = chain_b.get_block_by_height(0).expect("B genesis block");
+    assert_eq!(
+        genesis_b.hash(),
+        genesis.hash(),
+        "genesis must be deterministic across independent instances"
+    );
+    chain_b
+        .restore_state(0, genesis_b.hash(), 1)
+        .expect("B seed base");
+
+    for blk in &blocks {
+        let st = chain_b.add_block(blk.clone()).expect("B replay add");
+        assert!(
+            matches!(st, BlockStatus::Accepted),
+            "B: replayed block at height {} must be accepted, got {st:?}",
+            blk.header.height
+        );
+    }
+
+    // ── The two instances must be byte-identical on every accumulator ────────
+    let b = chain_b.stats();
+    assert_eq!(chain_b.height(), a_height, "replay height mismatch");
+    assert_eq!(chain_b.tip_hash(), a_tip, "replay tip mismatch");
+    assert_eq!(
+        b.total_supply, a.total_supply,
+        "replay total_supply mismatch"
+    );
+    assert_eq!(
+        b.total_difficulty, a.total_difficulty,
+        "replay total_difficulty mismatch"
+    );
+    assert_eq!(
+        b.total_burned, a.total_burned,
+        "replay total_burned mismatch"
+    );
+    assert_eq!(
+        b.total_transactions, a.total_transactions,
+        "replay total_transactions mismatch"
+    );
+
+    println!("PASS replay_of_same_blocks_produces_identical_state (h1..6)");
+}
