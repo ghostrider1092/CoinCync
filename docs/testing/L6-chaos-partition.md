@@ -1,6 +1,12 @@
 # L6 — Chaos / Partition Harness (foundation)
 
-**Status:** designed, not yet built.
+**Status:** minimal deliverable BUILT + PASSING (`tests/chaos_partition_l6.rs`
+`two_node_partition_heals_to_heavier_chain`, real-PoW `#[ignore]`, ~60s) —
+2 nodes diverge under partition (heights 5 vs 6) then heal and converge
+three-way (tip+height+total_difficulty) on the heavier chain via a real reorg.
+Shared mining helpers live in `tests/common/mining.rs` (reusable by L3).
+Remaining: scenarios (b) asymmetric, (c) crash-consistency, (d) slow node; and
+scaling to N>2 nodes.
 **Goal:** multi-node partition → heal → verify convergence to ONE chain;
 asymmetric partitions; a slow node; and crash-consistency (kill mid-write, reload
 from RocksDB).
