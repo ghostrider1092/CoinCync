@@ -5,12 +5,27 @@
 `StdRng`, `(time,seq)` `BinaryHeap` event queue, virtual clock, per-link
 delay + 10% duplication, deterministic per-node keys; SAFETY checked after every
 accepted block + LIVENESS asserted (3 nodes converge to the miner's tip at
-height 8). Uses `tests/common/mining.rs`. **Remaining:** the Byzantine behaviors
-(equivocation/withholding/invalid-spam/demon-timing) + a second miner — the
-`Behavior` enum and `broadcast()` seam are already stubbed for them.
+height 8). **EQUIVOCATION now BUILT + PASSING** (`equivocating_miner_does_not_
+split_honest_nodes`): a double-signing miner sends different twins to different
+honest nodes; they converge deterministically to one chain (this also drove the
+fork-choice fix in the RESOLVED finding below). Uses `tests/common/mining.rs`.
+**Remaining:** withholding / invalid-spam / demon-timing behaviors + a second
+miner — the `Behavior` enum and `broadcast_to()` seam are stubbed for them.
 Highest-value / largest-effort layer.
 
-## FINDING (surfaced building the equivocation behavior) — equal-work fork returns Err(ReorgTooDeep)
+## FINDING — RESOLVED 2026-08-18 (option a: deterministic hash-tiebreak)
+
+The inconsistency below was fixed by making `evaluate_reorg_acceptability`'s
+Tier-1 + bootstrap branches accept EQUAL work (`>=`), honoring the deliberate
+network-deterministic hash-lex tiebreak in `take_fork` (chain.rs:2455-2471). Deep
+equal-work reorgs stay rejected by the MESS tier. Three tests updated to the
+intended semantics (chain.rs shallow + bootstrap, tier14 `tier1_...`); the full
+reorg suite + total_difficulty guard re-verified green. The
+`equivocating_miner_does_not_split_honest_nodes` sim test now PASSES — an
+equivocating miner cannot split honest nodes; they converge deterministically to
+the same tie-winning chain. Original finding for the record:
+
+## FINDING (surfaced building the equivocation behavior) — equal-work fork returned Err(ReorgTooDeep)
 
 Building the equivocation test (a miner double-signs twin blocks at the same
 height) surfaced a **consensus-design inconsistency the codebase's own tests and

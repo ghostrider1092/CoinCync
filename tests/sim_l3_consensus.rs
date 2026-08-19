@@ -37,8 +37,10 @@ type NodeId = usize;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Behavior {
     Honest,
-    // Byzantine variants land next session:
-    // Equivocate, Withhold { release_after: u64 }, InvalidSpam,
+    /// Double-signs: mines two valid twin blocks at the same height and sends
+    /// different ones to different halves of its peers.
+    Equivocate,
+    // Further Byzantine variants (Withhold / InvalidSpam / demon-timing) next.
 }
 
 struct Node {
@@ -185,27 +187,59 @@ impl Sim {
         } else {
             self.nodes[miner].chain.next_target()
         };
-        let ts = self.base_ts + h * self.cfg.block_spacing_secs;
+        let base = self.base_ts + h * self.cfg.block_spacing_secs;
+        let miner_pk = self.nodes[miner].spend_pub;
         let (cb, _) = build_coinbase(h, &self.nodes[miner].spend_pub, &self.nodes[miner].view_pub, 0);
-        let blk = mine_block(
-            &parent,
-            h,
-            ts,
-            target,
-            vec![cb],
-            self.nodes[miner].spend_pub,
-            self.magic,
-        );
-        self.nodes[miner]
-            .chain
-            .add_block(blk.clone())
-            .expect("miner add");
-        self.broadcast(miner, Arc::new(blk));
+        let peers = self.nodes[miner].peers.clone();
+
+        match self.nodes[miner].behavior {
+            Behavior::Honest => {
+                let blk = mine_block(&parent, h, base, target, vec![cb], miner_pk, self.magic);
+                self.nodes[miner]
+                    .chain
+                    .add_block(blk.clone())
+                    .expect("miner add");
+                self.broadcast_to(Arc::new(blk), &peers);
+            }
+            Behavior::Equivocate => {
+                // Twin A uses the miner's normal coinbase; twin B pays a DISTINCT
+                // coinbase (different view key) so the two twins don't share an
+                // identical coinbase tx (which would collide in the tx index).
+                let (_vb, view_pub_b) = deterministic_keypair(self.cfg.seed, miner as u8 + 200);
+                let (cb_b, _) = build_coinbase(h, &self.nodes[miner].spend_pub, &view_pub_b, 0);
+
+                let a = mine_block(&parent, h, base, target, vec![cb], miner_pk, self.magic);
+                let mut b_ts = base + 1;
+                let b = loop {
+                    let cand =
+                        mine_block(&parent, h, b_ts, target, vec![cb_b.clone()], miner_pk, self.magic);
+                    if cand.hash() != a.hash() {
+                        break cand;
+                    }
+                    b_ts += 1;
+                };
+                // Adopt both locally (the node's own tip is the fork-choice winner);
+                // under the deterministic hash-tiebreak an equal-work twin is
+                // Ok(AcceptedFork) or Ok(AcceptedReorg), never an error.
+                self.nodes[miner]
+                    .chain
+                    .add_block(a.clone())
+                    .unwrap_or_else(|e| panic!("equiv add a failed: {e:?}"));
+                self.nodes[miner]
+                    .chain
+                    .add_block(b.clone())
+                    .unwrap_or_else(|e| panic!("equiv add b failed: {e:?}"));
+                // A to the first half of peers, B to the second half.
+                let mid = peers.len() / 2;
+                let (pa, pb) = peers.split_at(mid);
+                self.broadcast_to(Arc::new(a), pa);
+                self.broadcast_to(Arc::new(b), pb);
+            }
+        }
     }
 
-    fn broadcast(&mut self, from: NodeId, block: Arc<Block>) {
-        let peers = self.nodes[from].peers.clone();
-        for peer in peers {
+    fn broadcast_to(&mut self, block: Arc<Block>, targets: &[NodeId]) {
+        for &peer in targets {
             if self.rng.gen::<f64>() < self.cfg.drop_prob {
                 continue; // link dropped this message
             }
@@ -248,10 +282,19 @@ impl Sim {
                 EventKind::DeliverBlock { to, block } => {
                     match self.nodes[to].chain.add_block((*block).clone()) {
                         Ok(BlockStatus::Invalid(e)) => {
-                            return Err(format!("honest node {to} received an INVALID block: {e}"))
+                            return Err(format!("node {to} received an INVALID block: {e}"))
                         }
                         Err(e) => return Err(format!("add_block error at node {to}: {e}")),
-                        Ok(_) => {}
+                        Ok(BlockStatus::Accepted)
+                        | Ok(BlockStatus::AcceptedFork)
+                        | Ok(BlockStatus::AcceptedReorg { .. }) => {
+                            // Gossip: relay a newly-accepted block onward. Peers
+                            // that already have it return AlreadyKnown and do not
+                            // re-relay, so the flood terminates.
+                            let peers = self.nodes[to].peers.clone();
+                            self.broadcast_to(Arc::clone(&block), &peers);
+                        }
+                        Ok(_) => {} // AlreadyKnown / Orphan — no relay
                     }
                 }
             }
@@ -352,4 +395,58 @@ fn honest_single_miner_safety_and_liveness() {
     }
 
     println!("PASS honest_single_miner_safety_and_liveness: converged 3 nodes to height {h0}");
+}
+
+#[test]
+#[ignore = "real-PoW light-mode mining, slow; run with --features testnet -- --ignored"]
+fn equivocating_miner_does_not_split_honest_nodes() {
+    // Node 0 double-signs: at every height it mines two valid twin blocks and
+    // sends one to node 1 and the other to node 2. Under the deterministic
+    // hash-lex fork-choice, gossip propagates both twins and every honest node
+    // converges to the SAME tie-winning chain — equivocation cannot split them.
+    let cfg = SimConfig {
+        seed: 0x00BADBEE,
+        n_nodes: 3,
+        miners: vec![0],
+        behaviors: vec![Behavior::Equivocate, Behavior::Honest, Behavior::Honest],
+        min_delay: 50,
+        max_delay: 400,
+        drop_prob: 0.0, // no drops: every honest node must fully converge
+        dup_prob: 0.05,
+        block_spacing_secs: 3600,
+        finality_depth: 4,
+        rounds: 8,
+    };
+
+    let mut sim = Sim::new(cfg);
+    let start = sim.max_honest_height();
+
+    // Safety is checked after every accepted block, including the twin forks.
+    sim.run().expect("SAFETY must hold under equivocation");
+
+    let end = sim.max_honest_height();
+    assert!(
+        end >= start + 6,
+        "LIVENESS under equivocation: honest height must advance (start={start} end={end})"
+    );
+    sim.check_safety()
+        .expect("SAFETY: equivocation must not split honest nodes below the finality floor");
+
+    // The two honest nodes received DIFFERENT twins directly, yet the
+    // deterministic hash tiebreak + gossip converge them to the SAME tip.
+    assert_eq!(
+        sim.nodes[1].chain.tip_hash(),
+        sim.nodes[2].chain.tip_hash(),
+        "honest nodes must converge to ONE chain under equivocation (deterministic hash tiebreak)"
+    );
+    assert_eq!(
+        sim.nodes[1].chain.height(),
+        sim.nodes[2].chain.height(),
+        "honest heights must match after convergence"
+    );
+
+    println!(
+        "PASS equivocating_miner_does_not_split_honest_nodes: honest nodes converged to height {}",
+        sim.nodes[1].chain.height()
+    );
 }
