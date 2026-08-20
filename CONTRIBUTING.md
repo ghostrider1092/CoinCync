@@ -148,7 +148,7 @@ The 90-day coordinated-disclosure window for security issues is committed in Art
 
 ## Code of Conduct
 
-The community standards live at [`docs/CODE_OF_CONDUCT.md`](docs/CODE_OF_CONDUCT.md). Be civil. Disagreement is fine; harassment is not. Pseudonymous participants get the same treatment as named ones.
+The community standards live at [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Be civil. Disagreement is fine; harassment is not. Pseudonymous participants get the same treatment as named ones.
 
 ---
 
@@ -165,7 +165,7 @@ By contributing, you agree your contribution is released under the project's MIT
 - **Constitutional Commentary** (rationale, no constitutional force): [`docs/CONSTITUTIONAL_COMMENTARY.md`](docs/CONSTITUTIONAL_COMMENTARY.md)
 - **CIP index:** [`docs/cip/`](docs/cip/)
 - **Critical files lockfile:** [`critical_files.lock`](critical_files.lock)
-- **Code of Conduct:** [`docs/CODE_OF_CONDUCT.md`](docs/CODE_OF_CONDUCT.md)
+- **Code of Conduct:** [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 - **Maintainers:** [`MAINTAINERS.md`](MAINTAINERS.md) — who reviews what, review SLAs, recruiting
 - **Bus-factor inventory:** [`docs/governance/bus-factor.md`](docs/governance/bus-factor.md) — single-point-of-failure map
 - **Maintainer recovery procedure:** [`docs/operations/MAINTAINER_RECOVERY.md`](docs/operations/MAINTAINER_RECOVERY.md) — if the primary is gone

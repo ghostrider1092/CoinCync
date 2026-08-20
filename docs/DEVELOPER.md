@@ -407,7 +407,6 @@ You're building on Windows + the fleet is Linux. Cross-compile via WSL (see [`Cr
 │   └── ops/                             # Hard-fork rollout scripts
 ├── docs/
 │   ├── BILL_OF_RIGHTS.md                # User-facing rights
-│   ├── CODE_OF_CONDUCT.md
 │   ├── COMMANDS.md                      # CLI reference (this file's neighbor)
 │   ├── CONSTITUTIONAL_COMMENTARY.md     # Rationale (no constitutional force)
 │   ├── DEVELOPER.md                     # ← you are here
