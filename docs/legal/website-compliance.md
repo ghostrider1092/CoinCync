@@ -8,7 +8,7 @@ already exists at:
 
 - [docs/DISCLAIMER.md](../DISCLAIMER.md) — protocol disclaimer (no warranty, prohibited uses, no professional services)
 - [SECURITY.md](../../SECURITY.md) — responsible disclosure policy
-- [docs/CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) — contributor behavior
+- [CODE_OF_CONDUCT.md](../../CODE_OF_CONDUCT.md) — contributor behavior
 - [docs/THREAT_MODEL.md](../THREAT_MODEL.md) — adversary model
 
 This file fills the gap that anti-scam classifiers look for: a clear

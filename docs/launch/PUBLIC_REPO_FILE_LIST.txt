@@ -184,7 +184,6 @@ deploy/ops/redeploy-fleet.sh
 deploy/ops/verify-community-bootstrap.sh
 docs/API.md
 docs/BILL_OF_RIGHTS.md
-docs/CODE_OF_CONDUCT.md
 docs/COMMANDS.md
 docs/CONSTITUTIONAL_COMMENTARY.md
 docs/DEVELOPER.md
