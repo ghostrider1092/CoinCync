@@ -44,12 +44,9 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use coincync::config::NetworkType;
-use coincync::consensus::{
-    bind_randomx_genesis_for_network, compute_full_anchor, Block, BlockHeader, PowAlgorithm,
-};
-use coincync::crypto::{coinbase_stealth_address, BlindingFactor, PedersenCommitment};
-use coincync::primitives::{hash_domain, merkle_root, Address, Amount, Hash, PublicKey};
-use coincync::transaction::{Transaction, TxOutput, TxType};
+use coincync::consensus::{bind_randomx_genesis_for_network, Block, BlockHeader, PowAlgorithm};
+use coincync::primitives::{Address, Hash, PublicKey};
+use coincync::transaction::Transaction;
 
 use crate::daemon::DaemonClient;
 use crate::hasher::{HashInput, Hasher};
@@ -380,6 +377,10 @@ pub async fn run_solo(
             m.current_template_height
                 .store(height, std::sync::atomic::Ordering::Relaxed);
         }
+        // Approaching a RandomX key-epoch boundary? Build the next epoch's
+        // dataset in the background now, so the flip promotes it instantly
+        // instead of stalling this miner for the 30-60s (full-mem) build.
+        coincync::consensus::prewarm_next_epoch_if_near(height);
         let target = header.target;
         let input = HashInput {
             anchor: header.anchor,
@@ -390,7 +391,7 @@ pub async fn run_solo(
         // 4. Multi-thread nonce search until found OR poll interval elapsed
         let started = Instant::now();
         let deadline = started + Duration::from_secs(poll_interval_secs);
-        let result = mine_parallel(hasher, input, target, threads, deadline).await;
+        let result = mine_parallel(hasher, input, target, threads, deadline, 0).await;
 
         // 5. Submit if found
         match result {
@@ -520,6 +521,12 @@ async fn mine_parallel(
     target: Hash,
     threads: usize,
     deadline: Instant,
+    // Offset added to each thread's slice start. 0 for solo (every template is
+    // a fresh input, so restarting from the slice start is fine). The stratum
+    // pool client advances this each call so repeated searches of the SAME job
+    // don't re-test identical nonces. It grows far slower than the slice size
+    // (u64::MAX / threads), so threads never cross into each other's slices.
+    nonce_base: u64,
 ) -> MineResult {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -542,32 +549,60 @@ async fn mine_parallel(
         let my_attempts = thread_attempts.clone();
         let found_tx = found_tx.clone();
         let input = input.clone();
-        let start_nonce = (tid as u64).saturating_mul(slice);
+        let slice_start = (tid as u64).saturating_mul(slice);
+        let start_nonce = slice_start.wrapping_add(nonce_base);
+        // End at the NEXT slice boundary (independent of nonce_base), so the
+        // base only shifts where within the slice we search, never the slice's
+        // extent.
         let end_nonce = if tid + 1 == n_threads {
             u64::MAX
         } else {
-            start_nonce.saturating_add(slice)
+            ((tid + 1) as u64).saturating_mul(slice)
         };
         handles.push(std::thread::spawn(move || {
+            // Hash nonces in small batches through the pipelined RandomX
+            // path (`hash_batch`), which overlaps VM execution of one input
+            // with the next input's setup. BATCH is kept small so the
+            // `stop` flag is still checked frequently (8 hashes is a few ms
+            // in full-mem mode, ~50 ms in light mode — well inside the poll
+            // interval) and so a winning nonce is reported promptly.
+            const BATCH: u64 = 8;
             let mut nonce = start_nonce;
             let mut local: u64 = 0;
             while !stop.load(Ordering::Relaxed) && nonce < end_nonce {
-                if let Ok(h) = hasher.hash(&input, nonce) {
-                    if hasher.meets_target(&h, &target) {
-                        let _ = found_tx.send(nonce);
-                        break;
+                let batch_end = nonce.saturating_add(BATCH).min(end_nonce);
+                let batch: Vec<u64> = (nonce..batch_end).collect();
+                if batch.is_empty() {
+                    break;
+                }
+                let mut found = false;
+                // A batch hash error (e.g. VM reinit backoff) is tolerated
+                // exactly like the single-shot path's `if let Ok` — skip and
+                // keep searching.
+                if let Ok(hashes) = hasher.hash_batch(&input, &batch) {
+                    for (k, h) in hashes.iter().enumerate() {
+                        if hasher.meets_target(h, &target) {
+                            let _ = found_tx.send(batch[k]);
+                            stop.store(true, Ordering::Relaxed);
+                            found = true;
+                            break;
+                        }
                     }
                 }
-                nonce = nonce.saturating_add(1);
-                local = local.saturating_add(1);
-                // Flush our local counter to our per-thread atomic
-                // every 1024 hashes — same trade-off as before, but
-                // now there's no contention because each thread owns
-                // a separate atomic.
-                if local % 1024 == 0 {
-                    my_attempts.fetch_add(1024, Ordering::Relaxed);
+                let n = batch.len() as u64;
+                local = local.saturating_add(n);
+                // Flush our local counter to our per-thread atomic roughly
+                // every 1024 hashes — same trade-off as before, but now
+                // there's no contention because each thread owns a separate
+                // atomic.
+                if local >= 1024 {
+                    my_attempts.fetch_add(local, Ordering::Relaxed);
                     local = 0;
                 }
+                if found {
+                    break;
+                }
+                nonce = nonce.saturating_add(n);
             }
             my_attempts.fetch_add(local, Ordering::Relaxed);
         }));
@@ -657,6 +692,169 @@ impl BackoffState {
     }
 }
 
+/// A job as pushed by a CoinCync stratum pool (`login` result / `job` message).
+#[derive(Clone)]
+struct PoolJob {
+    job_id: String,
+    anchor: Hash,
+    tx_root: Hash,
+    target: Hash,
+    height: u64,
+}
+
+/// Parse the CoinCync `job` object: `{job_id, anchor, tx_root, seed_hash,
+/// target, height}` (all hashes hex). `seed_hash` is ignored — `compute_pow_hash`
+/// re-derives the RandomX key from `height`.
+fn parse_pool_job(v: &Value) -> Option<PoolJob> {
+    Some(PoolJob {
+        job_id: v.get("job_id")?.as_str()?.to_string(),
+        anchor: Hash::from_hex(v.get("anchor")?.as_str()?)?,
+        tx_root: Hash::from_hex(v.get("tx_root")?.as_str()?)?,
+        target: Hash::from_hex(v.get("target")?.as_str()?)?,
+        height: v.get("height")?.as_u64()?,
+    })
+}
+
+/// Connect to a CoinCync stratum pool, log in, and mine the jobs it pushes,
+/// submitting winning nonces. Reuses the SAME `mine_parallel` engine as solo
+/// mining — only the job source differs (the pool's `job` messages instead of
+/// the daemon's `get_block_template`). The pool builds the coinbase (to its own
+/// payout address) and does block assembly/submission server-side, so this
+/// client only searches nonces and submits.
+pub async fn run_pool(
+    pool_addr: &str,
+    login: &str,
+    password: &str,
+    network: NetworkType,
+    threads: usize,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    bind_randomx_genesis_for_network(network);
+    let n_threads = if threads == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        threads
+    };
+
+    let stream = TcpStream::connect(pool_addr)
+        .await
+        .with_context(|| format!("connecting to pool {pool_addr}"))?;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    // Log in (also delivers the first job in the response).
+    let login_msg = serde_json::json!({
+        "id": 1, "method": "login",
+        "params": {"login": login, "pass": password, "agent": "coincync-rig", "algo": ["cync/rx"]}
+    })
+    .to_string();
+    write_half.write_all(login_msg.as_bytes()).await?;
+    write_half.write_all(b"\n").await?;
+    write_half.flush().await?;
+    info!("pool: logged in to {} as {}", pool_addr, login);
+
+    // Latest job, updated by the reader task; the mining loop reads it.
+    let job_slot: Arc<tokio::sync::Mutex<Option<PoolJob>>> = Arc::new(tokio::sync::Mutex::new(None));
+    let job_slot_r = job_slot.clone();
+    tokio::spawn(async move {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => {
+                    warn!("pool: connection closed by pool");
+                    break;
+                }
+                Ok(_) => {
+                    let v: Value = match serde_json::from_str(line.trim()) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    // First job arrives in login's result.job; later jobs are
+                    // pushed as {"method":"job","params":{...}}.
+                    let job_val = v
+                        .get("result")
+                        .and_then(|r| r.get("job"))
+                        .or_else(|| {
+                            if v.get("method").and_then(|m| m.as_str()) == Some("job") {
+                                v.get("params")
+                            } else {
+                                None
+                            }
+                        });
+                    if let Some(jv) = job_val {
+                        if let Some(job) = parse_pool_job(jv) {
+                            info!("pool: new job {} (height {})", job.job_id, job.height);
+                            *job_slot_r.lock().await = Some(job);
+                        }
+                    } else if v.get("error").map(|e| !e.is_null()).unwrap_or(false) {
+                        warn!("pool: server error: {}", v.get("error").unwrap());
+                    }
+                }
+                Err(e) => {
+                    warn!("pool: read error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    let hasher = Hasher::new();
+    let mut nonce_base: u64 = 0;
+    let mut submit_id: u64 = 2;
+    loop {
+        let job = { job_slot.lock().await.clone() };
+        let Some(job) = job else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        };
+        let input = HashInput {
+            anchor: job.anchor,
+            tx_root: job.tx_root,
+            height: job.height,
+        };
+        // Short deadline so we pick up newly-pushed jobs promptly.
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let result = mine_parallel(hasher, input, job.target, n_threads, deadline, nonce_base).await;
+        let attempts = match &result {
+            MineResult::Found { total_attempts, .. } => *total_attempts,
+            MineResult::Timeout { total_attempts, .. } => *total_attempts,
+        };
+        nonce_base = nonce_base.wrapping_add(attempts).wrapping_add(1);
+
+        if let MineResult::Found { nonce, .. } = result {
+            // Don't submit against a job the pool has already superseded.
+            let still_current = job_slot
+                .lock()
+                .await
+                .as_ref()
+                .map(|j| j.job_id == job.job_id)
+                .unwrap_or(false);
+            if !still_current {
+                continue;
+            }
+            let submit = serde_json::json!({
+                "id": submit_id, "method": "submit",
+                "params": {"id": "x", "job_id": job.job_id, "nonce": format!("{:x}", nonce)}
+            })
+            .to_string();
+            submit_id = submit_id.wrapping_add(1);
+            if write_half.write_all(submit.as_bytes()).await.is_err() {
+                warn!("pool: write failed; connection lost");
+                break;
+            }
+            let _ = write_half.write_all(b"\n").await;
+            let _ = write_half.flush().await;
+            info!("pool: submitted nonce {:x} for job {}", nonce, job.job_id);
+        }
+    }
+    Ok(())
+}
+
 /// Build the full BlockHeader + transaction list from a daemon template.
 ///
 /// Every field in the returned header must match what the validator
@@ -668,210 +866,25 @@ fn build_header_from_template(
     fallback_network: NetworkType,
     signal_bits: coincync::consensus::fork_signal::SignalBits,
 ) -> Result<(BlockHeader, Vec<Transaction>)> {
-    let height = template["height"]
-        .as_u64()
-        .ok_or_else(|| anyhow!("template missing 'height'"))?;
-    let prev_hash_hex = template["prev_hash"]
-        .as_str()
-        .ok_or_else(|| anyhow!("template missing 'prev_hash'"))?;
-    let timestamp = template["timestamp"]
-        .as_i64()
-        .ok_or_else(|| anyhow!("template missing 'timestamp'"))? as u64;
-
-    let prev_hash = Hash::from_hex(prev_hash_hex)
-        .ok_or_else(|| anyhow!("template prev_hash {prev_hash_hex} is not valid hex"))?;
-
-    // Use the exact target the daemon computed (ASERT difficulty
-    // adjustment) instead of re-deriving from a difficulty number.
-    let target = if let Some(target_hex) = template["target"].as_str() {
-        Hash::from_hex(target_hex)
-            .ok_or_else(|| anyhow!("template target {target_hex} is not valid hex"))?
-    } else {
-        let difficulty_str = template["difficulty"]
-            .as_str()
-            .ok_or_else(|| anyhow!("template missing both 'target' and 'difficulty'"))?;
-        let difficulty: u64 = difficulty_str
-            .parse()
-            .with_context(|| format!("difficulty {difficulty_str:?} is not a u64"))?;
-        Hash::from_difficulty(difficulty)
-    };
-
-    // VDF + Yescrypt anchor — must match validator exactly.
-    let anchor_result = compute_full_anchor(&prev_hash, height, timestamp)
-        .map_err(|e| anyhow!("compute_full_anchor failed: {e}"))?;
-
-    let mempool_txs = parse_template_transactions(template);
-
-    // Fee-burn split per Constitution Article II — congestion-aware.
-    let claimable_fees = calculate_claimable_fees(height, &mempool_txs);
-    let coinbase = create_mining_coinbase_with_fees(
-        height,
+    // Single source of truth: the consensus-correct coinbase/anchor/tx_root
+    // logic lives in the library's block_builder (proven by its
+    // build_mine_submit_roundtrip test). The rig delegates so a rig-mined
+    // block and an in-node-produced block are byte-identical.
+    let candidate = coincync::mining::block_builder::build_block_from_template(
+        template,
         miner_spend_pub,
         miner_view_pub,
-        claimable_fees,
+        fallback_network,
         signal_bits,
-    )?;
-
-    // tx_root = merkle root over [coinbase, ...mempool_txs]
-    let mut all_txs = Vec::with_capacity(mempool_txs.len() + 1);
-    all_txs.push(coinbase);
-    all_txs.extend(mempool_txs);
-    let tx_hashes: Vec<Hash> = all_txs.iter().map(|tx| tx.hash()).collect();
-    let tx_root = merkle_root(&tx_hashes);
-
-    let network_magic = resolve_network_magic(template, fallback_network)?;
-
-    Ok((
-        BlockHeader {
-            network_magic,
-            version: 1,
-            height,
-            timestamp,
-            prev_hash,
-            tx_root,
-            anchor: anchor_result.mixed_hash,
-            algorithm: anchor_result.algorithm as u8,
-            nonce: 0,
-            target,
-            miner_pubkey: *miner_spend_pub,
-            supply_commitment: [0u8; 32],
-            checkpoint_vote: None,
-            spark_set_root: [0u8; 32],
-            mw_kernel_root: [0u8; 32],
-        },
-        all_txs,
-    ))
+    )
+    .map_err(|e| anyhow!("build_block_from_template failed: {e}"))?;
+    Ok((candidate.header, candidate.transactions))
 }
 
-fn parse_template_transactions(template: &Value) -> Vec<Transaction> {
-    let mut txs = Vec::new();
-    if let Some(tx_array) = template["transactions"].as_array() {
-        for tx_hex_val in tx_array {
-            if let Some(tx_hex) = tx_hex_val.as_str() {
-                if let Ok(tx_bytes) = hex::decode(tx_hex) {
-                    if let Ok(tx) = borsh::from_slice::<Transaction>(&tx_bytes) {
-                        txs.push(tx);
-                    }
-                }
-            }
-        }
-    }
-    txs
-}
-
-/// Per Constitution Article II: when the block is congested, a portion
-/// of the fee is burned; the miner only collects the un-burned share.
-/// Must match validator-side `validation.rs` exactly or the daemon
-/// rejects our coinbase.
-///
-/// The burn split only activates at `FEE_DISTRIBUTION_HEIGHT`. Before that
-/// height the validator lets the miner claim ALL fees (backward compatible;
-/// see `validation.rs` `max_coinbase`), so we must do the same here or the
-/// daemon rejects our coinbase for under-claiming the burned share. On
-/// mainnet `FEE_DISTRIBUTION_HEIGHT == 0`, so distribution is always active
-/// and this gate is a no-op; it only matters for the pre-activation window
-/// on testnet/regtest.
-fn calculate_claimable_fees(height: u64, mempool_txs: &[Transaction]) -> u64 {
-    let total_fees: u64 = mempool_txs.iter().map(|tx| tx.fee.as_atomic()).sum();
-    if total_fees == 0 {
-        return 0;
-    }
-    if height < coincync::constants::FEE_DISTRIBUTION_HEIGHT {
-        // Pre-activation: miner claims the full fee, no burn.
-        return total_fees;
-    }
-    let block_size: usize = mempool_txs
-        .iter()
-        .map(|tx| borsh::to_vec(tx).map(|v| v.len()).unwrap_or(0))
-        .sum();
-    let congestion_pct = (block_size as u128 * 100) / coincync::constants::MAX_BLOCK_SIZE as u128;
-    let congested = congestion_pct >= coincync::constants::CONGESTION_THRESHOLD as u128;
-    let dist =
-        coincync::consensus::fee_market::distribute_fee(Amount::from_atomic(total_fees), congested);
-    dist.to_miner.as_atomic()
-}
-
-/// Build the coinbase tx — emission reward + fees, paid to a fresh
-/// stealth address derived from (miner_spend_pub, miner_view_pub,
-/// height, output_index=0).
-fn create_mining_coinbase_with_fees(
-    height: u64,
-    miner_spend_pub: &PublicKey,
-    miner_view_pub: &PublicKey,
-    total_fees: u64,
-    signal_bits: coincync::consensus::fork_signal::SignalBits,
-) -> Result<Transaction> {
-    let reward = coincync::emission::calculate_block_reward(height);
-    let total_amount = reward.as_atomic().saturating_add(total_fees);
-
-    // Coinbase commitment uses zero blinding factor: the reward is
-    // publicly verifiable, so nothing to hide.
-    let commitment = PedersenCommitment::commit(total_amount, &BlindingFactor::zero());
-
-    // Same per-output secret derivation the existing miner uses — the
-    // wallet recognises a coinbase output by view-tag matching against
-    // its view key, so this derivation must be deterministic in
-    // (view_pub, height, output_index).
-    let miner_secret: [u8; 32] = *blake3::hash(miner_view_pub.as_bytes()).as_bytes();
-    let (stealth_addr, _tx_secret) =
-        coinbase_stealth_address(miner_spend_pub, miner_view_pub, height, 0, &miner_secret)
-            .map_err(|e| anyhow!("coinbase_stealth_address failed: {e}"))?;
-
-    let view_tag = {
-        let shared = hash_domain(
-            b"COINCYNC_VIEW_TAG",
-            &[stealth_addr.tx_public_key.as_bytes().as_slice(), &[0u8]].concat(),
-        );
-        shared.as_bytes()[0]
-    };
-
-    let output = TxOutput {
-        stealth_address: stealth_addr.public_key,
-        tx_public_key: stealth_addr.tx_public_key,
-        encrypted_amount: total_amount.to_le_bytes().to_vec(),
-        commitment: commitment.to_bytes(),
-        view_tag,
-        lock_height: None,
-        encrypted_memo: vec![],
-    };
-
-    Ok(Transaction {
-        version: 1,
-        tx_type: TxType::Coinbase,
-        inputs: vec![],
-        outputs: vec![output],
-        fee: Amount::ZERO,
-        range_proof: vec![],
-        // Coinbase extra carries the height (8 bytes) plus optional
-        // BIP-9 signal bits (4 bytes) when the operator opts in via
-        // --signal-v1012. encode_coinbase_extra preserves byte-for-byte
-        // compatibility with the pre-CIP-012 format when signal_bits == 0.
-        extra: coincync::consensus::fork_signal::encode_coinbase_extra(height, signal_bits),
-    })
-}
-
-fn resolve_network_magic(template: &Value, fallback_network: NetworkType) -> Result<[u8; 4]> {
-    if let Some(magic_hex) = template["network_magic"].as_str() {
-        let bytes = hex::decode(magic_hex)
-            .with_context(|| format!("network_magic {magic_hex:?} is not valid hex"))?;
-        if bytes.len() != 4 {
-            return Err(anyhow!(
-                "network_magic length: expected 4 bytes, got {}",
-                bytes.len()
-            ));
-        }
-        let magic = [bytes[0], bytes[1], bytes[2], bytes[3]];
-        if NetworkType::from_magic_bytes(magic).is_none() {
-            return Err(anyhow!(
-                "unknown network_magic {} — daemon and miner are on different networks",
-                hex::encode(magic)
-            ));
-        }
-        Ok(magic)
-    } else {
-        Ok(fallback_network.magic_bytes())
-    }
-}
+// build_header_from_template's coinbase/anchor/tx_root/network-magic helpers
+// moved to the library (`coincync::mining::block_builder`) — the single source
+// of truth for consensus-correct block construction, shared with the in-node
+// mining servers. The rig delegates above.
 
 fn short_hex(bytes: &[u8]) -> String {
     hex::encode(&bytes[..bytes.len().min(8)])
@@ -947,7 +960,7 @@ mod tests {
 
     #[test]
     fn claimable_fees_track_the_validator_activation_gate() {
-        use super::calculate_claimable_fees;
+        use coincync::mining::block_builder::calculate_claimable_fees;
         use coincync::constants::FEE_DISTRIBUTION_HEIGHT;
         use coincync::primitives::Amount;
 

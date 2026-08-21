@@ -32,7 +32,7 @@
 //!    accepts. If that test ever fails, the miner is broken even if it
 //!    compiles.
 
-use coincync::consensus::{compute_pow_hash, PowAlgorithm};
+use coincync::consensus::{compute_pow_hash, compute_pow_hash_batch, PowAlgorithm};
 use coincync::primitives::Hash;
 
 /// Inputs for one PoW attempt — exactly what the validator hashes.
@@ -78,6 +78,26 @@ impl Hasher {
             input.height,
         )
         .map_err(|e| anyhow::anyhow!("compute_pow_hash failed: {e}"))
+    }
+
+    /// Compute the PoW hash for a BATCH of nonces (same block template).
+    ///
+    /// Uses the pipelined RandomX path, which overlaps VM execution with
+    /// the next input's setup — meaningfully faster than calling
+    /// [`Hasher::hash`] once per nonce. Returns one hash per nonce, in
+    /// order. Consensus-safe: the validator still uses the single-shot
+    /// path, and [`tests::hash_batch_matches_single`] proves the two agree
+    /// bit-for-bit, so batched mining can never produce a share the
+    /// validator would reject that single-shot mining wouldn't.
+    pub fn hash_batch(&self, input: &HashInput, nonces: &[u64]) -> anyhow::Result<Vec<Hash>> {
+        compute_pow_hash_batch(
+            PowAlgorithm::RandomX,
+            &input.anchor,
+            nonces,
+            &input.tx_root,
+            input.height,
+        )
+        .map_err(|e| anyhow::anyhow!("compute_pow_hash_batch failed: {e}"))
     }
 
     /// Convenience: does this (input, nonce) pair satisfy the target?
@@ -129,6 +149,35 @@ mod tests {
             "miner-side hash diverged from validator-side hash — \
              this means coincync-rig will produce shares the validator rejects"
         );
+    }
+
+    /// Consensus-safety proof for the pipelined mining path: the batched
+    /// hash for each nonce MUST equal the single-shot hash the validator
+    /// uses. If this ever fails, batched mining would search a different
+    /// hash space than the validator accepts — so the batch path must never
+    /// ship without this passing.
+    #[test]
+    fn hash_batch_matches_single() {
+        let input = HashInput {
+            anchor: Hash::from_bytes([0x11; 32]),
+            tx_root: Hash::from_bytes([0x22; 32]),
+            height: 7,
+        };
+        let nonces = [1u64, 2, 3, 5, 8, 13, 21, 34];
+        let batched = Hasher::new()
+            .hash_batch(&input, &nonces)
+            .expect("hash_batch should succeed");
+        assert_eq!(batched.len(), nonces.len(), "one hash per nonce");
+        for (i, &n) in nonces.iter().enumerate() {
+            let single = Hasher::new().hash(&input, n).expect("single hash");
+            assert_eq!(
+                single.as_bytes(),
+                batched[i].as_bytes(),
+                "batched hash for nonce {} diverged from single-shot — \
+                 pipelined mining would produce shares the validator rejects",
+                n
+            );
+        }
     }
 
     /// A varying-nonce smoke test — the hash must change when only the

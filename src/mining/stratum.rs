@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::chain::SharedBlockchain;
 use crate::error::{Error, Result};
 use crate::mempool::SharedMempool;
+use crate::mining::block_builder::{self, CandidateBlock};
 use crate::primitives::{Hash, PublicKey};
 
 const MIN_SUBMIT_INTERVAL_MS: u64 = 200;
@@ -65,6 +66,16 @@ pub struct StratumConfig {
     pub tls_cert_path: Option<PathBuf>,
     /// PEM private key path for native TLS mode.
     pub tls_key_path: Option<PathBuf>,
+    /// Payout keys. The coinbase of any block this pool finds is paid to a
+    /// stealth address derived from `(payout_spend_public, payout_view_public)`
+    /// via [`block_builder::build_candidate_block`](crate::mining::block_builder).
+    /// REQUIRED to actually produce blocks: when `None`, the server can still
+    /// validate shares but cannot build/submit a real block (it logs a found
+    /// share without submitting). Wired into block production in Stage 3
+    /// (the CoinCync/RandomX job model).
+    pub payout_spend_public: Option<PublicKey>,
+    /// See [`payout_spend_public`](Self::payout_spend_public).
+    pub payout_view_public: Option<PublicKey>,
 }
 
 impl Default for StratumConfig {
@@ -104,6 +115,10 @@ impl Default for StratumConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            // No default payout keys — a pool operator must set these before
+            // the server can produce blocks. Absent = shares only.
+            payout_spend_public: None,
+            payout_view_public: None,
         }
     }
 }
@@ -164,11 +179,33 @@ fn build_stratum_tls_acceptor(config: &StratumConfig) -> Result<Option<TlsAccept
     Ok(Some(TlsAcceptor::from(Arc::new(tls_cfg))))
 }
 
-/// Mining job sent to workers
+/// Mining job sent to workers.
+///
+/// CoinCync/RandomX model: a miner hashes
+/// `compute_pow_hash(RandomX, anchor, nonce, tx_root, height)` and wins when it
+/// meets `target`. `seed_hash` is the RandomX VM key for this height. The full
+/// candidate block backing this job is held server-side in
+/// `StratumServer::candidates[job_id]` so a winning nonce can be assembled and
+/// submitted. (The Bitcoin-style `prev_hash`/`coinbase1`/`coinbase2`/
+/// `merkle_branches`/`nbits`/`version` fields are retained for the legacy wire
+/// format until the Monero-style wire protocol lands in Step 7; block
+/// production no longer uses them.)
 #[derive(Clone, Debug)]
 pub struct MiningJob {
     /// Unique job ID
     pub job_id: String,
+    // --- CoinCync/RandomX PoW fields (authoritative for verification) ---
+    /// PoW anchor for this height (from the candidate block).
+    pub anchor: Hash,
+    /// Merkle root over the candidate's transactions.
+    pub tx_root: Hash,
+    /// RandomX VM seed (key) for this height.
+    pub seed_hash: [u8; 32],
+    /// Full 256-bit block target.
+    pub target: Hash,
+    /// Block height
+    pub height: u64,
+    // --- legacy Bitcoin-style fields (wire compatibility only) ---
     /// Previous block hash
     pub prev_hash: Hash,
     /// Coinbase transaction (part 1)
@@ -185,8 +222,6 @@ pub struct MiningJob {
     pub ntime: u32,
     /// Whether to clean previous jobs
     pub clean_jobs: bool,
-    /// Block height
-    pub height: u64,
 }
 
 /// Share submitted by a worker
@@ -227,60 +262,34 @@ impl Share {
         &self,
         job: &MiningJob,
         share_difficulty: u64,
-        extranonce1: &[u8],
+        _extranonce1: &[u8],
     ) -> ShareResult {
         use crate::consensus::{compute_pow_hash, PowAlgorithm};
-        use sha3::{Digest, Sha3_256};
 
-        // Build the coinbase transaction
-        let mut coinbase = Vec::new();
-        coinbase.extend_from_slice(&job.coinbase1);
-        coinbase.extend_from_slice(extranonce1);
-        coinbase.extend_from_slice(&self.extranonce2);
-        coinbase.extend_from_slice(&job.coinbase2);
-
-        // Hash the coinbase to get coinbase hash
-        let coinbase_hash = Sha3_256::digest(&coinbase);
-
-        // Build merkle root from coinbase + branches
-        let mut merkle = Hash::from_bytes({
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&coinbase_hash);
-            bytes
-        });
-
-        for branch in &job.merkle_branches {
-            let mut hasher = Sha3_256::new();
-            hasher.update(merkle.as_bytes());
-            hasher.update(branch.as_bytes());
-            let result = hasher.finalize();
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&result);
-            merkle = Hash::from_bytes(bytes);
-        }
-
-        // Compute PoW hash using the standard algorithm
-        // anchor = prev_hash, nonce from share, tx_root = merkle
+        // CoinCync/RandomX PoW — identical to what the validator computes:
+        // hash the job's anchor + tx_root (both taken from the server-side
+        // candidate block) with the submitted nonce. A hash that meets the
+        // block target therefore corresponds to a real, submittable block; the
+        // submit handler assembles the stored candidate with `self.nonce`.
         let pow_hash = match compute_pow_hash(
             PowAlgorithm::RandomX,
-            &job.prev_hash,
+            &job.anchor,
             self.nonce as u64,
-            &merkle,
+            &job.tx_root,
             job.height,
         ) {
             Ok(h) => h,
             Err(_) => return ShareResult::Invalid,
         };
 
-        // Compare against full share target hash (not leading-zero approximation).
+        // Must meet the per-worker share target.
         let share_target = Hash::from_difficulty(share_difficulty);
         if !pow_hash.meets_difficulty(&share_target) {
             return ShareResult::Invalid;
         }
 
-        // Check if hash also meets block target encoded in compact nbits.
-        let block_target = nbits_to_target(job.nbits);
-        if pow_hash.meets_difficulty(&block_target) {
+        // Also meets the full block target? => a real block was found.
+        if pow_hash.meets_difficulty(&job.target) {
             return ShareResult::Block(pow_hash);
         }
 
@@ -289,6 +298,9 @@ impl Share {
 }
 
 /// Convert compact `nbits` into a full 256-bit target (big-endian).
+// Retained for the legacy Bitcoin-style wire (format_mining_notify sends nbits)
+// and its unit tests; the CoinCync PoW path uses the job's full `target`.
+#[allow(dead_code)]
 fn nbits_to_target(nbits: u32) -> Hash {
     let exponent = ((nbits >> 24) & 0xff) as usize;
     let mantissa = nbits & 0x007f_ffff;
@@ -325,6 +337,10 @@ fn nbits_to_target(nbits: u32) -> Hash {
 struct Worker {
     /// Worker name
     name: String,
+    /// The miner's payout login (the `login` string, conventionally
+    /// `<miner_address>.<worker>`). A public pool credits this miner's shares
+    /// here; the operator distributes rewards off the share tally.
+    payout_login: String,
     /// Worker address (for payout)
     address: Option<PublicKey>,
     /// Extranonce1 assigned to this worker
@@ -380,11 +396,19 @@ pub struct StratumServer {
     next_job_id: Arc<AtomicU64>,
     extranonce_counter: Arc<AtomicU64>,
     current_job: Arc<RwLock<Option<MiningJob>>>,
+    /// Full candidate block backing each live job, keyed by job_id. A winning
+    /// nonce is assembled from the candidate here and submitted to the chain.
+    /// Only populated when payout keys are configured.
+    candidates: Arc<RwLock<HashMap<String, CandidateBlock>>>,
     job_broadcast: broadcast::Sender<MiningJob>,
     stats: Arc<RwLock<StratumStats>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     bans: Arc<RwLock<HashMap<String, PersistedBanEntry>>>,
     banlist_path: Option<PathBuf>,
+    /// Optional P2P handle so a pool-found block is broadcast to peers. Without
+    /// it, an accepted block stays local — fine for an isolated regtest node,
+    /// but on a real network the pool would fork away from its peers.
+    p2p: Option<Arc<crate::network::P2PNode>>,
 }
 
 impl StratumServer {
@@ -408,12 +432,21 @@ impl StratumServer {
             next_job_id: Arc::new(AtomicU64::new(1)),
             extranonce_counter: Arc::new(AtomicU64::new(1)),
             current_job: Arc::new(RwLock::new(None)),
+            candidates: Arc::new(RwLock::new(HashMap::new())),
             job_broadcast,
             stats: Arc::new(RwLock::new(StratumStats::default())),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            p2p: None,
             bans: Arc::new(RwLock::new(bans)),
             banlist_path,
         }
+    }
+
+    /// Attach a P2P handle so pool-found blocks are broadcast to peers. Call
+    /// this when wiring the server into a node that has a live P2P layer.
+    pub fn with_p2p(mut self, p2p: Arc<crate::network::P2PNode>) -> Self {
+        self.p2p = Some(p2p);
+        self
     }
 
     /// Start the Stratum server
@@ -494,15 +527,36 @@ impl StratumServer {
         stats
     }
 
+    /// Per-login share tally for a PUBLIC-pool operator: each miner's valid
+    /// shares weighted by their share difficulty, keyed by their `login`
+    /// (conventionally `<miner_address>.<worker>`). This is the input to a
+    /// payout scheme — the operator distributes the coinbase (which pays the
+    /// pool's own `--stratum-address`) to miners in proportion to these
+    /// weighted shares. Solo/self-hosted operators can ignore it.
+    pub async fn share_tally(&self) -> HashMap<String, u128> {
+        let mut out: HashMap<String, u128> = HashMap::new();
+        for w in self.workers.read().await.values() {
+            if w.payout_login.is_empty() {
+                continue;
+            }
+            *out.entry(w.payout_login.clone()).or_insert(0) +=
+                (w.valid_shares as u128).saturating_mul(w.difficulty.max(1) as u128);
+        }
+        out
+    }
+
     /// Spawn job update task
     fn spawn_job_updater(&self) {
         let chain = self.chain.clone();
         let mempool = self.mempool.clone();
         let current_job = self.current_job.clone();
+        let candidates = self.candidates.clone();
         let job_broadcast = self.job_broadcast.clone();
         let next_job_id = self.next_job_id.clone();
         let running = self.running.clone();
         let share_difficulty = self.config.share_difficulty;
+        let payout_spend = self.config.payout_spend_public;
+        let payout_view = self.config.payout_view_public;
 
         tokio::spawn(async move {
             let mut last_tip = Hash::zero();
@@ -515,15 +569,64 @@ impl StratumServer {
                     last_tip = tip;
 
                     // Create new job
-                    let job_id = next_job_id.fetch_add(1, Ordering::SeqCst);
+                    let job_id_num = next_job_id.fetch_add(1, Ordering::SeqCst);
+                    let job_id = format!("{:08x}", job_id_num);
                     let height = chain.height() + 1;
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as u32)
                         .unwrap_or(0);
 
+                    // Build the real candidate block if payout keys are set. The
+                    // candidate carries the authoritative anchor/tx_root/target
+                    // and is stashed so a winning nonce can be assembled into a
+                    // submittable block. Without payout keys the pool can only
+                    // hand out (legacy) shares-only jobs.
+                    let (anchor, tx_root, target, job_height) = match (payout_spend, payout_view) {
+                        (Some(spend), Some(view)) => {
+                            match block_builder::build_candidate_block(
+                                &chain,
+                                &mempool,
+                                &spend,
+                                &view,
+                                chain.network(),
+                                crate::consensus::fork_signal::SignalBits(0),
+                            ) {
+                                Ok(cand) => {
+                                    let (a, t, h) = cand.pow_inputs();
+                                    let tgt = cand.header.target;
+                                    // Keep only the current job's candidate — a new
+                                    // job only fires on a tip change, so older
+                                    // candidates are for a superseded tip and can
+                                    // never produce a canonical block.
+                                    let mut c = candidates.write().await;
+                                    c.clear();
+                                    c.insert(job_id.clone(), cand);
+                                    (a, t, tgt, h)
+                                }
+                                Err(e) => {
+                                    warn!("stratum: build_candidate_block failed: {e}; retrying");
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => (
+                            Hash::zero(),
+                            Hash::zero(),
+                            Hash::from_difficulty(share_difficulty),
+                            height,
+                        ),
+                    };
+                    let seed_hash = crate::consensus::randomx_seed_for_height(job_height);
+
                     let job = MiningJob {
-                        job_id: format!("{:08x}", job_id),
+                        job_id: job_id.clone(),
+                        anchor,
+                        tx_root,
+                        seed_hash,
+                        target,
+                        height: job_height,
                         prev_hash: tip,
                         coinbase1: create_coinbase_prefix(height),
                         coinbase2: create_coinbase_suffix(),
@@ -532,7 +635,6 @@ impl StratumServer {
                         nbits: difficulty_to_nbits(share_difficulty),
                         ntime: timestamp,
                         clean_jobs: true,
-                        height,
                     };
 
                     // Update current job
@@ -541,7 +643,11 @@ impl StratumServer {
                     // Broadcast to all workers
                     let _ = job_broadcast.send(job);
 
-                    info!("New mining job: height={}", height);
+                    info!(
+                        "New mining job: height={} block_production={}",
+                        job_height,
+                        payout_spend.is_some()
+                    );
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -561,6 +667,9 @@ impl StratumServer {
         let mut job_rx = self.job_broadcast.subscribe();
         let stats = self.stats.clone();
         let chain = self.chain.clone();
+        let mempool = self.mempool.clone();
+        let candidates = self.candidates.clone();
+        let p2p = self.p2p.clone();
         let share_difficulty = self.config.share_difficulty;
         let required_password = self.config.auth_password.clone();
         let bans = self.bans.clone();
@@ -575,6 +684,7 @@ impl StratumServer {
             // Create worker entry
             let worker = Worker {
                 name: format!("worker_{}", worker_id),
+                payout_login: String::new(),
                 address: None,
                 extranonce1: extranonce1.to_le_bytes()[..4].to_vec(),
                 shares: 0,
@@ -610,7 +720,10 @@ impl StratumServer {
                         }
                         job = job_rx.recv() => {
                             if let Ok(job) = job {
-                                let notify = format_mining_notify(&job);
+                                let notify = format_cync_job_notify(
+                                    &job,
+                                    &Hash::from_difficulty(share_difficulty),
+                                );
                                 if writer.write_all(notify.as_bytes()).await.is_err() {
                                     break;
                                 }
@@ -653,8 +766,11 @@ impl StratumServer {
                             worker_id,
                             &workers,
                             &current_job,
+                            &candidates,
                             &stats,
                             &chain,
+                            &mempool,
+                            p2p.as_ref(),
                             share_difficulty,
                             required_password.as_deref(),
                             &addr.ip().to_string(),
@@ -678,13 +794,98 @@ impl StratumServer {
 }
 
 /// Handle a Stratum JSON-RPC message
+/// Assemble the stored candidate for `job_id` with the winning `nonce`, submit
+/// it through the validated chain path, and broadcast on acceptance. Shared by
+/// the legacy and CoinCync-native submit paths.
+async fn submit_and_broadcast(
+    candidates: &Arc<RwLock<HashMap<String, CandidateBlock>>>,
+    chain: &SharedBlockchain,
+    mempool: &SharedMempool,
+    p2p: Option<&Arc<crate::network::P2PNode>>,
+    job_id: &str,
+    nonce: u64,
+    worker_id: u64,
+) {
+    let cand = candidates.read().await.get(job_id).cloned();
+    match cand {
+        Some(cand) => {
+            let block = cand.into_block(nonce);
+            // Clone for broadcast before submit consumes the block.
+            let block_for_broadcast = p2p.map(|_| block.clone());
+            match block_builder::submit_mined_block(chain, mempool, block) {
+                Ok(status) => {
+                    info!("stratum: block from worker {} submitted — {:?}", worker_id, status);
+                    let accepted = matches!(
+                        status,
+                        crate::chain::BlockStatus::Accepted
+                            | crate::chain::BlockStatus::AcceptedFork
+                            | crate::chain::BlockStatus::AcceptedReorg { .. }
+                    );
+                    if accepted {
+                        if let (Some(p2p), Some(b)) = (p2p, block_for_broadcast) {
+                            let update = p2p.next_chain_update();
+                            p2p.set_chain_state(update).await;
+                            if let Err(e) = p2p.broadcast_block(&b).await {
+                                warn!("stratum: block broadcast failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => warn!("stratum: block submit failed: {}", e),
+            }
+        }
+        None => warn!(
+            "stratum: block found for job {} but no candidate stored \
+             (shares-only pool, or the job was superseded)",
+            job_id
+        ),
+    }
+}
+
+/// The CoinCync mining job as a JSON object. A miner varies a u64 `nonce` and
+/// wins when `compute_pow_hash(RandomX, anchor, nonce, tx_root, height)` —
+/// i.e. `RandomX(seed_hash, blake3(anchor ‖ nonce_le ‖ tx_root))` — meets
+/// `target`. This is CoinCync's OWN protocol; it is not Monero/xmrig blob
+/// mining (our PoW folds the nonce through blake3, which xmrig does not do).
+///
+/// `share_target` is the SHARE target the miner should aim for — easier than the
+/// block target, so miners submit "shares" at a steady rate. The server still
+/// checks every submitted share against the real block target and submits a
+/// block when one is met. For a solo/self-hosted pool, set `share_difficulty`
+/// low; for a public pool it's the (future vardiff-tuned) per-worker target.
+fn cync_job_json(job: &MiningJob, share_target: &Hash) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": job.job_id,
+        "algo": "cync/rx",
+        "anchor": hex::encode(job.anchor.as_bytes()),
+        "tx_root": hex::encode(job.tx_root.as_bytes()),
+        "seed_hash": hex::encode(job.seed_hash),
+        "target": hex::encode(share_target.as_bytes()),
+        "height": job.height,
+    })
+}
+
+/// A pushed `job` notification (sent to a logged-in miner on a tip change).
+fn format_cync_job_notify(job: &MiningJob, share_target: &Hash) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "job",
+        "params": cync_job_json(job, share_target),
+    })
+    .to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_stratum_message(
     message: &str,
     worker_id: u64,
     workers: &Arc<RwLock<HashMap<u64, Worker>>>,
     current_job: &Arc<RwLock<Option<MiningJob>>>,
+    candidates: &Arc<RwLock<HashMap<String, CandidateBlock>>>,
     stats: &Arc<RwLock<StratumStats>>,
-    _chain: &SharedBlockchain,
+    chain: &SharedBlockchain,
+    mempool: &SharedMempool,
+    p2p: Option<&Arc<crate::network::P2PNode>>,
     share_difficulty: u64,
     required_password: Option<&str>,
     client_ip: &str,
@@ -698,6 +899,173 @@ async fn handle_stratum_message(
     let params = json.get("params")?;
 
     match method {
+        // ===== CoinCync-native protocol: login / job / submit / keepalived =====
+        "login" => {
+            let login_name = params.get("login").and_then(|v| v.as_str()).unwrap_or("cync");
+            let pass = params.get("pass").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(expected) = required_password {
+                if pass.len() != expected.len()
+                    || !crate::crypto::ct_eq(pass.as_bytes(), expected.as_bytes())
+                {
+                    warn!("login: worker {} failed password", worker_id);
+                    register_stratum_strike(bans, banlist_path, client_ip, 5).await;
+                    return Some(
+                        serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                            "result": serde_json::Value::Null,
+                            "error": {"code": -1, "message": "unauthorized"}})
+                        .to_string(),
+                    );
+                }
+            }
+            {
+                let mut w = workers.write().await;
+                if let Some(worker) = w.get_mut(&worker_id) {
+                    worker.name = login_name.to_string();
+                    // Credit this miner's shares to their login (conventionally
+                    // <miner_address>.<worker>). The operator pays out on this.
+                    worker.payout_login = login_name.to_string();
+                    worker.authorized = true;
+                    worker.last_activity = timestamp_now();
+                }
+            }
+            info!("login: worker {} authorized as {}", worker_id, login_name);
+            let share_target = Hash::from_difficulty(share_difficulty);
+            let job_val = current_job
+                .read()
+                .await
+                .as_ref()
+                .map(|j| cync_job_json(j, &share_target))
+                .unwrap_or(serde_json::Value::Null);
+            Some(
+                serde_json::json!({
+                    "id": id.clone(), "jsonrpc": "2.0",
+                    "result": {"id": format!("{:08x}", worker_id), "job": job_val, "status": "OK"},
+                    "error": serde_json::Value::Null
+                })
+                .to_string(),
+            )
+        }
+
+        "submit" => {
+            // Params: {id: <session>, job_id, nonce (hex u64)}.
+            {
+                let wr = workers.read().await;
+                if !wr.get(&worker_id).map(|w| w.authorized).unwrap_or(false) {
+                    return Some(
+                        serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                            "result": serde_json::Value::Null,
+                            "error": {"code": -1, "message": "unauthenticated"}})
+                        .to_string(),
+                    );
+                }
+            }
+            let sub_job_id = params.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
+            let nonce_hex = params.get("nonce").and_then(|v| v.as_str()).unwrap_or("");
+            let nonce = match u64::from_str_radix(nonce_hex.trim_start_matches("0x"), 16) {
+                Ok(n) => n,
+                Err(_) => {
+                    return Some(
+                        serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                            "result": serde_json::Value::Null,
+                            "error": {"code": -1, "message": "bad nonce"}})
+                        .to_string(),
+                    )
+                }
+            };
+            // Cadence throttle.
+            {
+                let now_ms = timestamp_now_ms();
+                let mut ww = workers.write().await;
+                if let Some(w) = ww.get_mut(&worker_id) {
+                    if w.last_submit_ms > 0
+                        && now_ms.saturating_sub(w.last_submit_ms) < MIN_SUBMIT_INTERVAL_MS
+                    {
+                        return Some(
+                            serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                                "result": serde_json::Value::Null,
+                                "error": {"code": -1, "message": "throttled"}})
+                            .to_string(),
+                        );
+                    }
+                    w.last_submit_ms = now_ms;
+                    w.last_activity = timestamp_now();
+                }
+            }
+            // Snapshot the current job (drop the lock before hashing/submitting).
+            let job = {
+                let cur = current_job.read().await;
+                match cur.as_ref() {
+                    Some(j) if j.job_id == sub_job_id => j.clone(),
+                    _ => {
+                        return Some(
+                            serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                                "result": serde_json::Value::Null,
+                                "error": {"code": -1, "message": "stale job"}})
+                            .to_string(),
+                        )
+                    }
+                }
+            };
+            let pow = match crate::consensus::compute_pow_hash(
+                crate::consensus::PowAlgorithm::RandomX,
+                &job.anchor,
+                nonce,
+                &job.tx_root,
+                job.height,
+            ) {
+                Ok(h) => h,
+                Err(_) => {
+                    return Some(
+                        serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                            "result": serde_json::Value::Null,
+                            "error": {"code": -1, "message": "hash error"}})
+                        .to_string(),
+                    )
+                }
+            };
+            if !pow.meets_difficulty(&Hash::from_difficulty(share_difficulty)) {
+                let mut wr = workers.write().await;
+                if let Some(w) = wr.get_mut(&worker_id) {
+                    w.invalid_shares += 1;
+                }
+                return Some(
+                    serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                        "result": serde_json::Value::Null,
+                        "error": {"code": -1, "message": "low difficulty share"}})
+                    .to_string(),
+                );
+            }
+            {
+                let mut wr = workers.write().await;
+                if let Some(w) = wr.get_mut(&worker_id) {
+                    w.valid_shares += 1;
+                    w.invalid_streak = 0;
+                }
+                let mut s = stats.write().await;
+                s.total_shares += 1;
+                s.valid_shares += 1;
+            }
+            if pow.meets_difficulty(&job.target) {
+                {
+                    stats.write().await.blocks_found += 1;
+                }
+                info!("submit: BLOCK FOUND by worker {} (job {})", worker_id, sub_job_id);
+                submit_and_broadcast(candidates, chain, mempool, p2p, &job.job_id, nonce, worker_id)
+                    .await;
+            }
+            Some(
+                serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                    "result": {"status": "OK"}, "error": serde_json::Value::Null})
+                .to_string(),
+            )
+        }
+
+        "keepalived" => Some(
+            serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                "result": {"status": "KEEPALIVED"}, "error": serde_json::Value::Null})
+            .to_string(),
+        ),
+
         "mining.subscribe" => {
             let workers = workers.read().await;
             let worker = workers.get(&worker_id)?;
@@ -893,6 +1261,9 @@ async fn handle_stratum_message(
             } else {
                 ShareResult::Stale
             };
+            // Release the job read-guard before any chain work below, so the
+            // submit path never holds current_job while entering process_block.
+            drop(current);
 
             // Update stats based on result
             let mut should_strike_for_invalid_streak = false;
@@ -946,6 +1317,21 @@ async fn handle_stratum_message(
                     ShareResult::Stale => s.stale_shares += 1,
                     ShareResult::Invalid | ShareResult::Duplicate => s.invalid_shares += 1,
                 }
+            }
+
+            // A real block was found — assemble the stored candidate with the
+            // winning nonce and submit + broadcast it.
+            if matches!(share_result, ShareResult::Block(_)) {
+                submit_and_broadcast(
+                    candidates,
+                    chain,
+                    mempool,
+                    p2p,
+                    job_id,
+                    share.nonce as u64,
+                    worker_id,
+                )
+                .await;
             }
 
             debug!(
@@ -1232,6 +1618,11 @@ mod tests {
     fn test_mining_notify_format() {
         let job = MiningJob {
             job_id: "00000001".to_string(),
+            anchor: Hash::zero(),
+            tx_root: Hash::zero(),
+            seed_hash: [0u8; 32],
+            target: Hash::from_difficulty(1000),
+            height: 100,
             prev_hash: Hash::zero(),
             coinbase1: vec![0, 1, 2, 3],
             coinbase2: vec![4, 5, 6, 7],
@@ -1240,7 +1631,6 @@ mod tests {
             nbits: 0x1d00ffff,
             ntime: 1234567890,
             clean_jobs: true,
-            height: 100,
         };
 
         let notify = format_mining_notify(&job);
@@ -1305,6 +1695,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<String>(4);
         let worker = Worker {
             name: "w".to_string(),
+            payout_login: "w".to_string(),
             address: None,
             extranonce1: vec![1, 2, 3, 4],
             shares: 0,
@@ -1326,6 +1717,11 @@ mod tests {
         workers.write().await.insert(worker_id, worker);
         let current_job = Arc::new(RwLock::new(Some(MiningJob {
             job_id: "job-1".to_string(),
+            anchor: Hash::zero(),
+            tx_root: Hash::zero(),
+            seed_hash: [0u8; 32],
+            target: Hash::from_difficulty(1000),
+            height: 1,
             prev_hash: Hash::zero(),
             coinbase1: vec![],
             coinbase2: vec![],
@@ -1334,11 +1730,12 @@ mod tests {
             nbits: 0x1d00ffff,
             ntime: 1,
             clean_jobs: true,
-            height: 1,
         })));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
         let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
 
         let submit = r#"{"id":1,"method":"mining.submit","params":["w","job-1","00","00000001","00000001"]}"#;
         let resp = handle_stratum_message(
@@ -1346,8 +1743,11 @@ mod tests {
             worker_id,
             &workers,
             &current_job,
+            &candidates,
             &stats,
             &chain,
+            &mempool,
+            None,
             1000,
             None,
             "198.51.100.77",
@@ -1371,5 +1771,238 @@ mod tests {
             bans_guard.get("198.51.100.77").is_some(),
             "throttled submit should register strike"
         );
+    }
+
+    /// Stage-3 milestone: an authorized worker submits a REAL winning nonce and
+    /// the in-node pool assembles the stored candidate + submits it, advancing
+    /// the chain. This is the end-to-end "the pool produces blocks" proof.
+    /// `#[ignore]` — builds a RandomX cache and mines a block (~seconds). Run:
+    ///   cargo test -p coincync --features "randomx testnet" --lib -- --ignored stratum_submit_produces_block
+    #[tokio::test]
+    #[ignore]
+    async fn stratum_submit_produces_block() {
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        use crate::consensus::{compute_pow_hash, PowAlgorithm};
+        let net = crate::config::NetworkType::Testnet;
+        crate::consensus::bind_randomx_genesis_for_network(net);
+
+        // Fresh chain + mempool + payout keys.
+        let chain: SharedBlockchain = Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().expect("genesis");
+        let mempool = crate::mempool::SharedMempool::new();
+        let spend = crate::primitives::SecretKey::from_bytes([7u8; 32]).public_key();
+        let view = crate::primitives::SecretKey::from_bytes([9u8; 32]).public_key();
+
+        // Build the candidate the job updater would, and a matching job.
+        let cand = block_builder::build_candidate_block(
+            &chain,
+            &mempool,
+            &spend,
+            &view,
+            net,
+            crate::consensus::fork_signal::SignalBits(0),
+        )
+        .expect("candidate");
+        let (anchor, tx_root, height) = cand.pow_inputs();
+        let target = cand.header.target;
+        let job_id = "job-1".to_string();
+
+        // Mine a u32 nonce meeting the block target (floor difficulty on a fresh chain).
+        let mut nonce: u32 = 0;
+        let winning = loop {
+            let h = compute_pow_hash(PowAlgorithm::RandomX, &anchor, nonce as u64, &tx_root, height)
+                .expect("hash");
+            if h.meets_difficulty(&target) {
+                break nonce;
+            }
+            nonce = nonce.checked_add(1).expect("nonce found within u32 at floor difficulty");
+        };
+
+        // Stash candidate + job.
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+        candidates.write().await.insert(job_id.clone(), cand);
+        let current_job = Arc::new(RwLock::new(Some(MiningJob {
+            job_id: job_id.clone(),
+            anchor,
+            tx_root,
+            seed_hash: crate::consensus::randomx_seed_for_height(height),
+            target,
+            height,
+            prev_hash: chain.tip_hash(),
+            coinbase1: vec![],
+            coinbase2: vec![],
+            merkle_branches: vec![],
+            version: 1,
+            nbits: 0,
+            ntime: 0,
+            clean_jobs: true,
+        })));
+
+        // Authorized worker, no prior submit (so not throttled).
+        let worker_id = 1u64;
+        let (tx, _rx) = mpsc::channel::<String>(4);
+        let worker = Worker {
+            name: "w".to_string(),
+            payout_login: "w".to_string(),
+            address: None,
+            extranonce1: vec![0, 0, 0, 0],
+            shares: 0,
+            valid_shares: 0,
+            stale_shares: 0,
+            invalid_shares: 0,
+            difficulty: 1000,
+            authorized: true,
+            last_submit_ms: 0,
+            invalid_streak: 0,
+            last_activity: timestamp_now(),
+            current_job_id: job_id.clone(),
+            submitted_shares: std::collections::HashSet::new(),
+            tx,
+        };
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(worker_id, worker);
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+
+        // Submit the winning nonce through the real handler.
+        let submit = format!(
+            r#"{{"id":1,"method":"mining.submit","params":["w","{}","00","00000000","{:08x}"]}}"#,
+            job_id, winning
+        );
+        let resp = handle_stratum_message(
+            &submit,
+            worker_id,
+            &workers,
+            &current_job,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
+        )
+        .await
+        .expect("response");
+
+        assert!(resp.contains("\"result\":true"), "share accepted: {resp}");
+        assert_eq!(chain.height(), 1, "pool submitted the block; tip advanced");
+        assert_eq!(stats.read().await.blocks_found, 1, "one block found");
+    }
+
+    /// Stage-7 milestone: the CoinCync-native protocol end-to-end — `login`
+    /// authenticates + returns a job, then `submit` of a real winning u64 nonce
+    /// produces + submits the block. This is "our own version" of stratum.
+    /// `#[ignore]` — builds a RandomX cache + mines a block.
+    #[tokio::test]
+    #[ignore]
+    async fn cync_login_and_submit_produces_block() {
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        use crate::consensus::{compute_pow_hash, PowAlgorithm};
+        let net = crate::config::NetworkType::Testnet;
+        crate::consensus::bind_randomx_genesis_for_network(net);
+
+        let chain: SharedBlockchain = Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().expect("genesis");
+        let mempool = crate::mempool::SharedMempool::new();
+        let spend = crate::primitives::SecretKey::from_bytes([7u8; 32]).public_key();
+        let view = crate::primitives::SecretKey::from_bytes([9u8; 32]).public_key();
+        let cand = block_builder::build_candidate_block(
+            &chain,
+            &mempool,
+            &spend,
+            &view,
+            net,
+            crate::consensus::fork_signal::SignalBits(0),
+        )
+        .expect("candidate");
+        let (anchor, tx_root, height) = cand.pow_inputs();
+        let target = cand.header.target;
+        let job_id = "job-1".to_string();
+
+        // Mine a full u64 nonce (the native protocol uses u64 nonces).
+        let mut nonce: u64 = 0;
+        let winning = loop {
+            let h = compute_pow_hash(PowAlgorithm::RandomX, &anchor, nonce, &tx_root, height)
+                .expect("hash");
+            if h.meets_difficulty(&target) {
+                break nonce;
+            }
+            nonce += 1;
+        };
+
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+        candidates.write().await.insert(job_id.clone(), cand);
+        let current_job = Arc::new(RwLock::new(Some(MiningJob {
+            job_id: job_id.clone(),
+            anchor,
+            tx_root,
+            seed_hash: crate::consensus::randomx_seed_for_height(height),
+            target,
+            height,
+            prev_hash: chain.tip_hash(),
+            coinbase1: vec![],
+            coinbase2: vec![],
+            merkle_branches: vec![],
+            version: 1,
+            nbits: 0,
+            ntime: 0,
+            clean_jobs: true,
+        })));
+
+        // Worker starts UNauthorized — login authorizes it.
+        let worker_id = 1u64;
+        let (tx, _rx) = mpsc::channel::<String>(4);
+        let worker = Worker {
+            name: String::new(),
+            payout_login: "pool.w".to_string(),
+            address: None,
+            extranonce1: vec![0, 0, 0, 0],
+            shares: 0,
+            valid_shares: 0,
+            stale_shares: 0,
+            invalid_shares: 0,
+            difficulty: 1000,
+            authorized: false,
+            last_submit_ms: 0,
+            invalid_streak: 0,
+            last_activity: timestamp_now(),
+            current_job_id: String::new(),
+            submitted_shares: std::collections::HashSet::new(),
+            tx,
+        };
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(worker_id, worker);
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+
+        // login
+        let login = r#"{"id":1,"method":"login","params":{"login":"pool.w","pass":"","algo":["cync/rx"]}}"#;
+        let resp = handle_stratum_message(
+            login, worker_id, &workers, &current_job, &candidates, &stats, &chain, &mempool, None,
+            1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("login response");
+        assert!(resp.contains("\"status\":\"OK\""), "login OK: {resp}");
+        assert!(resp.contains(&job_id), "login returns the current job");
+
+        // submit the winning nonce
+        let submit = format!(
+            r#"{{"id":2,"method":"submit","params":{{"id":"sess","job_id":"{}","nonce":"{:x}"}}}}"#,
+            job_id, winning
+        );
+        let resp2 = handle_stratum_message(
+            &submit, worker_id, &workers, &current_job, &candidates, &stats, &chain, &mempool, None,
+            1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("submit response");
+        assert!(resp2.contains("\"status\":\"OK\""), "submit OK: {resp2}");
+        assert_eq!(chain.height(), 1, "native submit produced a block; tip advanced");
+        assert_eq!(stats.read().await.blocks_found, 1, "one block found");
     }
 }

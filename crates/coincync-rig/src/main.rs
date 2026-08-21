@@ -173,6 +173,28 @@ enum Command {
         signal_v1012: bool,
     },
 
+    /// Mine against a CoinCync stratum POOL (the node's built-in `--stratum`
+    /// pool, or any pool speaking CoinCync's login/job/submit protocol). The
+    /// pool builds the coinbase to ITS payout address and assembles/submits
+    /// blocks server-side; this client only searches nonces and submits.
+    RunPool {
+        /// Pool address, e.g. `127.0.0.1:3333`.
+        #[arg(long)]
+        pool: String,
+        /// Worker login label sent to the pool (payout is decided by the pool).
+        #[arg(long, default_value = "coincync-rig")]
+        login: String,
+        /// Optional pool password.
+        #[arg(long, default_value = "")]
+        password: String,
+        /// Network. Defaults to testnet.
+        #[arg(long, default_value = "testnet")]
+        network: NetworkArg,
+        /// Number of mining threads. 0 = auto-detect (cpu count).
+        #[arg(long, default_value = "0")]
+        threads: usize,
+    },
+
     /// Same as `run-solo`, but takes a TOML config file. CLI flags
     /// override config values when both are present. Useful for
     /// systemd units that don't want long ExecStart lines.
@@ -270,8 +292,34 @@ fn main() -> Result<()> {
             signal_v1012,
             tui_log_rx,
         ),
+        Command::RunPool {
+            pool,
+            login,
+            password,
+            network,
+            threads,
+        } => run_pool_cli(&pool, &login, &password, network, threads),
         Command::RunConfig { config } => run_config_cli(&config),
     }
+}
+
+// ─── run-pool ────────────────────────────────────────────────────────
+
+fn run_pool_cli(
+    pool: &str,
+    login: &str,
+    password: &str,
+    network: NetworkArg,
+    threads: usize,
+) -> Result<()> {
+    let net = network.into_network_type();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("creating tokio runtime")?;
+    println!("connecting to CoinCync pool {pool} …");
+    rt.block_on(async move { orchestrator::run_pool(pool, login, password, net, threads).await })
 }
 
 fn print_banner() {

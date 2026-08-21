@@ -114,6 +114,31 @@ struct Cli {
     #[arg(long)]
     rest_disable: bool,
 
+    /// Enable the built-in Stratum mining-pool server on this bind address
+    /// (e.g. `127.0.0.1:3333`). Off by default. Requires `--stratum-address`
+    /// to actually produce blocks; a non-loopback bind is subject to the
+    /// standard Stratum public-exposure policy (ACK + password + TLS/proxy).
+    #[arg(long)]
+    stratum: Option<String>,
+
+    /// Payout address for the built-in Stratum pool — the coinbase of every
+    /// block the pool finds is paid to a stealth address derived from this
+    /// CYNC address. Required for the pool to build blocks.
+    #[arg(long)]
+    stratum_address: Option<String>,
+
+    /// SOLO MINE: run a built-in CPU miner in this same process, paying the
+    /// coinbase to this CYNC address. One command = a node that mines to you,
+    /// no separate `coincync-rig` needed. The node only ever sees the address's
+    /// PUBLIC keys (no secret-key custody). Mines only when the node is synced
+    /// (or has no peers, or on regtest), to avoid building a private fork.
+    #[arg(long)]
+    mine: Option<String>,
+
+    /// Threads for the built-in solo miner (`--mine`). 0 = auto (CPU count).
+    #[arg(long, default_value = "0")]
+    mine_threads: usize,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -520,6 +545,10 @@ async fn main() {
                 cli.proxy,
                 cli.tor,
                 cli.onion_only,
+                cli.stratum,
+                cli.stratum_address,
+                cli.mine,
+                cli.mine_threads,
             )
             .await
             {
@@ -749,6 +778,10 @@ async fn start_node(
     proxy_arg: Option<String>,
     tor_shortcut: bool,
     onion_only: bool,
+    stratum: Option<String>,
+    stratum_address: Option<String>,
+    mine: Option<String>,
+    mine_threads: usize,
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
@@ -1426,6 +1459,172 @@ async fn start_node(
                 error!("REST API exited: {}", e);
             }
         });
+    }
+
+    // Built-in Stratum mining-pool server (opt-in via --stratum). It builds
+    // real candidate blocks and, on a winning share, assembles + submits +
+    // broadcasts them through the same validated path as submit_block. Without
+    // --stratum-address it runs shares-only (no block production).
+    if let Some(stratum_bind) = stratum {
+        match stratum_bind.parse::<std::net::SocketAddr>() {
+            Ok(bind_addr) => {
+                let mut scfg = coincync::mining::stratum::StratumConfig::default();
+                scfg.bind_addr = bind_addr;
+                match stratum_address.as_deref() {
+                    Some(s) => match coincync::primitives::Address::from_string(s) {
+                        Ok(addr) => {
+                            scfg.payout_spend_public = Some(addr.spend_public_key);
+                            scfg.payout_view_public = Some(addr.view_public_key);
+                        }
+                        Err(e) => error!(
+                            "--stratum-address invalid ({}); Stratum runs shares-only (no blocks)",
+                            e
+                        ),
+                    },
+                    None => warn!(
+                        "--stratum set without --stratum-address; Stratum runs shares-only (no blocks)"
+                    ),
+                }
+                let block_production = scfg.payout_spend_public.is_some();
+                let server = std::sync::Arc::new(
+                    coincync::mining::stratum::StratumServer::new(
+                        scfg,
+                        chain_arc.clone(),
+                        mempool.clone(),
+                    )
+                    .with_p2p(p2p.clone()),
+                );
+                info!(
+                    "Starting Stratum pool on {} (block_production={})",
+                    bind_addr, block_production
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = server.start().await {
+                        error!("Stratum server exited: {}", e);
+                    }
+                });
+            }
+            Err(e) => error!("--stratum bind address {:?} invalid: {}", stratum_bind, e),
+        }
+    }
+
+    // Built-in solo miner (opt-in via --mine). One process = a node that mines
+    // to your address. The node only ever holds the payout ADDRESS (public
+    // keys), never secret keys — you scan + spend the coinbase later with your
+    // wallet. Reuses the same block_builder + submit_mined_block engine as the
+    // pool, plus a threaded nonce search.
+    if let Some(mine_addr) = mine {
+        match coincync::primitives::Address::from_string(&mine_addr) {
+            Ok(addr) => {
+                let spend = addr.spend_public_key;
+                let view = addr.view_public_key;
+                let n_threads = if mine_threads == 0 {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1)
+                } else {
+                    mine_threads
+                };
+                let chain_m = chain_arc.clone();
+                let mempool_m = mempool.clone();
+                let p2p_m = p2p.clone();
+                info!(
+                    "Built-in solo miner ON — mining to {}… ({} threads)",
+                    &mine_addr[..mine_addr.len().min(16)],
+                    n_threads
+                );
+                tokio::spawn(async move {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    use std::sync::Arc;
+                    let nt = chain_m.network();
+                    let mut nonce_base: u64 = 0;
+                    loop {
+                        // Mine-gate: never build a private fork. Mine only when
+                        // synced, when there are no peers (solo island), or regtest.
+                        let allowed = matches!(nt, coincync::config::NetworkType::Regtest)
+                            || chain_m.is_synced()
+                            || p2p_m.peer_count() == 0;
+                        if !allowed {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                        let candidate = match coincync::mining::block_builder::build_candidate_block(
+                            &chain_m,
+                            &mempool_m,
+                            &spend,
+                            &view,
+                            nt,
+                            coincync::consensus::fork_signal::SignalBits(0),
+                        ) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                warn!("miner: build candidate failed: {}", e);
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                continue;
+                            }
+                        };
+                        let (anchor, tx_root, height) = candidate.pow_inputs();
+                        let target = candidate.header.target;
+                        let start_tip = chain_m.tip_hash();
+                        let stop = Arc::new(AtomicBool::new(false));
+                        // Watcher: abandon this candidate the moment the tip moves.
+                        let stop_w = stop.clone();
+                        let chain_w = chain_m.clone();
+                        let watcher = tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                if stop_w.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                if chain_w.tip_hash() != start_tip {
+                                    stop_w.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                            }
+                        });
+                        let stop_s = stop.clone();
+                        let base = nonce_base;
+                        let found = tokio::task::spawn_blocking(move || {
+                            coincync::mining::block_builder::search_nonce(
+                                anchor, tx_root, height, target, n_threads, base, &stop_s,
+                            )
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        stop.store(true, Ordering::Relaxed);
+                        watcher.abort();
+                        nonce_base = nonce_base.wrapping_add(1_000_000);
+                        if let Some(nonce) = found {
+                            let block = candidate.into_block(nonce);
+                            let b = block.clone();
+                            match coincync::mining::block_builder::submit_mined_block(
+                                &chain_m, &mempool_m, block,
+                            ) {
+                                Ok(status) => {
+                                    info!("miner: block at height {} — {:?}", height, status);
+                                    let accepted = matches!(
+                                        status,
+                                        coincync::chain::BlockStatus::Accepted
+                                            | coincync::chain::BlockStatus::AcceptedFork
+                                            | coincync::chain::BlockStatus::AcceptedReorg { .. }
+                                    );
+                                    if accepted {
+                                        let update = p2p_m.next_chain_update();
+                                        p2p_m.set_chain_state(update).await;
+                                        if let Err(e) = p2p_m.broadcast_block(&b).await {
+                                            warn!("miner: broadcast failed: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!("miner: submit failed: {}", e),
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => error!("--mine address {:?} invalid: {}", mine_addr, e),
+        }
     }
 
     info!("Node is running. Ctrl-C or systemctl stop to shut down.");

@@ -1,21 +1,28 @@
-//! # Mining Pool Reference Implementation
+//! # Mining Pool Reference Design (UNWIRED — reference only)
 //!
-//! A reference implementation for CoinCync mining pools using the Stratum protocol.
-//! This provides a foundation for pool operators to build upon.
+//! > **Status:** this module is a standalone *design reference* for the payout
+//! > layer (PPLNS + vardiff) and is **not wired to real block production**. It
+//! > builds no consensus-correct coinbase, submits nothing to the chain, and is
+//! > not started by any binary. Do **not** run a public pool from it.
+//! >
+//! > The **wired, consensus-correct** pool is the in-node Stratum server
+//! > ([`crate::mining::stratum::StratumServer`], exposed via the node's
+//! > `--stratum` flag). It builds candidates through
+//! > [`crate::mining::block_builder`], submits + broadcasts real blocks, and
+//! > records per-login share accounting via
+//! > [`StratumServer::share_tally`](crate::mining::stratum::StratumServer::share_tally).
+//! > See `docs/mining/POOL-AND-SOLO.md`.
+//! >
+//! > This file is retained as the reference for the *remaining* payout upgrades
+//! > (per-worker vardiff, PPLNS window, extranonce partitioning) to fold into
+//! > the stratum server — see the roadmap in that doc. When those land here,
+//! > delete this module.
 //!
-//! ## Features
-//! - Stratum V1 protocol support
+//! ## Reference design covers
+//! - Stratum V1 protocol shape
 //! - Share accounting with PPLNS payout scheme
 //! - Vardiff (variable difficulty) for miners
 //! - Job management and work distribution
-//!
-//! ## Usage
-//!
-//! ```ignore
-//! let config = PoolConfig::default();
-//! let pool = MiningPool::new(config).await?;
-//! pool.start().await?;
-//! ```
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
