@@ -1083,6 +1083,37 @@ async fn cmd_scan(
     let mut scanner = WalletScanner::new();
     scanner.add_keys(epoch.view_secret.clone(), epoch.spend_public, epoch.epoch);
 
+    // Register this wallet's subaddresses so the scanner can DETECT outputs
+    // sent to them. Without this, `subaddress_keys` stays empty and every
+    // subaddress-destined output is silently skipped: a subaddress output
+    // carries tx pubkey R = r*D_i, so the primary-address check (which
+    // expects R = r*G) never matches, and with no subaddress keys to fall
+    // back on the output is missed entirely. The MAIN address (0/0) is
+    // already covered by `add_keys` above; only non-main subaddresses need
+    // registering here. Detection then sets each matched output's
+    // (account,index), which the spend path (W-A) needs to derive the
+    // correct one-time secret.
+    if let Some(saved) = wallet.subaddress_data() {
+        use coincync::wallet::subaddress::SubaddressManager;
+        let mut mgr = SubaddressManager::new(
+            epoch.view_secret.clone(),
+            epoch.spend_public,
+            epoch.view_public,
+        );
+        mgr.import(saved);
+        let subkeys: Vec<_> = mgr
+            .all_spend_public_keys()
+            .into_iter()
+            .filter(|(_, idx)| !(idx.account == 0 && idx.index == 0))
+            .map(|(pk, idx)| (idx.account, idx.index, pk))
+            .collect();
+        if !subkeys.is_empty() {
+            let n = subkeys.len();
+            scanner.add_subaddress_keys(subkeys);
+            println!("Registered {} subaddress key(s) for scanning", n);
+        }
+    }
+
     // Defensive backstop (Bug #5 mitigation): when --from isn't passed,
     // resume from a few blocks BEFORE the persisted scanned_height. The
     // save() ordering fix in commit-following ensures sidecars are written
