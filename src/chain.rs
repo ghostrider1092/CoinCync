@@ -2862,33 +2862,15 @@ impl Blockchain {
                         // boundary to roll back to. Without this, fork
                         // blocks adopted by a reorg would be un-rewindable.
                         //
-                        // Placement is load-bearing: this MUST sit
-                        // immediately after the `height_to_hash` insert and
-                        // BEFORE the DB-persist `break` below. The site-5a
-                        // rollback guard keys on `height_to_hash`; if the
-                        // checkpoint were taken after the DB-persist break
-                        // point, a DB error would leave this block
-                        // height-mapped but un-checkpointed, and site 5a
-                        // would rewind one checkpoint too many — popping a
-                        // checkpoint belonging to a different block. Keeping
-                        // "height-mapped" and "checkpointed" inseparable
-                        // makes the site-5a guard exact. Still satisfies the
-                        // Interp-B "checkpoint before state applied"
-                        // contract — the UTXO mutations are applied below.
+                        // Placement is load-bearing: keep the height mapping
+                        // and checkpoint adjacent, before the UTXO mutation.
+                        // The site-5a rollback guard keys on height_to_hash,
+                        // so a mapped block must always own one checkpoint.
                         // Inert while stores are None.
                         self.checkpoint_phase2_stores(fork_block.header.height);
 
-                        if let Some(ref db) = self.db {
-                            if let Err(e) = db
-                                .blocks
-                                .set_height_hash(fork_block.header.height, &fork_hash)
-                            {
-                                tracing::error!("CRITICAL: Failed to persist reorg height mapping at height {}: {}", fork_block.header.height, e);
-                                reorg_error = Some(format!("DB error during reorg: {}", e));
-                                break;
-                            }
-                        }
-
+                        // Defer canonical DB mappings until the final atomic
+                        // reorg commit, after every fork block has validated.
                         // Apply fork block's UTXO mutations
                         let batch = UtxoSet::batch_from_block(
                             fork_block.header.height,
@@ -3106,20 +3088,6 @@ impl Blockchain {
                         inner.tip = pre_reorg_tip.clone();
                         inner.stats = pre_reorg_stats.clone();
                         rolled_back = true;
-
-                        // Restore DB height mappings and remove stale fork entries
-                        if let Some(ref db) = self.db {
-                            // Remove stale height entries above pre-reorg tip
-                            for h in (pre_reorg_tip.height + 1)
-                                ..=(inner.tip.height.max(pre_reorg_tip.height) + 1)
-                            {
-                                let _ = db.blocks.remove_height_hash(h);
-                            }
-                            // Re-set the main chain height mappings
-                            for (h, oh) in &disconnected_heights {
-                                let _ = db.blocks.set_height_hash(*h, oh);
-                            }
-                        }
                     }
 
                     // Only continue if fork blocks validated successfully
@@ -3274,18 +3242,6 @@ impl Blockchain {
 
                         inner.tip = pre_reorg_tip.clone();
                         inner.stats = pre_reorg_stats.clone();
-
-                        if let Some(ref db) = self.db {
-                            // Remove stale height entries above pre-reorg tip
-                            let max_h = block.header.height.max(pre_reorg_tip.height);
-                            for h in (pre_reorg_tip.height + 1)..=(max_h + 1) {
-                                let _ = db.blocks.remove_height_hash(h);
-                            }
-                            // Re-set the main chain height mappings
-                            for (h, oh) in &disconnected_heights {
-                                let _ = db.blocks.set_height_hash(*h, oh);
-                            }
-                        }
                     }
 
                     if reorg_error.is_none() {
@@ -3434,24 +3390,6 @@ impl Blockchain {
                             };
 
                         inner.height_to_hash.insert(block.header.height, hash);
-
-                        // Persist triggering block's height→hash to DB and
-                        // clean up stale height entries above new tip.
-                        if let Some(ref db) = self.db {
-                            if let Err(e) = db.blocks.set_height_hash(block.header.height, &hash) {
-                                tracing::error!(
-                                    "Failed to persist reorg tip height mapping: {}",
-                                    e
-                                );
-                            }
-                            // Remove ALL stale DB height entries above new tip.
-                            // After a reorg to a shorter chain, old heights remain
-                            // pointing to orphaned blocks — causes broken chain
-                            // links after restart.
-                            if let Err(e) = db.blocks.remove_heights_above(block.header.height) {
-                                tracing::error!("Failed to clean stale heights after reorg: {}", e);
-                            }
-                        }
                     }
                 }
 
@@ -3483,7 +3421,7 @@ impl Blockchain {
                 // call below (which takes a read lock — a still-held
                 // write guard would deadlock it under parking_lot's
                 // non-re-entrant RwLock).
-                {
+                let persist_result = (|| -> Result<()> {
                     // Bound (not `_`-prefixed) because we READ through it below:
                     // any `self.<method>()` that re-locks `self.inner` while this
                     // write guard is held self-deadlocks under parking_lot's
@@ -3548,15 +3486,16 @@ impl Blockchain {
 
                         // 3. Compute stale heights to remove (above new tip)
                         let new_tip_height = block.header.height;
-                        let height_removals: Vec<u64> =
-                            (new_tip_height + 1..=new_tip_height + 100).collect(); // Clean up to 100 stale entries
+                        let height_removals: Vec<u64> = if new_tip_height < pre_reorg_tip.height {
+                            (new_tip_height + 1..=pre_reorg_tip.height).collect()
+                        } else {
+                            Vec::new()
+                        };
 
                         // 4. Serialize new chain state
                         let last_checkpoint = db
                             .state
-                            .get_state()
-                            .ok()
-                            .flatten()
+                            .get_state()?
                             .map(|s| s.last_checkpoint)
                             .unwrap_or(0);
                         let new_state = ChainStateData {
@@ -3608,8 +3547,22 @@ impl Blockchain {
                         }
                         self.persist_output_index(&block.transactions, block.header.height);
                     }
-                } // R-34: close the write-guard scope so
-                  // inner_stats_for_log below can take a read lock.
+                    Ok(())
+                })(); // R-34: close the write-guard scope before handling errors
+                      // or taking the read lock used by the commit log below.
+
+                if let Err(error) = persist_result {
+                    panic!(
+                        "CONSENSUS PERSISTENCE FAILURE: reorg to block {} at height {} could not \
+                         be committed atomically: {}. The in-memory chain has already advanced, \
+                         while the atomic DB batch left the previous canonical state intact. \
+                         Halting so restart reloads that durable state instead of serving a \
+                         divergent tip.",
+                        hash.to_hex(),
+                        block.header.height,
+                        error
+                    );
+                }
 
                 // Structured divergence detection log — reorg completed
                 let stats_snapshot = inner_stats_for_log(&self.inner);
