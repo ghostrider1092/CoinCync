@@ -160,3 +160,7 @@ cf-ddns.ps1
 start-seed.ps1
 /seed-data/
 /regtest-node/
+
+# ── Internal turnover manual — local only, contains no secrets but
+#    is an internal handover doc; keep it out of the public mirror ──
+/local-notebook/

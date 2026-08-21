@@ -57,8 +57,16 @@ ExecStart=/usr/local/bin/coincync-rig run-solo \
     --threads 1 \
     --poll-interval-secs 60
 
-Restart=on-failure
-RestartSec=10
+# Restart=always, not on-failure: the RandomX light+JIT path can die from
+# an uncatchable native crash (a JIT execute-memory access violation inside
+# randomx_rs) during steady-state mining. A SIGSEGV already counts as a
+# failure, but `always` also covers the case where the native crash exits
+# with an otherwise-clean code -- the miner must ALWAYS come back. The node
+# persists the chain, so the relaunched rig just resumes from the tip.
+# RestartSec dropped 10 -> 3 to minimize the mining gap per crash (the only
+# cost is a ~2s light-cache rebuild on relaunch).
+Restart=always
+RestartSec=3
 TimeoutStartSec=120
 TimeoutStopSec=30
 
