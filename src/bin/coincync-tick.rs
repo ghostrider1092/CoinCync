@@ -90,6 +90,14 @@ struct Cli {
     /// changes no node behavior, observes no transaction. Off by default.
     #[arg(long)]
     castes_observe: bool,
+
+    /// Serve a Prometheus/OpenMetrics `/metrics` endpoint on this address
+    /// (e.g. `127.0.0.1:9109`) exposing the health data this sidecar already
+    /// collects. Strictly observational — scraping it changes no node state,
+    /// peer selection, or recovery behavior. Requires the `metrics` build
+    /// feature; without it the flag is accepted but a warning is logged.
+    #[arg(long)]
+    metrics_listen: Option<String>,
 }
 
 /// Max peers the colony recommends preferring — small (diversity over
@@ -145,31 +153,196 @@ fn read_bearer(path: &Path) -> Option<String> {
     }
 }
 
+/// Shared metrics state. With the `metrics` feature it is an
+/// `Arc<Mutex<Snapshot>>` published to on every tick and read by the
+/// `/metrics` HTTP handler; without the feature it is a zero-sized no-op so
+/// the rest of the loop compiles and runs unchanged.
+#[cfg(feature = "metrics")]
+type MetricsState = std::sync::Arc<std::sync::Mutex<metrics_endpoint::Snapshot>>;
+#[cfg(not(feature = "metrics"))]
+type MetricsState = ();
+
+/// Prometheus/OpenMetrics `/metrics` endpoint for the sidecar. Strictly
+/// observational: it mirrors the health values the tick already computes and
+/// serves them over HTTP. It never touches the adapter, the node, peer
+/// selection, or any recovery path — a scrape only reads a snapshot of numbers.
+#[cfg(feature = "metrics")]
+mod metrics_endpoint {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// Last-observed values, published for `/metrics` scrapes. The `*_present`
+    /// flags stay false until a value is successfully read, so the exposition
+    /// omits metrics we have never obtained (e.g. mempool/fleet numbers while
+    /// the local RPC is unavailable) while host-level metrics keep flowing.
+    #[derive(Default)]
+    pub struct Snapshot {
+        pub host_present: bool,
+        pub ram_used_pct: u8,
+        pub swap_used_pct: u8,
+        pub uptime_secs: u64,
+        pub mempool_present: bool,
+        pub mempool_txs: u64,
+        pub fleet_present: bool,
+        pub fleet_stalled: u16,
+        pub fleet_low_peer: u16,
+        pub fleet_divergent: u16,
+        pub fleet_median_difficulty: u128,
+    }
+
+    /// Publish the host + local-node portion of a tick (after a successful
+    /// `health_snapshot()`).
+    pub fn publish_health(state: &Arc<Mutex<Snapshot>>, ram: u8, swap: u8, uptime: u64, mempool: u64) {
+        if let Ok(mut s) = state.lock() {
+            s.host_present = true;
+            s.ram_used_pct = ram;
+            s.swap_used_pct = swap;
+            s.uptime_secs = uptime;
+            s.mempool_present = true;
+            s.mempool_txs = mempool;
+        }
+    }
+
+    /// Publish the fleet-aggregate portion of a tick.
+    pub fn publish_fleet(state: &Arc<Mutex<Snapshot>>, stalled: u16, low_peer: u16, divergent: u16, median: u128) {
+        if let Ok(mut s) = state.lock() {
+            s.fleet_present = true;
+            s.fleet_stalled = stalled;
+            s.fleet_low_peer = low_peer;
+            s.fleet_divergent = divergent;
+            s.fleet_median_difficulty = median;
+        }
+    }
+
+    /// Render the snapshot in Prometheus text-exposition format (v0.0.4).
+    fn render(s: &Snapshot) -> String {
+        let mut out = String::with_capacity(1024);
+        let mut gauge = |name: &str, help: &str, val: String| {
+            out.push_str("# HELP ");
+            out.push_str(name);
+            out.push(' ');
+            out.push_str(help);
+            out.push_str("\n# TYPE ");
+            out.push_str(name);
+            out.push_str(" gauge\n");
+            out.push_str(name);
+            out.push(' ');
+            out.push_str(&val);
+            out.push('\n');
+        };
+        if s.host_present {
+            gauge("coincync_node_ram_usage_percent", "Host RAM in use (percent).", s.ram_used_pct.to_string());
+            gauge("coincync_node_swap_usage_percent", "Host swap in use (percent).", s.swap_used_pct.to_string());
+            gauge("coincync_node_uptime_seconds", "Host uptime (seconds).", s.uptime_secs.to_string());
+        }
+        if s.mempool_present {
+            gauge("coincync_node_mempool_transactions", "Local node mempool transaction count.", s.mempool_txs.to_string());
+        }
+        if s.fleet_present {
+            gauge("coincync_fleet_stalled_nodes", "Fleet nodes whose tip is stalled.", s.fleet_stalled.to_string());
+            gauge("coincync_fleet_low_peer_nodes", "Fleet nodes below the low-peer threshold.", s.fleet_low_peer.to_string());
+            gauge("coincync_fleet_divergent_nodes", "Fleet nodes diverging from the median difficulty.", s.fleet_divergent.to_string());
+            gauge("coincync_fleet_median_difficulty", "Median difficulty across the fleet.", s.fleet_median_difficulty.to_string());
+        }
+        out
+    }
+
+    /// Public for testing: render an arbitrary snapshot.
+    #[cfg(test)]
+    pub fn render_for_test(s: &Snapshot) -> String {
+        render(s)
+    }
+
+    /// Spawn a tiny blocking HTTP/1.1 server answering `GET /metrics` from the
+    /// shared snapshot. One dedicated thread; connections are handled
+    /// synchronously (a scrape is small and infrequent). Read-only. A bind
+    /// failure is logged, not fatal — the monitor loop keeps running.
+    pub fn spawn_server(addr: String, state: Arc<Mutex<Snapshot>>) {
+        std::thread::spawn(move || {
+            let listener = match TcpListener::bind(&addr) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("metrics: failed to bind {}: {} (endpoint disabled)", addr, e);
+                    return;
+                }
+            };
+            tracing::info!("metrics: Prometheus endpoint on http://{}/metrics", addr);
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                // Only the request line matters; cap the read so a slow or
+                // oversized client can't tie the thread up unboundedly.
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let first = String::from_utf8_lossy(&buf[..n]);
+                let first = first.lines().next().unwrap_or("");
+                let (status, body) = if first.starts_with("GET /metrics") {
+                    let body = state.lock().map(|s| render(&s)).unwrap_or_default();
+                    ("200 OK", body)
+                } else {
+                    ("404 Not Found", String::new())
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+    }
+}
+
 /// Emit one health report. Read-only: on any adapter error it logs and
 /// returns — a monitoring sidecar must never abort the loop over a
-/// transient RPC hiccup.
-fn report_once(adapter: &CoincyncAdapter, fleet: bool) {
+/// transient RPC hiccup. Also publishes the values to the metrics snapshot
+/// (a no-op without the `metrics` feature).
+fn report_once(adapter: &CoincyncAdapter, fleet: bool, metrics: &MetricsState) {
+    #[cfg(not(feature = "metrics"))]
+    let _ = metrics;
     match adapter.health_snapshot() {
-        Ok(h) => info!(
-            ram_pct = h.ram_used_pct,
-            swap_pct = h.swap_used_pct,
-            uptime_secs = h.uptime_secs,
-            mempool_txs = h.mempool_txs,
-            "health"
-        ),
+        Ok(h) => {
+            info!(
+                ram_pct = h.ram_used_pct,
+                swap_pct = h.swap_used_pct,
+                uptime_secs = h.uptime_secs,
+                mempool_txs = h.mempool_txs,
+                "health"
+            );
+            #[cfg(feature = "metrics")]
+            metrics_endpoint::publish_health(
+                metrics,
+                h.ram_used_pct,
+                h.swap_used_pct,
+                h.uptime_secs,
+                h.mempool_txs as u64,
+            );
+        }
         Err(e) => warn!("health_snapshot failed: {}", e),
     }
 
     if fleet {
         match adapter.aggregate_fleet_health() {
-            Ok(a) => info!(
-                hosts = a.total_hosts,
-                stalled = a.stalled_count,
-                low_peer = a.low_peer_count,
-                divergent = a.divergent_count,
-                median_difficulty = a.median_difficulty,
-                "fleet"
-            ),
+            Ok(a) => {
+                info!(
+                    hosts = a.total_hosts,
+                    stalled = a.stalled_count,
+                    low_peer = a.low_peer_count,
+                    divergent = a.divergent_count,
+                    median_difficulty = a.median_difficulty,
+                    "fleet"
+                );
+                #[cfg(feature = "metrics")]
+                metrics_endpoint::publish_fleet(
+                    metrics,
+                    a.stalled_count,
+                    a.low_peer_count,
+                    a.divergent_count,
+                    a.median_difficulty,
+                );
+            }
             Err(e) => warn!("aggregate_fleet_health failed: {}", e),
         }
     }
@@ -254,28 +427,67 @@ const CICADA_HOUSEKEEPING_BASE_SECS: u64 = 300;
 /// volume), matching `COLONY_MAX_PREFER`.
 const CASTE_MAX_LEGS: usize = 3;
 
-/// Derive a `/16`-style netgroup bucket from a peer's RPC URL host. IPv4
-/// hosts use their first two octets (the eviction module's grouping);
-/// anything else (hostname, IPv6) falls back to a stable byte hash so it
-/// still buckets deterministically. Diversity input for centipede/army-ant.
-fn netgroup_of(rpc_url: &str) -> u16 {
+/// Extract the bare host from a peer's RPC URL, stripping scheme, path,
+/// userinfo, and port. Handles bracketed IPv6 (`[2001:db8::1]:8332` -> the
+/// address without brackets) — which naive `split(':')` mangles because IPv6
+/// addresses contain `:` themselves. IPv4, bare hostnames, and unbracketed
+/// IPv6 are handled too.
+fn extract_host(rpc_url: &str) -> &str {
     let after_scheme = rpc_url.rsplit("://").next().unwrap_or(rpc_url);
-    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = host_port
-        .rsplit('@')
-        .next()
-        .unwrap_or(host_port)
-        .split(':')
-        .next()
-        .unwrap_or(host_port);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // Strip any userinfo ("user:pass@" or "user@").
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
 
-    let octets: Vec<&str> = host.split('.').collect();
-    if octets.len() == 4 {
-        if let (Ok(a), Ok(b)) = (octets[0].parse::<u8>(), octets[1].parse::<u8>()) {
-            return (u16::from(a) << 8) | u16::from(b);
-        }
+    // Bracketed IPv6: `[addr]` or `[addr]:port`.
+    if let Some(rest) = host_port.strip_prefix('[') {
+        return match rest.find(']') {
+            Some(end) => &rest[..end],
+            None => rest, // malformed; best effort
+        };
     }
-    // Fallback: stable hash to a bucket (non-IP / IPv6 host).
+
+    // Unbracketed. Exactly one ':' => host:port (IPv4 or hostname) -> take the
+    // host. Zero colons => a bare host. Two or more => a bare (unbracketed)
+    // IPv6 literal, which we must NOT split on ':' -> keep the whole string.
+    match host_port.matches(':').count() {
+        1 => host_port.split(':').next().unwrap_or(host_port),
+        _ => host_port,
+    }
+}
+
+/// Derive a `/16`-style netgroup bucket from a peer's RPC URL host, used as the
+/// diversity/concentration input for the eclipse-observation logic. IPv4 hosts
+/// bucket by their first two octets (a `/16`, matching the eviction module).
+/// IPv6 hosts bucket by their `/32` routing prefix (Bitcoin's IPv6 netgroup
+/// granularity), so distinct IPv6 networks separate deterministically instead
+/// of all collapsing on the pre-colon text. IPv4-mapped IPv6 (`::ffff:a.b.c.d`)
+/// folds onto the IPv4 bucket. Hostnames and unparseable hosts fall back to a
+/// stable byte hash. Deterministic for every input.
+fn netgroup_of(rpc_url: &str) -> u16 {
+    let host = extract_host(rpc_url);
+
+    // IPv4 (incl. an IPv4-mapped IPv6 that resolves to a v4): first two octets.
+    let v4 = host.parse::<std::net::Ipv4Addr>().ok().or_else(|| {
+        host.parse::<std::net::Ipv6Addr>()
+            .ok()
+            .and_then(|v6| v6.to_ipv4_mapped())
+    });
+    if let Some(v4) = v4 {
+        let o = v4.octets();
+        return (u16::from(o[0]) << 8) | u16::from(o[1]);
+    }
+
+    // IPv6: hash the first four bytes (the /32 network prefix) into the bucket.
+    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        let o = v6.octets();
+        let mut h: u16 = 0;
+        for byte in &o[..4] {
+            h = h.wrapping_mul(31).wrapping_add(u16::from(*byte));
+        }
+        return h;
+    }
+
+    // Hostname / unparseable: stable byte hash of the extracted host.
     let mut h: u16 = 0;
     for byte in host.bytes() {
         h = h.wrapping_mul(31).wrapping_add(u16::from(byte));
@@ -476,8 +688,16 @@ fn main() -> anyhow::Result<()> {
         info!("biomimetic castes: OBSERVE mode (read-only; each caste logs what it WOULD do, nothing sent)");
     }
 
+    // Metrics snapshot shared with the /metrics endpoint. Created regardless
+    // of the feature (it is `()` without it) so report_once has one to receive.
+    #[cfg(feature = "metrics")]
+    let metrics_state: MetricsState =
+        std::sync::Arc::new(std::sync::Mutex::new(metrics_endpoint::Snapshot::default()));
+    #[cfg(not(feature = "metrics"))]
+    let metrics_state: MetricsState = ();
+
     if cli.once {
-        report_once(&adapter, fleet);
+        report_once(&adapter, fleet, &metrics_state);
         if colony_active {
             colony_observe_report(&adapter, &mut pheromone, fleet, cli.colony_advise);
         }
@@ -485,6 +705,19 @@ fn main() -> anyhow::Result<()> {
             castes_observe_report(&adapter, fleet, &mut cicada_sched, &mut locust);
         }
         return Ok(());
+    }
+
+    // Start the Prometheus endpoint for the long-running loop (not for --once).
+    #[cfg(feature = "metrics")]
+    if let Some(addr) = cli.metrics_listen.clone() {
+        metrics_endpoint::spawn_server(addr, metrics_state.clone());
+    }
+    #[cfg(not(feature = "metrics"))]
+    if cli.metrics_listen.is_some() {
+        warn!(
+            "--metrics-listen was given but this build lacks the `metrics` feature; \
+             endpoint disabled (rebuild with --features metrics)"
+        );
     }
 
     // Graceful shutdown: SIGTERM (systemd stop) / SIGINT (Ctrl-C) flip the
@@ -502,7 +735,7 @@ fn main() -> anyhow::Result<()> {
     info!(interval_secs = interval.as_secs(), "entering monitor loop");
 
     while !shutdown.load(Ordering::Relaxed) {
-        report_once(&adapter, fleet);
+        report_once(&adapter, fleet, &metrics_state);
         if colony_active {
             colony_observe_report(&adapter, &mut pheromone, fleet, cli.colony_advise);
         }
@@ -552,6 +785,87 @@ mod tests {
     fn netgroup_nonip_is_stable_and_deterministic() {
         let a = netgroup_of("http://seed.example.com:8332");
         assert_eq!(a, netgroup_of("http://seed.example.com:8332"));
+    }
+
+    #[test]
+    fn netgroup_ipv6_bracketed_and_bucketed_by_network() {
+        // Bracketed IPv6 with a port parses to the address itself, not the
+        // mangled pre-colon text the old `split(':')` produced.
+        let a = netgroup_of("http://[2001:db8::1]:8332");
+        // Deterministic.
+        assert_eq!(a, netgroup_of("http://[2001:db8::1]:8332"));
+        // Bracket-with-port == bracket-without-port == unbracketed literal.
+        assert_eq!(a, netgroup_of("http://[2001:db8::1]"));
+        assert_eq!(a, netgroup_of("http://2001:db8::1"));
+        // Same /32 network, different host suffix -> same bucket.
+        assert_eq!(a, netgroup_of("http://[2001:db8:ffff::9]:1"));
+        // THE FIX: two IPv6 addresses sharing only the leading hextet but in
+        // different /32 networks must NOT collapse into one bucket — the old
+        // code mangled both to "[2001" and hashed them identically.
+        assert_ne!(a, netgroup_of("http://[2001:dead::1]:8332"));
+        // Entirely different network -> different bucket.
+        assert_ne!(a, netgroup_of("http://[2a01:4f8::1]:8332"));
+    }
+
+    #[test]
+    fn netgroup_ipv4_mapped_ipv6_folds_onto_ipv4_bucket() {
+        assert_eq!(
+            netgroup_of("http://[::ffff:66.135.23.193]:8332"),
+            netgroup_of("http://66.135.23.193:8332")
+        );
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn metrics_render_exposes_series_and_gates_absent_data() {
+        use super::metrics_endpoint::{render_for_test, Snapshot};
+
+        // Everything present: all eight series, each a typed gauge.
+        let full = Snapshot {
+            host_present: true,
+            ram_used_pct: 42,
+            swap_used_pct: 7,
+            uptime_secs: 12345,
+            mempool_present: true,
+            mempool_txs: 9,
+            fleet_present: true,
+            fleet_stalled: 2,
+            fleet_low_peer: 1,
+            fleet_divergent: 0,
+            fleet_median_difficulty: 100_000,
+        };
+        let out = render_for_test(&full);
+        for name in [
+            "coincync_node_ram_usage_percent",
+            "coincync_node_swap_usage_percent",
+            "coincync_node_uptime_seconds",
+            "coincync_node_mempool_transactions",
+            "coincync_fleet_stalled_nodes",
+            "coincync_fleet_low_peer_nodes",
+            "coincync_fleet_divergent_nodes",
+            "coincync_fleet_median_difficulty",
+        ] {
+            assert!(out.contains(&format!("# TYPE {name} gauge")), "missing TYPE for {name}");
+        }
+        assert!(out.contains("coincync_node_ram_usage_percent 42\n"));
+        assert!(out.contains("coincync_fleet_median_difficulty 100000\n"));
+
+        // RPC unavailable: host metrics still flow; mempool + fleet are omitted.
+        let host_only = Snapshot {
+            host_present: true,
+            ram_used_pct: 5,
+            ..Default::default()
+        };
+        let out2 = render_for_test(&host_only);
+        assert!(out2.contains("coincync_node_ram_usage_percent 5\n"));
+        assert!(
+            !out2.contains("coincync_node_mempool_transactions"),
+            "mempool must be omitted when absent"
+        );
+        assert!(
+            !out2.contains("coincync_fleet_stalled_nodes"),
+            "fleet metrics must be omitted when absent"
+        );
     }
 
     #[test]
