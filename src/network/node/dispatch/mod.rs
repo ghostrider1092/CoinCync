@@ -179,7 +179,7 @@ pub(super) async fn process_message(
         }
 
         MessageType::Headers => {
-            headers::handle_headers(peer_id, payload, peers, sync, scorer).await?;
+            headers::handle_headers(peer_id, payload, peers, sync, chain, scorer).await?;
         }
 
         MessageType::GetAddr => {
