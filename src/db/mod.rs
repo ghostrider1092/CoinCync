@@ -1,17 +1,21 @@
 //! # Database Module
 //!
-//! Persistent storage using sled embedded database.
+//! Persistent storage using RocksDB, accessed through a sled-compatible shim
+//! (`src/db/shim.rs`) so the higher layers keep the sled `Tree`/`open_tree`
+//! API. Each logical "tree" is a RocksDB column family. (Historical note:
+//! this module was sled-backed pre-1.0; the API names survive, the engine
+//! underneath is RocksDB.)
 //!
 //! ## Key Encoding Convention (H26)
 //!
-//! CONVENTION: All sled tree keys use big-endian (BE) encoding for correct
+//! CONVENTION: All tree keys use big-endian (BE) encoding for correct
 //! lexicographic ordering. PoW hash inputs use little-endian (LE) as part of
 //! the hash preimage. These are different contexts and intentionally use
 //! different encodings.
 //!
 //! ## Performance Tuning
 //!
-//! Sled is configured for optimal blockchain performance:
+//! RocksDB is configured for optimal blockchain performance:
 //! - Large cache for hot data (blocks, UTXOs)
 //! - Async flushing to reduce write latency
 //! - Optimized segment size for blockchain workloads

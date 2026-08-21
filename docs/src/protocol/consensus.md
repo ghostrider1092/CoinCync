@@ -32,7 +32,7 @@ A block satisfies the difficulty target if `output ≤ target`, where `target` i
 
 The **anchor** is a deterministic chain-history value computed by `compute_full_anchor(prev_hash, height, timestamp)`. It binds every PoW solution to its specific chain context — you cannot pre-compute solutions for a hypothetical future chain, and a solution computed for block `h` is invalid at block `h+1` because the anchor differs.
 
-The RandomX VM key derives from the block's seed epoch. CoinCync rotates the VM seed every `RANDOMX_KEY_EPOCH = 64` blocks, which is ~2 hours at 120-second blocks. This matches Monero's epoch cadence and amortizes the ~1-second VM-key setup cost across ~60 blocks of hashing.
+The RandomX VM key derives from the block's seed epoch. CoinCync rotates the VM seed every `RANDOMX_KEY_EPOCH = 2048` blocks, which is ~2.8 days at 120-second blocks. Longer epochs amortize the VM-key setup cost across many more blocks and, critically, keep the setup out of the IBD hot path (a rebuild every 64 blocks stalled the validation pipeline). The next epoch's dataset is prewarmed on a background thread before the boundary so crossing it does not stall.
 
 Implementation:
 
@@ -42,9 +42,9 @@ Implementation:
 
 ## Difficulty adjustment
 
-CoinCync uses **LWMA** (Linearly Weighted Moving Average) difficulty adjustment, the same algorithm Monero adopted in 2018. LWMA is responsive to short-term hashrate changes (better than Bitcoin's 2-week retarget), resistant to time-warp attacks, and produces stable block intervals.
+CoinCync uses **dual-window ASERT** (Absolutely Scheduled Exponentially Rising Targets) difficulty adjustment — see `src/consensus/difficulty.rs::calculate_difficulty`. Two ASERT anchors (a short window that reacts quickly to hashrate changes and a long window that damps variance) are combined by weighted average. ASERT is responsive, resistant to time-warp attacks, and produces stable block intervals; a consensus floor `MIN_DIFFICULTY` prevents the controller from drifting difficulty arbitrarily low on a small chain.
 
-The target block time is fixed at **120 seconds** (`TARGET_BLOCK_TIME` in [`src/constants.rs`](../../../src/constants.rs)). 2-minute blocks give LWMA enough samples to damp hashrate volatility without overcorrecting. The window over which LWMA averages is 60 blocks (~2 hours, one full VM-key epoch).
+The target block time is fixed at **120 seconds** (`TARGET_BLOCK_TIME` in [`src/constants.rs`](../../../src/constants.rs)). The short/long window sizes and the ASERT half-life are the `DIFFICULTY_SHORT_WINDOW` / `DIFFICULTY_LONG_WINDOW` / `ASERT_HALFLIFE` constants — the retarget window is unrelated to the RandomX VM-key epoch.
 
 Emergency difficulty adjustment triggers if block production stalls beyond `EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * TARGET_BLOCK_TIME` — this is the anti-wedge rule that prevents a 95% hashrate drop from leaving the chain stuck producing one block per day until the next LWMA window completes.
 

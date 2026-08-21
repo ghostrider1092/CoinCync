@@ -36,7 +36,7 @@ build* — it does not mean a mainnet deployment exists yet.
 | **Stealth addresses** | `stealth.rs` | ECDH-derived one-time output keys — every output goes to a unique address. Includes subaddresses, audit keys, batch scanning. | ✅ Live |
 | **Scoped view keys** | `view_keys.rs` | Forward-secret view keys scoped by epoch / time-range / amount-cap / single-use (`ViewKeyScope`). Key bytes zeroized on drop, excluded from serialization. | ✅ Live |
 | **Encrypted memos** | `memo.rs` | ChaCha20-Poly1305 memos on outputs; ECDH key derivation; ≤256 bytes, enforced at consensus. | ✅ Live |
-| **Decoy selection** | `storage/utxos.rs` + `ring_selection.rs` | CoinCync V1 log-gamma target-height selection at the source, then uniform ring assembly. Samples are conditioned on the eligible canonical-chain age window; this bootstrap mapping is not described as equivalent to Monero's cumulative-output-index picker. | ✅ Live |
+| **Decoy selection** | `wallet/decoy_selection/sampling.rs` + `crypto/ring_selection.rs` | CoinCync V1 log-gamma target-height selection at the source (gamma shape 19.28 / rate 1.61 in `decoy_selection.rs`; `src/decoy.rs` holds only the locator/snapshot types), then uniform ring assembly. Samples are conditioned on the eligible canonical-chain age window; this bootstrap mapping is not described as equivalent to Monero's cumulative-output-index picker. | ✅ Live |
 | **Selective disclosure** | `disclosure.rs` | Non-interactive Fiat-Shamir proofs for voluntary compliance (prove balance ≥ X, ownership, source) without revealing the rest. | ✅ Live |
 | **Batch verification** | `batch_verify.rs`, `parallel_proofs.rs` | Parallel batch-verify of CLSAG / Bulletproofs — block-validation performance, not a privacy feature itself but part of the crypto path. | ✅ Live |
 | **CLSAG multisig** | `clsag_multisig.rs` | Multi-party CLSAG signing (pairs with the FROST coordinator work). | ✅ Live |
@@ -75,7 +75,7 @@ the **dead man's switch is ⚠️ inert** (metadata format validated only, no
 consensus authorization path) — see the rows above. They are not separate
 subsystems — they map onto the tables above:
 
-1. **Decoy defense** → `storage/utxos.rs` (V1 log-gamma target-height policy) + `crypto/ring_selection.rs` (uniform ring assembly)
+1. **Decoy defense** → `wallet/decoy_selection/sampling.rs` (V1 log-gamma target-height policy) + `crypto/ring_selection.rs` (uniform ring assembly)
 2. **Encrypted memos** → `crypto/memo.rs`
 3. **Scoped view keys** → `crypto/view_keys.rs`
 4. **Deniable wallets** → `wallet/persistence.rs`

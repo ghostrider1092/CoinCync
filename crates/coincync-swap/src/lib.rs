@@ -1,16 +1,20 @@
-//! # CoinCync Atomic Swap (skeleton)
+//! # CoinCync Atomic Swap
 //!
 //! Trustless cross-chain atomic swap between **CYNC** and **BTC**.
 //!
-//! ## Status: SKELETON
+//! ## Status: substantially implemented, GATED off pending audit
 //!
-//! This crate is **not** a working swap. It is the module structure,
-//! type signatures, and CLI surface that the eventual protocol
-//! implementation will fill in. Calling any operation here today
-//! returns `Error::NotImplemented` — the public surface exists so
-//! downstream code (wallet UI, CLI, tests, documentation) can be
-//! written against stable types while the cryptographic protocol
-//! is implemented in stages.
+//! This crate is NO LONGER a skeleton — the protocol is substantially
+//! complete (~16.5k LOC: adaptor signatures on both curves, cross-curve
+//! DLEQ binding, the BTC HTLC/CSV path, the Noise/Tor transport, and the
+//! full state machine), with ~350 passing tests (`--features strict-dleq`)
+//! and ~97% coverage. It is nonetheless **deliberately gated OFF** for this
+//! release: `is_implemented()` returns `false` and the wallet's swap
+//! commands sit behind `#[cfg(feature = "cyncswap")]`. Per the 2026-05-20
+//! staged-mainnet decision, cyncswap ships as **v1.1 after a dedicated
+//! audit**, not with the v1.0/2.0 base chain. Do not flip the gate without
+//! that audit — the `is_implemented() == false` return is the safety valve,
+//! not a statement that the code is missing.
 //!
 //! ## Protocol reference
 //!

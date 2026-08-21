@@ -511,8 +511,9 @@ impl Subaddress {
     ///
     /// AUDIT (R-11 fix, 2026-07-03): switched the domain separator
     /// from the unversioned `b"subaddr"` (7 bytes) to the versioned
-    /// canonical form `b"CYNC1_SUBADDR_v1"` (16 bytes) matching the
-    /// crate's other CYNC1_* personalization strings. Rationale:
+    /// canonical form `b"COINCYNC_SUBADDR_v1"` (19 bytes) — the exact
+    /// literal used by `crypto::subaddress_scalar` above, the single
+    /// source of truth shared by wallet and audit derivation. Rationale:
     ///   - The unversioned literal collides with any future scheme
     ///     that hashes `view_secret || short-ascii || index`.
     ///   - No shipped mainnet exists (v1.0 mainnet target 2026-10-01),
