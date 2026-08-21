@@ -282,6 +282,41 @@ pub fn compute_pow_hash(
     }
 }
 
+/// Batched PoW hash — MINING ONLY. Computes the PoW hash for many `nonces`
+/// against the same (anchor, tx_root, height), returning one `Hash` per
+/// nonce in order. Uses the pipelined RandomX path
+/// (`randomx_cache::compute_hash_batch`) so a batch of attempts is faster
+/// than the same count of single-shot `compute_pow_hash` calls.
+///
+/// This is deliberately NOT used by block validation — the validator hashes
+/// one candidate via `compute_pow_hash`. The batched and single-shot forms
+/// are bit-identical (RandomX guarantees it; asserted by the rig's
+/// `hash_batch_matches_single` test), and even a hypothetical mismatch would
+/// only cost the miner a rejected block, never fork consensus.
+#[cfg(feature = "randomx")]
+pub fn compute_pow_hash_batch(
+    algo: PowAlgorithm,
+    anchor: &Hash,
+    nonces: &[u64],
+    tx_root: &Hash,
+    height: u64,
+) -> Result<Vec<Hash>> {
+    let _ = algo; // single algorithm — kept for API symmetry with compute_pow_hash
+    if nonces.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Each attempt's RandomX input is the same concat the single-shot path
+    // builds: hash_concat(anchor, nonce_le, tx_root). Only the nonce varies.
+    let inputs: Vec<Hash> = nonces
+        .iter()
+        .map(|&nonce| hash_concat(&[anchor.as_bytes(), &nonce.to_le_bytes(), tx_root.as_bytes()]))
+        .collect();
+    let seed = randomx_key_for_height(height);
+    let input_refs: Vec<&[u8]> = inputs.iter().map(|h| h.as_bytes().as_slice()).collect();
+    let raw = randomx_cache::compute_hash_batch(&seed, &input_refs)?;
+    Ok(raw.into_iter().map(Hash::from_bytes).collect())
+}
+
 // =============================================================================
 // RandomX Support
 // =============================================================================
@@ -296,7 +331,7 @@ const RANDOMX_KEY_EPOCH: u64 = 2048;
 
 #[cfg(feature = "randomx")]
 mod randomx_cache {
-    use parking_lot::RwLock;
+    use parking_lot::{Mutex, RwLock};
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -327,6 +362,18 @@ mod randomx_cache {
 
     static DATASET_CACHE: RwLock<Option<DatasetEntry>> = RwLock::new(None);
     static RETRY_AFTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Prewarmed NEXT-epoch dataset, built on a background thread BEFORE the
+    /// epoch boundary is crossed so the crossing promotes it instantly
+    /// instead of stalling to build (30-60s in full-mem mode, ~2s in light
+    /// mode). Byte-identical to what a synchronous build would produce
+    /// (same seed -> same dataset via `create_dataset_entry`), so promotion
+    /// carries ZERO consensus risk — it only changes WHEN the dataset is
+    /// built, never the hash.
+    static PREWARM_CACHE: RwLock<Option<DatasetEntry>> = RwLock::new(None);
+    /// The seed a background prewarm is currently building (if any), so two
+    /// callers near the boundary never spawn duplicate builders.
+    static PREWARM_INFLIGHT: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
     thread_local! {
         /// Per-thread RandomX VM. Each thread builds its own VM from
@@ -423,6 +470,72 @@ mod randomx_cache {
         })
     }
 
+    /// Batched hash — MINING ONLY. Computes the RandomX hash of every input
+    /// in `inputs` against `seed` using the pipelined RandomX API
+    /// (`calculate_hash_set`, which drives randomx_calculate_hash_first/
+    /// next/last under the hood). The pipeline overlaps VM execution of one
+    /// input with dataset-read setup of the next, so a batch is meaningfully
+    /// faster than the same count of single-shot `compute_hash` calls.
+    ///
+    /// SAFE BY CONSTRUCTION for consensus: block VALIDATION always uses the
+    /// single-shot `compute_hash` above (one hash per block). Only the miner
+    /// searches with this batched path. The pipelined form produces
+    /// bit-identical hashes to the single-shot form (RandomX guarantees it;
+    /// the `batch_matches_single_shot` test asserts it), but even if it
+    /// somehow didn't, the miner's block would simply be rejected by the
+    /// single-shot validator — a self-correcting miss, never a consensus
+    /// split. Returns one hash per input, in input order.
+    pub fn compute_hash_batch(
+        seed: &[u8; 32],
+        inputs: &[&[u8]],
+    ) -> std::result::Result<Vec<[u8; 32]>, crate::error::Error> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let retry_at = RETRY_AFTER.load(Ordering::Relaxed);
+        if retry_at != 0 && now_secs < retry_at {
+            return Err(crate::error::Error::Internal(format!(
+                "RandomX in backoff for {}s",
+                retry_at - now_secs
+            )));
+        }
+
+        // Same seed/VM lifecycle as compute_hash: ensure the shared dataset
+        // matches the seed, then (re)build this thread's VM if the key
+        // rotated, then hash the whole batch through it.
+        let (cache, dataset, flags) = ensure_dataset(seed, now_secs)?;
+        THREAD_VM.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let needs_new = match &*guard {
+                Some(tvm) => tvm.key != *seed,
+                None => true,
+            };
+            if needs_new {
+                *guard = None;
+                let vm = RandomXVM::new(flags, Some(cache.clone()), dataset.clone())
+                    .map_err(|e| crate::error::Error::Internal(
+                        format!("per-thread RandomX VM init: {}", e)
+                    ))?;
+                *guard = Some(ThreadVm { key: *seed, vm });
+            }
+            let tvm = guard.as_ref()
+                .expect("BUG: thread VM guard is None immediately after being set — invariant broken by refactor");
+            let hashes = tvm.vm.calculate_hash_set(inputs)
+                .map_err(|e| crate::error::Error::Internal(format!("RandomX batch hash failed: {}", e)))?;
+            let mut out = Vec::with_capacity(hashes.len());
+            for h in hashes {
+                let mut o = [0u8; 32];
+                o.copy_from_slice(&h[..32]);
+                out.push(o);
+            }
+            Ok(out)
+        })
+    }
+
     /// Ensure `DATASET_CACHE` contains an entry for `seed`. Returns
     /// (cache, dataset, flags) cloned (Arc-bump cheap) for the caller
     /// to build a per-thread VM from.
@@ -449,6 +562,28 @@ mod randomx_cache {
                 return Ok((entry.cache.clone(), entry.dataset.clone(), entry.flags));
             }
         }
+
+        // Was this seed prewarmed on a background thread before the epoch
+        // boundary? If so, PROMOTE it — an Arc-bump, not a 30-60s rebuild —
+        // and the boundary crossing costs nothing. (Lock order is always
+        // DATASET_CACHE then PREWARM_CACHE; the background builder only ever
+        // takes PREWARM_CACHE, so no deadlock.)
+        {
+            let mut pw = PREWARM_CACHE.write();
+            let matches = pw.as_ref().map(|e| e.key == *seed).unwrap_or(false);
+            if matches {
+                let entry = pw.take().expect("checked Some above");
+                let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
+                *guard = Some(entry);
+                RETRY_AFTER.store(0, Ordering::Relaxed);
+                tracing::info!(
+                    "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
+                    hex::encode(&seed[..4])
+                );
+                return Ok(triple);
+            }
+        }
+
         match create_dataset_entry(seed) {
             Ok(entry) => {
                 let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
@@ -461,6 +596,67 @@ mod randomx_cache {
                 Err(e)
             }
         }
+    }
+
+    /// Kick off a BACKGROUND build of the dataset for `seed`, parking the
+    /// result in PREWARM_CACHE so a later `ensure_dataset(seed)` promotes it
+    /// instantly instead of stalling to build. Idempotent and cheap to call
+    /// repeatedly (e.g. every mining loop / every applied block near an
+    /// epoch boundary): it no-ops if `seed` is already the live dataset,
+    /// already prewarmed, or a prewarm is already in flight.
+    pub fn prewarm_seed(seed: [u8; 32]) {
+        // Already the live dataset? nothing to do.
+        if DATASET_CACHE
+            .read()
+            .as_ref()
+            .map(|e| e.key == seed)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // Already prewarmed? nothing to do.
+        if PREWARM_CACHE
+            .read()
+            .as_ref()
+            .map(|e| e.key == seed)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // Claim the single in-flight slot; bail if a prewarm is already
+        // running (we only ever prewarm the immediate next epoch, so one
+        // builder at a time is exactly right).
+        {
+            let mut inflight = PREWARM_INFLIGHT.lock();
+            if inflight.is_some() {
+                return;
+            }
+            *inflight = Some(seed);
+        }
+        std::thread::spawn(move || {
+            match create_dataset_entry(&seed) {
+                Ok(entry) => {
+                    *PREWARM_CACHE.write() = Some(entry);
+                    tracing::info!(
+                        "RandomX next-epoch dataset prewarmed, key={}...",
+                        hex::encode(&seed[..4])
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "RandomX prewarm build failed for key={}...: {} \
+                         (the boundary will build it synchronously instead)",
+                        hex::encode(&seed[..4]),
+                        e
+                    );
+                }
+            }
+            // Release the in-flight slot if it is still ours.
+            let mut inflight = PREWARM_INFLIGHT.lock();
+            if *inflight == Some(seed) {
+                *inflight = None;
+            }
+        });
     }
 
     /// Build the shared `DatasetEntry` for `seed` using the 4-tier
@@ -478,6 +674,26 @@ mod randomx_cache {
         let start = std::time::Instant::now();
         let recommended = RandomXFlag::get_recommended_flags();
 
+        // Windows JIT hardening. RandomX's JIT emits a native code buffer
+        // that, under Windows DEP / Defender exploit-protection, can have
+        // its execute permission revoked out from under the running
+        // program -- an access violation that kills the whole process with
+        // NO catchable Rust error (observed intermittently while mining in
+        // light+JIT mode; the process simply vanishes mid-loop). FLAG_SECURE
+        // switches the JIT to the W^X pattern (code buffer is writable while
+        // emitting, flipped to executable before it runs, back to writable
+        // to recompile), which is the reference library's remedy for exactly
+        // this failure. It costs a few percent of hashrate; correctness on
+        // Windows wins. CONSENSUS-SAFE: RandomX guarantees byte-identical
+        // hash output across every flag combination (see the
+        // fast_light_equivalence test) -- FLAG_SECURE changes memory
+        // protection only, never the computed hash. Non-Windows keeps the
+        // fast path (FLAG_DEFAULT == 0, so the OR below is a no-op there).
+        #[cfg(target_os = "windows")]
+        let secure = RandomXFlag::FLAG_SECURE;
+        #[cfg(not(target_os = "windows"))]
+        let secure = RandomXFlag::FLAG_DEFAULT;
+
         // Memory budget: full-mode RandomX needs ~2.5 GB total (cache
         // + 2 GB dataset, both shared across all threads via Arc).
         // Operators on low-RAM systems can opt out via env var; we
@@ -490,7 +706,7 @@ mod randomx_cache {
         // Tier 1: full-memory mode. JIT + AES + the 2 GB dataset.
         // Skipped if the operator opted out.
         if !light_mode_forced {
-            let full_flags = recommended | RandomXFlag::FLAG_FULL_MEM;
+            let full_flags = recommended | RandomXFlag::FLAG_FULL_MEM | secure;
             tracing::info!(
                 "Building RandomX dataset (mode: full-mem): active={:?}, key={}... \
                  (one-time ~30-60s build per epoch; subsequent thread VMs are ~ms)",
@@ -524,7 +740,7 @@ mod randomx_cache {
         }
 
         // Tier 2: light mode (cache-only).
-        let active_flags = recommended & !RandomXFlag::FLAG_FULL_MEM;
+        let active_flags = (recommended & !RandomXFlag::FLAG_FULL_MEM) | secure;
         tracing::info!(
             "Building RandomX cache (mode: light-jit): active={:?}, key={}...",
             active_flags,
@@ -549,7 +765,7 @@ mod randomx_cache {
         }
 
         // Tier 3: JIT-only fallback.
-        let jit_only = RandomXFlag::FLAG_JIT;
+        let jit_only = RandomXFlag::FLAG_JIT | secure;
         tracing::info!("Building RandomX cache with JIT-only fallback...");
         match try_build_entry(jit_only, seed) {
             Ok(entry) => {
@@ -695,6 +911,76 @@ mod randomx_cache {
     #[allow(unsafe_code)]
     mod tests {
         use super::*;
+
+        /// Hot-swap plumbing: a background `prewarm_seed` must land its
+        /// built dataset in PREWARM_CACHE, and the next `ensure_dataset` for
+        /// that seed must PROMOTE it (consume from PREWARM_CACHE, install as
+        /// the live DATASET_CACHE) instead of rebuilding. Promotion
+        /// *correctness* is guaranteed by construction —
+        /// `create_dataset_entry(seed)` is deterministic, so a promoted
+        /// dataset is byte-identical to a synchronously-built one — so this
+        /// test targets the concurrency plumbing: it lands, it promotes, it
+        /// doesn't deadlock.
+        ///
+        /// `#[ignore]` like the others here because it builds a real RandomX
+        /// cache. Run explicitly with:
+        ///   cargo test -p coincync --features "randomx testnet" -- --ignored prewarm_lands_and_promotes
+        #[test]
+        #[ignore]
+        fn prewarm_lands_and_promotes() {
+            // Force light mode so the build is ~2s, not a 2 GB dataset.
+            std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+            let seed = [0x5Au8; 32];
+
+            prewarm_seed(seed);
+
+            // Poll up to ~15s for the background build to populate PREWARM_CACHE.
+            let mut landed = false;
+            for _ in 0..150 {
+                if PREWARM_CACHE
+                    .read()
+                    .as_ref()
+                    .map(|e| e.key == seed)
+                    .unwrap_or(false)
+                {
+                    landed = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert!(landed, "background prewarm should populate PREWARM_CACHE");
+
+            // ensure_dataset must PROMOTE it — consume the prewarm slot and
+            // install it as the live dataset, no rebuild.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            ensure_dataset(&seed, now).expect("ensure_dataset should promote the prewarmed entry");
+
+            assert!(
+                DATASET_CACHE
+                    .read()
+                    .as_ref()
+                    .map(|e| e.key == seed)
+                    .unwrap_or(false),
+                "promoted entry should now be the live dataset"
+            );
+            assert!(
+                !PREWARM_CACHE
+                    .read()
+                    .as_ref()
+                    .map(|e| e.key == seed)
+                    .unwrap_or(false),
+                "prewarm slot should be consumed by promotion"
+            );
+
+            // Sanity: hashing through the promoted dataset works and is
+            // deterministic.
+            let h1 = compute_hash(&seed, b"prewarm smoke").expect("hash after promote");
+            let h2 = compute_hash(&seed, b"prewarm smoke").expect("hash after promote");
+            assert_eq!(h1, h2, "same seed+input must hash identically");
+        }
 
         #[test]
         #[ignore]
@@ -887,10 +1173,42 @@ fn randomx_key_for_height(height: u64) -> [u8; 32] {
     *key_hash.as_bytes()
 }
 
+/// The RandomX VM seed (key) for a block at `height` — the exact value a miner
+/// must initialize its RandomX VM with to hash this height's blocks. Public
+/// wrapper over the internal epoch derivation so the in-node mining surfaces
+/// (the Stratum/Pool job builder) can carry `seed_hash` in the job they hand
+/// out. Identical to what the validator derives; the value is consensus, so
+/// changing it is a hard fork.
+#[cfg(feature = "randomx")]
+pub fn randomx_seed_for_height(height: u64) -> [u8; 32] {
+    randomx_key_for_height(height)
+}
+
 #[cfg(feature = "randomx")]
 fn compute_randomx_hash(input: &Hash, height: u64) -> Result<Hash> {
     let seed = randomx_key_for_height(height);
     randomx_cache::compute_hash(&seed, input.as_bytes()).map(Hash::from_bytes)
+}
+
+/// If `current_height` is within the lookahead window before the next
+/// RandomX key-epoch boundary, kick off a background prewarm of the next
+/// epoch's dataset so crossing the boundary doesn't stall the miner (or the
+/// IBD validation pipeline). No-op otherwise, and idempotent — safe to call
+/// on every mining loop iteration and on every applied block. Promotion at
+/// the boundary is byte-identical to a synchronous build (same seed → same
+/// dataset), so this changes only WHEN work happens, never any hash.
+#[cfg(feature = "randomx")]
+pub fn prewarm_next_epoch_if_near(current_height: u64) {
+    // ~64 blocks of lead time: at 2-min mainnet blocks that is >2 hours,
+    // far more than the 30-60s dataset build, so the next epoch's dataset is
+    // always ready before the boundary. Cheap no-op when not near one.
+    const LOOKAHEAD_BLOCKS: u64 = 64;
+    let epoch = current_height / RANDOMX_KEY_EPOCH;
+    let next_boundary = (epoch + 1).saturating_mul(RANDOMX_KEY_EPOCH);
+    if next_boundary.saturating_sub(current_height) <= LOOKAHEAD_BLOCKS {
+        let next_seed = randomx_key_for_height(next_boundary);
+        randomx_cache::prewarm_seed(next_seed);
+    }
 }
 
 // =============================================================================

@@ -2441,6 +2441,14 @@ impl Blockchain {
                     }),
                 );
 
+                // Approaching a RandomX key-epoch boundary? Prewarm the next
+                // epoch's dataset in the background so the boundary crossing
+                // (during IBD or steady-state validation) promotes it instantly
+                // instead of stalling the pipeline for the build. No-op away
+                // from a boundary; idempotent.
+                #[cfg(feature = "randomx")]
+                crate::consensus::prewarm_next_epoch_if_near(block.header.height);
+
                 return Ok(BlockStatus::Accepted);
             }
         }

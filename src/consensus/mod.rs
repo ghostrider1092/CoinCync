@@ -49,6 +49,10 @@ pub use pow::{
     bind_randomx_genesis_for_network, compute_full_anchor, compute_pow_hash, meets_difficulty,
     verify_pow, work_from_target, Anchor, PowAlgorithm,
 };
+// Batched (pipelined) mining hash + next-epoch dataset prewarm + the public
+// per-height RandomX seed accessor — only exist in randomx-enabled builds.
+#[cfg(feature = "randomx")]
+pub use pow::{compute_pow_hash_batch, prewarm_next_epoch_if_near, randomx_seed_for_height};
 // M-1: finality module is dead code; re-exports removed.
 pub use validation::{
     v1_0_12_rules_active, validate_block, validate_block_with_checkpoint,
