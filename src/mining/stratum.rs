@@ -367,9 +367,14 @@ struct Worker {
     /// When a fresh submit's job_id differs, `submitted_shares` is
     /// cleared — old job's share space no longer applies.
     current_job_id: String,
-    /// Per-job submitted (nonce, extranonce2) pairs. Used to reject
-    /// duplicates within a single job. Bounded by job rotation cadence.
-    submitted_shares: std::collections::HashSet<(u32, Vec<u8>)>,
+    /// Per-job submitted nonces, used to reject duplicate shares within a
+    /// single job. Keyed on the NONCE ALONE — CoinCync's PoW is
+    /// `RandomX(seed, blake3(anchor ‖ nonce_le ‖ tx_root))`, a pure function
+    /// of the nonce for a fixed job, so `extranonce2`/`ntime` carry no work
+    /// and MUST NOT be part of the dedup key (varying an attacker-controlled
+    /// extranonce2 would otherwise re-count the same real share — payout
+    /// theft in a reward-splitting pool). Bounded by job rotation cadence.
+    submitted_shares: std::collections::HashSet<u64>,
     /// Message sender
     tx: mpsc::Sender<String>,
 }
@@ -972,7 +977,11 @@ async fn handle_stratum_message(
                     )
                 }
             };
-            // Cadence throttle.
+            // Cadence throttle + per-job duplicate-nonce rejection. Both run
+            // under one workers write-lock. Dedup happens BEFORE the RandomX
+            // recompute below so a replayed nonce costs no PoW work, and — the
+            // load-bearing part — a worker cannot re-count one found share by
+            // resubmitting the same nonce (share-inflation / pool-payout theft).
             {
                 let now_ms = timestamp_now_ms();
                 let mut ww = workers.write().await;
@@ -989,6 +998,19 @@ async fn handle_stratum_message(
                     }
                     w.last_submit_ms = now_ms;
                     w.last_activity = timestamp_now();
+                    // New job → wipe the stale per-job nonce set.
+                    if w.current_job_id != sub_job_id {
+                        w.submitted_shares.clear();
+                        w.current_job_id = sub_job_id.to_string();
+                    }
+                    if !w.submitted_shares.insert(nonce) {
+                        return Some(
+                            serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                                "result": serde_json::Value::Null,
+                                "error": {"code": -1, "message": "duplicate share"}})
+                            .to_string(),
+                        );
+                    }
                 }
             }
             // Snapshot the current job (drop the lock before hashing/submitting).
@@ -1230,7 +1252,10 @@ async fn handle_stratum_message(
                         w.submitted_shares.clear();
                         w.current_job_id = job_id.to_string();
                     }
-                    let dup = !w.submitted_shares.insert((nonce, extranonce2.clone()));
+                    // Dedup on nonce alone — extranonce2 is not part of the
+                    // CoinCync PoW, so keying on it would let a varied
+                    // extranonce2 re-count the same real share.
+                    let dup = !w.submitted_shares.insert(nonce as u64);
                     (w.extranonce1.clone(), dup)
                 } else {
                     (Vec::new(), false)
@@ -1249,10 +1274,14 @@ async fn handle_stratum_message(
             // Verify share against current job.
             // The duplicate gate runs first — a duplicate is rejected
             // before paying for PoW recomputation in verify().
-            let current = current_job.read().await;
+            // Snapshot the job and DROP the read-guard before verify(): the
+            // RandomX recompute inside verify() takes tens of ms, and holding
+            // current_job across it stalls spawn_job_updater's current_job
+            // write() on every submit. Mirrors the native submit path.
+            let job_snapshot = { current_job.read().await.as_ref().cloned() };
             let share_result = if is_duplicate {
                 ShareResult::Duplicate
-            } else if let Some(job) = current.as_ref() {
+            } else if let Some(job) = job_snapshot.as_ref() {
                 if job.job_id != job_id {
                     ShareResult::Stale
                 } else {
@@ -1261,9 +1290,6 @@ async fn handle_stratum_message(
             } else {
                 ShareResult::Stale
             };
-            // Release the job read-guard before any chain work below, so the
-            // submit path never holds current_job while entering process_block.
-            drop(current);
 
             // Update stats based on result
             let mut should_strike_for_invalid_streak = false;
@@ -2004,5 +2030,141 @@ mod tests {
         assert!(resp2.contains("\"status\":\"OK\""), "submit OK: {resp2}");
         assert_eq!(chain.height(), 1, "native submit produced a block; tip advanced");
         assert_eq!(stats.read().await.blocks_found, 1, "one block found");
+    }
+
+    /// Regression for the share-replay / payout-theft fix (#1): a worker that
+    /// resubmits the SAME nonce must have it counted at most once. The native
+    /// `submit` path previously had NO dedup, so one found share could be
+    /// resubmitted repeatedly, each time incrementing `valid_shares` — and
+    /// `share_tally()` weights `valid_shares`, so the miner would inflate its
+    /// pool payout at honest miners' expense. This proves the replay is now
+    /// rejected as a duplicate and does not double-count.
+    #[tokio::test]
+    #[ignore]
+    async fn native_submit_dedup_prevents_double_count() {
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        use crate::consensus::{compute_pow_hash, PowAlgorithm};
+        let net = crate::config::NetworkType::Testnet;
+        crate::consensus::bind_randomx_genesis_for_network(net);
+
+        let chain: SharedBlockchain = Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().expect("genesis");
+        let mempool = crate::mempool::SharedMempool::new();
+        let spend = crate::primitives::SecretKey::from_bytes([7u8; 32]).public_key();
+        let view = crate::primitives::SecretKey::from_bytes([9u8; 32]).public_key();
+        let cand = block_builder::build_candidate_block(
+            &chain,
+            &mempool,
+            &spend,
+            &view,
+            net,
+            crate::consensus::fork_signal::SignalBits(0),
+        )
+        .expect("candidate");
+        let (anchor, tx_root, height) = cand.pow_inputs();
+        let target = cand.header.target;
+        let job_id = "job-1".to_string();
+
+        let mut nonce: u64 = 0;
+        let winning = loop {
+            let h = compute_pow_hash(PowAlgorithm::RandomX, &anchor, nonce, &tx_root, height)
+                .expect("hash");
+            if h.meets_difficulty(&target) {
+                break nonce;
+            }
+            nonce += 1;
+        };
+
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+        candidates.write().await.insert(job_id.clone(), cand);
+        let current_job = Arc::new(RwLock::new(Some(MiningJob {
+            job_id: job_id.clone(),
+            anchor,
+            tx_root,
+            seed_hash: crate::consensus::randomx_seed_for_height(height),
+            target,
+            height,
+            prev_hash: chain.tip_hash(),
+            coinbase1: vec![],
+            coinbase2: vec![],
+            merkle_branches: vec![],
+            version: 1,
+            nbits: 0,
+            ntime: 0,
+            clean_jobs: true,
+        })));
+
+        let worker_id = 1u64;
+        let (tx, _rx) = mpsc::channel::<String>(4);
+        let worker = Worker {
+            name: String::new(),
+            payout_login: "pool.w".to_string(),
+            address: None,
+            extranonce1: vec![0, 0, 0, 0],
+            shares: 0,
+            valid_shares: 0,
+            stale_shares: 0,
+            invalid_shares: 0,
+            difficulty: 1000,
+            authorized: false,
+            last_submit_ms: 0,
+            invalid_streak: 0,
+            last_activity: timestamp_now(),
+            current_job_id: String::new(),
+            submitted_shares: std::collections::HashSet::new(),
+            tx,
+        };
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(worker_id, worker);
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+
+        let login =
+            r#"{"id":1,"method":"login","params":{"login":"pool.w","pass":"","algo":["cync/rx"]}}"#;
+        handle_stratum_message(
+            login, worker_id, &workers, &current_job, &candidates, &stats, &chain, &mempool, None,
+            1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("login");
+
+        let submit = format!(
+            r#"{{"id":2,"method":"submit","params":{{"id":"sess","job_id":"{}","nonce":"{:x}"}}}}"#,
+            job_id, winning
+        );
+        // First submit: a genuine share (also meets the block target here).
+        let resp1 = handle_stratum_message(
+            &submit, worker_id, &workers, &current_job, &candidates, &stats, &chain, &mempool, None,
+            1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("submit1");
+        assert!(resp1.contains("\"status\":\"OK\""), "first submit OK: {resp1}");
+        assert_eq!(
+            workers.read().await.get(&worker_id).unwrap().valid_shares,
+            1,
+            "first valid share counted once"
+        );
+
+        // Bypass the cadence throttle so the replay reaches the dedup gate
+        // rather than being rejected as "throttled".
+        workers.write().await.get_mut(&worker_id).unwrap().last_submit_ms = 0;
+
+        // Replay the SAME nonce: must be rejected as a duplicate, not counted.
+        let resp2 = handle_stratum_message(
+            &submit, worker_id, &workers, &current_job, &candidates, &stats, &chain, &mempool, None,
+            1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("submit2");
+        assert!(
+            resp2.contains("duplicate"),
+            "replayed nonce rejected as duplicate: {resp2}"
+        );
+        assert_eq!(
+            workers.read().await.get(&worker_id).unwrap().valid_shares,
+            1,
+            "replayed nonce did NOT double-count (share_tally weights valid_shares)"
+        );
     }
 }

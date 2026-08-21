@@ -97,12 +97,18 @@ pub fn submit_mined_block(
 }
 
 /// Multi-threaded nonce search for a candidate block, used by the node's
-/// built-in solo miner (`--mine`). Each of `threads` OS threads scans a slice
-/// of the u64 nonce space (offset by `nonce_base`) via the pipelined batch PoW,
+/// built-in solo miner (`--mine`). Each of `threads` OS threads scans a
+/// disjoint slice of the full u64 nonce space via the pipelined batch PoW,
 /// returning the first nonce whose `compute_pow_hash` meets `target`. Returns
 /// `None` if `stop` is set first (the caller sets it when the tip changes, so
 /// the miner abandons a superseded candidate). Blocking/CPU-bound — call it
 /// from `spawn_blocking`, not a bare async task.
+///
+/// The threads together cover `[0, u64::MAX)` with no gaps; there is no
+/// cross-call nonce offset because every call operates on a freshly-built
+/// candidate (new timestamp/tx set), i.e. an independent search space, and at
+/// any real difficulty a solution is found in a vanishing fraction of one
+/// slice long before the space is exhausted.
 #[cfg(feature = "randomx")]
 pub fn search_nonce(
     anchor: Hash,
@@ -110,7 +116,6 @@ pub fn search_nonce(
     height: u64,
     target: Hash,
     threads: usize,
-    nonce_base: u64,
     stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<u64> {
     use crate::consensus::PowAlgorithm;
@@ -121,7 +126,7 @@ pub fn search_nonce(
     let (tx, rx) = std::sync::mpsc::channel::<u64>();
     let mut handles = Vec::with_capacity(n);
     for tid in 0..n {
-        let start = (tid as u64).saturating_mul(slice).wrapping_add(nonce_base);
+        let start = (tid as u64).saturating_mul(slice);
         let end = if tid + 1 == n {
             u64::MAX
         } else {
@@ -304,10 +309,26 @@ pub fn calculate_claimable_fees(height: u64, mempool_txs: &[Transaction]) -> u64
     if height < crate::constants::FEE_DISTRIBUTION_HEIGHT {
         return total_fees;
     }
-    let block_size: usize = mempool_txs
+    let mempool_size: usize = mempool_txs
         .iter()
         .map(|tx| borsh::to_vec(tx).map(|v| v.len()).unwrap_or(0))
         .sum();
+    // Match the validator's size basis. It classifies congestion on
+    // `block.size()` = 200 (header) + Σ tx.size() over ALL txs INCLUDING the
+    // coinbase (see block.rs::size / validation.rs max_coinbase). If we sized
+    // on mempool txs alone we could under-estimate congestion at the boundary,
+    // classify "uncongested", claim the 70% share, and have the network — which
+    // sees the extra bytes and classifies "congested" (50%) — reject our own
+    // valid-PoW block. We add the header + a safe upper bound on the coinbase
+    // (a single-output, zero-range-proof tx is well under 512 B). Over-counting
+    // only ever makes us classify congested *earlier* than the validator, i.e.
+    // claim the smaller share, which the validator always accepts — so this can
+    // only prevent the false-reject, never cause an over-claim.
+    const HEADER_BYTES: usize = 200;
+    const COINBASE_MAX_BYTES: usize = 512;
+    let block_size = mempool_size
+        .saturating_add(HEADER_BYTES)
+        .saturating_add(COINBASE_MAX_BYTES);
     let congestion_pct = (block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128;
     let congested = congestion_pct >= crate::constants::CONGESTION_THRESHOLD as u128;
     let dist = distribute_fee(Amount::from_atomic(total_fees), congested);

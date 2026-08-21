@@ -1537,14 +1537,42 @@ async fn start_node(
                     use std::sync::atomic::{AtomicBool, Ordering};
                     use std::sync::Arc;
                     let nt = chain_m.network();
-                    let mut nonce_base: u64 = 0;
+                    // How far the local tip may lead the best peer before we
+                    // treat it as a private fork and stop — mirrors the rig's
+                    // FORK_DIVERGENCE_MARGIN (2026-07-08 runaway-fork fix). A
+                    // healthy solo miner leads by 0–2 blocks; a sustained lead
+                    // this large means peers are NOT adopting our blocks.
+                    const FORK_DIVERGENCE_MARGIN: u64 = 25;
                     loop {
-                        // Mine-gate: never build a private fork. Mine only when
-                        // synced, when there are no peers (solo island), or regtest.
-                        let allowed = matches!(nt, coincync::config::NetworkType::Regtest)
-                            || chain_m.is_synced()
-                            || p2p_m.peer_count() == 0;
+                        // Mine-gate: never build a private fork. `is_synced()` is
+                        // height-based, so a node sitting on a worse fork at equal
+                        // height passes it; and a momentary `peer_count()==0` blip
+                        // must not let us run away. So even when the height/peer
+                        // gate says "go", refuse if the tip has diverged far ahead
+                        // of every peer (peers not adopting our blocks). peer height
+                        // 0 = "none reported" → not divergence (the peerless case is
+                        // the legitimate solo island, covered below).
+                        let local_height = chain_m.height();
+                        let peer_target = p2p_m
+                            .connected_peers()
+                            .iter()
+                            .map(|p| p.height)
+                            .max()
+                            .unwrap_or(0);
+                        let diverged = peer_target > 0
+                            && local_height > peer_target.saturating_add(FORK_DIVERGENCE_MARGIN);
+                        let allowed = !diverged
+                            && (matches!(nt, coincync::config::NetworkType::Regtest)
+                                || chain_m.is_synced()
+                                || p2p_m.peer_count() == 0);
                         if !allowed {
+                            if diverged {
+                                warn!(
+                                    "miner: fork-divergence — local height {} runs >{} ahead of best peer {}; \
+                                     blocks not being adopted, pausing to avoid a private fork",
+                                    local_height, FORK_DIVERGENCE_MARGIN, peer_target
+                                );
+                            }
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
                         }
@@ -1583,10 +1611,9 @@ async fn start_node(
                             }
                         });
                         let stop_s = stop.clone();
-                        let base = nonce_base;
                         let found = tokio::task::spawn_blocking(move || {
                             coincync::mining::block_builder::search_nonce(
-                                anchor, tx_root, height, target, n_threads, base, &stop_s,
+                                anchor, tx_root, height, target, n_threads, &stop_s,
                             )
                         })
                         .await
@@ -1594,7 +1621,6 @@ async fn start_node(
                         .flatten();
                         stop.store(true, Ordering::Relaxed);
                         watcher.abort();
-                        nonce_base = nonce_base.wrapping_add(1_000_000);
                         if let Some(nonce) = found {
                             let block = candidate.into_block(nonce);
                             let b = block.clone();

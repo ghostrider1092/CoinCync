@@ -728,7 +728,7 @@ pub async fn run_pool(
     network: NetworkType,
     threads: usize,
 ) -> Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
 
     bind_randomx_genesis_for_network(network);
@@ -761,12 +761,24 @@ pub async fn run_pool(
     let job_slot: Arc<tokio::sync::Mutex<Option<PoolJob>>> = Arc::new(tokio::sync::Mutex::new(None));
     let job_slot_r = job_slot.clone();
     tokio::spawn(async move {
+        // Cap each line like the server does. A malicious or compromised pool
+        // could otherwise stream unbounded bytes with no newline; read_line
+        // grows the String until \n or EOF and would OOM the miner.
+        const MAX_LINE_LENGTH: u64 = 16 * 1024;
         let mut line = String::new();
         loop {
             line.clear();
-            match reader.read_line(&mut line).await {
+            let mut limited = (&mut reader).take(MAX_LINE_LENGTH);
+            match limited.read_line(&mut line).await {
                 Ok(0) => {
                     warn!("pool: connection closed by pool");
+                    break;
+                }
+                Ok(_) if !line.ends_with('\n') => {
+                    warn!(
+                        "pool: oversized message (>{} bytes) from pool, disconnecting",
+                        MAX_LINE_LENGTH
+                    );
                     break;
                 }
                 Ok(_) => {
