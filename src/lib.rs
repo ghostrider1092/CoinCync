@@ -47,6 +47,7 @@ pub mod wallet;
 
 // ── Storage ─────────────────────────────────────────────────
 pub mod db;
+pub mod release;
 pub mod snapshot;
 pub mod storage;
 
