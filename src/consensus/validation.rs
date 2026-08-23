@@ -7,12 +7,11 @@
 //! concurrently when validating blocks.
 
 use super::difficulty::max_target;
-use super::fee_market::{congestion_multiplier, distribute_fee};
+use super::fee_market::distribute_fee;
 use super::pow::verify_pow;
 use super::{Block, BlockHeader};
 use crate::constants::{
     block_version_at_height, MAX_BLOCK_SIZE, MAX_TIMESTAMP_DRIFT, MAX_TXS_PER_BLOCK,
-    MIN_FEE_PER_BYTE,
 };
 use crate::emission::calculate_block_reward;
 use crate::error::{Error, Result};
@@ -603,38 +602,18 @@ pub fn validate_block_with_checkpoint_for_network(
         // multiplication doesn't approach u64::MAX (the `checked_mul`
         // chain catches that case identically).
         let congestion_pct: u64 = ((size as u128 * 100) / MAX_BLOCK_SIZE as u128) as u64;
-        let multiplier_x100: u64 = congestion_multiplier(congestion_pct);
 
-        for (idx, tx) in block.transactions.iter().enumerate().skip(1) {
-            let tx_size = tx.size() as u64;
-            // FIX #42: use checked_mul. Previously saturating_mul silently
-            // clamped to u64::MAX on overflow, producing a `dynamic_min`
-            // of ~1.8e18 — well above any realistic fee. The fee-low
-            // check then rejected every transaction in the block with a
-            // misleading error message. Treating overflow as an explicit
-            // oversized-transaction error surfaces the real problem.
-            let dynamic_min = match tx_size
-                .checked_mul(MIN_FEE_PER_BYTE)
-                .and_then(|v| v.checked_mul(multiplier_x100))
-                .map(|v| v / 100)
-            {
-                Some(v) => v,
-                None => {
-                    result.add_error(format!(
-                        "Transaction {} fee calculation overflow (tx size {} too large for fee computation)",
-                        idx, tx_size
-                    ));
-                    continue;
-                }
-            };
-            if tx.fee.as_atomic() < dynamic_min {
-                result.add_error(format!(
-                    "Transaction {} fee too low for congestion: {} < {} (congestion {}%, multiplier {}x/100)",
-                    idx, tx.fee.as_atomic(), dynamic_min,
-                    congestion_pct, multiplier_x100
-                ));
-            }
-        }
+        // audit H-2: per-tx congestion-fee adequacy is NO LONGER a block-validity
+        // rule. Making it consensus (a per-tx fee floor scaled by BLOCK fullness)
+        // while the block builders did not apply that scaling during selection let
+        // ~1 MB of valid minimum-fee txs be packed into a >=50%-full block that the
+        // miner's OWN validator then rejected — a near-zero-cost chain stall. This
+        // adopts the Bitcoin posture: fee adequacy is mining/relay policy, not
+        // block validity. The static per-byte floor and the congestion multiplier
+        // are still enforced at mempool admission and honored by the builder's
+        // fee-sorted selection; they simply no longer gate block validity.
+        // `congestion_pct` is retained solely for the coinbase fee-distribution
+        // split below.
 
         // Validate coinbase fee distribution (miner/burn/protocol split).
         // The coinbase must claim fees according to the distribution rules,
@@ -1975,6 +1954,20 @@ pub(crate) fn verify_ring_signature(
     use crate::crypto::{
         clsag_verify, global_cache, ring_sig_cache_key, ClsagRingMember, EcCommitment, PublicPoint,
     };
+
+    // SECURITY (audit C-2): bind the double-spend key image to the signed one.
+    // The double-spend set is keyed on `input.key_image`, but the CLSAG proves
+    // ownership of `input.signature.key_image`. If they are not identical, a
+    // signer can present an honest signature while placing an arbitrary point in
+    // `input.key_image`, so the same output spends repeatedly under fresh key
+    // images (inflation). This check runs BEFORE the signature cache — the cache
+    // is keyed only on (message, signature) and would otherwise return a
+    // cached-valid verdict for a mismatched `input.key_image`. The only prior
+    // enforcement lived in `transaction::validator::validate_transaction`, which
+    // is not on any live path.
+    if input.signature.key_image.to_bytes() != *input.key_image.as_bytes() {
+        return false;
+    }
 
     // Message is the transaction hash (excluding signatures)
     let message = tx.signing_hash();

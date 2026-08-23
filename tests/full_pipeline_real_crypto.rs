@@ -282,6 +282,43 @@ fn real_crypto_corrupted_key_image_rejected() {
 }
 
 // =============================================================================
+// TEST 5b (audit C-2): unbound key image → REJECTED
+//
+// The double-spend set is keyed on `input.key_image`, but the CLSAG proves
+// `input.signature.key_image`. If they aren't bound, a signer can keep an honest
+// signature and place a DIFFERENT valid key image in `input.key_image`, so the
+// same output spends repeatedly under fresh images. Here we borrow a valid key
+// image from another real transaction (a real curve point, unlike the corrupted
+// case above) and leave the signature honest.
+// =============================================================================
+
+#[test]
+fn real_crypto_unbound_key_image_rejected() {
+    let mut pool = Mempool::new();
+    let mut tx = build_valid_tx_for_mempool();
+    let other = build_valid_tx_for_mempool();
+
+    let honest = tx.inputs[0].key_image.as_bytes().to_owned();
+    let different_valid = other.inputs[0].key_image.as_bytes().to_owned();
+    assert_ne!(
+        honest, different_valid,
+        "test setup: need a different, valid key image"
+    );
+
+    // Swap in the different (valid) key image; the honest signature (and its
+    // signature.key_image) is left untouched.
+    tx.inputs[0].key_image = KeyImage::from_bytes(different_valid);
+
+    let result = pool.add(tx);
+    assert!(
+        result.is_err(),
+        "Unbound key image (honest signature, mismatched input.key_image) MUST be \
+         rejected. If this passes, the same output can be double-spent under fresh \
+         key images (audit C-2)."
+    );
+}
+
+// =============================================================================
 // TEST 6: Swapped ring member → REJECTED
 //
 // Attacker scenario: replace a ring member with a different public key.
