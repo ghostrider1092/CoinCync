@@ -24,6 +24,7 @@ use crate::config::NetworkType;
 use crate::consensus::fee_market::distribute_fee;
 use crate::consensus::fork_signal::{encode_coinbase_extra, SignalBits};
 use crate::consensus::{compute_full_anchor, BlockHeader};
+use crate::constants::block_version_at_height;
 use crate::crypto::{coinbase_stealth_address, BlindingFactor, PedersenCommitment};
 use crate::error::{Error, Result};
 use crate::mempool::SharedMempool;
@@ -254,7 +255,7 @@ pub fn build_block_from_template(
 
     let header = BlockHeader {
         network_magic,
-        version: 1,
+        version: block_version_at_height(height),
         height,
         timestamp,
         prev_hash,
@@ -459,6 +460,28 @@ mod tests {
         let block = candidate.into_block(42);
         assert_eq!(block.header.nonce, 42);
         assert!(block.verify_merkle_root(), "assembled block merkle root is valid");
+    }
+
+    #[test]
+    fn candidate_uses_consensus_header_version_at_activation() {
+        crate::consensus::bind_randomx_genesis_for_network(NetworkType::Regtest);
+        let (spend, view) = test_keys();
+
+        for (height, expected_version) in [
+            (crate::constants::V2_TX_ACTIVATION_HEIGHT - 1, 1),
+            (crate::constants::V2_TX_ACTIVATION_HEIGHT, 2),
+        ] {
+            let candidate = build_block_from_template(
+                &make_template(height),
+                &spend,
+                &view,
+                NetworkType::Regtest,
+                SignalBits(0),
+            )
+            .expect("build candidate");
+
+            assert_eq!(candidate.header.version, expected_version);
+        }
     }
 
     /// End-to-end proof of the Stage-2 block-production core: build a real
