@@ -1643,13 +1643,32 @@ impl Blockchain {
         {
             let mut inner = self.inner.write();
 
-            // Disconnect blocks in reverse height order
+            // Disconnect blocks in reverse height order.
+            //
+            // #48 (junbyjun1238): resolve BOTH the block hash and the full block
+            // from the DB when the in-memory caches miss. `height_to_hash` and
+            // `blocks` are bounded to the cache window (~hundreds of blocks), so a
+            // rollback deeper than that would otherwise skip the UTXO, supply,
+            // burn, and total_difficulty disconnect for the older blocks entirely
+            // — silently drifting all of that state against the lowered tip. We
+            // load the missing blocks from the DB and apply the identical
+            // disconnect logic before the tip is updated below.
             for h in (target_height + 1..=current_height).rev() {
-                let orphan_hash = inner.height_to_hash.get(&h).copied();
+                let orphan_hash = inner.height_to_hash.get(&h).copied().or_else(|| {
+                    self.db
+                        .as_ref()
+                        .and_then(|db| db.blocks.get_hash_by_height(h).ok().flatten())
+                });
                 if let Some(oh) = orphan_hash {
-                    let orphan_txs = inner.blocks.get(&oh).map(|b| b.transactions.clone());
-                    if let Some(txs) = orphan_txs {
-                        let disconnect_batch = UtxoSet::batch_disconnect_block(&txs);
+                    // Cache first, then DB — a deep rollback's blocks live only on disk.
+                    let block = inner.blocks.get(&oh).cloned().or_else(|| {
+                        self.db
+                            .as_ref()
+                            .and_then(|db| db.blocks.get(&oh).ok().flatten())
+                    });
+                    if let Some(block) = block {
+                        let txs = &block.transactions;
+                        let disconnect_batch = UtxoSet::batch_disconnect_block(txs);
                         inner.utxos.apply_batch(disconnect_batch);
                         // Phase 2 store rewind (site 2: rollback_to_height
                         // deep-partition recovery). One rewind per
@@ -1658,24 +1677,16 @@ impl Blockchain {
                         // are None.
                         self.rewind_phase2_stores(h);
                         // Collect non-coinbase txs
-                        for tx in &txs {
+                        for tx in txs {
                             if !tx.is_coinbase() {
                                 all_orphaned_txs.push(tx.clone());
                             }
                         }
                         // Subtract emission
                         let emission = calculate_block_reward(h);
-                        // Burn accumulator moves in lockstep with supply: the
-                        // block being disconnected is the one in the cache under
-                        // `oh` (its txs were just read above), so its fee-burn is
-                        // well-defined. Computed before the stat mutations so the
-                        // immutable borrow of `inner.blocks` is released first.
-                        let fee_burn = block_fee_burn(
-                            inner
-                                .blocks
-                                .get(&oh)
-                                .expect("disconnected block is in cache; its txs were just read"),
-                        );
+                        // Burn accumulator moves in lockstep with supply, using the
+                        // block we just loaded (cache or DB).
+                        let fee_burn = block_fee_burn(&block);
                         // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                         //
                         // AUDIT (2026-07-02): third site of the self-defeating supply-
@@ -1729,13 +1740,22 @@ impl Blockchain {
                         // so this node would advertise more work than one that reached
                         // the same tip linearly — a false `work_behind` veto / wrong
                         // fork choice. saturating_sub: work never drops below the base.
-                        let disc_difficulty = inner
-                            .blocks
-                            .get(&oh)
-                            .map(|b| calculate_difficulty_from_target(&b.header.target))
-                            .unwrap_or(0);
+                        let disc_difficulty =
+                            calculate_difficulty_from_target(&block.header.target);
                         inner.stats.total_difficulty =
                             inner.stats.total_difficulty.saturating_sub(disc_difficulty);
+                    } else {
+                        // #48: the block for a height we are rolling back could not
+                        // be found in the cache OR the DB. It should exist (it is at
+                        // or below the current tip), so this is a corruption signal.
+                        // Log loudly — disconnecting is impossible without the block,
+                        // and silently skipping would drift UTXO/supply/work state.
+                        tracing::error!(
+                            "rollback_to_height: block {} at height {} not found in cache or DB; \
+                             cannot disconnect it — chain state may drift and require a reindex",
+                            oh.to_hex(),
+                            h
+                        );
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -5068,6 +5088,76 @@ mod tests {
         assert_eq!(
             chain.stats().total_burned, 0,
             "disconnecting every fee-carrying block returns total_burned to 0"
+        );
+    }
+
+    #[test]
+    fn rollback_deep_disconnects_blocks_present_only_in_db() {
+        // #48 (junbyjun1238): a rollback deeper than the in-memory cache window
+        // must load the missing blocks from the DB and still disconnect them —
+        // otherwise their UTXO/supply/burn/total_difficulty adjustments are
+        // silently skipped and the state drifts against the lowered tip. Here the
+        // fee-carrying blocks live ONLY in the DB (never inserted into the
+        // in-memory caches), simulating deep-rollback cache eviction.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+        db.state.save_state(&state_for_genesis(&genesis)).unwrap();
+
+        let chain = Blockchain::with_database(db.clone(), NetworkType::Testnet);
+        chain.load_from_database().expect("load genesis-only chain");
+
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        let h1 = act.max(1);
+        let h2 = h1 + 1;
+        let b1 = burn_test_block(h1, 41, &[3_000_000]);
+        let b2 = burn_test_block(h2, 42, &[5_000_000]);
+        let burn1 = block_fee_burn(&b1);
+        let burn2 = block_fee_burn(&b2);
+        assert!(burn1 > 0 && burn2 > 0, "staged blocks must burn fees");
+        let dft = |b: &Block| calculate_difficulty_from_target(&b.header.target);
+
+        // Persist the two blocks to the DB ONLY — deliberately NOT into
+        // inner.blocks / inner.height_to_hash, so the disconnect loop must use
+        // the DB fallback.
+        db.blocks.insert(&b1).unwrap();
+        db.blocks.set_height_hash(h1, &b1.hash()).unwrap();
+        db.blocks.insert(&b2).unwrap();
+        db.blocks.set_height_hash(h2, &b2.hash()).unwrap();
+        {
+            let mut inner = chain.inner.write();
+            inner.tip.hash = b2.hash();
+            inner.tip.height = h2;
+            inner.stats.height = h2;
+            inner.stats.tip_hash = b2.hash();
+            // Ample supply headroom so the emission subtracts never underflow.
+            inner.stats.total_supply = u64::MAX as u128;
+            inner.stats.total_burned = burn1 + burn2;
+            inner.stats.total_difficulty = 1 + dft(&b1) + dft(&b2);
+        }
+
+        // Precondition: the blocks are genuinely absent from the in-memory cache.
+        {
+            let inner = chain.inner.read();
+            assert!(inner.blocks.get(&b1.hash()).is_none(), "b1 must be DB-only");
+            assert!(inner.height_to_hash.get(&h1).is_none(), "h1 must be DB-only");
+        }
+
+        chain.rollback_to_height(0).expect("deep rollback to genesis");
+
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
+        assert_eq!(
+            chain.stats().total_burned,
+            0,
+            "#48: DB-only blocks must still be disconnected (total_burned back to 0)"
+        );
+        assert_eq!(
+            chain.stats().total_difficulty,
+            1,
+            "#48: DB-only blocks' work must be subtracted (back to the genesis base)"
         );
     }
 }
