@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::Manager;
+use tauri::Emitter;
 use zeroize::Zeroize;
 
 use crate::{
@@ -9,28 +9,42 @@ use crate::{
 };
 
 #[derive(Serialize)]
-pub(crate) struct Balance { total: String, unlocked: String, locked: String }
+pub(crate) struct Balance {
+    total: String,
+    unlocked: String,
+    locked: String,
+}
 
 #[tauri::command]
 pub(crate) fn get_balance(state: tauri::State<'_, State>) -> Balance {
-    let w = state.lock().unwrap();
+    // Recover from a poisoned mutex instead of panicking (the data behind it is
+    // still valid; poisoning only flags that some other handler panicked). A
+    // bare unwrap() here would make every balance read panic thereafter.
+    let w = state.lock().unwrap_or_else(|e| e.into_inner());
     let t = w.balance_total as f64 / 1e12;
     let formatted = if t > 0.0 {
         format!("{:.12}", t)
     } else {
         "0.000000000000".to_string()
     };
-    Balance { total: formatted.clone(), unlocked: formatted, locked: "0.000000000000".into() }
+    Balance {
+        total: formatted.clone(),
+        unlocked: formatted,
+        locked: "0.000000000000".into(),
+    }
 }
 
 #[tauri::command]
 pub(crate) fn get_transactions(state: tauri::State<'_, State>) -> serde_json::Value {
-    let w = state.lock().unwrap();
+    let w = state.lock().unwrap_or_else(|e| e.into_inner());
     serde_json::json!({ "txs": w.transactions })
 }
 
 #[tauri::command]
-pub(crate) fn validate_address(address: String, state: tauri::State<'_, State>) -> serde_json::Value {
+pub(crate) fn validate_address(
+    address: String,
+    state: tauri::State<'_, State>,
+) -> serde_json::Value {
     let addr = address.trim().to_string();
     if addr.is_empty() {
         return serde_json::json!({"valid": false, "type": "unknown", "reason": "empty address"});
@@ -146,8 +160,12 @@ pub(crate) fn restore_wallet(
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
     let p = path.to_string_lossy().to_string();
 
-    wallet_cli(&bin, &["--wallet", &p, "restore", &normalized_seed], &password)
-        .map_err(WalletError::from_cli_error)?;
+    wallet_cli(
+        &bin,
+        &["--wallet", &p, "restore", &normalized_seed],
+        &password,
+    )
+    .map_err(WalletError::from_cli_error)?;
 
     let mut s = state.lock()?;
     s.wallet_path = path;
@@ -223,17 +241,31 @@ pub(crate) fn scan_wallet(
     let (bin, path, pw) = {
         let s = state.lock()?;
         let pw = with_session_password(&s, |pw| Ok(pw.to_string()))?;
-        (s.wallet_bin.clone(), s.wallet_path.to_string_lossy().to_string(), pw)
+        (
+            s.wallet_bin.clone(),
+            s.wallet_path.to_string_lossy().to_string(),
+            pw,
+        )
     };
 
     let node_url = active_node_url();
 
-    let out = wallet_cli(&bin, &[
-        "--wallet", &path,
-        "--node", &node_url,
-        "scan", "--from", "0", "--max-blocks", "10000",
-    ], &pw)
-        .map_err(WalletError::from_cli_error)?;
+    let out = wallet_cli(
+        &bin,
+        &[
+            "--wallet",
+            &path,
+            "--node",
+            &node_url,
+            "scan",
+            "--from",
+            "0",
+            "--max-blocks",
+            "10000",
+        ],
+        &pw,
+    )
+    .map_err(WalletError::from_cli_error)?;
     let mut pw = pw;
     pw.zeroize();
 
@@ -251,16 +283,32 @@ pub(crate) fn scan_wallet(
     let mut reorg_depth: Option<u64> = None;
     for line in out.lines() {
         if line.contains("Balance total:") {
-            bal = line.split_whitespace().filter_map(|s| s.parse::<u64>().ok()).next().unwrap_or(0);
+            bal = line
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u64>().ok())
+                .next()
+                .unwrap_or(0);
         }
         if line.contains("UTXO count:") {
-            utxos = line.split_whitespace().filter_map(|s| s.parse::<usize>().ok()).next().unwrap_or(0);
+            utxos = line
+                .split_whitespace()
+                .filter_map(|s| s.parse::<usize>().ok())
+                .next()
+                .unwrap_or(0);
         }
         if line.contains("height=") {
-            tip = line.split("height=").nth(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            tip = line
+                .split("height=")
+                .nth(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
         }
         if line.contains("Found outputs:") {
-            found = line.split_whitespace().filter_map(|s| s.parse::<usize>().ok()).next().unwrap_or(0);
+            found = line
+                .split_whitespace()
+                .filter_map(|s| s.parse::<usize>().ok())
+                .next()
+                .unwrap_or(0);
         }
         if line.contains("Reorg recovered") {
             // Extract new_height (post-rewind tip) — the canonical
@@ -279,19 +327,21 @@ pub(crate) fn scan_wallet(
         }
     }
 
-    let txs: Vec<TxRecord> = (0..found.min(50)).map(|i| TxRecord {
-        id: format!("{:016x}", i),
-        tx_type: "received".into(),
-        amount: format!("{:.12}", bal as f64 / found.max(1) as f64 / 1e12),
-        date: "—".into(),
-        height: tip.saturating_sub(found as u64 - i as u64),
-        status: "confirmed".into(),
-        tx_kind: if i == 0 { "coinbase" } else { "ring" }.into(),
-        ring: 11,
-        memo: "".into(),
-        confirmations: i as u64 + 1,
-        fee: "0.000005984000".into(),
-    }).collect();
+    let txs: Vec<TxRecord> = (0..found.min(50))
+        .map(|i| TxRecord {
+            id: format!("{:016x}", i),
+            tx_type: "received".into(),
+            amount: format!("{:.12}", bal as f64 / found.max(1) as f64 / 1e12),
+            date: "—".into(),
+            height: tip.saturating_sub(found as u64 - i as u64),
+            status: "confirmed".into(),
+            tx_kind: if i == 0 { "coinbase" } else { "ring" }.into(),
+            ring: 11,
+            memo: "".into(),
+            confirmations: i as u64 + 1,
+            fee: "0.000005984000".into(),
+        })
+        .collect();
 
     // Detect "new outputs found" BEFORE we update state so we can fire a
     // tx_received event that the UI can show as a toast / activity-list
@@ -327,14 +377,21 @@ pub(crate) fn scan_wallet(
     // distinct from "wallet state changed." The JS can use it to show a
     // toast or animate the activity list. Only emit if the count grew.
     if found > prior_tx_count {
-        let _ = app.emit_all("tx_received", serde_json::json!({
-            "new_count": found - prior_tx_count,
-            "scanned_height": tip,
-        }));
+        let _ = app.emit(
+            "tx_received",
+            serde_json::json!({
+                "new_count": found - prior_tx_count,
+                "scanned_height": tip,
+            }),
+        );
     }
 
-    Ok(format!("Scanned to height {}. Found {} outputs. Balance: {:.12} CYNC.",
-        tip, found, bal as f64 / 1e12))
+    Ok(format!(
+        "Scanned to height {}. Found {} outputs. Balance: {:.12} CYNC.",
+        tip,
+        found,
+        bal as f64 / 1e12
+    ))
 }
 
 /// Task #7: clear the most-recent reorg notification from AppState
@@ -380,9 +437,15 @@ pub(crate) fn wallet_exists() -> bool {
 /// unlock the default (`wallet_dir().join("default.wallet")`) is returned.
 #[tauri::command]
 pub(crate) fn wallet_path(state: tauri::State<'_, State>) -> String {
-    state.lock()
+    state
+        .lock()
         .map(|s| s.wallet_path.to_string_lossy().to_string())
-        .unwrap_or_else(|_| wallet_dir().join("default.wallet").to_string_lossy().to_string())
+        .unwrap_or_else(|_| {
+            wallet_dir()
+                .join("default.wallet")
+                .to_string_lossy()
+                .to_string()
+        })
 }
 
 /// FIX #5: Return the REAL wallet address, not a hardcoded one
