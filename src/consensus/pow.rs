@@ -107,6 +107,21 @@ static RANDOMX_GENESIS_BYTES: OnceLock<[u8; 32]> = OnceLock::new();
 /// Bind RandomX epoch keys to the genesis hash for the selected network.
 /// Call once at process startup from `coincync-node` and `coincync-miner` (before PoW).
 pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
+    // SECURITY (issue #51): `regtest-fast` pins difficulty and bypasses the
+    // difficulty sanity checks. It is a DEV/CI-only feature and must NEVER take
+    // effect on mainnet or testnet — documentation is not a sufficient boundary.
+    // Every binary calls this at startup with the real `--network`, so this is
+    // the single chokepoint that fails closed if such a binary is pointed at a
+    // non-Regtest network.
+    #[cfg(feature = "regtest-fast")]
+    {
+        assert!(
+            matches!(network, crate::config::NetworkType::Regtest),
+            "regtest-fast feature is compiled in but the selected network is {:?}; refusing to \
+             start — regtest-fast bypasses difficulty and must only ever run on Regtest",
+            network
+        );
+    }
     #[cfg(feature = "randomx")]
     {
         let genesis: [u8; 32] = match network {
