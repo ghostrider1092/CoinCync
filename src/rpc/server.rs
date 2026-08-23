@@ -2014,8 +2014,15 @@ pub async fn start_rpc_server(
             let end = end
                 .min(start.saturating_add(MAX_DIGEST_BLOCKS - 1))
                 .min(chain_height);
-            let mut digests =
-                Vec::with_capacity(((end - start + 1) as usize).min(MAX_DIGEST_BLOCKS as usize));
+            // `end` was just clamped to `min(chain_height)`, which can drop it
+            // below `start` when `start > chain_height` (the earlier guard saw
+            // the pre-clamp `end`). Use saturating math — matching the sibling
+            // range handlers — so the capacity calc can't underflow. The
+            // `start..=end` loop below is simply empty in that case.
+            let mut digests = Vec::with_capacity(
+                (end.saturating_sub(start).saturating_add(1) as usize)
+                    .min(MAX_DIGEST_BLOCKS as usize),
+            );
             for h in start..=end {
                 if let Some(block) = state.chain.get_block_by_height(h) {
                     digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
