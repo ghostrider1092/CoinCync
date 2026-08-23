@@ -333,6 +333,14 @@ pub struct AddressManager {
     manual: HashSet<SocketAddr>,
     /// Maximum addresses to store
     max_addresses: usize,
+    /// ANTI-ECLIPSE (address-book netgroup diversity): the most addresses any
+    /// single netgroup (/16 for IPv4, /32 for IPv6) may occupy in the book.
+    /// The connection layer already caps outbound peers per /16
+    /// (`connection_tracker::MAX_OUTBOUND_PER_SUBNET`); this is the
+    /// address-*table* analog — it stops an attacker from flooding the book
+    /// with addresses from one group and crowding out honest, diverse peers
+    /// (an address-table eclipse). Operator `manual` peers are exempt.
+    max_per_group: usize,
 }
 
 impl AddressManager {
@@ -347,7 +355,36 @@ impl AddressManager {
             failures: HashMap::new(),
             manual: HashSet::new(),
             max_addresses,
+            // No single netgroup may hold more than ~1/8 of the book (floor 8
+            // for tiny books), so honest diversity always keeps a majority.
+            max_per_group: (max_addresses / 8).max(8),
         }
+    }
+
+    /// Netgroup key for anti-eclipse book diversity: /16 for IPv4, /32 for
+    /// IPv6, with a high marker bit so v4 and v6 groups never collide.
+    fn addr_netgroup(addr: &SocketAddr) -> u64 {
+        match addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
+                ((o[0] as u64) << 8) | (o[1] as u64)
+            }
+            std::net::IpAddr::V6(v6) => {
+                let s = v6.segments();
+                0x1_0000_0000 | ((s[0] as u64) << 16) | (s[1] as u64)
+            }
+        }
+    }
+
+    /// Count how many addresses currently in the book belong to `group`.
+    /// Computed on demand (no separate counter to drift across the several
+    /// removal sites); `add` already sorts O(n log n) when the book is full,
+    /// so this O(n) scan is comparable.
+    fn group_count(&self, group: u64) -> usize {
+        self.addresses
+            .iter()
+            .filter(|a| Self::addr_netgroup(&a.addr) == group)
+            .count()
     }
 
     /// Register a manually-configured (--addnode) peer. Manual peers are
@@ -382,6 +419,24 @@ impl AddressManager {
         if self.self_addresses.contains(&addr.addr) {
             return;
         }
+
+        // Don't add if already known or tried (check before the anti-eclipse
+        // quota + eviction so a re-gossip of a known addr is a cheap no-op).
+        if self.tried.contains(&addr.addr) || self.known_addrs.contains(&addr.addr) {
+            return;
+        }
+
+        // ANTI-ECLIPSE (address-book netgroup diversity): reject a NEW address
+        // whose netgroup already holds its quota, BEFORE any eviction — so an
+        // attacker flooding one /16 cannot evict honest, diverse addresses to
+        // make room for its own. Operator `manual` peers bypass the quota.
+        if !self.manual.contains(&addr.addr) {
+            let group = Self::addr_netgroup(&addr.addr);
+            if self.group_count(group) >= self.max_per_group {
+                return;
+            }
+        }
+
         if self.addresses.len() >= self.max_addresses {
             // Remove oldest
             self.addresses
@@ -389,11 +444,6 @@ impl AddressManager {
             if let Some(evicted) = self.addresses.pop() {
                 self.known_addrs.remove(&evicted.addr);
             }
-        }
-
-        // Don't add if already known or tried
-        if self.tried.contains(&addr.addr) {
-            return;
         }
 
         // SECURITY (L6): O(1) dedup check via HashSet instead of O(n) linear scan
@@ -694,6 +744,54 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_book_netgroup_quota_bounds_flooding() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        // max_per_group = (1000 / 8).max(8) = 125.
+        let mut am = AddressManager::new(1000);
+
+        // Flood 500 distinct addresses all inside one /16 (10.20.0.0/16).
+        for i in 0..500u32 {
+            let ip = Ipv4Addr::new(10, 20, (i / 256) as u8, (i % 256) as u8);
+            am.add(PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 18080)));
+        }
+        let all = am.get_for_exchange(10_000);
+        let flooded = all
+            .iter()
+            .filter(|a| matches!(a.addr.ip(), IpAddr::V4(v4) if v4.octets()[0] == 10 && v4.octets()[1] == 20))
+            .count();
+        assert!(
+            flooded <= 125,
+            "one /16 must not exceed the book quota (125), got {flooded}"
+        );
+
+        // A diverse address from a different /16 is still admitted.
+        let diverse = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 18080);
+        am.add(PeerAddress::new(diverse));
+        assert!(
+            am.get_for_exchange(10_000).iter().any(|a| a.addr == diverse),
+            "an address from an unsaturated netgroup must still be admitted"
+        );
+    }
+
+    #[test]
+    fn manual_peers_bypass_netgroup_quota() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let mut am = AddressManager::new(1000); // quota 125 per /16
+        // Saturate 10.20/16 with discovered addresses.
+        for i in 0..300u32 {
+            let ip = Ipv4Addr::new(10, 20, (i / 256) as u8, (i % 256) as u8);
+            am.add(PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 18080)));
+        }
+        // An operator --addnode peer in the SAME /16 must still be admitted.
+        let manual = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 255, 254)), 18080);
+        am.add_manual(manual);
+        assert!(
+            am.get_for_exchange(10_000).iter().any(|a| a.addr == manual),
+            "operator manual peer must bypass the netgroup quota"
+        );
+    }
 
     #[test]
     fn bootstrap_config_is_network_aware() {
