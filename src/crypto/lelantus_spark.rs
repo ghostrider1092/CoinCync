@@ -432,15 +432,31 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
     // using l_real and the message. Then walk forward, computing L and c
     // for each non-real index.
     let mut idx = (real_index + 1) % n;
-    // Seed the first challenge from the ring opener
-    let serial_tag_point = gen_g() * serial;
+    // Seed the first challenge from the ring opener.
+    //
+    // H-1 FIX (serial-tag binding): the ring is a DUAL-BASE proof. Each
+    // position carries an H-side commitment L_i (over P_i = s*H) and a
+    // G-side companion L'_i (over T = s*G), sharing the same (z_i, c_i).
+    // Hashing BOTH into every Fiat-Shamir step forces the SAME secret s to
+    // satisfy P_real = s*H and T = s*G. Previously only the H-side was
+    // hashed and T was merely committed in the seed, so a spender could
+    // attach an arbitrary T' != s*G and still verify — a fresh tag per
+    // spend defeats double-spend detection (unlimited double-spends).
+    // (Feature-gated `sketch-lelantus-spark`, off by default — no v1.0
+    // activation impact. Hand-rolled ZK: needs external review before
+    // this feature is ever turned on.)
+    let g_gen = gen_g();
+    let serial_tag_point = g_gen * serial; // T = s*G
+    let lp_real = g_gen * k; // k*G — G-side companion of l_real (k*H)
     let mut prev_commit = l_real.compress();
+    let mut prev_commit_p = lp_real.compress();
     let seed_challenge = fs_challenge(
         b"ring_seed",
         &[
             message,
             &(real_index as u64).to_le_bytes(),
             prev_commit.as_bytes(),
+            prev_commit_p.as_bytes(),
             serial_tag_point.compress().as_bytes(),
         ],
     );
@@ -450,12 +466,16 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
         let z_i = random_scalar(rng);
         z[idx] = z_i;
 
-        // L_i = z_i * H + c_i * P_i
+        // Dual-base commitments over the shared (z_i, c_i):
+        //   L_i  = z_i * H + c_i * P_i   (H-side, binds P_real = s*H)
+        //   L'_i = z_i * G + c_i * T     (G-side, binds T      = s*G)
         let l_i = h_gen * z_i + pubkeys[idx] * c[idx];
+        let lp_i = g_gen * z_i + serial_tag_point * c[idx];
         commits[idx] = l_i;
 
-        // Next challenge = Fiat-Shamir of the previous step
+        // Next challenge = Fiat-Shamir over BOTH sides of the previous step.
         prev_commit = l_i.compress();
+        prev_commit_p = lp_i.compress();
         let next_idx = (idx + 1) % n;
         if next_idx != (real_index + 1) % n {
             c[next_idx] = fs_challenge(
@@ -464,17 +484,19 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
                     message,
                     &(next_idx as u64).to_le_bytes(),
                     prev_commit.as_bytes(),
+                    prev_commit_p.as_bytes(),
                 ],
             );
         } else {
             // We're about to wrap back to the seed point. Compute the
-            // real challenge for the real index from the last L.
+            // real challenge for the real index from the last L / L'.
             c[real_index] = fs_challenge(
                 b"ring_step",
                 &[
                     message,
                     &(real_index as u64).to_le_bytes(),
                     prev_commit.as_bytes(),
+                    prev_commit_p.as_bytes(),
                 ],
             );
         }
@@ -571,8 +593,13 @@ pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -
         .collect::<Result<Vec<_>>>()
         .map_err(|_| Error::SparkVerifyFailed)?;
 
-    // Recompute L_i = z_i*H + c_i*P_i for every i
+    // Recompute BOTH sides of the dual-base ring for every i (see the H-1
+    // FIX note in `prove_spark_spend`):
+    //   L_i  = z_i*H + c_i*P_i   (H-side)
+    //   L'_i = z_i*G + c_i*T     (G-side, binds the serial tag to the same s)
     let l: Vec<RistrettoPoint> = (0..n).map(|i| h_gen * z[i] + pubkeys[i] * c[i]).collect();
+    let g_gen = gen_g();
+    let lp: Vec<RistrettoPoint> = (0..n).map(|i| g_gen * z[i] + serial_tag * c[i]).collect();
 
     // ── Degenerate ring of size 1 ───────────────────────────────────
     //
@@ -601,6 +628,7 @@ pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -
                 &proof.message,
                 &0u64.to_le_bytes(),
                 l[0].compress().as_bytes(),
+                lp[0].compress().as_bytes(),
                 serial_tag.compress().as_bytes(),
             ],
         );
@@ -634,6 +662,7 @@ pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -
                 &proof.message,
                 &(r as u64).to_le_bytes(),
                 l[r].compress().as_bytes(),
+                lp[r].compress().as_bytes(),
                 serial_tag.compress().as_bytes(),
             ],
         );
@@ -656,6 +685,7 @@ pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -
                     &proof.message,
                     &(next as u64).to_le_bytes(),
                     l[idx].compress().as_bytes(),
+                    lp[idx].compress().as_bytes(),
                 ],
             );
             if expected != c[next] {
@@ -674,6 +704,7 @@ pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -
                     &proof.message,
                     &(r as u64).to_le_bytes(),
                     l[(r + n - 1) % n].compress().as_bytes(),
+                    lp[(r + n - 1) % n].compress().as_bytes(),
                 ],
             );
             if r_expected == c[r] {
@@ -794,6 +825,66 @@ mod tests {
         let pubkeys: Vec<RistrettoPoint> =
             anon_set.iter().map(|c| spark_pubkey(c, v, &r)).collect();
         (note, anon_set, pubkeys)
+    }
+
+    // ─── Soundness: serial-tag binding (H-1 regression) ────────────
+
+    #[test]
+    fn double_spend_forged_serial_tag_is_rejected() {
+        // H-1 regression. A coin owner must NOT be able to spend with a
+        // serial tag T' != s*G. Before the dual-base binding, the ring only
+        // proved P_real = s*H and merely hashed the tag into the seed, so a
+        // spender could emit a FRESH forged tag on each spend — the
+        // double-spend detector (which keys on the tag) never saw a
+        // collision, allowing unlimited double-spends of one coin.
+        //
+        // This forges an n=1 spend with a wrong tag following the exact
+        // honest construction (best-case attacker: hashes the honest G-side
+        // companion k*G) and asserts the verifier rejects it — which only
+        // holds because L'_i = z_i*G + c_i*T is now bound into every step.
+        let mut rng = OsRng;
+        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 1, 0);
+        let indices = vec![0u64];
+        let message = [21u8; 32];
+        let s = note.serial_scalar();
+
+        // Positive control: the honest spend verifies and its tag is s*G.
+        let honest =
+            prove_spark_spend(&note, &anon_set, &indices, 0, &message, &mut rng).unwrap();
+        verify_spark_spend(&honest, &pubkeys).expect("honest n=1 must verify");
+        assert_eq!(
+            honest.serial_tag,
+            (gen_g() * s).compress().to_bytes(),
+            "honest tag must be the canonical s*G"
+        );
+
+        // Forge: same n=1 construction, but tag T' = (s+1)*G != s*G.
+        let forged_tag = gen_g() * (s + Scalar::ONE);
+        let k = random_scalar(&mut rng);
+        let l_real = gen_h() * k; // k*H
+        let lp_real = gen_g() * k; // k*G (honest companion)
+        let c0 = fs_challenge(
+            b"ring_seed",
+            &[
+                &message,
+                &0u64.to_le_bytes(),
+                l_real.compress().as_bytes(),
+                lp_real.compress().as_bytes(),
+                forged_tag.compress().as_bytes(),
+            ],
+        );
+        let z0 = k - c0 * s;
+        let forged = SparkSpendProof {
+            anon_set_indices: indices.clone(),
+            serial_tag: forged_tag.compress().to_bytes(),
+            challenges: vec![c0.to_bytes()],
+            responses: vec![z0.to_bytes()],
+            message,
+        };
+        assert!(
+            verify_spark_spend(&forged, &pubkeys).is_err(),
+            "forged serial tag (T' != s*G) MUST be rejected by the dual-base binding"
+        );
     }
 
     // ─── Completeness ──────────────────────────────────────────────
