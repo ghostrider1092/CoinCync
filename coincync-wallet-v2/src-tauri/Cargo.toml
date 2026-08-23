@@ -8,9 +8,9 @@ edition = "2021"
 # Must track the Tauri v1 line to match `tauri = "1.6"` below. A v2
 # tauri-build (2.x) parses tauri.conf.json as the v2 schema and rejects
 # v1 keys like `devPath`/`distDir`, breaking the build. Keep both on v1.
-tauri-build = { version = "2.6", features = [] }
+tauri-build = { version = "2", features = [] }
 [dependencies]
-tauri     = { version = "1.6", features = [ "process-relaunch", "notification-all", "shell-open"] }
+tauri     = { version = "2", features = [] }
 serde     = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest   = { version = "0.13", features = ["json", "blocking"] }
@@ -26,11 +26,14 @@ keyring = "4"
 # `RngCore::fill_bytes`). A prior bump to "0.10" pulled a crate whose
 # API has no root `thread_rng`/`RngCore`, breaking the RPC-key generator.
 # 0.8's ThreadRng is a CSPRNG — correct for a bearer-key generator.
-rand = "0.10"
+rand = "0.8"
 # QR code rendering for the Receive page. SVG output keeps the bundle
 # small and scales cleanly. Same version as the workspace-wide pin in
 # the root Cargo.toml.
 qrcode = "0.14"
+tauri-plugin-notification = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

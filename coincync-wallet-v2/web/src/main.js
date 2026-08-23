@@ -18,10 +18,12 @@ const IS_TAURI = typeof window !== "undefined" && !!window.__TAURI__;
 async function invoke(cmd, params = undefined) {
   if (IS_TAURI) {
     const t = window.__TAURI__;
-    // Tauri 1.x exposes invoke at either window.__TAURI__.invoke OR
-    // window.__TAURI__.tauri.invoke depending on the global-init mode.
-    // Pick whichever is defined.
-    const inv = (t.tauri && t.tauri.invoke) || t.invoke;
+    // Resolve invoke across Tauri versions. v2 (post-migration) exposes it at
+    // window.__TAURI__.core.invoke; v1 used window.__TAURI__.invoke or
+    // window.__TAURI__.tauri.invoke. Prefer v2, fall back to v1 so the same
+    // frontend works either way.
+    const inv =
+      (t.core && t.core.invoke) || (t.tauri && t.tauri.invoke) || t.invoke;
     if (typeof inv !== "function") {
       console.error("[invoke] no invoke() on window.__TAURI__:", Object.keys(t));
       throw new Error("Tauri API not initialised");
@@ -180,6 +182,16 @@ let state = {
   peerCount: 0,
   mempoolSize: 0,
   connected: false,
+  // Network identity (driven by get_network_info at boot). `unit` is the
+  // display ticker — testnet builds show tCYNC, mainnet shows CYNC. Default
+  // to the testnet unit since testnet is the only live network today.
+  network: "",
+  unit: "tCYNC",
+  nodeVersion: "",
+  // Live fee estimate from the node ({slow,normal,fast,flash} as decimal
+  // strings). Null until get_fee_estimate resolves; the Send view falls
+  // back to static defaults until then.
+  feeEstimate: null,
   // Wallet-side (driven by wallet_state event + initial scan)
   balance: 0,            // atomic units → CYNC (already divided)
   balanceUnlocked: 0,    // confirmed + spendable
@@ -812,14 +824,22 @@ function renderRestoreWallet() {
 // Fetch + cache the wallet state so the Dashboard renders quickly.
 async function primeWalletState() {
   try {
-    const [bal, blk, addr, walletPath] = await Promise.allSettled([
+    const [bal, blk, addr, walletPath, netInfo] = await Promise.allSettled([
       invoke("get_balance"),
       invoke("get_block_height"),
       invoke("get_wallet_address"),
       invoke("wallet_path"),
+      invoke("get_network_info"),
     ]);
     if (walletPath.status === "fulfilled" && typeof walletPath.value === "string") {
       state.walletFilePath = walletPath.value;
+    }
+    if (netInfo.status === "fulfilled" && netInfo.value) {
+      // { version, network, connections }. Derive the display ticker from
+      // the network: only mainnet uses the bare "CYNC" symbol.
+      state.network = netInfo.value.network || state.network;
+      state.nodeVersion = netInfo.value.version || state.nodeVersion;
+      state.unit = state.network === "mainnet" ? "CYNC" : "tCYNC";
     }
     if (bal.status === "fulfilled" && bal.value) {
       // v1 returns total/unlocked/locked as strings; v2 dashboard
@@ -840,6 +860,22 @@ async function primeWalletState() {
     }
   } catch (e) {
     console.warn("[primeWalletState]", e);
+  }
+}
+
+// Refresh the node's live fee estimate and, if the user is on the Send
+// view, re-render so the tiers + review pane reflect current pricing.
+// Best-effort: on any error we keep whatever estimate (or static fallback)
+// is already in place.
+async function refreshFeeEstimate() {
+  try {
+    const fe = await invoke("get_fee_estimate");
+    if (fe && (fe.normal || fe.slow || fe.fast || fe.flash)) {
+      state.feeEstimate = fe;
+      if (state.page === "send") renderShell();
+    }
+  } catch (e) {
+    console.warn("[refreshFeeEstimate]", e);
   }
 }
 
@@ -1008,10 +1044,10 @@ function dashboardHtml() {
         : "Sent",
       meta: tx.height ? `Block #${tx.height.toLocaleString()}` : (tx.date || "—"),
       amount: `${sign}${tx.amount || "0.000000"}`,
-      // tCYNC matches the hero-balance + history-page units. Mainnet
-      // will swap to "CYNC" via a network-aware constant once v1.0
-      // ships; testnet builds (the only ones live today) stay tCYNC.
-      unit: "tCYNC",
+      // Network-aware ticker: tCYNC on testnet, CYNC on mainnet. Sourced
+      // from get_network_info at boot (state.unit), matching the
+      // hero-balance + history-page units.
+      unit: state.unit,
     };
   });
   const pending = Math.max(0, state.balance - state.balanceUnlocked);
@@ -1034,7 +1070,7 @@ function dashboardHtml() {
         <div class="hero-balance__label">Total balance</div>
         <div class="hero-balance__row">
           <div class="hero-balance__value">${state.balance.toFixed(6)}</div>
-          <div class="hero-balance__unit">tCYNC</div>
+          <div class="hero-balance__unit">${state.unit}</div>
         </div>
         <div class="hero-balance__sub">
           <span>${state.balanceUnlocked.toFixed(6)}</span> available · ${pending.toFixed(6)} pending
@@ -1118,11 +1154,20 @@ function dashboardHtml() {
 
 // ─── Send screen ──────────────────────────────────────────────────
 function sendHtml() {
+  // Costs come from the node's live get_fee_estimate when available
+  // (state.feeEstimate, populated by refreshFeeEstimate on Send open);
+  // otherwise fall back to static placeholders. Node values are 12-dp
+  // strings — trim to 6 dp for display.
+  const fee6 = (v, fallback) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n.toFixed(6) : fallback;
+  };
+  const fe = state.feeEstimate;
   const feeTiers = [
-    { id: "slow",   name: "Slow",   time: "~30 min", cost: "0.000084" },
-    { id: "normal", name: "Normal", time: "~5 min",  cost: "0.000142" },
-    { id: "fast",   name: "Fast",   time: "<1 min",  cost: "0.000284" },
-    { id: "flash",  name: "Flash",  time: "Next blk",cost: "0.000568" },
+    { id: "slow",   name: "Slow",   time: "~30 min",  cost: fee6(fe?.slow,   "0.000084") },
+    { id: "normal", name: "Normal", time: "~5 min",   cost: fee6(fe?.normal, "0.000142") },
+    { id: "fast",   name: "Fast",   time: "<1 min",   cost: fee6(fe?.fast,   "0.000284") },
+    { id: "flash",  name: "Flash",  time: "Next blk", cost: fee6(fe?.flash,  "0.000568") },
   ];
 
   return `
@@ -1139,10 +1184,10 @@ function sendHtml() {
           <div class="send-amount__row">
             <input class="send-amount__input" id="sendAmount" type="text"
                    placeholder="0.000000" inputmode="decimal" />
-            <div class="send-amount__unit">tCYNC</div>
+            <div class="send-amount__unit">${state.unit}</div>
           </div>
           <div class="send-amount__available">
-            Available <strong style="color: var(--text-secondary);">${state.balance.toFixed(6)}</strong> tCYNC
+            Available <strong style="color: var(--text-secondary);">${state.balance.toFixed(6)}</strong> ${state.unit}
             <button class="send-amount__max" id="sendMax">MAX</button>
           </div>
 
@@ -1150,10 +1195,10 @@ function sendHtml() {
             <div class="field-group">
               <div class="field-label">
                 <span>Recipient address</span>
-                <span class="field-label__hint">tCYNC… or .cync handle</span>
+                <span class="field-label__hint" id="addrHint">${state.unit}… or .cync handle</span>
               </div>
               <div class="field-input">
-                <input type="text" placeholder="tCYNC…" id="sendAddress" />
+                <input type="text" placeholder="${state.unit}…" id="sendAddress" />
                 <div class="field-input__actions">
                   <button class="field-icon-btn" title="Paste">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
@@ -1185,7 +1230,7 @@ function sendHtml() {
                   <button class="fee-tier ${i === 1 ? "is-active" : ""}" data-fee="${f.id}">
                     <div class="fee-tier__name">${f.name}</div>
                     <div class="fee-tier__time">${f.time}</div>
-                    <div class="fee-tier__cost">${f.cost} tCYNC</div>
+                    <div class="fee-tier__cost">${f.cost} ${state.unit}</div>
                   </button>
                 `).join("")}
               </div>
@@ -1202,11 +1247,11 @@ function sendHtml() {
         </div>
         <div class="send-summary__row">
           <span>Amount</span>
-          <span id="summaryAmount">0.000000 tCYNC</span>
+          <span id="summaryAmount">0.000000 ${state.unit}</span>
         </div>
         <div class="send-summary__row">
           <span>Network fee</span>
-          <span id="summaryFee">0.000142 tCYNC</span>
+          <span id="summaryFee">${feeTiers[1].cost} ${state.unit}</span>
         </div>
         <div class="send-summary__row">
           <span>Privacy</span>
@@ -1214,7 +1259,7 @@ function sendHtml() {
         </div>
         <div class="send-summary__total">
           <span class="send-summary__total-label">Total</span>
-          <span class="send-summary__total-value" id="summaryTotal">0.000142<span>tCYNC</span></span>
+          <span class="send-summary__total-value" id="summaryTotal">${feeTiers[1].cost}<span>${state.unit}</span></span>
         </div>
         <button class="primary-button" disabled>Send transaction</button>
       </aside>
@@ -1242,6 +1287,64 @@ function wireSend() {
   }
   [amount, address, memo].forEach(el => el && el.addEventListener("input", updateSendButton));
 
+  // Live recipient-address validation. Runs on blur (not per-keystroke —
+  // validate_address shells out to the wallet CLI, so debounce to field
+  // exit). Updates the recipient hint with the verified address type or the
+  // rejection reason, and records validity so the Send handler can block.
+  const addrHint = document.getElementById("addrHint");
+  const addrHintDefault = addrHint ? addrHint.textContent : "";
+  let addrValidated = null; // null=unknown, true/false once checked
+  if (address && addrHint) {
+    address.addEventListener("blur", async () => {
+      const value = address.value.trim();
+      if (!value) {
+        addrValidated = null;
+        addrHint.textContent = addrHintDefault;
+        addrHint.style.color = "";
+        address.classList.remove("is-valid", "is-invalid");
+        return;
+      }
+      addrHint.textContent = "Checking address…";
+      addrHint.style.color = "var(--text-tertiary)";
+      try {
+        const res = await invoke("validate_address", { address: value });
+        if (res && res.valid) {
+          addrValidated = true;
+          addrHint.textContent = `✓ Valid ${res.type || "stealth"} address`;
+          addrHint.style.color = "var(--green)";
+          address.classList.add("is-valid");
+          address.classList.remove("is-invalid");
+        } else {
+          addrValidated = false;
+          addrHint.textContent = `✗ ${(res && res.reason) || "invalid address"}`;
+          addrHint.style.color = "var(--red, #e5484d)";
+          address.classList.add("is-invalid");
+          address.classList.remove("is-valid");
+        }
+      } catch (e) {
+        // Validation is best-effort — a CLI error shouldn't hard-block the
+        // user (the node re-validates on submit). Fall back to neutral.
+        addrValidated = null;
+        addrHint.textContent = addrHintDefault;
+        addrHint.style.color = "";
+        address.classList.remove("is-valid", "is-invalid");
+      }
+    });
+    // Clear the verdict as soon as the user edits again.
+    address.addEventListener("input", () => {
+      addrValidated = null;
+      addrHint.textContent = addrHintDefault;
+      addrHint.style.color = "";
+      address.classList.remove("is-valid", "is-invalid");
+    });
+  }
+
+  // Pull a live fee estimate from the node the first time the Send view
+  // mounts, then re-render so the tiers/summary reflect real mempool
+  // pricing. Guarded on null so the re-render doesn't re-trigger a fetch
+  // (renderShell re-runs wireSend), which would loop.
+  if (!state.feeEstimate) refreshFeeEstimate();
+
   const sendBtn = app.querySelector(".primary-button");
   if (sendBtn) {
     sendBtn.addEventListener("click", async () => {
@@ -1251,6 +1354,10 @@ function wireSend() {
       const fee  = app.querySelector(".fee-tier.is-active")?.dataset.fee || "normal";
 
       if (!to || parseFloat(amt) <= 0) return;
+      if (addrValidated === false) {
+        showToast("Recipient address failed validation — check it and try again", "error");
+        return;
+      }
 
       sendBtn.disabled = true;
       sendBtn.textContent = "Sending…";
@@ -1291,7 +1398,7 @@ function wireSend() {
     const amt    = parseFloat(amount?.value || 0);
     const to     = (address?.value || "").trim();
     const feeTier = app.querySelector(".fee-tier.is-active");
-    const feeTxt = feeTier?.querySelector(".fee-tier__cost")?.textContent || "0.000142 tCYNC";
+    const feeTxt = feeTier?.querySelector(".fee-tier__cost")?.textContent || `0.000142 ${state.unit}`;
     const feeNum = parseFloat(feeTxt) || 0;
     const total  = amt + feeNum;
 
@@ -1308,13 +1415,13 @@ function wireSend() {
       }
     }
     if (summaryAmount) {
-      summaryAmount.textContent = `${(amt || 0).toFixed(6)} tCYNC`;
+      summaryAmount.textContent = `${(amt || 0).toFixed(6)} ${state.unit}`;
     }
     if (summaryFee) {
       summaryFee.textContent = feeTxt;
     }
     if (summaryTotal) {
-      summaryTotal.innerHTML = `${total.toFixed(6)}<span>tCYNC</span>`;
+      summaryTotal.innerHTML = `${total.toFixed(6)}<span>${state.unit}</span>`;
     }
   }
 
@@ -1801,6 +1908,13 @@ function settingsTabHtml() {
         <div class="settings-card">
           <div class="settings-row">
             <div>
+              <div class="settings-row__label">Lock wallet now</div>
+              <div class="settings-row__sub">Clear the in-memory password and return to the unlock screen.</div>
+            </div>
+            <button class="ghost-button" id="lockNowBtn" style="width: auto; padding: 6px 14px;">Lock now</button>
+          </div>
+          <div class="settings-row">
+            <div>
               <div class="settings-row__label">Auto-lock</div>
               <div class="settings-row__sub">Lock the wallet automatically after idle period.</div>
             </div>
@@ -1941,12 +2055,16 @@ function settingsTabHtml() {
             <div class="settings-row__value">build a091e2c</div>
           </div>
           <div class="settings-row">
+            <div><div class="settings-row__label">Check for updates</div><div class="settings-row__sub" id="updateStatus">Compare this build against the latest published release.</div></div>
+            <button class="ghost-button" id="checkUpdateBtn" style="width: auto; padding: 6px 14px;">Check</button>
+          </div>
+          <div class="settings-row">
             <div><div class="settings-row__label">Wallet file</div><div class="settings-row__sub">${state.walletFilePath || "Not loaded — unlock first"}</div></div>
             <div class="settings-row__value" title="${state.walletFilePath || ""}">${fmtPath(state.walletFilePath)}</div>
           </div>
           <div class="settings-row">
             <div><div class="settings-row__label">Network</div><div class="settings-row__sub">Currently connected</div></div>
-            <div class="settings-row__value">${state.connected ? "testnet · live" : "offline"}</div>
+            <div class="settings-row__value">${state.connected ? `${state.network || "testnet"} · live` : "offline"}</div>
           </div>
           <div class="settings-row">
             <div><div class="settings-row__label">Chain tip</div><div class="settings-row__sub">Last seen block height</div></div>
@@ -2005,6 +2123,58 @@ function wireSettings() {
   app.querySelectorAll("[data-pref-select-num]").forEach(s => {
     s.addEventListener("change", () => setPref(s.dataset.prefSelectNum, parseInt(s.value, 10) || 0));
   });
+
+  // Security → Lock now. lock_wallet clears the session password and emits
+  // wallet_state; the wallet_state listener routes the UI back to unlock.
+  const lockBtn = document.getElementById("lockNowBtn");
+  if (lockBtn) {
+    lockBtn.addEventListener("click", async () => {
+      lockBtn.disabled = true;
+      try {
+        await invoke("lock_wallet");
+        // Clear sensitive display state and route to the unlock screen —
+        // the wallet_state event doesn't carry a locked flag, so drive the
+        // transition client-side.
+        state.balance = 0;
+        state.balanceUnlocked = 0;
+        state.address = "";
+        state.transactions = [];
+        showToast("Wallet locked", "success");
+        renderUnlock();
+      } catch (e) {
+        showToast(`Lock failed: ${e.message || e}`, "error");
+        lockBtn.disabled = false;
+      }
+    });
+  }
+
+  // About → Check for updates. check_for_update queries the release feed and
+  // reports whether a newer build is available.
+  const updateBtn = document.getElementById("checkUpdateBtn");
+  const updateStatus = document.getElementById("updateStatus");
+  if (updateBtn && updateStatus) {
+    updateBtn.addEventListener("click", async () => {
+      updateBtn.disabled = true;
+      updateStatus.textContent = "Checking…";
+      try {
+        const info = await invoke("check_for_update");
+        if (info && info.error) {
+          updateStatus.textContent = `Check failed: ${info.error}`;
+          updateStatus.style.color = "var(--text-tertiary)";
+        } else if (info && info.available) {
+          updateStatus.textContent = `Update available: ${info.latest || info.tag} (you have ${info.current})`;
+          updateStatus.style.color = "var(--green)";
+        } else if (info) {
+          updateStatus.textContent = `Up to date (v${info.current})`;
+          updateStatus.style.color = "var(--green)";
+        }
+      } catch (e) {
+        updateStatus.textContent = `Check failed: ${e.message || e}`;
+        updateStatus.style.color = "var(--text-tertiary)";
+      }
+      updateBtn.disabled = false;
+    });
+  }
 }
 
 // ─── Addresses ────────────────────────────────────────────────────
@@ -2304,7 +2474,7 @@ function miningHtml() {
         <div class="mining-stat">
           <div class="mining-stat__label">Blocks found</div>
           <div class="mining-stat__value">${mining.blocksThisSession}</div>
-          <div class="mining-stat__sub">+${earnedThisSession} tCYNC est. this session</div>
+          <div class="mining-stat__sub">+${earnedThisSession} ${state.unit} est. this session</div>
         </div>
         <div class="mining-stat">
           <div class="mining-stat__label">Session</div>

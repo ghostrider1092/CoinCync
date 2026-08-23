@@ -3,16 +3,16 @@
 mod commands;
 
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-use tauri::Manager;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::process::{Child, Command, Stdio};
-use std::fs;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::Emitter;
 use zeroize::Zeroize;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -29,22 +29,32 @@ const DEFAULT_P2P_PORT: u16 = 28080;
 const MAX_UNLOCK_ATTEMPTS: u32 = 5;
 const UNLOCK_LOCKOUT_SECS: u64 = 30;
 
-/// Public testnet RPC fallback when the local node is unreachable. nginx on
-/// the API host gates this so unauth'd reads (get_info, etc.) work for new
-/// users who haven't generated a local bearer yet. Override with env.
+/// Documented value a user can OPT INTO for the public RPC (see below). It is
+/// intentionally NOT used automatically — a privacy coin must not silently
+/// route a user's wallet scans/sends (or even their IP) through a project
+/// server when the local node is down.
 const DEFAULT_PUBLIC_RPC_URL: &str = "https://api.coincync.network/rpc/testnet";
 
+/// Optional HTTPS public-RPC fallback — **opt-in only**.
+///
+/// PRIVACY (audit fix): previously this defaulted to `DEFAULT_PUBLIC_RPC_URL`,
+/// so an unreachable local node silently redirected all RPC — including the
+/// `--node` used by wallet `scan`/`send` — to a hardcoded remote. For a
+/// privacy coin that ties the user's IP and on-chain activity to a project
+/// server with no consent. Now it returns `Some` ONLY when the user explicitly
+/// sets `COINCYNC_PUBLIC_RPC_URL` to an `https://` URL (e.g. to
+/// `DEFAULT_PUBLIC_RPC_URL`); otherwise `None` — no remote fallback, and the
+/// app surfaces "local node unreachable" instead.
 fn optional_public_https_rpc() -> Option<String> {
-    let env_v = std::env::var("COINCYNC_PUBLIC_RPC_URL").ok()
+    let v = std::env::var("COINCYNC_PUBLIC_RPC_URL")
+        .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let v = env_v.unwrap_or_else(|| DEFAULT_PUBLIC_RPC_URL.to_string());
+        .filter(|s| !s.is_empty())?; // unset -> None: no silent remote fallback
     if !v.starts_with("https://") {
-        tracing::warn!(
-            "Public RPC URL must start with https:// — ignoring unsafe URL"
-        );
+        tracing::warn!("COINCYNC_PUBLIC_RPC_URL must start with https:// — ignoring unsafe URL");
         return None;
     }
+    tracing::info!("Public RPC fallback enabled by COINCYNC_PUBLIC_RPC_URL (opt-in)");
     Some(v)
 }
 
@@ -87,7 +97,8 @@ fn rpc_bearer_value() -> Option<String> {
     if let Some(v) = std::env::var("COINCYNC_RPC_API_KEY")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty()) {
+        .filter(|s| !s.is_empty())
+    {
         return Some(v);
     }
     // Fallback: read from $APPDATA/coincync/rpc.key so users who launch the
@@ -142,6 +153,19 @@ struct AppState {
     last_reorg_depth: Option<u64>,
 }
 
+impl Drop for AppState {
+    /// Wipe the session password from the heap on ANY teardown — normal exit,
+    /// panic unwind, or the window `Destroyed` handler — so the field's
+    /// "zeroized on process exit" guarantee is real, not just best-effort in
+    /// one code path. (Drop does not run on a hard abort/SIGKILL; nothing can
+    /// help there.)
+    fn drop(&mut self) {
+        if let Some(pw) = self.password.as_mut() {
+            pw.zeroize();
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct TxRecord {
     id: String,
@@ -166,7 +190,8 @@ type State = Arc<Mutex<AppState>>;
 // ═══════════════════════════════════════════════════════════════════════
 
 fn resolve_binary(name: &str) -> String {
-    let exe_dir = std::env::current_exe().ok()
+    let exe_dir = std::env::current_exe()
+        .ok()
         .and_then(|e| e.parent().map(|p| p.to_path_buf()));
 
     if let Some(dir) = &exe_dir {
@@ -176,13 +201,19 @@ fn resolve_binary(name: &str) -> String {
             dir.join("binaries").join(format!("{}.exe", name)),
             dir.join("binaries").join(name),
             // Tauri `bundle.resources` (see `tauri.conf.json`) — shipped installers
-            dir.join("resources").join("binaries").join(format!("{}.exe", name)),
+            dir.join("resources")
+                .join("binaries")
+                .join(format!("{}.exe", name)),
             dir.join("resources").join("binaries").join(name),
-            dir.join("../Resources/binaries").join(format!("{}.exe", name)),
+            dir.join("../Resources/binaries")
+                .join(format!("{}.exe", name)),
             dir.join("../Resources/binaries").join(name),
-            dir.join("../../../target/release").join(format!("{}.exe", name)),
-            dir.join("../../target/release").join(format!("{}.exe", name)),
-            dir.join("../../../../target/release").join(format!("{}.exe", name)),
+            dir.join("../../../target/release")
+                .join(format!("{}.exe", name)),
+            dir.join("../../target/release")
+                .join(format!("{}.exe", name)),
+            dir.join("../../../../target/release")
+                .join(format!("{}.exe", name)),
             dir.join("../Resources").join(name),
             dir.join("../lib").join(name),
         ];
@@ -195,8 +226,23 @@ fn resolve_binary(name: &str) -> String {
         }
     }
 
-    tracing::warn!("Binary '{}' not found in app directory, trying PATH", name);
-    name.to_string()
+    // SECURITY (audit fix): do NOT fall back to the bare program name. On
+    // Windows `CreateProcess` searches the current working directory before
+    // PATH, and these binaries (coincync-node/wallet/rig) never live in system
+    // dirs — so a bare name would let a binary planted in the CWD run with the
+    // user's privileges (and receive the node RPC bearer via env). Fail closed:
+    // return an ABSOLUTE, non-existent path next to the app exe so `Command`
+    // errors cleanly ("not found") and `check_binaries` reports it missing,
+    // instead of silently executing an attacker-controlled CWD binary.
+    let missing = exe_dir
+        .map(|d| d.join(format!("{}.exe", name)))
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.exe", name)));
+    tracing::warn!(
+        "Binary '{}' not found in any known location; refusing PATH/CWD fallback (expected at {})",
+        name,
+        missing.display()
+    );
+    missing.to_string_lossy().to_string()
 }
 
 /// Workspace ships `coincync-wallet`; some dev trees used `coincync-wallet-cli`.
@@ -233,7 +279,8 @@ fn rpc_call(method: &str, params: serde_json::Value) -> Result<serde_json::Value
     let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
-        .build().map_err(|e| e.to_string())?;
+        .build()
+        .map_err(|e| e.to_string())?;
 
     let urls = rpc_url_candidates();
     let mut last_err = String::new();
@@ -244,19 +291,23 @@ fn rpc_call(method: &str, params: serde_json::Value) -> Result<serde_json::Value
             req = req.header("Authorization", format!("Bearer {}", key));
         }
         match req.send() {
-            Ok(resp) => {
-                match resp.json::<serde_json::Value>() {
-                    Ok(json) => {
-                        if let Some(err) = json.get("error") {
-                            last_err = format!("RPC error: {}", err);
-                            continue;
-                        }
-                        return Ok(json["result"].clone());
+            Ok(resp) => match resp.json::<serde_json::Value>() {
+                Ok(json) => {
+                    if let Some(err) = json.get("error") {
+                        last_err = format!("RPC error: {}", err);
+                        continue;
                     }
-                    Err(e) => { last_err = e.to_string(); continue; }
+                    return Ok(json["result"].clone());
                 }
+                Err(e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+            },
+            Err(e) => {
+                last_err = format!("{}: {}", url, e);
+                continue;
             }
-            Err(e) => { last_err = format!("{}: {}", url, e); continue; }
         }
     }
 
@@ -267,7 +318,8 @@ fn rpc_call(method: &str, params: serde_json::Value) -> Result<serde_json::Value
 fn active_node_url() -> String {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
-        .build().ok();
+        .build()
+        .ok();
 
     if let Some(ref c) = client {
         let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"get_info"});
@@ -276,7 +328,11 @@ fn active_node_url() -> String {
             if let Some(ref key) = rpc_bearer_value() {
                 req = req.header("Authorization", format!("Bearer {}", key));
             }
-            if req.send().and_then(|r| r.json::<serde_json::Value>()).is_ok() {
+            if req
+                .send()
+                .and_then(|r| r.json::<serde_json::Value>())
+                .is_ok()
+            {
                 return url;
             }
         }
@@ -289,7 +345,8 @@ fn active_node_url() -> String {
 fn active_node_addr() -> String {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
-        .build().ok();
+        .build()
+        .ok();
 
     if let Some(ref c) = client {
         let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"get_info"});
@@ -298,7 +355,11 @@ fn active_node_addr() -> String {
             if let Some(ref key) = rpc_bearer_value() {
                 req = req.header("Authorization", format!("Bearer {}", key));
             }
-            if req.send().and_then(|r| r.json::<serde_json::Value>()).is_ok() {
+            if req
+                .send()
+                .and_then(|r| r.json::<serde_json::Value>())
+                .is_ok()
+            {
                 if url.starts_with(LOCAL_RPC_URL) {
                     return format!("127.0.0.1:{}", DEFAULT_RPC_PORT);
                 }
@@ -317,8 +378,9 @@ fn active_node_addr() -> String {
 fn wallet_cli(bin: &str, args: &[&str], password: &str) -> Result<String, String> {
     let mut cmd = Command::new(bin);
     cmd.args(args)
-       .env("COINCYNC_WALLET_PASSWORD", password)
-       .stdout(Stdio::piped()).stderr(Stdio::piped());
+        .env("COINCYNC_WALLET_PASSWORD", password)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // Suppress the brief console flash on Windows when GUI parent shells out
     // to a console binary.
     #[cfg(windows)]
@@ -326,8 +388,7 @@ fn wallet_cli(bin: &str, args: &[&str], password: &str) -> Result<String, String
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let output = cmd.output()
-        .map_err(|e| format!("CLI failed: {}", e))?;
+    let output = cmd.output().map_err(|e| format!("CLI failed: {}", e))?;
     let out = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
@@ -379,7 +440,8 @@ fn record_unlock_failure(failed_unlock_attempts: u32, now_secs: u64) -> (u32, u6
 fn is_local_node_running() -> bool {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
-        .build().ok();
+        .build()
+        .ok();
     if let Some(c) = client {
         let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"get_info"});
         let mut req = c.post(LOCAL_RPC_URL).json(&body);
@@ -387,8 +449,11 @@ fn is_local_node_running() -> bool {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
         req.send()
-            .and_then(|r| r.json::<serde_json::Value>()).is_ok()
-    } else { false }
+            .and_then(|r| r.json::<serde_json::Value>())
+            .is_ok()
+    } else {
+        false
+    }
 }
 
 fn is_remote_node_running() -> bool {
@@ -397,7 +462,8 @@ fn is_remote_node_running() -> bool {
     };
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
-        .build().ok();
+        .build()
+        .ok();
     if let Some(c) = client {
         let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"get_info"});
         let mut req = c.post(remote).json(&body);
@@ -405,8 +471,11 @@ fn is_remote_node_running() -> bool {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
         req.send()
-            .and_then(|r| r.json::<serde_json::Value>()).is_ok()
-    } else { false }
+            .and_then(|r| r.json::<serde_json::Value>())
+            .is_ok()
+    } else {
+        false
+    }
 }
 
 fn start_node(state: &mut AppState) -> Result<(), String> {
@@ -421,20 +490,24 @@ fn start_node(state: &mut AppState) -> Result<(), String> {
     // Current testnet fleet (2026-06-06 rewrite — the previous list
     // referenced DO + dead-LON boxes that no longer exist).
     let seeds = [
-        "66.135.23.193",   // seed1 — New York
-        "140.82.57.168",   // seed2 — Amsterdam
-        "207.148.6.50",    // explorer — Dallas
-        "207.148.111.76",  // seed3 — Tokyo
-        "95.179.165.225",  // api — Frankfurt
+        "66.135.23.193",  // seed1 — New York
+        "140.82.57.168",  // seed2 — Amsterdam
+        "207.148.6.50",   // explorer — Dallas
+        "207.148.111.76", // seed3 — Tokyo
+        "95.179.165.225", // api — Frankfurt
     ];
 
     let mut cmd = Command::new(&state.node_bin);
-    cmd.arg("--network").arg("testnet")
-       .arg("--data-dir").arg(data.to_string_lossy().as_ref())
-       .arg("--rpc-bind").arg(format!("127.0.0.1:{}", DEFAULT_RPC_PORT));
+    cmd.arg("--network")
+        .arg("testnet")
+        .arg("--data-dir")
+        .arg(data.to_string_lossy().as_ref())
+        .arg("--rpc-bind")
+        .arg(format!("127.0.0.1:{}", DEFAULT_RPC_PORT));
 
     for seed in &seeds {
-        cmd.arg("--addnode").arg(format!("{}:{}", seed, DEFAULT_P2P_PORT));
+        cmd.arg("--addnode")
+            .arg(format!("{}:{}", seed, DEFAULT_P2P_PORT));
     }
 
     // Pass bearer key so the wallet's own RPC calls (and the spawned TUI
@@ -454,7 +527,8 @@ fn start_node(state: &mut AppState) -> Result<(), String> {
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    let child = cmd.spawn()
+    let child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to start node: {}", e))?;
 
     state.node_process = Some(child);
@@ -474,7 +548,13 @@ fn start_node(state: &mut AppState) -> Result<(), String> {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[derive(Serialize)]
-struct BlockInfo { height: u64, #[serde(rename="chainHeight")] chain_height: u64, #[serde(rename="syncPct")] sync_pct: f64 }
+struct BlockInfo {
+    height: u64,
+    #[serde(rename = "chainHeight")]
+    chain_height: u64,
+    #[serde(rename = "syncPct")]
+    sync_pct: f64,
+}
 
 #[tauri::command]
 fn get_block_height() -> BlockInfo {
@@ -482,14 +562,26 @@ fn get_block_height() -> BlockInfo {
         Ok(i) => BlockInfo {
             height: i["height"].as_u64().unwrap_or(0),
             chain_height: i["height"].as_u64().unwrap_or(0),
-            sync_pct: if i["is_synced"].as_bool().unwrap_or(false) { 100.0 } else { 50.0 },
+            sync_pct: if i["is_synced"].as_bool().unwrap_or(false) {
+                100.0
+            } else {
+                50.0
+            },
         },
-        Err(_) => BlockInfo { height:0, chain_height:0, sync_pct:0.0 },
+        Err(_) => BlockInfo {
+            height: 0,
+            chain_height: 0,
+            sync_pct: 0.0,
+        },
     }
 }
 
 #[derive(Serialize)]
-struct PeerInfo { peers: u32, outbound: u32, inbound: u32 }
+struct PeerInfo {
+    peers: u32,
+    outbound: u32,
+    inbound: u32,
+}
 
 /// Typed error type for wallet operations. Serialized to the JS side
 /// as `{ "code": "VARIANT_NAME", ...detail_fields }` so the frontend
@@ -647,7 +739,7 @@ fn emit_wallet_state(handle: &tauri::AppHandle, s: &AppState) {
         last_reorg_at_height: s.last_reorg_at_height,
         last_reorg_depth: s.last_reorg_depth,
     };
-    if let Err(e) = handle.emit_all("wallet_state", &payload) {
+    if let Err(e) = handle.emit("wallet_state", &payload) {
         tracing::debug!(error = %e, "wallet_state emit failed (window may be closing)");
     }
 }
@@ -660,13 +752,22 @@ fn get_peer_count() -> PeerInfo {
             outbound: 0,
             inbound: i["peer_count"].as_u64().unwrap_or(0) as u32,
         },
-        Err(_) => PeerInfo { peers:0, outbound:0, inbound:0 },
+        Err(_) => PeerInfo {
+            peers: 0,
+            outbound: 0,
+            inbound: 0,
+        },
     }
 }
 
 /// FIX #33: Query real fee data from mempool instead of hardcoded values
 #[derive(Serialize)]
-struct FeeEstimate { slow: String, normal: String, fast: String, flash: String }
+struct FeeEstimate {
+    slow: String,
+    normal: String,
+    fast: String,
+    flash: String,
+}
 
 #[tauri::command]
 fn get_fee_estimate() -> FeeEstimate {
@@ -687,7 +788,12 @@ fn get_fee_estimate() -> FeeEstimate {
 
     // Fallback: estimate from MIN_FEE_PER_BYTE (1000) * typical tx size (2400)
     let base = 2_400_000u64;
-    FeeEstimate { slow: f(base/2), normal: f(base), fast: f(base*2), flash: f(base*4) }
+    FeeEstimate {
+        slow: f(base / 2),
+        normal: f(base),
+        fast: f(base * 2),
+        flash: f(base * 4),
+    }
 }
 
 #[tauri::command]
@@ -714,7 +820,6 @@ fn get_network_info() -> serde_json::Value {
         Err(_) => serde_json::json!({"version":"1.0.0","network":"starting...","connections":0}),
     }
 }
-
 
 // ── Atomic Swap (cyncswap / CIP-001) ──────────────────────────────────
 //
@@ -750,7 +855,10 @@ struct SwapInitResult {
 
 #[cfg(feature = "cyncswap")]
 #[tauri::command]
-fn swap_init(params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<SwapInitResult, String> {
+fn swap_init(
+    params: SwapInitParams,
+    _state: tauri::State<'_, State>,
+) -> Result<SwapInitResult, String> {
     if params.role != "alice" {
         // Bob's join flow runs through swap_handshake (paste invite +
         // call wallet-init-bob). swap_init is Alice-only.
@@ -777,9 +885,12 @@ fn swap_init(params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<
 
     let mut args = vec![
         "wallet-init-alice",
-        "--listen", &listen,
-        "--cync-amount", &cync_amount_s,
-        "--btc-amount-sats", &btc_amount_s,
+        "--listen",
+        &listen,
+        "--cync-amount",
+        &cync_amount_s,
+        "--btc-amount-sats",
+        &btc_amount_s,
     ];
     if let Some(addr) = &params.btc_address {
         if !addr.is_empty() {
@@ -792,10 +903,26 @@ fn swap_init(params: SwapInitParams, _state: tauri::State<'_, State>) -> Result<
         .map_err(|e| format!("cyncswap output not JSON: {}\n---output---\n{}", e, out))?;
 
     Ok(SwapInitResult {
-        id: v.get("swap_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        role: v.get("role").and_then(|x| x.as_str()).unwrap_or("alice").to_string(),
-        state: v.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        invite_hex: v.get("invite_hex").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        id: v
+            .get("swap_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        role: v
+            .get("role")
+            .and_then(|x| x.as_str())
+            .unwrap_or("alice")
+            .to_string(),
+        state: v
+            .get("state")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        invite_hex: v
+            .get("invite_hex")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
@@ -808,15 +935,15 @@ struct SwapHandshakeParams {
 
 #[cfg(feature = "cyncswap")]
 #[tauri::command]
-fn swap_handshake(params: SwapHandshakeParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+fn swap_handshake(
+    params: SwapHandshakeParams,
+    _state: tauri::State<'_, State>,
+) -> Result<serde_json::Value, String> {
     if params.invite_hex.trim().is_empty() {
         return Err("invite_hex is required".into());
     }
     let bin = resolve_binary("cyncswap");
-    let mut args = vec![
-        "wallet-init-bob",
-        "--invite-hex", params.invite_hex.trim(),
-    ];
+    let mut args = vec!["wallet-init-bob", "--invite-hex", params.invite_hex.trim()];
     if let Some(addr) = &params.btc_address {
         if !addr.is_empty() {
             args.push("--bob-btc-address");
@@ -830,7 +957,9 @@ fn swap_handshake(params: SwapHandshakeParams, _state: tauri::State<'_, State>) 
 
 #[cfg(feature = "cyncswap")]
 #[derive(Deserialize)]
-struct SwapIdParams { swap_id: String }
+struct SwapIdParams {
+    swap_id: String,
+}
 
 /// Determine the role of the active swap from the state file via
 /// `cyncswap wallet-status`. Returns "Alice", "Bob", or an Err
@@ -846,8 +975,12 @@ fn active_swap_role(bin: &str) -> Result<(String, String), String> {
         ));
     }
     let out = wallet_cli(bin, &["wallet-status", "--state-file", &path_str], "")?;
-    let v: serde_json::Value = serde_json::from_str(out.trim())
-        .map_err(|e| format!("wallet-status output not JSON: {}\n---output---\n{}", e, out))?;
+    let v: serde_json::Value = serde_json::from_str(out.trim()).map_err(|e| {
+        format!(
+            "wallet-status output not JSON: {}\n---output---\n{}",
+            e, out
+        )
+    })?;
     let role = v
         .get("role")
         .and_then(|x| x.as_str())
@@ -878,7 +1011,17 @@ struct SwapBroadcastParams {
 
 #[cfg(feature = "cyncswap")]
 #[tauri::command]
-fn swap_lock(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+fn swap_lock(
+    params: SwapBroadcastParams,
+    _state: tauri::State<'_, State>,
+) -> Result<serde_json::Value, String> {
+    // SECURITY / audit TODO (cyncswap, feature-gated OFF): the swap creds below
+    // (--api-key node bearer, --rpc-user/--rpc-pass bitcoind) are pushed onto
+    // the child process argv, which is world-readable (tasklist / wmic /
+    // /proc/<pid>/cmdline). Before wiring cyncswap on for real, pass these via
+    // env vars like `wallet_cli` (COINCYNC_WALLET_PASSWORD) and `start_node`
+    // (COINCYNC_RPC_API_KEY) do — never on the command line. Must be resolved
+    // in the cyncswap module's own audit before it ships.
     if params.signed_tx_hex.trim().is_empty() {
         return Err("signed_tx_hex is required".into());
     }
@@ -891,10 +1034,14 @@ fn swap_lock(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Re
         "Alice" => {
             let mut args = vec![
                 "lock-cync",
-                "--state-file", &path_str,
-                "--network", &params.network,
-                "--rpc-url", &params.rpc_url,
-                "--signed-tx-hex", &signed,
+                "--state-file",
+                &path_str,
+                "--network",
+                &params.network,
+                "--rpc-url",
+                &params.rpc_url,
+                "--signed-tx-hex",
+                &signed,
             ];
             let key_owned;
             if let Some(key) = &params.api_key {
@@ -911,10 +1058,14 @@ fn swap_lock(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Re
         "Bob" => {
             let mut args = vec![
                 "lock-btc",
-                "--state-file", &path_str,
-                "--network", &params.network,
-                "--rpc-url", &params.rpc_url,
-                "--signed-tx-hex", &signed,
+                "--state-file",
+                &path_str,
+                "--network",
+                &params.network,
+                "--rpc-url",
+                &params.rpc_url,
+                "--signed-tx-hex",
+                &signed,
             ];
             let user_owned;
             let pass_owned;
@@ -939,7 +1090,10 @@ fn swap_lock(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Re
 
 #[cfg(feature = "cyncswap")]
 #[tauri::command]
-fn swap_claim(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+fn swap_claim(
+    params: SwapBroadcastParams,
+    _state: tauri::State<'_, State>,
+) -> Result<serde_json::Value, String> {
     if params.signed_tx_hex.trim().is_empty() {
         return Err("signed_tx_hex is required".into());
     }
@@ -952,10 +1106,14 @@ fn swap_claim(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> R
         "Alice" => {
             let mut args = vec![
                 "claim-btc",
-                "--state-file", &path_str,
-                "--network", &params.network,
-                "--rpc-url", &params.rpc_url,
-                "--signed-tx-hex", &signed,
+                "--state-file",
+                &path_str,
+                "--network",
+                &params.network,
+                "--rpc-url",
+                &params.rpc_url,
+                "--signed-tx-hex",
+                &signed,
             ];
             let user_owned;
             let pass_owned;
@@ -976,10 +1134,14 @@ fn swap_claim(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> R
         "Bob" => {
             let mut args = vec![
                 "claim-cync",
-                "--state-file", &path_str,
-                "--network", &params.network,
-                "--rpc-url", &params.rpc_url,
-                "--signed-tx-hex", &signed,
+                "--state-file",
+                &path_str,
+                "--network",
+                &params.network,
+                "--rpc-url",
+                &params.rpc_url,
+                "--signed-tx-hex",
+                &signed,
             ];
             let key_owned;
             if let Some(key) = &params.api_key {
@@ -1000,7 +1162,10 @@ fn swap_claim(params: SwapBroadcastParams, _state: tauri::State<'_, State>) -> R
 
 #[cfg(feature = "cyncswap")]
 #[tauri::command]
-fn swap_abort(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<serde_json::Value, String> {
+fn swap_abort(
+    _params: SwapIdParams,
+    _state: tauri::State<'_, State>,
+) -> Result<serde_json::Value, String> {
     let bin = resolve_binary("cyncswap");
     let path = default_swap_state_path();
     let path_str = path.to_string_lossy().to_string();
@@ -1013,7 +1178,9 @@ fn swap_abort(_params: SwapIdParams, _state: tauri::State<'_, State>) -> Result<
 
 #[cfg(feature = "cyncswap")]
 #[derive(Serialize)]
-struct SwapListResult { swaps: Vec<serde_json::Value> }
+struct SwapListResult {
+    swaps: Vec<serde_json::Value>,
+}
 
 /// Default state-file path the cyncswap CLI uses (matches the CLI's
 /// `resolve_state_path(None)` fallback). The wallet maintains exactly
@@ -1022,7 +1189,9 @@ struct SwapListResult { swaps: Vec<serde_json::Value> }
 #[cfg(feature = "cyncswap")]
 fn default_swap_state_path() -> std::path::PathBuf {
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        std::path::PathBuf::from(home).join(".coincync").join("swap.json")
+        std::path::PathBuf::from(home)
+            .join(".coincync")
+            .join("swap.json")
     } else {
         std::path::PathBuf::from("swap.json")
     }
@@ -1043,7 +1212,10 @@ fn swap_list(_state: tauri::State<'_, State>) -> Result<SwapListResult, String> 
     match wallet_cli(&bin, &["wallet-status", "--state-file", &path_str], "") {
         Ok(out) => {
             let v: serde_json::Value = serde_json::from_str(out.trim()).map_err(|e| {
-                format!("wallet-status output not JSON: {}\n---output---\n{}", e, out)
+                format!(
+                    "wallet-status output not JSON: {}\n---output---\n{}",
+                    e, out
+                )
             })?;
             // Filter out terminal states from "active" — they belong in history.
             let terminal = v.get("terminal").and_then(|x| x.as_bool()).unwrap_or(false);
@@ -1073,7 +1245,10 @@ fn swap_history(_state: tauri::State<'_, State>) -> Result<SwapListResult, Strin
     match wallet_cli(&bin, &["wallet-status", "--state-file", &path_str], "") {
         Ok(out) => {
             let v: serde_json::Value = serde_json::from_str(out.trim()).map_err(|e| {
-                format!("wallet-status output not JSON: {}\n---output---\n{}", e, out)
+                format!(
+                    "wallet-status output not JSON: {}\n---output---\n{}",
+                    e, out
+                )
             })?;
             let terminal = v.get("terminal").and_then(|x| x.as_bool()).unwrap_or(false);
             if terminal {
@@ -1088,9 +1263,14 @@ fn swap_history(_state: tauri::State<'_, State>) -> Result<SwapListResult, Strin
 
 // ── Mining ────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
-#[derive(Clone)]
-struct MiningStats { is_mining: bool, hashrate: f64, blocks_found: u64, threads: u32, algorithm: String }
+#[derive(Serialize, Clone)]
+struct MiningStats {
+    is_mining: bool,
+    hashrate: f64,
+    blocks_found: u64,
+    threads: u32,
+    algorithm: String,
+}
 
 /// Loopback port the rig binds its Prometheus /metrics endpoint to.
 /// The wallet scrapes this port every monitor tick (3 s) to pull live
@@ -1159,19 +1339,22 @@ fn emit_mining_stats(handle: &tauri::AppHandle, s: &AppState) {
         threads: s.miner_threads,
         algorithm: "RandomX".into(),
     };
-    if let Err(e) = handle.emit_all("mining_stats", &stats) {
+    if let Err(e) = handle.emit("mining_stats", &stats) {
         tracing::debug!(error = %e, "mining_stats emit failed (window may be closing)");
     }
 }
 
 #[tauri::command]
 fn check_binaries(state: tauri::State<'_, State>) -> serde_json::Value {
-    let s = state.lock().unwrap();
-    let node_found = std::path::Path::new(&s.node_bin).exists() || find_binary("coincync-node").is_some();
+    // Recover from a poisoned mutex rather than panicking (see get_balance).
+    let s = state.lock().unwrap_or_else(|e| e.into_inner());
+    let node_found =
+        std::path::Path::new(&s.node_bin).exists() || find_binary("coincync-node").is_some();
     let wallet_found = std::path::Path::new(&s.wallet_bin).exists()
         || find_binary("coincync-wallet-cli").is_some()
         || find_binary("coincync-wallet").is_some();
-    let miner_found = std::path::Path::new(&s.miner_bin).exists() || find_binary("coincync-rig").is_some();
+    let miner_found =
+        std::path::Path::new(&s.miner_bin).exists() || find_binary("coincync-rig").is_some();
 
     serde_json::json!({
         "node": node_found,
@@ -1184,7 +1367,11 @@ fn check_binaries(state: tauri::State<'_, State>) -> serde_json::Value {
 fn find_binary(name: &str) -> Option<String> {
     let resolved = resolve_binary(name);
     let path = std::path::Path::new(&resolved);
-    if path.exists() || path.canonicalize().is_ok() { Some(resolved) } else { None }
+    if path.exists() || path.canonicalize().is_ok() {
+        Some(resolved)
+    } else {
+        None
+    }
 }
 
 /// Launch the coincync-rig solo miner in its own console window.
@@ -1245,11 +1432,16 @@ fn start_mining(
     let mut cmd = Command::new(&miner_path);
     cmd.args(&[
         "run-solo",
-        "--node", &rpc_url,
-        "--address", &address,
-        "--threads", &threads.to_string(),
-        "--network", "testnet",
-        "--metrics-port", &metrics_port_str,
+        "--node",
+        &rpc_url,
+        "--address",
+        &address,
+        "--threads",
+        &threads.to_string(),
+        "--network",
+        "testnet",
+        "--metrics-port",
+        &metrics_port_str,
     ]);
 
     // Propagate the RPC bearer so rig can authenticate to a node that
@@ -1269,10 +1461,9 @@ fn start_mining(
         cmd.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
     }
 
-    let child = cmd.spawn()
-        .map_err(|e| WalletError::CliFailed {
-            msg: format!("coincync-rig spawn failed: {}", e),
-        })?;
+    let child = cmd.spawn().map_err(|e| WalletError::CliFailed {
+        msg: format!("coincync-rig spawn failed: {}", e),
+    })?;
 
     s.miner_process = Some(child);
     s.miner_running = true;
@@ -1296,13 +1487,17 @@ fn start_mining(
                 let s = state_clone.lock().unwrap();
                 s.miner_running
             };
-            if !running { break; }
+            if !running {
+                break;
+            }
 
             let alive = {
                 let mut s = state_clone.lock().unwrap();
                 if let Some(ref mut child) = s.miner_process {
                     matches!(child.try_wait(), Ok(None))
-                } else { false }
+                } else {
+                    false
+                }
             };
 
             if !alive {
@@ -1338,10 +1533,13 @@ fn start_mining(
                 if blocks > prior_blocks {
                     let delta = blocks - prior_blocks;
                     drop(s); // release lock before emit
-                    let _ = app_clone.emit_all("block_found", serde_json::json!({
-                        "delta": delta,
-                        "total": blocks,
-                    }));
+                    let _ = app_clone.emit(
+                        "block_found",
+                        serde_json::json!({
+                            "delta": delta,
+                            "total": blocks,
+                        }),
+                    );
                 }
             }
 
@@ -1466,15 +1664,13 @@ fn check_for_update() -> UpdateInfo {
         .header("Accept", "application/vnd.github+json")
         .send()
     {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<serde_json::Value>() {
-                Ok(v) => extract_release(&v),
-                Err(e) => {
-                    info.error = Some(format!("parse failed: {}", e));
-                    return info;
-                }
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>() {
+            Ok(v) => extract_release(&v),
+            Err(e) => {
+                info.error = Some(format!("parse failed: {}", e));
+                return info;
             }
-        }
+        },
         Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
             match client
                 .get(&recent_url)
@@ -1541,16 +1737,28 @@ fn check_for_update() -> UpdateInfo {
 /// or the wrong type — better to fail closed than to render garbage.
 fn extract_release(v: &serde_json::Value) -> Option<(String, String, String, bool)> {
     let tag = v.get("tag_name")?.as_str()?.to_string();
-    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or(&tag).to_string();
-    let url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let is_pre = v.get("prerelease").and_then(|x| x.as_bool()).unwrap_or(false);
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or(&tag)
+        .to_string();
+    let url = v
+        .get("html_url")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let is_pre = v
+        .get("prerelease")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     Some((tag, name, url, is_pre))
 }
 
 fn time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs()).unwrap_or(0)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1618,6 +1826,9 @@ fn main() {
 
     let state_for_shutdown = state.clone();
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state.clone())
         .setup(|app| {
             // Background chain-state poller. Polls `get_info` every 2 s and
@@ -1628,7 +1839,7 @@ fn main() {
             // Uses std::thread + std::thread::sleep (no tokio dependency).
             // 2 s cadence is the right balance: tight enough that the UI
             // feels alive, loose enough that the node RPC isn't hammered.
-            let app_handle = app.handle();
+            let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut last: Option<ChainState> = None;
                 loop {
@@ -1683,7 +1894,7 @@ fn main() {
                         }
                     };
                     if changed {
-                        if let Err(e) = app_handle.emit_all("chain_state", &next) {
+                        if let Err(e) = app_handle.emit("chain_state", &next) {
                             tracing::debug!(error = %e, "chain_state emit failed (window may be closing)");
                         }
                         last = Some(next);
@@ -1738,8 +1949,8 @@ fn main() {
                 ]
             }
         })
-        .on_window_event(move |event| {
-            if let tauri::WindowEvent::Destroyed = event.event() {
+        .on_window_event(move |_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
                 tracing::info!("Shutting down...");
                 if let Ok(mut s) = state_for_shutdown.lock() {
                     clear_session_password(&mut s);

@@ -5,10 +5,18 @@ use crate::{active_node_url, wallet_cli, with_session_password, State, WalletErr
 
 /// FIX #35: Parse tCYNC address into spend+view keys properly
 #[derive(Deserialize)]
-pub(crate) struct SendParams { to: String, amount: String, memo: Option<String>, priority: String }
+pub(crate) struct SendParams {
+    to: String,
+    amount: String,
+    memo: Option<String>,
+    priority: String,
+}
 
 #[derive(Serialize)]
-pub(crate) struct SendResult { txid: String, status: String }
+pub(crate) struct SendResult {
+    txid: String,
+    status: String,
+}
 
 #[tauri::command]
 pub(crate) fn send_transaction(
@@ -18,12 +26,36 @@ pub(crate) fn send_transaction(
     let (bin, path, pw) = {
         let s = state.lock()?;
         let pw = with_session_password(&s, |pw| Ok(pw.to_string()))?;
-        (s.wallet_bin.clone(), s.wallet_path.to_string_lossy().to_string(), pw)
+        (
+            s.wallet_bin.clone(),
+            s.wallet_path.to_string_lossy().to_string(),
+            pw,
+        )
     };
 
-    let amount_atomic = (params.amount.parse::<f64>()
-        .map_err(|e| WalletError::InvalidAmount { reason: e.to_string() })?
-        * 1e12) as u64;
+    // Parse + VALIDATE the amount. A bare `(f64 * 1e12) as u64` silently
+    // saturates a negative/NaN to 0 and an absurd value to u64::MAX, so a
+    // "-5"/"abc"/"1e999" input could become a 0-amount (or maxed) send with no
+    // error. Reject anything not finite-and-positive, and reject amounts that
+    // round below one atomic unit.
+    let amount_cync = params
+        .amount
+        .parse::<f64>()
+        .map_err(|e| WalletError::InvalidAmount {
+            reason: e.to_string(),
+        })?;
+    if !amount_cync.is_finite() || amount_cync <= 0.0 {
+        return Err(WalletError::InvalidAmount {
+            reason: format!("amount must be a positive number (got {:?})", params.amount),
+        });
+    }
+    let atomic_f = amount_cync * 1e12;
+    if atomic_f < 1.0 || atomic_f >= u64::MAX as f64 {
+        return Err(WalletError::InvalidAmount {
+            reason: format!("amount out of range (got {:?} CYNC)", params.amount),
+        });
+    }
+    let amount_atomic = atomic_f as u64;
 
     let node_url = active_node_url();
 
@@ -55,21 +87,36 @@ pub(crate) fn send_transaction(
         });
     };
 
-    let out = wallet_cli(&bin, &[
-        "--wallet", &path,
-        "--node", &node_url,
-        "send",
-        "--to-spend", &spend_hex,
-        "--to-view", &view_hex,
-        "--amount", &amount_atomic.to_string(),
-    ], &pw)
-        .map_err(WalletError::from_cli_error)?;
+    let out = wallet_cli(
+        &bin,
+        &[
+            "--wallet",
+            &path,
+            "--node",
+            &node_url,
+            "send",
+            "--to-spend",
+            &spend_hex,
+            "--to-view",
+            &view_hex,
+            "--amount",
+            &amount_atomic.to_string(),
+        ],
+        &pw,
+    )
+    .map_err(WalletError::from_cli_error)?;
     let mut pw = pw;
     pw.zeroize();
 
-    let txid = out.lines().find(|l| l.contains("Hash:"))
+    let txid = out
+        .lines()
+        .find(|l| l.contains("Hash:"))
         .and_then(|l| l.split_whitespace().last())
-        .unwrap_or("submitted").to_string();
+        .unwrap_or("submitted")
+        .to_string();
 
-    Ok(SendResult { txid, status: "accepted".into() })
+    Ok(SendResult {
+        txid,
+        status: "accepted".into(),
+    })
 }
