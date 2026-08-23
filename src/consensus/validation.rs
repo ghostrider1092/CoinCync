@@ -1129,11 +1129,22 @@ fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidat
 /// Compared to the strict ASERT check this is approximately 16x looser
 /// — that gap is intentional, sized to never false-reject a legitimate
 /// boundary-clamped sequence.
+#[cfg_attr(feature = "regtest-fast", allow(unreachable_code, unused_variables))]
 fn validate_difficulty_target(
     block: &Block,
     prev_block: Option<&Block>,
     result: &mut BlockValidation,
 ) {
+    // regtest-fast (dev/CI only): `calculate_difficulty` pins the target to the
+    // easiest value, so the target-sanity checks below (max-target floor,
+    // non-zero, and the inter-block adjustment-ratio clamp) do not apply — a
+    // pinned target is a large, intentional drop from the genesis difficulty.
+    // Never enabled for mainnet/testnet.
+    #[cfg(feature = "regtest-fast")]
+    {
+        let _ = (block, prev_block, result);
+        return;
+    }
     let target = &block.header.target;
 
     // Check 1: Target must not be easier than max_target.

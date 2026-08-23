@@ -100,7 +100,22 @@ pub fn assert_weight_invariant() {
 }
 
 /// Calculate next difficulty target using dual-anchor ASERT
+// Under `regtest-fast` the early return makes the ASERT body unreachable and
+// its params unused — expected for that dev-only feature; silence just there.
+#[cfg_attr(feature = "regtest-fast", allow(unreachable_code, unused_variables))]
 pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> Hash {
+    // regtest-fast (dev/CI only): pin difficulty to a fixed, low-but-nonzero
+    // value so blocks mine quickly and difficulty never oscillates. Off by
+    // default; NEVER enable for mainnet/testnet. The validator calls this same
+    // function, so miner and validator stay consistent automatically.
+    //
+    // NOT max_target() (difficulty ~1): that lets every hash win, so the miner
+    // floods block commits in a tight loop and starves the chain write-lock
+    // (RPC goes unresponsive). A fixed ~1024 gives fast-but-controlled mining.
+    #[cfg(feature = "regtest-fast")]
+    {
+        return Hash::from_difficulty(1024);
+    }
     if blocks.len() < 2 {
         return max_target();
     }

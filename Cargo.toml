@@ -56,6 +56,9 @@ default = ["randomx"]
 testnet = ["randomx"]
 mainnet = ["randomx"]
 randomx = ["randomx-rs"]
+# DEV/CI ONLY — pins regtest difficulty to the easiest target for instant
+# local mining. Never enable for mainnet/public-testnet builds.
+regtest-fast = []
 metrics = []
 # Rolling soft-finality (CIP-009.D) consensus-layer adapter. Off by
 # default: compiles in `src/consensus/rolling_finality.rs` and pulls
