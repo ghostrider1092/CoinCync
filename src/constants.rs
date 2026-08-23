@@ -98,6 +98,20 @@ pub const MIN_DIFFICULTY_ADJ_NUM: u64 = 1;
 /// Minimum difficulty adjustment per block: denominator
 pub const MIN_DIFFICULTY_ADJ_DEN: u64 = 2;
 
+/// Activation height for the anchor-base ASERT retarget (audit H-1).
+///
+/// Below this height the legacy tip-base retarget is used; at/after it, the
+/// retarget bases the ASERT exponent on the ANCHOR block's target (true
+/// aserti3-2d) instead of the tip's, removing the tip-base compounding that
+/// caused difficulty oscillation (validated by `examples/difficulty_simulator.rs`
+/// and `docs/design/difficulty-oscillation-analysis.md` §6).
+///
+/// CONSENSUS-AFFECTING (changes computed targets): this is a coordinated,
+/// height-gated hard fork. It ships INERT (`u64::MAX`) so no chain's consensus
+/// changes by accident — set it to the agreed activation height at release,
+/// activating on testnet first. A fresh mainnet genesis may set it to 0.
+pub const ANCHOR_BASE_DIFFICULTY_HEIGHT: u64 = u64::MAX;
+
 // =============================================================================
 // Network Ports
 // =============================================================================

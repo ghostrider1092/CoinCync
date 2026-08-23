@@ -108,3 +108,34 @@ Independent of any algorithm change: keeping ≥1 miner continuously online (so 
 chain never goes idle long enough to enter the variance-dominated regime) avoids
 the trigger entirely. The idle→collapse→overshoot→ring cycle only starts after a
 long production gap.
+
+## 6. Simulator results (2026-08-23, audit H-1)
+
+`examples/difficulty_simulator.rs` replays synthetic block-time sequences through
+the shipped algorithm and two candidates (f64 model of the dual-window ASERT +
+clamp). Headline finding: the shipped retarget bases the exponent on the **tip**
+target with a whole-window time error, so each solvetime deviation is re-applied
+for ~W blocks while the block stays in the window — a compounding over-correction
+(audit H-1). This is a distinct, more specific root cause than the §3
+"variance-rails-the-clamp" hypothesis, and it rails the clamp even at low
+variance.
+
+| Scenario | Current (tip-base) | AnchorBase (fix) | TightClamp |
+|---|---|---|---|
+| Steady-state solvetime CV | 1.479 | **1.084** (≈ Poisson floor 1.0) | 1.446 |
+| Steady-state clamp-hit % | 0.0 | 0.0 | 3.8 |
+| 2× hashrate step: post CV / blocks-to-settle | 1.73 / 8 | 1.02 / **38** | 3.11 / 27 |
+| Idle-gap re-baseline (blocks) | **999** | **160** | 157 |
+
+**Interpretation.** AnchorBase drops steady-state oscillation to essentially the
+inherent Poisson floor (CV≈1) and recovers from an idle gap ~6× faster (160 vs
+999 blocks — the observed post-idle overshoot). Its only cost is a slower (38 vs
+8 block) response to a genuine 2× hashrate step, which is the right trade
+(stability over twitchiness). TightClamp alone is worse under a real hashrate
+change (CV 3.11) and is not a viable standalone fix.
+
+**Recommendation (updates §5).** Adopt the **anchor-base** retarget (true
+aserti3-2d: base the exponent on the anchor block's target, not the tip's).
+Implement behind a height-gated hard fork, re-lock `difficulty.rs`, activate on
+testnet first. Optionally pair with a modestly wider/less-weighted short window;
+do NOT ship a tighter clamp alone.
