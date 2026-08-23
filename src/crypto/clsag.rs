@@ -112,15 +112,33 @@ fn clsag_hash(
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Round hash for CLSAG
-fn clsag_round_hash(
+/// Aggregation-coefficient transcript hash.
+///
+/// SECURITY (key-image binding, audit C-1): binds the FULL statement — ring,
+/// key image `I`, **commitment key image `D`**, pseudo-output, and message —
+/// under a per-coefficient domain tag. Including `D` is what makes `I`/`D`
+/// non-malleable. The previous construction computed `mu_p` over the transcript
+/// WITHOUT `D` and derived `mu_c = H(mu_p)` — so neither coefficient depended on
+/// `D`. Since verification checks `J = mu_p·I + mu_c·D` with `I`,`D` both
+/// signer-supplied, a signer could pick an arbitrary `I'` and solve
+/// `D' = mu_c⁻¹·(agg·Hp − mu_p·I')` in closed form, producing a verifying
+/// signature whose key image is unrelated to `x·Hp(P)` — unlimited double-spend.
+/// Hashing `D` into both coefficients removes the closed-form solve (Monero
+/// CLSAG: `mu_P`, `mu_C` are both over the full transcript incl. `D`).
+///
+/// CONSENSUS-AFFECTING: changes the CLSAG challenge, so every signature's bytes
+/// change. Requires a testnet wipe / new genesis (no in-band height gate is
+/// possible for a signature-format change).
+fn clsag_agg_hash(
+    domain: &[u8],
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
     message: &[u8],
 ) -> Scalar {
     let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_round");
+    hasher.update(domain);
 
     for member in ring {
         hasher.update(member.public_key.to_bytes());
@@ -128,26 +146,41 @@ fn clsag_round_hash(
     }
 
     hasher.update(key_image.to_bytes());
+    hasher.update(commitment_image.to_bytes());
     hasher.update(pseudo_output.to_bytes());
     hasher.update(message);
 
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Compute aggregate key coefficients
+/// Compute aggregate key coefficients `(mu_p, mu_c)`.
+///
+/// Both are independent, domain-separated hashes over the full transcript
+/// INCLUDING the commitment key image `D` (see [`clsag_agg_hash`] for why `D`
+/// is load-bearing).
 fn compute_aggregate_coefficients(
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
     message: &[u8],
 ) -> (Scalar, Scalar) {
-    let mu_p = clsag_round_hash(ring, key_image, pseudo_output, message);
-
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_agg_1");
-    hasher.update(mu_p.as_bytes());
-    let mu_c = Scalar::from_bytes_mod_order_wide(&hasher.finalize().into());
-
+    let mu_p = clsag_agg_hash(
+        b"CLSAG_agg_P",
+        ring,
+        key_image,
+        commitment_image,
+        pseudo_output,
+        message,
+    );
+    let mu_c = clsag_agg_hash(
+        b"CLSAG_agg_C",
+        ring,
+        key_image,
+        commitment_image,
+        pseudo_output,
+        message,
+    );
     (mu_p, mu_c)
 }
 
@@ -202,8 +235,9 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
     let hp = hash_to_point(&expected_public.to_bytes());
     let commitment_image = PublicPoint::from_point(blinding_diff.as_scalar() * hp);
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) = compute_aggregate_coefficients(ring, &key_image, pseudo_output, message);
+    // Compute aggregate coefficients (bind the commitment key image D — audit C-1)
+    let (mu_p, mu_c) =
+        compute_aggregate_coefficients(ring, &key_image, &commitment_image, pseudo_output, message);
 
     // Generate random alpha
     let alpha = SecretScalar::random(rng);
@@ -401,9 +435,14 @@ pub fn clsag_verify(
         return false;
     }
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) =
-        compute_aggregate_coefficients(ring, &signature.key_image, pseudo_output, message);
+    // Compute aggregate coefficients (bind the commitment key image D — audit C-1)
+    let (mu_p, mu_c) = compute_aggregate_coefficients(
+        ring,
+        &signature.key_image,
+        &signature.commitment_image,
+        pseudo_output,
+        message,
+    );
 
     // Compute aggregate public keys (must match signing formulation)
     // W_i = mu_p * P_i + mu_c * (C_i - C')
@@ -779,6 +818,43 @@ mod tests {
         // Wrong pseudo_output should fail
         let wrong_pseudo = Commitment::commit(value + 1, &SecretScalar::random(&mut OsRng));
         assert!(!clsag_verify(message, &ring, &wrong_pseudo, &sig));
+    }
+
+    #[test]
+    fn aggregate_coefficients_bind_commitment_image() {
+        // audit C-1: mu_p AND mu_c must both depend on the commitment key image
+        // D. The old construction hashed the transcript WITHOUT D into mu_p and
+        // derived mu_c = H(mu_p), so neither depended on D — which let a signer
+        // solve for D' against an arbitrary key image I'. This test fails on the
+        // old construction.
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let value = 1000u64;
+        let ring = vec![
+            RingMember::new(public, Commitment::commit(value, &SecretScalar::random(&mut OsRng))),
+            RingMember::new(
+                SecretScalar::random(&mut OsRng).to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        let key_image = KeyImage::from_secret(&secret);
+        let pseudo_output = Commitment::commit(value, &SecretScalar::random(&mut OsRng));
+        let message = b"agg coeff binding test";
+
+        // Two distinct commitment key images D.
+        let d1 = PublicPoint::from_point(generator() * SecretScalar::random(&mut OsRng).as_scalar());
+        let d2 = PublicPoint::from_point(generator() * SecretScalar::random(&mut OsRng).as_scalar());
+        assert_ne!(d1.as_point(), d2.as_point(), "test setup: D1 != D2");
+
+        let (p1, c1) =
+            compute_aggregate_coefficients(&ring, &key_image, &d1, &pseudo_output, message);
+        let (p2, c2) =
+            compute_aggregate_coefficients(&ring, &key_image, &d2, &pseudo_output, message);
+
+        assert_ne!(p1, p2, "mu_p must bind the commitment key image D");
+        assert_ne!(c1, c2, "mu_c must bind the commitment key image D");
+        // mu_c must be an independent hash, not H(mu_p) (distinct domain tags).
+        assert_ne!(p1, c1, "mu_p and mu_c must be independent");
     }
 
     #[test]
