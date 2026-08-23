@@ -1903,8 +1903,8 @@ mod tests {
             "get_block_by_height",
             "get_block",
             "get_peers",
-            "get_transaction", // NotImplemented stub but still allowlisted
-            "get_asset_info",  // NotImplemented stub but still allowlisted
+            "get_transaction", // wired (real implementation in server.rs)
+            "get_asset_info",  // returns -32601 by design (asset layer removed in 1.0)
         ] {
             assert!(
                 RPC_ALLOWED_METHODS.contains(&method),

@@ -15,15 +15,15 @@ pub mod tls;
 pub mod types;
 mod websocket;
 
-// Phase 1 RPC surface — wired in. `wallet_api` is a deliberate placeholder
-// stub that will be fleshed out once the wallet modules stabilise; the
-// other two (`node_api`, `openapi`) are self-contained.
+// Phase 1 RPC surface — wired in.
+// (Removed 2026-08-22) `node_api` (a full duplicate of the node RPC methods
+// that `server.rs` already registers inline — a drift hazard) and `wallet_api`
+// (a `NotImplemented` placeholder stub) were dead with no callers and deleted.
+// `openapi` is retained as a self-contained doc generator.
 pub mod explorer;
 pub mod lightwallet;
-pub mod node_api;
 pub mod openapi;
 pub mod rest;
-pub mod wallet_api;
 
 pub use ratelimit::{
     create_rate_limiter, RateLimitConfig, RateLimitResult, RateLimitStats, RateLimiter,

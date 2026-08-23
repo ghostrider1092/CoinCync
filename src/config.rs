@@ -249,7 +249,20 @@ impl std::fmt::Display for NetworkType {
     }
 }
 
-/// Node configuration
+/// Node configuration.
+///
+/// ⚠️ **DEAD / NOT WIRED (as of 2026-08-22).** No binary constructs or loads
+/// this. The `coincync-node` daemon drives everything from clap flags plus
+/// `network::node::NodeConfig` defaults, and RPC uses `rpc::server::RpcConfig`
+/// — NOT this tree. This whole config-file struct hierarchy (`NodeConfig` and
+/// the sub-configs it owns: `PersonalConfig`, `ChainParams`, `P2PConfig`,
+/// `P2PEncryptionConfig`, `RpcConfig`, `DatabaseConfig`, `MiningConfig`,
+/// `PruningConfig`, `WalletConfig`, `NodeConfigBuilder`) is unreachable in the
+/// production build. The `--config` node flag that would have loaded it was
+/// removed. Do not add callers; if a real TOML config system is wanted, design
+/// it deliberately rather than reviving this. Kept (labeled) rather than excised
+/// only because it is interleaved with live types (`NetworkType`, `ProxyConfig`)
+/// in this file; a focused removal pass is tracked separately.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Network type
