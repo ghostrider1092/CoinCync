@@ -700,19 +700,39 @@ struct PoolJob {
     tx_root: Hash,
     target: Hash,
     height: u64,
+    /// RandomX seed the server advertised for this job's height. Validated
+    /// against the locally derived seed before mining (issue #45).
+    seed_hash: [u8; 32],
 }
 
 /// Parse the CoinCync `job` object: `{job_id, anchor, tx_root, seed_hash,
-/// target, height}` (all hashes hex). `seed_hash` is ignored — `compute_pow_hash`
-/// re-derives the RandomX key from `height`.
+/// share_target|target, height}` (all hashes hex). `target` is accepted as an
+/// alias of `share_target` for older servers (issue #44).
 fn parse_pool_job(v: &Value) -> Option<PoolJob> {
+    let seed_hex = v.get("seed_hash")?.as_str()?;
+    let seed_vec = hex::decode(seed_hex).ok()?;
+    let seed_hash: [u8; 32] = seed_vec.try_into().ok()?;
+    // Prefer the explicit share_target; fall back to the legacy `target` field.
+    let target_hex = v
+        .get("share_target")
+        .and_then(|t| t.as_str())
+        .or_else(|| v.get("target").and_then(|t| t.as_str()))?;
     Some(PoolJob {
         job_id: v.get("job_id")?.as_str()?.to_string(),
         anchor: Hash::from_hex(v.get("anchor")?.as_str()?)?,
         tx_root: Hash::from_hex(v.get("tx_root")?.as_str()?)?,
-        target: Hash::from_hex(v.get("target")?.as_str()?)?,
+        target: Hash::from_hex(target_hex)?,
         height: v.get("height")?.as_u64()?,
+        seed_hash,
     })
+}
+
+/// True iff the job's advertised RandomX seed matches the seed this rig would
+/// derive locally for that height (issue #45). A mismatch means the server is on
+/// a different network/seed, so mining the job would only ever yield shares the
+/// server rejects. Requires `bind_randomx_genesis_for_network` to have run.
+fn pool_job_seed_ok(job: &PoolJob) -> bool {
+    coincync::consensus::randomx_seed_for_height(job.height) == job.seed_hash
 }
 
 /// Connect to a CoinCync stratum pool, log in, and mine the jobs it pushes,
@@ -788,6 +808,17 @@ pub async fn run_pool(
                         });
                     if let Some(jv) = job_val {
                         if let Some(job) = parse_pool_job(jv) {
+                            // Reject jobs whose advertised seed doesn't match the
+                            // locally derived RandomX seed — mining them would only
+                            // produce shares the server rejects (issue #45).
+                            if !pool_job_seed_ok(&job) {
+                                warn!(
+                                    "pool: job {} (height {}) seed_hash does not match the local \
+                                     RandomX seed — network/seed mismatch; not mining this job",
+                                    job.job_id, job.height
+                                );
+                                continue;
+                            }
                             info!("pool: new job {} (height {})", job.job_id, job.height);
                             *job_slot_r.lock().await = Some(job);
                         }
@@ -959,47 +990,92 @@ mod tests {
     }
 
     #[test]
-    fn claimable_fees_track_the_validator_activation_gate() {
-        use coincync::mining::block_builder::calculate_claimable_fees;
-        use coincync::constants::FEE_DISTRIBUTION_HEIGHT;
+    fn claimable_fees_track_activation_and_congestion_by_block_size() {
+        use coincync::constants::{CONGESTION_THRESHOLD, FEE_DISTRIBUTION_HEIGHT, MAX_BLOCK_SIZE};
+        use coincync::consensus::fee_market::distribute_fee;
+        use coincync::mining::block_builder::claimable_fees_for_block_size;
         use coincync::primitives::Amount;
 
-        // No fees → nothing claimable, regardless of height.
-        assert_eq!(calculate_claimable_fees(FEE_DISTRIBUTION_HEIGHT, &[]), 0);
-        assert_eq!(calculate_claimable_fees(0, &[tx_with_fee(0)]), 0);
-
         let fee = 7_160_000u64;
-        let txs = [tx_with_fee(fee)];
+        let small_block = 1_000usize; // far below the congestion threshold
 
-        // At/after activation the burn split applies: the miner claims only
-        // `distribute_fee(...).to_miner`. A lone tiny tx is far from the
-        // congestion threshold, so the split is the non-congested one.
-        let expected_after = coincync::consensus::fee_market::distribute_fee(
-            Amount::from_atomic(fee),
-            false,
-        )
-        .to_miner
-        .as_atomic();
+        // No fees → nothing claimable, regardless of height/size.
         assert_eq!(
-            calculate_claimable_fees(FEE_DISTRIBUTION_HEIGHT, &txs),
-            expected_after,
-            "at/after activation the miner claims only the un-burned share"
+            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, 0, small_block),
+            0
         );
 
-        // Before activation the validator lets the miner claim the WHOLE fee
-        // (backward compatible). This window only exists when the activation
-        // height is non-zero — i.e. testnet builds. On mainnet it is 0, so
-        // there is no pre-activation block to test and the split is always on.
+        let non_congested = distribute_fee(Amount::from_atomic(fee), false)
+            .to_miner
+            .as_atomic();
+        let congested = distribute_fee(Amount::from_atomic(fee), true)
+            .to_miner
+            .as_atomic();
+
+        // At/after activation, a small block gets the non-congested split.
+        assert_eq!(
+            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, fee, small_block),
+            non_congested,
+            "small block → non-congested split"
+        );
+
+        // Boundary (issue #41): block sizes straddling CONGESTION_THRESHOLD pick
+        // different splits — this is exactly where the coinbase + 200-byte header
+        // overhead can push a candidate across the line, so builder and validator
+        // must size the block identically.
+        let just_below = (CONGESTION_THRESHOLD.saturating_sub(1) as usize * MAX_BLOCK_SIZE) / 100;
+        assert_eq!(
+            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, fee, just_below),
+            non_congested,
+            "just below threshold → non-congested"
+        );
+        assert_eq!(
+            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, fee, MAX_BLOCK_SIZE),
+            congested,
+            "a full block → congested split"
+        );
+        assert!(
+            non_congested >= congested,
+            "congestion must not increase the miner's share"
+        );
+
+        // Before activation the miner claims the WHOLE fee regardless of size.
         if FEE_DISTRIBUTION_HEIGHT > 0 {
-            let before = calculate_claimable_fees(FEE_DISTRIBUTION_HEIGHT - 1, &txs);
             assert_eq!(
-                before, fee,
+                claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT - 1, fee, MAX_BLOCK_SIZE),
+                fee,
                 "below activation the miner claims the full fee, no burn"
             );
-            assert!(
-                before > expected_after,
-                "the burn split must reduce the miner's share once active"
-            );
         }
+    }
+
+    /// Issue #45: the rig must accept a job whose advertised seed matches the
+    /// locally derived RandomX seed for that height, and reject a mismatched one.
+    #[test]
+    fn pool_job_seed_is_validated_against_local_network() {
+        use super::{parse_pool_job, pool_job_seed_ok};
+        use coincync::consensus::randomx_seed_for_height;
+
+        let height = 5u64;
+        let good_seed = randomx_seed_for_height(height);
+        let mk = |seed: [u8; 32]| {
+            serde_json::json!({
+                "job_id": "j",
+                "anchor": hex::encode([0u8; 32]),
+                "tx_root": hex::encode([0u8; 32]),
+                "seed_hash": hex::encode(seed),
+                "share_target": hex::encode([0xffu8; 32]),
+                "block_target": hex::encode([0xffu8; 32]),
+                "height": height,
+            })
+        };
+
+        let good = parse_pool_job(&mk(good_seed)).expect("job parses");
+        assert!(pool_job_seed_ok(&good), "matching seed must be accepted");
+
+        let mut bad_seed = good_seed;
+        bad_seed[0] ^= 0xff;
+        let bad = parse_pool_job(&mk(bad_seed)).expect("job parses");
+        assert!(!pool_job_seed_ok(&bad), "mismatched seed must be rejected");
     }
 }
