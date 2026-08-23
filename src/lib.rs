@@ -25,6 +25,7 @@ pub mod config;
 pub mod helpers;
 #[cfg(kani)]
 mod kani_proofs;
+pub mod net_time;
 pub mod prelude;
 
 // ── Primitives + types ──────────────────────────────────────

@@ -1064,7 +1064,7 @@ fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidati
 /// nodes on badly-configured hosts still process blocks (validation of
 /// crypto and consensus rules is orthogonal to wall-clock).
 fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidation) {
-    let current_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    let local_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(e) => {
             result.add_error(format!(
@@ -1074,6 +1074,16 @@ fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidat
             return;
         }
     };
+    // audit M-4: compare against NETWORK-adjusted time (local clock + a bounded
+    // median of peer clock offsets), not the raw local clock. Otherwise a node
+    // whose wall clock is skewed by more than MAX_TIMESTAMP_DRIFT rejects blocks
+    // the rest of the network accepts (and bans the serving peer on the header
+    // path) — self-isolation / partition. The offset is 0 until enough peers
+    // have reported and is hard-capped, so this can only shift the acceptance
+    // boundary by a bounded amount and never affects already-mined blocks.
+    // See crate::net_time.
+    let current_time =
+        (local_time as i64 + crate::net_time::time_offset_secs()).max(0) as u64;
     // Sanity: current time should be reasonably recent (after 2020).
     const MIN_REASONABLE_TIME: u64 = 1577836800; // 2020-01-01 00:00:00 UTC
     if current_time < MIN_REASONABLE_TIME {
