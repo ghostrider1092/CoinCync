@@ -171,12 +171,18 @@ enum Command {
         /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Recipient spend public key (64-hex).
+        /// Recipient address string (standard, subaddress, or integrated). When
+        /// given, its spend/view keys, address type, and any embedded payment ID
+        /// are used directly, so --to-spend/--to-view/--payment-id/--subaddress are
+        /// not needed. This is the way to pay an integrated address.
         #[arg(long)]
-        to_spend: String,
-        /// Recipient view public key (64-hex).
+        address: Option<String>,
+        /// Recipient spend public key (64-hex). Not needed when --address is given.
         #[arg(long)]
-        to_view: String,
+        to_spend: Option<String>,
+        /// Recipient view public key (64-hex). Not needed when --address is given.
+        #[arg(long)]
+        to_view: Option<String>,
         /// Amount to send, in atomic CYNC units.
         #[arg(long)]
         amount: u64,
@@ -574,16 +580,17 @@ async fn main() {
             memo,
             recovery_address,
             recovery_timeout,
-            // Integrated-address payment IDs are handled by the v2 send path
-            // (`dispatch_v2` intercepts `Send` before this legacy arm is
-            // reached), so this superseded path ignores the flag.
+            // Integrated-address payment IDs and --address parsing are handled by
+            // the v2 send path (`dispatch_v2` intercepts `Send` before this legacy
+            // arm is reached), so this superseded path ignores those flags.
             payment_id: _,
+            address: _,
         } => {
             cmd_send(
                 &wallet_path,
                 password,
-                to_spend,
-                to_view,
+                to_spend.unwrap_or_default(),
+                to_view.unwrap_or_default(),
                 amount,
                 fee_multiplier,
                 split_output,
