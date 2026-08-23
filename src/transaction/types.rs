@@ -55,36 +55,28 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Compute transaction hash. If serialization fails (shouldn't happen with valid tx),
-    /// we produce a unique hash from available fields to prevent hash collisions.
+    /// Compute the transaction hash (txid) as `blake3(borsh(self))`.
+    ///
+    /// Fails closed on the (practically impossible) borsh error. The previous
+    /// fallback computed a DIFFERENT, non-injective hash from a subset of
+    /// fields — a consensus footgun: if two nodes ever disagreed on whether the
+    /// error path was taken they would compute different txids for the same tx
+    /// → merkle-root mismatch → chain split. `borsh::to_vec` into a `Vec` is
+    /// infallible in practice, so a failure here means memory corruption and we
+    /// halt rather than silently diverge.
     pub fn hash(&self) -> Hash {
-        match borsh::to_vec(self) {
-            Ok(data) => hash_concat(&[&data]),
-            Err(_) => {
-                // Fallback: create deterministic hash from key fields
-                // This should never happen with a valid transaction
-                let mut fallback_data = Vec::with_capacity(64);
-                fallback_data.extend_from_slice(&[self.version, self.tx_type as u8]);
-                fallback_data.extend_from_slice(&(self.inputs.len() as u32).to_le_bytes());
-                fallback_data.extend_from_slice(&(self.outputs.len() as u32).to_le_bytes());
-                fallback_data.extend_from_slice(&self.fee.as_atomic().to_le_bytes());
-                for input in &self.inputs {
-                    fallback_data.extend_from_slice(input.key_image.as_bytes());
-                }
-                hash_concat(&[&fallback_data])
-            }
-        }
+        let data = borsh::to_vec(self)
+            .expect("Transaction borsh serialization is infallible into a Vec; a failure indicates memory corruption");
+        hash_concat(&[&data])
     }
 
-    /// Get transaction size in bytes. Returns minimum valid size on serialization failure.
+    /// Serialized transaction size in bytes. Fails closed on the (impossible)
+    /// borsh error rather than returning a divergent size — a wrong size feeds
+    /// fee/congestion math that must be identical across nodes.
     pub fn size(&self) -> usize {
-        match borsh::to_vec(self) {
-            Ok(v) => v.len(),
-            Err(_) => {
-                // Return minimum transaction size to ensure fee checks aren't bypassed
-                crate::constants::MIN_TX_SIZE
-            }
-        }
+        borsh::to_vec(self)
+            .map(|v| v.len())
+            .expect("Transaction borsh serialization is infallible into a Vec")
     }
 
     pub fn is_coinbase(&self) -> bool {

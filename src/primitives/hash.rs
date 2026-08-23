@@ -227,8 +227,25 @@ pub fn merkle_root(hashes: &[Hash]) -> Hash {
         return hash_concat(&[&[0x00], hashes[0].as_slice()]);
     }
 
-    // H-4 FIX: RFC 6962 domain separation prevents merkle malleability (CVE-2012-2459)
-    // Leaf nodes are prefixed with 0x00; internal nodes with 0x01.
+    // The 0x00 (leaf) / 0x01 (internal) domain tags prevent the leaf-as-node
+    // second-preimage attack. They do NOT, however, prevent the classic
+    // CVE-2012-2459 *duplication* malleability, because the odd-node branch
+    // below DUPLICATES the lone node (`chunk[0], chunk[0]`) rather than
+    // promoting it RFC-6962-style — so `merkle_root([A,B,C]) ==
+    // merkle_root([A,B,C,C])` (identical root, different tx set).
+    //
+    // Why this is not a live consensus-split/DoS today (contained by the block
+    // validator, NOT by this construction): duplicating a non-coinbase tx
+    // repeats its key images (rejected by the block dup-key-image check; every
+    // non-coinbase tx must have >=1 input), duplicating the coinbase trips the
+    // "multiple coinbase" reject, and there is no invalid-block-hash cache to
+    // poison. The safety therefore rests on those downstream checks.
+    //
+    // ROOT FIX is a consensus (hard-fork) change — promoting odd nodes instead
+    // of duplicating, or committing the tx count into the header, alters every
+    // tx_root — so it must land before the mainnet genesis hash is finalized.
+    // Tracked as an owner decision; do not change the construction here without
+    // re-freezing MAINNET_GENESIS_HASH and versioning testnet.
     let mut level: Vec<Hash> = hashes
         .iter()
         .map(|h| hash_concat(&[&[0x00], h.as_slice()]))
@@ -239,6 +256,9 @@ pub fn merkle_root(hashes: &[Hash]) -> Hash {
             let hash = if chunk.len() == 2 {
                 hash_concat(&[&[0x01], chunk[0].as_slice(), chunk[1].as_slice()])
             } else {
+                // NOTE: duplication (not RFC-6962 promotion) — see the
+                // CVE-2012-2459 note above. Consensus-frozen; changing this is a
+                // hard fork.
                 hash_concat(&[&[0x01], chunk[0].as_slice(), chunk[0].as_slice()])
             };
             next.push(hash);

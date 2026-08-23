@@ -31,11 +31,6 @@ struct Cli {
     #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest"])]
     network: String,
 
-    /// Path to config file (TOML). Currently unused — defaults are used
-    /// with CLI overrides applied on top.
-    #[arg(long)]
-    config: Option<PathBuf>,
-
     /// Log level.
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -1391,6 +1386,88 @@ async fn start_node(
             warn!("Metrics endpoint exited: {}", e);
         }
     });
+
+    // Enterprise chain-health metrics: refresh the state gauges every 5s from
+    // live chain/mempool/p2p state. Event counters (reorg, block interval,
+    // mempool rejects) are incremented at their event sites elsewhere.
+    {
+        let snap_chain = chain_arc.clone();
+        let snap_mempool = mempool.clone();
+        let snap_p2p = p2p.clone();
+        let snap_db_path = db_path.clone();
+        tokio::spawn(async move {
+            // Recursive on-disk size of the database directory.
+            fn dir_size_bytes(path: &std::path::Path) -> u64 {
+                let mut total = 0u64;
+                if let Ok(entries) = std::fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        match entry.metadata() {
+                            Ok(md) if md.is_dir() => total += dir_size_bytes(&entry.path()),
+                            Ok(md) => total += md.len(),
+                            Err(_) => {}
+                        }
+                    }
+                }
+                total
+            }
+
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut tick: u64 = 0;
+            // DB-size walks the directory, so refresh it less often (~60s)
+            // than the in-memory gauges. Cached between walks.
+            let mut db_size_cached: i64 = 0;
+            loop {
+                ticker.tick().await;
+                let stats = snap_chain.stats();
+                let height = stats.height;
+                let target = snap_chain.target_height();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let tip_age = now.saturating_sub(snap_chain.tip().timestamp) as f64;
+                let mp = snap_mempool.stats();
+                let circulating = stats.total_supply.saturating_sub(stats.total_burned);
+                let reward = coincync::emission::calculate_block_reward(height).as_atomic();
+                let sync_pct = if target > 0 {
+                    (height as f64 / target as f64 * 100.0).min(100.0)
+                } else {
+                    100.0
+                };
+                // Refresh the DB size on the first tick and every ~60s after.
+                if tick % 12 == 0 {
+                    let p = snap_db_path.clone();
+                    db_size_cached = tokio::task::spawn_blocking(move || dir_size_bytes(&p))
+                        .await
+                        .unwrap_or(0) as i64;
+                }
+                tick = tick.wrapping_add(1);
+                let snapshot = coincync::metrics::ChainSnapshot {
+                    height,
+                    tip_age_seconds: tip_age,
+                    difficulty: stats.difficulty as f64,
+                    total_difficulty: stats.total_difficulty as f64,
+                    total_transactions: stats.total_transactions,
+                    circulating_supply_atomic: circulating as f64,
+                    total_supply_atomic: stats.total_supply as f64,
+                    fee_burned_total_atomic: stats.total_burned as f64,
+                    block_reward_atomic: reward as f64,
+                    is_synced: snap_chain.is_synced(),
+                    blocks_behind: target.saturating_sub(height) as i64,
+                    sync_progress_percent: sync_pct,
+                    peers: snap_p2p.peer_count() as i64,
+                    // No inbound/outbound split accessor yet — reported as 0.
+                    peers_inbound: 0,
+                    peers_outbound: 0,
+                    mempool_size: mp.tx_count as i64,
+                    mempool_bytes: mp.size_bytes as i64,
+                    utxo_set_size: snap_chain.utxo_count() as i64,
+                    db_size_bytes: db_size_cached,
+                };
+                coincync::metrics::record_chain_snapshot(&snapshot);
+            }
+        });
+    }
 
     // ── REST + (optional) embedded explorer ────────────────────
     //

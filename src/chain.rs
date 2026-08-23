@@ -1054,6 +1054,12 @@ impl Blockchain {
         self.inner.read().tip.clone()
     }
 
+    /// Number of unspent outputs currently tracked. Observability only
+    /// (metrics/RPC) — not a consensus value.
+    pub fn utxo_count(&self) -> usize {
+        self.inner.read().utxos.output_count()
+    }
+
     /// Look up a transaction's block height and index via the tx_index.
     pub fn get_tx_location(&self, tx_hash: &[u8]) -> Option<(u64, u32)> {
         self.db.as_ref().and_then(|db| db.get_tx_location(tx_hash))
@@ -1538,6 +1544,20 @@ impl Blockchain {
                                     fee_burn, inner.stats.total_burned
                                 )
                             });
+                        // F3 (audit fix): decrement cumulative work per disconnected
+                        // block, mirroring the connect path's `total_difficulty +=
+                        // difficulty`. Without this, rollback_to_height persists the
+                        // pre-rollback (inflated) total_difficulty against a lower tip,
+                        // so this node would advertise more work than one that reached
+                        // the same tip linearly — a false `work_behind` veto / wrong
+                        // fork choice. saturating_sub: work never drops below the base.
+                        let disc_difficulty = inner
+                            .blocks
+                            .get(&oh)
+                            .map(|b| calculate_difficulty_from_target(&b.header.target))
+                            .unwrap_or(0);
+                        inner.stats.total_difficulty =
+                            inner.stats.total_difficulty.saturating_sub(disc_difficulty);
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -2900,9 +2920,19 @@ impl Blockchain {
                                 // restored pre-reorg chain). Inert while
                                 // stores are None.
                                 self.checkpoint_phase2_stores(*h);
-                                let batch =
-                                    UtxoSet::batch_from_block(*h, &orphan_block.transactions);
+                                let txs = orphan_block.transactions.clone();
+                                let batch = UtxoSet::batch_from_block(*h, &txs);
                                 inner.utxos.apply_batch(batch);
+                                // F1 (audit fix): the disconnect above removed these
+                                // outputs from the ON-DISK output_index too (R-68,
+                                // immediate write in remove_output). Re-applying only
+                                // in memory leaves disk permanently missing them, so
+                                // after they age out of the ~1000-block cache, ring-
+                                // member validation using one as a decoy fails on this
+                                // node but succeeds on nodes that never did this failed
+                                // reorg -> mempool/consensus partition. Restore the disk
+                                // rows so the rollback is symmetric on disk as well.
+                                self.persist_output_index(&txs, *h);
                             }
                         }
 
@@ -3056,9 +3086,13 @@ impl Blockchain {
                                 // site 6a but for the triggering-block-failed
                                 // rollback path). Inert while stores are None.
                                 self.checkpoint_phase2_stores(*h);
-                                let batch =
-                                    UtxoSet::batch_from_block(*h, &orphan_block.transactions);
+                                let txs = orphan_block.transactions.clone();
+                                let batch = UtxoSet::batch_from_block(*h, &txs);
                                 inner.utxos.apply_batch(batch);
+                                // F1 (audit fix): restore the ON-DISK output_index the
+                                // disconnect removed (R-68), so a failed reorg is
+                                // symmetric on disk — see the path-A note above.
+                                self.persist_output_index(&txs, *h);
                             }
                         }
 
@@ -3067,6 +3101,15 @@ impl Blockchain {
                     }
 
                     if reorg_error.is_none() {
+                        // F2 (audit fix): checkpoint the Phase-2 stores BEFORE the tip
+                        // block's UTXO mutations, matching every other apply site
+                        // (clean-extend, fork-block loop, both rollback paths). The
+                        // triggering tip is excluded from collect_fork_chain and only
+                        // applied here, so without this the Phase-2 checkpoint stack
+                        // ends one short per reorg and a later disconnect through this
+                        // tip rewinds the wrong boundary (mainnet blocker once the
+                        // shielded/spark/kernel stores activate; inert while None).
+                        self.checkpoint_phase2_stores(block.header.height);
                         // Apply the new tip block (the triggering block)
                         let tip_batch =
                             UtxoSet::batch_from_block(block.header.height, &block.transactions);
@@ -3417,6 +3460,9 @@ impl Blockchain {
                         "fork_point": fork_point,
                     }),
                 );
+
+                // Enterprise metrics: count the reorg and record its depth.
+                crate::metrics::record_reorg(reorg_depth as u64);
 
                 Ok(BlockStatus::AcceptedReorg { orphaned_txs })
             } else {
