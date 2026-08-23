@@ -44,6 +44,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        payment_id,
     } = command
     else {
         unreachable!("send dispatcher called for a non-send command");
@@ -61,6 +62,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        payment_id,
         node,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -94,6 +96,7 @@ struct SendCommandArguments {
     memo: Option<String>,
     recovery_address: Option<String>,
     recovery_timeout: Option<u64>,
+    payment_id: Option<String>,
     node: String,
 }
 
@@ -110,10 +113,24 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         memo,
         recovery_address: recovery_address_hex,
         recovery_timeout,
+        payment_id: payment_id_hex,
         node,
     } = arguments;
     use coincync::wallet::spend::{SpendCoordinator, SpendIntent, SpendSubmission};
     use coincync::wallet::{KeyEpoch, Wallet};
+
+    // Parse an optional integrated-address payment ID (16-hex / 8 bytes).
+    let payment_id: Option<[u8; 8]> = match payment_id_hex.as_deref() {
+        Some(h) => {
+            let bytes = hex::decode(h.trim())
+                .map_err(|e| format!("invalid --payment-id hex: {e}"))?;
+            let arr: [u8; 8] = bytes
+                .try_into()
+                .map_err(|b: Vec<u8>| format!("payment id must be 8 bytes, got {}", b.len()))?;
+            Some(arr)
+        }
+        None => None,
+    };
 
     let to_spend = parse_public_key_v2(&to_spend_hex, "to-spend")?;
     let to_view = parse_public_key_v2(&to_view_hex, "to-view")?;
@@ -139,19 +156,10 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     wallet
         .unlock(password.as_str())
         .map_err(|error| format!("unlock wallet: {error}"))?;
-    // W-1/W-B launch-safety: --subaddress sends are disabled on mainnet in this
-    // release. This raw-pubkey path bypasses Address parsing (where the mainnet
-    // subaddress gate lives), so it must be rejected here explicitly — a
-    // subaddress-received output is currently unspendable (spend path omits the
-    // per-subaddress offset). Available on testnet/regtest. See W-B / W-1.
-    if subaddress && wallet.network_name() == "mainnet" {
-        return Err(
-            "subaddresses are disabled on mainnet in this release (funds received \
-             at a subaddress would be permanently unspendable); omit --subaddress \
-             and send to a standard address"
-                .to_string(),
-        );
-    }
+    // W-1/W-B gate LIFTED: the spend path now applies the per-subaddress offset
+    // (W-A fix), so subaddress-received outputs are spendable on all networks —
+    // verified end-to-end by `real_crypto_subaddress_output_spendable_e2e`. The
+    // prior mainnet rejection on this raw-pubkey send path has been removed.
     let keys: KeyEpoch = wallet
         .current_keys()
         .cloned()
@@ -190,7 +198,8 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     let intent = SpendIntent::new(payments)
         .with_fee_multiplier(fee_multiplier)
         .with_memo(memo_bytes)
-        .with_extra(extra);
+        .with_extra(extra)
+        .with_payment_id(payment_id);
     let mut rng = rand::rngs::OsRng;
     let built = coordinator
         .build_privacy_transaction(

@@ -58,6 +58,7 @@ pub fn prepare_privacy_transaction<R: RngCore + CryptoRng>(
         fee_multiplier,
         memo,
         extra,
+        payment_id,
     } = request;
     let shape = TransferShape::classify(&payments, context.target_height())?;
     let total_send: Amount = payments.iter().map(|payment| payment.amount).sum();
@@ -137,5 +138,6 @@ pub fn prepare_privacy_transaction<R: RngCore + CryptoRng>(
         view_public: keys.view_public,
         memo,
         extra,
+        payment_id,
     })
 }

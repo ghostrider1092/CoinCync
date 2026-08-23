@@ -7,6 +7,7 @@
 //! - Transaction fragmentation for large payments
 
 mod builder;
+pub mod payment_id;
 pub mod recovery;
 mod types;
 mod validator;

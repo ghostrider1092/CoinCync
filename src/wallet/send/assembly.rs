@@ -23,6 +23,7 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
         view_public,
         memo,
         extra,
+        payment_id,
     } = prepared;
 
     let mut builder =
@@ -32,6 +33,9 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
     }
     if !extra.is_empty() {
         builder = builder.with_extra(extra);
+    }
+    if let Some(pid) = payment_id {
+        builder = builder.with_payment_id(pid);
     }
     add_prepared_inputs(&mut builder, inputs, rings, context.ring_size())?;
 

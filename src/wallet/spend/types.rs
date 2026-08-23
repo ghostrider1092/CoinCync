@@ -13,6 +13,7 @@ pub struct SpendIntent {
     fee_multiplier: f64,
     memo: Option<Vec<u8>>,
     extra: Vec<u8>,
+    payment_id: Option<[u8; 8]>,
 }
 
 impl SpendIntent {
@@ -23,7 +24,14 @@ impl SpendIntent {
             fee_multiplier: 1.0,
             memo: None,
             extra: Vec::new(),
+            payment_id: None,
         }
+    }
+
+    /// Attach an 8-byte integrated-address payment ID (encrypted into tx.extra).
+    pub fn with_payment_id(mut self, payment_id: Option<[u8; 8]>) -> Self {
+        self.payment_id = payment_id;
+        self
     }
 
     /// Apply the caller's fee multiplier.
@@ -49,6 +57,7 @@ impl SpendIntent {
             .with_fee_multiplier(self.fee_multiplier)
             .with_memo(self.memo)
             .with_extra(self.extra)
+            .with_payment_id(self.payment_id)
     }
 }
 

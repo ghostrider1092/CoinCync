@@ -13,7 +13,6 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);

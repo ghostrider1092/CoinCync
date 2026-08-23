@@ -111,6 +111,29 @@ enum Command {
         password: Option<String>,
     },
 
+    /// Generate an integrated address: this wallet's address plus an 8-byte
+    /// payment ID, so a sender's payment can be associated with an account /
+    /// invoice. Share the printed address; the payment ID is recovered
+    /// (encrypted) when the payment is received.
+    IntegratedAddress {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// 16-hex (8-byte) payment ID. Omit for a random one.
+        #[arg(long)]
+        payment_id: Option<String>,
+    },
+
+    /// List the wallet's unspent outputs (amount, height, subaddress, spent).
+    /// Reads the persisted UTXO sidecar — run `scan` first to populate it.
+    Utxos {
+        /// Wallet password. Use `-` to read from stdin.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Also show already-spent outputs (default: unspent only).
+        #[arg(long)]
+        include_spent: bool,
+    },
+
     /// Print the master seed as hex (requires password).
     ShowSeed {
         /// Wallet password. Use `-` to read from stdin (recommended for
@@ -195,6 +218,11 @@ enum Command {
         /// is set; ignored otherwise.
         #[arg(long)]
         recovery_timeout: Option<u64>,
+        /// Integrated-address payment ID (16-hex / 8 bytes). Carried encrypted
+        /// in tx.extra and recovered by the recipient on scan. Use when paying
+        /// an exchange that issued you an integrated address.
+        #[arg(long)]
+        payment_id: Option<String>,
     },
 
     /// Generate M-of-N multi-sig key shares using FROST.
@@ -520,6 +548,14 @@ async fn main() {
         Command::Info { password } => cmd_info(&wallet_path, password, &cli.node, network).await,
         Command::Address { password } => cmd_address(&wallet_path, password, network).await,
         Command::Balance { password } => cmd_balance(&wallet_path, password).await,
+        Command::IntegratedAddress {
+            password,
+            payment_id,
+        } => cmd_integrated_address(&wallet_path, password, payment_id, network).await,
+        Command::Utxos {
+            password,
+            include_spent,
+        } => cmd_utxos(&wallet_path, password, include_spent).await,
         Command::ShowSeed { password } => cmd_show_seed(&wallet_path, password).await,
         Command::Scan {
             password,
@@ -538,6 +574,10 @@ async fn main() {
             memo,
             recovery_address,
             recovery_timeout,
+            // Integrated-address payment IDs are handled by the v2 send path
+            // (`dispatch_v2` intercepts `Send` before this legacy arm is
+            // reached), so this superseded path ignores the flag.
+            payment_id: _,
         } => {
             cmd_send(
                 &wallet_path,
@@ -614,32 +654,22 @@ async fn main() {
             message,
         } => cmd_multisig_aggregate(&commitments, &shares, &key_shares, &message).await,
         Command::Subaddress { action } => {
-            // W-1 launch-safety gate (2026-08-16): subaddress-received funds are
-            // currently UNSPENDABLE — the spend-side one-time-secret / key-image
-            // derivation omits the per-subaddress offset m_i, so coins sent to a
-            // subaddress can be detected but never spent. Disable subaddresses on
-            // mainnet until the fix ships with a verified receive->spend
-            // round-trip test. Kept enabled on testnet/regtest so the fix can be
-            // developed and tested there. See project_full_audit_2026-08-16 (W-1).
-            if matches!(network, Network::Mainnet) {
-                Err(
-                    "subaddresses are disabled on mainnet in this release: \
-                     funds received at a subaddress would be permanently unspendable. \
-                     Use your main address (`address` command). Subaddresses remain \
-                     available on testnet/regtest."
-                        .to_string(),
-                )
-            } else {
-                match action {
-                    SubaddressAction::List { password } => {
-                        cmd_subaddress_list(&wallet_path, password, network).await
-                    }
-                    SubaddressAction::Create {
-                        password,
-                        account,
-                        label,
-                    } => cmd_subaddress_create(&wallet_path, password, account, label, network).await,
+            // W-1 gate LIFTED: the spend-side one-time-secret / key-image
+            // derivation now applies the per-subaddress offset m_i (W-A fix),
+            // so subaddress-received funds are spendable on mainnet too —
+            // verified by the receive->spend->validate round-trip test
+            // `real_crypto_subaddress_output_spendable_e2e`. The prior
+            // mainnet-disable arm has been removed.
+            // See project_full_audit_2026-08-16 (W-1) for history.
+            match action {
+                SubaddressAction::List { password } => {
+                    cmd_subaddress_list(&wallet_path, password, network).await
                 }
+                SubaddressAction::Create {
+                    password,
+                    account,
+                    label,
+                } => cmd_subaddress_create(&wallet_path, password, account, label, network).await,
             }
         }
         Command::Disclose { action } => match action {
@@ -1017,6 +1047,58 @@ async fn cmd_address(
     Ok(())
 }
 
+async fn cmd_integrated_address(
+    path: &PathBuf,
+    password: Option<String>,
+    payment_id_hex: Option<String>,
+    network: Network,
+) -> Result<(), String> {
+    use rand::RngCore;
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
+    let keys = WalletKeys::from_seed(data.seed);
+    let epoch = keys
+        .current()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+
+    // Payment ID: parse the supplied 16-hex, or generate a random 8 bytes.
+    let mut pid = [0u8; 8];
+    match payment_id_hex {
+        Some(h) => {
+            let bytes = hex::decode(h.trim())
+                .map_err(|e| format!("invalid --payment-id hex: {e}"))?;
+            if bytes.len() != 8 {
+                return Err(format!(
+                    "payment id must be 8 bytes (16 hex), got {}",
+                    bytes.len()
+                ));
+            }
+            pid.copy_from_slice(&bytes);
+        }
+        None => rand::rngs::OsRng.fill_bytes(&mut pid),
+    }
+
+    let prim_network = match network {
+        Network::Mainnet => coincync::primitives::Network::Mainnet,
+        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+    };
+    let mut addr =
+        coincync::primitives::Address::new(prim_network, epoch.spend_public, epoch.view_public);
+    addr.address_type = coincync::primitives::AddressType::Integrated;
+    addr.payment_id = Some(pid);
+
+    println!("Integrated address: {}", addr);
+    println!("Payment ID:         {}", hex::encode(pid));
+    println!();
+    println!("Share the integrated address with the sender. When they pay it,");
+    println!("the payment ID is carried encrypted and recovered on your scan.");
+    Ok(())
+}
+
 async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), String> {
     let password = resolve_password(password, false)?;
     let data =
@@ -1028,6 +1110,73 @@ async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), Str
     println!("(P1 note: balance computed from wallet file state only.");
     println!(" The file doesn't persist UTXOs yet — P2 work will add a");
     println!(" real chain-scan-via-RPC path and UTXO materialisation.)");
+    Ok(())
+}
+
+async fn cmd_utxos(
+    path: &PathBuf,
+    password: Option<String>,
+    include_spent: bool,
+) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+
+    let mut utxos = wallet.all_utxos();
+    // Stable order: by height, then tx_hash/index, so output is deterministic
+    // and matches the index used by `disclose balance`.
+    utxos.sort_by(|a, b| {
+        a.height
+            .cmp(&b.height)
+            .then(a.tx_hash.as_bytes().cmp(b.tx_hash.as_bytes()))
+            .then(a.output_index.cmp(&b.output_index))
+    });
+
+    println!(
+        "{:>4}  {:>18}  {:>8}  {:>10}  {:>6}  {:>18}  {}",
+        "idx", "amount (CYNC)", "height", "subaddr", "spent", "tx:out", "payment_id"
+    );
+    let mut shown = 0usize;
+    let mut spendable_atomic: u128 = 0;
+    for (i, u) in utxos.iter().enumerate() {
+        if u.spent && !include_spent {
+            continue;
+        }
+        let subaddr = match (u.subaddress_account, u.subaddress_index) {
+            (Some(a), Some(idx)) => format!("{}/{}", a, idx),
+            _ => "main".to_string(),
+        };
+        let pid = match u.payment_id {
+            Some(p) => hex::encode(p),
+            None => "-".to_string(),
+        };
+        if !u.spent {
+            spendable_atomic += u.amount.as_atomic() as u128;
+        }
+        println!(
+            "{:>4}  {:>18.6}  {:>8}  {:>10}  {:>6}  {}:{}  {}",
+            i,
+            u.amount.as_atomic() as f64 / 1e12,
+            u.height,
+            subaddr,
+            if u.spent { "yes" } else { "no" },
+            &hex::encode(u.tx_hash.as_bytes())[..12],
+            u.output_index,
+            pid,
+        );
+        shown += 1;
+    }
+    println!();
+    println!(
+        "{} output(s) shown; unspent total {:.6} CYNC{}",
+        shown,
+        spendable_atomic as f64 / 1e12,
+        if include_spent { "" } else { " (run with --include-spent to see spent)" }
+    );
     Ok(())
 }
 

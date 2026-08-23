@@ -428,6 +428,7 @@ impl LightWalletSync {
                     shared_secret,
                     key_epoch: keys.epoch,
                     subaddress_index: matched_subaddr,
+                    payment_id: None,
                 });
             }
         }
@@ -639,6 +640,7 @@ fn scan_output_digest_with_keys(
                 shared_secret,
                 key_epoch: key_set.epoch,
                 subaddress_index: matched_subaddr,
+                payment_id: None,
             });
         }
     }
