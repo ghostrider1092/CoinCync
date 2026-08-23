@@ -29,7 +29,8 @@ use crate::crypto::{coinbase_stealth_address, BlindingFactor, PedersenCommitment
 use crate::error::{Error, Result};
 use crate::mempool::SharedMempool;
 use crate::mining::template::build_template_json;
-use crate::primitives::{hash_domain, merkle_root, Amount, Hash, PublicKey};
+use crate::primitives::{merkle_root, Amount, Hash, PublicKey};
+use rand::RngCore;
 use crate::transaction::{Transaction, TxOutput, TxType};
 
 /// A full block awaiting only a valid nonce. The header's `nonce` is `0`;
@@ -233,9 +234,22 @@ pub fn build_block_from_template(
 
     let mempool_txs = parse_template_transactions(template);
 
-    // Fee-burn split per Constitution Article II (congestion-aware). Must
-    // match validation.rs `max_coinbase` or the daemon rejects our coinbase.
-    let claimable_fees = calculate_claimable_fees(height, &mempool_txs);
+    // Fee-burn split per Constitution Article II (congestion-aware). Must match
+    // validation.rs `max_coinbase` or the daemon rejects our own block. The
+    // congestion input is the FINAL block size the validator will see (issue
+    // #41): a provisional coinbase sizes the block (its serialized size is
+    // independent of the fee value — the amount is a fixed 8-byte field), then we
+    // compute the claimable fee from that size and build the real coinbase.
+    let total_fees: u64 = mempool_txs.iter().map(|tx| tx.fee.as_atomic()).sum();
+    let sizing_coinbase = build_coinbase_with_fees(
+        height,
+        payout_spend_pub,
+        payout_view_pub,
+        total_fees,
+        signal_bits,
+    )?;
+    let block_size = assembled_block_size(&sizing_coinbase, &mempool_txs);
+    let claimable_fees = claimable_fees_for_block_size(height, total_fees, block_size);
     let coinbase = build_coinbase_with_fees(
         height,
         payout_spend_pub,
@@ -294,33 +308,52 @@ fn parse_template_transactions(template: &Value) -> Vec<Transaction> {
     txs
 }
 
-/// Fee the miner may claim in the coinbase. Before `FEE_DISTRIBUTION_HEIGHT`
-/// the miner claims all fees; at/after, a congestion-dependent portion is
-/// burned per Constitution Article II. Must match `validation.rs`.
-pub fn calculate_claimable_fees(height: u64, mempool_txs: &[Transaction]) -> u64 {
-    let total_fees: u64 = mempool_txs.iter().map(|tx| tx.fee.as_atomic()).sum();
+/// Fee the miner may claim in the coinbase, given the **final assembled block
+/// size** in bytes. Before `FEE_DISTRIBUTION_HEIGHT` the miner claims all fees;
+/// at/after, a congestion-dependent portion is burned per Constitution Article II.
+///
+/// SECURITY (issue #41): this is the single source of truth for the split, and
+/// `block_size` MUST be the same quantity the validator uses —
+/// `Block::size()` = 200-byte header + Σ `tx.size()` over `[coinbase, ...mempool]`.
+/// Sizing on the mempool alone (omitting the coinbase and header overhead) let a
+/// candidate near `CONGESTION_THRESHOLD` compute a different miner share than the
+/// validator, so the builder overclaimed and the daemon rejected its own block.
+pub fn claimable_fees_for_block_size(height: u64, total_fees: u64, block_size: usize) -> u64 {
     if total_fees == 0 {
         return 0;
     }
     if height < crate::constants::FEE_DISTRIBUTION_HEIGHT {
         return total_fees;
     }
-    let block_size: usize = mempool_txs
-        .iter()
-        .map(|tx| borsh::to_vec(tx).map(|v| v.len()).unwrap_or(0))
-        .sum();
     let congestion_pct = (block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128;
     let congested = congestion_pct >= crate::constants::CONGESTION_THRESHOLD as u128;
-    let dist = distribute_fee(Amount::from_atomic(total_fees), congested);
-    dist.to_miner.as_atomic()
+    distribute_fee(Amount::from_atomic(total_fees), congested)
+        .to_miner
+        .as_atomic()
+}
+
+/// The validator's block-size formula, so the builder can size a candidate the
+/// exact same way: 200-byte header + every transaction (coinbase included).
+/// Mirrors `Block::size()` in `consensus/block.rs`.
+fn assembled_block_size(coinbase: &Transaction, mempool_txs: &[Transaction]) -> usize {
+    let tx_sizes = std::iter::once(coinbase)
+        .chain(mempool_txs.iter())
+        .map(|tx| tx.size())
+        .fold(0usize, |acc, s| acc.saturating_add(s));
+    200usize.saturating_add(tx_sizes)
 }
 
 /// Build the coinbase tx — emission reward + claimable fees, paid to a fresh
-/// stealth address derived from (spend_pub, view_pub, height, output_index=0).
-/// Zero-blinding commitment (the reward is publicly verifiable). Faithful port
-/// of the rig's `create_mining_coinbase_with_fees` — the derivation must stay
-/// deterministic in (view_pub, height, output_index) so a receiving wallet
-/// recognizes the coinbase output.
+/// stealth address for (spend_pub, view_pub, output_index=0).
+///
+/// PRIVACY (issue #46): the ephemeral secret is drawn from the OS CSPRNG, NOT
+/// derived from the public view key. A public-key-derived secret is reproducible
+/// by anyone who knows the payout address, which would let an observer link every
+/// coinbase output to the miner. A random secret keeps the tx public key
+/// unpredictable while the recipient still detects the output by the canonical
+/// ECDH scan (`is_output_ours` on `tx_public_key`), so no deterministic
+/// derivation is required. The view tag is the canonical sender-side ECDH tag
+/// (`generate_view_tag`), not a value derivable from the public tx key.
 fn build_coinbase_with_fees(
     height: u64,
     miner_spend_pub: &PublicKey,
@@ -328,23 +361,25 @@ fn build_coinbase_with_fees(
     total_fees: u64,
     signal_bits: SignalBits,
 ) -> Result<Transaction> {
+    use zeroize::Zeroize;
+
     let reward = crate::emission::calculate_block_reward(height);
     let total_amount = reward.as_atomic().saturating_add(total_fees);
 
     let commitment = PedersenCommitment::commit(total_amount, &BlindingFactor::zero());
 
-    let miner_secret: [u8; 32] = *blake3::hash(miner_view_pub.as_bytes()).as_bytes();
-    let (stealth_addr, _tx_secret) =
+    // Unpredictable per-coinbase ephemeral material (issue #46) — never derived
+    // from the public payout keys.
+    let mut miner_secret = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut miner_secret);
+    let (stealth_addr, tx_secret) =
         coinbase_stealth_address(miner_spend_pub, miner_view_pub, height, 0, &miner_secret)
             .map_err(|e| Error::Internal(format!("coinbase_stealth_address failed: {e}")))?;
+    miner_secret.zeroize();
 
-    let view_tag = {
-        let shared = hash_domain(
-            b"COINCYNC_VIEW_TAG",
-            &[stealth_addr.tx_public_key.as_bytes().as_slice(), &[0u8]].concat(),
-        );
-        shared.as_bytes()[0]
-    };
+    // Canonical sender-side ECDH view tag (matches wallet-scanner derivation);
+    // computable only by the view-key holder, unlike a public-tx-key hash.
+    let view_tag = crate::wallet::scanner::generate_view_tag(miner_view_pub, &tx_secret, 0);
 
     let output = TxOutput {
         stealth_address: stealth_addr.public_key,
@@ -537,5 +572,52 @@ mod tests {
             "chain must accept the mined block, got {status:?}"
         );
         assert_eq!(chain.height(), 1, "tip advanced to the mined block");
+    }
+
+    /// Issue #46: a coinbase output must stay detectable by the payout wallet
+    /// (canonical ECDH scan) WITHOUT its derivation being predictable from the
+    /// public payout keys. Two coinbases for the same (height, keys) must have
+    /// different tx public keys, and an outsider must not be able to claim them.
+    #[test]
+    fn coinbase_is_detectable_but_not_publicly_linkable() {
+        use crate::crypto::{is_output_ours, StealthAddress};
+
+        let spend_secret = crate::primitives::SecretKey::from_bytes([7u8; 32]);
+        let view_secret = crate::primitives::SecretKey::from_bytes([9u8; 32]);
+        let spend_pub = spend_secret.public_key();
+        let view_pub = view_secret.public_key();
+        let height = 42u64;
+
+        let cb1 = build_coinbase_with_fees(height, &spend_pub, &view_pub, 0, SignalBits(0))
+            .expect("coinbase 1");
+        let cb2 = build_coinbase_with_fees(height, &spend_pub, &view_pub, 0, SignalBits(0))
+            .expect("coinbase 2");
+        let out1 = &cb1.outputs[0];
+        let out2 = &cb2.outputs[0];
+
+        // Detectable by the owner via the canonical ECDH scan (no miner_secret).
+        let stealth1 = StealthAddress {
+            public_key: out1.stealth_address,
+            tx_public_key: out1.tx_public_key,
+        };
+        assert!(
+            is_output_ours(&stealth1, &view_secret, &spend_pub, 0),
+            "payout wallet must detect its own coinbase output"
+        );
+
+        // Unpredictable: two coinbases for the SAME (height, keys) differ, so the
+        // derivation is not reproducible from the public payout address.
+        assert_ne!(
+            out1.tx_public_key.as_bytes(),
+            out2.tx_public_key.as_bytes(),
+            "coinbase tx pubkey must not be predictable from public keys"
+        );
+
+        // An outsider (wrong view key) cannot claim the coinbase.
+        let outsider_view = crate::primitives::SecretKey::from_bytes([3u8; 32]);
+        assert!(
+            !is_output_ours(&stealth1, &outsider_view, &spend_pub, 0),
+            "an outsider must not detect the coinbase output"
+        );
     }
 }
