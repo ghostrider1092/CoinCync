@@ -376,6 +376,21 @@ impl Mempool {
             reason: err.to_string(),
             timestamp: unix_now(),
         });
+        // Enterprise metric: count rejections by a STABLE, low-cardinality
+        // reason label (never the raw error string — that would explode
+        // Prometheus label cardinality).
+        let reason: &'static str = match &err {
+            Error::MempoolFull => "mempool_full",
+            Error::InvalidTransaction(_) => "invalid_transaction",
+            Error::InvalidState(_) => "invalid_state",
+            Error::InvalidMessage(_) => "invalid_message",
+            Error::SerializationError(_) => "serialization",
+            Error::CryptoError(_)
+            | Error::SparkVerifyFailed
+            | Error::MwCutthroughVerifyFailed => "crypto",
+            _ => "other",
+        };
+        crate::metrics::record_mempool_reject(reason);
         err
     }
 
