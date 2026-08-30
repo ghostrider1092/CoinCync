@@ -4,6 +4,13 @@ use super::super::protocol::NetAddr;
 
 /// Convert a wire address to a socket address, rejecting unspecified IPv6.
 pub(super) fn to_socket_addr(net_addr: &NetAddr) -> Option<SocketAddr> {
+    // SECURITY (L-13): reject port 0 — not a connectable TCP port. Such
+    // gossiped addresses only pollute the book and churn the dialer (each dial
+    // fails instantly) until the failure-purge threshold removes them,
+    // amplifying an addr-flood at near-zero attacker cost.
+    if net_addr.port == 0 {
+        return None;
+    }
     let ip = Ipv6Addr::from(net_addr.ip);
 
     if let Some(v4) = ip.to_ipv4_mapped() {
