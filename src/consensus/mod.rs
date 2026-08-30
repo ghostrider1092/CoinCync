@@ -23,6 +23,7 @@ pub mod finality;
 pub mod fork_signal;
 pub mod header;
 pub mod pow;
+pub mod pow_cache;
 pub mod privacy_policy;
 pub mod validation;
 
