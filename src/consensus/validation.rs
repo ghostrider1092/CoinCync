@@ -1272,6 +1272,12 @@ pub fn validate_transaction_for_network(
     }
 
     check_tx_v2_activation(tx, current_height)?;
+    // Per-output curve/identity checks (stealth_address, tx_public_key,
+    // commitment). Ported here from the mempool-only path so a self-mined
+    // block cannot carry an identity/non-curve output that the block
+    // validator would otherwise accept (mempool-vs-block drift). Runs after
+    // the coinbase early-return above, so genesis's burn output is unaffected.
+    check_output_curve_points(tx)?;
     check_tx_input_output_counts(tx, v1_0_12_active)?;
     check_tx_io_ratio_legacy(tx)?;
     check_tx_uniform_shape(tx, current_height)?;
@@ -2309,6 +2315,76 @@ pub fn validate_all_transactions(
 /// Bump this on each hard fork that introduces a new version.
 const MAX_TX_VERSION: u8 = 2;
 
+/// Reject outputs whose curve-point fields are the identity point or not a
+/// valid Ristretto point. Shared by the mempool path
+/// (`validate_transaction_basic`) and the block path
+/// (`validate_transaction_for_network`) so the two cannot drift.
+///
+/// The stealth_address / commitment checks (H-19) previously lived ONLY in
+/// the mempool path, so a self-mined block could carry an identity output
+/// undetected — the same mempool-vs-block drift class as the version==0 and
+/// encrypted_memo-cap ports elsewhere in this file. The `tx_public_key`
+/// checks are new: that field was never validated on any path.
+///
+/// Three per-output curve fields:
+/// - `stealth_address` (one-time destination key): identity/non-curve makes
+///   the output unspendable — a burning attack.
+/// - `tx_public_key` (ephemeral R = r·G, feeds stealth-address ECDH):
+///   identity R makes the ECDH shared secret recipient-independent, so an
+///   observer recomputes it and links the output to a recipient
+///   (deanonymization); non-curve R makes the output undecryptable.
+/// - `commitment` (Pedersen): identity/non-curve breaks the balance equation.
+///
+/// Ristretto note: the all-zero 32-byte encoding is the CANONICAL encoding of
+/// the identity point and decompresses successfully, so the explicit
+/// `== [0u8; 32]` check is required in addition to `from_bytes()`.
+///
+/// NOT run on coinbase: the caller invokes this only for non-coinbase txs
+/// (coinbase never enters the mempool, and the block path calls this after
+/// its coinbase early-return). Genesis pays a burn output whose bytes may
+/// legitimately be all-zero, which these checks would otherwise reject.
+fn check_output_curve_points(tx: &Transaction) -> Result<()> {
+    for output in &tx.outputs {
+        // stealth_address (H-19)
+        if output.stealth_address.as_bytes() == &[0u8; 32] {
+            return Err(Error::InvalidTransaction(
+                "output stealth address is zero (unspendable — potential burning attack)".into(),
+            ));
+        }
+        if crate::crypto::PublicPoint::from_bytes(*output.stealth_address.as_bytes()).is_none() {
+            return Err(Error::InvalidTransaction(
+                "output stealth address is not a valid Ristretto point (unspendable)".into(),
+            ));
+        }
+
+        // tx_public_key (ephemeral R) — deanonymization / burn vector
+        if output.tx_public_key.as_bytes() == &[0u8; 32] {
+            return Err(Error::InvalidTransaction(
+                "output tx_public_key is zero (identity point — breaks stealth ECDH / deanon)"
+                    .into(),
+            ));
+        }
+        if crate::crypto::PublicPoint::from_bytes(*output.tx_public_key.as_bytes()).is_none() {
+            return Err(Error::InvalidTransaction(
+                "output tx_public_key is not a valid Ristretto point (unspendable)".into(),
+            ));
+        }
+
+        // commitment (H-19)
+        if output.commitment == [0u8; 32] {
+            return Err(Error::InvalidTransaction(
+                "output commitment is zero (identity point — balance equation breakable)".into(),
+            ));
+        }
+        if crate::crypto::PublicPoint::from_bytes(output.commitment).is_none() {
+            return Err(Error::InvalidTransaction(
+                "output commitment is not a valid Ristretto point".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Quick contextless validation (for mempool)
 pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
     // FIX #39: accept any version in 1..=MAX_TX_VERSION.
@@ -2444,39 +2520,15 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
                 output.encrypted_memo.len()
             )));
         }
-
-        // SECURITY (H-19): Reject outputs with invalid curve points as stealth address.
-        // An invalid Ristretto point (e.g., all-0xFF, random non-curve bytes) creates
-        // an unspendable output — enabling burning attacks where an attacker destroys
-        // another user's funds by sending to addresses nobody can spend from.
-        // Historical incident referenced from public record: Monero
-        // burning bug (September 2018). Details not re-fetched this
-        // session; the check below stands on its own security
-        // reasoning above.
-        if output.stealth_address.as_bytes() == &[0u8; 32] {
-            return Err(Error::InvalidTransaction(
-                "output stealth address is zero (unspendable — potential burning attack)".into(),
-            ));
-        }
-        if crate::crypto::PublicPoint::from_bytes(*output.stealth_address.as_bytes()).is_none() {
-            return Err(Error::InvalidTransaction(
-                "output stealth address is not a valid Ristretto point (unspendable)".into(),
-            ));
-        }
-
-        // SECURITY (H-19): Reject zero or invalid commitments.
-        // A zero commitment (identity point) breaks the balance equation.
-        if output.commitment == [0u8; 32] {
-            return Err(Error::InvalidTransaction(
-                "output commitment is zero (identity point — balance equation breakable)".into(),
-            ));
-        }
-        if crate::crypto::PublicPoint::from_bytes(output.commitment).is_none() {
-            return Err(Error::InvalidTransaction(
-                "output commitment is not a valid Ristretto point".into(),
-            ));
-        }
     }
+
+    // SECURITY (H-19 + tx_public_key deanon): per-output curve/identity checks
+    // (stealth_address, tx_public_key, commitment). Shared with the block path
+    // via check_output_curve_points so the mempool and block validators cannot
+    // drift — the stealth/commitment checks previously lived ONLY here, and
+    // tx_public_key was validated on no path at all. Error strings are
+    // unchanged for the stealth/commitment cases.
+    check_output_curve_points(tx)?;
 
     // SECURITY (C-9 / H-18): Reject inputs with invalid key images.
     // A zero key image or non-curve-point key image bypasses double-spend detection.
@@ -2508,6 +2560,71 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single-output non-coinbase tx whose three per-output curve fields
+    /// (stealth_address, tx_public_key, commitment) are all the Ristretto
+    /// basepoint — a guaranteed valid, non-identity point. Used to exercise
+    /// check_output_curve_points in isolation.
+    fn tx_with_output_points(
+        stealth: [u8; 32],
+        tx_public_key: [u8; 32],
+        commitment: [u8; 32],
+    ) -> Transaction {
+        use crate::primitives::PublicKey;
+        use crate::transaction::TxOutput;
+        Transaction {
+            version: 2,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                stealth_address: PublicKey::from_bytes(stealth),
+                tx_public_key: PublicKey::from_bytes(tx_public_key),
+                commitment,
+                encrypted_amount: vec![0u8; 8],
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            }],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    fn valid_point_bytes() -> [u8; 32] {
+        crate::crypto::PublicPoint::from_point(
+            curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT,
+        )
+        .to_bytes()
+    }
+
+    #[test]
+    fn output_curve_points_accepts_valid_points() {
+        let v = valid_point_bytes();
+        assert!(check_output_curve_points(&tx_with_output_points(v, v, v)).is_ok());
+    }
+
+    #[test]
+    fn identity_tx_public_key_is_rejected() {
+        // The vuln: an identity ephemeral R makes the stealth-address ECDH
+        // shared secret recipient-independent → deanonymization. Pre-fix this
+        // was validated on no path; the check must reject it. Ristretto
+        // identity is the all-zero encoding (which DECOMPRESSES successfully,
+        // so the explicit zero-check is what catches it).
+        let v = valid_point_bytes();
+        let tx = tx_with_output_points(v, [0u8; 32], v);
+        let err = check_output_curve_points(&tx).unwrap_err().to_string();
+        assert!(err.contains("tx_public_key is zero"), "got: {err}");
+    }
+
+    #[test]
+    fn noncurve_tx_public_key_is_rejected() {
+        // All-0xFF is a non-canonical encoding that fails to decompress →
+        // undecryptable output (burn vector).
+        let v = valid_point_bytes();
+        let tx = tx_with_output_points(v, [0xFFu8; 32], v);
+        assert!(check_output_curve_points(&tx).is_err());
+    }
 
     /// The validator selects its "expected network magic" at compile time
     /// via `#[cfg(feature = "testnet")]`. Tests must therefore build blocks
