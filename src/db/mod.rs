@@ -912,12 +912,32 @@ impl Database {
     ) -> Result<()> {
         use shim::transaction::Transactional;
 
-        // Pre-compute oldest-wins additions: the transaction closure must
-        // be purely writes (shim TxTree reads pass through to committed
-        // state, not the pending batch), so do the "already present" check
-        // up-front against the committed DB.
+        // Pre-compute oldest-wins additions: the transaction closure must be
+        // purely writes (shim TxTree reads pass through to committed state, not
+        // the pending batch), so decide up-front which additions to apply.
+        //
+        // FIX (db/mod.rs:920): an addition is skipped ONLY if its stealth
+        // address will STILL be present after this batch's removals — i.e. it is
+        // genuinely already indexed and staying. An address that is ALSO in
+        // output_removals is being disconnected and re-added (a re-mined output
+        // on the winning fork) and MUST be re-inserted; removals run before
+        // inserts in the transaction below, so the re-insert lands on top of the
+        // removal and the address ends up present with the NEW chain's entry.
+        // Pre-fix, the committed-state check saw it still present and skipped the
+        // insert, then the removal deleted it — silently dropping a live output
+        // from the index, which made ring-member lookups reject valid txs.
+        let removal_set: std::collections::HashSet<&[u8; 32]> = output_removals.iter().collect();
         let mut oi_to_insert: Vec<(&[u8; 32], &Vec<u8>)> = Vec::new();
         for (stealth, entry_bytes) in output_additions {
+            if removal_set.contains(stealth) {
+                // Removed in this same batch → not a pre-existing duplicate;
+                // always re-insert the new chain's entry.
+                oi_to_insert.push((stealth, entry_bytes));
+                continue;
+            }
+            // Not being removed → oldest-wins against committed state: skip if
+            // already indexed (keeps the earliest entry for a genuinely shared
+            // stealth address, e.g. coinbase reuse).
             if self
                 .output_index
                 .tree
@@ -1104,6 +1124,108 @@ pub fn serialize<T: borsh::BorshSerialize>(value: &T) -> Result<Vec<u8>> {
 /// Helper to deserialize data from storage
 pub fn deserialize<T: borsh::BorshDeserialize>(bytes: &[u8]) -> Result<T> {
     borsh::from_slice(bytes).map_err(|e| Error::SerializationError(e.to_string()))
+}
+
+#[cfg(test)]
+mod reorg_output_index_tests {
+    #[test]
+    fn reorg_does_not_drop_a_re_mined_output_index_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = super::Database::open(dir.path()).unwrap();
+
+        let x = [0xABu8; 32]; // stealth address re-mined across the reorg
+
+        let old_entry = super::serialize(&super::OutputIndexEntry {
+            commitment: [1u8; 32],
+            height: 100,
+            is_coinbase: false,
+            lock_height: None,
+        })
+        .unwrap();
+        let new_entry = super::serialize(&super::OutputIndexEntry {
+            commitment: [2u8; 32],
+            height: 101,
+            is_coinbase: false,
+            lock_height: None,
+        })
+        .unwrap();
+
+        // X exists in the committed index from the about-to-be-disconnected block.
+        db.output_index.tree.insert(x.as_slice(), old_entry.as_slice()).unwrap();
+
+        let new_state = super::serialize(&super::ChainStateData {
+            tip_hash: super::Hash::from_bytes([9u8; 32]),
+            height: 101,
+            total_difficulty: 1,
+            total_supply: 0,
+            total_burned: 0,
+            last_checkpoint: 0,
+        })
+        .unwrap();
+
+        // Reorg: X removed (old block disconnected) AND re-added (re-mined, new entry).
+        db.apply_reorg_atomic(&[x], &[(x, new_entry.clone())], &[], &[], &new_state, &[], &[])
+            .unwrap();
+
+        // PRE-FIX: X filtered from the insert then removed → None (dropped).
+        // POST-FIX: X re-inserted with the new chain's entry.
+        let got = db.output_index.tree.get(x.as_slice()).unwrap();
+        assert!(
+            got.is_some(),
+            "re-mined output X was dropped from output_index (db/mod.rs:920)"
+        );
+        assert_eq!(
+            got.unwrap().as_ref(),
+            new_entry.as_slice(),
+            "re-mined X must carry the NEW chain's entry, not the disconnected old one"
+        );
+    }
+
+    #[test]
+    fn reorg_preserves_oldest_wins_for_non_removed_shared_address() {
+        // Guard the intent we must NOT break: a shared stealth address that is
+        // NOT being removed keeps its earliest (committed) entry.
+        let dir = tempfile::tempdir().unwrap();
+        let db = super::Database::open(dir.path()).unwrap();
+
+        let y = [0xCDu8; 32];
+        let first = super::serialize(&super::OutputIndexEntry {
+            commitment: [1u8; 32],
+            height: 10,
+            is_coinbase: true,
+            lock_height: None,
+        })
+        .unwrap();
+        let later = super::serialize(&super::OutputIndexEntry {
+            commitment: [2u8; 32],
+            height: 20,
+            is_coinbase: true,
+            lock_height: None,
+        })
+        .unwrap();
+
+        db.output_index.tree.insert(y.as_slice(), first.as_slice()).unwrap();
+
+        let new_state = super::serialize(&super::ChainStateData {
+            tip_hash: super::Hash::from_bytes([9u8; 32]),
+            height: 20,
+            total_difficulty: 1,
+            total_supply: 0,
+            total_burned: 0,
+            last_checkpoint: 0,
+        })
+        .unwrap();
+
+        // Y only in additions (not removals) → oldest-wins keeps `first`.
+        db.apply_reorg_atomic(&[], &[(y, later)], &[], &[], &new_state, &[], &[])
+            .unwrap();
+
+        assert_eq!(
+            db.output_index.tree.get(y.as_slice()).unwrap().unwrap().as_ref(),
+            first.as_slice(),
+            "oldest-wins must be preserved for a non-removed shared address"
+        );
+    }
 }
 
 #[cfg(test)]
