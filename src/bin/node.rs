@@ -995,6 +995,19 @@ async fn start_node(
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
     });
+    // Crash-recovery: if a prior snapshot import was interrupted (crash after
+    // the operator's chaindata was moved to a .pre-snapshot-* backup but before
+    // the install committed), restore the original chaindata BEFORE we open it,
+    // so the node never boots on a half-installed snapshot. No-op when no
+    // interrupted install is pending. (snapshot/mod.rs FIX B.)
+    match coincync::snapshot::recover_interrupted_install(&db_path) {
+        Ok(true) => info!("Recovered an interrupted snapshot install before opening the database"),
+        Ok(false) => {}
+        Err(e) => {
+            error!("Snapshot install-recovery failed: {}. Refusing to open a possibly half-installed chaindata.", e);
+            return Err(e.into());
+        }
+    }
     info!("Opening database at {:?}", db_path);
     let db = Database::open(&db_path).map_err(|e| {
         error!("Database open failed: {}", e);

@@ -231,8 +231,11 @@ pub fn import(
         )));
     }
 
-    // Back up any existing chaindata (reversible — moved, never deleted). Held
-    // so a failed verification can roll the node back to its prior state.
+    // Back up any existing chaindata (reversible — moved, never deleted) and
+    // write the crash-recovery marker BEFORE the destructive rename, so a crash
+    // between the rename and a committed install is auto-recovered on next
+    // startup (see recover_interrupted_install).
+    let marker_path = marker_path_for(chaindata_dir);
     let backup_path = if chaindata_dir.exists() {
         let name = chaindata_dir
             .file_name()
@@ -240,32 +243,47 @@ pub fn import(
             .unwrap_or("chaindata");
         let backup =
             chaindata_dir.with_file_name(format!("{}.pre-snapshot-{}", name, policy.backup_stamp));
+        write_install_marker(&marker_path, Some(&backup))?;
         std::fs::rename(chaindata_dir, &backup)
             .map_err(|e| io_err("back up existing chaindata", e))?;
         Some(backup)
     } else {
+        write_install_marker(&marker_path, None)?;
         None
     };
-    copy_dir_recursive(&db_src, chaindata_dir)?;
+
+    // Copy the snapshot into place. On failure roll back LOUDLY — previously the
+    // `?` here returned with the operator's chaindata stranded under
+    // .pre-snapshot-<stamp> and no restore (snapshot/mod.rs:249).
+    if let Err(copy_err) = copy_dir_recursive(&db_src, chaindata_dir) {
+        rollback_failed_install(chaindata_dir, backup_path.as_deref(), &marker_path, &copy_err)?;
+        return Err(copy_err);
+    }
 
     // Trust verification: bind the freshly installed DB to the canonical chain
     // via consensus checkpoints (+ manifest/DB tip consistency). On ANY failure
-    // the bad DB is removed and the prior chaindata restored, so a rejected
-    // snapshot never becomes the node's live state.
+    // roll back LOUDLY (previously `let _ = ...` swallowed rollback errors,
+    // which could leave a rejected snapshot installed as live state).
     if !policy.checkpoints.is_empty() {
-        if let Err(e) = verify::verify_installed_db(
+        if let Err(verify_err) = verify::verify_installed_db(
             chaindata_dir,
             policy.network,
             &manifest,
             policy.checkpoints,
         ) {
-            let _ = std::fs::remove_dir_all(chaindata_dir);
-            if let Some(bp) = &backup_path {
-                let _ = std::fs::rename(bp, chaindata_dir);
-            }
-            return Err(e);
+            rollback_failed_install(
+                chaindata_dir,
+                backup_path.as_deref(),
+                &marker_path,
+                &verify_err,
+            )?;
+            return Err(verify_err);
         }
     }
+
+    // Committed. Clear the marker; the backup is intentionally left on disk for
+    // the operator (reversible, never auto-deleted).
+    let _ = std::fs::remove_file(&marker_path);
 
     Ok(manifest)
 }
@@ -287,21 +305,81 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Upper bound on the total bytes a snapshot may contain. Bounds import
+/// disk/time cost against a maliciously oversized snapshot; the memory-OOM
+/// vector is closed by streaming regardless of this value (we never hold more
+/// than the 64 KiB read buffer). Honest snapshots are the real DB size; tune to
+/// comfortably exceed the largest legitimate snapshot for this chain.
+const MAX_SNAPSHOT_BYTES: u64 = 100 * 1024 * 1024 * 1024; // 100 GiB
+
+/// Hash one file into `hasher` in constant memory, decrementing `budget` by the
+/// bytes streamed. Preserves the exact pre-fix hash input format — rel path +
+/// NUL + LE u64 length + contents — so blake3 values match snapshots produced
+/// before this change (existing manifests still verify).
+fn hash_file_streaming(
+    hasher: &mut blake3::Hasher,
+    path: &Path,
+    rel: &Path,
+    budget: &mut u64,
+) -> Result<()> {
+    use std::io::Read;
+
+    let declared_len = std::fs::metadata(path)
+        .map_err(|e| io_err("stat file for hash", e))?
+        .len();
+
+    // Format-preserving prefix (matches the old blake3_of_dir exactly).
+    hasher.update(rel.to_string_lossy().as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(&declared_len.to_le_bytes());
+
+    let mut f = std::fs::File::open(path).map_err(|e| io_err("open file for hash", e))?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut streamed: u64 = 0;
+    loop {
+        let n = f.read(&mut buf).map_err(|e| io_err("read file for hash", e))?;
+        if n == 0 {
+            break;
+        }
+        // Enforce the budget on ACTUAL streamed bytes, so a file that grows
+        // during the read (TOCTOU/tamper) can't blow past the cap.
+        *budget = budget.checked_sub(n as u64).ok_or_else(|| {
+            Error::InvalidState(format!(
+                "snapshot exceeds the maximum allowed size ({} bytes) — refusing \
+                 (possible oversized/malicious snapshot)",
+                MAX_SNAPSHOT_BYTES
+            ))
+        })?;
+        hasher.update(&buf[..n]);
+        streamed += n as u64;
+    }
+
+    if streamed != declared_len {
+        return Err(Error::InvalidState(format!(
+            "file {} changed size during hashing (declared {}, streamed {}) — refusing",
+            path.display(),
+            declared_len,
+            streamed
+        )));
+    }
+    Ok(())
+}
+
 /// Deterministic blake3 over every file in `dir` (relative path + byte length +
 /// contents, files sorted), so identical DB content always hashes the same
-/// regardless of directory-read order across machines.
+/// regardless of directory-read order across machines. Streams each file in
+/// constant memory and enforces a total-size budget (replaces the pre-fix
+/// version that `fs::read`-loaded whole files into RAM — an OOM vector on a
+/// malicious oversized snapshot, snapshot/mod.rs:302).
 fn blake3_of_dir(dir: &Path) -> Result<String> {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_files(dir, &mut files)?;
     files.sort();
     let mut hasher = blake3::Hasher::new();
+    let mut budget: u64 = MAX_SNAPSHOT_BYTES;
     for f in &files {
         let rel = f.strip_prefix(dir).unwrap_or(f);
-        hasher.update(rel.to_string_lossy().as_bytes());
-        hasher.update(&[0u8]);
-        let bytes = std::fs::read(f).map_err(|e| io_err("read file for hash", e))?;
-        hasher.update(&(bytes.len() as u64).to_le_bytes());
-        hasher.update(&bytes);
+        hash_file_streaming(&mut hasher, f, rel, &mut budget)?;
     }
     Ok(hasher.finalize().to_hex().to_string())
 }
@@ -318,6 +396,217 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ── FIX B — crash-atomic, loud-error install rollback ──────────────────────
+
+const INSTALL_MARKER_SUFFIX: &str = ".snapshot-install-in-progress";
+
+/// Written next to chaindata_dir before the destructive install begins, cleared
+/// on success. If a crash leaves it behind, `recover_interrupted_install`
+/// restores the operator's original chaindata on next startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstallMarker {
+    /// Path to the `.pre-snapshot-<stamp>` backup of the operator's original
+    /// chaindata, or None if the destination was empty (fresh install).
+    backup: Option<String>,
+}
+
+fn marker_path_for(chaindata_dir: &Path) -> PathBuf {
+    let name = chaindata_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("chaindata");
+    chaindata_dir.with_file_name(format!("{}{}", name, INSTALL_MARKER_SUFFIX))
+}
+
+fn write_install_marker(marker_path: &Path, backup: Option<&Path>) -> Result<()> {
+    let marker = InstallMarker {
+        backup: backup.map(|p| p.display().to_string()),
+    };
+    let json =
+        serde_json::to_string(&marker).map_err(|e| Error::SerializationError(e.to_string()))?;
+    std::fs::write(marker_path, json).map_err(|e| io_err("write install marker", e))
+}
+
+/// Roll back a failed install. Unlike the pre-fix `let _ = ...` version, EVERY
+/// filesystem op surfaces its error, and every error names the backup directory
+/// so the operator can recover by hand. Returns Ok(()) only if the original
+/// chaindata was fully restored; otherwise a loud, actionable error.
+fn rollback_failed_install(
+    chaindata_dir: &Path,
+    backup_path: Option<&Path>,
+    marker_path: &Path,
+    cause: &Error,
+) -> Result<()> {
+    // 1. Remove the rejected/half-installed snapshot DB.
+    if chaindata_dir.exists() {
+        if let Err(rm) = std::fs::remove_dir_all(chaindata_dir) {
+            return Err(Error::InvalidState(format!(
+                "snapshot install failed ({cause}); ALSO could not remove the bad DB at {} ({rm}). \
+                 Your original chaindata is intact{}. Recover manually: delete {} then move the backup back. \
+                 Marker left at {} for automatic recovery on next startup.",
+                chaindata_dir.display(),
+                backup_path
+                    .map(|b| format!(" at {}", b.display()))
+                    .unwrap_or_else(|| " (none — destination was empty)".into()),
+                chaindata_dir.display(),
+                marker_path.display(),
+            )));
+        }
+    }
+
+    // 2. Restore the operator's original chaindata, if there was one.
+    if let Some(bp) = backup_path {
+        if let Err(mv) = std::fs::rename(bp, chaindata_dir) {
+            return Err(Error::InvalidState(format!(
+                "snapshot install failed ({cause}); the bad DB was removed but RESTORING your original \
+                 chaindata FAILED ({mv}). Your data is SAFE at {} — move it back to {} manually. \
+                 Marker left at {} for automatic recovery on next startup.",
+                bp.display(),
+                chaindata_dir.display(),
+                marker_path.display(),
+            )));
+        }
+    }
+
+    // 3. Fully rolled back — safe to clear the marker.
+    let _ = std::fs::remove_file(marker_path);
+    Ok(())
+}
+
+/// Call on node startup, BEFORE opening chaindata. If a prior snapshot install
+/// was interrupted (crash after the backup was moved aside but before commit),
+/// restores the operator's original chaindata and returns Ok(true). Ok(false)
+/// when there is nothing to recover.
+pub fn recover_interrupted_install(chaindata_dir: &Path) -> Result<bool> {
+    let marker_path = marker_path_for(chaindata_dir);
+    let raw = match std::fs::read_to_string(&marker_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(false), // no marker → nothing interrupted
+    };
+    let marker: InstallMarker = serde_json::from_str(&raw).map_err(|e| {
+        Error::InvalidState(format!(
+            "found a snapshot install marker at {} but could not parse it ({e}); \
+             inspect it manually before starting the node",
+            marker_path.display()
+        ))
+    })?;
+
+    match marker.backup.as_deref().map(Path::new) {
+        Some(backup) if backup.exists() => {
+            if chaindata_dir.exists() {
+                std::fs::remove_dir_all(chaindata_dir)
+                    .map_err(|e| io_err("recovery: remove half-installed DB", e))?;
+            }
+            std::fs::rename(backup, chaindata_dir)
+                .map_err(|e| io_err("recovery: restore original chaindata", e))?;
+            tracing::warn!(
+                "Recovered interrupted snapshot install: restored original chaindata from {}",
+                backup.display()
+            );
+        }
+        _ => {
+            // No backup (fresh install interrupted). Whatever is in chaindata_dir
+            // is an untrusted half-copy — remove it so the node starts clean.
+            if chaindata_dir.exists() {
+                std::fs::remove_dir_all(chaindata_dir)
+                    .map_err(|e| io_err("recovery: remove half-installed snapshot", e))?;
+            }
+            tracing::warn!(
+                "Recovered interrupted snapshot install: removed half-installed snapshot \
+                 (no prior chaindata to restore)"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_file(&marker_path);
+    Ok(true)
+}
+
+#[cfg(test)]
+mod snapshot_hardening_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cync-snap-hard-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn streaming_hash_matches_prefix_format_and_is_deterministic() {
+        // Two dirs with identical content must hash equal regardless of write
+        // order — and the value must be stable (format preserved).
+        let a = scratch("hash-a");
+        let b = scratch("hash-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("z.db"), b"zzz").unwrap();
+        std::fs::write(a.join("a.db"), b"aaa").unwrap();
+        std::fs::write(b.join("a.db"), b"aaa").unwrap();
+        std::fs::write(b.join("z.db"), b"zzz").unwrap();
+        assert_eq!(blake3_of_dir(&a).unwrap(), blake3_of_dir(&b).unwrap());
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn oversized_snapshot_is_refused_without_oom() {
+        // A file larger than the budget must be REFUSED by the streaming hash
+        // rather than read into memory. Drive hash_file_streaming with a tiny
+        // budget to prove it refuses on budget exhaustion (constant memory).
+        let dir = scratch("oom");
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("huge.db");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(8 * 1024 * 1024).unwrap(); // 8 MiB sparse
+
+        let mut hasher = blake3::Hasher::new();
+        let mut budget: u64 = 1024; // 1 KiB budget vs 8 MiB file
+        let rel = Path::new("huge.db");
+        let err = hash_file_streaming(&mut hasher, &big, rel, &mut budget).unwrap_err();
+        assert!(
+            format!("{:?}", err).to_lowercase().contains("maximum allowed size"),
+            "oversized file must be refused by the budget, got: {:?}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_interrupted_install_restores_from_backup() {
+        let tmp = scratch("recover");
+        let chaindata = tmp.join("chaindata");
+        let backup = tmp.join("chaindata.pre-snapshot-42");
+
+        // Simulate a crash mid-install: a half-copied snapshot in chaindata, the
+        // operator's real data in the backup, and a marker pointing at it.
+        std::fs::create_dir_all(&chaindata).unwrap();
+        std::fs::write(chaindata.join("HALF"), b"half-installed-snapshot").unwrap();
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("REAL"), b"operators-real-chaindata").unwrap();
+        write_install_marker(&marker_path_for(&chaindata), Some(&backup)).unwrap();
+
+        let recovered = recover_interrupted_install(&chaindata).unwrap();
+        assert!(recovered, "must report a recovery happened");
+        assert!(chaindata.join("REAL").exists(), "original chaindata must be restored");
+        assert!(!chaindata.join("HALF").exists(), "half-installed snapshot must be gone");
+        assert!(!backup.exists(), "backup consumed by the restore");
+        assert!(!marker_path_for(&chaindata).exists(), "marker cleared after recovery");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn recover_is_noop_without_marker() {
+        let tmp = scratch("recover-noop");
+        let chaindata = tmp.join("chaindata");
+        std::fs::create_dir_all(&chaindata).unwrap();
+        std::fs::write(chaindata.join("REAL"), b"live").unwrap();
+        assert!(!recover_interrupted_install(&chaindata).unwrap());
+        assert!(chaindata.join("REAL").exists(), "live data untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 #[cfg(test)]
