@@ -169,7 +169,7 @@ pub(super) async fn process_message(
 
         MessageType::Txs => {
             relay::handle_txs(
-                peer_id, payload, magic, peers, senders, dandelion, event_tx, scorer,
+                peer_id, payload, magic, peers, senders, dandelion, event_tx, scorer, chain,
             )
             .await?;
         }
