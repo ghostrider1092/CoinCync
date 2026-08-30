@@ -194,6 +194,17 @@ const NODES=[
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
+// SECURITY (XSS): HTML-escape any attacker/user-controlled value before it is
+// interpolated into an innerHTML template. Untrusted sources include the peer
+// user_agent/version (from the P2P Version handshake — see get_peers), asset
+// names, and the search query `q`. Wrap every such value in esc(v).
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// SECURITY (XSS, JS-string context): esc() covers HTML context but NOT values
+// placed INSIDE an inline handler string, e.g. onclick="viewTx('${v}')". Hashes
+// there must be validated hex or the handler string can be broken out of. Node-
+// emitted hashes ARE hex; hex(v) makes the explorer not RELY on that upstream
+// contract — returns the value only if it is pure hex, else '' (fails safe).
+const hex=s=>/^[0-9a-fA-F]{1,128}$/.test(String(s==null?'':s))?String(s):'';
 function atomicToCyncDisplayNumber(value){
   // Keep six display decimals using integer arithmetic before converting to
   // Number; aggregate RPC fields are decimal strings because they exceed u64.
