@@ -442,12 +442,18 @@ pub(super) async fn handle_blocks(
                 }
                 // Recompute failure may be local, but a computed sub-target hash
                 // proves the relayed block invalid and warrants immediate scoring.
-                let pow_hash = match crate::consensus::compute_pow_hash(
-                    crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
-                    &block.header.anchor,
+                // Preimage-cached RandomX (R3-2): all hash-distinct variants of
+                // one solution (e.g. target mutated to spray "new" blocks) share
+                // one RandomX run. Also binds the claimed anchor (recomputed
+                // inside) — the relay previously trusted block.header.anchor.
+                let pow_hash = match crate::consensus::pow_cache::pow_hash_cached(
+                    &block.header.prev_hash,
+                    block.header.height,
+                    block.header.timestamp,
                     block.header.nonce,
                     &block.header.tx_root,
-                    block.header.height,
+                    &block.header.anchor,
+                    block.header.algorithm,
                 ) {
                     Ok(h) => h,
                     Err(_) => {
@@ -618,12 +624,16 @@ pub(super) async fn handle_block_data(
         }
         // Success is recorded only after cheap PoW verification so invalid
         // relays cannot build reputation before full chain validation.
-        let pow_hash = match crate::consensus::compute_pow_hash(
-            crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
-            &block.header.anchor,
+        // Preimage-cached RandomX (R3-2): variants of one solution collapse to a
+        // single RandomX run; also binds the claimed anchor (recomputed inside).
+        let pow_hash = match crate::consensus::pow_cache::pow_hash_cached(
+            &block.header.prev_hash,
+            block.header.height,
+            block.header.timestamp,
             block.header.nonce,
             &block.header.tx_root,
-            block.header.height,
+            &block.header.anchor,
+            block.header.algorithm,
         ) {
             Ok(h) => h,
             Err(_) => {
