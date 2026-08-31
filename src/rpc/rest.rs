@@ -1317,20 +1317,34 @@ async fn get_emission(
 
 /// GET /api/v1/asset/:id — asset info by ID
 async fn get_asset(
-    State(st): State<RestState>,
-    Path(id): Path<String>,
+    State(_st): State<RestState>,
+    Path(_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    validate_hex_hash(&id)?;
-    let asset = jsonrpc_call(&st, "get_asset_info", Value::Array(vec![Value::String(id)])).await?;
-    Ok(Json(asset))
+    // Assets were removed in CoinCync 1.0 — no per-asset data can exist.
+    Err(assets_gone())
 }
 
-/// GET /api/v1/assets — list all registered assets
+/// GET /api/v1/assets — the confidential-asset subsystem was removed in 1.0.
 async fn list_assets(
-    State(st): State<RestState>,
+    State(_st): State<RestState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let assets = jsonrpc_call(&st, "list_assets", Value::Array(vec![])).await?;
-    Ok(Json(assets))
+    Err(assets_gone())
+}
+
+/// 410 Gone for the removed asset endpoints. CoinCync 1.0 is single-asset CYNC
+/// (the confidential-asset stack was removed in the 2.0 → 1.0 trim), so these
+/// routes previously 500'd by calling a JSON-RPC method that no longer exists.
+/// 410 (not 501) is accurate: the resource existed and was deliberately removed.
+fn assets_gone() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "error": "removed",
+            "message": "The assets subsystem was removed in CoinCync 1.0. \
+                        This endpoint no longer serves data.",
+            "since": "1.0",
+        })),
+    )
 }
 
 // ══════════════════════════════���════════════════════════════════════════════════
@@ -1669,14 +1683,14 @@ pub async fn run_rest_api(
         .route("/api/v1/supply/max", get(get_supply_max))
         // ─── Blocks ──────────────────────────────────────────
         .route("/api/v1/blocks/recent", get(get_recent_blocks))
-        .route("/api/v1/block/hash/{hash}", get(get_block_by_hash))
-        .route("/api/v1/block/height/{height}", get(get_block_by_height))
+        .route("/api/v1/block/hash/:hash", get(get_block_by_hash))
+        .route("/api/v1/block/height/:height", get(get_block_by_height))
         .route(
             "/api/v1/block/{height}/transactions",
             get(get_block_transactions),
         )
         // ─── Transactions ────────────────────────────────────
-        .route("/api/v1/transaction/{hash}", get(get_transaction))
+        .route("/api/v1/transaction/:hash", get(get_transaction))
         .route("/api/v1/transaction/submit", post(submit_transaction))
         // ─── Mempool ─────────────────────────────────────────
         .route("/api/v1/mempool", get(get_mempool))
@@ -1693,7 +1707,7 @@ pub async fn run_rest_api(
         // ─── Events ──────────────────────────────────────────
         .route("/api/v1/events", get(get_chain_events))
         // ─── Assets ───────��──────────────────────────────────
-        .route("/api/v1/asset/{id}", get(get_asset))
+        .route("/api/v1/asset/:id", get(get_asset))
         .route("/api/v1/assets", get(list_assets))
         // ─── WebSocket ───────────────────────────────────────
         .route("/api/v1/ws", get(ws_upgrade))
