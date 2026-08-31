@@ -2073,71 +2073,11 @@ impl Blockchain {
             let difficulty_blocks = if is_main_chain {
                 self.get_difficulty_blocks(block.header.height)
             } else {
-                // SECURITY (C20-FIX): Build fork-aware difficulty window.
-                // Walk the fork chain backwards to find the fork point, then mix
-                // main-chain blocks (below fork) with fork blocks (above fork).
-                let inner = self.inner.read();
-                let window = 144u64; // DIFFICULTY_LONG_WINDOW
-                let start = block.header.height.saturating_sub(window);
-
-                // Trace fork chain backwards to find fork point and collect fork blocks
-                let mut fork_chain: Vec<(u64, u64, Hash)> = Vec::new(); // (height, timestamp, target)
-                let mut cursor_hash = block.header.prev_hash;
-                let mut fork_point = 0u64;
-
-                loop {
-                    // Check if this hash is on the main chain
-                    if let Some(blk) = inner.blocks.get(&cursor_hash) {
-                        let h = blk.header.height;
-                        // If this block's height has a main-chain mapping that matches,
-                        // we've found the fork point
-                        if let Some(main_hash) = inner.height_to_hash.get(&h) {
-                            if *main_hash == cursor_hash {
-                                fork_point = h;
-                                break;
-                            }
-                        }
-                        // This is a fork block — add it to our fork chain
-                        fork_chain.push((h, blk.header.timestamp, blk.header.target));
-                        if h == 0 {
-                            break;
-                        }
-                        cursor_hash = blk.header.prev_hash;
-                    } else {
-                        // Parent not found — can't validate, use main chain as fallback
-                        break;
-                    }
-                }
-                fork_chain.reverse(); // oldest first
-
-                // Build mixed difficulty window
-                let mut diff_blocks = Vec::new();
-                for h in start..block.header.height {
-                    if h <= fork_point {
-                        // Below fork point: use main-chain blocks
-                        if let Some(hash) = inner.height_to_hash.get(&h) {
-                            if let Some(b) = inner.blocks.get(hash) {
-                                diff_blocks.push(DifficultyBlock {
-                                    height: h,
-                                    timestamp: b.header.timestamp,
-                                    target: b.header.target,
-                                });
-                            }
-                        }
-                    } else {
-                        // Above fork point: use fork blocks
-                        let offset = (h - fork_point - 1) as usize;
-                        if let Some(&(fh, ts, tgt)) = fork_chain.get(offset) {
-                            diff_blocks.push(DifficultyBlock {
-                                height: fh,
-                                timestamp: ts,
-                                target: tgt,
-                            });
-                        }
-                    }
-                }
-                drop(inner);
-                diff_blocks
+                // DB-sourced fork window — deterministic across all nodes
+                // (fix for chain.rs:2056; replaces the volatile in-memory-cache
+                // walk that made two nodes compute different windows/targets for
+                // the same fork block → consensus split).
+                self.fork_difficulty_window(block.header.prev_hash, block.header.height)
             };
 
             if difficulty_blocks.len() >= 2 {
@@ -2870,7 +2810,19 @@ impl Blockchain {
                             for h in start..fork_block.header.height {
                                 if h <= fork_point {
                                     // Below fork point: use main-chain blocks
-                                    if let Some(hash) = inner.height_to_hash.get(&h) {
+                                    if let Some(ref db) = self.db {
+                                        // DB-sourced (deterministic across nodes). Heights
+                                        // <= fork_point are stable during a reorg (it only
+                                        // mutates heights above fork_point). Falls back to the
+                                        // held in-memory guard only in no-DB test mode.
+                                        if let Ok(Some(b)) = db.blocks.get_by_height(h) {
+                                            diff_blocks.push(DifficultyBlock {
+                                                height: h,
+                                                timestamp: b.header.timestamp,
+                                                target: b.header.target,
+                                            });
+                                        }
+                                    } else if let Some(hash) = inner.height_to_hash.get(&h) {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
@@ -3163,7 +3115,19 @@ impl Blockchain {
 
                             for h in start..block.header.height {
                                 if h <= fork_point {
-                                    if let Some(hash) = inner.height_to_hash.get(&h) {
+                                    if let Some(ref db) = self.db {
+                                        // DB-sourced (deterministic across nodes). Heights
+                                        // <= fork_point are stable during a reorg (it only
+                                        // mutates heights above fork_point). Falls back to the
+                                        // held in-memory guard only in no-DB test mode.
+                                        if let Ok(Some(b)) = db.blocks.get_by_height(h) {
+                                            diff_blocks.push(DifficultyBlock {
+                                                height: h,
+                                                timestamp: b.header.timestamp,
+                                                target: b.header.target,
+                                            });
+                                        }
+                                    } else if let Some(hash) = inner.height_to_hash.get(&h) {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
@@ -3683,20 +3647,132 @@ impl Blockchain {
     }
 
     /// Get recent blocks as DifficultyBlock entries for ASERT calculation
-    pub fn get_difficulty_blocks(&self, up_to_height: u64) -> Vec<DifficultyBlock> {
+    /// A main-chain block's `DifficultyBlock`, sourced from DURABLE storage so
+    /// the difficulty window is identical on every node. Reading the volatile,
+    /// height-evicted in-memory cache (MAX_BLOCK_CACHE) is what made difficulty
+    /// validation nondeterministic (chain.rs:2056/2810 — a cold-cache node built
+    /// a truncated window and computed a different expected target than a
+    /// hot-cache node, a consensus split). The DB path takes no `inner` lock;
+    /// the cache fallback is reached ONLY in no-DB in-memory test mode (where
+    /// callers do not hold the lock).
+    fn main_chain_diff_block(&self, height: u64) -> Option<DifficultyBlock> {
+        if let Some(ref db) = self.db {
+            match db.blocks.get_by_height(height) {
+                Ok(Some(b)) => Some(DifficultyBlock {
+                    height,
+                    timestamp: b.header.timestamp,
+                    target: b.header.target,
+                }),
+                _ => None,
+            }
+        } else {
+            let inner = self.inner.read();
+            let hash = inner.height_to_hash.get(&height)?;
+            let b = inner.blocks.get(hash)?;
+            Some(DifficultyBlock {
+                height,
+                timestamp: b.header.timestamp,
+                target: b.header.target,
+            })
+        }
+    }
+
+    /// Fork-aware ASERT window for a block whose parent is `parent_hash`, sourced
+    /// from the DB so every node computes the same window (fix for chain.rs:2056).
+    /// Walks the fork's prev_hash chain to the fork point, then assembles
+    /// main-chain-below-fork + fork-above-fork, ascending. DB-sourced in
+    /// production; the in-memory cache is used only in no-DB test mode, and its
+    /// read guard is dropped before the assembly loop so `main_chain_diff_block`
+    /// (which re-reads) can never recursive-read-lock.
+    fn fork_difficulty_window(&self, parent_hash: Hash, block_height: u64) -> Vec<DifficultyBlock> {
         let window = 144u64; // DIFFICULTY_LONG_WINDOW
-        let start = up_to_height.saturating_sub(window);
-        let inner = self.inner.read();
-        let mut blocks = Vec::new();
-        for h in start..up_to_height {
-            if let Some(hash) = inner.height_to_hash.get(&h) {
-                if let Some(block) = inner.blocks.get(hash) {
-                    blocks.push(DifficultyBlock {
-                        height: h,
-                        timestamp: block.header.timestamp,
-                        target: block.header.target,
+        let start = block_height.saturating_sub(window);
+
+        // (height, timestamp, target) of the above-fork fork blocks, ascending.
+        let mut fork: Vec<(u64, u64, Hash)> = Vec::new();
+        let mut fork_point = 0u64;
+        let mut cursor = parent_hash;
+        let mut visited = std::collections::HashSet::new();
+
+        if let Some(ref db) = self.db {
+            loop {
+                if !visited.insert(cursor) {
+                    break; // prev_hash cycle (corruption) — exact-target check rejects a wrong window
+                }
+                let blk = match db.blocks.get(&cursor) {
+                    Ok(Some(b)) => b,
+                    _ => break, // parent not in DB — can't extend the walk
+                };
+                let h = blk.header.height;
+                if let Ok(Some(main_hash)) = db.blocks.get_hash_by_height(h) {
+                    if main_hash == cursor {
+                        fork_point = h;
+                        break;
+                    }
+                }
+                fork.push((h, blk.header.timestamp, blk.header.target));
+                if h == 0 {
+                    break;
+                }
+                cursor = blk.header.prev_hash;
+            }
+        } else {
+            // No-DB in-memory test mode: walk the cache. Scoped so the read
+            // guard drops before the assembly loop below.
+            let inner = self.inner.read();
+            loop {
+                if !visited.insert(cursor) {
+                    break;
+                }
+                let blk = match inner.blocks.get(&cursor) {
+                    Some(b) => b,
+                    None => break,
+                };
+                let h = blk.header.height;
+                if let Some(main_hash) = inner.height_to_hash.get(&h) {
+                    if *main_hash == cursor {
+                        fork_point = h;
+                        break;
+                    }
+                }
+                fork.push((h, blk.header.timestamp, blk.header.target));
+                if h == 0 {
+                    break;
+                }
+                cursor = blk.header.prev_hash;
+            }
+        }
+        fork.reverse(); // ascending
+
+        let mut out = Vec::new();
+        for h in start..block_height {
+            if h <= fork_point {
+                if let Some(d) = self.main_chain_diff_block(h) {
+                    out.push(d);
+                }
+            } else {
+                let off = (h - fork_point - 1) as usize;
+                if let Some(&(fh, ts, tgt)) = fork.get(off) {
+                    out.push(DifficultyBlock {
+                        height: fh,
+                        timestamp: ts,
+                        target: tgt,
                     });
                 }
+            }
+        }
+        out
+    }
+
+    pub fn get_difficulty_blocks(&self, up_to_height: u64) -> Vec<DifficultyBlock> {
+        // DB-sourced window (deterministic across nodes) — see
+        // main_chain_diff_block for why the in-memory cache was unsafe here.
+        let window = 144u64; // DIFFICULTY_LONG_WINDOW
+        let start = up_to_height.saturating_sub(window);
+        let mut blocks = Vec::new();
+        for h in start..up_to_height {
+            if let Some(d) = self.main_chain_diff_block(h) {
+                blocks.push(d);
             }
         }
         blocks
