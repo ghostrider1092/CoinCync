@@ -421,6 +421,15 @@ fn marker_path_for(chaindata_dir: &Path) -> PathBuf {
 }
 
 fn write_install_marker(marker_path: &Path, backup: Option<&Path>) -> Result<()> {
+    // The marker is a sibling of the chaindata dir, so it lives in the data
+    // dir. On a FRESH import that data dir does not exist yet (the copy step
+    // creates the chaindata dir only later), so create the marker's parent
+    // first — otherwise the write fails with "path not found" before any
+    // chaindata is touched. create_dir_all is a no-op when it already exists
+    // (the existing-chaindata path).
+    if let Some(parent) = marker_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io_err("create data dir for install marker", e))?;
+    }
     let marker = InstallMarker {
         backup: backup.map(|p| p.display().to_string()),
     };
