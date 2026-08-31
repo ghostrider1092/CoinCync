@@ -3,6 +3,7 @@ use parking_lot::RwLock as ParkingRwLock;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, warn};
 
+use crate::chain::SharedBlockchain;
 use crate::error::Result;
 use crate::mempool::SharedMempool;
 use crate::network::dandelion::{DandelionRouter, StemAction};
@@ -222,6 +223,7 @@ pub(super) async fn handle_txs(
     dandelion: &RwLock<DandelionRouter>,
     event_tx: &broadcast::Sender<NodeEvent>,
     scorer: &RwLock<PeerScorer>,
+    chain: &SharedBlockchain,
 ) -> Result<()> {
     // Bound deserialization work and classify excess volume separately from malformed data.
     if payload.len() > crate::network::protocol::MAX_MESSAGE_SIZE {
@@ -281,6 +283,42 @@ pub(super) async fn handle_txs(
                     }
                     continue;
                 }
+
+                // FULL validation BEFORE relay ("accept-then-relay"). The
+                // structural gate above is cheap and does NOT verify ring
+                // signatures, range proofs, or the balance proof (those need
+                // the UTXO set). Without this gate a structurally-valid but
+                // cryptographically-forged tx would be routed into Dandelion
+                // and its INV broadcast to every peer on the fluff path BEFORE
+                // any node fully validated it — network-wide amplification of
+                // invalid txs. chain.validate_transaction runs the full
+                // consensus validator against the live UTXO set WITHOUT
+                // inserting into the mempool, so Dandelion stem privacy is
+                // preserved (received txs still never enter our mempool on the
+                // stem — see the StemAction::Stem arm below; the fluff path
+                // admits via the NodeEvent consumer as before). The crypto is
+                // CPU-heavy, so run it under block_in_place to keep the tokio
+                // worker schedulable (same treatment server.rs gives this work).
+                if let Err(e) = tokio::task::block_in_place(|| chain.validate_transaction(&tx)) {
+                    let reason = e.to_string();
+                    warn!(
+                        "Rejecting invalid tx (full validation) from peer {}: {}",
+                        hex::encode(&peer_id[..8]),
+                        reason
+                    );
+                    if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                        // A peer that relayed a fully-invalid tx to us amplified
+                        // it — score them on the same ladder as the structural
+                        // rejection above.
+                        let offense = crate::network::scoring::classify_invalid_tx_reason(&reason);
+                        let mut s = scorer.write().await;
+                        let score = s.get_or_create(addr);
+                        score.record_misbehavior(offense);
+                        score.invalid_txs += 1;
+                    }
+                    continue; // NOT relayed — the whole point of the fix
+                }
+
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer.write().await.get_or_create(addr).record_tx_success();
                 }
@@ -343,9 +381,11 @@ pub(super) async fn handle_txs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::Blockchain;
     use crate::primitives::Amount;
     use crate::transaction::{Transaction, TxType};
     use std::net::SocketAddr;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn invalid_transactions_are_not_credited_as_successful_relays() {
@@ -357,6 +397,11 @@ mod tests {
         let dandelion = RwLock::new(DandelionRouter::new());
         let (event_tx, mut event_rx) = broadcast::channel(4);
         let scorer = RwLock::new(PeerScorer::new());
+        // A `version: 0` tx fails the cheap structural gate
+        // (validate_transaction_basic) and short-circuits before the full
+        // chain-validation gate, so an empty in-memory chain is sufficient
+        // here — chain.validate_transaction is never reached on this input.
+        let chain: SharedBlockchain = Arc::new(Blockchain::new());
         let invalid = Transaction {
             version: 0,
             tx_type: TxType::Transfer,
@@ -380,6 +425,7 @@ mod tests {
             &dandelion,
             &event_tx,
             &scorer,
+            &chain,
         )
         .await
         .unwrap();
