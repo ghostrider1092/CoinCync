@@ -302,6 +302,36 @@ const FAILURE_PURGE_THRESHOLD: u32 = 5;
 /// Maximum number of failed addresses retained in one retry cycle.
 const MAX_TRIED: usize = 5_000;
 
+/// SECURITY (H-3, eclipse resistance): the address book is bounded so that any
+/// single netgroup may occupy at most `max_addresses / NETGROUP_BOOK_DENOM`
+/// slots. A flood of thousands of IPs from one /16 therefore competes for a
+/// bounded slice of the book instead of crowding out honest peers from other
+/// ranges — the precondition an eclipse (→ double-spend on a low-hashrate
+/// chain) needs. `connection_tracker.rs` enforces a complementary per-/16 cap
+/// on live OUTBOUND connections; this bounds the BOOK the dialer selects from.
+const NETGROUP_BOOK_DENOM: usize = 8;
+
+/// Netgroup key for eclipse-resistance bucketing: groups addresses by the range
+/// an attacker most cheaply controls (IPv4 /16, IPv6 /32). Mirrors Bitcoin
+/// Core's `GetGroup()` intent.
+fn netgroup_key(ip: std::net::IpAddr) -> [u8; 5] {
+    let mut k = [0u8; 5];
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            k[0] = 4;
+            k[1] = o[0];
+            k[2] = o[1]; // /16 — the attacker-cost boundary for IPv4
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.octets();
+            k[0] = 6;
+            k[1..5].copy_from_slice(&s[0..4]); // /32 for IPv6
+        }
+    }
+    k
+}
+
 /// Address manager for peer discovery
 pub struct AddressManager {
     /// Known addresses
@@ -382,24 +412,80 @@ impl AddressManager {
         if self.self_addresses.contains(&addr.addr) {
             return;
         }
-        if self.addresses.len() >= self.max_addresses {
-            // Remove oldest
-            self.addresses
-                .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
-            if let Some(evicted) = self.addresses.pop() {
-                self.known_addrs.remove(&evicted.addr);
-            }
-        }
 
-        // Don't add if already known or tried
+        // SECURITY (L-12): dedup / tried guards run BEFORE any capacity eviction.
+        // Previously the eviction below ran first, so a duplicate or already-
+        // tried address evicted a real entry and then inserted nothing —
+        // shrinking the book by one honest peer per repeated/tried gossip entry
+        // (an eclipse assist). Guard first; only evict when actually inserting.
         if self.tried.contains(&addr.addr) {
             return;
         }
-
-        // SECURITY (L6): O(1) dedup check via HashSet instead of O(n) linear scan
-        if self.known_addrs.insert(addr.addr) {
-            self.addresses.push(addr);
+        if self.known_addrs.contains(&addr.addr) {
+            return;
         }
+
+        let privileged =
+            self.manual.contains(&addr.addr) || self.anchors.contains(&addr.addr);
+
+        // SECURITY (H-3, eclipse): bound any single netgroup's share of the book
+        // so a flood of many IPs from one /16 (v4) or /32 (v6) can't crowd out
+        // honest peers from other ranges. Manual/anchor peers are operator-
+        // chosen and exempt.
+        if !privileged {
+            let cap = (self.max_addresses / NETGROUP_BOOK_DENOM).max(2);
+            let ng = netgroup_key(addr.addr.ip());
+            let group_count = self
+                .addresses
+                .iter()
+                .filter(|a| netgroup_key(a.addr.ip()) == ng)
+                .count();
+            if group_count >= cap {
+                return;
+            }
+        }
+
+        // Capacity eviction — only now that we know we're actually inserting,
+        // and from the MOST over-represented netgroup (never a manual/anchor
+        // address) so a flood evicts its OWN kind, not an honest peer.
+        if self.addresses.len() >= self.max_addresses {
+            match self.pick_eviction_index() {
+                Some(idx) => {
+                    let evicted = self.addresses.swap_remove(idx);
+                    self.known_addrs.remove(&evicted.addr);
+                }
+                None => return, // book is full of only privileged addrs
+            }
+        }
+
+        self.known_addrs.insert(addr.addr);
+        self.addresses.push(addr);
+    }
+
+    /// Choose an address to evict when the book is full: the oldest entry within
+    /// the MOST over-represented netgroup, never a manual/anchor address. Makes
+    /// a single-netgroup flood evict its own entries rather than honest peers
+    /// from other ranges (H-3 eclipse resistance).
+    fn pick_eviction_index(&self) -> Option<usize> {
+        let mut counts: HashMap<[u8; 5], usize> = HashMap::new();
+        for a in &self.addresses {
+            *counts.entry(netgroup_key(a.addr.ip())).or_insert(0) += 1;
+        }
+        let mut best: Option<(usize, usize, u64)> = None; // (idx, group_size, last_seen)
+        for (i, a) in self.addresses.iter().enumerate() {
+            if self.manual.contains(&a.addr) || self.anchors.contains(&a.addr) {
+                continue;
+            }
+            let gsize = counts.get(&netgroup_key(a.addr.ip())).copied().unwrap_or(0);
+            let better = match best {
+                None => true,
+                Some((_, bg, bls)) => gsize > bg || (gsize == bg && a.last_seen < bls),
+            };
+            if better {
+                best = Some((i, gsize, a.last_seen));
+            }
+        }
+        best.map(|(i, _, _)| i)
     }
 
     /// Add multiple addresses
@@ -817,10 +903,15 @@ mod tests {
 
     #[test]
     fn test_address_manager_max() {
+        // Capacity (max_addresses) test. Uses DISTINCT netgroups — one IP per
+        // /16 — so the per-netgroup eclipse cap (H-3) doesn't bound the count
+        // first; this proves max_addresses is enforced. The netgroup cap itself
+        // is covered by addr_book_resists_single_netgroup_flood.
         let mut mgr = AddressManager::new(5);
 
-        for i in 0..10 {
-            let addr = PeerAddress::new(format!("127.0.0.{}:8080", i).parse().unwrap());
+        for i in 0..10u8 {
+            let addr =
+                PeerAddress::new(format!("{}.{}.0.1:8080", 11 + i, 20 + i).parse().unwrap());
             mgr.add(addr);
         }
 
@@ -1146,6 +1237,48 @@ mod tests {
                 !seed.ip().is_unspecified(),
                 "seed {} has unspecified IP (0.0.0.0/::)",
                 seed
+            );
+        }
+    }
+
+    #[test]
+    fn addr_book_resists_single_netgroup_flood() {
+        // H-3 (eclipse): a flood of many IPs from ONE netgroup (203.0.0.0/16)
+        // must not crowd out honest peers from other ranges.
+        let mut mgr = AddressManager::new(100);
+        let cap = (100 / NETGROUP_BOOK_DENOM).max(2); // per-netgroup slot cap
+
+        for i in 0..10_000u32 {
+            let a: std::net::SocketAddr =
+                format!("203.0.113.{}:{}", i % 256, 30_000 + (i % 20_000))
+                    .parse()
+                    .unwrap();
+            mgr.add(PeerAddress::new(a));
+        }
+        let flood_ng = netgroup_key("203.0.113.1".parse().unwrap());
+        let flood_count = mgr
+            .addresses
+            .iter()
+            .filter(|p| netgroup_key(p.addr.ip()) == flood_ng)
+            .count();
+        assert!(
+            flood_count <= cap,
+            "single netgroup occupied {flood_count} slots, cap is {cap}"
+        );
+
+        // Honest peers from DISTINCT netgroups are admitted and survive.
+        let honest: Vec<std::net::SocketAddr> = vec![
+            "198.51.100.7:28333".parse().unwrap(),
+            "192.0.2.9:28333".parse().unwrap(),
+            "8.8.8.8:28333".parse().unwrap(),
+        ];
+        for h in &honest {
+            mgr.add(PeerAddress::new(*h));
+        }
+        for h in &honest {
+            assert!(
+                mgr.addresses.iter().any(|p| p.addr == *h),
+                "honest peer {h} was evicted by the single-netgroup flood"
             );
         }
     }
