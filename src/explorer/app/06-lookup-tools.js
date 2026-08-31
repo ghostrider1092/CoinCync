@@ -83,7 +83,7 @@ async function loadPeerExp(){
       <div style="padding:14px 20px">
         <div class="detail-grid" style="border:none">
           <div class="dl" style="background:none;border-bottom:1px solid var(--b)">Height</div><div class="dv" style="border-bottom:1px solid var(--b);color:var(--ac2);font-weight:600">#${num(p.height)}</div>
-          <div class="dl" style="background:none;border-bottom:1px solid var(--b)">Version</div><div class="dv" style="border-bottom:1px solid var(--b)">v${p.version}</div>
+          <div class="dl" style="background:none;border-bottom:1px solid var(--b)">Version</div><div class="dv" style="border-bottom:1px solid var(--b)">v${esc(p.version)}</div>
           <div class="dl" style="background:none;border-bottom:1px solid var(--b)">User agent</div><div class="dv" style="border-bottom:1px solid var(--b);font-size:11px">${p.user_agent||'—'}</div>
           <div class="dl" style="background:none;border-bottom:1px solid var(--b)">Bytes sent</div><div class="dv" style="border-bottom:1px solid var(--b)">${p.bytes_sent?fmtSize(p.bytes_sent):'—'}</div>
           <div class="dl" style="background:none">Bytes recv</div><div class="dv">${p.bytes_recv?fmtSize(p.bytes_recv):'—'}</div>

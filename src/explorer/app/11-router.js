@@ -205,7 +205,7 @@ async function viewTx(txHash){
       <div class="panel">
         <div class="panel-head">Transaction Details</div>
         <div class="detail-grid">
-          <div class="dl">Hash</div><div class="dv mono" style="font-size:10px;word-break:break-all">${tx.hash||txHash} <button onclick="copyText('${tx.hash||txHash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button></div>
+          <div class="dl">Hash</div><div class="dv mono" style="font-size:10px;word-break:break-all">${esc(tx.hash||txHash)} <button onclick="copyText('${hex(tx.hash||txHash)}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button></div>
           <div class="dl">Block</div><div class="dv">${isMempool?'<span style="color:#F0C040">Mempool (pending)</span>':`<a onclick="viewBlock(${tx.block_height})" style="color:var(--ac2);cursor:pointer">#${num(tx.block_height||0)}</a>`}</div>
           <div class="dl">Block hash</div><div class="dv mono" style="font-size:10px;word-break:break-all">${isMempool?'waiting for confirmation':tx.block_hash||'—'}</div>
           <div class="dl">Version</div><div class="dv">${tx.version||1}</div>
@@ -293,8 +293,8 @@ doSearch = async function(){
     if(asset&&asset.name){
       $('search-body').innerHTML=`
         <div class="info-box">
-          <h3>Asset: ${asset.name}</h3>
-          <div class="kv-row"><span class="kv-key">Asset ID</span><span class="kv-val mono">${q}</span></div>
+          <h3>Asset: ${esc(asset.name)}</h3>
+          <div class="kv-row"><span class="kv-key">Asset ID</span><span class="kv-val mono">${esc(q)}</span></div>
           <div class="kv-row"><span class="kv-key">Precision</span><span class="kv-val">${asset.precision||0}</span></div>
           <div class="kv-row"><span class="kv-key">Supply</span><span class="kv-val">${num(asset.initial_supply||0)}</span></div>
         </div>`;
@@ -302,7 +302,7 @@ doSearch = async function(){
     }
   }
 
-  $('search-body').innerHTML=`<div class="info-box amber">No results for "${q}".<br><br>
+  $('search-body').innerHTML=`<div class="info-box amber">No results for "${esc(q)}".<br><br>
     <span style="color:var(--t3);font-size:12px">Search supports: block height (e.g. 1000), block hash (64 hex), transaction hash (64 hex), or asset ID (64 hex)</span></div>`;
 };
 
