@@ -941,15 +941,18 @@ async fn cmd_info(
     println!("Node:     {}", node);
 
     if wallet_exists(path) {
-        let pw = match password {
-            Some(p) => Some(p),
-            None => {
-                // Try unlock only if password given; otherwise skip metadata
-                None
-            }
-        };
-        if let Some(pw) = pw {
-            match load_wallet(path, Some(pw.as_str())) {
+        // Only attempt unlock if a password was supplied; otherwise skip
+        // metadata (don't prompt). Resolve through resolve_password so `-`
+        // (stdin) and the env var behave IDENTICALLY to open/scan/send.
+        // Previously cmd_info passed the raw CLI value straight to
+        // load_wallet, so `--password -` was taken as the literal password
+        // "-" and unlock failed the HMAC even with the correct password —
+        // the same divergent-code-path drift that has bitten this codebase
+        // elsewhere. One resolver, every command.
+        if password.is_some() {
+            match resolve_password(password, false)
+                .and_then(|pw| load_wallet(path, Some(pw.as_str())).map_err(|e| e.to_string()))
+            {
                 Ok(data) => {
                     println!("Label:    {}", data.label);
                     println!("Epoch:    {}", data.current_epoch);
