@@ -15,6 +15,23 @@ a second reviewer (GitHub forbids self-approval), while external contributors
 still get the full review + CI gate. Direct pushes / force-pushes / deletions
 are blocked for everyone.
 
+## ⚠️ Platform constraint: rulesets need public-or-Pro
+
+On a **private repo on the Free plan**, the rulesets API/UI is gated — creating
+one returns `403 "Upgrade to GitHub Pro or make this repository public to enable
+this feature."` So there are two safe sequences:
+
+- **No unprotected window (recommended):** enable **GitHub Pro** (or Team) →
+  apply the rulesets *while still private* → then flip the repo public. Main is
+  protected from the instant it's visible.
+- **Free plan:** flip the repo public → **immediately** run the two `gh api`
+  commands below (or UI-import). There's a short window between "public" and
+  "ruleset applied" where `main` is unprotected — do the apply as the very next
+  action, before announcing the repo anywhere.
+
+Branch protection is not available on Free-plan **private** repos either, so a
+ruleset is the right mechanism; it just can't be armed until public/Pro.
+
 ## Apply
 
 **Option A — UI import (simplest):**
