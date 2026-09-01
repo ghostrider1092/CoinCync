@@ -67,6 +67,35 @@ pub(super) async fn process_message(
         return Ok(());
     }
 
+    // Cheap payload-size gate for the light-client / DHT query types (audit
+    // R3-4). Their requests are tiny (filters/digests = 16 bytes; ki-status
+    // <= ~3.2 KiB) and there is no framing-level per-type cap on this path, so
+    // drop oversized payloads before any handler allocates or parses.
+    const MAX_LIGHT_QUERY_PAYLOAD: usize = 8 * 1024;
+    if matches!(
+        msg_type,
+        MessageType::GetFilters
+            | MessageType::GetOutputDigests
+            | MessageType::GetFilterCheckpoints
+            | MessageType::GetKeyImageStatus
+    ) && payload.len() > MAX_LIGHT_QUERY_PAYLOAD
+    {
+        tracing::warn!(
+            "Oversized {:?} payload ({} bytes) from peer {:?} — dropping",
+            msg_type,
+            payload.len(),
+            &peer_id[..4]
+        );
+        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+            scorer
+                .write()
+                .await
+                .get_or_create(addr)
+                .record_misbehavior(crate::network::scoring::MisbehaviorType::OversizedMessage);
+        }
+        return Ok(());
+    }
+
     trace!("Received {:?} from peer {:?}", msg_type, &peer_id[..4]);
 
     // Update peer activity
