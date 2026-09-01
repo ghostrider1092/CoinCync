@@ -1686,7 +1686,7 @@ pub async fn run_rest_api(
         .route("/api/v1/block/hash/:hash", get(get_block_by_hash))
         .route("/api/v1/block/height/:height", get(get_block_by_height))
         .route(
-            "/api/v1/block/{height}/transactions",
+            "/api/v1/block/:height/transactions",
             get(get_block_transactions),
         )
         // ─── Transactions ────────────────────────────────────
@@ -1823,6 +1823,54 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Regression guard for the axum route-syntax bug (#2): axum 0.7 matches
+    /// path params with `:name`; axum 0.8 uses `{name}`. When the two diverge,
+    /// a real value stops matching and every parameterized endpoint silently
+    /// 404s (block/tx/asset lookups over REST). This registers the SAME five
+    /// `:param` route strings the production router uses and asserts each one
+    /// MATCHES a concrete value — i.e. does NOT return axum's empty-body 404
+    /// for an unrouted path. (The JSON-RPC backend isn't running, so a matched
+    /// route returns a handler error, not 404 — anything but 404 proves the
+    /// route matched.) If the crate's axum major and these route strings ever
+    /// diverge again, this test fails loudly instead of shipping dead routes.
+    #[tokio::test]
+    async fn param_routes_match_real_values_not_404() {
+        let state = RestState {
+            jsonrpc_addr: "127.0.0.1:19099".parse().unwrap(),
+            client: reqwest::Client::new(),
+            rpc_bearer: None,
+        };
+        let app = Router::new()
+            .route("/api/v1/block/hash/:hash", get(get_block_by_hash))
+            .route("/api/v1/block/height/:height", get(get_block_by_height))
+            .route(
+                "/api/v1/block/:height/transactions",
+                get(get_block_transactions),
+            )
+            .route("/api/v1/transaction/:hash", get(get_transaction))
+            .route("/api/v1/asset/:id", get(get_asset))
+            .with_state(state);
+
+        for path in [
+            "/api/v1/block/hash/deadbeef",
+            "/api/v1/block/height/1",
+            "/api/v1/block/1/transactions",
+            "/api/v1/transaction/deadbeef",
+            "/api/v1/asset/x",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "param route {path} did not match — axum :param/{{param}} route-syntax regression (#2)"
+            );
+        }
     }
 
     #[tokio::test]
