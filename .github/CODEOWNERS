@@ -31,8 +31,11 @@
 /src/consensus/                     @ghostrider1092
 /src/transaction/validator.rs       @ghostrider1092
 /src/chain.rs                       @ghostrider1092
-/src/emission.rs                    @ghostrider1092
+/src/emission/                      @ghostrider1092
 /src/constants.rs                   @ghostrider1092
+/src/testnet.rs                     @ghostrider1092
+# build.rs enforces the consensus-file hash lock (critical_files.lock).
+/build.rs                           @ghostrider1092
 
 # ── Cryptographic primitives: any change here can break privacy ─────
 # CLSAG, Bulletproofs+, stealth-address derivation, key-image
@@ -47,9 +50,12 @@
 # detection, output decryption, balance updates. Bugs here can
 # produce silent double-spends or stuck UTXOs.
 /src/wallet/send.rs                 @ghostrider1092
+/src/wallet/send/                   @ghostrider1092
 /src/wallet/scanner.rs              @ghostrider1092
 /src/wallet/balance.rs              @ghostrider1092
+/src/wallet/persistence.rs          @ghostrider1092
 /src/bin/wallet.rs                  @ghostrider1092
+/src/bin/wallet_support/            @ghostrider1092
 
 # ── Mempool + network admit paths: chain-stall vectors ──────────────
 # A bug in tx-admit that lets invalid txs persist will stall block
