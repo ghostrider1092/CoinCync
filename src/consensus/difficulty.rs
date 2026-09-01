@@ -110,6 +110,14 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
     };
     let tip_target = target_to_u128(&tip.target);
 
+    // audit H-1: at/after the activation height, base the ASERT exponent on the
+    // ANCHOR block's target (true aserti3-2d) instead of the TIP target. The
+    // tip-base form re-applied each solvetime deviation for ~W blocks while the
+    // block stayed in the window, compounding into difficulty oscillation
+    // (validated by examples/difficulty_simulator.rs: steady-state CV 1.48→1.08,
+    // idle-gap recovery 999→160 blocks). Height-gated hard fork; testnet-first.
+    let use_anchor_base = current_height >= crate::constants::ANCHOR_BASE_DIFFICULTY_HEIGHT;
+
     let short_anchor = get_anchor(blocks, DIFFICULTY_SHORT_WINDOW as usize);
     let short_target = apply_asert(
         tip_target,
@@ -117,6 +125,7 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
         tip,
         TARGET_BLOCK_TIME,
         ASERT_HALFLIFE,
+        use_anchor_base,
     );
 
     let long_anchor = get_anchor(blocks, DIFFICULTY_LONG_WINDOW as usize);
@@ -126,6 +135,7 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
         tip,
         TARGET_BLOCK_TIME,
         ASERT_HALFLIFE,
+        use_anchor_base,
     );
 
     let short_weighted = safe_mul_u128(short_target, DIFFICULTY_SHORT_WEIGHT as u128);
@@ -170,11 +180,22 @@ fn apply_asert(
     tip: &DifficultyBlock,
     target_time: u64,
     halflife: u64,
+    use_anchor_base: bool,
 ) -> u128 {
     let height_diff = tip.height.saturating_sub(anchor.height);
     if height_diff == 0 {
         return current_target;
     }
+
+    // audit H-1: the multiplicative base. Legacy = the TIP target (which already
+    // embeds every prior adjustment, so a windowed exponent compounds); fixed =
+    // the ANCHOR block's target, making the retarget absolute (true aserti3-2d)
+    // with no compounding. The exponent (whole-window time error) is unchanged.
+    let base_target = if use_anchor_base {
+        target_to_u128(&anchor.target).max(1)
+    } else {
+        current_target
+    };
 
     let time_diff = (tip.timestamp as i128) - (anchor.timestamp as i128);
     let expected_time = (height_diff as i128) * (target_time as i128);
@@ -226,7 +247,7 @@ fn apply_asert(
     let clamped_int = int_part.clamp(-MAX_INT_EXPONENT, MAX_INT_EXPONENT);
 
     let frac_pow2 = pow2_frac(frac_part);
-    let adjusted = safe_mul_shift(current_target, frac_pow2);
+    let adjusted = safe_mul_shift(base_target, frac_pow2);
 
     if clamped_int >= 0 {
         adjusted
@@ -603,9 +624,37 @@ mod tests {
     fn test_asert_same_height() {
         let block = make_block(10, 300);
         assert_eq!(
-            apply_asert(12345, &block, &block, TARGET_BLOCK_TIME, ASERT_HALFLIFE),
+            apply_asert(12345, &block, &block, TARGET_BLOCK_TIME, ASERT_HALFLIFE, false),
             12345
         );
+    }
+
+    #[test]
+    fn asert_anchor_base_uses_anchor_target_not_tip() {
+        // audit H-1: with use_anchor_base=true the retarget multiplies the
+        // ANCHOR block's target; with false it multiplies the TIP target. Use a
+        // ZERO-time-error window (8 blocks exactly TARGET apart → exponent 2^0=1)
+        // so the result is purely the base, and an anchor target distinct from
+        // the tip target. Fails on the old (tip-base-only) code.
+        let tip_t: u128 = 1_000_000;
+        let anchor_t: u128 = 1_500_000;
+        let anchor = DifficultyBlock {
+            height: 0,
+            timestamp: 0,
+            target: u128_to_target(anchor_t),
+        };
+        let tip = DifficultyBlock {
+            height: DIFFICULTY_SHORT_WINDOW,
+            timestamp: DIFFICULTY_SHORT_WINDOW * TARGET_BLOCK_TIME,
+            target: u128_to_target(tip_t),
+        };
+
+        let legacy = apply_asert(tip_t, &anchor, &tip, TARGET_BLOCK_TIME, ASERT_HALFLIFE, false);
+        let fixed = apply_asert(tip_t, &anchor, &tip, TARGET_BLOCK_TIME, ASERT_HALFLIFE, true);
+
+        assert_eq!(legacy, tip_t, "tip-base must return the tip target at zero error");
+        assert_eq!(fixed, anchor_t, "anchor-base must return the anchor target at zero error");
+        assert_ne!(legacy, fixed, "the two bases must differ when anchor != tip");
     }
 
     #[test]
