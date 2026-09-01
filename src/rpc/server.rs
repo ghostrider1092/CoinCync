@@ -1021,7 +1021,8 @@ pub async fn start_rpc_server(
             match block_opt {
                 Some(block) => Ok::<_, ErrorObjectOwned>(serialize_block(&block, h)),
                 None => Err(ErrorObjectOwned::owned(
-                    -32000,
+                    // -5 = not-found; the REST proxy maps it to HTTP 404 (not 500).
+                    -5,
                     format!("block at height {} not found", h),
                     None::<()>,
                 )),
@@ -1101,7 +1102,8 @@ pub async fn start_rpc_server(
                     Ok::<_, ErrorObjectOwned>(serialize_block(&block, height))
                 }
                 None => Err(ErrorObjectOwned::owned(
-                    -32000,
+                    // -5 = not-found; the REST proxy maps it to HTTP 404 (not 500).
+                    -5,
                     format!("block with hash {} not found", hex::encode(bytes)),
                     None::<()>,
                 )),
@@ -1907,7 +1909,10 @@ pub async fn start_rpc_server(
                 }
             }
             None => Err(ErrorObjectOwned::owned(
-                -32000, format!("transaction not found in index"), None::<()>,
+                // -5 = not-found; the REST proxy maps it to HTTP 404 (not 500).
+                -5,
+                "transaction not found in index".to_string(),
+                None::<()>,
             )),
         }
     }).map_err(|e| Error::RpcError(e.to_string()))?;
