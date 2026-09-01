@@ -281,6 +281,7 @@ coincync-rolling-finality = { path = "crates/coincync-rolling-finality", feature
 
 [dev-dependencies]
 criterion         = "0.8"
+rand              = "0.8"
 proptest          = "1"
 tempfile          = "3"
 tokio-test        = "0.4"
