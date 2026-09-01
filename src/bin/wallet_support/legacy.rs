@@ -1798,10 +1798,13 @@ async fn cmd_multisig_gen(
     );
     println!();
     println!(
-        "To sign a transaction, {} of {} participants run:",
+        "To sign a transaction, {} of {} participants run the FROST rounds:",
         threshold, total
     );
-    println!("  coincync-wallet multisig-sign --share-file <their-share.json> ...");
+    println!("  1. multisig-round1   --share-file <their-share.json>   (nonces + commitment)");
+    println!("  2. multisig-round2   --share-file <their-share.json> ... (signature share)");
+    println!("  3. multisig-aggregate ...                              (combine shares)");
+    println!("  or multisig-send ... to reconstruct the group key from M shares and submit.");
 
     Ok(())
 }
