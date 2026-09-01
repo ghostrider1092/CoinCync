@@ -13,7 +13,7 @@ async function doSearch(){
     const h=parseInt(q);
     if(h>=1&&h<=chainHeight){viewBlock(h);return;}
   }
-  $('search-body').innerHTML='<div class="info-box amber">⚠ No results for "'+q+'". Enter a 64-character block hash or block height number.</div>';
+  $('search-body').innerHTML='<div class="info-box amber">⚠ No results for "'+esc(q)+'". Enter a 64-character block hash or block height number.</div>';
 }
 
 // ── MOBILE NAV ────────────────────────────────────────────────
