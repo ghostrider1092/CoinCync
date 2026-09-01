@@ -2290,16 +2290,13 @@ impl Blockchain {
                             is_coinbase,
                             lock_height: output.lock_height,
                         };
-                        match crate::db::serialize(&entry) {
-                            Ok(bytes) => {
-                                output_additions.push((*output.stealth_address.as_bytes(), bytes))
-                            }
-                            Err(e) => tracing::error!(
-                                target: "chain::persistence",
+                        let bytes = crate::db::serialize(&entry).map_err(|e| {
+                            Error::Internal(format!(
                                 "serialize OutputIndexEntry failed at height {}: {}",
                                 block.header.height, e
-                            ),
-                        }
+                            ))
+                        })?;
+                        output_additions.push((*output.stealth_address.as_bytes(), bytes));
                     }
                     tx_index_adds.push((*tx.hash().as_bytes(), block.header.height, tx_idx as u32));
                 }
@@ -3512,7 +3509,7 @@ impl Blockchain {
                             |b: &crate::consensus::Block,
                              oi: &mut Vec<([u8; 32], Vec<u8>)>,
                              hs: &mut Vec<(u64, [u8; 32])>,
-                             ti: &mut Vec<([u8; 32], u64, u32)>| {
+                             ti: &mut Vec<([u8; 32], u64, u32)>| -> Result<()> {
                                 let h = b.header.height;
                                 hs.push((h, *b.hash().as_bytes()));
                                 for (idx, tx) in b.transactions.iter().enumerate() {
@@ -3524,12 +3521,17 @@ impl Blockchain {
                                             is_coinbase,
                                             lock_height: output.lock_height,
                                         };
-                                        if let Ok(data) = crate::db::serialize(&entry) {
-                                            oi.push((*output.stealth_address.as_bytes(), data));
-                                        }
+                                        let data = crate::db::serialize(&entry).map_err(|e| {
+                                            Error::Internal(format!(
+                                                "serialize OutputIndexEntry failed at height {}: {}",
+                                                h, e
+                                            ))
+                                        })?;
+                                        oi.push((*output.stealth_address.as_bytes(), data));
                                     }
                                     ti.push((*tx.hash().as_bytes(), h, idx as u32));
                                 }
+                                Ok(())
                             };
 
                         for fork_block in &fork_blocks {
@@ -3538,14 +3540,14 @@ impl Blockchain {
                                 &mut oi_additions,
                                 &mut height_sets,
                                 &mut ti_adds,
-                            );
+                            )?;
                         }
                         collect_block_outputs(
                             &block,
                             &mut oi_additions,
                             &mut height_sets,
                             &mut ti_adds,
-                        );
+                        )?;
 
                         // 3. Compute stale heights to remove (above new tip)
                         let new_tip_height = block.header.height;
