@@ -61,6 +61,11 @@ enum Command {
 
     /// Restore a wallet from a 24-word seed phrase.
     Restore {
+        /// 24-word seed phrase. Use `-` to read it from stdin (recommended
+        /// for piped automation), or omit it to be prompted with terminal
+        /// echo disabled. A literal phrase here — or via `COINCYNC_SEED_PHRASE`
+        /// — is visible to other local users (process list / env inherited by
+        /// children); avoid it for a real secret.
         #[arg(env = "COINCYNC_SEED_PHRASE", hide_env_values = true)]
         seed: Option<String>,
         /// Wallet password. Use `-` to read from stdin (recommended for
@@ -797,6 +802,84 @@ fn resolve_password(
     }
 }
 
+/// Max accepted seed-phrase length. A 24/25-word mnemonic is ~200 bytes;
+/// 1 KiB is ample headroom while still refusing an accidentally-piped file.
+const MAX_SEED_LEN: usize = 1024;
+
+/// Resolve a 24-word seed phrase, mirroring `resolve_password`'s three cases
+/// so the master secret gets the same argv/echo protection as the wallet
+/// password (M-9/M-10):
+/// - `Some("-")` reads the phrase from stdin (piped automation), keeping it
+///   out of argv and env. Length-capped; empty is an error.
+/// - `Some(s)` for any other s uses s, but warns that a literal argument or
+///   `COINCYNC_SEED_PHRASE` is visible to other local users.
+/// - `None` prompts interactively with terminal echo DISABLED
+///   (dialoguer::Password), so the phrase never lands in scrollback, terminal
+///   recordings, or a logged tty. No confirmation prompt — the caller is
+///   entering an existing phrase, not choosing a new one.
+///
+/// Whitespace is trimmed in every branch: unlike a password, surrounding
+/// whitespace is never significant in a space-delimited mnemonic (this
+/// matches the prior interactive behaviour, which did `line.trim()`).
+fn resolve_seed(opt: Option<String>) -> Result<zeroize::Zeroizing<String>, String> {
+    use std::io::Read;
+    use zeroize::Zeroize;
+    match opt {
+        Some(s) if s == "-" => {
+            let stdin = std::io::stdin();
+            let mut handle = stdin.lock().take((MAX_SEED_LEN + 1) as u64);
+            let mut buf = zeroize::Zeroizing::new(String::new());
+            handle
+                .read_to_string(&mut *buf)
+                .map_err(|e| e.to_string())?;
+            if buf.len() > MAX_SEED_LEN {
+                return Err(format!(
+                    "stdin seed phrase too long (max {} bytes); refusing to read \
+                     more — did you accidentally pipe a large file?",
+                    MAX_SEED_LEN,
+                ));
+            }
+            let seed = zeroize::Zeroizing::new(buf.trim().to_string());
+            if seed.is_empty() {
+                return Err("seed phrase must not be empty when reading from stdin".into());
+            }
+            Ok(seed)
+        }
+        Some(mut s) => {
+            // ARGV/env exposure warning — see function doc.
+            tracing::warn!(
+                "Seed phrase passed as a literal argument or via \
+                 `COINCYNC_SEED_PHRASE` is visible to any local user (\
+                 /proc/<pid>/cmdline on Linux, `wmic process get commandline` \
+                 on Windows) and env vars are inherited by child processes. \
+                 Prefer omitting it to be prompted (no echo), or pass `-` to \
+                 pipe it on stdin."
+            );
+            let seed = zeroize::Zeroizing::new(s.trim().to_string());
+            s.zeroize();
+            if seed.is_empty() {
+                return Err("seed phrase must not be empty".into());
+            }
+            Ok(seed)
+        }
+        None => {
+            // No-echo prompt (M-9): the previous read_line echoed the master
+            // seed to the terminal — visible in scrollback, recordings, and
+            // any logged tty. dialoguer::Password disables echo cross-platform.
+            let mut raw = dialoguer::Password::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt("24-word seed phrase")
+                .interact()
+                .map_err(|e| format!("seed prompt failed: {}", e))?;
+            let seed = zeroize::Zeroizing::new(raw.trim().to_string());
+            raw.zeroize();
+            if seed.is_empty() {
+                return Err("seed phrase must not be empty".into());
+            }
+            Ok(seed)
+        }
+    }
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -874,23 +957,9 @@ async fn cmd_restore(
     password: Option<String>,
     network: Network,
 ) -> Result<(), String> {
-    let seed_str = match seed {
-        Some(s) => s,
-        None => {
-            use std::io::{BufRead, Write};
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            write!(out, "24-word seed phrase: ").map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())?;
-            let mut line = String::new();
-            stdin
-                .lock()
-                .read_line(&mut line)
-                .map_err(|e| e.to_string())?;
-            line.trim().to_string()
-        }
-    };
+    // Seed handling mirrors the password path: stdin `-`, argv-exposure
+    // warning, length cap, and a no-echo interactive prompt (M-9/M-10).
+    let seed_str = resolve_seed(seed)?;
 
     let seed_bytes =
         mnemonic_to_seed(&seed_str).map_err(|e| format!("invalid seed phrase: {}", e))?;
@@ -905,7 +974,7 @@ async fn cmd_restore(
         created_at: unix_now(),
         network: network_label(network).to_string(),
         subaddresses: None,
-        mnemonic_phrase: Some(seed_str.clone()),
+        mnemonic_phrase: Some(seed_str.to_string()),
     };
 
     if let Some(parent) = path.parent() {
