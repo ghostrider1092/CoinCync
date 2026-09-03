@@ -142,7 +142,13 @@ pub(super) async fn handle_version(
 
         if let Some(mut peer) = peers.get_mut(&peer_id) {
             peer.version = version.version;
-            peer.user_agent = version.user_agent;
+            // SECURITY (defense-in-depth, explorer stored-XSS class): strip
+            // control characters from the peer-supplied user_agent before we
+            // store or ever serve it over get_peers. Length is already bounded
+            // by VersionMessage::validate (MAX_USER_AGENT_LENGTH). Client UIs
+            // still HTML-escape at render (esc()); this protects EVERY consumer
+            // of get_peers (other UIs, scripts, monitors) that might not.
+            peer.user_agent = version.user_agent.chars().filter(|c| !c.is_control()).collect();
             peer.height = version.start_height;
             peer.tip_hash = version.best_hash;
             peer.state = PeerState::VersionReceived;
