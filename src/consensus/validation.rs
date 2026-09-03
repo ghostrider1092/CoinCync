@@ -1982,6 +1982,22 @@ pub(crate) fn verify_ring_signature(
         clsag_verify, global_cache, ring_sig_cache_key, ClsagRingMember, EcCommitment, PublicPoint,
     };
 
+    // SECURITY (C-2 / supply inflation): bind `input.key_image` to the key
+    // image the CLSAG signature actually proves. The double-spend set is keyed
+    // on `input.key_image`, but the CLSAG proves ownership of
+    // `input.signature.key_image`. If the two differ, an attacker can keep the
+    // real `signature.key_image` (so the crypto still verifies) while varying
+    // `input.key_image`, spending the SAME output repeatedly under fresh
+    // double-spend-set keys — undetectable inflation. This runs BEFORE the
+    // ring-sig cache below: otherwise a cached-valid verdict for a mismatched
+    // `input.key_image` would slip through (the only prior gate). Pure
+    // tightening, always-on — an honest tx always has
+    // `input.key_image == signature.key_image`, so no honest tx or historical
+    // block is affected.
+    if input.signature.key_image.to_bytes() != *input.key_image.as_bytes() {
+        return false;
+    }
+
     // Message is the transaction hash (excluding signatures)
     let message = tx.signing_hash();
 
