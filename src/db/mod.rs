@@ -989,6 +989,105 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically commit a single connected (extend-path) block: output-index
+    /// additions, the height→hash mapping, the new chain state, and the
+    /// tx-index additions — all in ONE sled transaction, then flush.
+    ///
+    /// Crash-consistent by construction: on restart the height index, output
+    /// index, tx index, and chain state can never disagree, closing the
+    /// `db/blocks.rs:227` (height index ahead of state) and
+    /// `output_index.rs:130` (output-index entries for an uncommitted block)
+    /// findings. The pre-fix extend path wrote these as five separate,
+    /// non-transactional calls (`persist_output_index`, per-tx `index_tx`,
+    /// `set_height_hash`, `save_state`) with no crash barrier between them.
+    ///
+    /// Deliberately bundles the SAME four trees as [`Self::apply_reorg_atomic`]
+    /// so the connect and reorg commit paths share one transaction discipline
+    /// and cannot drift. Checkpoint recording is intentionally NOT part of this
+    /// transaction — a checkpoint lost to a crash is re-recorded at the next
+    /// interval, and it is not part of the height/state/output consistency
+    /// invariant this method guarantees.
+    ///
+    /// `output_additions` follows the same oldest-wins rule as the reorg path:
+    /// a stealth address already present in the committed output index is not
+    /// overwritten (the "already present" test is precomputed against committed
+    /// state because shim transaction reads pass through to committed data, not
+    /// the pending batch).
+    pub fn commit_block_atomic(
+        &self,
+        // Output index additions: (stealth_address, serialized OutputIndexEntry)
+        output_additions: &[([u8; 32], Vec<u8>)],
+        // The (height, block_hash) mapping for the newly connected tip.
+        height_set: (u64, [u8; 32]),
+        // Tx index additions: (tx_hash, height, tx_idx)
+        tx_index_adds: &[([u8; 32], u64, u32)],
+        // New chain state (serialized ChainStateData).
+        new_state: &[u8],
+    ) -> Result<()> {
+        use shim::transaction::Transactional;
+
+        // Oldest-wins precompute against the COMMITTED index (same discipline as
+        // apply_reorg_atomic — the transaction closure must be writes-only since
+        // its reads see committed state, not the pending batch).
+        let mut oi_to_insert: Vec<(&[u8; 32], &Vec<u8>)> = Vec::new();
+        for (stealth, entry_bytes) in output_additions {
+            if self
+                .output_index
+                .tree
+                .get(stealth.as_slice())
+                .map_err(|e| Error::DatabaseError(e.to_string()))?
+                .is_none()
+            {
+                oi_to_insert.push((stealth, entry_bytes));
+            }
+        }
+
+        let trees: &[&shim::Tree] = &[
+            &self.output_index.tree,
+            &self.blocks.height_index,
+            &self.state.state,
+            &self.tx_index,
+        ];
+
+        trees
+            .transaction(|tx_trees| {
+                let oi_tree = &tx_trees[0];
+                let hi_tree = &tx_trees[1];
+                let st_tree = &tx_trees[2];
+                let ti_tree = &tx_trees[3];
+
+                // 1. Output-index additions (oldest-wins filtered above)
+                for (stealth, entry_bytes) in &oi_to_insert {
+                    oi_tree.insert(stealth.as_slice(), entry_bytes.as_slice())?;
+                }
+
+                // 2. Height → hash for the new tip
+                let (height, hash) = height_set;
+                hi_tree.insert(&height.to_be_bytes(), hash.as_slice())?;
+
+                // 3. Chain state (same key the reorg path uses)
+                st_tree.insert(b"chain_state", new_state)?;
+
+                // 4. Tx index (same 12-byte height||idx encoding as the reorg path)
+                for (hash, height, tx_idx) in tx_index_adds {
+                    let mut value = [0u8; 12];
+                    value[..8].copy_from_slice(&height.to_le_bytes());
+                    value[8..].copy_from_slice(&tx_idx.to_le_bytes());
+                    ti_tree.insert(hash.as_slice(), &value)?;
+                }
+
+                Ok(())
+            })
+            .map_err(|e: shim::transaction::TransactionError| {
+                Error::DatabaseError(format!("commit_block_atomic transaction failed: {:?}", e))
+            })?;
+
+        // Durability barrier before the caller announces "Accepted".
+        self.flush()?;
+
+        Ok(())
+    }
+
     /// Flush all pending writes to disk
     pub fn flush(&self) -> Result<()> {
         self.db
@@ -1143,6 +1242,90 @@ mod tests {
             )
             .unwrap();
         db.flush().unwrap();
+    }
+
+    /// commit_block_atomic writes output-index + height→hash + chain-state +
+    /// tx-index in ONE transaction; after it returns, all four trees reflect
+    /// the same block. (Happy-path proof that the bundle lands together.)
+    #[test]
+    fn commit_block_atomic_writes_all_four_trees_together() {
+        let db = Database::open_temp().unwrap();
+        let h = 5u64;
+        let blk_hash = [0xABu8; 32];
+        let stealth = [0x11u8; 32];
+        let entry = OutputIndexEntry {
+            commitment: [0x22u8; 32],
+            height: h,
+            is_coinbase: false,
+            lock_height: None,
+        };
+        let tx_hash = [0x33u8; 32];
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes(blk_hash),
+            height: h,
+            total_difficulty: 100,
+            total_supply: 5_000,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+
+        db.commit_block_atomic(
+            &[(stealth, serialize(&entry).unwrap())],
+            (h, blk_hash),
+            &[(tx_hash, h, 0u32)],
+            &serialize(&state).unwrap(),
+        )
+        .unwrap();
+
+        // All four trees agree on the committed block.
+        let st = db.state.get_state().unwrap().expect("chain state present");
+        assert_eq!(st.height, h);
+        assert_eq!(st.tip_hash, Hash::from_bytes(blk_hash));
+        assert_eq!(
+            db.blocks.get_hash_by_height(h).unwrap(),
+            Some(Hash::from_bytes(blk_hash)),
+            "height index must map h -> tip hash"
+        );
+        let oi = db.output_index.get(&stealth).unwrap().expect("output index entry present");
+        assert_eq!(oi.commitment, [0x22u8; 32]);
+        assert_eq!(oi.height, h);
+        assert_eq!(db.get_tx_location(&tx_hash), Some((h, 0)));
+    }
+
+    /// The db/blocks.rs:227 invariant stated as an assertion: after every
+    /// commit_block_atomic, the height index maps state.height -> state.tip_hash
+    /// and NO height entry exists above state.height. Pre-fix (separate
+    /// set_height_hash + save_state), a crash between them could leave a height
+    /// entry above the committed state; the single transaction makes that
+    /// impossible.
+    #[test]
+    fn commit_block_atomic_height_index_never_outruns_state() {
+        let db = Database::open_temp().unwrap();
+        for h in 1..=10u64 {
+            let blk_hash = [h as u8; 32];
+            let state = ChainStateData {
+                tip_hash: Hash::from_bytes(blk_hash),
+                height: h,
+                total_difficulty: h as u128,
+                total_supply: (h as u128) * 1_000,
+                total_burned: 0,
+                last_checkpoint: 0,
+            };
+            db.commit_block_atomic(&[], (h, blk_hash), &[], &serialize(&state).unwrap())
+                .unwrap();
+
+            let st = db.state.get_state().unwrap().unwrap();
+            assert_eq!(
+                db.blocks.get_hash_by_height(st.height).unwrap(),
+                Some(st.tip_hash),
+                "height index must agree with state at h={h}"
+            );
+            assert_eq!(
+                db.blocks.get_hash_by_height(st.height + 1).unwrap(),
+                None,
+                "height index must never outrun committed state (h={h})"
+            );
+        }
     }
 
     #[test]

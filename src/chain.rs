@@ -206,6 +206,25 @@ impl BlockchainInner {
 
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
+    /// Coarse serialization lock for the ENTIRE block-application operation
+    /// (`add_block` / `rollback_to_height` / `restore_state`).
+    ///
+    /// This is NOT the data lock — `inner` still guards the structures. Its sole
+    /// job is to make the whole read→decide→mutate→persist sequence atomic
+    /// against OTHER writers: `add_block` is a series of separate `inner.write()`
+    /// critical sections with reads, DB I/O, validation, and (on reorg) a
+    /// lock-released `collect_fork_chain` in between; without this, two ingest
+    /// paths (P2P `BlockReceived`, RPC `submit_block`, the internal miner) can
+    /// interleave across those gaps (reorg-vs-extend, reorg-vs-reorg), corrupting
+    /// the UTXO set / `total_supply` / `height_to_hash`. The `state_updates`
+    /// counter below does NOT serialize — it only signals the mempool.
+    ///
+    /// LOCK ORDER: always acquire `apply_lock` BEFORE `inner`, never the reverse.
+    /// REENTRANCY: `parking_lot::Mutex` is NOT reentrant. ONLY the public write
+    /// entry points take it (`add_block`, `rollback_to_height`, `restore_state`).
+    /// `process_block` delegates to `add_block` and MUST NOT take it; no internal
+    /// helper may take it. Violating either invariant self-deadlocks.
+    apply_lock: parking_lot::Mutex<()>,
     /// Internal mutable state protected by RwLock
     inner: RwLock<BlockchainInner>,
     /// Monotonic marker for canonical-state changes observed by mempool admission.
@@ -286,6 +305,7 @@ impl Blockchain {
     /// Create new blockchain with explicit network type
     pub fn new_with_network(network: NetworkType) -> Self {
         Blockchain {
+            apply_lock: parking_lot::Mutex::new(()),
             inner: RwLock::new(BlockchainInner {
                 blocks: HashMap::new(),
                 height_to_hash: HashMap::new(),
@@ -324,6 +344,7 @@ impl Blockchain {
     /// Create blockchain with database and network type
     pub fn with_database(db: Arc<Database>, network: NetworkType) -> Self {
         Blockchain {
+            apply_lock: parking_lot::Mutex::new(()),
             inner: RwLock::new(BlockchainInner {
                 blocks: HashMap::new(),
                 height_to_hash: HashMap::new(),
@@ -1411,6 +1432,9 @@ impl Blockchain {
 
     /// Restore state from database
     pub fn restore_state(&self, height: u64, tip_hash: Hash, total_difficulty: u128) -> Result<()> {
+        // Coarse writer lock — serialize against add_block / rollback_to_height
+        // (see `apply_lock` doc). No reentrancy: does not call an apply_lock taker.
+        let _apply = self.apply_lock.lock();
         let _state_update = self.begin_state_update();
         {
             let mut inner = self.inner.write();
@@ -1430,6 +1454,10 @@ impl Blockchain {
     /// Returns the list of non-coinbase transactions from disconnected blocks
     /// (for mempool restoration).
     pub fn rollback_to_height(&self, target_height: u64) -> Result<Vec<Transaction>> {
+        // Coarse writer lock — serialize this multi-section mutation against
+        // add_block / restore_state (see `apply_lock` doc). Does not call back
+        // into any apply_lock taker, so no reentrancy.
+        let _apply = self.apply_lock.lock();
         let _state_update = self.begin_state_update();
         let current_height = self.height();
         if target_height >= current_height {
@@ -1719,6 +1747,12 @@ impl Blockchain {
 
     /// Add block to chain
     pub fn add_block(&self, block: Block) -> Result<BlockStatus> {
+        // Serialize the ENTIRE block-application operation against other writers
+        // (see `apply_lock` doc). Held for the whole read→decide→mutate→persist
+        // sequence — no other add_block/rollback/restore can interleave across
+        // the fine-grained `inner` sections or the lock-released fork walk.
+        // `process_block` delegates here and must NOT take this lock.
+        let _apply = self.apply_lock.lock();
         let _state_update = self.begin_state_update();
         let hash = block.hash();
 
@@ -2081,8 +2115,33 @@ impl Blockchain {
                 // The block is stored but not applied. The fork path will check
                 // cumulative work and perform a reorg if this block's chain is heavier.
             } else {
-                // Post-lock work: persist to database, record checkpoints.
-                self.persist_output_index(&block.transactions, block.header.height);
+                // Post-lock work: build the atomic-commit batch, then commit it
+                // ONCE below (crash-consistent). Replaces the former separate,
+                // non-transactional persist_output_index + per-tx index_tx +
+                // set_height_hash + save_state writes — a crash between any two
+                // of those left disk internally inconsistent (db/blocks.rs:227,
+                // output_index.rs:130). See Database::commit_block_atomic.
+                let mut output_additions: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+                let mut tx_index_adds: Vec<([u8; 32], u64, u32)> = Vec::new();
+                for (tx_idx, tx) in block.transactions.iter().enumerate() {
+                    let is_coinbase = tx.is_coinbase();
+                    for output in &tx.outputs {
+                        let entry = OutputIndexEntry {
+                            commitment: output.commitment,
+                            height: block.header.height,
+                            is_coinbase,
+                            lock_height: output.lock_height,
+                        };
+                        let bytes = crate::db::serialize(&entry).map_err(|e| {
+                            Error::Internal(format!(
+                                "serialize OutputIndexEntry failed at height {}: {}",
+                                block.header.height, e
+                            ))
+                        })?;
+                        output_additions.push((*output.stealth_address.as_bytes(), bytes));
+                    }
+                    tx_index_adds.push((*tx.hash().as_bytes(), block.header.height, tx_idx as u32));
+                }
 
                 // Index transactions for O(1) lookup by hash.
                 //
@@ -2105,20 +2164,8 @@ impl Blockchain {
                 // session) but it's the block-hash→pindex lookup, not
                 // the tx→block writer. Reference kept qualitative rather
                 // than perpetuate a mis-named identifier.
-                if let Some(ref db) = self.db {
-                    for (idx, tx) in block.transactions.iter().enumerate() {
-                        if let Err(e) =
-                            db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32)
-                        {
-                            tracing::warn!(
-                                target: "chain::tx_index",
-                                "tx_index insert failed for tx {} at height {}: {} \
-                                 (block accepted; explorer/wallet may miss this tx by hash)",
-                                hex::encode(tx.hash().as_bytes()), block.header.height, e
-                            );
-                        }
-                    }
-                }
+                // (tx-index is now written inside commit_block_atomic below,
+                // as part of the single crash-consistent transaction.)
 
                 // Update database height index (only after race check passes).
                 //
@@ -2132,20 +2179,8 @@ impl Blockchain {
                 // cleanly, and on restart the node re-syncs this single block from
                 // peers rather than running with in-memory ahead of disk.
                 if let Some(ref db) = self.db {
-                    db.blocks
-                        .set_height_hash(block.header.height, &hash)
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "CONSENSUS PERSISTENCE FAILURE: could not write the height \
-                                 index for block {} at height {}: {}. The in-memory tip has \
-                                 already advanced to this block; halting to preserve on-disk \
-                                 state (SIGTERM handler flushes RocksDB cleanly). Restart \
-                                 re-syncs this block from peers.",
-                                hash.to_hex(),
-                                block.header.height,
-                                e
-                            )
-                        });
+                    // (height→hash is now written inside commit_block_atomic
+                    // below, atomically with output-index, state, and tx-index.)
 
                     // Auto-record checkpoint every CHECKPOINT_INTERVAL blocks
                     let mut last_checkpoint_height = 0u64;
@@ -2190,10 +2225,35 @@ impl Blockchain {
                         total_burned: stats.total_burned as u64,
                         last_checkpoint: last_checkpoint_height,
                     };
-                    db.state.save_state(&state).unwrap_or_else(|e| {
+                    let state_bytes = crate::db::serialize(&state).unwrap_or_else(|e| {
                         panic!(
-                            "CONSENSUS PERSISTENCE FAILURE: could not persist chain state at \
-                             height {} (tip {}): {}. In-memory supply/difficulty/tip have already \
+                            "CONSENSUS PERSISTENCE FAILURE: could not serialize chain state at \
+                             height {} (tip {}): {}. In-memory tip already advanced; halting.",
+                            block.header.height,
+                            hash.to_hex(),
+                            e
+                        )
+                    });
+                    // ── ONE crash-consistent transaction ──
+                    // Commits output-index + height→hash + chain-state + tx-index
+                    // together (Database::commit_block_atomic), replacing the four
+                    // former separate writes so a crash can never leave the height
+                    // index / output index / tx index / state disagreeing.
+                    // Same halt-on-error model as the previous save_state: a
+                    // returned Err would mean in-memory is ahead of disk, so we
+                    // panic to let the SIGTERM flush + restart re-sync this one
+                    // block from peers. (Rollback-instead-of-halt is a separable,
+                    // reviewer-gated enhancement.)
+                    db.commit_block_atomic(
+                        &output_additions,
+                        (block.header.height, *hash.as_bytes()),
+                        &tx_index_adds,
+                        &state_bytes,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "CONSENSUS PERSISTENCE FAILURE: commit_block_atomic failed at height \
+                             {} (tip {}): {}. In-memory supply/difficulty/tip have already \
                              advanced; halting to preserve on-disk state (SIGTERM handler flushes \
                              RocksDB cleanly) so restart re-derives consistently rather than \
                              running with in-memory ahead of disk.",
@@ -3314,7 +3374,7 @@ impl Blockchain {
                             |b: &crate::consensus::Block,
                              oi: &mut Vec<([u8; 32], Vec<u8>)>,
                              hs: &mut Vec<(u64, [u8; 32])>,
-                             ti: &mut Vec<([u8; 32], u64, u32)>| {
+                             ti: &mut Vec<([u8; 32], u64, u32)>| -> Result<()> {
                                 let h = b.header.height;
                                 hs.push((h, *b.hash().as_bytes()));
                                 for (idx, tx) in b.transactions.iter().enumerate() {
@@ -3326,12 +3386,17 @@ impl Blockchain {
                                             is_coinbase,
                                             lock_height: output.lock_height,
                                         };
-                                        if let Ok(data) = crate::db::serialize(&entry) {
-                                            oi.push((*output.stealth_address.as_bytes(), data));
-                                        }
+                                        let data = crate::db::serialize(&entry).map_err(|e| {
+                                            Error::Internal(format!(
+                                                "serialize OutputIndexEntry failed at height {}: {}",
+                                                h, e
+                                            ))
+                                        })?;
+                                        oi.push((*output.stealth_address.as_bytes(), data));
                                     }
                                     ti.push((*tx.hash().as_bytes(), h, idx as u32));
                                 }
+                                Ok(())
                             };
 
                         for fork_block in &fork_blocks {
@@ -3340,14 +3405,14 @@ impl Blockchain {
                                 &mut oi_additions,
                                 &mut height_sets,
                                 &mut ti_adds,
-                            );
+                            )?;
                         }
                         collect_block_outputs(
                             &block,
                             &mut oi_additions,
                             &mut height_sets,
                             &mut ti_adds,
-                        );
+                        )?;
 
                         // 3. Compute stale heights to remove (above new tip)
                         let new_tip_height = block.header.height;
