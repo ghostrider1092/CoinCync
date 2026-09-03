@@ -517,17 +517,61 @@ impl Blockchain {
     /// reports it could not roll back (an empty checkpoint stack —
     /// e.g. a rewind attempted past a node restart).
     fn rewind_phase2_stores(&self, height: u64) {
-        for (name, outcome) in [
-            ("shielded", self.shielded_store.as_ref().map(|s| s.rewind())),
-            ("spark", self.spark_store.as_ref().map(|s| s.rewind())),
-            ("kernel", self.kernel_store.as_ref().map(|s| s.rewind())),
-        ] {
-            if outcome == Some(false) {
-                tracing::warn!(
-                    "{}_store.rewind() returned false at h={} — store could not \
-                     be rolled back; tree/UTXO state may be inconsistent",
+        // `rewind()` returns false ONLY when the in-memory checkpoint stack is
+        // empty (see the store impls). That has two very different meanings we
+        // must NOT conflate:
+        //   * the store is EMPTY (no Phase-2 data) — nothing to roll back. This
+        //     is the normal case today: shielded/spark/MW are dormant, so every
+        //     reorg used to spam a scary "state may be inconsistent" warning
+        //     (once per store per disconnected block) for a completely benign
+        //     no-op. Demote to debug.
+        //   * the store is NON-EMPTY but the checkpoint stack is gone (e.g. a
+        //     reorg reaching past a node restart — the stack is in-memory and
+        //     not yet restart-durable). Then a disconnected block's Phase-2
+        //     state is stranded above the new tip: a genuine inconsistency.
+        //     Make it a loud, unmistakable error that names the blocker.
+        //
+        // The full fix (restart-durable rewind checkpoints for the three
+        // Phase-2 stores) is a prerequisite for activating shielded/spark/MW —
+        // tracked as the phase-2-reorg-rewind mainnet blocker. Until then the
+        // stores stay dormant and this only ever hits the benign branch.
+        let stores: [(&str, Option<bool>, usize); 3] = [
+            (
+                "shielded",
+                self.shielded_store.as_ref().map(|s| s.rewind()),
+                self.shielded_store.as_ref().map(|s| s.tree_size()).unwrap_or(0),
+            ),
+            (
+                "spark",
+                self.spark_store.as_ref().map(|s| s.rewind()),
+                self.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
+            ),
+            (
+                "kernel",
+                self.kernel_store.as_ref().map(|s| s.rewind()),
+                self.kernel_store.as_ref().map(|s| s.len()).unwrap_or(0),
+            ),
+        ];
+        for (name, outcome, remaining) in stores {
+            if outcome != Some(false) {
+                continue;
+            }
+            if remaining == 0 {
+                tracing::debug!(
+                    "{}_store.rewind() at h={}: empty store, nothing to roll back",
                     name,
                     height
+                );
+            } else {
+                tracing::error!(
+                    "{}_store.rewind() FAILED at h={} with {} element(s) still \
+                     held — a disconnected block's Phase-2 state cannot be rolled \
+                     back and is now inconsistent with the reorged chain. \
+                     shielded/spark/MW MUST NOT be activated until rewind \
+                     checkpoints are restart-durable (phase-2-reorg-rewind).",
+                    name,
+                    height,
+                    remaining
                 );
             }
         }
