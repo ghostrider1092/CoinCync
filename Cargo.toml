@@ -261,7 +261,7 @@ incrementalmerkletree = "0.5"
 bridgetree            = "0.4"
 pasta_curves          = "0.5"
 blake2b_simd          = "1.0"
-ff                    = "0.13"
+ff                    = "0.14"
 group                 = "0.13"
 
 # Bridge crate â€” bytes-only cross-stack boundary types.
