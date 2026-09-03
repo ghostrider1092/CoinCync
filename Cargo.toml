@@ -246,7 +246,7 @@ tokio-tungstenite  = "0.29"
 # â”€â”€ Misc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 qrcode     = "0.14"
 image      = { version = "0.25", default-features = false, features = ["png"] }
-hashlink   = "0.9"
+hashlink   = "0.12"
 bloomfilter = "1"
 prometheus  = "0.14"
 
