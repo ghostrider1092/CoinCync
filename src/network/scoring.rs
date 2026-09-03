@@ -448,6 +448,14 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (23, 100), // MessageType::InvBlock   — 10/sec (block-announce flood)
     (30, 50),  // MessageType::GetAddr    — 5/sec  (peer-list scraping)
     (2, 30),   // MessageType::Ping       — 3/sec  (keepalive spam)
+    // Light-client / DHT query types (audit R3-4). Their handlers do bounded but
+    // CPU-heavy work (Golomb-Rice filters, digests, DB lookups); they were absent
+    // from this table, so record() returned false = UNLIMITED, letting a peer
+    // force sustained recompute. Discriminants verified against protocol.rs.
+    (60, 50), // MessageType::GetFilters           — 5/sec (filter range req)
+    (62, 50), // MessageType::GetOutputDigests     — 5/sec (digest range req)
+    (64, 20), // MessageType::GetFilterCheckpoints — 2/sec (zero-body, cheap to spam)
+    (70, 50), // MessageType::GetKeyImageStatus    — 5/sec (DHT ki query)
                // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
                // are intentionally NOT rate-limited here — we asked for them.
                // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
