@@ -258,6 +258,10 @@ pub struct DecryptedOutput {
     /// Previously this was always dropped, causing BackgroundScanner to persist
     /// `subaddress_index: None` for all outputs, losing subaddress association.
     pub subaddress_index: Option<(u32, u32)>,
+    /// Decrypted 8-byte payment ID (integrated addresses), if this transaction
+    /// carried one for us. Recovered at the tx level in `scan_transaction` from
+    /// the encrypted `tx.extra` entry; `None` on the per-output scan paths.
+    pub payment_id: Option<[u8; 8]>,
 }
 
 impl std::fmt::Debug for DecryptedOutput {
@@ -662,6 +666,7 @@ impl WalletScanner {
                         shared_secret: [0u8; 32],
                         key_epoch: keys.epoch,
                         subaddress_index: None, // Coinbase always to primary address
+                        payment_id: None, // coinbase carries no payment id
                     });
                 }
 
@@ -693,6 +698,7 @@ impl WalletScanner {
                         shared_secret: [0u8; 32],
                         key_epoch: keys.epoch,
                         subaddress_index: None, // Coinbase always to primary address
+                        payment_id: None, // coinbase carries no payment id
                     });
                 }
 
@@ -807,6 +813,7 @@ impl WalletScanner {
                     shared_secret,
                     key_epoch: keys.epoch,
                     subaddress_index: matched_subaddr,
+                    payment_id: None,
                 });
             }
         }
@@ -840,6 +847,31 @@ impl WalletScanner {
                 self.stats.outputs_found += 1;
                 self.stats.total_amount += decrypted.amount as u128;
                 found.push(decrypted);
+            }
+        }
+
+        // Integrated-address payment ID: recover once per transaction from the
+        // encrypted `tx.extra` entry, keyed to a detected output (same ECDH
+        // channel as memos). Attach to the found outputs so the wallet / an
+        // exchange can associate this deposit.
+        if !found.is_empty() {
+            if let Some(enc) = crate::transaction::payment_id::find_encrypted(&tx.extra) {
+                let tx_pub = found[0].output.tx_public_key;
+                let recovered = self.keys.iter().find_map(|k| {
+                    crate::crypto::decrypt_memo(&enc, k.view_secret.as_bytes(), tx_pub.as_bytes())
+                        .ok()
+                        .filter(|v| v.len() == crate::transaction::payment_id::PAYMENT_ID_LEN)
+                        .map(|v| {
+                            let mut a = [0u8; 8];
+                            a.copy_from_slice(&v);
+                            a
+                        })
+                });
+                if let Some(pid) = recovered {
+                    for d in &mut found {
+                        d.payment_id = Some(pid);
+                    }
+                }
             }
         }
 
@@ -1136,6 +1168,7 @@ fn scan_output_with_keys(
                     shared_secret: [0u8; 32],
                     key_epoch: key_set.epoch,
                     subaddress_index: None, // Coinbase always to primary address
+                    payment_id: None,
                 });
             }
 
@@ -1169,6 +1202,7 @@ fn scan_output_with_keys(
                     shared_secret: [0u8; 32],
                     key_epoch: key_set.epoch,
                     subaddress_index: None, // Coinbase always to primary address
+                    payment_id: None,
                 });
             }
             continue; // Not ours under this key_set
@@ -1258,6 +1292,7 @@ fn scan_output_with_keys(
                 shared_secret,
                 key_epoch: key_set.epoch,
                 subaddress_index: matched_subaddr,
+                payment_id: None,
             });
         }
     }
@@ -1742,6 +1777,7 @@ pub fn decrypted_to_utxo(
         lock_height: decrypted.output.lock_height,
         subaddress_account: decrypted.subaddress_index.map(|(a, _)| a),
         subaddress_index: decrypted.subaddress_index.map(|(_, i)| i),
+        payment_id: decrypted.payment_id,
     })
 }
 
@@ -2409,6 +2445,7 @@ mod tests {
             shared_secret: [0u8; 32],
             key_epoch: 0,
             subaddress_index: Some((0, 1)),
+            payment_id: None,
         };
 
         let utxo = decrypted_to_utxo(&decrypted, &view_secret, &spend_secret, 1).unwrap();

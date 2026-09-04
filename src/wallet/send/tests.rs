@@ -45,6 +45,7 @@ fn make_utxo(amount: u64, index: u8) -> UTXO {
         lock_height: None,
         subaddress_account: None,
         subaddress_index: None,
+        payment_id: None,
     }
 }
 

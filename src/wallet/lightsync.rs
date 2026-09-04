@@ -67,10 +67,19 @@ pub struct OutputDigest {
     pub tx_hash: Hash,
     /// Reference: output index within the transaction (1 byte)
     pub output_index: u8,
+    /// Integrated-address encrypted payment ID from the transaction's `extra`
+    /// (issue #50). Non-empty only on the tx's FIRST output, whose
+    /// `tx_public_key` is the ECDH key the payment ID was encrypted to, so a
+    /// light client that owns that output can recover it without full scanning.
+    /// Empty when the transaction carries no payment ID.
+    #[serde(default)]
+    pub encrypted_payment_id: Vec<u8>,
 }
 
 impl OutputDigest {
-    /// Create an OutputDigest from a TxOutput and its transaction context
+    /// Create an OutputDigest from a TxOutput and its transaction context.
+    /// The encrypted payment ID (if any) is attached separately in
+    /// [`BlockDigest::from_block`], which has the transaction-level `extra`.
     pub fn from_output(output: &TxOutput, tx_hash: Hash, output_index: u8) -> Self {
         OutputDigest {
             tx_public_key: output.tx_public_key,
@@ -80,13 +89,14 @@ impl OutputDigest {
             encrypted_amount: output.encrypted_amount.clone(),
             tx_hash,
             output_index,
+            encrypted_payment_id: Vec::new(),
         }
     }
 
     /// Estimated serialized size in bytes
     pub fn estimated_size() -> usize {
-        // 32 + 1 + 32 + 32 + 8 + 32 + 1 = ~138 with overhead
-        138
+        // 32 + 1 + 32 + 32 + 8 + 32 + 1 + ~9 (payment id) = ~147 with overhead
+        147
     }
 }
 
@@ -122,11 +132,23 @@ impl BlockDigest {
 
         for tx in &block.transactions {
             let tx_hash = tx.hash();
+            let first_output_pos = outputs.len();
+            let mut any_output = false;
             for (idx, output) in tx.outputs.iter().enumerate() {
                 if idx > 255 {
                     break;
                 } // Same safety as WalletScanner
                 outputs.push(OutputDigest::from_output(output, tx_hash, idx as u8));
+                any_output = true;
+            }
+            // Integrated-address payment ID (issue #50): carry the encrypted
+            // extra entry on the tx's first output digest so a light client that
+            // owns it can recover the payment ID (its tx_public_key is the ECDH
+            // key the ID was encrypted to).
+            if any_output {
+                if let Some(enc) = crate::transaction::payment_id::find_encrypted(&tx.extra) {
+                    outputs[first_output_pos].encrypted_payment_id = enc;
+                }
             }
         }
 
@@ -407,6 +429,27 @@ impl LightWalletSync {
                     continue;
                 }
 
+                // Integrated-address payment ID (issue #50): if this output
+                // carries the encrypted extra entry (set on the tx's first
+                // output), recover it over the same ECDH channel the full
+                // scanner uses, so light-wallet users don't lose it.
+                let payment_id = if output.encrypted_payment_id.is_empty() {
+                    None
+                } else {
+                    crate::crypto::decrypt_memo(
+                        &output.encrypted_payment_id,
+                        keys.view_secret.as_bytes(),
+                        output.tx_public_key.as_bytes(),
+                    )
+                    .ok()
+                    .filter(|v| v.len() == crate::transaction::payment_id::PAYMENT_ID_LEN)
+                    .map(|v| {
+                        let mut a = [0u8; 8];
+                        a.copy_from_slice(&v);
+                        a
+                    })
+                };
+
                 // Reconstruct TxOutput for DecryptedOutput compatibility
                 let tx_output = TxOutput {
                     stealth_address: output.stealth_address,
@@ -428,6 +471,7 @@ impl LightWalletSync {
                     shared_secret,
                     key_epoch: keys.epoch,
                     subaddress_index: matched_subaddr,
+                    payment_id,
                 });
             }
         }
@@ -639,6 +683,7 @@ fn scan_output_digest_with_keys(
                 shared_secret,
                 key_epoch: key_set.epoch,
                 subaddress_index: matched_subaddr,
+                payment_id: None,
             });
         }
     }
@@ -908,6 +953,71 @@ mod tests {
                 height: 1,
                 ordinal: 0,
             })
+        );
+    }
+
+    #[test]
+    fn test_scan_digest_recovers_payment_id() {
+        // issue #50: light-sync must recover the integrated-address payment ID
+        // instead of silently dropping it.
+        let (view_secret, spend_public) = make_test_keys();
+        let view_public = PublicKey::from_bytes(
+            CurveSecretScalar::from_bytes(*view_secret.as_bytes())
+                .to_public()
+                .to_bytes(),
+        );
+        let amount = 3_000_000u64;
+        let (output, tx_secret) = create_test_output(&view_secret, &spend_public, amount, 0);
+
+        // Encrypt a payment ID to the recipient over the output's ECDH channel
+        // (exactly as TransactionBuilder::with_payment_id does) and place the
+        // tagged entry in tx.extra.
+        let pid = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let enc = crate::crypto::encrypt_memo(&pid, tx_secret.as_bytes(), view_public.as_bytes())
+            .expect("encrypt payment id");
+        let extra = crate::transaction::payment_id::encode_extra(&enc);
+
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Coinbase,
+            inputs: vec![],
+            outputs: vec![output],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height: 1,
+            timestamp: 1000,
+            prev_hash: Hash::from_bytes([0u8; 32]),
+            tx_root: tx.hash(),
+            anchor: Hash::from_bytes([0u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: spend_public,
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        let block = Block::new(header, vec![tx]);
+        let digest = BlockDigest::from_block(&block);
+        assert!(
+            !digest.outputs[0].encrypted_payment_id.is_empty(),
+            "digest must carry the encrypted payment id on the first output"
+        );
+
+        let keys = ScanKeys::new(view_secret, spend_public, 0);
+        let mut sync = LightWalletSync::new(vec![keys]);
+        let found = sync.scan_digest(&digest);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].payment_id,
+            Some(pid),
+            "light-sync must recover the integrated-address payment id"
         );
     }
 

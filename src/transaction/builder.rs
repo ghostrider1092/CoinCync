@@ -126,6 +126,10 @@ pub struct TransactionBuilder {
     /// outputs). The CLI flow is `set-recovery` → store config →
     /// `send --recovery-address X --recovery-timeout Y` → embed.
     extra: Vec<u8>,
+    /// Optional 8-byte payment ID (integrated addresses). Encrypted with the
+    /// first recipient output's ECDH secret during `build()` and stored as a
+    /// tagged entry in `tx.extra`; recovered by the recipient on scan.
+    payment_id: Option<[u8; 8]>,
     /// Transaction version.
     tx_version: u8,
 }
@@ -143,8 +147,16 @@ impl TransactionBuilder {
             target_height: 0,
             memo: None,
             extra: Vec::new(),
+            payment_id: None,
             tx_version: 1,
         }
+    }
+
+    /// Attach an 8-byte payment ID (integrated address). Encrypted into
+    /// `tx.extra` during `build()` and recovered by the recipient on scan.
+    pub fn with_payment_id(mut self, payment_id: [u8; 8]) -> Self {
+        self.payment_id = Some(payment_id);
+        self
     }
 
     /// Attach raw bytes to `tx.extra`. Used to embed `RecoveryMeta`
@@ -573,6 +585,23 @@ impl TransactionBuilder {
             }
         }
 
+        // Integrated-address payment ID: encrypt the 8-byte id with the first
+        // recipient output's ECDH secret (same channel as the memo) and append
+        // it to `tx.extra` as a tagged entry. Bound into the signing hash below
+        // (extra is covered), so it can't be stripped/altered. The recipient
+        // recovers it on scan via `payment_id::find_encrypted` + `decrypt_memo`.
+        let mut extra = self.extra.clone();
+        if let Some(pid) = self.payment_id {
+            for (idx, o) in self.outputs.iter().enumerate() {
+                if let Some(view_pub) = &o.recipient_view_public {
+                    let tx_secret = &self.output_tx_secrets[idx];
+                    let enc = encrypt_memo(&pid, tx_secret.as_bytes(), view_pub.as_bytes())?;
+                    extra.extend_from_slice(&crate::transaction::payment_id::encode_extra(&enc));
+                    break; // only the first recipient output
+                }
+            }
+        }
+
         // Build outputs
         let tx_outputs: Vec<TxOutput> = self
             .outputs
@@ -687,7 +716,7 @@ impl TransactionBuilder {
             signing_input_views,
             &tx_outputs,
             &range_proof_bytes,
-            &self.extra,
+            &extra,
         );
         let message = signing_hash.as_bytes().to_vec();
 
@@ -738,7 +767,7 @@ impl TransactionBuilder {
             outputs: tx_outputs,
             fee: self.fee,
             range_proof: range_proof_bytes,
-            extra: self.extra,
+            extra,
         })
     }
 }
