@@ -85,8 +85,8 @@ pub const TESTNET_INITIAL_DIFFICULTY: u64 = 64_000;
 // fails fast so CI catches it before it ships.
 // Public testnet genesis — April 21, 2026 reset
 pub const TESTNET_GENESIS_HASH: [u8; 32] = [
-    0x3c, 0xd2, 0x87, 0x86, 0xb3, 0x33, 0x08, 0x44, 0x77, 0x1b, 0x7b, 0xc4, 0x3e, 0xbd, 0xbc, 0x61,
-    0xe3, 0xa8, 0xcf, 0xfd, 0xf1, 0x8c, 0xc6, 0x0e, 0xa3, 0xba, 0x32, 0xab, 0xb0, 0xba, 0x7c, 0x2d,
+    0xd2, 0x24, 0x0f, 0xea, 0xa1, 0xf5, 0xaa, 0x29, 0xf2, 0x5f, 0x4c, 0x9f, 0x3b, 0x69, 0x48, 0x36,
+    0x8a, 0x9a, 0x36, 0x07, 0x44, 0x3d, 0x63, 0x76, 0x60, 0x63, 0x7d, 0x28, 0xa0, 0x0d, 0x82, 0xda,
 ];
 
 // ── Checkpoints ──────────────────────────────────────────────────────────────
@@ -192,11 +192,20 @@ pub fn testnet_genesis() -> Block {
     // Bumping the timestamp by 1 second changes the genesis hash and
     // therefore the RandomX key, avoiding the bad key.
     // L-7: +1 workaround for randomx_rs Argon2d KVM hang. File upstream bug.
-    // RESET 2026-04-21: New genesis for public testnet launch.
+    // RESET 2026-09-04: New genesis for public testnet launch.
     // Previous timestamp 1772784001 produced chains that got contaminated
     // during infrastructure updates. Fresh start with current timestamp.
-    let timestamp = 1776818628;
-    let genesis_message = b"CoinCync Public Testnet - April 2026 - Trust the Math";
+    //
+    // The genesis timestamp MUST be near the chain's actual start. A stale one
+    // defeats the difficulty calibration above: ASERT anchors its window at
+    // genesis for the first DIFFICULTY_LONG_WINDOW blocks, so if the first real
+    // block is mined long after the genesis timestamp, that huge apparent gap
+    // makes the chain look catastrophically slow and crashes difficulty to the
+    // floor for ~144 blocks before recovering. The prior 1776818628 (Apr 21) was
+    // 135 days stale by the Sept restart and did exactly that. See
+    // docs/design/difficulty-oscillation-analysis.md §7.
+    let timestamp = 1788480000; // 2026-09-04 testnet reset
+    let genesis_message = b"CoinCync Public Testnet - September 2026 - Trust the Math";
     let coinbase_tx = create_genesis_coinbase(genesis_message);
 
     let params = NetworkType::Testnet.params();
