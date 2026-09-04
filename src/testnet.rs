@@ -70,7 +70,13 @@ pub const TESTNET_BLOCK_TIME: u64 = crate::constants::TARGET_BLOCK_TIME;
 // Premium AMD 1 vCPU droplets (light mode, no huge pages). Target
 // block time = 120 s → difficulty = 40 × 120 = 4800. from_difficulty
 // rounds to 12 leading zero bits (effective ~4096).
-pub const TESTNET_INITIAL_DIFFICULTY: u64 = 4_800;
+// Calibrated 2026-09-02 to a single home-CPU RandomX hashrate (~530 H/s):
+// initial difficulty ≈ H × TARGET_BLOCK_TIME (120s) so a fresh chain produces
+// ~120s blocks from genesis instead of solving far under target and driving
+// ASERT into a large startup overshoot/stall. See
+// docs/design/difficulty-oscillation-analysis.md §7 (the fix is genesis
+// calibration, NOT an ASERT hard fork — the algorithm is left unchanged).
+pub const TESTNET_INITIAL_DIFFICULTY: u64 = 64_000;
 
 // Recomputed after the header/tx signing-hash domain separator landing.
 // See `BlockHeader::HEADER_HASH_DOMAIN_TAG` in src/consensus/header.rs and
@@ -79,8 +85,8 @@ pub const TESTNET_INITIAL_DIFFICULTY: u64 = 4_800;
 // fails fast so CI catches it before it ships.
 // Public testnet genesis — April 21, 2026 reset
 pub const TESTNET_GENESIS_HASH: [u8; 32] = [
-    0x41, 0xf9, 0x70, 0xdf, 0x61, 0x52, 0x42, 0x5a, 0x29, 0x38, 0x72, 0x54, 0x23, 0x23, 0x5c, 0x2c,
-    0x40, 0xec, 0x52, 0x55, 0x6e, 0xcc, 0x0f, 0xd1, 0x42, 0x2d, 0x58, 0x86, 0x52, 0xcc, 0x56, 0xb4,
+    0xd2, 0x24, 0x0f, 0xea, 0xa1, 0xf5, 0xaa, 0x29, 0xf2, 0x5f, 0x4c, 0x9f, 0x3b, 0x69, 0x48, 0x36,
+    0x8a, 0x9a, 0x36, 0x07, 0x44, 0x3d, 0x63, 0x76, 0x60, 0x63, 0x7d, 0x28, 0xa0, 0x0d, 0x82, 0xda,
 ];
 
 // ── Checkpoints ──────────────────────────────────────────────────────────────
@@ -186,11 +192,20 @@ pub fn testnet_genesis() -> Block {
     // Bumping the timestamp by 1 second changes the genesis hash and
     // therefore the RandomX key, avoiding the bad key.
     // L-7: +1 workaround for randomx_rs Argon2d KVM hang. File upstream bug.
-    // RESET 2026-04-21: New genesis for public testnet launch.
+    // RESET 2026-09-04: New genesis for public testnet launch.
     // Previous timestamp 1772784001 produced chains that got contaminated
     // during infrastructure updates. Fresh start with current timestamp.
-    let timestamp = 1776818628;
-    let genesis_message = b"CoinCync Public Testnet - April 2026 - Trust the Math";
+    //
+    // The genesis timestamp MUST be near the chain's actual start. A stale one
+    // defeats the difficulty calibration above: ASERT anchors its window at
+    // genesis for the first DIFFICULTY_LONG_WINDOW blocks, so if the first real
+    // block is mined long after the genesis timestamp, that huge apparent gap
+    // makes the chain look catastrophically slow and crashes difficulty to the
+    // floor for ~144 blocks before recovering. The prior 1776818628 (Apr 21) was
+    // 135 days stale by the Sept restart and did exactly that. See
+    // docs/design/difficulty-oscillation-analysis.md §7.
+    let timestamp = 1788480000; // 2026-09-04 testnet reset
+    let genesis_message = b"CoinCync Public Testnet - September 2026 - Trust the Math";
     let coinbase_tx = create_genesis_coinbase(genesis_message);
 
     let params = NetworkType::Testnet.params();

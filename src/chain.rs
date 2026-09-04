@@ -1240,10 +1240,13 @@ impl Blockchain {
         if self.network == crate::config::NetworkType::Regtest {
             // Ease difficulty DOWN toward the MIN_DIFFICULTY floor at <=3x per
             // block (safely inside the ±4x/step sanity layer), then pin there
-            // and never retarget. A fresh regtest chain therefore drops from the
-            // genesis difficulty to the floor in a couple of blocks and then
-            // produces blocks at a stable, low, overshoot-free rate — the fast
-            // local harness Bitcoin's regtest provides.
+            // and never retarget. Applies from the very first block (parent =
+            // genesis), so a fresh regtest chain drops from the genesis
+            // difficulty to the floor in a few blocks and then produces blocks
+            // at a stable, low, overshoot-free rate — the fast local harness
+            // Bitcoin's regtest provides. (The ease starts at genesis rather
+            // than jumping straight to the floor because the locked ±4x/step
+            // sanity layer would reject a single large drop.)
             let parent = blocks.last().map(|b| b.target).unwrap_or_else(max_target);
             let parent_diff = crate::consensus::difficulty::target_to_difficulty(&parent);
             let floor = crate::consensus::difficulty::MIN_DIFFICULTY;
@@ -1254,7 +1257,14 @@ impl Blockchain {
             let next_diff = (parent_diff / 3).max(floor).min(u64::MAX as u128) as u64;
             return Hash::from_difficulty(next_diff);
         }
-        calculate_difficulty(blocks, height)
+        if blocks.len() >= 2 {
+            calculate_difficulty(blocks, height)
+        } else {
+            // Only genesis (or nothing): maintain genesis difficulty until ASERT
+            // has a full window. Non-regtest networks rely on a calibrated
+            // genesis difficulty here (see {testnet,mainnet}.rs INITIAL_DIFFICULTY).
+            blocks.last().map(|b| b.target).unwrap_or_else(max_target)
+        }
     }
 
     /// Compute the exact target hash for the next block using ASERT difficulty adjustment.
@@ -1262,13 +1272,7 @@ impl Blockchain {
     pub fn next_target(&self) -> Hash {
         let height = self.height() + 1;
         let diff_blocks = self.get_difficulty_blocks(height);
-        match diff_blocks.len() {
-            0 => max_target(),
-            // Only genesis exists: maintain genesis difficulty until ASERT has enough data
-            // (regtest keeps this pinned target for the life of the chain).
-            1 => diff_blocks[0].target,
-            _ => self.expected_next_target(&diff_blocks, height),
-        }
+        self.expected_next_target(&diff_blocks, height)
     }
 
     /// Check if chain is synced (updated by P2P layer via set_sync_info).
@@ -1570,10 +1574,41 @@ impl Blockchain {
 
             // Disconnect blocks in reverse height order
             for h in (target_height + 1..=current_height).rev() {
-                let orphan_hash = inner.height_to_hash.get(&h).copied();
+                let orphan_hash = inner.height_to_hash.get(&h).copied().or_else(|| {
+                    self.db
+                        .as_ref()
+                        .and_then(|db| db.blocks.get_hash_by_height(h).ok().flatten())
+                });
                 if let Some(oh) = orphan_hash {
-                    let orphan_txs = inner.blocks.get(&oh).map(|b| b.transactions.clone());
-                    if let Some(txs) = orphan_txs {
+                    // Resolve the block body from the in-memory cache, falling back
+                    // to the DB. Deep rollbacks (this function's whole purpose)
+                    // routinely target heights below the ~200-block cache window; if
+                    // the body is DB-only, the original cache-only lookup returned
+                    // None and skipped ALL of the disconnect below (UTXO / supply /
+                    // burn / total_difficulty / phase-2) while the tip still moved
+                    // down — over-counting persisted state. Mirror the tip cascade.
+                    let orphan_block = inner.blocks.get(&oh).cloned().or_else(|| {
+                        self.db
+                            .as_ref()
+                            .and_then(|db| db.blocks.get(&oh).ok().flatten())
+                    });
+                    let orphan_block = match orphan_block {
+                        Some(b) => b,
+                        None => {
+                            // Body missing from cache AND DB: cannot revert this
+                            // block's state safely. Fail loudly instead of silently
+                            // under-disconnecting (which corrupts supply/work) —
+                            // consistent with the halt-on-corruption arms below.
+                            return Err(Error::InvalidState(format!(
+                                "rollback_to_height: block {} at height {} missing from \
+                                 cache AND DB; cannot revert its state — resync required",
+                                oh.to_hex(),
+                                h
+                            )));
+                        }
+                    };
+                    let txs = orphan_block.transactions.clone();
+                    {
                         let disconnect_batch = UtxoSet::batch_disconnect_block(&txs);
                         inner.utxos.apply_batch(disconnect_batch);
                         // Phase 2 store rewind (site 2: rollback_to_height
@@ -1595,12 +1630,7 @@ impl Blockchain {
                         // `oh` (its txs were just read above), so its fee-burn is
                         // well-defined. Computed before the stat mutations so the
                         // immutable borrow of `inner.blocks` is released first.
-                        let fee_burn = block_fee_burn(
-                            inner
-                                .blocks
-                                .get(&oh)
-                                .expect("disconnected block is in cache; its txs were just read"),
-                        );
+                        let fee_burn = block_fee_burn(&orphan_block);
                         // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                         //
                         // AUDIT (2026-07-02): third site of the self-defeating supply-
@@ -1654,11 +1684,8 @@ impl Blockchain {
                         // so this node would advertise more work than one that reached
                         // the same tip linearly — a false `work_behind` veto / wrong
                         // fork choice. saturating_sub: work never drops below the base.
-                        let disc_difficulty = inner
-                            .blocks
-                            .get(&oh)
-                            .map(|b| calculate_difficulty_from_target(&b.header.target))
-                            .unwrap_or(0);
+                        let disc_difficulty =
+                            calculate_difficulty_from_target(&orphan_block.header.target);
                         inner.stats.total_difficulty =
                             inner.stats.total_difficulty.saturating_sub(disc_difficulty);
                     }
@@ -5024,6 +5051,80 @@ mod tests {
         assert_eq!(
             chain.stats().total_burned, 0,
             "disconnecting every fee-carrying block returns total_burned to 0"
+        );
+    }
+
+    #[test]
+    fn rollback_to_height_disconnects_db_only_blocks_past_the_cache() {
+        // Regression (junbyjun1238, PR #48): deep rollbacks target heights below
+        // the ~200-block in-memory cache window, so the blocks being disconnected
+        // live only in the DB. Their UTXO / supply / burn / total_difficulty must
+        // still be reverted. Stage two fee-carrying blocks in the DB ONLY (never
+        // the in-memory cache — the cache-evicted condition), advance the
+        // accumulators as the connect path would, then roll back to genesis.
+        // Before the fix the cache-only lookup skipped these blocks entirely,
+        // leaving state over-counted while the tip still moved down; now the
+        // disconnect loop falls back to the DB.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let genesis_hash = chain.init_genesis().unwrap();
+
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        let h1 = act.max(1);
+        let h2 = h1 + 1;
+        let b1 = burn_test_block(h1, 31, &[3_000_000]);
+        let b2 = burn_test_block(h2, 32, &[5_000_000]);
+        let burn1 = block_fee_burn(&b1);
+        let burn2 = block_fee_burn(&b2);
+        let diff1 = calculate_difficulty_from_target(&b1.header.target);
+        let diff2 = calculate_difficulty_from_target(&b2.header.target);
+        assert!(burn1 > 0 && burn2 > 0, "staged blocks must burn fees");
+
+        // DB-ONLY: bodies + height index into the DB; deliberately NOT into
+        // inner.blocks / inner.height_to_hash (simulating cache eviction).
+        db.blocks.insert(&b1).unwrap();
+        db.blocks.insert(&b2).unwrap();
+        db.blocks.set_height_hash(h1, &b1.hash()).unwrap();
+        db.blocks.set_height_hash(h2, &b2.hash()).unwrap();
+
+        let base_supply;
+        let base_diff;
+        {
+            let mut inner = chain.inner.write();
+            base_supply = inner.stats.total_supply;
+            base_diff = inner.stats.total_difficulty;
+            inner.tip.hash = b2.hash();
+            inner.tip.height = h2;
+            inner.stats.height = h2;
+            inner.stats.tip_hash = b2.hash();
+            inner.stats.total_supply = base_supply
+                + calculate_block_reward(h1).as_atomic() as u128
+                + calculate_block_reward(h2).as_atomic() as u128;
+            inner.stats.total_burned += burn1 + burn2;
+            inner.stats.total_difficulty = base_diff + diff1 + diff2;
+        }
+        let burned_before = chain.stats().total_burned;
+
+        chain
+            .rollback_to_height(0)
+            .expect("deep rollback to genesis (DB-only blocks)");
+
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
+        assert_eq!(
+            chain.stats().total_supply,
+            base_supply,
+            "supply reverted through the DB-fallback disconnect"
+        );
+        assert_eq!(
+            chain.stats().total_burned,
+            burned_before - burn1 - burn2,
+            "burn reverted through the DB-fallback disconnect"
+        );
+        assert_eq!(
+            chain.stats().total_difficulty,
+            base_diff,
+            "total_difficulty reverted through the DB-fallback disconnect"
         );
     }
 }

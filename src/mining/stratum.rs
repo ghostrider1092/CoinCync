@@ -254,6 +254,18 @@ pub enum ShareResult {
     Duplicate,
 }
 
+/// If the server's canonical job is no longer current (it rotated during the
+/// share's RandomX hashing), a Valid/Block result was computed against a stale
+/// template and must be treated as Stale — for BOTH stat accounting and block
+/// submission. Extracted as a pure function so the downgrade decision can be
+/// unit-tested without the async submit machinery. (audit #35, junbyjun1238)
+fn downgrade_stale_share(result: ShareResult, job_still_current: bool) -> ShareResult {
+    match result {
+        ShareResult::Valid | ShareResult::Block(_) if !job_still_current => ShareResult::Stale,
+        other => other,
+    }
+}
+
 impl Share {
     /// Verify a share meets the target difficulty
     ///
@@ -1396,6 +1408,18 @@ async fn handle_stratum_message(
                 },
             };
 
+            // Revalidate the canonical job AFTER verify()'s (RandomX) hashing and
+            // BEFORE any accounting: if the server's canonical job rotated during
+            // the hash, a Valid/Block result was computed against a stale template
+            // and must not be credited to worker/pool stats (nor submitted). The
+            // native path already revalidates before crediting; the legacy path
+            // previously only revalidated before block submission, so a rotation
+            // during verify() still credited a stale share to stats. Downgrade to
+            // Stale here so both the stats blocks below and the submission guard
+            // see the corrected result. (audit #35, junbyjun1238)
+            let job_still_current = canonical_job_unchanged(current_job, job_id).await;
+            let share_result = downgrade_stale_share(share_result, job_still_current);
+
             // Update stats based on result
             let mut should_strike_for_invalid_streak = false;
             {
@@ -1697,6 +1721,42 @@ async fn register_stratum_strike(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downgrade_stale_share_treats_rotated_job_results_as_stale() {
+        // audit #35: if the canonical job rotated during verify()'s hashing, a
+        // Valid/Block share is stale and must not be credited (nor submitted).
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Valid, false),
+            ShareResult::Stale
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Block(Hash::zero()), false),
+            ShareResult::Stale
+        ));
+        // Job still current → pass through unchanged.
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Valid, true),
+            ShareResult::Valid
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Block(Hash::zero()), true),
+            ShareResult::Block(_)
+        ));
+        // Non-valid results are never changed, regardless of job state.
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Invalid, false),
+            ShareResult::Invalid
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Duplicate, false),
+            ShareResult::Duplicate
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Stale, true),
+            ShareResult::Stale
+        ));
+    }
     use std::io::Write;
     use std::sync::{Mutex, OnceLock};
 

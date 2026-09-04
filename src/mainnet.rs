@@ -23,7 +23,15 @@ use crate::transaction::{Transaction, TxOutput, TxType};
 /// Higher than testnet to account for real mining hardware at launch.
 /// ASERT converges toward the `TARGET_BLOCK_TIME` (120s) target regardless of
 /// this seed; a modest initial hashrate simply takes a few blocks to settle.
-pub const MAINNET_INITIAL_DIFFICULTY: u64 = 10_000;
+// Calibrated 2026-09-02 to a home-CPU RandomX launch hashrate (~530 H/s per
+// CPU): initial difficulty ≈ H × TARGET_BLOCK_TIME (120s) so genesis-era blocks
+// land near the 120s target instead of solving far under it and driving ASERT
+// into a startup overshoot/stall. 64k assumes a single-CPU founder launch and
+// stays safe as more home miners join (blocks stay well above 1s, so no
+// timestamp-compression spiral — a gentle bounded ramp at worst). If mainnet
+// launches with substantially more aggregate hashrate, raise this to
+// ≈ total_launch_hashrate × 120. See docs/design/difficulty-oscillation-analysis.md §7.
+pub const MAINNET_INITIAL_DIFFICULTY: u64 = 64_000;
 
 /// Hardcoded mainnet genesis hash.
 /// Computed from `mainnet_genesis()` — any accidental change to the genesis
@@ -37,8 +45,8 @@ pub const MAINNET_INITIAL_DIFFICULTY: u64 = 10_000;
 // this constant must be recomputed — `test_mainnet_genesis_hash_consistency`
 // below fails fast so CI catches it before it ships.
 pub const MAINNET_GENESIS_HASH: [u8; 32] = [
-    0x9d, 0xbb, 0x99, 0xab, 0x3e, 0x63, 0xac, 0x14, 0x0f, 0x4a, 0xdf, 0xb8, 0xfb, 0x76, 0xef, 0xbd,
-    0x66, 0x5f, 0xb7, 0xf2, 0x3d, 0x75, 0xda, 0x9f, 0xa7, 0xda, 0x82, 0xe4, 0xd5, 0xc0, 0x33, 0x68,
+    0xc9, 0xeb, 0x73, 0xab, 0x1e, 0xd2, 0xd9, 0xe4, 0x00, 0x42, 0xa9, 0x62, 0x99, 0x0b, 0xba, 0x98,
+    0x11, 0x4b, 0xc5, 0x09, 0xb3, 0x30, 0xbc, 0xda, 0x02, 0x2b, 0x9e, 0xc8, 0xfe, 0x07, 0x63, 0x5c,
 ];
 
 // AUDIT (2026-07-02): removed the `pub mod emission { ... }` block that

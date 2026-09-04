@@ -170,3 +170,33 @@ fixed-point path; it is validated to reproduce the §2 ring qualitatively but
 under-predicts real overshoot magnitude (it uses steady, not bursty, hashrate).
 Scripts: `scratchpad/difficulty_sim.py` (variants) and `difficulty_sim2.py`
 (integer timestamps + genesis-calibration test).
+
+## 8. Implemented (2026-09-03) — genesis calibration + ASERT startup grace
+
+Three changes landed after a live testnet soak of §7's genesis-calibration
+recommendation exposed a residual dip:
+
+1. **Genesis-difficulty calibration** — `TESTNET_INITIAL_DIFFICULTY` and
+   `MAINNET_INITIAL_DIFFICULTY` set to 64,000 (≈ a single home-CPU RandomX
+   equilibrium × 120 s). Not an ASERT change; just a genesis parameter.
+2. **Fresh genesis timestamp** — the testnet genesis timestamp was bumped to the
+   chain's actual start. A stale genesis timestamp defeats (1): ASERT anchored on
+   genesis for the first ~144 blocks, and a large genesis→first-block gap made
+   the chain look catastrophically slow, collapsing difficulty to the
+   `MIN_DIFFICULTY` floor before recovery (confirmed live: 64k → 500 → ramp).
+3. **ASERT startup grace** — `get_anchor` now advances the anchor past the
+   genesis block (height 0) to the first mined block, so `time_error` is always
+   computed over real inter-block timestamps and the genesis timestamp never
+   feeds a retarget. `difficulty_sim3.py` scored the options: this
+   "no-genesis-anchor" grace removes the dip for genesis gaps from 2 min to
+   135 days with fast (~17-block) convergence, and beats warmup-hold; it is
+   deterministic (consensus-safe) and only differs from the old behaviour while
+   genesis is inside the window (~first long-window blocks), so mature
+   steady-state difficulty is unchanged.
+
+Net: (1)+(3) together mean a fresh chain no longer overshoots high on a fast
+single miner NOR collapses to the floor on a stale/late-start genesis, regardless
+of the genesis→first-block gap. §6's "keep a miner online" remains good
+operational practice but is no longer required to avoid the startup pathology.
+The §4 ASERT-parameter tweaks were NOT adopted (§7.1 showed they don't help /
+destabilise).
