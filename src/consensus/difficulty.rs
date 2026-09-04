@@ -346,7 +346,26 @@ fn safe_mul_shift(target: u128, frac_pow2: u128) -> u128 {
 }
 
 fn get_anchor(blocks: &[DifficultyBlock], depth: usize) -> &DifficultyBlock {
-    let idx = blocks.len().saturating_sub(depth.min(blocks.len()));
+    let mut idx = blocks.len().saturating_sub(depth.min(blocks.len()));
+    // STARTUP GRACE: never anchor ASERT on the genesis block (height 0). Its
+    // timestamp is a fixed constant that need not reflect when mining actually
+    // began. If the first real block is mined long after the genesis timestamp,
+    // anchoring on genesis makes `time_error` enormous — the chain looks
+    // catastrophically slow — and ASERT drives difficulty to the MIN_DIFFICULTY
+    // floor for roughly the first long-window of blocks before recovering.
+    // Advancing the anchor to the first *mined* block keeps every `time_error`
+    // over real inter-block timestamps, eliminating the startup dip regardless
+    // of the genesis→first-block gap. This is deterministic (all nodes see the
+    // same block heights) so it is consensus-safe, and it only differs from the
+    // old behaviour while genesis is still inside the difficulty window (roughly
+    // the first `DIFFICULTY_LONG_WINDOW` blocks); on a mature chain the window
+    // never contains genesis, so mainnet steady-state difficulty is unchanged.
+    // Offline-simulated: eliminates the dip for genesis gaps from 2 min to
+    // 135 days while preserving fast convergence to the true-hashrate target.
+    // See docs/design/difficulty-oscillation-analysis.md §7.
+    if idx + 1 < blocks.len() && blocks[idx].height == 0 {
+        idx += 1;
+    }
     &blocks[idx]
 }
 
@@ -512,6 +531,37 @@ mod tests {
             "slow blocks should produce target ≥ tip target: old={}, new={}",
             old_val,
             new_val
+        );
+    }
+
+    #[test]
+    fn startup_grace_ignores_a_stale_genesis_timestamp() {
+        // Regression (docs/design/difficulty-oscillation-analysis.md §7): with a
+        // genesis timestamp far before the first mined block, anchoring ASERT on
+        // genesis makes the chain look catastrophically slow and drives difficulty
+        // to the MIN_DIFFICULTY floor for the first long-window of blocks.
+        // get_anchor now skips the genesis anchor, so time_error is computed over
+        // real inter-block timestamps only. Build a chain whose genesis is 30 days
+        // stale but whose real blocks land on the 120s target, and assert
+        // difficulty holds near the initial value instead of collapsing.
+        const STALE: u64 = 30 * 24 * 3600; // genesis 30 days before block 1
+        let init_diff = target_to_difficulty(&make_block_realistic(0, 0).target);
+        let mut blocks = vec![make_block_realistic(0, 0)]; // genesis at ts=0
+        for i in 1..=20u64 {
+            // real blocks on the 120s target, offset by the stale genesis gap
+            blocks.push(make_block_realistic(i, STALE + i * TARGET_BLOCK_TIME));
+        }
+        let new_diff = target_to_difficulty(&calculate_difficulty(&blocks, 20));
+        // On-target real blocks must keep difficulty ~stable near init and must
+        // NOT collapse toward the floor (which is what happened when genesis was
+        // the anchor: time_error ≈ the 30-day gap → difficulty → MIN_DIFFICULTY).
+        assert!(
+            new_diff >= init_diff / 2,
+            "stale genesis must not collapse difficulty: init={init_diff} new={new_diff}"
+        );
+        assert!(
+            new_diff > MIN_DIFFICULTY * 4,
+            "difficulty must stay well above the floor: new={new_diff} floor={MIN_DIFFICULTY}"
         );
     }
 
