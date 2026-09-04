@@ -2546,19 +2546,35 @@ impl Blockchain {
                 // recorded for assume-valid IBD and telemetry; it just no longer
                 // gates consensus.
                 {
+                    // audit H-3: a rolling finality floor that ALWAYS leaves a
+                    // full CHECKPOINT_INTERVAL window reorg-able. The previous
+                    // `tip - (tip % interval)` made the floor the last boundary,
+                    // so the max reorg depth was `tip % interval` — as low as
+                    // ZERO when the tip sat exactly on a boundary — permanently
+                    // rejecting a routine shallow reorg that happened to cross a
+                    // boundary and stranding the node on the minority branch.
+                    // Base the floor a full interval below the tip instead; the
+                    // 3-tier MESS gate above remains the primary depth policy.
                     let tip_height = self.inner.read().tip.height;
                     let interval = crate::constants::CHECKPOINT_INTERVAL;
-                    let finality_floor = tip_height - (tip_height % interval);
+                    let finality_floor = tip_height.saturating_sub(interval);
                     if finality_floor > 0 && fork_point < finality_floor {
+                        let depth = block.header.height.saturating_sub(fork_point);
                         tracing::error!(
-                            "Rejecting reorg: fork point {} is before finality floor at height {}",
+                            "Rejecting reorg: fork point {} is before finality floor {} (depth {})",
                             fork_point,
-                            finality_floor
+                            finality_floor,
+                            depth
                         );
-                        return Ok(BlockStatus::Invalid(format!(
-                            "Reorg rejected: fork point {} is before checkpoint at height {}",
-                            fork_point, finality_floor
-                        )));
+                        // Return ReorgTooDeep (NOT BlockStatus::Invalid) so the
+                        // honest peer serving the heavier chain is not banned —
+                        // this is a "too deep for our finality rule" outcome,
+                        // identical in spirit to the MESS hard cap above, which
+                        // also returns this (audit H-3 / P2P Finding 4).
+                        return Err(Error::ReorgTooDeep {
+                            depth,
+                            max: interval,
+                        });
                     }
                 }
 
