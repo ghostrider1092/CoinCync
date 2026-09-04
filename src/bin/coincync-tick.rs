@@ -215,6 +215,26 @@ mod metrics_endpoint {
         }
     }
 
+    /// Mark the host + local-node series ABSENT after a failed `health_snapshot()`
+    /// so `/metrics` omits them rather than exposing the last-successful (now
+    /// stale) values. Without this, once `*_present` was set true it was never
+    /// cleared, so a later refresh failure left stale gauges published.
+    /// (audit #38, junbyjun1238)
+    pub fn publish_health_absent(state: &Arc<Mutex<Snapshot>>) {
+        if let Ok(mut s) = state.lock() {
+            s.host_present = false;
+            s.mempool_present = false;
+        }
+    }
+
+    /// Mark the fleet-aggregate series ABSENT after a failed
+    /// `aggregate_fleet_health()`, for the same reason as `publish_health_absent`.
+    pub fn publish_fleet_absent(state: &Arc<Mutex<Snapshot>>) {
+        if let Ok(mut s) = state.lock() {
+            s.fleet_present = false;
+        }
+    }
+
     /// Render the snapshot in Prometheus text-exposition format (v0.0.4).
     fn render(s: &Snapshot) -> String {
         let mut out = String::with_capacity(1024);
@@ -273,6 +293,12 @@ mod metrics_endpoint {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
+                // Bound how long one (mis)behaving client can hold this handler
+                // thread. Connections are served serially, so without a read
+                // timeout a client that connects and sends nothing blocks read()
+                // forever and stalls every later scrape. (audit #38, junbyjun1238)
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
                 // Only the request line matters; cap the read so a slow or
                 // oversized client can't tie the thread up unboundedly.
                 let mut buf = [0u8; 1024];
@@ -320,7 +346,13 @@ fn report_once(adapter: &CoincyncAdapter, fleet: bool, metrics: &MetricsState) {
                 h.mempool_txs as u64,
             );
         }
-        Err(e) => warn!("health_snapshot failed: {}", e),
+        Err(e) => {
+            warn!("health_snapshot failed: {}", e);
+            // Clear the host/local series so /metrics omits them instead of
+            // serving the last-successful (now stale) values. (audit #38)
+            #[cfg(feature = "metrics")]
+            metrics_endpoint::publish_health_absent(metrics);
+        }
     }
 
     if fleet {
@@ -343,7 +375,13 @@ fn report_once(adapter: &CoincyncAdapter, fleet: bool, metrics: &MetricsState) {
                     a.median_difficulty,
                 );
             }
-            Err(e) => warn!("aggregate_fleet_health failed: {}", e),
+            Err(e) => {
+                warn!("aggregate_fleet_health failed: {}", e);
+                // Clear the fleet series so /metrics omits it rather than serving
+                // stale aggregates. (audit #38)
+                #[cfg(feature = "metrics")]
+                metrics_endpoint::publish_fleet_absent(metrics);
+            }
         }
     }
 }

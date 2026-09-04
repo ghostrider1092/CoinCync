@@ -1396,6 +1396,24 @@ async fn handle_stratum_message(
                 },
             };
 
+            // Revalidate the canonical job AFTER verify()'s (RandomX) hashing and
+            // BEFORE any accounting: if the server's canonical job rotated during
+            // the hash, a Valid/Block result was computed against a stale template
+            // and must not be credited to worker/pool stats (nor submitted). The
+            // native path already revalidates before crediting; the legacy path
+            // previously only revalidated before block submission, so a rotation
+            // during verify() still credited a stale share to stats. Downgrade to
+            // Stale here so both the stats blocks below and the submission guard
+            // see the corrected result. (audit #35, junbyjun1238)
+            let share_result = match share_result {
+                ShareResult::Valid | ShareResult::Block(_)
+                    if !canonical_job_unchanged(current_job, job_id).await =>
+                {
+                    ShareResult::Stale
+                }
+                other => other,
+            };
+
             // Update stats based on result
             let mut should_strike_for_invalid_streak = false;
             {
