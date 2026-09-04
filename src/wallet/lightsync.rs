@@ -67,10 +67,21 @@ pub struct OutputDigest {
     pub tx_hash: Hash,
     /// Reference: output index within the transaction (1 byte)
     pub output_index: u8,
+    /// True if this output belongs to a coinbase transaction (audit H-4).
+    /// Coinbase outputs carry a PLAINTEXT amount, a zero-blinding commitment, and
+    /// a public-data view tag — so a light client must detect them by direct
+    /// match / ECDH (NOT the view-tag gate) and read the amount as a plaintext LE
+    /// u64. Without this flag the view-tag gate skips them and the XOR
+    /// amount-decrypt + commitment recompute both fail, so a solo miner on light
+    /// sync sees zero reward balance. Set in [`BlockDigest::from_block`].
+    #[serde(default)]
+    pub is_coinbase: bool,
 }
 
 impl OutputDigest {
-    /// Create an OutputDigest from a TxOutput and its transaction context
+    /// Create an OutputDigest from a TxOutput and its transaction context.
+    /// `is_coinbase` is attached separately in [`BlockDigest::from_block`],
+    /// which has the transaction-level context.
     pub fn from_output(output: &TxOutput, tx_hash: Hash, output_index: u8) -> Self {
         OutputDigest {
             tx_public_key: output.tx_public_key,
@@ -80,6 +91,7 @@ impl OutputDigest {
             encrypted_amount: output.encrypted_amount.clone(),
             tx_hash,
             output_index,
+            is_coinbase: false,
         }
     }
 
@@ -122,11 +134,16 @@ impl BlockDigest {
 
         for tx in &block.transactions {
             let tx_hash = tx.hash();
+            let is_coinbase = tx.is_coinbase();
             for (idx, output) in tx.outputs.iter().enumerate() {
                 if idx > 255 {
                     break;
                 } // Same safety as WalletScanner
-                outputs.push(OutputDigest::from_output(output, tx_hash, idx as u8));
+                let mut digest = OutputDigest::from_output(output, tx_hash, idx as u8);
+                // audit H-4: mark coinbase outputs so the light client uses the
+                // coinbase detection path (plaintext amount, no view-tag gate).
+                digest.is_coinbase = is_coinbase;
+                outputs.push(digest);
             }
         }
 
@@ -339,6 +356,18 @@ impl LightWalletSync {
     /// subaddresses via light sync — causing permanent fund loss for subaddress users.
     fn scan_output_digest(&self, output: &OutputDigest) -> Option<DecryptedOutput> {
         for keys in &self.scan_keys {
+            // audit H-4: coinbase outputs carry a PLAINTEXT amount, a zero-blinding
+            // commitment, and a public-data view tag, so detect them by direct
+            // match / ECDH (NOT the view-tag gate) and read the plaintext amount —
+            // mirroring the full scanner. Without this the light client never sees
+            // mining rewards. output_locator stays None here; scan_digest fills it.
+            if output.is_coinbase {
+                if let Some(d) = detect_coinbase_digest(output, keys) {
+                    return Some(d);
+                }
+                continue;
+            }
+
             // Step 1: View tag fast filter (eliminates ~255/256 outputs)
             let expected_tag = compute_view_tag_light(
                 &keys.view_secret,
@@ -545,6 +574,58 @@ impl LightWalletSync {
 // STANDALONE SCANNING FUNCTIONS (for parallel use)
 // =============================================================================
 
+/// Detect a coinbase output digest under one key set (audit H-4).
+///
+/// Coinbase outputs carry a plaintext LE-u64 amount, a zero-blinding commitment,
+/// and a public-data view tag, so they are NOT detectable by the normal ECDH
+/// amount/commitment path. This mirrors `WalletScanner`'s coinbase handling:
+/// old-format coinbases match `stealth_address == spend_public`; new-format ones
+/// are found by ECDH ownership; either way the amount is read as plaintext and
+/// the blinding is zero. `output_locator` is left `None` for `scan_digest` to
+/// fill from the block height/ordinal, consistent with the non-coinbase path.
+fn detect_coinbase_digest(output: &OutputDigest, keys: &ScanKeys) -> Option<DecryptedOutput> {
+    let stealth = StealthAddress {
+        public_key: output.stealth_address,
+        tx_public_key: output.tx_public_key,
+    };
+    let owned = output.stealth_address == keys.spend_public
+        || is_output_ours(
+            &stealth,
+            &keys.view_secret,
+            &keys.spend_public,
+            output.output_index,
+        );
+    if !owned {
+        return None;
+    }
+    let amount = if output.encrypted_amount.len() >= 8 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&output.encrypted_amount[..8]);
+        u64::from_le_bytes(b)
+    } else {
+        0
+    };
+    Some(DecryptedOutput {
+        tx_hash: output.tx_hash,
+        output_index: output.output_index,
+        output_locator: None,
+        output: TxOutput {
+            stealth_address: output.stealth_address,
+            tx_public_key: output.tx_public_key,
+            commitment: output.commitment,
+            encrypted_amount: output.encrypted_amount.clone(),
+            view_tag: output.view_tag,
+            lock_height: None,
+            encrypted_memo: vec![],
+        },
+        amount,
+        blinding_factor: BlindingFactor::zero(),
+        shared_secret: [0u8; 32],
+        key_epoch: keys.epoch,
+        subaddress_index: None, // coinbase always to the primary address
+    })
+}
+
 /// Scan a single output digest with provided keys (thread-safe, no mutation)
 ///
 /// SECURITY (C9-FIX): Now checks subaddress keys in addition to primary address.
@@ -553,6 +634,15 @@ fn scan_output_digest_with_keys(
     keys: &[ScanKeys],
 ) -> Option<DecryptedOutput> {
     for key_set in keys {
+        // audit H-4: coinbase detection (plaintext amount, no view-tag gate) —
+        // see detect_coinbase_digest / scan_output_digest.
+        if output.is_coinbase {
+            if let Some(d) = detect_coinbase_digest(output, key_set) {
+                return Some(d);
+            }
+            continue;
+        }
+
         // View tag fast filter
         let expected_tag = compute_view_tag_light(
             &key_set.view_secret,
@@ -821,7 +911,7 @@ mod tests {
         // Create a minimal block with one transaction
         let tx = Transaction {
             version: 1,
-            tx_type: TxType::Coinbase,
+            tx_type: TxType::Transfer,
             inputs: vec![],
             outputs: vec![output.clone()],
             fee: Amount::from_atomic(0),
@@ -867,7 +957,7 @@ mod tests {
 
         let tx = Transaction {
             version: 1,
-            tx_type: TxType::Coinbase,
+            tx_type: TxType::Transfer,
             inputs: vec![],
             outputs: vec![output],
             fee: Amount::from_atomic(0),
@@ -919,7 +1009,7 @@ mod tests {
 
         let tx = Transaction {
             version: 1,
-            tx_type: TxType::Coinbase,
+            tx_type: TxType::Transfer,
             inputs: vec![],
             outputs: vec![output],
             fee: Amount::from_atomic(0),
@@ -971,7 +1061,7 @@ mod tests {
 
             let tx = Transaction {
                 version: 1,
-                tx_type: TxType::Coinbase,
+                tx_type: TxType::Transfer,
                 inputs: vec![],
                 outputs: vec![output],
                 fee: Amount::from_atomic(0),
@@ -1116,5 +1206,69 @@ mod tests {
         let json = serde_json::to_string(&digest).unwrap();
         let recovered2: BlockDigest = serde_json::from_str(&json).unwrap();
         assert_eq!(recovered2.height, 42);
+    }
+
+    #[test]
+    fn scan_digest_detects_coinbase_plaintext_amount() {
+        // audit H-4: a coinbase output carries a PLAINTEXT LE-u64 amount, a
+        // zero-blinding commitment, and a public-data view tag. The light client
+        // must detect it via direct/ECDH match (NOT the view-tag gate) and read
+        // the amount as plaintext; otherwise a solo miner on light sync sees a
+        // zero reward balance. Old-format coinbase: stealth_address == spend_public.
+        let (view_secret, spend_public) = make_test_keys();
+        let reward = 50_000_000_000u64;
+        let output = TxOutput {
+            stealth_address: spend_public, // old-format coinbase → direct match
+            tx_public_key: spend_public,
+            commitment: [0u8; 32],               // zero-blinding placeholder
+            encrypted_amount: reward.to_le_bytes().to_vec(), // PLAINTEXT LE amount
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Coinbase,
+            inputs: vec![],
+            outputs: vec![output],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height: 1,
+            timestamp: 1000,
+            prev_hash: Hash::from_bytes([0u8; 32]),
+            tx_root: tx.hash(),
+            anchor: Hash::from_bytes([0u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: spend_public,
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        let block = Block::new(header, vec![tx]);
+        let digest = BlockDigest::from_block(&block);
+        assert!(
+            digest.outputs[0].is_coinbase,
+            "from_block must flag coinbase outputs"
+        );
+
+        let keys = ScanKeys::new(view_secret, spend_public, 0);
+        let mut sync = LightWalletSync::new(vec![keys]);
+        let found = sync.scan_digest(&digest);
+        assert_eq!(found.len(), 1, "coinbase reward must be detected on light sync");
+        assert_eq!(found[0].amount, reward, "plaintext coinbase amount recovered");
+        // Coinbase blinding is zero (plaintext amount); compare via bytes since
+        // BlindingFactor doesn't implement PartialEq.
+        assert_eq!(
+            found[0].blinding_factor.to_bytes(),
+            BlindingFactor::zero().to_bytes()
+        );
     }
 }
