@@ -906,6 +906,45 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn absent_publishers_clear_present_flags_so_stale_series_are_omitted() {
+        // audit #38: a failed refresh must clear the *_present flags so /metrics
+        // omits those series instead of serving the last-successful (stale)
+        // values. Populate as a good tick would, then simulate a failed refresh.
+        use super::metrics_endpoint::{
+            publish_fleet, publish_fleet_absent, publish_health, publish_health_absent,
+            render_for_test, Snapshot,
+        };
+        use std::sync::{Arc, Mutex};
+
+        let state = Arc::new(Mutex::new(Snapshot::default()));
+        publish_health(&state, 50, 10, 1000, 7);
+        publish_fleet(&state, 1, 0, 0, 42);
+        {
+            let out = render_for_test(&state.lock().unwrap());
+            assert!(out.contains("coincync_node_mempool_transactions 7\n"));
+            assert!(out.contains("coincync_fleet_stalled_nodes 1\n"));
+        }
+
+        // Failed refreshes → clear the series.
+        publish_health_absent(&state);
+        publish_fleet_absent(&state);
+        let out = render_for_test(&state.lock().unwrap());
+        assert!(
+            !out.contains("coincync_node_mempool_transactions"),
+            "mempool omitted after a failed refresh, not served stale"
+        );
+        assert!(
+            !out.contains("coincync_node_ram_usage_percent"),
+            "host omitted after a failed refresh, not served stale"
+        );
+        assert!(
+            !out.contains("coincync_fleet_stalled_nodes"),
+            "fleet omitted after a failed refresh, not served stale"
+        );
+    }
+
     #[test]
     fn pct_is_bounded_and_zero_total_safe() {
         assert_eq!(pct_u8(0, 0), 0);
