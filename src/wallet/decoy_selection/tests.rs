@@ -360,3 +360,41 @@ fn allocation_rejects_real_identity_mismatch() {
         Err(DecoySelectionError::RealOutputIdentityMismatch(locator)) if locator == real
     ));
 }
+
+// Regression: the genesis coinbase is a placeholder with an all-zero
+// (identity-point) public key and commitment, and it is added to the canonical
+// output catalog like any other output. If the sampler places it in a ring, the
+// CLSAG verifier rejects that input with "Ring signature verification failed"
+// (crypto/clsag.rs identity-member guard). allocate_unique_rings must therefore
+// exclude identity-point outputs from the decoy candidate set. Here every
+// non-real candidate is an identity-point output, so none are eligible and the
+// allocation must fail with InsufficientDecoys rather than silently building a
+// ring around a poison decoy.
+#[test]
+fn allocation_excludes_identity_point_decoys() {
+    let snapshot = snapshot(200, 1);
+    let real_locator = OutputLocator {
+        height: 50,
+        ordinal: 0,
+    };
+    let real_outputs = [real_identity(real_locator)];
+    let mut rng = ChaCha20Rng::seed_from_u64(21);
+    let request = build_covered_request(&snapshot, &[real_locator], 2, 10, &mut rng).unwrap();
+    let mut response = response_for(&request);
+    // Turn every non-real candidate into the genesis-style identity placeholder
+    // (all-zero pubkey AND commitment).
+    for output in &mut response.outputs {
+        if output.locator != real_locator {
+            output.public_key = PublicKey::from_bytes([0u8; 32]);
+            output.commitment = [0u8; 32];
+        }
+    }
+    let validated = validate_covered_response(request, response).unwrap();
+    assert!(matches!(
+        allocate_unique_rings(validated, &real_outputs, &mut rng),
+        Err(DecoySelectionError::InsufficientDecoys {
+            available: 0,
+            needed: 1
+        })
+    ));
+}

@@ -53,6 +53,19 @@ pub fn allocate_unique_rings<R: RngCore + CryptoRng + ?Sized>(
                 .lock_height
                 .map_or(true, |height| spend_height >= height)
         })
+        // Never select an identity-point output as a decoy. The genesis
+        // coinbase is a placeholder with an all-zero (identity-point) public
+        // key and commitment (testnet.rs / mainnet.rs create_genesis_coinbase),
+        // and it is added to the canonical output catalog like any other
+        // output, so the sampler can draw it — most likely early in a chain's
+        // life when the eligible pool is small. The CLSAG verifier rejects any
+        // ring member whose public key OR commitment is the identity point
+        // (crypto/clsag.rs), so a ring containing it fails with "Ring signature
+        // verification failed" for that one input. Mirror that guard here at
+        // selection time so such an output is never placed in a ring.
+        .filter(|output| {
+            *output.public_key.as_bytes() != [0u8; 32] && output.commitment != [0u8; 32]
+        })
         .filter(|output| used_public_keys.insert(*output.public_key.as_bytes()))
         .collect();
 
