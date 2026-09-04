@@ -108,3 +108,65 @@ Independent of any algorithm change: keeping ≥1 miner continuously online (so 
 chain never goes idle long enough to enter the variance-dominated regime) avoids
 the trigger entirely. The idle→collapse→overshoot→ring cycle only starts after a
 long production gap.
+
+## 7. Simulation results (2026-09-02) — the §5 simulator was built
+
+An offline f64 behavioural simulator of `calculate_difficulty` (dual-window ASERT
++ per-step clamp + emergency drop) was run against: fresh-chain startup, Poisson
+steady-state (45 H/s … 20 kH/s), a genuine 2× hashrate step, idle-resume, and the
+recorded §2 gap sequence. It reproduces V0's ~4–5× steady-state ring qualitatively
+(matching §2). Two findings change the recommendation:
+
+**7.1 The §4 candidate parameter fixes do NOT help — several destabilise.**
+Measured startup overshoot (Dpeak / equilibrium, single home CPU):
+
+| variant | startup overshoot | steady ring | 2× step lag |
+|---|---|---|---|
+| V0 current (8@70 / 144@30, clamp 2×/½) | **3.0×** | 5.4× | 17 blk |
+| V1 tighten clamp 1.25×/0.8× | 3.0× (no change) | 5.4× | 17 blk |
+| V2 flip weights 30/70 | 7.3× (worse) | 171× | 23 blk |
+| V3 widen short 24 @50/50 | 12× (worse) | unstable | 44 blk |
+| V4 median input | 36× (worse) | 492× | 17 blk |
+
+The per-step clamp is a **no-op** for the overshoot: during a smooth ramp the
+per-block move is < 2×, so the clamp never binds — tightening it changes nothing.
+De-weighting / widening the short window or feeding a median *increases* startup
+overshoot and steady-state variance (added lag), and destabilises the ring. **An
+ASERT-parameter hard fork is therefore not supported by evidence and is likely
+harmful.** This supersedes the §4 hypotheses.
+
+**7.2 The overshoot is a genesis-calibration problem, and the driver is the
+strictly-increasing-integer-timestamp rule** (`validation.rs`: a block's timestamp
+must be strictly greater than its parent's, at 1-second resolution). When a fresh
+chain's initial difficulty is far below the miner's actual capability, early blocks
+solve in ≪ 1 s and their timestamps are forced to `parent+1s`, feeding ASERT a
+*pinned* "1 s/block" signal — 120× faster than the 120 s target — for a long run.
+That laggy, sustained error is what drives the large ramp and the subsequent
+stall/emergency-drop overshoot. Simulator evidence (integer timestamps):
+
+- Initial difficulty **matched to launch hashrate** (`H × 120 s`) → overshoot is a
+  constant, benign **2.6×** at *every* hashrate tested (200 H/s → 20 kH/s), then
+  converges; worst single inter-block gap ~20 min during convergence.
+- Initial difficulty left far too low (4 800) → overshoot **grows with hashrate**
+  (2.6× → 4.9× in sim; the live 2026-09-02 regtest hit ~25× because sub-second
+  bursts compress even harder than the steady-rate model).
+
+**7.3 Recommendation (revised).**
+1. **Do NOT hard-fork the ASERT parameters.** The current V0 params are at or near
+   the best of the tested set; the proposed tweaks make things worse.
+2. **Calibrate the genesis/initial difficulty of any fresh chain to the expected
+   launch hashrate** (`≈ H_launch × 120 s`). This is a *genesis parameter* set once
+   for a new chain (testnet `TESTNET_INITIAL_DIFFICULTY`, mainnet initial target),
+   **not** a mid-chain consensus fork — so it carries none of the hard-fork risk of
+   editing the ASERT math. It removes the amplified overshoot; the residual 2.6× is
+   inherent and settles quickly.
+3. Combine with §6 (keep ≥1 miner online) to avoid the idle-resume ring.
+4. If, after (2)+(3), the residual steady-state ring is still judged too high for
+   mainnet, revisit only *then* — and model integer-timestamp compression + real
+   bursty hashrate first, since the ideal model under-predicts real overshoot.
+
+**Caveats.** The simulator is a behavioural f64 model, not the bit-exact
+fixed-point path; it is validated to reproduce the §2 ring qualitatively but
+under-predicts real overshoot magnitude (it uses steady, not bursty, hashrate).
+Scripts: `scratchpad/difficulty_sim.py` (variants) and `difficulty_sim2.py`
+(integer timestamps + genesis-calibration test).

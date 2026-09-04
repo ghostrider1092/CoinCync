@@ -1225,18 +1225,49 @@ impl Blockchain {
         self.inner.read().tip.difficulty
     }
 
+    /// Consensus difficulty target for a block at `height`, given its difficulty
+    /// window `blocks` (whose last element is the parent). All networks use
+    /// dual-anchor ASERT (`calculate_difficulty`) EXCEPT regtest, which pins
+    /// difficulty at the parent's target and never retargets — Bitcoin-regtest
+    /// style. That keeps a single CPU producing blocks at a stable, low,
+    /// overshoot-free rate for local functional testing (ASERT's fast-block
+    /// ramp would otherwise spike difficulty on an isolated miner). Regtest is
+    /// an isolated, local-only network (never dials peers, never mainnet/testnet
+    /// genesis), so this branch has ZERO effect on testnet/mainnet consensus.
+    /// A pinned target also trivially satisfies the ±4x/step sanity layer in
+    /// `validate_difficulty_target` (ratio is always 1.0).
+    fn expected_next_target(&self, blocks: &[DifficultyBlock], height: u64) -> Hash {
+        if self.network == crate::config::NetworkType::Regtest {
+            // Ease difficulty DOWN toward the MIN_DIFFICULTY floor at <=3x per
+            // block (safely inside the ±4x/step sanity layer), then pin there
+            // and never retarget. A fresh regtest chain therefore drops from the
+            // genesis difficulty to the floor in a couple of blocks and then
+            // produces blocks at a stable, low, overshoot-free rate — the fast
+            // local harness Bitcoin's regtest provides.
+            let parent = blocks.last().map(|b| b.target).unwrap_or_else(max_target);
+            let parent_diff = crate::consensus::difficulty::target_to_difficulty(&parent);
+            let floor = crate::consensus::difficulty::MIN_DIFFICULTY;
+            if parent_diff <= floor {
+                return parent;
+            }
+            // next_diff <= parent_diff <= genesis difficulty, so it always fits u64.
+            let next_diff = (parent_diff / 3).max(floor).min(u64::MAX as u128) as u64;
+            return Hash::from_difficulty(next_diff);
+        }
+        calculate_difficulty(blocks, height)
+    }
+
     /// Compute the exact target hash for the next block using ASERT difficulty adjustment.
     /// This is the authoritative target that the validator will enforce.
     pub fn next_target(&self) -> Hash {
         let height = self.height() + 1;
         let diff_blocks = self.get_difficulty_blocks(height);
-        if diff_blocks.len() >= 2 {
-            calculate_difficulty(&diff_blocks, height)
-        } else if diff_blocks.len() == 1 {
+        match diff_blocks.len() {
+            0 => max_target(),
             // Only genesis exists: maintain genesis difficulty until ASERT has enough data
-            diff_blocks[0].target
-        } else {
-            max_target()
+            // (regtest keeps this pinned target for the life of the chain).
+            1 => diff_blocks[0].target,
+            _ => self.expected_next_target(&diff_blocks, height),
         }
     }
 
@@ -1967,7 +1998,8 @@ impl Blockchain {
             };
 
             if difficulty_blocks.len() >= 2 {
-                let expected_target = calculate_difficulty(&difficulty_blocks, block.header.height);
+                let expected_target =
+                    self.expected_next_target(&difficulty_blocks, block.header.height);
                 if block.header.target != expected_target {
                     return Ok(BlockStatus::Invalid(format!(
                         "Difficulty target mismatch: expected {}, got {}",
@@ -2729,8 +2761,8 @@ impl Blockchain {
                             }
 
                             if diff_blocks.len() >= 2 {
-                                let expected_target =
-                                    calculate_difficulty(&diff_blocks, fork_block.header.height);
+                                let expected_target = self
+                                    .expected_next_target(&diff_blocks, fork_block.header.height);
                                 if fork_block.header.target != expected_target {
                                     tracing::warn!(
                                         "Fork block {} at height {} has wrong difficulty target",
@@ -3044,7 +3076,7 @@ impl Blockchain {
 
                             if diff_blocks.len() >= 2 {
                                 let expected_target =
-                                    calculate_difficulty(&diff_blocks, block.header.height);
+                                    self.expected_next_target(&diff_blocks, block.header.height);
                                 if block.header.target != expected_target {
                                     tracing::warn!(
                                         "Reorg tip block {} at height {} has wrong difficulty target",
