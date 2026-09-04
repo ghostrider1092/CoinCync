@@ -70,7 +70,13 @@ pub const TESTNET_BLOCK_TIME: u64 = crate::constants::TARGET_BLOCK_TIME;
 // Premium AMD 1 vCPU droplets (light mode, no huge pages). Target
 // block time = 120 s → difficulty = 40 × 120 = 4800. from_difficulty
 // rounds to 12 leading zero bits (effective ~4096).
-pub const TESTNET_INITIAL_DIFFICULTY: u64 = 4_800;
+// Calibrated 2026-09-02 to a single home-CPU RandomX hashrate (~530 H/s):
+// initial difficulty ≈ H × TARGET_BLOCK_TIME (120s) so a fresh chain produces
+// ~120s blocks from genesis instead of solving far under target and driving
+// ASERT into a large startup overshoot/stall. See
+// docs/design/difficulty-oscillation-analysis.md §7 (the fix is genesis
+// calibration, NOT an ASERT hard fork — the algorithm is left unchanged).
+pub const TESTNET_INITIAL_DIFFICULTY: u64 = 64_000;
 
 // Recomputed after the header/tx signing-hash domain separator landing.
 // See `BlockHeader::HEADER_HASH_DOMAIN_TAG` in src/consensus/header.rs and
@@ -79,8 +85,8 @@ pub const TESTNET_INITIAL_DIFFICULTY: u64 = 4_800;
 // fails fast so CI catches it before it ships.
 // Public testnet genesis — April 21, 2026 reset
 pub const TESTNET_GENESIS_HASH: [u8; 32] = [
-    0x41, 0xf9, 0x70, 0xdf, 0x61, 0x52, 0x42, 0x5a, 0x29, 0x38, 0x72, 0x54, 0x23, 0x23, 0x5c, 0x2c,
-    0x40, 0xec, 0x52, 0x55, 0x6e, 0xcc, 0x0f, 0xd1, 0x42, 0x2d, 0x58, 0x86, 0x52, 0xcc, 0x56, 0xb4,
+    0x3c, 0xd2, 0x87, 0x86, 0xb3, 0x33, 0x08, 0x44, 0x77, 0x1b, 0x7b, 0xc4, 0x3e, 0xbd, 0xbc, 0x61,
+    0xe3, 0xa8, 0xcf, 0xfd, 0xf1, 0x8c, 0xc6, 0x0e, 0xa3, 0xba, 0x32, 0xab, 0xb0, 0xba, 0x7c, 0x2d,
 ];
 
 // ── Checkpoints ──────────────────────────────────────────────────────────────

@@ -1240,10 +1240,13 @@ impl Blockchain {
         if self.network == crate::config::NetworkType::Regtest {
             // Ease difficulty DOWN toward the MIN_DIFFICULTY floor at <=3x per
             // block (safely inside the ±4x/step sanity layer), then pin there
-            // and never retarget. A fresh regtest chain therefore drops from the
-            // genesis difficulty to the floor in a couple of blocks and then
-            // produces blocks at a stable, low, overshoot-free rate — the fast
-            // local harness Bitcoin's regtest provides.
+            // and never retarget. Applies from the very first block (parent =
+            // genesis), so a fresh regtest chain drops from the genesis
+            // difficulty to the floor in a few blocks and then produces blocks
+            // at a stable, low, overshoot-free rate — the fast local harness
+            // Bitcoin's regtest provides. (The ease starts at genesis rather
+            // than jumping straight to the floor because the locked ±4x/step
+            // sanity layer would reject a single large drop.)
             let parent = blocks.last().map(|b| b.target).unwrap_or_else(max_target);
             let parent_diff = crate::consensus::difficulty::target_to_difficulty(&parent);
             let floor = crate::consensus::difficulty::MIN_DIFFICULTY;
@@ -1254,7 +1257,14 @@ impl Blockchain {
             let next_diff = (parent_diff / 3).max(floor).min(u64::MAX as u128) as u64;
             return Hash::from_difficulty(next_diff);
         }
-        calculate_difficulty(blocks, height)
+        if blocks.len() >= 2 {
+            calculate_difficulty(blocks, height)
+        } else {
+            // Only genesis (or nothing): maintain genesis difficulty until ASERT
+            // has a full window. Non-regtest networks rely on a calibrated
+            // genesis difficulty here (see {testnet,mainnet}.rs INITIAL_DIFFICULTY).
+            blocks.last().map(|b| b.target).unwrap_or_else(max_target)
+        }
     }
 
     /// Compute the exact target hash for the next block using ASERT difficulty adjustment.
@@ -1262,13 +1272,7 @@ impl Blockchain {
     pub fn next_target(&self) -> Hash {
         let height = self.height() + 1;
         let diff_blocks = self.get_difficulty_blocks(height);
-        match diff_blocks.len() {
-            0 => max_target(),
-            // Only genesis exists: maintain genesis difficulty until ASERT has enough data
-            // (regtest keeps this pinned target for the life of the chain).
-            1 => diff_blocks[0].target,
-            _ => self.expected_next_target(&diff_blocks, height),
-        }
+        self.expected_next_target(&diff_blocks, height)
     }
 
     /// Check if chain is synced (updated by P2P layer via set_sync_info).
