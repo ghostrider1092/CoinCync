@@ -14,6 +14,23 @@
 #![recursion_limit = "1024"]
 #![doc = "CoinCync 1.0 — compliant privacy cryptocurrency with CPU-only proof of work."]
 
+// CoinCync's proof of work is RandomX-only by design: the non-`randomx` PoW
+// path in src/consensus/pow.rs deliberately returns an error at runtime, so a
+// node built without `randomx` can neither mine nor validate PoW. A no-`randomx`
+// build also cannot even compile — it re-triggers the known tari_bulletproofs_plus
+// 0.4 SIMD trait overflow (`error[E0275]: overflow evaluating for<'v> &'v Simd:
+// Add`; see the recursion_limit note below and rust-toolchain). Fail fast here
+// with an actionable message instead of that cryptic dependency error. Every
+// supported build enables `randomx` (it is part of `default`, `testnet`, and
+// `mainnet`).
+#[cfg(not(feature = "randomx"))]
+compile_error!(
+    "CoinCync must be built with the `randomx` feature (included in the default, \
+     `testnet`, and `mainnet` features). Proof of work is RandomX-only: a build \
+     without it cannot mine or validate PoW and does not compile. Build with, \
+     e.g., `cargo build --release --features testnet`."
+);
+
 // ── Foundation ──────────────────────────────────────────────
 pub mod constants;
 pub mod error;
