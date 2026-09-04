@@ -69,10 +69,10 @@ const PROTECT_PER_AXIS: usize = 4;
 /// local design pick with the rationale above.)
 const MIN_AGE_BEFORE_EVICT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Reputation threshold above which a peer is exempted from eviction
-/// outright. PeerInfo reputation is clamped to [-100, 100]; default is 100.
-/// Anything ≥ this is considered well-behaved and never evicted.
-const REPUTATION_PROTECT_FLOOR: i32 = 80;
+// audit M-1: the former REPUTATION_PROTECT_FLOOR (absolute "never evict above
+// reputation 80") was removed — with a default reputation of 100 it exempted
+// every quiet peer and let an inbound flooder eclipse the node. Protection is
+// now purely relative (per-axis top-N below), matching Bitcoin Core.
 
 /// /16 (IPv4) or /32 (IPv6) netgroup key. Similar in spirit to Bitcoin
 /// Core's netgroup keying — in current upstream that logic lives in
@@ -129,8 +129,14 @@ where
         .filter(|p| !p.outbound)
         // Skip very-young connections — they may still be handshaking.
         .filter(|p| now.duration_since(p.connected_at) >= MIN_AGE_BEFORE_EVICT)
-        // Skip peers above the reputation floor (well-behaved, never evict).
-        .filter(|p| p.reputation < REPUTATION_PROTECT_FLOOR)
+        // audit M-1: NO absolute reputation floor here. The default reputation
+        // is 100 and only drops on misbehavior, so an absolute
+        // `reputation < 80` candidate filter meant a quiet inbound flooder (all
+        // peers at rep 100) produced an EMPTY candidate set → eviction returned
+        // None → every new (honest) inbound was rejected: the exact eclipse this
+        // function exists to prevent. Well-behaved peers are still protected
+        // RELATIVELY by the per-axis top-N steps below (which include a
+        // reputation axis), matching Bitcoin Core's purely-relative eviction.
         .collect();
 
     if candidates.is_empty() {
@@ -301,14 +307,21 @@ mod tests {
     }
 
     #[test]
-    fn skips_high_reputation_peers() {
+    fn all_high_reputation_flood_still_yields_eviction_candidate() {
+        // audit M-1: a quiet inbound flood — all peers at the DEFAULT maximum
+        // reputation (100), same netgroup, well-aged — must STILL yield an
+        // eviction candidate, or the node can never admit a new honest inbound
+        // peer and is eclipsed. Pre-fix, the absolute reputation floor made this
+        // return None (the bug). Well-behaved peers remain protected RELATIVELY
+        // (per-axis top-N), so a legitimately diverse, non-flooded set is still
+        // safe — see the other eviction tests.
         let peers: Vec<PeerInfo> = (0..20u8)
             .map(|i| mk(i, &format!("1.2.3.{}", i + 10), 3600, 100, false, false))
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
         assert!(
-            select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new()).is_none(),
-            "all-high-reputation peer pool must yield no eviction candidate"
+            select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new()).is_some(),
+            "an all-high-reputation single-netgroup flood must remain evictable (eclipse-safe)"
         );
     }
 
