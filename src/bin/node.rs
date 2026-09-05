@@ -253,6 +253,55 @@ async fn main() {
         _ => Network::Testnet,
     };
 
+    // ── Compile-time feature vs runtime --network ────────────────────────
+    //
+    // Several consensus constants are selected by `#[cfg(feature = "testnet")]`
+    // at COMPILE time, not by `--network` at runtime — notably
+    // `MIN_OUTPUT_AGE_HARDFORK_HEIGHT` (which decides whether output maturity is
+    // 10 or 100 blocks), plus FEE_DISTRIBUTION_HEIGHT, CONSENSUS_CHECKPOINTS and
+    // the ROLLING_FINALITY_* heights.
+    //
+    // So a binary built `--features testnet` and started `--network mainnet`
+    // silently enforces TESTNET consensus rules on mainnet, and would disagree
+    // with correctly-built peers about whether an output is spendable — a chain
+    // split, with no symptom until it happens.
+    //
+    // This is the F31 SEV-A shape that already bit this project once: the
+    // 2026-07-04 partition trap, where a binary built without `--features
+    // testnet` used mainnet's 100-block reorg cap while configured for testnet
+    // at runtime. That was fixed for `max_reorg_depth` by making it read the
+    // runtime network; the remaining constants above are still compile-time, so
+    // the mismatch is guarded here instead.
+    //
+    // Fail closed rather than warn: a consensus-rule mismatch is not something
+    // an operator can safely proceed through, and the official release build
+    // (`cargo build --release --features "${NETWORK}"`) never produces one.
+    {
+        let built_for_testnet = cfg!(feature = "testnet");
+        let runtime_is_testnet_family = !matches!(network, Network::Mainnet);
+        if built_for_testnet != runtime_is_testnet_family {
+            let (built, wanted) = if built_for_testnet {
+                ("with", "without")
+            } else {
+                ("without", "with")
+            };
+            eprintln!(
+                "\nFATAL: this binary was built {built} `--features testnet`, but was started \
+                 with `--network {}`.\n\n\
+                 Consensus constants including MIN_OUTPUT_AGE_HARDFORK_HEIGHT (output maturity, \
+                 10 vs 100 blocks), FEE_DISTRIBUTION_HEIGHT and CONSENSUS_CHECKPOINTS are \
+                 selected at COMPILE time by that feature, not by --network. Running this \
+                 combination would enforce the wrong consensus rules and disagree with \
+                 correctly-built peers about which blocks and spends are valid.\n\n\
+                 Rebuild {wanted} the feature:\n    \
+                 cargo build --release --features \"randomx{}\"\n",
+                cli.network,
+                if built_for_testnet { "" } else { " testnet" },
+            );
+            std::process::exit(1);
+        }
+    }
+
     // RandomX VM keys must use the same genesis binding as the rest of the network.
     coincync::consensus::bind_randomx_genesis_for_network(network);
 
