@@ -346,6 +346,40 @@ colony, because the quorum refuses one source on one dimension. The
 The harness is kept in the repo (`cargo run --example colony_live -- <rpc-url>`)
 so the whole pipeline can be re-run against any node.
 
+## Round 8 — full-stack run (everything, one fresh chain)
+
+A single end-to-end run on a fresh 2-node regtest chain, from binaries rebuilt
+from HEAD, exercising the whole system in one sequence.
+
+| # | Check | Result |
+|---|---|---|
+| 54 | Two-node sync | both nodes same height + tip throughout |
+| 55 | Coinbase detection (clean wallet) | w1 rescan-from-0 found 536 outputs / 26 796 CYNC (stale cross-chain UTXOs cleared first — see note) |
+| 56 | RingCT send with memo | 2-in/2-out, fee 7 160 000, accepted |
+| 57 | Tx propagation to the follower node | both nodes saw it in the same block `939a2895` |
+| 58 | **Cross-node private receipt** | w2 detected its 50 CYNC by stealth scan **through node 2** |
+| 59 | Memo decrypt (padded) | `"full-test invoice #7"`, exactly **256** wire bytes |
+| 60 | Dust quarantine | 5 000 000-atomic output auto-held; `quarantine list` shows it, spendable balance excludes it |
+| 61 | **Spend-of-received** | w2 spent its received 50+45 (2-in/2-out) back to w1 **via the follower node** |
+| 62 | Disclosure balance proof | 2 678-byte proof; unanchored verify confirms ≥1 CYNC with the not-anchored warning (anchored ALLOW/MISMATCH proven round 3) |
+| 63 | **Independent supply audit, both nodes** | python+blake3: RPC==header==recomputed; genesis zero; inflated figure fails — PASS on both |
+| 64 | Colony sidecar (castes + spine, live) | every caste reported; `colony/spine: no threat reached quorum confidence — nothing would act` |
+| 65 | Reconnect + catch-up | after a split, n2 (a prefix of n1) caught up and both converged to identical tip `55419398` |
+
+**One thing did not exercise as intended.** The fresh reorg attempt did not
+diverge: a stale n2 process from before the split kept following n1, so there was
+only ever one chain (both "forks" showed the same tip). That is the same
+fixture-hygiene trap noted in round 6, and a test-orchestration miss, not a
+product issue — reorg with post-reorg supply consistency (byte-identical
+commitments on the reorged vs non-reorged node) was proven definitively in
+round 6. The reconnect/catch-up path (#65) did exercise cleanly here.
+
+**Note on wallet reuse.** The persistent `w1.wallet` carried 3 222 UTXOs from
+prior chains; a send would have selected inputs that don't exist on the fresh
+chain. Deleting the `.utxos`/`.reservations` sidecars and rescanning `--from 0`
+gave clean state. Worth a wallet-side guard later: a wallet bound to a genesis
+hash should refuse to load UTXOs from a different chain.
+
 ## Superseded — the original round-3 write-up of this finding
 
 **Memos are not padded.** WP-014 §3.4 and WP-011 §3.3 both state that honest
