@@ -676,6 +676,35 @@ impl P2PNode {
         }
     }
 
+    /// Replay orphan blocks that were waiting on `hash`, now that it has
+    /// connected to the chain. Drains the direct orphan children from the pool
+    /// and re-emits each as a `BlockReceived` event so it flows through the
+    /// normal block-processing path (which re-fires this hook for that child's
+    /// own children — a terminating cascade, since each orphan is drained once).
+    ///
+    /// This closes the orphan-reconnection gap: the production block handler
+    /// stashes orphans via `notify_block_orphan` but never drained them after
+    /// the parent arrived (the forward drain lived only in the unused
+    /// `on_block_received_from`), so out-of-order / reorg delivery stalled up to
+    /// the 30-minute orphan TTL. Re-emitting through the event channel re-uses
+    /// the full validate → connect → relay path with no duplicated logic.
+    pub async fn notify_block_accepted(&self, hash: &Hash) {
+        let drained = self.sync.write().await.take_orphans_of(*hash);
+        for (block, from) in drained {
+            // Attribute the replay to the orphan's origin peer so a later
+            // invalid-block finding scores the right peer; fall back to a zero
+            // sentinel for self-originated orphans.
+            let peer = from.unwrap_or([0u8; 32]);
+            let child = block.hash();
+            tracing::debug!(
+                "orphan replay: re-injecting {} now that parent {} connected",
+                hex::encode(&child.as_bytes()[..8]),
+                hex::encode(&hash.as_bytes()[..8]),
+            );
+            let _ = self.event_tx.send(NodeEvent::BlockReceived(block, peer));
+        }
+    }
+
     /// Force a full resync by clearing sync state and requesting headers again.
     /// Used when a deep chain divergence exceeds the reorg depth limit in chain.rs.
     pub async fn force_resync(&self) {

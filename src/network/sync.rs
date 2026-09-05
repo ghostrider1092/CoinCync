@@ -948,6 +948,37 @@ impl ChainSync {
         Ok(vec![])
     }
 
+    /// Drain and return the orphan blocks whose `prev_hash == parent_hash`,
+    /// removing them from the pool, now that `parent_hash` has connected to the
+    /// chain. Returns each child with its ORIGIN peer (for correct re-scoring /
+    /// relay attribution). Only DIRECT children are returned; deeper descendants
+    /// drain on the next accept-hook when each child itself connects.
+    ///
+    /// This wires the PRODUCTION accept path to the orphan pool. Without it, a
+    /// block stashed via `mark_block_orphan` was never fed back after its parent
+    /// arrived (the forward drain only existed inside `on_block_received_from`,
+    /// which the production block handler does not call), so out-of-order /
+    /// reorg block delivery stalled until the 30-minute orphan TTL freed the
+    /// child for re-download. Per-child bookkeeping mirrors the drain loop in
+    /// `on_block_received_from` (remove from both maps; decrement the origin
+    /// peer's `orphans_per_peer` on resolution).
+    pub fn take_orphans_of(&mut self, parent_hash: Hash) -> Vec<(Block, Option<PeerId>)> {
+        let mut drained = Vec::new();
+        if let Some(children) = self.orphan_by_parent.remove(&parent_hash) {
+            for ch in children {
+                if let Some(o) = self.orphan_blocks.remove(&ch) {
+                    if let Some(pid) = o.from {
+                        if let Some(c) = self.orphans_per_peer.get_mut(&pid) {
+                            *c = c.saturating_sub(1);
+                        }
+                    }
+                    drained.push((o.block, o.from));
+                }
+            }
+        }
+        drained
+    }
+
     pub fn mark_block_received(&mut self, hash: &Hash) {
         if let Some(req) = self.pending_requests.remove(hash) {
             self.on_block_success(&req.requested_from);
