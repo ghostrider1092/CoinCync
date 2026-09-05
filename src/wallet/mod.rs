@@ -31,7 +31,7 @@ pub mod lightsync;
 pub mod wallet;
 
 pub use balance::{Balance, UTXO};
-pub use key_epoch::{KeyEpoch, ScopedViewKey, ViewOnlyEpoch};
+pub use key_epoch::{KeyEpoch, ViewOnlyEpoch};
 pub use keys::{
     FullViewingKey,
     IncomingViewingKey,

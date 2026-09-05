@@ -1,9 +1,10 @@
 # WP-015 · Dead-Man's Switch and Auto-Churn
 ### Inheritance without custody, and unlinkability without a schedule
 
-**Status:** **Split — auto-churn Shipped; dead-man's switch Placeholder
-(metadata only, no spend path)** · **Layer:** Wallet · **Series:**
-[CoinCync Whitepapers](README.md)
+**Status:** **Split — auto-churn Shipped; dead-man's switch DEFERRED
+post-launch (its CLI was removed in v1: the metadata was inert, with no
+consensus recovery-spend rule, so it could not do what its name promised).**
+· **Layer:** Wallet · **Series:** [CoinCync Whitepapers](README.md)
 
 ---
 

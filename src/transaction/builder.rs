@@ -119,12 +119,11 @@ pub struct TransactionBuilder {
     target_height: u64,
     /// Optional plaintext memo to encrypt on the first recipient output.
     memo: Option<Vec<u8>>,
-    /// Optional bytes to embed in `tx.extra`. Used by the dead-man's
-    /// switch to encode `RecoveryMeta` (sender provides a recovery
-    /// pubkey + inactivity-timeout-blocks; if the wallet stops signing
-    /// for `timeout_blocks`, the recovery address can sweep these
-    /// outputs). The CLI flow is `set-recovery` → store config →
-    /// `send --recovery-address X --recovery-timeout Y` → embed.
+    /// Optional bytes to embed in `tx.extra`. This is a generic escape hatch;
+    /// it carried `RecoveryMeta` for the dead-man's switch, but that CLI flow
+    /// was removed for v1 (the metadata was inert — no consensus recovery-spend
+    /// rule exists; tracked as post-launch consensus work), so nothing populates
+    /// this today. Empty → standard tx (the default).
     extra: Vec<u8>,
     /// Transaction version.
     tx_version: u8,
@@ -147,12 +146,10 @@ impl TransactionBuilder {
         }
     }
 
-    /// Attach raw bytes to `tx.extra`. Used to embed `RecoveryMeta`
-    /// (dead-man's switch) so the chain validator can persist the
-    /// recovery address + timeout, and the recovery wallet can detect
-    /// expiry. Format is whatever the caller provides — typically
-    /// `RecoveryMeta::encode_all(&[meta])` for the dead-man's switch
-    /// case. Empty → standard tx with no recovery metadata (default).
+    /// Attach raw bytes to `tx.extra`. A generic escape hatch: the caller
+    /// chooses the format. It previously carried `RecoveryMeta` for the
+    /// dead-man's switch, but that flow was removed for v1 (see the `extra`
+    /// field docs). Empty → standard tx (the default).
     pub fn with_extra(mut self, extra: Vec<u8>) -> Self {
         self.extra = extra;
         self

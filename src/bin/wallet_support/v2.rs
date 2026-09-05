@@ -42,8 +42,6 @@ fn run_send_command_v2(cli: Cli) {
         split_output,
         subaddress,
         memo,
-        recovery_address,
-        recovery_timeout,
     } = command
     else {
         unreachable!("send dispatcher called for a non-send command");
@@ -59,8 +57,6 @@ fn run_send_command_v2(cli: Cli) {
         split_output,
         subaddress,
         memo,
-        recovery_address,
-        recovery_timeout,
         node,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -92,8 +88,6 @@ struct SendCommandArguments {
     split_output: bool,
     subaddress: bool,
     memo: Option<String>,
-    recovery_address: Option<String>,
-    recovery_timeout: Option<u64>,
     node: String,
 }
 
@@ -108,8 +102,6 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         split_output,
         subaddress,
         memo,
-        recovery_address: recovery_address_hex,
-        recovery_timeout,
         node,
     } = arguments;
     use coincync::wallet::spend::{SpendCoordinator, SpendIntent, SpendSubmission};
@@ -119,20 +111,10 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     let to_view = parse_public_key_v2(&to_view_hex, "to-view")?;
     let memo_bytes = validate_memo_v2(memo)?;
 
-    if matches!(
-        (recovery_address_hex.as_ref(), recovery_timeout),
-        (Some(_), None) | (None, Some(_))
-    ) {
-        return Err(
-            "--recovery-address and --recovery-timeout must be passed together".into(),
-        );
-    }
     let payments = payments_v2(to_spend, to_view, amount, split_output, subaddress);
-    let extra = recovery_extra_v2(
-        recovery_address_hex.as_deref(),
-        recovery_timeout,
-        payments.len(),
-    )?;
+    // Dead-man's-switch recovery metadata was removed for v1 (inert — no
+    // consensus recovery-spend rule), so no extra bytes are attached today.
+    let extra: Vec<u8> = Vec::new();
 
     let password = resolve_password(password, false)?;
     let mut wallet = Wallet::open(wallet_path).map_err(|error| format!("open wallet: {error}"))?;
@@ -177,16 +159,6 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
             payments[1].amount.as_atomic()
         );
     }
-    if let (Some(address), Some(timeout)) =
-        (recovery_address_hex.as_deref(), recovery_timeout)
-    {
-        println!(
-            "  Recovery:        addr={}…  timeout={} blocks",
-            &address[..16],
-            timeout
-        );
-    }
-
     let intent = SpendIntent::new(payments)
         .with_fee_multiplier(fee_multiplier)
         .with_memo(memo_bytes)
@@ -320,36 +292,3 @@ fn payments_v2(
     }
 }
 
-fn recovery_extra_v2(
-    recovery_address_hex: Option<&str>,
-    recovery_timeout: Option<u64>,
-    output_count: usize,
-) -> Result<Vec<u8>, String> {
-    use coincync::transaction::recovery::RecoveryMeta;
-
-    match (recovery_address_hex, recovery_timeout) {
-        (Some(address), Some(timeout_blocks)) => {
-            let bytes = hex::decode(address)
-                .map_err(|error| format!("invalid --recovery-address hex: {error}"))?;
-            let recovery_address: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
-                format!(
-                    "--recovery-address must be 32 bytes (64 hex), got {}",
-                    bytes.len()
-                )
-            })?;
-            let metadata = RecoveryMeta {
-                output_index: 0,
-                recovery_address,
-                timeout_blocks,
-            };
-            metadata
-                .validate(output_count)
-                .map_err(|error| format!("invalid recovery config: {error}"))?;
-            Ok(RecoveryMeta::encode_all(&[metadata]))
-        }
-        (None, None) => Ok(Vec::new()),
-        _ => Err(
-            "--recovery-address and --recovery-timeout must be passed together".into(),
-        ),
-    }
-}

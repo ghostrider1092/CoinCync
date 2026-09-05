@@ -188,19 +188,10 @@ enum Command {
         /// don't belong on-chain in plaintext.
         #[arg(long)]
         memo: Option<String>,
-        /// Dead-man's switch — recovery address (64-hex spend pubkey of a
-        /// backup wallet). Embeds a 42-byte RecoveryMeta into `tx.extra`; both
-        /// flags must be passed together. NOTE (WP-015 §5.1): recovery SPENDING
-        /// is not yet implemented — no consensus rule lets the recovery address
-        /// spend after the timeout, so this metadata is currently inert and must
-        /// not be relied on for fund recovery.
-        #[arg(long)]
-        recovery_address: Option<String>,
-        /// Blocks of inactivity before recovery activates (min 720 ≈
-        /// 24h, max 525960 ≈ 2yr). Required when `--recovery-address`
-        /// is set; ignored otherwise.
-        #[arg(long)]
-        recovery_timeout: Option<u64>,
+        // NOTE: `--recovery-address` / `--recovery-timeout` (dead-man's switch)
+        // were removed for v1. The metadata they embedded was inert (no consensus
+        // recovery-spend rule), so the flags promised protection the network
+        // could not honour. Tracked as post-launch consensus work.
     },
 
     /// Generate M-of-N multi-sig key shares using FROST.
@@ -269,37 +260,11 @@ enum Command {
         amount: u64,
     },
 
-    /// Set a dead man's switch recovery address for future transactions.
-    /// NOTE: recovery spending is NOT yet implemented (WP-015 §5.1) — the
-    /// metadata is written but is inert until a future consensus change; do not
-    /// rely on it for recovery. The command explains this before it acts.
-    SetRecovery {
-        /// Wallet password. Use `-` to read from stdin (recommended for
-        /// piped automation: `echo $pw | wallet ... --password -`).
-        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
-        /// stdin is provided; otherwise prompts interactively.
-        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
-        password: Option<String>,
-        /// Recovery address (64-hex spend public key of backup wallet).
-        #[arg(long)]
-        address: String,
-        /// Blocks of inactivity before recovery activates (min 720 ≈ 24h, max 525960 ≈ 2yr).
-        #[arg(long, default_value = "262800")]
-        timeout: u64,
-    },
-
-    /// Check if any UTXOs have recovery metadata and their recovery status.
-    CheckRecovery {
-        /// Wallet password. Use `-` to read from stdin (recommended for
-        /// piped automation: `echo $pw | wallet ... --password -`).
-        /// Reads `COINCYNC_WALLET_PASSWORD` env if neither flag nor
-        /// stdin is provided; otherwise prompts interactively.
-        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
-        password: Option<String>,
-        /// Node RPC URL.
-        #[arg(long)]
-        node_override: Option<String>,
-    },
+    // NOTE: `set-recovery` / `check-recovery` (the dead-man's switch) were
+    // removed for v1. The recovery metadata was inert — there is NO consensus
+    // rule letting a recovery address spend after the timeout, so the feature
+    // could not do what its name promised. A real recovery-spend path is a
+    // post-launch consensus feature. Use a seed backup or multisig meanwhile.
 
     /// Enable auto-churn: automatic self-sends at random intervals to poison
     /// the transaction graph. Runs as a background loop until stopped.
@@ -449,28 +414,12 @@ enum DiscloseAction {
         #[arg(long)]
         anchor: bool,
     },
-    /// Export a time-scoped view key: a read-only key that decrypts only
-    /// outputs in blocks [--from-height, --to-height]. Discloses your
-    /// history for a bounded period (e.g. a tax year) without giving up
-    /// past-or-future privacy. Contains a view secret — share carefully.
-    ScopedViewKey {
-        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
-        password: Option<String>,
-        /// First block height the exported key can decrypt (inclusive).
-        #[arg(long)]
-        from_height: u64,
-        /// Last block height the exported key can decrypt (inclusive).
-        #[arg(long)]
-        to_height: u64,
-    },
-    /// Auditor side: scan a scoped view key's block range and list the
-    /// outputs it can see. Read-only, no wallet, bounded to the key's
-    /// disclosed range.
-    ScanScoped {
-        /// The scoped view key JSON (from `disclose scoped-view-key`).
-        #[arg(long)]
-        view_key: String,
-    },
+    // NOTE: `scoped-view-key` / `scan-scoped` were removed for v1. The export was
+    // the wallet's FULL view secret with the range honoured only by cooperating
+    // software — it could not cryptographically bound disclosure to a height
+    // range (a Monero-style view secret is monolithic; range-binding needs a
+    // protocol change, tracked post-launch). Use the cryptographic disclosure
+    // proofs above (`balance`, `verify-ownership`) for an adversary-proof bound.
 }
 
 #[derive(Subcommand)]
@@ -586,8 +535,6 @@ async fn main() {
             split_output,
             subaddress,
             memo,
-            recovery_address,
-            recovery_timeout,
         } => {
             cmd_send(
                 &wallet_path,
@@ -599,8 +546,6 @@ async fn main() {
                 split_output,
                 subaddress,
                 memo,
-                recovery_address,
-                recovery_timeout,
                 &cli.node,
             )
             .await
@@ -627,18 +572,6 @@ async fn main() {
             message,
             output,
         } => cmd_multisig_round2(&share_file, &nonce_file, &commitments, &message, &output).await,
-        Command::SetRecovery {
-            password,
-            address,
-            timeout,
-        } => cmd_set_recovery(&wallet_path, password, &address, timeout).await,
-        Command::CheckRecovery {
-            password,
-            node_override,
-        } => {
-            let node_url = node_override.as_deref().unwrap_or(&cli.node);
-            cmd_check_recovery(&wallet_path, password, node_url).await
-        }
         Command::AutoChurn {
             password,
             min_interval,
@@ -715,14 +648,6 @@ async fn main() {
                 anchor_output_index,
             } => {
                 cmd_disclose_verify_balance(&proof, &cli.node, anchor_tx, anchor_output_index).await
-            }
-            DiscloseAction::ScopedViewKey {
-                password,
-                from_height,
-                to_height,
-            } => cmd_disclose_scoped_view_key(&wallet_path, password, from_height, to_height).await,
-            DiscloseAction::ScanScoped { view_key } => {
-                cmd_disclose_scan_scoped(&view_key, &cli.node).await
             }
             DiscloseAction::VerifyOwnership { proof, anchor } => {
                 cmd_disclose_verify_ownership(&proof, &cli.node, anchor).await
@@ -1474,8 +1399,6 @@ async fn cmd_send(
     split_output: bool,
     is_subaddress: bool,
     memo: Option<String>,
-    recovery_address_hex: Option<String>,
-    recovery_timeout: Option<u64>,
     node: &str,
 ) -> Result<(), String> {
     use coincync::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
@@ -1499,21 +1422,13 @@ async fn cmd_send(
     let to_spend = parse_pk(&to_spend_hex, "to-spend")?;
     let to_view = parse_pk(&to_view_hex, "to-view")?;
 
-    // Cheap arg-validation before any network or wallet I/O. A
-    // wrong --memo or mismatched --recovery-* pair shouldn't make
-    // the user wait for an RPC roundtrip + decoy fetch only to
-    // bail. The deeper checks (hex decode, output_index against
-    // recipients) stay below where the values are consumed.
+    // Cheap arg-validation before any network or wallet I/O. A wrong --memo
+    // shouldn't make the user wait for an RPC roundtrip + decoy fetch only to
+    // bail. The deeper checks stay below where the values are consumed.
     if let Some(s) = memo.as_deref() {
         if s.len() > 256 {
             return Err(format!("memo too long: {} bytes (max 256)", s.len()));
         }
-    }
-    match (recovery_address_hex.as_deref(), recovery_timeout) {
-        (Some(_), None) | (None, Some(_)) => {
-            return Err("--recovery-address and --recovery-timeout must be passed together".into());
-        }
-        _ => {}
     }
 
     // Unlock wallet
@@ -1573,11 +1488,9 @@ async fn cmd_send(
         vec![(to_spend, to_view, Amount::from_atomic(amount), is_subaddress)]
     };
 
-    // Build the optional memo + recovery extra. Memo is bounded at 256
-    // bytes (consensus rule); we surface a clear CLI error rather than
-    // letting the builder reject it cryptically. Recovery requires both
-    // --recovery-address AND --recovery-timeout — pass-only-one is a
-    // user-error.
+    // Build the optional memo. Memo is bounded at 256 bytes (consensus rule);
+    // we surface a clear CLI error rather than letting the builder reject it
+    // cryptically.
     let memo_bytes: Option<Vec<u8>> = match memo {
         Some(s) if s.len() > 256 => {
             return Err(format!("memo too long: {} bytes (max 256)", s.len()));
@@ -1586,49 +1499,9 @@ async fn cmd_send(
         None => None,
     };
 
-    let extra_bytes: Vec<u8> = match (recovery_address_hex, recovery_timeout) {
-        (Some(addr_hex), Some(timeout)) => {
-            use coincync::transaction::recovery::RecoveryMeta;
-            let addr_v = hex::decode(&addr_hex)
-                .map_err(|e| format!("invalid --recovery-address hex: {}", e))?;
-            if addr_v.len() != 32 {
-                return Err(format!(
-                    "--recovery-address must be 32 bytes (64 hex), got {}",
-                    addr_v.len()
-                ));
-            }
-            let mut addr = [0u8; 32];
-            addr.copy_from_slice(&addr_v);
-            // Attach recovery metadata to output 0. For the uniform 2-out
-            // shape, output 0 is the first recipient; output 1 is change
-            // (or a second recipient in drip-pair). The "right" semantic
-            // is "recovery applies to the change output the sender keeps"
-            // — implementing that requires either (a) emitting per-output
-            // recovery entries indexed at the change output specifically,
-            // or (b) the consensus validator recognizing recovery from
-            // EITHER key image. For now we attach to output 0 so the
-            // encoding round-trips through tx.extra and `check-recovery`
-            // can detect the metadata; the consensus-level recovery-spend
-            // path is tracked separately.
-            let meta = RecoveryMeta {
-                output_index: 0,
-                recovery_address: addr,
-                timeout_blocks: timeout,
-            };
-            meta.validate(recipients.len())
-                .map_err(|e| format!("invalid recovery config: {}", e))?;
-            println!(
-                "  Recovery:        addr={}…  timeout={} blocks",
-                &addr_hex[..16.min(addr_hex.len())],
-                timeout
-            );
-            RecoveryMeta::encode_all(&[meta])
-        }
-        (Some(_), None) | (None, Some(_)) => {
-            return Err("--recovery-address and --recovery-timeout must be passed together".into());
-        }
-        (None, None) => Vec::new(),
-    };
+    // Dead-man's-switch recovery metadata was removed for v1 (inert — no
+    // consensus recovery-spend rule), so no extra bytes are attached today.
+    let extra_bytes: Vec<u8> = Vec::new();
 
     // R-113 note: SharedWallet.balance() clones because it can't
     // hold the RwLock guard across the return. If a future refactor
@@ -2367,121 +2240,6 @@ async fn cmd_quarantine_accept(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// DEAD MAN'S SWITCH COMMANDS
-// ══════════════════════════════════════════════════════════════════════════════
-
-async fn cmd_set_recovery(
-    path: &PathBuf,
-    password: Option<String>,
-    recovery_address_hex: &str,
-    timeout_blocks: u64,
-) -> Result<(), String> {
-    use coincync::transaction::recovery::RecoveryMeta;
-
-    // Parse recovery address
-    let addr_bytes = hex::decode(recovery_address_hex)
-        .map_err(|e| format!("invalid recovery address hex: {}", e))?;
-    if addr_bytes.len() != 32 {
-        return Err("recovery address must be 32 bytes (64 hex chars)".into());
-    }
-    let mut recovery_address = [0u8; 32];
-    recovery_address.copy_from_slice(&addr_bytes);
-
-    // Validate
-    let meta = RecoveryMeta {
-        output_index: 0,
-        recovery_address,
-        timeout_blocks,
-    };
-    meta.validate(1)
-        .map_err(|e| format!("invalid recovery config: {}", e))?;
-
-    // Verify wallet opens
-    let password = resolve_password(password, false)?;
-    if !wallet_exists(path) {
-        return Err(format!("no wallet at {:?}", path));
-    }
-    let _data =
-        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
-
-    let timeout_hours = timeout_blocks * 2 / 60; // approximate at 120s blocks
-    let timeout_days = timeout_hours / 24;
-
-    // HONESTY GATE (WP-015 §5.1). The recovery *metadata* is real, validated, and
-    // forward-compatible — but there is NO consensus spend path for it:
-    // `is_recovery_eligible` has no caller in validation or the wallet spend
-    // path, so a recovery address CANNOT actually spend after the timeout. The
-    // previous message here said "Dead man's switch configured … the recovery
-    // address can sweep the outputs", which is false and is the most dangerous
-    // shape of defect a wallet can have: a user relies on it, and their heirs get
-    // nothing while the tool reported success. Lead with the truth.
-    println!("⚠ DEAD-MAN'S SWITCH IS NOT YET FUNCTIONAL — DO NOT RELY ON IT.");
-    println!();
-    println!("  The recovery metadata below is valid and will be written to your");
-    println!("  transactions, but the network has NO rule that lets a recovery");
-    println!("  address spend after the timeout. Recovery spending is unimplemented");
-    println!("  (it needs a consensus change that has not shipped). Today this");
-    println!("  metadata is INERT: if you lose access, these funds are NOT");
-    println!("  recoverable through this mechanism.");
-    println!();
-    println!("  Do not use this as your inheritance or backup plan. Use a real");
-    println!("  seed backup, or multisig, until this is activated on the network.");
-    println!();
-    println!("Metadata that WOULD be written (inert until the consensus rule ships):");
-    println!("  Recovery address: {}", recovery_address_hex);
-    println!(
-        "  Timeout:          {} blocks (≈{} days)",
-        timeout_blocks, timeout_days
-    );
-    println!();
-    println!("To embed this (forward-compatible) metadata in a transaction, pass:");
-    println!(
-        "  --recovery-address {} --recovery-timeout {}",
-        recovery_address_hex, timeout_blocks
-    );
-    println!("with the 'send' command.");
-    println!();
-    println!("Recovery metadata encoding (for the tx extra field):");
-    let encoded = meta.encode();
-    println!("  {} ({} bytes)", hex::encode(&encoded), encoded.len());
-
-    Ok(())
-}
-
-async fn cmd_check_recovery(
-    path: &PathBuf,
-    password: Option<String>,
-    node: &str,
-) -> Result<(), String> {
-    let password = resolve_password(password, false)?;
-    if !wallet_exists(path) {
-        return Err(format!("no wallet at {:?}", path));
-    }
-    let _data =
-        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
-
-    // Get current chain height
-    let info = rpc_get_info(node)
-        .await
-        .map_err(|e| format!("rpc: {}", e))?;
-    let current_height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    println!("Dead man's switch status:");
-    println!("  Current chain height: {}", current_height);
-    println!();
-    println!("  Note: Recovery metadata is embedded in transaction extra fields.");
-    println!("  Use the explorer or 'get_transaction' RPC to inspect individual");
-    println!("  transactions for recovery tags (0xDE prefix).");
-    println!();
-    println!("  ⚠ Recovery SPENDING is not implemented (WP-015 §5.1): the network");
-    println!("    has no rule permitting a recovery address to spend after the");
-    println!("    timeout. This metadata is inert until a future consensus change.");
-    println!("    Do not rely on it for fund recovery.");
-
-    Ok(())
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // AUTO-CHURN COMMAND
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -2747,169 +2505,6 @@ async fn cmd_disclose_balance(
     println!();
     println!("Verifier needs only the bytes above — no chain access, no wallet keys.");
     println!("Run `coincync-wallet disclose verify-balance --proof <hex>` to check.");
-    Ok(())
-}
-
-/// Export a time-scoped view key covering blocks [from_height, to_height].
-/// The key can decrypt only the wallet's outputs inside that range —
-/// bounded disclosure ("particular description"), not a full view key.
-async fn cmd_disclose_scoped_view_key(
-    path: &PathBuf,
-    password: Option<String>,
-    from_height: u64,
-    to_height: u64,
-) -> Result<(), String> {
-    use coincync::wallet::{ScopedViewKey, Wallet};
-
-    if from_height > to_height {
-        return Err(format!(
-            "--from-height ({}) must be <= --to-height ({})",
-            from_height, to_height
-        ));
-    }
-    if !wallet_exists(path) {
-        return Err(format!("no wallet at {:?}", path));
-    }
-    let password = resolve_password(password, false)?;
-    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
-    wallet
-        .unlock(&password)
-        .map_err(|e| format!("unlock wallet: {}", e))?;
-    let epoch = wallet
-        .current_keys()
-        .ok_or_else(|| "wallet has no active key epoch".to_string())?;
-    let scoped = ScopedViewKey::from_epoch(&epoch, from_height, to_height);
-
-    println!(
-        "Scoped view key — blocks {}..={} (inclusive)",
-        from_height, to_height
-    );
-    println!();
-    println!("{}", scoped.to_json());
-    println!();
-    // WP-013 §3.6. The height range is NOT a cryptographic bound: the exported
-    // `view_secret` is this wallet's full view secret, byte-identical no matter
-    // which range is requested (verified live 2026-09-05 — two exports with
-    // ranges 1180..1200 and 1..50 produced the same secret). `from_height` /
-    // `to_height` are honoured by OUR scanner (`disclose scan-scoped`) and by
-    // nothing else; a recipient running their own scanner sees the wallet's
-    // entire history, past and future.
-    //
-    // This warning previously read "…and nothing outside it" — the opposite of
-    // the truth, about an irreversible disclosure. Sharing a view key is a
-    // considered act taken on the strength of exactly this sentence, so it has
-    // to say what the key actually does.
-    println!("⚠ THIS KEY DISCLOSES YOUR ENTIRE VIEW HISTORY — NOT JUST THIS RANGE.");
-    println!();
-    println!("  The height range is a REQUEST, not a cryptographic limit. The key");
-    println!("  material above is your full view secret: a holder who runs their own");
-    println!("  scanner, instead of `disclose scan-scoped`, can decrypt every output");
-    println!("  this wallet has EVER received or will receive. The range is honoured");
-    println!("  only by cooperating software.");
-    println!();
-    println!("  It cannot spend, and it cannot be revoked once shared.");
-    println!();
-    println!("  Share it only with someone you would trust with your whole receive");
-    println!("  history. If you need a bound that holds against an adversarial");
-    println!("  recipient, use a disclosure PROOF instead (`disclose balance`,");
-    println!("  `verify-ownership`) — those are cryptographic; this is not.");
-    Ok(())
-}
-
-/// Auditor side of a scoped view key: scan the disclosed block range and
-/// list the outputs the key can see. Read-only, no wallet, no spend
-/// capability, and bounded to [from_height, to_height] — nothing outside
-/// the disclosed scope is visible.
-async fn cmd_disclose_scan_scoped(view_key_json: &str, node: &str) -> Result<(), String> {
-    use coincync::consensus::Block;
-    use coincync::primitives::{PublicKey, SecretKey};
-    use coincync::wallet::scanner::ScanResult;
-    use coincync::wallet::WalletScanner;
-
-    let v: serde_json::Value = serde_json::from_str(view_key_json)
-        .map_err(|e| format!("invalid scoped-view-key JSON: {}", e))?;
-    let get_bytes = |k: &str| -> Result<[u8; 32], String> {
-        let s = v
-            .get(k)
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| format!("scoped-view-key missing field '{}'", k))?;
-        let raw = hex::decode(s).map_err(|e| format!("bad hex for '{}': {}", k, e))?;
-        if raw.len() != 32 {
-            return Err(format!("'{}' must be 32 bytes, got {}", k, raw.len()));
-        }
-        let mut b = [0u8; 32];
-        b.copy_from_slice(&raw);
-        Ok(b)
-    };
-    let view_secret = SecretKey::from_bytes(get_bytes("view_secret")?);
-    let spend_public = PublicKey::from_bytes(get_bytes("spend_public")?);
-    let from_height = v
-        .get("from_height")
-        .and_then(|x| x.as_u64())
-        .ok_or("scoped-view-key missing from_height")?;
-    let to_height = v
-        .get("to_height")
-        .and_then(|x| x.as_u64())
-        .ok_or("scoped-view-key missing to_height")?;
-    if from_height > to_height {
-        return Err(format!(
-            "from_height ({}) > to_height ({})",
-            from_height, to_height
-        ));
-    }
-
-    let mut scanner = WalletScanner::new();
-    scanner.add_keys(view_secret, spend_public, 0);
-
-    println!(
-        "Scoped scan — blocks {}..={} via {}",
-        from_height, to_height, node
-    );
-    let (mut found, mut total) = (0usize, 0u64);
-    let mut cursor = from_height;
-    while cursor <= to_height {
-        let batch_end = (cursor + 99).min(to_height);
-        let blocks = rpc_get_block_range(node, cursor, batch_end).await?;
-        if blocks.is_empty() {
-            break;
-        }
-        for b in &blocks {
-            let height = b.get("height").and_then(|x| x.as_u64()).unwrap_or(cursor);
-            let bytes_hex = b
-                .get("bytes")
-                .and_then(|x| x.as_str())
-                .ok_or("block missing bytes")?;
-            let block_bytes =
-                hex::decode(bytes_hex).map_err(|e| format!("bad block hex: {}", e))?;
-            let block: Block =
-                borsh::from_slice(&block_bytes).map_err(|e| format!("block decode: {}", e))?;
-            if let ScanResult::Scanned { outputs, .. } = scanner.scan_block_with_result(&block) {
-                for o in &outputs {
-                    found += 1;
-                    total = total.saturating_add(o.amount);
-                    println!(
-                        "  h{:<8} {:>16} atomic (~{:.6} CYNC)  tx={} out={}",
-                        height,
-                        o.amount,
-                        o.amount as f64 / 1e12,
-                        hex::encode(&o.tx_hash.as_bytes()[..8]),
-                        o.output_index,
-                    );
-                }
-            }
-        }
-        cursor = batch_end + 1;
-    }
-    println!();
-    println!(
-        "Found {} output(s), total {} atomic (~{:.6} CYNC) in blocks {}..={}.",
-        found,
-        total,
-        total as f64 / 1e12,
-        from_height,
-        to_height,
-    );
-    println!("Bounded to the disclosed range — nothing outside it is visible to this key.");
     Ok(())
 }
 

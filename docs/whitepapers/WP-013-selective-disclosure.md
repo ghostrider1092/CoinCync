@@ -137,8 +137,9 @@ for different responses. Auditing tools need to tell them apart.
 
 ### 3.6 Scoped view keys — two mechanisms, different strengths
 
-Two distinct primitives share the "scoped view key" name, and they are **not**
-equally strong. Stating the difference is the point of this section.
+Two primitives once shared the "scoped view key" name. Only one ships in v1; the
+other was removed for over-promising. Stating the difference is the point of this
+section — the name invites exactly the wrong assumption.
 
 **`ViewKey` (`src/crypto/view_keys.rs`) — derived, watermarked, in-process
 enforced.** Derived per epoch via `hash_domain(b"COINCYNC_VIEWKEY_v2", …)` so a
@@ -148,23 +149,25 @@ are enforced through `authorize_scan(epoch, amount)` against mutable state
 (cumulative consumed amount; single-use fired). The secret is excluded from
 `Serialize`, redacted in `Debug`, and zeroed on drop.
 
-**`ScopedViewKey` (`src/wallet/key_epoch.rs`) — a height range, enforced by the
-scanner.** This one exports a `(from_height, to_height)` range for period
-disclosure — a tax year, an audit window.
+**`ScopedViewKey` (height range) — REMOVED in v1.** A second primitive once
+shared the "scoped view key" name: it exported a `(from_height, to_height)` range
+for period disclosure (a tax year, an audit window). **It was not
+cryptographically scoped** — the exported material was the **full view secret**,
+byte-identical for every range, with the range honoured only by cooperating
+software. A recipient running their own scanner saw the holder's **entire** view
+history, past and future. Because the name promised a bound the key could not
+enforce, the type and its CLI (`disclose scoped-view-key` / `scan-scoped`) were
+**removed in v1** rather than shipped behind a warning.
 
-> **It is not cryptographically scoped.** The key material is the **full view
-> secret**; the range is enforced by the wallet scanner, which skips blocks
-> outside it. A recipient running their own software can scan **any** height.
+A real, cryptographically range-bound view key needs a protocol-level change (a
+Monero-style view secret is monolithic — detecting an output requires it in full,
+so it cannot be restricted to a height range without altering output derivation).
+That is tracked as post-launch work. **Until then, the disclosure primitive is the
+§3.1 predicate proofs** — those *are* cryptographic and sound against an
+adversarial recipient, which is what a period disclosure actually needs.
 
-Sharing a `ScopedViewKey` therefore discloses the holder's **entire** view
-history, past and future, to a recipient willing to ignore the declared scope.
-The range is an honest-recipient convention, not an enforcement boundary. Where a
-disclosure must be *sound against an adversarial recipient*, use the §3.1 proofs
-— those are cryptographic. This limitation is recorded here rather than in a
-footnote because the name invites exactly the wrong assumption.
-
-*(A previous code comment described time-scoped view keys as an innovation over
-Monero. That comparative claim was dropped: it was never re-verified against
+*(A previous code comment also described time-scoped view keys as an innovation
+over Monero. That comparative claim was dropped: it was never re-verified against
 Monero source, and the series does not make novelty claims it has not checked.)*
 
 ---
@@ -183,8 +186,11 @@ Monero source, and the series does not make novelty claims it has not checked.)*
 
 **What this does not protect against.**
 
-- **`ScopedViewKey` against an adversarial recipient** (§3.6). This is the
-  sharpest limit in the paper.
+- **Period disclosure against an adversarial recipient.** The height-range
+  `ScopedViewKey` that would have covered this was **removed in v1** because it
+  could not enforce the bound (§3.6); use the §3.1 predicate proofs, which are
+  cryptographic. There is no v1 primitive that hands an adversarial recipient a
+  time-bounded *view* key — by design.
 - **`AmountCapped` / `SingleUse` against an adversarial holder.** Enforcement is
   mutable in-process state. A holder running modified software resets the
   counter. These scopes constrain *cooperating* tooling; they are not capability
@@ -217,7 +223,6 @@ asserting a security property is not evidence the property holds.**
 | Four proof types, Fiat–Shamir, domain separation | `src/crypto/disclosure.rs` |
 | `ChainAnchor`, `AnchorVerdict`, `verify_*_anchored` | `src/crypto/disclosure.rs` |
 | Forward-secret `ViewKey`, scopes, `authorize_scan` | `src/crypto/view_keys.rs` |
-| `ScopedViewKey` height range + JSON export | `src/wallet/key_epoch.rs` |
 | Wallet CLI: `disclose` / `disclose verify-*` (+ remote-anchor warning) | `src/bin/wallet_support/legacy.rs` |
 | Range proofs, Pedersen commitments | `src/crypto/bulletproofs.rs`, `src/crypto/curve.rs` |
 
@@ -230,8 +235,9 @@ disclosure `BalanceProof`.
 
 ## 6. Known limits
 
-- `ScopedViewKey`'s range is not cryptographically enforced (§3.6) — the most
-  important caveat in this paper.
+- Height-range period disclosure is not available in v1: the `ScopedViewKey` that
+  would have provided it could not enforce the range and was removed (§3.6). Use
+  the §3.1 predicate proofs, which are cryptographic.
 - `AmountCapped` / `SingleUse` bind cooperating software only.
 - Unanchored verifiers remain callable and are a footgun by API shape.
 - Anchoring requires a local chain view for full privacy.
