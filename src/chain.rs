@@ -31,8 +31,8 @@ use crate::transaction::Transaction;
 // API are unchanged. Chain MUTATION (block connect/disconnect, UTXO/state
 // application, reorg execution) stays in this file.
 pub use crate::consensus::finality::{
-    evaluate_reorg_acceptability, max_reorg_depth_for, BOOTSTRAP_MESS_HEIGHT,
-    MESS_EXPONENT_DIVISOR, REORG_UNCONDITIONAL_DEPTH,
+    evaluate_reorg_acceptability, max_reorg_depth_for, mess_work_multiplier,
+    BOOTSTRAP_MESS_HEIGHT, MESS_EXPONENT_DIVISOR, REORG_UNCONDITIONAL_DEPTH,
 };
 #[allow(deprecated)]
 pub use crate::consensus::finality::max_reorg_depth;

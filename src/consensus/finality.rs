@@ -131,6 +131,33 @@ pub const MESS_EXPONENT_DIVISOR: u64 = 20;
 /// can reach.
 pub const BOOTSTRAP_MESS_HEIGHT: u64 = 1000;
 
+/// The Tier-2 MESS work multiplier a reorg at `depth` must beat: an attacker
+/// needs strictly more than `honest_work × multiplier` to reorg this deep.
+///
+/// `2^((depth - REORG_UNCONDITIONAL_DEPTH) / MESS_EXPONENT_DIVISOR)`, i.e.
+/// doubling every 20 blocks past depth 10. Returns 1 at or below the
+/// unconditional depth (no extra cost). The exponent is capped at 40 to prevent
+/// overflow; 2^40 is already an absurd requirement.
+///
+/// Extracted so [`evaluate_reorg_acceptability`] and the merchant-facing
+/// `get_finality_info` RPC report **the same** curve. A finality API that
+/// re-derived the multiplier would be a second implementation of a consensus
+/// value — the WP-006 §4.4 failure shape — and the failure mode here is
+/// especially bad: the API would quote merchants a safety margin the chain does
+/// not actually enforce.
+///
+/// Note this is Tier 2 only. It does not encode Tier 3 (hard reject past
+/// `max_depth`), Tier 1 (unconditional at/below depth 10), or the bootstrap
+/// suspension below [`BOOTSTRAP_MESS_HEIGHT`]; callers wanting the full verdict
+/// must consider those too.
+pub fn mess_work_multiplier(depth: u64) -> u128 {
+    if depth <= REORG_UNCONDITIONAL_DEPTH {
+        return 1;
+    }
+    let exponent = (depth - REORG_UNCONDITIONAL_DEPTH) / MESS_EXPONENT_DIVISOR;
+    1u128 << exponent.min(40)
+}
+
 /// Evaluate whether a reorg at `depth` with `fork_work` cumulative work should
 /// be accepted given `honest_work` on the current chain. `current_height` is the
 /// caller's current tip; below `BOOTSTRAP_MESS_HEIGHT` we skip Tier-2 MESS.
@@ -168,13 +195,18 @@ pub fn evaluate_reorg_acceptability(
     //
     // Accepts EQUAL work (`>=`), not only strictly-greater. The sole caller
     // (add_block's take_fork) reaches here for an equal-work fork ONLY when the
-    // fork's tip hash is strictly SMALLER than the current tip — the
-    // deterministic hash-lex tiebreak (see the take_fork comment). That gate
+    // fork tip wins the deterministic tiebreak — a strictly SMALLER **proof-of-
+    // work hash** (see `Blockchain::fork_wins_equal_work_tiebreak`). That gate
     // makes an equal-work reorg monotonic: a node only ever moves toward a
-    // smaller tip hash, so every honest node converges to the same tie-winning
+    // smaller PoW hash, so every honest node converges to the same tie-winning
     // chain regardless of block arrival order (the point of the
     // network-deterministic tiebreak). Deep equal-work reorgs are still rejected
-    // by the MESS tier below (only shallow ties resolve by hash).
+    // by the MESS tier below (only shallow ties resolve by the tiebreak).
+    //
+    // The comparison is on the PoW hash, NOT `block.hash()`: the block hash
+    // covers header fields outside the RandomX preimage (notably the
+    // unvalidated `miner_pubkey`), so it can be ground cheaply to win every tie
+    // without redoing work. See the tiebreak function's doc-comment.
     if depth <= REORG_UNCONDITIONAL_DEPTH {
         if fork_work >= honest_work {
             return Ok(());
@@ -202,10 +234,8 @@ pub fn evaluate_reorg_acceptability(
 
     // Tier 2: MESS — exponential cost multiplier
     // Required: fork_work > honest_work * 2^((depth - 10) / 20)
-    let exponent = (depth - REORG_UNCONDITIONAL_DEPTH) / MESS_EXPONENT_DIVISOR;
-    // Cap exponent to prevent overflow (2^40 is already absurdly high)
-    let capped_exponent = exponent.min(40);
-    let multiplier: u128 = 1u128 << capped_exponent;
+    let multiplier = mess_work_multiplier(depth);
+    let capped_exponent = multiplier.trailing_zeros();
 
     let required_work = honest_work.saturating_mul(multiplier);
 
@@ -226,6 +256,65 @@ pub fn evaluate_reorg_acceptability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `mess_work_multiplier` was extracted from `evaluate_reorg_acceptability`
+    /// so the merchant-facing `get_finality_info` RPC quotes the SAME curve
+    /// consensus enforces. This pins the extraction: the standalone function
+    /// must reproduce the acceptance boundary exactly.
+    ///
+    /// The failure this guards against is specific and nasty — a finality API
+    /// that drifted from the consensus rule would quote merchants a safety
+    /// margin the chain does not actually enforce.
+    #[test]
+    fn mess_multiplier_matches_the_acceptance_boundary() {
+        let honest: u128 = 1_000_000;
+        let height = BOOTSTRAP_MESS_HEIGHT + 10_000; // well past bootstrap
+        let max_depth = 100;
+
+        for depth in [11u64, 29, 30, 31, 50, 70, 90, 100] {
+            let m = mess_work_multiplier(depth);
+            let required = honest.saturating_mul(m);
+
+            // Consensus accepts strictly ABOVE honest*multiplier...
+            assert!(
+                evaluate_reorg_acceptability(depth, required + 1, honest, height, max_depth)
+                    .is_ok(),
+                "depth {depth}: fork_work just above honest*{m} must be accepted"
+            );
+            // ...and rejects AT the boundary.
+            assert!(
+                evaluate_reorg_acceptability(depth, required, honest, height, max_depth).is_err(),
+                "depth {depth}: fork_work exactly at honest*{m} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mess_multiplier_shape() {
+        // No extra cost inside the unconditional tier.
+        assert_eq!(mess_work_multiplier(0), 1);
+        assert_eq!(mess_work_multiplier(REORG_UNCONDITIONAL_DEPTH), 1);
+
+        // Doubling every MESS_EXPONENT_DIVISOR blocks past the threshold.
+        assert_eq!(mess_work_multiplier(REORG_UNCONDITIONAL_DEPTH + 1), 1);
+        assert_eq!(
+            mess_work_multiplier(REORG_UNCONDITIONAL_DEPTH + MESS_EXPONENT_DIVISOR),
+            2
+        );
+        assert_eq!(
+            mess_work_multiplier(REORG_UNCONDITIONAL_DEPTH + 2 * MESS_EXPONENT_DIVISOR),
+            4
+        );
+
+        // Monotonic, and capped so a huge depth cannot overflow the shift.
+        let mut prev = 0u128;
+        for d in (0..=5_000u64).step_by(7) {
+            let m = mess_work_multiplier(d);
+            assert!(m >= prev, "multiplier must not decrease with depth");
+            prev = m;
+        }
+        assert_eq!(mess_work_multiplier(u64::MAX), 1u128 << 40, "exponent capped");
+    }
 
     #[test]
     fn test_reorg_acceptability_shallow_accepts_equal_or_more_work() {

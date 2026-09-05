@@ -1017,6 +1017,118 @@ pub async fn start_rpc_server(
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_finality_info ─────────────────────────────────────
+    //
+    // Merchant-facing "is it safe to accept yet?" endpoint.
+    //
+    // A merchant's real question is not "how many confirmations" but "what
+    // would it cost to undo this payment". CoinCync can answer that concretely,
+    // because reorg resistance is a published rule rather than folklore: a
+    // three-tier MESS gate plus a rolling finality floor. This exposes those
+    // rules and applies them to a queried height.
+    //
+    // Optional single param: the block height the payment landed in.
+    //   {"jsonrpc":"2.0","method":"get_finality_info","params":[12300],"id":1}
+    // Called with no params it returns the network-wide picture only.
+    //
+    // Every number here is read from the SAME functions consensus uses
+    // (`mess_work_multiplier`, `max_reorg_depth`, `CHECKPOINT_INTERVAL`). A
+    // finality API that re-derived them would be a second implementation of a
+    // consensus value, and the failure mode is the worst kind: quoting a
+    // merchant a safety margin the chain does not actually enforce.
+    module
+        .register_method("get_finality_info", |params, state, _ext| {
+            let queried: Option<u64> = params.parse::<(u64,)>().ok().map(|(h,)| h);
+
+            let stats = state.chain.stats();
+            let tip = stats.height;
+            let max_depth = state.chain.max_reorg_depth();
+            let interval = crate::constants::CHECKPOINT_INTERVAL;
+
+            // Hard finality: a reorg is refused by RULE (not by work) once it
+            // would cross either bound. Both are pure functions of tip height —
+            // deliberately, so two nodes on the same tip always agree (the
+            // path-dependence bug that made `last_checkpoint` non-consensus).
+            let floor_by_interval = tip.saturating_sub(interval);
+            let floor_by_max_depth = tip.saturating_sub(max_depth);
+            let hard_final_height = floor_by_interval.min(floor_by_max_depth);
+
+            // Tier-2 MESS is suspended during bootstrap: a young chain has too
+            // little cumulative work for the multiplier to be meaningful, and
+            // locking in parallel low-work forks would be worse than the attack.
+            // Merchants on a young chain MUST know this — it is the difference
+            // between "expensive to reorg" and "only bounded by the hard cap".
+            let mess_active = tip >= crate::chain::BOOTSTRAP_MESS_HEIGHT;
+
+            let mut out = json!({
+                "height": tip,
+                "hard_final_height": hard_final_height,
+                "hard_final_rule": "min(tip - checkpoint_interval, tip - max_reorg_depth); a reorg crossing this is rejected regardless of how much work backs it",
+                "max_reorg_depth": max_depth,
+                "checkpoint_interval": interval,
+                "unconditional_reorg_depth": crate::chain::REORG_UNCONDITIONAL_DEPTH,
+                "mess": {
+                    "active": mess_active,
+                    "bootstrap_height": crate::chain::BOOTSTRAP_MESS_HEIGHT,
+                    "exponent_divisor": crate::chain::MESS_EXPONENT_DIVISOR,
+                    "formula": "required_work_multiplier = 2^((depth - unconditional_reorg_depth) / exponent_divisor)",
+                    "note": if mess_active {
+                        "Tier-2 active: reorgs deeper than the unconditional depth must beat honest work by the multiplier."
+                    } else {
+                        "Tier-2 SUSPENDED during bootstrap — depth is bounded only by max_reorg_depth and checkpoints. Treat confirmations as weaker than the multiplier suggests."
+                    },
+                },
+                // Miner-attested soft finality (CIP-009.D). The adapter is behind
+                // the `rolling-finality` feature and dormant by default, so this
+                // is null on every current build. Reported explicitly rather than
+                // omitted, so an integrator can see it exists and is off.
+                "soft_final_height": serde_json::Value::Null,
+                "soft_finality_status": "not active (rolling-finality feature off; see WP-008)",
+                "tiers": "1: depth <= unconditional_reorg_depth, any heavier chain wins. 2: deeper, must beat honest work x multiplier. 3: beyond max_reorg_depth, rejected outright.",
+            });
+
+            if let Some(h) = queried {
+                let (confirmations, depth) = if h > tip {
+                    (0u64, 0u64)
+                } else {
+                    // A block AT the tip has 1 confirmation and depth 0: undoing
+                    // it is a 1-block reorg, which sits in the unconditional tier.
+                    (tip - h + 1, tip - h)
+                };
+
+                let verdict = if h > tip {
+                    "unknown: height is above the current tip"
+                } else if h <= hard_final_height {
+                    "hard_final: cannot be reorged by rule"
+                } else if depth <= crate::chain::REORG_UNCONDITIONAL_DEPTH {
+                    "unconditional: any heavier chain displaces this with no extra cost"
+                } else if mess_active {
+                    "economic: reorg requires the work multiplier below"
+                } else {
+                    "bootstrap: Tier-2 suspended; bounded only by max_reorg_depth"
+                };
+
+                out["query"] = json!({
+                    "height": h,
+                    "confirmations": confirmations,
+                    "reorg_depth_to_undo": depth,
+                    "hard_final": h <= hard_final_height,
+                    // Tier-2 only. 1 means "no extra work required beyond being
+                    // heavier" — either the depth is inside the unconditional
+                    // tier or MESS is suspended.
+                    "required_work_multiplier": if mess_active {
+                        crate::chain::mess_work_multiplier(depth).to_string()
+                    } else {
+                        "1".to_string()
+                    },
+                    "verdict": verdict,
+                });
+            }
+
+            Ok::<_, ErrorObjectOwned>(out)
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_block_by_height ───────────────────────────────────
     //
     // Rich block payload: every field the embedded explorer's
