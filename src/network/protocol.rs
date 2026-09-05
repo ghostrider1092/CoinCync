@@ -382,7 +382,17 @@ impl VersionMessage {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             nonce,
-            user_agent: format!("CoinCync/{}", crate::VERSION),
+            // Canonical, version-less user-agent for the WHOLE network (WP-011
+            // §3.6). Previously `format!("CoinCync/{}", crate::VERSION)`, which
+            // stamped this node's exact build onto every handshake — a
+            // re-identification handle that survives across sessions and
+            // networks. A single shared constant makes nodes mutually
+            // indistinguishable on this field; a per-node/version-bearing string
+            // does not, and neither does a randomized one (its distribution is
+            // itself a fingerprint). See `colony::stick_insect` for the
+            // one-constant rationale — it held this policy as the single audited
+            // definition; this is the wiring it was waiting for.
+            user_agent: crate::colony::stick_insect::CANONICAL_USER_AGENT.to_string(),
             start_height: height,
             best_hash,
         }
