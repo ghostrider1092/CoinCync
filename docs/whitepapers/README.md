@@ -86,8 +86,8 @@ Title · Status · Layer
 | WP-021 | Orphan reconnection and the sync engine's generation nonces | Shipped |
 | WP-022 | Relative peer eviction: eclipse resistance without absolute protection | Shipped |
 | WP-023 | Share-replay resistance: the per-canonical-job nonce ledger | Shipped |
-| WP-024 | Snapshot bootstrap and warp sync | Shipped |
-| WP-025 | The colony: advisory biomimetic telemetry castes | Shipped (non-consensus) |
+| WP-024 | Snapshot bootstrap: trusting a database you did not build | Shipped (no warp sync) |
+| WP-025 | The colony: advisory biomimetic castes | Shipped (2 of 11 live, observe-only) |
 | WP-026 | Reproducible builds and release attestation | Shipped |
 
 ### Part IV — The record
