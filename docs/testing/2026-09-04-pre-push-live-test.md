@@ -258,6 +258,69 @@ through between throttle windows and blocks are produced — but on a real netwo
 this cadence is per-worker and legitimate; it only looks alarming because
 regtest difficulty makes every hash a share.
 
+## Round 6 — mainnet-parameter chain
+
+Everything before this ran on regtest/testnet. This round built **real mainnet
+binaries** (`--features randomx`, no `testnet`) and exercised mainnet consensus.
+
+### What a mainnet binary does, confirmed live
+
+| # | Check | Result |
+|---|---|---|
+| 41 | Mainnet binary boots on `--network mainnet` (the guard from 257a452a passes for the correct build) | `Cynstra node starting (coincync 2.0.0)` / `Network: Cynstra (mainnet)` |
+| 42 | **Cynstra branding live on a real mainnet binary** | first observation of the mainnet display name on an actual mainnet node |
+| 43 | Genesis hash matches `MAINNET_GENESIS_HASH` | `c9eb73ab…fe07635c` |
+| 44 | Mainnet address prefix | `CYNC…` (99 chars), not `tCYNC` |
+
+### A mainnet chain cannot be mined before Oct 1 2026 — by design, proven
+
+The mainnet genesis is timestamped **1790812800 (Oct 1 2026)**. Today is Sept 5.
+`check_header_future_timestamp` (validation.rs:1103) exempts genesis but caps
+every later block at `local_clock + MAX_TIMESTAMP_DRIFT` (600 s). The miner sets
+block 1's timestamp to `max(now, genesis+1)` = Oct 1, which is ~26 days past the
+drift window, so block 1 can never be accepted today.
+
+Confirmed by a **controlled experiment**: a real-genesis mainnet miner sat at
+height 0 indefinitely; changing *only* the genesis timestamp to ~2 h ago (nothing
+else) made the same binary mine immediately. The future-dated genesis is the sole
+blocker — you cannot mine mainnet before its launch date, which is correct.
+
+The genesis-integrity guard also fired correctly during this: altering the
+genesis produced `Genesis hash mismatch! Computed d39d548e… but expected
+c9eb73ab…`, catching the change at startup.
+
+### Mainnet consensus rules, on a test-genesis chain
+
+With a near-now test genesis (all other mainnet params intact — magic, difficulty
+64000, ring schedule, emission, maturity, fee-burn height):
+
+| # | Check | Result |
+|---|---|---|
+| 45 | Mines valid blocks under mainnet consensus | height climbed, difficulty settling ~32k→converging toward the 120 s target |
+| 46 | **Independent supply audit passes under mainnet params** | RPC == header == blake3-recomputed; genesis zero; inflated figure fails |
+| 47 | Emission schedule | `emission_phase: Distribution`, per-block reward matches the curve |
+
+### Not driven — and why, stated plainly
+
+- **100-block maturity (vs testnet's 10).** `MIN_OUTPUT_AGE_POST_FORK = 100` is
+  the active constant on a mainnet build (unit-tested, and now protected by the
+  feature/network startup guard). Driving a real spend of a 100-deep output at
+  mainnet difficulty needs ~130 blocks × ~120 s ≈ 4 h — impractical this session.
+  The maturity *gate mechanism* is the same code verified on testnet at 10 blocks.
+- **Fee-burn from genesis (`FEE_DISTRIBUTION_HEIGHT = 0`).** Every block mined
+  here was coinbase-only, so `total_burned` stayed 0 correctly (no fees to burn).
+  Exercising a non-zero burn flowing into the supply commitment needs a
+  fee-paying transaction, which needs a mature output — the same 4 h wall. The
+  burn split itself is unit-tested (`block_fee_burn_matches_validator_burn_split`)
+  and the supply-commitment path is verified in rounds 1–2.
+
+### Cleanup
+
+The test genesis was a throwaway local edit to the **unlocked** `src/mainnet.rs`
+(timestamp + hash), never committed. Reverted from backup; `git diff` on
+`mainnet.rs` is empty, `test_mainnet_genesis_hash_consistency` passes, and the
+standard testnet working binaries were rebuilt.
+
 ## Superseded — the original round-3 write-up of this finding
 
 **Memos are not padded.** WP-014 §3.4 and WP-011 §3.3 both state that honest
