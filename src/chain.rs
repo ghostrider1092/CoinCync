@@ -1236,7 +1236,14 @@ impl Blockchain {
     /// genesis), so this branch has ZERO effect on testnet/mainnet consensus.
     /// A pinned target also trivially satisfies the ±4x/step sanity layer in
     /// `validate_difficulty_target` (ratio is always 1.0).
-    fn expected_next_target(&self, blocks: &[DifficultyBlock], height: u64) -> Hash {
+    ///
+    /// SINGLE SOURCE OF THE DIFFICULTY RULE: every expected-target computation
+    /// must go through this — the miner (`next_target`), block validation, fork
+    /// validation, AND header validation (`network::node::dispatch::headers`).
+    /// (Regtest DOES peer via `--addnode`; header validation previously called
+    /// `calculate_difficulty` directly and diverged from this regtest branch,
+    /// rejecting every peer header so regtest nodes could not sync. Hence `pub`.)
+    pub fn expected_next_target(&self, blocks: &[DifficultyBlock], height: u64) -> Hash {
         if self.network == crate::config::NetworkType::Regtest {
             // Ease difficulty DOWN toward the MIN_DIFFICULTY floor at <=3x per
             // block (safely inside the ±4x/step sanity layer), then pin there
