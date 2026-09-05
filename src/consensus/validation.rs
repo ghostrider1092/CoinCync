@@ -215,15 +215,26 @@ pub fn validate_block_with_checkpoint_for_network(
                     block.height(),
                     checkpoint_height.unwrap_or(0)
                 );
-            } else if fast_sync_requested {
-                tracing::warn!(
-                    "Checkpoint crypto skip requested at height {} but this build \
-                     does not have the insecure-fast-sync feature — full verification \
-                     will run. Rebuild with `--features insecure-fast-sync` only for \
-                     explicitly trusted dev/testnet bootstrap flows.",
-                    block.height()
-                );
             } else {
+                // SECURITY FIX: a `fast_sync_requested` (below-checkpoint) block in
+                // a build WITHOUT the insecure-fast-sync feature must still have its
+                // PoW fully verified. This previously lived in an `else if
+                // fast_sync_requested` arm that logged "full verification will run"
+                // and then returned WITHOUT calling verify_pow — silently skipping
+                // PoW for every below-checkpoint block in a normal production build,
+                // letting an attacker cheaply flood a node with invalid-PoW fork
+                // blocks at low heights (anti-DoS gate bypass). The skip is now
+                // gated solely on `fast_sync` (requested AND the feature enabled);
+                // every other path runs the full check below.
+                if fast_sync_requested {
+                    tracing::warn!(
+                        "Checkpoint crypto skip requested at height {} but this build \
+                         does not have the insecure-fast-sync feature — running full \
+                         verification. Rebuild with `--features insecure-fast-sync` \
+                         only for explicitly trusted dev/testnet bootstrap flows.",
+                        block.height()
+                    );
+                }
                 // Full PoW verification including VDF anchor recomputation
                 match verify_pow(
                     &prev.header.hash(),

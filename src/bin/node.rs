@@ -1241,6 +1241,14 @@ async fn start_node(
                                 p2p2.notify_block_received(&hash).await;
                                 p2p2.notify_block_processed(chain_update).await;
                                 let _ = p2p2.broadcast_block(&block_for_relay).await;
+                                // Orphan reconnection: now that this block has
+                                // connected, replay any orphans that were waiting
+                                // on it (re-injected as BlockReceived events so
+                                // they run the normal validate→connect→relay path,
+                                // cascading to their own children). Closes the
+                                // out-of-order / reorg stall where stashed orphans
+                                // were never fed back until the 30-min TTL.
+                                p2p2.notify_block_accepted(&hash).await;
                             });
                         }
                         Ok(BlockStatus::AlreadyKnown) => {

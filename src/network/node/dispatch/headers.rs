@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, warn};
 
 use crate::chain::SharedBlockchain;
-use crate::consensus::{calculate_difficulty, verify_pow, BlockHeader, DifficultyBlock};
+use crate::consensus::{verify_pow, BlockHeader, DifficultyBlock};
 use crate::error::Result;
 use crate::network::peer::{PeerId, PeerInfo};
 use crate::network::protocol::{GetHeadersMessage, Message, MAX_HEADERS_RESPONSE};
@@ -175,7 +175,12 @@ fn validate_header_batch(
         }
 
         if history.len() >= 2 {
-            let expected_target = calculate_difficulty(&history, header.height);
+            // Single-source the difficulty rule via the chain's network-aware
+            // computation (identical to `calculate_difficulty` on mainnet/testnet,
+            // but honors the regtest pin/ease). Calling `calculate_difficulty`
+            // directly here diverged from the miner + block validator on regtest
+            // and rejected every peer header, wedging regtest multi-node sync.
+            let expected_target = chain.expected_next_target(&history, header.height);
             if header.target != expected_target {
                 return Err(reject(
                     format!(
@@ -275,7 +280,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::chain::Blockchain;
-    use crate::consensus::{compute_full_anchor, compute_pow_hash, PowAlgorithm};
+    use crate::consensus::{calculate_difficulty, compute_full_anchor, compute_pow_hash, PowAlgorithm};
 
     use super::*;
 
