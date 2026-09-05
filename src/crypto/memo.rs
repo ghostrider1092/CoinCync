@@ -6,11 +6,20 @@
 //! Protocol:
 //! 1. Sender computes shared_point = tx_secret * recipient_view_public
 //! 2. Key = BLAKE3("COINCYNC_MEMO_v1" || shared_point)
-//! 3. Nonce = BLAKE3("COINCYNC_MEMO_NONCE_v1" || shared_point)[0..12]
+//! 3. Nonce = 12 fresh random bytes from the OS RNG, per encryption
 //! 4. Ciphertext = ChaCha20-Poly1305(key, nonce, memo)
 //! 5. Wire format: nonce (12 bytes) || ciphertext || tag (16 bytes)
 //!
-//! Recipient decrypts with: shared_point = view_secret * tx_public_key
+//! Recipient decrypts with: shared_point = view_secret * tx_public_key,
+//! reading the nonce back off the wire.
+//!
+//! NOTE (2026-06-03): step 3 previously derived the nonce deterministically
+//! as `BLAKE3("COINCYNC_MEMO_NONCE_v1" || shared_point)[0..12]`. That is a
+//! nonce-reuse bug — two memos under the same (tx_secret, recipient) pair
+//! share a (key, nonce) pair, which is catastrophic for ChaCha20-Poly1305.
+//! It was replaced by the random nonce above; see the long-form comment in
+//! `encrypt_memo`. This header still described the old derivation until
+//! 2026-09-04.
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

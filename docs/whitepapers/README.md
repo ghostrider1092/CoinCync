@@ -73,7 +73,7 @@ Title · Status · Layer
 | WP-012 | Traffic shaping: timing jitter, size normalisation, cover traffic | Shipped |
 | WP-013 | Selective disclosure: balance, ownership, and scoped view keys | Shipped |
 | WP-014 | Encrypted memos and payment metadata | Shipped |
-| WP-015 | Dead-man's switch and auto-churn | Shipped |
+| WP-015 | Dead-man's switch and auto-churn | Churn **Shipped**; switch **Placeholder** |
 | WP-016 | Subaddresses with per-subaddress view keys | Gated (mainnet-disabled, W-1) |
 | WP-017 | Private light-wallet sync: the digest protocol | Shipped |
 | WP-018 | Dust quarantine | **Proposed** |
