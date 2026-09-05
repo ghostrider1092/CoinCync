@@ -141,9 +141,12 @@ used to smuggle an oversized logical payload inside a large rung.
 
 ### 3.6 Canonical identity strings
 
-A node's advertised user-agent is a re-identification handle. The policy is a
-single constant — `/coincync/` — for the entire network, deliberately
-version-less and build-less.
+A node's advertised user-agent is a re-identification handle. Every node
+advertises a single constant — `/coincync/` — for the entire network,
+deliberately version-less and build-less. Wired to the P2P handshake as of
+2026-09-05 (verified live: a peer reports `user_agent: "/coincync/"` via
+`get_peers`); it was previously `CoinCync/<version>`, which stamped each node's
+exact build onto every handshake.
 
 The reasoning behind choosing a *constant* over the two obvious alternatives is
 worth stating, because it generalises:
@@ -207,19 +210,19 @@ sides; the canonical-identity policy has one audited definition.
 | Receipt-side enforcement (`is_normalized_payload_size`, semantic limits) | `src/network/framing.rs` |
 | Recovery metadata, churn shape/timing | `src/bin/wallet_support/legacy.rs`, `src/wallet/churn.rs` |
 
-**Status caveat — one layer is policy-only.** `stick_insect` defines the
-canonical user-agent and the size ladder as a pure, testable policy with one
-audited definition. The **size ladder is live** (traffic shaping and framing use
-it). The **canonical user-agent is not yet wired to the handshake banner** — that
-is explicitly a later phase in the module's own documentation. Until it is,
-§3.5's property is a specified policy, not an enforced one, and node build
-strings remain a potential re-identification handle.
+**Status.** `stick_insect` defines the canonical user-agent and the size ladder
+as one audited policy. Both are now live: the **size ladder** in traffic shaping
+and framing, and the **canonical user-agent** on the P2P handshake as of
+2026-09-05 (`src/network/protocol.rs`, verified live via `get_peers`). §3.6 is
+therefore enforced, not merely specified.
 
 ---
 
 ## 6. Known limits
 
-- Canonical user-agent defined but **unwired** to the handshake (§5).
+- Canonical user-agent is wired to the handshake (§3.6); this is a per-message
+  field only — deeper wire-fingerprint vectors (packet timing, connection shape)
+  are WP-012's subject, not this field's.
 - Memo padding is wallet-side convention; consensus enforces only the cap (§4).
 - Bootstrap ring size is a real, scheduled weakening.
 - No measurement of how well the envelope resists a classifier — the same gap

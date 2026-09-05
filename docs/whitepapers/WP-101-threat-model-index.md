@@ -43,16 +43,16 @@ a document that is individually accurate in every sentence.
 | Stealth addresses — one-time output keys | — (inherited) | Shipped |
 | Uniform transaction shape (exactly 2-in / 2-or-3-out) | [WP-011](WP-011-transaction-uniformity.md) §3.2 | Shipped — consensus-enforced |
 | Decoy selection: gamma sampling, generation awareness, poison exclusion | [WP-010](WP-010-decoy-selection.md) | Shipped |
-| Encrypted memos, padded to a fixed cap | [WP-014](WP-014-encrypted-memos.md) | Shipped — **padding is wallet convention, not consensus** |
+| Encrypted memos, padded to a fixed size | [WP-014](WP-014-encrypted-memos.md) | Shipped — length hidden (padding wired 2026-09-05); padding is wallet convention not consensus, and memo *presence* still leaks |
 | Auto-churn with Poisson intervals | [WP-015](WP-015-deadmans-switch-and-churn.md) §4 | Shipped (opt-in, off by default) |
 | Subaddresses — unlinkable receive addresses | [WP-016](WP-016-subaddresses.md) | **Gated** — mainnet-disabled; received funds unspendable (W-1) |
-| Dust quarantine — unsolicited outputs never auto-spent | [WP-018](WP-018-dust-quarantine.md) | **Partial** — core live, no CLI surface |
+| Dust quarantine — unsolicited outputs never auto-spent | [WP-018](WP-018-dust-quarantine.md) | Shipped — list/accept CLI live; threshold not yet user-configurable |
 | Supply auditability — header-bound cumulative supply | [WP-002](WP-002-supply-auditability.md) | Shipped (genesis-active) |
 
-**Weakest points against Class A.** Memo padding is honoured by our wallet, not
-compelled by consensus — a modified wallet self-identifies its user
-(WP-014 §4). Subaddresses are off on mainnet. Dust quarantine has no way for a
-user to release a quarantined output yet.
+**Weakest points against Class A.** Memo *length* is now hidden by padding, but
+padding is wallet-side (consensus enforces only the cap) so a modified wallet can
+skip it, and memo *presence* still leaks (WP-014 §4). Subaddresses are off on
+mainnet.
 
 ---
 
@@ -68,15 +68,15 @@ user to release a quarantined output yet.
 | Wire size normalisation — 9-rung ladder, enforced on receipt | [WP-011](WP-011-transaction-uniformity.md) §3.4–3.5, [WP-012](WP-012-traffic-shaping.md) | Shipped |
 | Timing jitter (0–200 ms) | [WP-012](WP-012-traffic-shaping.md) §3.3 | Shipped |
 | Constant-rate cover traffic | [WP-012](WP-012-traffic-shaping.md) §3.1 | Shipped |
-| Canonical user-agent (`/coincync/`) | [WP-011](WP-011-transaction-uniformity.md) §3.6 | **Placeholder** — policy defined, **not wired to the handshake** |
+| Canonical user-agent (`/coincync/`) | [WP-011](WP-011-transaction-uniformity.md) §3.6 | Shipped — wired to the handshake 2026-09-05 (verified live via `get_peers`) |
 | Tor / onion transport | node CLI (`--tor`, `--onion-only`, `--proxy`) | Shipped |
 | Netgroup-aware peer eviction | [WP-022](WP-022-relative-peer-eviction.md) | Shipped |
 | Network-adjusted time (clock-skew self-isolation) | — (audit M-4) | Shipped — outbound-sampled only |
 
-**Weakest points against Class B.** The canonical user-agent is specified but
-unwired, so node build strings remain a re-identification handle. No mechanism
-here has been evaluated against a real traffic classifier — WP-012 §4 says so
-explicitly, and that gap applies to the whole row group.
+**Weakest points against Class B.** No mechanism here has been evaluated against
+a real traffic classifier — WP-012 §4 says so explicitly, and that gap applies to
+the whole row group. Dandelion++ rests on protocol correctness rather than an
+adversarial network measurement (WP-020 §4).
 
 ---
 
@@ -115,15 +115,16 @@ answer offered for this class, not our own mechanisms.
 | Forward-secret `ViewKey` scopes | [WP-013](WP-013-selective-disclosure.md) §3.6 | Shipped — enforcement is **in-process only** |
 | `ScopedViewKey` height range | [WP-013](WP-013-selective-disclosure.md) §3.6 | Shipped — **NOT cryptographically scoped** |
 | Deniable wallets | — | **Placeholder** — not wired (see wiring map) |
-| Dead-man's switch recovery | [WP-015](WP-015-deadmans-switch-and-churn.md) | **Placeholder** — metadata validates; **no spend path exists** |
+| Dead-man's switch recovery | [WP-015](WP-015-deadmans-switch-and-churn.md) | **Placeholder** — metadata validates; **no spend path exists**. CLI now says so plainly (2026-09-05) instead of reporting success |
 
 **The two entries a reader must not misread.** A `ScopedViewKey` hands over the
 **full view secret** — the height range is enforced by a cooperating scanner, not
 by cryptography, so an adversarial recipient sees everything. And the dead-man's
-switch **does not work**: a user can configure it, the CLI reports success, the
-metadata goes on chain and validates, and the recovery address still cannot spend
-anything, because `is_recovery_eligible` has no consensus caller. Both are
-recorded in full in their papers. Against a coercion adversary, the sound
+switch **does not work**: the metadata validates and goes on chain, but the
+recovery address cannot spend anything because `is_recovery_eligible` has no
+consensus caller. As of 2026-09-05 the CLI leads with this ('NOT YET FUNCTIONAL —
+DO NOT RELY ON IT') instead of reporting success, but the spend rule itself is
+still unbuilt. Both are recorded in full in their papers. Against a coercion adversary, the sound
 primitives are the §3.1 disclosure proofs — those are cryptographic.
 
 ---
@@ -158,14 +159,11 @@ Every "not Shipped" entry above, collected so nobody has to scan five tables:
 
 | Gap | Where | Consequence |
 |---|---|---|
-| **Dead-man's switch has no spend path** | WP-015 §5.1 | A user's heirs get nothing, and the wallet reports success |
+| **Dead-man's switch has no spend path** | WP-015 §5.1 | Recovery is inert; the CLI now says so plainly (fixed 2026-09-05) rather than reporting success. A consensus spend rule is still unbuilt. |
 | **Subaddress funds unspendable** | WP-016 §4 | Gated off mainnet; W-1 |
 | **`ScopedViewKey` is not cryptographic** | WP-013 §3.6 | Sharing one discloses the entire view history |
-| **Canonical user-agent unwired** | WP-011 §5 | Build strings remain a node fingerprint |
-| **Memo padding not consensus-enforced** | WP-014 §4 | A modified wallet self-identifies |
-| **Dust quarantine has no CLI surface** | WP-018 §7 | Users cannot release quarantined outputs |
+| **Memo padding not consensus-enforced** | WP-014 §4 | Honest wallets now pad (length hidden, fixed 2026-09-05); consensus enforces only the cap, so a modified wallet can still skip padding. Memo *presence* also still leaks. |
 | **Rolling finality dormant** | WP-008 §4 | No soft finality today |
-| **`src/mainnet.rs` not hash-locked** | WP-007 §4 | Mainnet genesis editable without tripping the gate |
 | **Reproducible builds not in CI** | WP-026 §4 | Verification is manual; GitHub Actions blocked at account level |
 | **Spark proof position leak** | WP-100 §5.2 | Gated off |
 | **No traffic-classifier evaluation** | WP-012 §4 | Shaping effectiveness unmeasured |

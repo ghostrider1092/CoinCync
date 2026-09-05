@@ -102,7 +102,7 @@ Title · Status · Layer
 | # | Paper | Status |
 |---|---|---|
 | WP-010 | Decoy selection: gamma sampling, generation awareness, and poison exclusion | Shipped |
-| WP-011 | Transaction uniformity and the canonical observable envelope | Shipped (canonical UA unwired) |
+| WP-011 | Transaction uniformity and the canonical observable envelope | Shipped |
 | WP-012 | Traffic shaping: timing jitter, size normalisation, cover traffic | Shipped |
 | WP-013 | Selective disclosure: balance, ownership, and scoped view keys | Shipped |
 | WP-014 | Encrypted memos and payment metadata | Shipped |
