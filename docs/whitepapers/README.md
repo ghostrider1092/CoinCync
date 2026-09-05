@@ -88,7 +88,7 @@ Title · Status · Layer
 | # | Paper | Status |
 |---|---|---|
 | WP-001 | Difficulty stability: dual-anchor ASERT, genesis calibration, and the startup grace | Shipped |
-| WP-002 | Supply auditability for a confidential-amount chain | **Proposed** (the open workstream) |
+| WP-002 | Supply auditability for a confidential-amount chain | Shipped (genesis-active) |
 | WP-003 | Emission: asymptotic tail, zero dev tax, height-determined reward | Shipped |
 | WP-004 | Proof-of-work binding: the block anchor and RandomX epoch/seed derivation | Shipped |
 | WP-005 | Layered reorg defense: MESS, finality floor, and checkpoints | Shipped |

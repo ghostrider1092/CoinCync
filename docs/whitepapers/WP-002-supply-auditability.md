@@ -1,14 +1,21 @@
 # WP-002 · Supply Auditability
 ### Proving no silent inflation on a confidential-amount chain
 
-**Status:** **Proposed** — scaffolding exists, the mechanism does not yet ·
+**Status:** **Shipped** — genesis-active on both networks ·
 **Layer:** Consensus · **Series:** [CoinCync Whitepapers](README.md)
 
-> **Honest status up front.** The header carries a `supply_commitment` field and
-> `src/crypto/audit.rs` defines a `SupplyState`, but the field is currently
-> written as 32 zero bytes and the existing helper is documented in its own
-> source as *a self-consistent checksum, not a proof*. This paper specifies what
-> must be built. Nothing in it should be read as shipped.
+> **Status change (2026-09-04).** This paper was written as a *proposal*, while
+> the header's `supply_commitment` was 32 zero bytes and the only helper was
+> documented in its own source as *a self-consistent checksum, not a proof*. It
+> is now implemented and active from block 0 on both networks (`c0b9f407`,
+> `909fe059`). §3.5 argued that enabling it before mainnet genesis "avoids the
+> fork entirely and is the strongly preferred path" — that is the path taken,
+> and the window it depended on closes at mainnet launch.
+>
+> Two findings from implementation are recorded rather than smoothed over:
+> there were **three** disconnected attempts at this mechanism, two of which
+> disagreed with each other, and a block is connected by **two** independent
+> code paths, so verifying in one would have left a hole. Both are in §5.
 
 ---
 
@@ -102,13 +109,29 @@ the block to its parent's state. Because both sides are pure functions of the
 chain, all honest nodes compute identically — the same determinism discipline
 applied to cumulative work in WP-006.
 
-### 3.5 Activation
+### 3.5 Activation — resolved: genesis-active, no fork
 
-The field exists and is hashed today with a zero value, so turning it on changes
-the header pre-image semantics and must be **height-gated** as a hard fork under
-the standard activation policy (CIP-007), with the legacy zero accepted below the
-activation height. Doing this **before mainnet genesis** avoids the fork entirely
-and is the strongly preferred path.
+The field is in the header pre-image, so turning it on changes header semantics.
+That normally forces a height-gated hard fork under CIP-007, with the legacy zero
+accepted below the activation height.
+
+**It did not, because the rule landed while both chains were still resettable.**
+Mainnet had not launched, and testnet genesis had just been reset by the
+difficulty-calibration change (`852d07cf`), so both networks start from height 0
+on current software. The rule is therefore active from block 0 with **no
+activation constant, no rollout, and no change to the hash-locked
+`constants.rs`** — it is simply how these chains work.
+
+The transition cost is real and is pinned as a test
+(`zero_placeholder_commitment_is_rejected_above_genesis`): a block carrying the
+old all-zero placeholder is now **invalid above genesis**, so any pre-existing
+chain data is discarded. That cost was acceptable only because it was paid inside
+a window that was already open. **After mainnet launch this becomes a permanent
+hard fork** — which is the whole reason it was worth doing now rather than later.
+
+Genesis itself keeps the all-zero commitment, handled inside the shared
+commitment function rather than at each call site, so the pinned `GENESIS_HASH`
+constants stay valid and no genesis rebuild was needed.
 
 ---
 
@@ -159,37 +182,95 @@ information and does not touch the transaction graph.
 
 ## 5. Implementation
 
-**Existing scaffolding (not the mechanism):**
+| Piece | Location |
+|---|---|
+| `supply_commitment(height, minted, burned)` — **the** definition | `src/emission/supply.rs` |
+| `advance_supply_totals` — the shared arithmetic (miner + both validators) | `src/chain.rs` |
+| `advance_and_verify_supply` — totals + commitment check | `src/chain.rs` |
+| Verification on the linear tip-extend path | `src/chain.rs` (`add_block`) |
+| Verification on the reorg fork-block re-apply path | `src/chain.rs` |
+| Miner population from the assembled block | `src/mining/block_builder.rs` |
+| `parent_total_minted` / `parent_total_burned` in the template | `src/mining/template.rs` |
+| `supply_commitment` + domain + encoding in `get_supply_info` | `src/rpc/server.rs` |
+| `supply_commitment` header field (in the hash pre-image) | `src/consensus/header.rs` |
+| Coinbase exact-amount validation | `src/consensus/validation.rs` |
+| Emission schedule (pure function of height) | `src/emission/curve.rs` (WP-003) |
+| Supply accounting, `checked_add`/`checked_sub` + halt-on-overflow | `src/chain.rs` |
 
-| Piece | Location | Status |
-|---|---|---|
-| `supply_commitment` header field | `src/consensus/header.rs` (in the hash pre-image) | Present, written as zeros |
-| `SupplyState`, domain-separated commitment, `verify()` | `src/crypto/audit.rs` | Present; documented as a checksum, not a proof |
-| Coinbase exact-amount validation | `src/consensus/validation.rs` | **Shipped** |
-| Emission schedule (pure function of height) | `src/emission/curve.rs` | **Shipped** (see WP-003) |
-| Supply accounting with `checked_add`/`checked_sub` + halt-on-underflow | `src/chain.rs` | **Shipped** |
+### 5.1 Three attempts, two of which disagreed
 
-**Work required:**
+Scoping found the mechanism had been started **three** times and finished zero:
+the header field (always zero), `crypto::audit::SupplyState` (zero callers), and
+`emission::supply::calculate_supply_commitment` (zero callers, re-exported only,
+and documented as a "Pedersen commitment" when it was a plain hash).
 
-1. Populate `supply_commitment` from the derived `SupplyState` at block
-   construction.
-2. Add the consensus check that the committed value equals the derived value.
-3. Height-gate the rule (or set it at genesis, preferred).
-4. Expose an audit RPC returning the supply state and its derivation at any
-   height, so third parties can verify without running custom code.
-5. Add regression tests: a block claiming inflated emission must be rejected; a
-   recomputation from genesis must match every committed state.
+The two implementations **disagreed on both inputs and domain separator** —
+`minted ‖ burned` under `"supply_commitment"` versus
+`emitted ‖ burned ‖ circulating ‖ emission_remaining` under
+`"COINCYNC_SUPPLY_COMMITMENT"`. Two implementations of one consensus value that
+must agree is the WP-006 §4.4 shape, the one that already produced a fleet-wide
+`total_difficulty` divergence. It cost nothing to fix here because nothing
+depended on it yet; the same defect discovered after launch is a chain split.
+
+The derived fields were dropped: `circulating` is `minted − burned` and
+`emission_remaining` is a function of height, so committing to them added no
+information and two more ways to diverge.
+
+### 5.2 Two connect paths, not one
+
+A block reaches the chain through **two** independent loops: the linear
+tip-extend path and the reorg fork-block re-apply path. They already duplicated
+the emission and burn arithmetic. Verifying in only the linear path would have
+let a block enter the chain unverified **simply by arriving as part of a reorg** —
+a hole an attacker chooses freely, since they control whether their block arrives
+as an extension or a fork.
+
+Both paths now call one routine. Ordering is load-bearing on each: the check runs
+before *any* mutation — before tip and `height_to_hash` on the linear path, and
+before the height mapping, the Phase-2 checkpoint and the UTXO batch on the reorg
+path — so a rejection leaves nothing to unwind. The reorg rollback unwinds by
+index and its site-5a guard keys on `height_to_hash`, both of which assume a
+block is either fully applied or untouched.
+
+### 5.3 Why the template ships parent totals, not a commitment
+
+`get_block_template` sends `parent_total_minted` / `parent_total_burned` rather
+than a finished commitment. A template is a suggestion, not a mandate: a miner may
+assemble a different transaction set, and the block's fee-burn depends on that
+set. Handing over the parent totals lets the miner compute the correct commitment
+for whatever block it actually builds. A pre-computed commitment would be valid
+only for that exact transaction list and would turn any legitimate deviation into
+an unsubmittable block.
+
+### 5.4 Tests
+
+`miner_commitment_round_trips_through_the_validator` is the drift guard — it
+pins the miner's computation to the validator's, the same role
+`builder_and_validator_use_identical_floor` plays for the fee floor. Plus
+mismatch rejection, genesis acceptance, and the transition cost stated as an
+assertion. Full lib suite 1177 passed / 0 failed.
+
+**Still open:** an audit RPC returning the supply state *at an arbitrary past
+height* (today's `get_supply_info` reports the tip), and a from-genesis
+recomputation harness that checks every committed state in one pass.
 
 ---
 
 ## 6. Known limits
 
-- **This is a proposal.** Nothing in §3 is implemented today beyond the field and
-  the helper struct.
 - It bounds **emission-side** inflation only; confidential-transfer soundness
-  rests on the range proofs (§4.2).
-- Enabling it after mainnet genesis is a hard fork; the intended path is to
-  enable it at genesis.
+  rests on the range proofs (§4.2). This is the most important limit in the
+  paper and is unchanged by shipping.
+- **No historical audit endpoint yet.** `get_supply_info` reports the tip; there
+  is no RPC for the supply state at an arbitrary past height, and no
+  from-genesis recomputation harness (§5.4).
+- The commitment is verified **on connect**, so it binds the chain a node
+  actually builds. A light client still needs the header to check a claimed
+  reading against — see WP-017 for what light clients can and cannot verify.
+- Live-fire coverage is thin: the logic is unit-tested and the wiring is
+  review-verified, but the chain test module cannot yet drive real `add_block`
+  calls with valid PoW, so no test exercises rejection end-to-end through a
+  running node.
 - The mechanism detects divergence; it does not automatically repair a chain that
   has already inflated. Response is an operational decision.
 
