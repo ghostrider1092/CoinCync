@@ -635,6 +635,22 @@ impl Wallet {
         self.balance.add_utxo(utxo);
     }
 
+    /// Release a quarantined output so it becomes spendable (WP-018).
+    ///
+    /// Returns `true` if a quarantined output was found and released. The
+    /// caller must have obtained informed consent first — see
+    /// [`Balance::accept_quarantined`] for why "accept" cannot honestly mean
+    /// "spend it safely" on a chain where every transfer has exactly two
+    /// inputs. The wallet CLI prints the linkage consequence in full before
+    /// calling this.
+    ///
+    /// Exposed as a method rather than a `balance_mut()` accessor so the only
+    /// way to clear the flag is this documented path — a general mutable
+    /// handle would let any caller flip it without the consent step.
+    pub fn accept_quarantined(&mut self, key: &(Hash, u8)) -> bool {
+        self.balance.accept_quarantined(key)
+    }
+
     /// Mark UTXO as spent
     pub fn mark_spent(&mut self, tx_hash: Hash, output_index: u8) {
         self.balance.mark_spent(tx_hash, output_index);

@@ -348,6 +348,19 @@ enum Command {
         action: SubaddressAction,
     },
 
+    /// Dust quarantine: outputs that arrived unsolicited and are held
+    /// back from spending until you accept them (WP-018).
+    ///
+    /// An output someone ELSE created is one they know belongs to you.
+    /// Because every transfer on this chain carries exactly two inputs,
+    /// spending such an output proves the other input is yours too — so
+    /// small unsolicited outputs are quarantined rather than spent
+    /// automatically.
+    Quarantine {
+        #[command(subcommand)]
+        action: QuarantineAction,
+    },
+
     /// Selective-disclosure proofs. Prove statements about owned
     /// UTXOs to a third party (auditor, KYC counterparty) without
     /// revealing values or one-time secrets. All non-interactive —
@@ -454,6 +467,35 @@ enum DiscloseAction {
         /// The scoped view key JSON (from `disclose scoped-view-key`).
         #[arg(long)]
         view_key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuarantineAction {
+    /// List outputs currently held in quarantine.
+    List {
+        /// Wallet password. Use `-` to read from stdin.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+    /// Release a quarantined output so it can be spent.
+    ///
+    /// This is an informed-consent step, not a formality — see the
+    /// warning the command prints before acting.
+    Accept {
+        /// Transaction hash of the output (64-hex), from `quarantine list`.
+        #[arg(long)]
+        tx_hash: String,
+        /// Output index within that transaction, from `quarantine list`.
+        #[arg(long)]
+        output_index: u8,
+        /// Skip the interactive confirmation. For scripted use only —
+        /// the operator is asserting they understand the linkage below.
+        #[arg(long)]
+        yes: bool,
+        /// Wallet password. Use `-` to read from stdin.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
     },
 }
 
@@ -647,6 +689,17 @@ async fn main() {
                 }
             }
         }
+        Command::Quarantine { action } => match action {
+            QuarantineAction::List { password } => {
+                cmd_quarantine_list(&wallet_path, password).await
+            }
+            QuarantineAction::Accept {
+                tx_hash,
+                output_index,
+                yes,
+                password,
+            } => cmd_quarantine_accept(&wallet_path, password, &tx_hash, output_index, yes).await,
+        },
         Command::Disclose { action } => match action {
             DiscloseAction::Balance {
                 password,
@@ -2166,6 +2219,147 @@ async fn cmd_multisig_info(share_file: &str) -> Result<(), String> {
         share.config.threshold
     );
 
+    Ok(())
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DUST QUARANTINE COMMANDS (WP-018)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// The linkage warning shown before releasing a quarantined output.
+///
+/// WP-018 §4.3: on this chain a released output CANNOT be spent in isolation,
+/// because every transfer carries exactly two inputs. So "accept" can never
+/// honestly mean "spend it safely" — it means "I accept that spending this will
+/// link it to one other of my outputs". A generic "accept funds?" prompt would
+/// be a lie by omission, so the cost is stated in full every time.
+const QUARANTINE_ACCEPT_WARNING: &str = "\
+  Every CoinCync transfer has EXACTLY TWO inputs. There is no way to spend this
+  output on its own.
+
+  When you spend it, it will share a transaction with one other of your outputs.
+  Whoever sent you this output knows it is yours — so they can then conclude that
+  the OTHER input is yours too.
+
+  Accept only if you know where this came from, or if that linkage does not
+  matter to you.";
+
+async fn cmd_quarantine_list(path: &PathBuf, password: Option<String>) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+
+    let balance = wallet.balance();
+    let held = balance.quarantined_utxos();
+
+    if held.is_empty() {
+        println!("No quarantined outputs.");
+        println!();
+        println!(
+            "Outputs below {} atomic units that arrive unsolicited are held here",
+            coincync::wallet::scanner::QUARANTINE_AMOUNT_THRESHOLD
+        );
+        println!("until you accept them, so they are never spent by accident.");
+        return Ok(());
+    }
+
+    println!(
+        "{} quarantined output(s), total {} atomic units:",
+        held.len(),
+        balance.quarantined_balance().as_atomic()
+    );
+    println!();
+    for u in &held {
+        println!(
+            "  {}:{}  amount={}  height={}",
+            hex::encode(u.tx_hash.as_bytes()),
+            u.output_index,
+            u.amount.as_atomic(),
+            u.height,
+        );
+    }
+    println!();
+    println!("These are NOT included in your spendable balance and will never be");
+    println!("selected automatically. To release one:");
+    println!();
+    println!("  wallet quarantine accept --tx-hash <hash> --output-index <n>");
+    Ok(())
+}
+
+async fn cmd_quarantine_accept(
+    path: &PathBuf,
+    password: Option<String>,
+    tx_hash_hex: &str,
+    output_index: u8,
+    assume_yes: bool,
+) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    let raw = hex::decode(tx_hash_hex.trim())
+        .map_err(|e| format!("tx_hash must be 64 hex characters: {}", e))?;
+    let bytes: [u8; 32] = raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("tx_hash must be 32 bytes (64 hex chars), got {}", raw.len()))?;
+    let tx_hash = coincync::primitives::Hash::from_bytes(bytes);
+
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+
+    // Show WHAT is being accepted before asking. A confirmation prompt that
+    // doesn't say what it is confirming is not consent.
+    let key = (tx_hash, output_index);
+    let amount = wallet
+        .balance_ref()
+        .quarantined_utxos()
+        .iter()
+        .find(|u| u.tx_hash == tx_hash && u.output_index == output_index)
+        .map(|u| u.amount.as_atomic())
+        .ok_or_else(|| {
+            format!(
+                "no quarantined output {}:{} — run `wallet quarantine list`",
+                tx_hash_hex, output_index
+            )
+        })?;
+
+    println!("Releasing {}:{} ({} atomic units)", tx_hash_hex, output_index, amount);
+    println!();
+    println!("{}", QUARANTINE_ACCEPT_WARNING);
+    println!();
+
+    if !assume_yes {
+        print!("Type 'accept' to confirm: ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| format!("read confirmation: {}", e))?;
+        if line.trim() != "accept" {
+            return Err("aborted — output remains quarantined".to_string());
+        }
+    }
+
+    if !wallet.accept_quarantined(&key) {
+        return Err(format!(
+            "no quarantined output {}:{} (it may have been accepted already)",
+            tx_hash_hex, output_index
+        ));
+    }
+
+    wallet
+        .save(Some(password.as_str()))
+        .map_err(|e| format!("save wallet after accepting: {}", e))?;
+
+    println!();
+    println!("Released. This output is now part of your spendable balance.");
     Ok(())
 }
 

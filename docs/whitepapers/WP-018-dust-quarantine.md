@@ -1,8 +1,8 @@
 # WP-018 · Dust Quarantine
 ### Unsolicited outputs, and why accepting one costs more here than elsewhere
 
-**Status:** **Shipped (core)** — classification, exclusion, acceptance and
-persistence are live; the CLI surface and user-adjustable threshold are not ·
+**Status:** **Shipped** — classification, exclusion, acceptance, persistence and
+the CLI surface are live; the threshold is not yet user-configurable ·
 **Layer:** Wallet · **Series:** [CoinCync Whitepapers](README.md)
 
 ---
@@ -175,8 +175,9 @@ path can pick one by accident.
 | Exclusion via the shared `is_selectable` predicate | `src/wallet/balance.rs` | **Live** |
 | `quarantined_balance()` / `quarantined_utxos()` | `src/wallet/balance.rs` | **Live** |
 | `accept_quarantined(key)` | `src/wallet/balance.rs` | **Live** |
+| `Wallet::accept_quarantined` (no `balance_mut()` handle) | `src/wallet/wallet.rs` | **Live** |
+| CLI `quarantine list` / `quarantine accept` with the §4.3 warning | `src/bin/wallet_support/legacy.rs` | **Live** |
 | User-adjustable threshold | wallet config | **Missing** |
-| CLI: list quarantined, accept with the §4.3 warning | `src/bin/wallet_support/legacy.rs` | **Missing** |
 
 Two structural choices worth noting, both applying WP-009 §4 rule 2 *before* an
 incident rather than after one:
@@ -206,12 +207,10 @@ un-quarantine everything at the next wallet open). Full lib suite 1184 pass.
 
 ## 7. Known limits
 
-- **No user surface yet.** The mechanism is live in the wallet core, but nothing
-  lists quarantined outputs or performs the §4.3 informed-consent acceptance, so
-  a user currently has no way to release one. Until that lands the feature can
-  strand small legitimate payments — it must not be considered finished.
 - **Threshold is fixed, not configurable.** §4.1 requires it to be
-  user-adjustable; it is currently a constant.
+  user-adjustable; it is currently a constant. Until that lands, a user who
+  regularly receives genuinely small payments will see them quarantined and must
+  release each one by hand.
 - Classification by amount is a placeholder for real expectation-matching.
 - The single-clean-output cliff (§5) has no answer yet.
 - Does not address ring pollution or output flooding.
