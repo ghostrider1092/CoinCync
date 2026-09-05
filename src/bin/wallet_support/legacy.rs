@@ -188,11 +188,12 @@ enum Command {
         /// don't belong on-chain in plaintext.
         #[arg(long)]
         memo: Option<String>,
-        /// Dead-man's switch — recovery address (64-hex spend pubkey
-        /// of a backup wallet). If this wallet doesn't sign for
-        /// `--recovery-timeout` blocks, the recovery wallet can sweep
-        /// the outputs of this tx. Embeds a 42-byte RecoveryMeta into
-        /// `tx.extra`. Both flags must be passed together.
+        /// Dead-man's switch — recovery address (64-hex spend pubkey of a
+        /// backup wallet). Embeds a 42-byte RecoveryMeta into `tx.extra`; both
+        /// flags must be passed together. NOTE (WP-015 §5.1): recovery SPENDING
+        /// is not yet implemented — no consensus rule lets the recovery address
+        /// spend after the timeout, so this metadata is currently inert and must
+        /// not be relied on for fund recovery.
         #[arg(long)]
         recovery_address: Option<String>,
         /// Blocks of inactivity before recovery activates (min 720 ≈
@@ -269,7 +270,9 @@ enum Command {
     },
 
     /// Set a dead man's switch recovery address for future transactions.
-    /// If this wallet doesn't sign for --timeout blocks, the recovery address can sweep.
+    /// NOTE: recovery spending is NOT yet implemented (WP-015 §5.1) — the
+    /// metadata is written but is inert until a future consensus change; do not
+    /// rely on it for recovery. The command explains this before it acts.
     SetRecovery {
         /// Wallet password. Use `-` to read from stdin (recommended for
         /// piped automation: `echo $pw | wallet ... --password -`).
@@ -2404,21 +2407,34 @@ async fn cmd_set_recovery(
     let timeout_hours = timeout_blocks * 2 / 60; // approximate at 120s blocks
     let timeout_days = timeout_hours / 24;
 
-    println!("Dead man's switch configured:");
+    // HONESTY GATE (WP-015 §5.1). The recovery *metadata* is real, validated, and
+    // forward-compatible — but there is NO consensus spend path for it:
+    // `is_recovery_eligible` has no caller in validation or the wallet spend
+    // path, so a recovery address CANNOT actually spend after the timeout. The
+    // previous message here said "Dead man's switch configured … the recovery
+    // address can sweep the outputs", which is false and is the most dangerous
+    // shape of defect a wallet can have: a user relies on it, and their heirs get
+    // nothing while the tool reported success. Lead with the truth.
+    println!("⚠ DEAD-MAN'S SWITCH IS NOT YET FUNCTIONAL — DO NOT RELY ON IT.");
+    println!();
+    println!("  The recovery metadata below is valid and will be written to your");
+    println!("  transactions, but the network has NO rule that lets a recovery");
+    println!("  address spend after the timeout. Recovery spending is unimplemented");
+    println!("  (it needs a consensus change that has not shipped). Today this");
+    println!("  metadata is INERT: if you lose access, these funds are NOT");
+    println!("  recoverable through this mechanism.");
+    println!();
+    println!("  Do not use this as your inheritance or backup plan. Use a real");
+    println!("  seed backup, or multisig, until this is activated on the network.");
+    println!();
+    println!("Metadata that WOULD be written (inert until the consensus rule ships):");
     println!("  Recovery address: {}", recovery_address_hex);
     println!(
         "  Timeout:          {} blocks (≈{} days)",
         timeout_blocks, timeout_days
     );
     println!();
-    println!("Future transactions from this wallet will include recovery");
-    println!(
-        "metadata. If this wallet is inactive for {} blocks,",
-        timeout_blocks
-    );
-    println!("the recovery address can sweep the outputs.");
-    println!();
-    println!("To include recovery metadata in a transaction, pass:");
+    println!("To embed this (forward-compatible) metadata in a transaction, pass:");
     println!(
         "  --recovery-address {} --recovery-timeout {}",
         recovery_address_hex, timeout_blocks
@@ -2457,8 +2473,10 @@ async fn cmd_check_recovery(
     println!("  Use the explorer or 'get_transaction' RPC to inspect individual");
     println!("  transactions for recovery tags (0xDE prefix).");
     println!();
-    println!("  Recovery-eligible outputs can be swept by the recovery address");
-    println!("  when current_height - creation_height >= timeout_blocks.");
+    println!("  ⚠ Recovery SPENDING is not implemented (WP-015 §5.1): the network");
+    println!("    has no rule permitting a recovery address to spend after the");
+    println!("    timeout. This metadata is inert until a future consensus change.");
+    println!("    Do not rely on it for fund recovery.");
 
     Ok(())
 }
