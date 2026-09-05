@@ -23,7 +23,7 @@ use crate::chain::SharedBlockchain;
 use crate::config::NetworkType;
 use crate::consensus::fee_market::distribute_fee;
 use crate::consensus::fork_signal::{encode_coinbase_extra, SignalBits};
-use crate::consensus::{compute_full_anchor, BlockHeader};
+use crate::consensus::{compute_full_anchor, Block, BlockHeader};
 use crate::constants::block_version_at_height;
 use crate::crypto::{coinbase_stealth_address, BlindingFactor, PedersenCommitment};
 use crate::error::{Error, Result};
@@ -279,16 +279,61 @@ pub fn build_block_from_template(
         nonce: 0,
         target,
         miner_pubkey: *payout_spend_pub,
+        // Filled in below, once the block is assembled: the commitment covers
+        // this block's fee-burn, which depends on the transactions actually
+        // included.
         supply_commitment: [0u8; 32],
         checkpoint_vote: None,
         spark_set_root: [0u8; 32],
         mw_kernel_root: [0u8; 32],
     };
 
+    // Supply commitment. The template carries the CUMULATIVE totals at the
+    // parent; we add this block's own emission and fee-burn and commit to the
+    // result, using the same `advance_supply_totals` the node runs on connect —
+    // so the miner and the validator cannot disagree about what the totals are
+    // (WP-006 §4.4).
+    //
+    // Computed from the ASSEMBLED block rather than from the template's proposed
+    // tx list, because the fee-burn depends on the transactions actually included
+    // and their total size. A miner that deviates from the template still
+    // produces a valid commitment.
+    let (parent_minted, parent_burned) = parse_parent_supply_totals(template);
+    let mut block = Block::new(header, all_txs);
+    let (minted, burned) = crate::chain::advance_supply_totals(
+        &block,
+        parent_minted,
+        parent_burned,
+        "block template assembly",
+    );
+    block.header.supply_commitment =
+        crate::emission::supply_commitment(block.header.height, minted, burned);
+
     Ok(CandidateBlock {
-        header,
-        transactions: all_txs,
+        header: block.header,
+        transactions: block.transactions,
     })
+}
+
+/// Cumulative `(total_minted, total_burned)` at the template's parent block.
+///
+/// Sent as decimal strings because they are `u128` and a JSON number would lose
+/// precision. A missing or unparseable field yields `0`, which produces a
+/// commitment the node will reject rather than a silently wrong chain — the
+/// failure is loud and local to the miner, which is the right direction: an old
+/// miner talking to a new node stops producing accepted blocks instead of
+/// producing blocks that corrupt supply accounting.
+fn parse_parent_supply_totals(template: &Value) -> (u128, u128) {
+    let read = |key: &str| -> u128 {
+        template[key]
+            .as_str()
+            .and_then(|s| s.parse::<u128>().ok())
+            .unwrap_or(0)
+    };
+    (
+        read("parent_total_minted"),
+        read("parent_total_burned"),
+    )
 }
 
 /// Decode the hex-encoded mempool transactions carried in the template.

@@ -220,6 +220,23 @@ pub fn build_template_json(
 
     let network_magic = chain.network().magic_bytes();
 
+    // Cumulative supply totals AT THE TIP (the parent of the block being built).
+    // The miner adds this block's own emission and fee-burn to these and hashes
+    // the result into `header.supply_commitment`; the node recomputes the same
+    // totals on connect and rejects a mismatch.
+    //
+    // We send the PARENT totals rather than a finished commitment on purpose. A
+    // miner may legitimately assemble a different transaction set than this
+    // template proposes (it is a suggestion, not a mandate), and the block's
+    // fee-burn depends on that set. Handing over the parent totals lets the miner
+    // compute the correct commitment for whatever block it actually builds; a
+    // pre-computed commitment would be valid only for this exact tx list and
+    // would turn any deviation into an unsubmittable block.
+    //
+    // Decimal strings, not JSON numbers: these are u128 and would lose precision
+    // through a JSON f64. Same reason `difficulty` is a string.
+    let supply = chain.stats();
+
     serde_json::json!({
         "height":     next_height,
         "prev_hash":  hex::encode(tip.hash.as_bytes()),
@@ -228,6 +245,8 @@ pub fn build_template_json(
         "target":     hex::encode(next_target.as_bytes()),
         "difficulty": next_difficulty.to_string(),
         "transactions": tx_hex,
+        "parent_total_minted": supply.total_supply.to_string(),
+        "parent_total_burned": supply.total_burned.to_string(),
     })
 }
 

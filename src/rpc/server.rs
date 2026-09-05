@@ -984,6 +984,23 @@ pub async fn start_rpc_server(
                     stats.total_supply.saturating_sub(stats.total_burned),
                 ),
                 "supply_note":        "total_supply/total_emitted is gross emission; circulating_supply is net of burned fees (total_supply − total_burned).",
+                // The value committed in the tip block's header. This is what
+                // turns the figures above from "trust this RPC" into "verify
+                // against the chain": recompute the commitment from the fields
+                // below and compare it against the `supply_commitment` of the
+                // block header at `height`, which is covered by that block's
+                // proof of work. A node reporting inflated supply cannot produce
+                // a matching header without redoing the work for that block and
+                // every block after it.
+                "supply_commitment": hex::encode(crate::emission::supply_commitment(
+                    height,
+                    stats.total_supply,
+                    stats.total_burned,
+                )),
+                "supply_commitment_domain": String::from_utf8_lossy(
+                    crate::emission::SUPPLY_COMMITMENT_DOMAIN,
+                ),
+                "supply_commitment_encoding": "blake3_domain(domain, height:u64_le || total_emitted:u128_le || total_burned:u128_le); genesis (height 0) commits to 32 zero bytes",
                 "emission_phase":     phase.name(),
                 // Public emission parameters so anyone can independently
                 // recompute the schedule and confirm `total_emitted`. Emission

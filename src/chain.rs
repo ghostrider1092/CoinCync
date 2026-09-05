@@ -2063,7 +2063,12 @@ impl Blockchain {
         if is_main_chain {
             // Update tip — but first re-check for race conditions.
             let difficulty = calculate_difficulty_from_target(&block.header.target);
-            let race_detected = {
+            // Set by the supply-commitment check inside the block below when the
+            // header's commitment disagrees with what this chain computes. The
+            // check runs before any mutation, so on rejection nothing has been
+            // applied and the block is reported Invalid after the lock is dropped.
+            let mut supply_reject: Option<String> = None;
+            let race_detected = 'race: {
                 let mut inner = self.inner.write();
 
                 // SECURITY (RACE-R7): Re-check that tip hasn't changed since our read
@@ -2082,6 +2087,39 @@ impl Blockchain {
                     true
                 } else {
                     // Race check passed — safe to apply as main chain.
+                    //
+                    // Supply commitment FIRST, before any mutation. Track supply:
+                    // total_supply is GROSS emission — the full per-block reward
+                    // is added; fee burns are NOT subtracted here (total_burned is
+                    // tracked separately). So total_supply == sum of the
+                    // deterministic emission schedule, which is exactly what
+                    // get_supply_info exposes as verifiable.
+                    //
+                    // `advance_and_verify_supply` is the single routine both
+                    // connect paths use: it advances the accumulators and checks
+                    // the header's commitment against the result. It runs under
+                    // this write lock and BEFORE the tip/height_to_hash writes so
+                    // a mismatch leaves no partially-applied state behind — the
+                    // same discipline as the difficulty-target check above, which
+                    // rejects before touching anything. Overflow panics inside it,
+                    // as it did inline here.
+                    let advanced = advance_and_verify_supply(
+                        &block,
+                        inner.stats.total_supply,
+                        inner.stats.total_burned,
+                        "block connect",
+                    );
+                    let (new_minted, new_burned) = match advanced {
+                        Ok(totals) => totals,
+                        Err(reason) => {
+                            supply_reject = Some(reason);
+                            // Nothing has been mutated; leave the block with "no
+                            // race" and let the caller turn `supply_reject` into
+                            // an Invalid status.
+                            break 'race false;
+                        }
+                    };
+
                     inner.height_to_hash.insert(block.header.height, hash);
                     inner.tip = ChainTip {
                         hash,
@@ -2095,48 +2133,8 @@ impl Blockchain {
                     inner.stats.difficulty = difficulty;
                     inner.stats.tip_hash = hash;
                     inner.stats.total_difficulty += difficulty;
-
-                    // Track supply: total_supply is GROSS emission — the full
-                    // per-block reward is added; fee burns are NOT subtracted
-                    // here (total_burned is tracked separately). So total_supply
-                    // == sum of the deterministic emission schedule, which is
-                    // exactly what get_supply_info exposes as verifiable.
-                    let emission = calculate_block_reward(block.header.height);
-                    // AUDIT (2026-07-01): checked_add + panic for symmetry with the
-                    // reorg-rollback path's checked_sub + panic (fixed same day).
-                    // saturating_add silently clamps at u64::MAX; if emission ever
-                    // returns a corrupt large value (bug in calculate_block_reward),
-                    // the silent clamp hides it and every subsequent supply query
-                    // returns u64::MAX until the process is bounced. Panicking on
-                    // overflow surfaces the corruption exactly once, at the site.
-                    // Prior art matches the SEV-A rollback fix comment above.
-                    inner.stats.total_supply = inner
-                        .stats
-                        .total_supply
-                        .checked_add(emission.as_atomic() as u128)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "CONSENSUS CORRUPTION: supply overflow on block connect — \
-                             tried to add emission={} to total_supply={}. Emission is \
-                             deterministic from height and cannot be attacker-controlled; \
-                             this indicates a bug in calculate_block_reward or on-disk \
-                             corruption. Halting for RocksDB flush + operator triage.",
-                                emission, inner.stats.total_supply
-                            )
-                        });
-                    // Burn accumulator, in lockstep with the supply add above.
-                    inner.stats.total_burned = inner
-                        .stats
-                        .total_burned
-                        .checked_add(block_fee_burn(&block))
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "CONSENSUS CORRUPTION: total_burned overflow on block \
-                                 connect — total_burned={} + this block's fee-burn \
-                                 exceeded u128. Halting for RocksDB flush + operator triage.",
-                                inner.stats.total_burned
-                            )
-                        });
+                    inner.stats.total_supply = new_minted;
+                    inner.stats.total_burned = new_burned;
 
                     // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
                     // CIP-009.D Interp-B contract: checkpoint each Phase-2
@@ -2159,6 +2157,22 @@ impl Blockchain {
                     false
                 }
             }; // write lock released
+
+            // Supply-commitment rejection. The check ran under the write lock
+            // BEFORE any tip/stats/UTXO mutation, so there is nothing to unwind
+            // here — the chain is exactly as it was. The block was already stored
+            // in the block cache/DB above (as every candidate is, valid or not,
+            // so orphan reconnection can find it), but it is not on the chain and
+            // holds no height mapping.
+            if let Some(reason) = supply_reject {
+                tracing::warn!(
+                    "Rejecting block {} at height {}: {}",
+                    hash.to_hex()[..8].to_string(),
+                    block.header.height,
+                    reason
+                );
+                return Ok(BlockStatus::Invalid(reason));
+            }
 
             if race_detected {
                 // Fall through to the fork-evaluation path below.
@@ -2830,6 +2844,43 @@ impl Blockchain {
                             }
                         }
 
+                        // Verify this fork block's supply commitment through the
+                        // SAME routine the linear connect path uses, and get the
+                        // post-block totals. A fork block whose commitment
+                        // disagrees with the totals it would produce on this chain
+                        // aborts the reorg like any other invalid fork block —
+                        // `reorg_error` triggers the proven rollback below, which
+                        // restores pre-reorg tip, stats and UTXOs.
+                        //
+                        // Without this the check would cover only the linear path,
+                        // and a block could enter the chain unverified simply by
+                        // arriving as part of a reorg.
+                        //
+                        // ORDERING: this sits with the validation and
+                        // difficulty checks above — BEFORE the height mapping, the
+                        // Phase-2 checkpoint and the UTXO batch — so a rejected
+                        // fork block leaves NOTHING applied. The failed-reorg
+                        // rollback unwinds by index (`offset < fork_idx`) and its
+                        // site-5a guard keys on `height_to_hash`, both of which
+                        // assume a block is either fully applied or untouched.
+                        let (new_minted, new_burned) = match advance_and_verify_supply(
+                            fork_block,
+                            inner.stats.total_supply,
+                            inner.stats.total_burned,
+                            "reorg fork-block connect",
+                        ) {
+                            Ok(totals) => totals,
+                            Err(reason) => {
+                                tracing::warn!(
+                                    "Fork block {} rejected during reorg: {}",
+                                    fork_block.hash().to_hex(),
+                                    reason
+                                );
+                                reorg_error = Some(reason);
+                                break;
+                            }
+                        };
+
                         let fork_hash = fork_block.hash();
                         inner
                             .height_to_hash
@@ -2858,45 +2909,8 @@ impl Blockchain {
                         );
                         inner.utxos.apply_batch(batch);
 
-                        // Add this fork block's emission to supply
-                        let emission = calculate_block_reward(fork_block.header.height);
-                        // AUDIT (2026-07-01): checked_add + panic for symmetry with the
-                        // reorg-rollback path's checked_sub + panic (fixed same day).
-                        // saturating_add silently clamps at u64::MAX; if emission ever
-                        // returns a corrupt large value (bug in calculate_block_reward),
-                        // the silent clamp hides it and every subsequent supply query
-                        // returns u64::MAX until the process is bounced. Panicking on
-                        // overflow surfaces the corruption exactly once, at the site.
-                        // Prior art matches the SEV-A rollback fix comment above.
-                        inner.stats.total_supply = inner
-                            .stats
-                            .total_supply
-                            .checked_add(emission.as_atomic() as u128)
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "CONSENSUS CORRUPTION: supply overflow on block connect — \
-                             tried to add emission={} to total_supply={}. Emission is \
-                             deterministic from height and cannot be attacker-controlled; \
-                             this indicates a bug in calculate_block_reward or on-disk \
-                             corruption. Halting for RocksDB flush + operator triage.",
-                                    emission, inner.stats.total_supply
-                                )
-                            });
-                        // Burn accumulator, in lockstep with this fork block's
-                        // supply add above.
-                        inner.stats.total_burned = inner
-                            .stats
-                            .total_burned
-                            .checked_add(block_fee_burn(fork_block))
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "CONSENSUS CORRUPTION: total_burned overflow on reorg \
-                                     fork-block connect — total_burned={} + this block's \
-                                     fee-burn exceeded u128. Halting for RocksDB flush + \
-                                     operator triage.",
-                                    inner.stats.total_burned
-                                )
-                            });
+                        inner.stats.total_supply = new_minted;
+                        inner.stats.total_burned = new_burned;
                     }
 
                     // SECURITY (REORG-TIP-VALIDATE, 2026-08-13): re-validate the
@@ -4315,6 +4329,112 @@ pub(crate) fn block_fee_burn(block: &Block) -> u128 {
         .as_atomic() as u128
 }
 
+/// Advance the running supply totals by `block`, returning the post-block
+/// `(total_minted, total_burned)`.
+///
+/// This is the arithmetic half, shared by the two connect paths (through
+/// [`advance_and_verify_supply`]) **and by the miner**, which needs the same
+/// totals to fill `header.supply_commitment` for the block it assembled. One
+/// definition of "the supply totals after this block" — the WP-006 §4.4 rule.
+///
+/// Overflow panics rather than saturating, matching the accumulators this
+/// replaced: emission is deterministic from height and cannot be
+/// attacker-controlled, so an overflow means a `calculate_block_reward` bug or
+/// on-disk corruption. Silently clamping would hide it and poison every later
+/// supply query. `site` names the calling path so the panic identifies which
+/// loop tripped.
+pub(crate) fn advance_supply_totals(
+    block: &Block,
+    parent_minted: u128,
+    parent_burned: u128,
+    site: &'static str,
+) -> (u128, u128) {
+    let height = block.header.height;
+
+    let emission = calculate_block_reward(height);
+    let new_minted = parent_minted
+        .checked_add(emission.as_atomic() as u128)
+        .unwrap_or_else(|| {
+            panic!(
+                "CONSENSUS CORRUPTION: supply overflow on {site} — tried to add \
+                 emission={emission} to total_minted={parent_minted} at height {height}. \
+                 Emission is deterministic from height and cannot be attacker-controlled; \
+                 this indicates a bug in calculate_block_reward or on-disk corruption. \
+                 Halting for RocksDB flush + operator triage."
+            )
+        });
+
+    let burn = block_fee_burn(block);
+    let new_burned = parent_burned.checked_add(burn).unwrap_or_else(|| {
+        panic!(
+            "CONSENSUS CORRUPTION: total_burned overflow on {site} — tried to add \
+             fee_burn={burn} to total_burned={parent_burned} at height {height}. \
+             Halting for RocksDB flush + operator triage."
+        )
+    });
+
+    (new_minted, new_burned)
+}
+
+/// Advance the running supply totals by `block` and verify the block header's
+/// supply commitment against the result.
+///
+/// Returns the post-block `(total_minted, total_burned)` on success, or a
+/// rejection reason if the header's commitment does not match what this chain
+/// computes.
+///
+/// # Why this is one function
+///
+/// A block is connected by **two** independent loops in this file: the linear
+/// tip-extend path and the reorg fork-block re-apply path. They already
+/// duplicate the emission and burn arithmetic. Duplicating the supply *check*
+/// as well would be a third instance of the failure shape documented in
+/// `docs/whitepapers/WP-006-cumulative-work-determinism.md` §4.4 — the one that
+/// produced the fleet-wide `total_difficulty` divergence, where two
+/// implementations of one value disagreed by a constant and nobody owned the
+/// relationship. Both loops call this; there is one definition of "the supply
+/// totals after this block" and one of "is the header's commitment correct".
+///
+/// # Genesis
+///
+/// Height 0 commits to all-zero (see `emission::supply_commitment`) and is
+/// pinned by the hard-coded `GENESIS_HASH` constants, so it needs no separate
+/// treatment here — the shared commitment function owns the exception.
+///
+/// # Overflow
+///
+/// Overflow panics rather than saturating, matching the existing accumulators:
+/// emission is deterministic from height and cannot be attacker-controlled, so
+/// an overflow means a `calculate_block_reward` bug or on-disk corruption.
+/// Silently clamping would hide it and poison every later supply query.
+/// `site` names the calling path so the panic identifies which loop tripped.
+fn advance_and_verify_supply(
+    block: &Block,
+    parent_minted: u128,
+    parent_burned: u128,
+    site: &'static str,
+) -> std::result::Result<(u128, u128), String> {
+    let height = block.header.height;
+    let (new_minted, new_burned) =
+        advance_supply_totals(block, parent_minted, parent_burned, site);
+
+    let expected = crate::emission::supply_commitment(height, new_minted, new_burned);
+    if block.header.supply_commitment != expected {
+        return Err(format!(
+            "Supply commitment mismatch at height {}: header has {}, chain computes {} \
+             (total_minted={}, total_burned={}). The block claims cumulative supply this \
+             chain does not agree with.",
+            height,
+            hex::encode(&block.header.supply_commitment[..8]),
+            hex::encode(&expected[..8]),
+            new_minted,
+            new_burned,
+        ));
+    }
+
+    Ok((new_minted, new_burned))
+}
+
 impl Default for Blockchain {
     fn default() -> Self {
         Self::new()
@@ -4962,6 +5082,104 @@ mod tests {
         }
         b.transactions = txs;
         b
+    }
+
+    /// The supply commitment a MINER writes must be the one the VALIDATOR
+    /// expects — the round-trip that pins `mining::block_builder` to
+    /// `Blockchain::add_block`.
+    ///
+    /// Drift guard, same role as `builder_and_validator_use_identical_floor` in
+    /// mining/template.rs. Both sides go through `advance_supply_totals` +
+    /// `emission::supply_commitment`; if someone re-inlines a divergent
+    /// computation on either side, this fails.
+    #[test]
+    fn miner_commitment_round_trips_through_the_validator() {
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        let parent_minted = 4_200_000_000u128;
+        let parent_burned = 77_000u128;
+
+        let mut block = burn_test_block(act + 10, 1, &[1_000_000, 2_000_000]);
+
+        // Miner side: assemble, then commit to the resulting totals.
+        let (minted, burned) = advance_supply_totals(
+            &block,
+            parent_minted,
+            parent_burned,
+            "test miner",
+        );
+        block.header.supply_commitment =
+            crate::emission::supply_commitment(block.header.height, minted, burned);
+
+        // Validator side: independently recompute and verify.
+        let verified = advance_and_verify_supply(&block, parent_minted, parent_burned, "test");
+        assert_eq!(
+            verified,
+            Ok((minted, burned)),
+            "a block committed by the miner must verify, and yield the same totals"
+        );
+
+        // The totals must actually have moved — a no-op would make this vacuous.
+        assert!(minted > parent_minted, "emission must advance minted");
+        assert_eq!(
+            burned,
+            parent_burned + 900_000,
+            "3_000_000 fees × 30% normal burn"
+        );
+    }
+
+    #[test]
+    fn supply_commitment_mismatch_is_rejected() {
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        let mut block = burn_test_block(act + 10, 2, &[1_000_000]);
+
+        // A block committing to totals from a DIFFERENT parent state — the shape
+        // of a chain that disagrees about cumulative supply.
+        let (wrong_minted, wrong_burned) = advance_supply_totals(&block, 999, 0, "test");
+        block.header.supply_commitment =
+            crate::emission::supply_commitment(block.header.height, wrong_minted, wrong_burned);
+
+        let result = advance_and_verify_supply(&block, 4_200_000_000, 77_000, "test");
+        assert!(
+            result.is_err(),
+            "a commitment computed against different parent totals must be rejected"
+        );
+        assert!(
+            result.unwrap_err().contains("Supply commitment mismatch"),
+            "rejection must name the reason"
+        );
+    }
+
+    /// The transition cost of making this rule genesis-active, pinned as a test:
+    /// a block carrying the old all-zero placeholder is now INVALID above
+    /// genesis. Any pre-existing chain data must be discarded — which is why
+    /// this landed while both networks were still resettable.
+    #[test]
+    fn zero_placeholder_commitment_is_rejected_above_genesis() {
+        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        let mut block = burn_test_block(act + 10, 3, &[]);
+        block.header.supply_commitment = [0u8; 32];
+
+        assert!(
+            advance_and_verify_supply(&block, 0, 0, "test").is_err(),
+            "the pre-commitment placeholder must not validate above genesis"
+        );
+    }
+
+    /// Genesis keeps the all-zero commitment, so the pinned GENESIS_HASH
+    /// constants stay valid and no genesis rebuild is needed.
+    #[test]
+    fn genesis_zero_commitment_verifies() {
+        let mut block = burn_test_block(0, 4, &[]);
+        block.header.supply_commitment = [0u8; 32];
+
+        assert_eq!(
+            advance_and_verify_supply(&block, 0, 0, "test"),
+            Ok((
+                calculate_block_reward(0).as_atomic() as u128,
+                0
+            )),
+            "height 0 commits to all-zero and must verify"
+        );
     }
 
     #[test]
