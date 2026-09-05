@@ -19,6 +19,26 @@ use super::persistence::{
 };
 use super::wallet_keys::WalletKeys;
 
+/// Genesis hash for a network name, used to bind a wallet's UTXO/reservation
+/// sidecars to the chain they were scanned against.
+///
+/// A wallet reused across chains will otherwise load outputs that reference
+/// transactions which do not exist on the current chain — the wallet looks
+/// funded but a send selects phantom inputs the network rejects. The dangerous
+/// case is cross-network (testnet/regtest UTXOs loaded into a mainnet-pointed
+/// wallet). Regtest shares testnet's genesis.
+///
+/// LIMIT: this catches a genesis *mismatch* (different network). It does NOT
+/// catch two chain *instances* that share a genesis but diverged in history
+/// (e.g. a regtest chain re-mined from scratch) — those need scan-time tip-hash
+/// reconciliation, tracked separately.
+fn network_genesis_hash(network: &str) -> [u8; 32] {
+    match network {
+        "mainnet" => crate::mainnet::MAINNET_GENESIS_HASH,
+        _ => crate::testnet::TESTNET_GENESIS_HASH, // testnet + regtest
+    }
+}
+
 /// Wallet state
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalletState {
@@ -368,8 +388,27 @@ impl Wallet {
         // Vec drop unzeroized, leaving the plaintext on the heap
         // until re-allocation. Now: `mut json_bytes` + explicit
         // `.zeroize()` after deserialization at each sidecar path.
+        // Cross-chain guard: if a chain marker exists and does not match this
+        // wallet's network genesis, the persisted sidecars were scanned on a
+        // different chain and must NOT be loaded — their UTXOs reference outputs
+        // that do not exist here (a wallet that looks funded but whose sends
+        // select phantom inputs). Skip them; `scan --from 0` rebuilds correct
+        // state. Fail-safe: the worst case of a false positive is a rescan.
+        let chain_path = self.path.with_extension("chain");
+        let foreign_chain = std::fs::read_to_string(&chain_path)
+            .ok()
+            .map(|marker| marker.trim() != hex::encode(network_genesis_hash(&self.network)))
+            .unwrap_or(false);
+        if foreign_chain {
+            tracing::warn!(
+                "wallet sidecars were scanned on a different chain (genesis marker \
+                 mismatch); skipping stale UTXOs/reservations. Run `scan --from 0` \
+                 to rebuild from the current chain."
+            );
+        }
+
         let utxo_path = self.path.with_extension("utxos");
-        if utxo_path.exists() {
+        if !foreign_chain && utxo_path.exists() {
             if let Ok(bytes) = std::fs::read(&utxo_path) {
                 let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
                 if let Ok(utxos) = serde_json::from_slice::<Vec<UTXO>>(&json_bytes) {
@@ -406,7 +445,7 @@ impl Wallet {
         //
         // R-111 fix: zeroize decrypted plaintext after use.
         let reservations_path = self.path.with_extension("reservations");
-        if reservations_path.exists() {
+        if !foreign_chain && reservations_path.exists() {
             if let Ok(bytes) = std::fs::read(&reservations_path) {
                 let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
                 if let Ok(entries) = serde_json::from_slice::<
@@ -919,6 +958,15 @@ impl Wallet {
         } else if utxo_path.exists() {
             let _ = std::fs::remove_file(&utxo_path);
         }
+
+        // === Step 1.25: chain-binding marker ===
+        // Records which network's genesis these sidecars were scanned against,
+        // so `load` can refuse to import UTXOs/reservations from a different
+        // chain (see `network_genesis_hash`). The genesis hash is public, so
+        // this is not encrypted. Written unconditionally so it stays in sync
+        // with whatever sidecars exist for this wallet.
+        let chain_path = self.path.with_extension("chain");
+        let _ = std::fs::write(&chain_path, hex::encode(network_genesis_hash(&self.network)));
 
         // === Step 1.5: reservations sidecar (Item 1) ===
         // Persisted alongside UTXOs because a reservation is meaningless
@@ -1657,5 +1705,70 @@ mod tests {
             wallet.subaddress_data.is_none(),
             "R-112: subaddress_data must be cleared on lock"
         );
+    }
+
+    /// Cross-chain UTXO guard: a wallet must not load UTXOs whose `.chain`
+    /// marker names a different network's genesis. The dangerous case is
+    /// mainnet — testnet/regtest UTXOs loaded into a mainnet-pointed wallet
+    /// reference outputs that do not exist there, so the wallet looks funded but
+    /// every send selects a phantom input the network rejects.
+    #[test]
+    fn foreign_chain_utxos_are_not_loaded() {
+        use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
+        use crate::wallet::balance::UTXO;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("guard.wallet");
+        let mk_utxo = || UTXO {
+            tx_hash: Hash::from_bytes([9u8; 32]),
+            output_index: 0,
+            output_locator: None,
+            amount: Amount::from_atomic(5_000_000),
+            height: 7,
+            key_image: KeyImage::from_bytes([9u8; 32]),
+            spent: false,
+            amount_blinding_bytes: [0u8; 32],
+            tx_public_key: PublicKey::from_bytes([0u8; 32]),
+            lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
+            quarantined: false,
+        };
+
+        // Create a testnet wallet, seed a UTXO, persist. save() writes the
+        // .utxos sidecar AND a .chain marker = testnet genesis.
+        {
+            let (mut w, _) = Wallet::create(path.clone(), Some("pw"), "testnet").unwrap();
+            w.balance.add_utxo(mk_utxo());
+            w.save(Some("pw")).unwrap();
+        }
+        let chain_marker = path.with_extension("chain");
+        assert!(chain_marker.exists(), "save must write the chain marker");
+        assert_eq!(
+            std::fs::read_to_string(&chain_marker).unwrap().trim(),
+            hex::encode(network_genesis_hash("testnet")),
+            "marker records the testnet genesis"
+        );
+
+        // Same chain: reopen + unlock restores the UTXO.
+        {
+            let mut w = Wallet::open(path.clone()).unwrap();
+            w.unlock("pw").unwrap();
+            assert_eq!(w.total_balance().as_atomic(), 5_000_000, "same-chain load restores UTXOs");
+        }
+
+        // Tamper the marker to a FOREIGN genesis (as if these were mainnet
+        // UTXOs opened by a testnet wallet, or vice versa). The UTXO sidecar is
+        // untouched and still on disk.
+        std::fs::write(&chain_marker, hex::encode(network_genesis_hash("mainnet"))).unwrap();
+        {
+            let mut w = Wallet::open(path.clone()).unwrap();
+            w.unlock("pw").unwrap();
+            assert_eq!(
+                w.total_balance().as_atomic(),
+                0,
+                "foreign-chain UTXOs must NOT be loaded — a rescan rebuilds correct state"
+            );
+        }
     }
 }
