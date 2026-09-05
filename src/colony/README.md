@@ -95,6 +95,33 @@ The pure decision cores for the act-phase castes exist and are tested; the
 sidecar wiring that would let them *act* is deliberately gated behind the phases
 above so nothing advisory can ever become load-bearing before it's proven.
 
+### The act-phase spine (built ahead of any caste acting)
+
+The guards above are not per-caste promises; they are one shared, non-bypassable
+layer every action passes through, plus the trust check that decides whether an
+action may fire at all. Both are **pure, deterministic decision cores** — built
+and tested *before* any caste is wired to act, so the act phase cannot become an
+attack surface the moment it turns on.
+
+- [`honeybee`](honeybee.rs) — **quorum-gated trust.** Every act-phase signal
+  (spider's eclipse/flood/partition, sensor's fleet health) is
+  attacker-influenceable, so nothing acts on one. honeybee raises evidence to a
+  **confidence scalar** only when it is corroborated by *independent* sources
+  (deduped by netgroup, so spam from one vantage counts once) across *two or more
+  distinct evidence kinds* (one metric is capped below the act threshold), and
+  only once corroboration **exceeds an explicit fault budget** (fabricable
+  evidence is worth nothing). Stale evidence evaporates. This is the gate that
+  makes wiring the rest safe.
+- [`guards`](guards.rs) — the middleware, written once: **kill switch**,
+  **confidence gate** (ties every action to honeybee), **rate limit**,
+  **max-dwell** (a defensive posture auto-releases unless quorum re-confirms with
+  fresh evidence — defeats the *trap-me-in-an-expensive-mode* DoS), and the
+  **diversity floor** no peer-affecting action may cross (so anti-eclipse
+  machinery can never become an eclipse vector).
+
+Each is tested against the attack it must survive — forge the trigger, spam one
+source, trap-in-posture, floor breach — not just its happy path.
+
 ---
 
 ## Invariants every caste keeps

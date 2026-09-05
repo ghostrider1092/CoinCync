@@ -136,6 +136,19 @@ behaviour:
 Specifying these *before* building the act phase is the point. Guards retrofitted
 onto an autonomous system are guards designed around what was already built.
 
+**Update (2026-09-05): the spine is built, ahead of any caste acting.** The four
+guards, plus a quorum-gated trust check, now exist as pure, deterministic
+decision cores (`src/colony/guards.rs`, `src/colony/honeybee.rs`) with adversarial
+tests. `honeybee` is the load-bearing addition: every act-phase signal is
+attacker-influenceable, so nothing acts on one — evidence is raised to a
+*confidence scalar* only when corroborated by **independent** sources (deduped by
+netgroup) across **≥2 distinct evidence kinds**, and only once corroboration
+**exceeds an explicit fault budget**. `guards` adds a **max-dwell** auto-release
+(defeating the "trap the node in an expensive defensive posture" DoS) alongside
+the kill switch, confidence gate, rate limit and the never-crossable diversity
+floor. Building the spine changed zero runtime behavior — it is the precondition
+for wiring any caste to act, not an action itself.
+
 ---
 
 ## 5. Security analysis
