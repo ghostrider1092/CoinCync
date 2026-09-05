@@ -125,12 +125,14 @@ RUN find target/release -maxdepth 1 -type f -executable \
 # into a slim layer that can be exported via `docker run -v`.
 FROM debian:bookworm-slim AS artifacts
 
+# cyncswap (atomic-swap CLI) is intentionally NOT exported: atomic swap is
+# deferred out of the v1 mainnet launch (unaudited crypto composition). The
+# crate still builds under --workspace above, but no release artifact ships it.
 COPY --from=builder /src/target/release/coincync-node \
                     /src/target/release/coincync-wallet \
                     /src/target/release/coincync-rig \
                     /src/target/release/coord \
                     /src/target/release/coord-cli \
-                    /src/target/release/cyncswap \
                     /artifacts/
 
 # Compute checksums of the binaries inside the image so they're

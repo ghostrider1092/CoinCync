@@ -15,6 +15,14 @@
 | `install-testnet-node.sh` | Linux helper: install systemd unit from repo layout |
 | `README.md` | This file |
 
+## Not included (deferred post-launch)
+
+- **Atomic swap (`cyncswap`)** — cross-chain trustless CYNC↔BTC swaps. The
+  crypto composition is not yet independently audited, so it is intentionally
+  **not shipped in this release** and is not reachable from the node. It will
+  return in a later release once audited. Do not rely on any third-party
+  `cyncswap` build against a mainnet wallet.
+
 ## Verify Downloads
 
 ```bash

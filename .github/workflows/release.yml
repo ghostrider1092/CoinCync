@@ -96,11 +96,11 @@ jobs:
         run: |
           mkdir pkg
           # The Docker artifacts stage produces:
-          #   coincync-node, coincync-wallet, coincync-rig,
-          #   coord, coord-cli, cyncswap
+          #   coincync-node, coincync-wallet, coincync-rig, coord, coord-cli
           # (see docker/builder.Dockerfile, artifacts stage COPY).
+          # cyncswap (atomic-swap CLI) is deferred out of v1 and NOT shipped.
           # Copy the ones we ship in the Linux release tarball.
-          cp out/coincync-node out/coincync-rig out/coincync-wallet out/cyncswap pkg/
+          cp out/coincync-node out/coincync-rig out/coincync-wallet pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
@@ -116,7 +116,7 @@ jobs:
           # tarball match Docker's out/SHA256SUMS byte-for-byte. If a
           # future refactor accidentally copies from `target/release/`
           # (the non-Docker path) instead of `out/`, this catches it.
-          for bin in coincync-node coincync-rig coincync-wallet cyncswap; do
+          for bin in coincync-node coincync-rig coincync-wallet; do
             docker_sha="$(awk -v b=$bin '$2 == b {print $1}' out/SHA256SUMS)"
             pkg_sha="$(awk -v b=$bin '$2 == b {print $1}' pkg/SHA256SUMS.txt)"
             if [ "$docker_sha" != "$pkg_sha" ]; then
@@ -144,13 +144,13 @@ jobs:
         run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
-      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
-        run: cargo build --release -p coincync-swap --bin cyncswap
+      # cyncswap (atomic-swap CLI) is deferred out of the v1 mainnet launch and
+      # is intentionally NOT built or shipped here (unaudited crypto).
       - name: Package
         shell: bash
         run: |
           mkdir pkg
-          cp target/release/coincync-node.exe target/release/coincync-rig.exe target/release/coincync-wallet.exe target/release/cyncswap.exe pkg/
+          cp target/release/coincync-node.exe target/release/coincync-rig.exe target/release/coincync-wallet.exe pkg/
           cd pkg && sha256sum * > SHA256SUMS.txt && cd ..
           tar czf coincync-windows-x64.tar.gz -C pkg .
       - uses: actions/upload-artifact@v7
@@ -174,12 +174,12 @@ jobs:
         run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
-      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
-        run: cargo build --release -p coincync-swap --bin cyncswap
+      # cyncswap (atomic-swap CLI) is deferred out of the v1 mainnet launch and
+      # is intentionally NOT built or shipped here (unaudited crypto).
       - name: Package
         run: |
           mkdir pkg
-          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet target/release/cyncswap pkg/
+          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
@@ -206,12 +206,12 @@ jobs:
         run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
         run: cargo build --release -p coincync-rig
-      - name: Build cyncswap (atomic-swap state-machine CLI; crypto skeleton, see CIP-001)
-        run: cargo build --release -p coincync-swap --bin cyncswap
+      # cyncswap (atomic-swap CLI) is deferred out of the v1 mainnet launch and
+      # is intentionally NOT built or shipped here (unaudited crypto).
       - name: Package
         run: |
           mkdir pkg
-          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet target/release/cyncswap pkg/
+          cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
           chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
