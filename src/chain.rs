@@ -2458,9 +2458,7 @@ impl Blockchain {
             let take_fork = if fork_cumulative > current_total_difficulty {
                 true
             } else if fork_cumulative == current_total_difficulty {
-                let current_tip_hash = self.tip().hash;
-                let fork_tip = block.hash();
-                fork_tip.as_bytes() < current_tip_hash.as_bytes()
+                self.fork_wins_equal_work_tiebreak(&block)
             } else {
                 false
             };
@@ -3974,6 +3972,88 @@ impl Blockchain {
     /// also catch cycles but costs an allocation; the height-derived cap
     /// is allocation-free and serves the same purpose because the walk
     /// can only legitimately visit at most `block.height` distinct heights.
+    /// Equal-work tie-break: does `fork_tip` beat the current tip?
+    ///
+    /// Compares **proof-of-work hashes**, lower wins — the "luckier block wins" rule.
+    ///
+    /// # Why not the block hash (the bug this replaced)
+    ///
+    /// This previously compared `block.hash()`, and the rationale beside it argued
+    /// the winner has "more leading zeros = luckier PoW". That reasoning is only
+    /// true of the *PoW* hash. `block.hash()` is a cheap BLAKE3 hash of the whole
+    /// header, and `src/consensus/pow_cache.rs` already documents why that is
+    /// malleable: the RandomX input is a pure function of
+    /// `(prev_hash, height, timestamp, nonce, tx_root)`, so every other header field
+    /// — `target`, **`miner_pubkey`**, `supply_commitment`, `checkpoint_vote`, the
+    /// spark/mw roots, `version`, `network_magic` — can be mutated to produce
+    /// unlimited hash-distinct blocks that all share ONE valid proof of work.
+    ///
+    /// `miner_pubkey` is 32 bytes, chosen freely by the miner, and **not validated
+    /// by consensus against anything**. So a miner who found a block could grind it
+    /// over millions of cheap BLAKE3 header hashes, pick the variant with the
+    /// smallest `block.hash()`, and win essentially *every* equal-work tie-break —
+    /// without redoing any proof of work.
+    ///
+    /// That is an incentive break, not just an oddity. In the Eyal–Sirer selfish
+    /// mining model the profitability threshold is `α > (1-γ)/(3-2γ)`, where `γ` is
+    /// the share of the honest network that ends up mining on the attacker's block
+    /// during a tie. A grinding attacker who wins every deterministic tie has
+    /// `γ ≈ 1`, which drives the threshold toward **zero** — selfish mining pays at
+    /// any hashrate. The malleability was known (pow_cache.rs, audit R3-2, where it
+    /// was fixed as a DoS amplification vector) and the tie-break was known; nobody
+    /// had connected them.
+    ///
+    /// # Why the PoW hash fixes it
+    ///
+    /// The PoW hash cannot be ground without redoing RandomX — grinding it *is*
+    /// mining. It is also a pure function of the preimage, so it stays fully
+    /// network-deterministic: every honest node picks the same winner regardless of
+    /// arrival order, which is the property the original design wanted and which
+    /// Bitcoin Core's `nSequenceId` (per-node arrival order) does not have.
+    ///
+    /// An attacker can still *condition* on their own PoW hash being low and
+    /// withhold selectively, so `γ ≈ 0.5` rather than 0 — the threshold lands near
+    /// 25% instead of Bitcoin's ~33%. That residual is inherent to any deterministic
+    /// tie-break and is the documented price of partition-healing determinism.
+    ///
+    /// # Failure handling
+    ///
+    /// If either PoW hash cannot be computed, the tie-break returns `false` (keep
+    /// the current tip). Failing closed matters: a fork that cannot be evaluated
+    /// must not displace a tip that is already established.
+    fn fork_wins_equal_work_tiebreak(&self, fork_tip: &Block) -> bool {
+        let current_tip_hash = self.tip().hash;
+        let Some(current_tip) = self.get_block(&current_tip_hash) else {
+            return false;
+        };
+
+        let pow_of = |b: &Block| -> Option<Hash> {
+            crate::consensus::pow_cache::pow_hash_cached(
+                &b.header.prev_hash,
+                b.header.height,
+                b.header.timestamp,
+                b.header.nonce,
+                &b.header.tx_root,
+                &b.header.anchor,
+                b.header.algorithm,
+            )
+            .ok()
+        };
+
+        match (pow_of(fork_tip), pow_of(&current_tip)) {
+            (Some(fork_pow), Some(tip_pow)) => fork_pow.as_bytes() < tip_pow.as_bytes(),
+            _ => {
+                tracing::warn!(
+                    "Equal-work tiebreak: could not compute a PoW hash for the fork tip {} \
+                     or the current tip {}; keeping the current tip (fail closed)",
+                    fork_tip.hash().to_hex()[..8].to_string(),
+                    current_tip_hash.to_hex()[..8].to_string(),
+                );
+                false
+            }
+        }
+    }
+
     fn calculate_fork_cumulative_work(&self, block: &Block) -> u128 {
         let mut total_work = calculate_difficulty_from_target(&block.header.target);
         let mut current_hash = block.header.prev_hash;
@@ -5082,6 +5162,82 @@ mod tests {
         }
         b.transactions = txs;
         b
+    }
+
+    /// The equal-work tie-break must be immune to header grinding.
+    ///
+    /// REGRESSION LOCK. The tie-break used to compare `block.hash()`, a cheap
+    /// BLAKE3 hash over the WHOLE header. But the RandomX input is only
+    /// `(prev_hash, height, timestamp, nonce, tx_root)` — so `miner_pubkey`
+    /// (32 free bytes, never validated by consensus), `target`,
+    /// `supply_commitment`, `checkpoint_vote` and the spark/mw roots can all be
+    /// mutated to produce unlimited hash-distinct blocks sharing ONE valid proof
+    /// of work. That malleability is documented in `pow_cache.rs` (audit R3-2),
+    /// where it was fixed only as a DoS amplification vector — nobody connected
+    /// it to fork choice.
+    ///
+    /// A miner could therefore grind `miner_pubkey` for the lowest
+    /// `block.hash()` and win every equal-work tie for free: Eyal–Sirer γ ≈ 1,
+    /// driving the selfish-mining threshold toward zero.
+    ///
+    /// This asserts the property that makes that impossible — mutating a
+    /// non-preimage header field changes `block.hash()` but leaves the PoW
+    /// preimage, and therefore the PoW hash the tie-break now compares,
+    /// completely unchanged.
+    #[test]
+    fn grinding_a_non_preimage_field_cannot_move_the_tiebreak() {
+        use crate::consensus::pow_cache::pow_preimage_key;
+
+        let base = burn_test_block(crate::constants::FEE_DISTRIBUTION_HEIGHT + 10, 7, &[]);
+
+        let key_of = |b: &Block| {
+            pow_preimage_key(
+                &b.header.prev_hash,
+                b.header.height,
+                b.header.timestamp,
+                b.header.nonce,
+                &b.header.tx_root,
+            )
+        };
+
+        // Grind the free, unvalidated 32-byte field the way an attacker would.
+        let mut best = base.clone();
+        let mut found_lower_block_hash = false;
+        for n in 0..512u32 {
+            let mut variant = base.clone();
+            let mut pk = [0u8; 32];
+            pk[..4].copy_from_slice(&n.to_le_bytes());
+            variant.header.miner_pubkey = crate::primitives::PublicKey::from_bytes(pk);
+
+            // The grind is real: it does move the block hash.
+            if variant.hash().as_bytes() < best.hash().as_bytes() {
+                best = variant.clone();
+                found_lower_block_hash = true;
+            }
+
+            // But it must NOT move the PoW preimage — the tie-break's input.
+            assert_eq!(
+                key_of(&variant),
+                key_of(&base),
+                "mutating miner_pubkey must not change the PoW preimage key"
+            );
+        }
+
+        assert!(
+            found_lower_block_hash,
+            "sanity: grinding miner_pubkey must actually produce a lower block hash — \
+             otherwise this test proves nothing about the attack it locks out"
+        );
+        assert_ne!(
+            best.hash(),
+            base.hash(),
+            "the ground variant must be a genuinely different block by block-hash"
+        );
+        assert_eq!(
+            key_of(&best),
+            key_of(&base),
+            "…yet share one PoW preimage, so the PoW-hash tiebreak cannot be ground"
+        );
     }
 
     /// The supply commitment a MINER writes must be the one the VALIDATOR
