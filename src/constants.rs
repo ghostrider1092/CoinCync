@@ -204,10 +204,16 @@ pub const HARD_FORK_V1_0_12_HEIGHT: u64 = 13_000;
 
 /// Maximum bytes per output's `encrypted_memo` field.
 ///
-/// XOR-encrypted ciphertext envelope around a user memo. Honest
-/// wallets pad memos up to this cap via the
-/// MAX_MEMO_SIZE = 256 + MEMO_OVERHEAD constants in src/crypto/memo.rs;
-/// caller code never produces longer payloads. The cap exists to
+/// ChaCha20-Poly1305 ciphertext envelope around a user memo. Wallets pad
+/// every memo to exactly this size before encrypting (see
+/// `crypto::memo::MEMO_PADDED_PLAINTEXT`, which is DERIVED from this
+/// constant), so memo length is not observable on chain.
+///
+/// The prior comment claimed padding happened "via the MAX_MEMO_SIZE = 256 +
+/// MEMO_OVERHEAD constants" — it did not, until 2026-09-05, and those numbers
+/// were also inconsistent: a 256-byte plaintext encrypts to 284, which this
+/// cap rejects. Both are fixed; the padded size is now derived from here with
+/// a compile-time assertion. The cap exists to
 /// prevent block-level chain bloat from miner-crafted txs that
 /// bypass mempool admission. v1.0.12 hard-fork enforces this cap at
 /// block-validation time too (see HARD_FORK_V1_0_12_HEIGHT).

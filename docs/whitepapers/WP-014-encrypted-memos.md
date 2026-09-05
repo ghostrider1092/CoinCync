@@ -52,8 +52,18 @@ The recipient recovers the same shared point as
 of the view key can decrypt — the same key that already detects the output, so
 memos require no additional key material and no separate channel.
 
-Sizes: plaintext capped at **256 bytes**, overhead **28** (12 nonce + 16 tag),
-maximum encrypted memo **284 bytes**.
+Sizes: plaintext capped at **226 bytes**, padded to **228**, overhead **28**
+(12 nonce + 16 tag) — so every encrypted memo on the wire is exactly **256
+bytes**, the consensus cap.
+
+The cap is **derived** from `MAX_OUTPUT_MEMO_SIZE` rather than written down
+twice, with a compile-time assertion that the padded plaintext plus AEAD
+overhead lands exactly on it. This is deliberate: the previous hardcoded 256-byte
+plaintext cap encrypted to 284 bytes, which consensus **rejected** — the
+documented maximum memo was unusable, and the wallet would build a transaction
+the network refused (verified live: a 240-byte memo drew `encrypted_memo too
+large: 268 bytes (max 256)`). Deriving it makes that asymmetry unrepresentable
+rather than merely fixed.
 
 ### 3.2 The nonce-reuse defect
 
@@ -113,16 +123,32 @@ of scope:
 None of these were exploitable on their own; together they are the difference
 between "the key is gone" and "the key is probably gone."
 
-### 3.4 Uniformity: the composition requirement
+### 3.4 Uniformity: padding, and what it does not fix
 
-Honest wallets **pad memos up to the cap**, so a transaction carrying a memo is
-indistinguishable in size from one that does not, and memo length reveals nothing
-about content class.
+The plaintext is padded to a constant size before encryption, as
+`[len: u16 LE][memo][zero fill]`, so **every** encrypted memo is exactly 256
+bytes regardless of what the user wrote. Memo *length* is therefore not
+observable, and a 6-byte invoice reference is indistinguishable on the wire from
+a 200-byte note.
 
-Consensus enforces the 256-byte **cap** at block validation from the v1.0.12 hard
+This closes a real leak. Until 2026-09-05 the plaintext was encrypted unpadded,
+so ciphertext length tracked content length directly — live measurement: a
+27-byte memo produced 55 wire bytes, a 200-byte memo produced 228. That sorts
+users by content class, the partitioning WP-011 §1 exists to prevent.
+
+**Padding does not hide memo *presence*.** An output with no memo carries an
+empty field; one with a memo carries 256 bytes. Closing that gap requires a
+fixed-size memo field on *every* output — a consensus rule with a real
+per-transaction size cost, and a separate decision (§6).
+
+Consensus enforces the 256-byte cap at block validation from the v1.0.12 hard
 fork (height 13,000), which exists to stop miner-crafted transactions from
-bypassing mempool admission and bloating blocks. Consensus does **not** require
-padding *up* to the cap — see §4.
+bypassing mempool admission and bloating blocks. Padding is wallet-side; the cap
+is consensus-side, and the two are now tied together by derivation.
+
+**Backward compatible.** A padded plaintext is always exactly the padded size, so
+any other decrypted length is unambiguously a pre-padding memo and is returned
+unchanged — no version byte, and memos written before the change still read.
 
 ---
 
@@ -134,11 +160,14 @@ size cap is consensus-enforced against bloat.
 
 **What this does not protect against.**
 
-- **Padding is a wallet convention, not a consensus rule.** A modified wallet that
-  emits a short memo produces a smaller transaction and self-identifies its user.
-  The uniformity property in §3.4 holds for honest software only. Closing this
-  requires a consensus rule fixing the encrypted-memo field to a constant length —
-  a hard fork, and the right long-term answer.
+- **Padding is a wallet convention, not a consensus rule.** Consensus caps the
+  encrypted memo but does not *require* it to be exactly that size, so a modified
+  wallet can still emit a short unpadded memo and self-identify its user. The
+  uniformity property in §3.4 holds for honest software. Closing it requires
+  consensus to fix the field to a constant length — a hard fork, and the right
+  long-term answer.
+- **Memo presence is still observable** (§3.4). This is now the larger of the two
+  remaining leaks, since length is closed.
 - **The recipient learns the memo.** Obviously, but worth stating: memos are
   confidential *from third parties*, not from the counterparty.
 - **The view key decrypts memos.** Anyone given a view key — for auditing,
@@ -168,9 +197,12 @@ R-7-class / R-80 (2026-07-02–03); header-comment correction 2026-09-04.
 
 ## 6. Known limits
 
-- Padding is not consensus-enforced (§4) — the main open item.
+- Padding is not consensus-enforced (§4) — a modified wallet can still skip it.
+- **Memo presence still leaks**: 256 bytes versus an empty field. Fixing it needs
+  a fixed-size memo field on every output — consensus change, real size cost.
 - No forward secrecy against later view-key compromise.
-- 256 bytes is a policy cap, not a derived one.
+- The usable memo is 226 bytes, down from a documented 256 that could not
+  actually be spent.
 - Memo presence (at padded size) is not concealed by this mechanism alone; it
   depends on WP-011's uniformity holding network-wide.
 

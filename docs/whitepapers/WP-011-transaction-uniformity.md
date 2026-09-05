@@ -102,9 +102,10 @@ a consensus rule requires a hard fork and the removal has no observable benefit.
 Confidential amounts (RingCT + Bulletproofs+) and stealth addresses already make
 value and recipient uniform. The remaining variability is in optional payloads:
 
-- **Encrypted memos** — capped at 256 bytes plus a nonce/tag envelope, with
-  wallets padding *up to* the cap so a transaction carrying a memo is
-  indistinguishable in size from one that does not.
+- **Encrypted memos** — the plaintext is padded to a constant size before
+  encryption, so every encrypted memo is exactly 256 bytes on the wire and memo
+  *length* is not observable. Memo *presence* still is: an output without a memo
+  carries an empty field (WP-014 §3.4).
 - **Dead-man's-switch recovery metadata** — a fixed-size record in the `extra`
   field, so a protected transaction is not identifiable as one. This matters more
   than most: identifying such transactions identifies precisely the users who have
@@ -175,13 +176,12 @@ sides; the canonical-identity policy has one audited definition.
 
 **What this does not protect against.**
 
-- **Memo padding is a wallet convention, not consensus.** Consensus enforces the
-  256-byte *cap* (at block validation from the v1.0.12 hard fork, height 13,000,
-  to prevent miner-crafted bloat that bypasses mempool admission). It does **not**
-  require padding *up* to the cap. A modified wallet emitting a short memo
-  produces a smaller transaction and self-identifies. Honest wallets pad; the
-  protocol does not compel it. Closing this would require a consensus rule
-  mandating a fixed encrypted-memo length.
+- **Memo padding is a wallet convention, not consensus.** Wallets now pad (fixed
+  2026-09-05; until then they did not, despite three documents saying so). But
+  consensus enforces only the 256-byte *cap*, not a fixed length, so a modified
+  wallet emitting a short unpadded memo still self-identifies. Closing this needs
+  a consensus rule mandating a constant encrypted-memo length — and memo
+  *presence* would still leak until every output carries such a field.
 - **Uniformity is not unlinkability.** Identical-looking transactions can still be
   linked through the transaction graph, decoy-selection weakness (WP-010), or
   timing. Uniformity removes *one* class of distinguisher.
