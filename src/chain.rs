@@ -4283,7 +4283,13 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
 ///     `congested = congestion_pct >= CONGESTION_THRESHOLD` — the same
 ///     `size = block.size()` the validator uses.
 ///   * burn = `distribute_fee(total_fees, congested).burned`.
-fn block_fee_burn(block: &Block) -> u128 {
+///
+/// `pub(crate)` because the miner needs it too: `mining::block_builder` computes
+/// the same value to fill the header's supply commitment, and the connect path
+/// below recomputes it to verify. One implementation, two callers — the WP-006
+/// §4.4 rule. `block_fee_burn_matches_validator_burn_split` pins it to the
+/// validator's split.
+pub(crate) fn block_fee_burn(block: &Block) -> u128 {
     let total_fees: crate::primitives::Amount = block
         .transactions
         .iter()

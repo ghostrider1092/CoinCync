@@ -19,7 +19,7 @@ mod kani_proofs;
 pub use curve::{
     base_reward, base_reward_from_supply, block_reward, emission_phase, EmissionPhase,
 };
-pub use supply::{calculate_supply_commitment, SupplyStats};
+pub use supply::{supply_commitment, SUPPLY_COMMITMENT_DOMAIN};
 
 use crate::primitives::Amount;
 

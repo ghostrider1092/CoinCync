@@ -48,16 +48,18 @@ impl SupplyState {
         self.circulating() == expected_supply
     }
 
+    /// Recompute the commitment through the **canonical** definition in
+    /// `emission::supply`.
+    ///
+    /// This previously carried its own hash over `minted ‖ burned` under the
+    /// domain `"supply_commitment"`, while `emission::supply` carried a
+    /// different one over a different field set. Two definitions of one
+    /// consensus value is the WP-006 §4.4 failure shape; there is now exactly
+    /// one, and this calls it. A `SupplyState` at height `h` therefore produces
+    /// byte-identical output to the block header the chain writes at `h`.
     fn update_commitment(&mut self) {
-        self.supply_commitment = *hash_domain(
-            b"supply_commitment",
-            &[
-                self.total_minted.to_le_bytes().as_slice(),
-                self.total_burned.to_le_bytes().as_slice(),
-            ]
-            .concat(),
-        )
-        .as_bytes();
+        self.supply_commitment =
+            crate::emission::supply_commitment(self.height, self.total_minted, self.total_burned);
     }
 }
 
