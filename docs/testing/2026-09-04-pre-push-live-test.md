@@ -221,6 +221,43 @@ deliberate re-lock — the WP-007 gate working as intended on a comment-only edi
 needs a fixed-size memo field on every output — a consensus rule with a real
 per-transaction size cost, and a separate decision.
 
+## Round 5 — stratum share submission and the WP-023 replay defense
+
+The remaining money-adjacent gap: the pool payout accounting, where WP-023's
+per-canonical-job nonce ledger lives, was untested outside unit tests. Ran the
+real `coincync-rig run-pool` client against the node's built-in `--stratum` pool.
+
+| # | Check | Result |
+|---|---|---|
+| 36 | Miner logs in, receives jobs | `pool: logged in ... as live-test-worker`, `new job 00000001 (height 1)` |
+| 37 | Shares accepted, blocks produced server-side | **83 blocks** mined via stratum; `stratum: block from worker 1 submitted — Accepted` |
+| 38 | **WP-023 cross-connection nonce replay REJECTED** | conn A submits nonce N → `low difficulty share`; conn B (separate login) replays N → `duplicate share` |
+| 39 | Ledger records at claim time, before PoW | An arbitrary (invalid) nonce still cannot be replayed — the ledger caught it without RandomX ever running on the replay |
+| 40 | Valid work still accepted (ledger not over-rejecting) | The same run that rejects replays produced 83 real blocks |
+
+**Check 38 is the one this round exists for.** The defense WP-023 documents is
+that the nonce ledger is *server-owned*, not per-connection: if it were
+per-worker, a second connection replaying the same nonce would be re-credited
+(paid twice for one unit of work, diluting every honest miner). Two separate
+logins, same nonce, same canonical job — the second is rejected as `duplicate`
+before `verify()` recomputes any PoW. Test script kept at
+`docs/testing/wp023-stratum-replay-test.py` (raw TCP, ~90 lines, no CoinCync
+dependency).
+
+The ledger records the nonce at *claim* time, before the PoW check, so the replay
+is caught even for a nonce that would fail verification — which is why an
+arbitrary test nonce suffices and no RandomX is needed to demonstrate the
+defense.
+
+### One observation, not a defect
+
+Under regtest's trivial difficulty the rig submits far faster than the
+`MIN_SUBMIT_INTERVAL_MS = 200` cadence throttle, so the client log fills with
+`{"code":-1,"message":"throttled"}` warnings. Harmless — shares still get
+through between throttle windows and blocks are produced — but on a real network
+this cadence is per-worker and legitimate; it only looks alarming because
+regtest difficulty makes every hash a share.
+
 ## Superseded — the original round-3 write-up of this finding
 
 **Memos are not padded.** WP-014 §3.4 and WP-011 §3.3 both state that honest
@@ -262,9 +299,8 @@ corrected — that is not optional, since two of them are whitepapers.
 - **Subaddress receive→spend on regtest** — the mainnet gate was verified; the
   underlying W-1 unspendability was not re-demonstrated, since it is a known and
   documented defect and the gate is what protects users.
-- **Stratum share submission** — the pool server starts and listens; no miner
-  client connected, so share handling and the WP-023 nonce ledger are untested
-  live.
+- **Stratum share submission** — DONE in round 5 (WP-023 replay defense verified
+  live).
 - **Mainnet chain run** — genesis parameters verified; no mainnet chain was
   built or mined.
 
