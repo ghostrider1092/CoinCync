@@ -321,6 +321,31 @@ The test genesis was a throwaway local edit to the **unlocked** `src/mainnet.rs`
 `mainnet.rs` is empty, `test_mainnet_genesis_hash_consistency` passes, and the
 standard testnet working binaries were rebuilt.
 
+## Round 7 — the colony castes, live
+
+After building the act-phase spine (honeybee quorum + guards), every caste was
+exercised against a live node via `examples/colony_live.rs` — the real decision
+cores, on real public RPC signals, with the detection castes' output run through
+the spine. It only reads and prints; no node behavior changes.
+
+| # | Check | Result |
+|---|---|---|
+| 48 | Every caste core runs on live signals | spider/sensor/forager/army_ant/centipede/locust/cicada/firefly/mantis/stick_insect all produced output from a live 2-node chain |
+| 49 | **A live single-signal detection does NOT act** | spider fired `EclipsePressure` (1 inbound peer, 100% one netgroup); honeybee: *"no threat reached quorum confidence (nothing would act)"* |
+| 50 | Corroborated threat reaches confidence | synthetic 5-source / 3-dimension Partition → confidence **100** |
+| 51 | Guard allows a floor-safe response | `army_ant-bridge` keeping 6 netgroups → `Ok` |
+| 52 | **Guard denies a floor-breaking response** | `peer-rotate` dropping to 2 netgroups → `WouldBreakDiversityFloor { floor: 4 }` |
+| 53 | Kill switch overrides everything | engaged → `Err(KillSwitch)` even on a confidence-100 action |
+
+**Check 49 is the whole point.** The colony's own defenses are the obvious attack
+surface — forge a detection, steer a response. On live data, a genuine caste
+detection (`spider` seeing eclipse-shaped topology) could not by itself move the
+colony, because the quorum refuses one source on one dimension. The
+"not-an-attack-surface" property is demonstrated, not just asserted.
+
+The harness is kept in the repo (`cargo run --example colony_live -- <rpc-url>`)
+so the whole pipeline can be re-run against any node.
+
 ## Superseded — the original round-3 write-up of this finding
 
 **Memos are not padded.** WP-014 §3.4 and WP-011 §3.3 both state that honest
