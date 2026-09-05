@@ -778,8 +778,15 @@ async fn start_node(
     mine: Option<String>,
     mine_threads: usize,
 ) -> coincync::Result<()> {
-    info!("CoinCync 1.0 node starting");
-    info!("Network:  {:?}", network);
+    // Brand name for the operator-facing banner: mainnet is "Cynstra", test
+    // networks stay "CoinCync". The stable lowercase identifier (`network.name()`)
+    // is what data dirs, CLI args and magic-byte lookup use — never this.
+    info!(
+        "{} node starting (coincync {})",
+        network.display_name(),
+        env!("CARGO_PKG_VERSION")
+    );
+    info!("Network:  {} ({})", network.display_name(), network.name());
     info!("Data dir: {:?}", data_dir);
 
     // Ensure data dir exists

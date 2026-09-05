@@ -15,6 +15,21 @@ Concentric Privacy is a defense-in-depth model in which independent privacy laye
 
 This paper describes the architecture, the reasoning behind it, its honest limitations, and the engineering discipline — *composition safety* — required to keep many privacy mechanisms from interfering with one another.
 
+> **This paper is the front door.** It states the architecture; the
+> [CoinCync whitepaper series](whitepapers/README.md) is its set of technical
+> annexes — one paper per layer, mechanism, or failure, each with implementation
+> receipts and an explicit *Known limits* section. Read
+> [WP-009 · Privacy feature composition](whitepapers/WP-009-privacy-feature-composition.md)
+> next: it is §5's composition-safety discipline derived from the collisions we
+> actually hit in this codebase, and
+> [WP-100 · Solved-issues ledger](whitepapers/WP-100-solved-issues-ledger.md) is
+> the record of every failure found and the assumption it died on.
+>
+> **On naming:** *Cynstra* is the mainnet network; *CoinCync* is the project,
+> the codebase, and the test networks. Protocol identifiers — ticker `CYNC`,
+> address prefixes, P2P magic bytes, the canonical user-agent — are unchanged and
+> stay CoinCync-derived.
+
 ---
 
 ## 1. Motivation

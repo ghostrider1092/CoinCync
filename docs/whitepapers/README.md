@@ -23,6 +23,39 @@ from scratch, our cryptography is not.
 4. **Subtraction counts.** Where the defense is the *absence* of a feature, that
    is stated as a design result, not a gap.
 
+## Naming: CoinCync and Cynstra
+
+Two names, one system, and the split is deliberate:
+
+| Name | What it refers to |
+|---|---|
+| **Cynstra** | The **mainnet network** — the brand users, exchanges, and press see |
+| **CoinCync** | The **project, the codebase, and the test networks** — crates, binaries, repository, data directories |
+
+The architecture Cynstra names is **Concentric Privacy**: independent privacy
+layers that each guard a different attack surface, **degrade independently**, and
+compose so that the failure of one does not deanonymise another. Consensus is
+*fail-operational* (the chain keeps producing valid blocks when a component
+fails); privacy is *fail-closed* (the protocol never silently downgrades to a
+weaker-privacy transaction).
+
+**[WP-000 · Cynstra: Concentric Privacy](../cynstra-whitepaper.md)** is the front
+door of this series. It states the architecture; the numbered papers below are its
+technical annexes, each documenting one layer, one mechanism, or one failure. In
+particular [WP-009](WP-009-privacy-feature-composition.md) is the *composition
+safety* discipline that WP-000 argues is required to keep many privacy mechanisms
+from interfering with one another — derived here from the collisions we actually
+hit.
+
+**Protocol identifiers do not change.** The ticker stays `CYNC`, address prefixes
+stay `CYNC` / `tCYNC`, P2P magic bytes stay `"CYNC"`, and the canonical
+user-agent stays `/coincync/`. Those are consensus- and wire-level constants;
+renaming them would be a hard fork for no benefit, and the canonical user-agent
+must stay identical across every node (WP-011 §3.6). Cynstra is a **display
+name** — `NetworkType::display_name()` — used in banners, wallet output, the
+explorer, and release notes, never in data directories, CLI arguments, RPC
+payloads, or magic-byte lookup.
+
 ## Status vocabulary
 
 | Label | Meaning |

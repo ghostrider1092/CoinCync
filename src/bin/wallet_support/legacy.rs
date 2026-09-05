@@ -895,6 +895,21 @@ fn network_label(n: Network) -> &'static str {
     }
 }
 
+/// Brand name for user-facing wallet output. Mainnet is branded **Cynstra**;
+/// the test networks stay CoinCync. Mirrors
+/// `coincync::config::NetworkType::display_name`.
+///
+/// NEVER use this where a stable identifier is required — wallet files, RPC
+/// payloads, address prefixes and `--network` arguments all use
+/// [`network_label`], which must not change.
+fn network_display_name(n: Network) -> &'static str {
+    match n {
+        Network::Mainnet => "Cynstra",
+        Network::Testnet => "CoinCync Testnet",
+        Network::Regtest => "CoinCync Regtest",
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Commands
 // ═══════════════════════════════════════════════════════════════════════
@@ -1006,7 +1021,11 @@ async fn cmd_info(
 ) -> Result<(), String> {
     println!("Wallet:   {:?}", path);
     println!("Exists:   {}", wallet_exists(path));
-    println!("Network:  {:?}", network);
+    println!(
+        "Network:  {} ({})",
+        network_display_name(network),
+        network_label(network)
+    );
     println!("Node:     {}", node);
 
     if wallet_exists(path) {
