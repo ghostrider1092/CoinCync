@@ -35,6 +35,14 @@ const CRITICAL_FILES: &[&str] = &[
     "CONSTITUTION.md",
     "docs/BILL_OF_RIGHTS.md",
     "src/testnet.rs",
+    // src/mainnet.rs holds the mainnet genesis + initial difficulty. It was
+    // previously only `rerun-if-changed` (edits triggered a rebuild) but was NOT
+    // integrity-checked, so mainnet genesis could be altered without tripping
+    // this gate while testnet's could not — an asymmetry in the wrong direction
+    // (WP-007 §4). Now locked, so mainnet genesis gets the same protection as
+    // testnet's. A legitimate genesis change (e.g. finalizing the launch
+    // timestamp) requires a deliberate re-lock — the intended review checkpoint.
+    "src/mainnet.rs",
     "src/constants.rs",
     "src/consensus/difficulty.rs",
     "src/consensus/pow.rs",
@@ -46,7 +54,8 @@ fn main() {
     // ── Standard cargo reruns ────────────────────────────────────────
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=critical_files.lock");
-    println!("cargo:rerun-if-changed=src/mainnet.rs");
+    // src/mainnet.rs is covered by the CRITICAL_FILES loop below now that it is
+    // locked; its standalone rerun line is redundant and was removed.
     for file in CRITICAL_FILES {
         println!("cargo:rerun-if-changed={}", file);
     }

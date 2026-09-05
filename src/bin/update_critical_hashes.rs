@@ -26,6 +26,7 @@ const CRITICAL_FILES: &[&str] = &[
     "CONSTITUTION.md",
     "docs/BILL_OF_RIGHTS.md",
     "src/testnet.rs",
+    "src/mainnet.rs", // locked alongside testnet.rs — see build.rs::CRITICAL_FILES
     "src/constants.rs",
     "src/consensus/difficulty.rs",
     "src/consensus/pow.rs",
