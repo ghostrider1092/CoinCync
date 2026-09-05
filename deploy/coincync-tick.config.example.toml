@@ -16,3 +16,21 @@ local_rpc_token_path = "/etc/coincync/rpc-token"
 
 # Fleet peer list. Only consulted when deployment_mode = "fleet".
 fleet_config_path = "/etc/coincync-tick/fleet-config.json"
+
+# ── Colony (optional, off by default) ────────────────────────────────────────
+# The colony is enabled by CLI flags on the ExecStart line, NOT here:
+#   --colony-observe / --colony-advise / --castes-observe
+# All are read-only and log-only — they change no node behaviour and observe no
+# transaction. --castes-observe additionally runs the honeybee->guards spine,
+# which corroborates caste detections and logs a quorum-gated verdict
+# ("colony/spine: ..."). spider/sensor only produce evidence with a fleet
+# aggregate, so set deployment_mode = "fleet" on the aggregator to exercise it.
+# See deploy/coincync-tick-runbook.md, "caste suite + act-phase spine".
+#
+# Example fleet-config.json (one shared rpc_port; hosts keyed by IP; role "api"
+# is excluded from the probed set):
+#   { "rpc_port": 28081,
+#     "nodes": {
+#       "seed1": { "ip": "A.B.C.D", "rpc_bind": "0.0.0.0", "role": "seed" },
+#       "seed2": { "ip": "E.F.G.H", "rpc_bind": "0.0.0.0", "role": "seed" }
+#     } }

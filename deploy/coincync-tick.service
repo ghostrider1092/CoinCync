@@ -15,6 +15,15 @@ Type=simple
 User=coincync
 Group=coincync
 ExecStart=/usr/local/bin/coincync-tick --config /etc/coincync-tick/config.toml --interval 30
+# To enable the colony (all read-only, log-only — no node behaviour changes),
+# append one of these flags to the ExecStart line above (they stack):
+#   --colony-observe   forager peer scoring, logged
+#   --colony-advise    + the peer preference it WOULD advise (implies observe)
+#   --castes-observe   the full caste suite + the honeybee->guards spine; logs
+#                      each detection and the quorum-gated verdict (grep
+#                      journalctl for "colony/spine"). See the runbook's
+#                      "caste suite + act-phase spine" section. There is no act
+#                      phase — the guard verdict is logged, never enforced.
 Restart=on-failure
 RestartSec=10s
 
