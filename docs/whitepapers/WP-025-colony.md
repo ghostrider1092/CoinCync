@@ -103,7 +103,7 @@ rate-limited so a pulse flood can neither drive nor amplify our timing),
 `stick_insect` (canonical wire fingerprint).
 
 `stick_insect`'s size-bucket ladder is the model for the live wire normalisation
-in `traffic_shaping.rs` / `framing.rs` (WP-011 §3.3, WP-012 §3.2) — the caste
+in `traffic_shaping.rs` / `framing.rs` (WP-011 §3.4, WP-012 §3.2) — the caste
 holds the *policy* as one audited definition; the network layer does the sending.
 
 ### 4.2 Honest status
