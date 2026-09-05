@@ -7,8 +7,13 @@
 //! 1. Sender computes shared_point = tx_secret * recipient_view_public
 //! 2. Key = BLAKE3("COINCYNC_MEMO_v1" || shared_point)
 //! 3. Nonce = 12 fresh random bytes from the OS RNG, per encryption
-//! 4. Ciphertext = ChaCha20-Poly1305(key, nonce, memo)
-//! 5. Wire format: nonce (12 bytes) || ciphertext || tag (16 bytes)
+//! 4. Plaintext is PADDED to a constant size: [len: u16 LE][memo][zero fill]
+//! 5. Ciphertext = ChaCha20-Poly1305(key, nonce, padded)
+//! 6. Wire format: nonce (12 bytes) || ciphertext || tag (16 bytes)
+//!
+//! Every encrypted memo is therefore exactly `MAX_OUTPUT_MEMO_SIZE` bytes, so
+//! memo LENGTH is not observable on chain. Memo PRESENCE still is — an output
+//! without a memo carries an empty field. See `encrypt_memo`.
 //!
 //! Recipient decrypts with: shared_point = view_secret * tx_public_key,
 //! reading the nonce back off the wire.
@@ -32,9 +37,6 @@ use crate::crypto::{PublicPoint, SecretScalar};
 use crate::error::{Error, Result};
 use crate::primitives::hash_domain;
 
-/// Maximum plaintext memo size (bytes)
-pub const MAX_MEMO_SIZE: usize = 256;
-
 /// Poly1305 authentication tag size
 pub const MEMO_TAG_SIZE: usize = 16;
 
@@ -44,8 +46,47 @@ pub const MEMO_NONCE_SIZE: usize = 12;
 /// Total overhead: nonce + tag
 pub const MEMO_OVERHEAD: usize = MEMO_NONCE_SIZE + MEMO_TAG_SIZE;
 
-/// Maximum encrypted memo size on the wire
-pub const MAX_ENCRYPTED_MEMO_SIZE: usize = MAX_MEMO_SIZE + MEMO_OVERHEAD;
+/// Plaintext size every memo is padded to before encryption.
+///
+/// **Derived from the consensus cap, never hardcoded.** Consensus rejects any
+/// `encrypted_memo` longer than `MAX_OUTPUT_MEMO_SIZE`
+/// (`consensus/validation.rs`), and encryption adds [`MEMO_OVERHEAD`], so the
+/// largest plaintext that can ever reach the chain is exactly this. Deriving it
+/// means the two can never drift apart.
+///
+/// This corrects a real builder/verifier asymmetry (WP-009 §2.3): `MAX_MEMO_SIZE`
+/// used to be a hardcoded 256, so the wallet happily built a 256-byte memo that
+/// encrypted to 284 bytes and consensus refused — verified live, a 240-byte memo
+/// was rejected with `encrypted_memo too large: 268 bytes (max 256)`. The
+/// documented maximum memo size was unusable.
+pub const MEMO_PADDED_PLAINTEXT: usize =
+    crate::constants::MAX_OUTPUT_MEMO_SIZE - MEMO_OVERHEAD;
+
+/// Bytes reserved for the little-endian `u16` length prefix inside the padded
+/// plaintext. Padding must be reversible, so the true length travels with it.
+const MEMO_LEN_PREFIX: usize = 2;
+
+/// Maximum plaintext memo a caller may supply.
+///
+/// Smaller than it once was, and honestly so: the old 256 could not be spent.
+pub const MAX_MEMO_SIZE: usize = MEMO_PADDED_PLAINTEXT - MEMO_LEN_PREFIX;
+
+// A padded memo must land exactly on the consensus cap. If someone retunes
+// MAX_OUTPUT_MEMO_SIZE or the AEAD overhead, fail the build rather than start
+// emitting transactions the network rejects.
+const _: () = assert!(
+    MEMO_PADDED_PLAINTEXT + MEMO_OVERHEAD == crate::constants::MAX_OUTPUT_MEMO_SIZE,
+    "padded memo must encrypt to exactly MAX_OUTPUT_MEMO_SIZE"
+);
+
+/// Encrypted memo size on the wire.
+///
+/// Not a maximum any more — an INVARIANT. Every non-empty memo is padded to
+/// [`MEMO_PADDED_PLAINTEXT`] before encryption, so every encrypted memo that
+/// reaches the chain is exactly this many bytes and memo length is not
+/// observable. Equal to the consensus cap by construction (see the static
+/// assertion above).
+pub const MAX_ENCRYPTED_MEMO_SIZE: usize = MEMO_PADDED_PLAINTEXT + MEMO_OVERHEAD;
 
 /// Derive the ChaCha20-Poly1305 key from the ECDH shared point.
 ///
@@ -59,13 +100,41 @@ fn derive_memo_key(shared_point_bytes: &[u8]) -> [u8; 32] {
 
 /// Encrypt a memo for a specific recipient.
 ///
+/// The plaintext is **padded to a constant size** before encryption, so every
+/// encrypted memo on chain is exactly `MAX_OUTPUT_MEMO_SIZE` bytes regardless of
+/// what the user wrote.
+///
+/// # Why padding is mandatory, not a nicety
+///
+/// A memo's ciphertext length is attacker-visible. Unpadded, a 6-byte invoice
+/// reference and a 200-byte note are trivially distinguishable, which sorts
+/// users by *content class* — the anonymity-set partitioning WP-011 §1 exists to
+/// prevent, and which the project's own design charter commits against under
+/// "mandatory uniformity: fixed ring size, uniform fees, **padded sizes**".
+///
+/// This was previously unimplemented while three separate documents asserted it
+/// was done (`constants.rs`, WP-014 §3.4, WP-011 §3.3). Live check: a 27-byte
+/// memo produced 55 wire bytes.
+///
+/// # What padding still does NOT hide
+///
+/// Memo **presence**. An output with no memo carries an empty field; one with a
+/// memo now carries 256 bytes. Closing that requires a fixed-size memo field on
+/// *every* output — a consensus rule with a real per-transaction size cost, and
+/// a separate decision. Padding removes the length leak; it does not remove the
+/// presence leak, and this comment exists so nobody later assumes it did.
+///
+/// # Padded layout
+///
+/// `[len: u16 LE][memo bytes][zero fill]`, totalling [`MEMO_PADDED_PLAINTEXT`].
+///
 /// # Arguments
-/// * `memo` — plaintext memo bytes (max 256)
+/// * `memo` — plaintext memo bytes (max [`MAX_MEMO_SIZE`])
 /// * `tx_secret_bytes` — ephemeral tx secret key (32 bytes)
 /// * `recipient_view_public_bytes` — recipient's view public key (32 bytes)
 ///
 /// # Returns
-/// Encrypted memo: nonce (12) || ciphertext+tag (len + 16)
+/// Encrypted memo: nonce (12) || ciphertext+tag — always `MAX_OUTPUT_MEMO_SIZE`.
 pub fn encrypt_memo(
     memo: &[u8],
     tx_secret_bytes: &[u8; 32],
@@ -81,6 +150,13 @@ pub fn encrypt_memo(
             MAX_MEMO_SIZE
         )));
     }
+
+    // Pad to a constant size. `memo.len()` is bounded above, so the cast and the
+    // slice writes below cannot overflow or panic.
+    let mut padded = vec![0u8; MEMO_PADDED_PLAINTEXT];
+    padded[..MEMO_LEN_PREFIX].copy_from_slice(&(memo.len() as u16).to_le_bytes());
+    padded[MEMO_LEN_PREFIX..MEMO_LEN_PREFIX + memo.len()].copy_from_slice(memo);
+    let memo: &[u8] = &padded;
 
     let tx_scalar = SecretScalar::from_bytes(*tx_secret_bytes);
     let view_point = PublicPoint::from_bytes(*recipient_view_public_bytes).ok_or(
@@ -218,7 +294,30 @@ pub fn decrypt_memo(
 
     // R-17: wipe AEAD key after decrypt completes (success or failure).
     key_bytes.zeroize();
-    result
+
+    result.map(unpad_memo)
+}
+
+/// Recover the original memo from a padded plaintext.
+///
+/// A padded memo is *always* exactly [`MEMO_PADDED_PLAINTEXT`] bytes, so that
+/// length is the discriminator — no version byte needed. Anything else is a
+/// pre-padding memo and is returned unchanged, so memos written before padding
+/// existed still read correctly rather than decoding to garbage.
+///
+/// A declared length that does not fit the buffer means corruption or a
+/// hostile-but-authenticated payload; return the raw bytes rather than panicking
+/// on a slice, since this runs on data the sender chose.
+fn unpad_memo(plaintext: Vec<u8>) -> Vec<u8> {
+    if plaintext.len() != MEMO_PADDED_PLAINTEXT {
+        return plaintext; // legacy unpadded memo
+    }
+    let declared =
+        u16::from_le_bytes([plaintext[0], plaintext[1]]) as usize;
+    if declared > MEMO_PADDED_PLAINTEXT - MEMO_LEN_PREFIX {
+        return plaintext;
+    }
+    plaintext[MEMO_LEN_PREFIX..MEMO_LEN_PREFIX + declared].to_vec()
 }
 
 #[cfg(test)]
@@ -233,6 +332,94 @@ mod tests {
         (secret.to_bytes(), public.to_bytes())
     }
 
+    /// THE uniformity property: memo length must not be observable on chain.
+    ///
+    /// Every encrypted memo is exactly `MAX_OUTPUT_MEMO_SIZE`, whatever the user
+    /// wrote. Before padding, a 27-byte memo produced 55 wire bytes and a
+    /// 200-byte one produced 228 — sorting users by content class, the
+    /// anonymity-set partitioning WP-011 §1 exists to prevent.
+    #[test]
+    fn every_encrypted_memo_is_the_same_size() {
+        let (tx_secret, _) = random_keypair();
+        let (_, view_public) = random_keypair();
+
+        let mut seen = std::collections::HashSet::new();
+        for len in [1usize, 6, 27, 100, 200, MAX_MEMO_SIZE] {
+            let memo = vec![b'x'; len];
+            let ct = encrypt_memo(&memo, &tx_secret, &view_public).expect("encrypt");
+            assert_eq!(
+                ct.len(),
+                crate::constants::MAX_OUTPUT_MEMO_SIZE,
+                "memo of {len} bytes must still encrypt to the constant wire size"
+            );
+            seen.insert(ct.len());
+        }
+        assert_eq!(seen.len(), 1, "all memo sizes must collapse to one wire length");
+    }
+
+    /// Padding must be reversible for every length, including the edges.
+    #[test]
+    fn padded_memo_round_trips_at_every_length() {
+        let tx_secret_scalar = SecretScalar::random(&mut OsRng);
+        let tx_secret = tx_secret_scalar.to_bytes();
+        let tx_public = tx_secret_scalar.to_public().to_bytes();
+        let view_secret_scalar = SecretScalar::random(&mut OsRng);
+        let view_secret = view_secret_scalar.to_bytes();
+        let view_public = view_secret_scalar.to_public().to_bytes();
+
+        for len in [1usize, 2, 27, 225, MAX_MEMO_SIZE] {
+            let memo: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let ct = encrypt_memo(&memo, &tx_secret, &view_public).expect("encrypt");
+            let out = decrypt_memo(&ct, &view_secret, &tx_public).expect("decrypt");
+            assert_eq!(out, memo, "round-trip failed at {len} bytes");
+        }
+    }
+
+    /// The builder must not accept what the verifier will reject (WP-009 §2.3).
+    ///
+    /// `MAX_MEMO_SIZE` was a hardcoded 256 while consensus capped the ENCRYPTED
+    /// field at 256, so a max-size memo encrypted to 284 and the network refused
+    /// it. Verified live: a 240-byte memo was rejected with `encrypted_memo too
+    /// large: 268 bytes (max 256)`. Deriving the cap makes that unrepresentable.
+    #[test]
+    fn max_memo_cannot_exceed_the_consensus_cap() {
+        let (tx_secret, _) = random_keypair();
+        let (_, view_public) = random_keypair();
+
+        let at_max = vec![b'x'; MAX_MEMO_SIZE];
+        let ct = encrypt_memo(&at_max, &tx_secret, &view_public).expect("max memo must encrypt");
+        assert!(
+            ct.len() <= crate::constants::MAX_OUTPUT_MEMO_SIZE,
+            "a maximum-size memo must be acceptable to consensus, got {} > {}",
+            ct.len(),
+            crate::constants::MAX_OUTPUT_MEMO_SIZE
+        );
+
+        assert!(
+            encrypt_memo(&vec![b'x'; MAX_MEMO_SIZE + 1], &tx_secret, &view_public).is_err(),
+            "over-cap memo must be refused by the builder, not by the network"
+        );
+    }
+
+    /// Memos written before padding existed must still decode, not turn to
+    /// garbage: the padded form is always exactly MEMO_PADDED_PLAINTEXT, so any
+    /// other length is unambiguously legacy.
+    #[test]
+    fn legacy_unpadded_plaintext_is_returned_unchanged() {
+        let legacy = b"written before padding".to_vec();
+        assert_ne!(legacy.len(), MEMO_PADDED_PLAINTEXT);
+        assert_eq!(unpad_memo(legacy.clone()), legacy);
+    }
+
+    /// A padded buffer whose declared length overruns it is corrupt or hostile.
+    /// It must not panic on the slice.
+    #[test]
+    fn corrupt_length_prefix_does_not_panic() {
+        let mut bad = vec![0u8; MEMO_PADDED_PLAINTEXT];
+        bad[..2].copy_from_slice(&u16::MAX.to_le_bytes());
+        let _ = unpad_memo(bad); // must simply not panic
+    }
+
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let (tx_secret, _tx_public) = random_keypair();
@@ -245,11 +432,13 @@ mod tests {
         let memo = b"Payment for coffee";
         let encrypted = encrypt_memo(memo, &tx_secret, &view_public).unwrap();
 
+        // Ciphertext length must NOT track memo length — that was the leak.
+        // This assertion previously read
+        //     encrypted.len() == MEMO_NONCE_SIZE + memo.len() + MEMO_TAG_SIZE
+        // which pinned the bug in place: it required the wire size to reveal how
+        // long the memo was.
         assert!(encrypted.len() > memo.len());
-        assert_eq!(
-            encrypted.len(),
-            MEMO_NONCE_SIZE + memo.len() + MEMO_TAG_SIZE
-        );
+        assert_eq!(encrypted.len(), MAX_ENCRYPTED_MEMO_SIZE);
 
         let decrypted = decrypt_memo(&encrypted, &view_secret, &tx_public_bytes).unwrap();
         assert_eq!(decrypted, memo);
