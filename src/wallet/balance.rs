@@ -61,6 +61,20 @@ pub struct UTXO {
     pub subaddress_account: Option<u32>,
     #[serde(default)]
     pub subaddress_index: Option<u32>,
+    /// Dust quarantine (WP-018): this output arrived unsolicited and must not be
+    /// spent until the user explicitly accepts it.
+    ///
+    /// An output the ATTACKER created is an output the attacker knows belongs to
+    /// you. They need no cryptanalysis to exploit it — only for your wallet to
+    /// spend it, so they can reason about what it was spent alongside. Because
+    /// every Transfer carries exactly two inputs (WP-011 §3.2), a transaction
+    /// spending a known attacker output proves the OTHER input is yours too,
+    /// with no dilution. Hence a hard exclusion rather than a ranking penalty.
+    ///
+    /// `#[serde(default)]` so wallet files written before this field load with
+    /// `false` — the pre-existing behaviour — rather than failing to open.
+    #[serde(default)]
+    pub quarantined: bool,
 }
 
 impl std::fmt::Debug for UTXO {
@@ -283,29 +297,83 @@ impl Balance {
     pub fn spendable(&self, current_height: u64, min_age: u64) -> Amount {
         self.utxos
             .values()
-            .filter(|u| {
-                !u.spent
-                    && current_height >= u.height.saturating_add(min_age)
-                    && u.lock_height.map_or(true, |lh| current_height >= lh)
-                    && !self.is_reserved(&(u.tx_hash, u.output_index), current_height)
-            })
+            .filter(|u| self.is_selectable(u, current_height, min_age))
             .map(|u| u.amount)
             .sum()
     }
 
     /// UTXOs that are legally spendable right now: unspent, mature, unlocked,
-    /// AND not held by an active in-flight reservation (expired reservations
-    /// are ignored, see `is_reserved`).
+    /// not held by an active in-flight reservation (expired reservations are
+    /// ignored, see `is_reserved`), and NOT quarantined (WP-018).
     pub fn available_utxos(&self, current_height: u64, min_age: u64) -> Vec<&UTXO> {
         self.utxos
             .values()
-            .filter(|u| {
-                !u.spent
-                    && current_height >= u.height.saturating_add(min_age)
-                    && u.lock_height.map_or(true, |lh| current_height >= lh)
-                    && !self.is_reserved(&(u.tx_hash, u.output_index), current_height)
-            })
+            .filter(|u| self.is_selectable(u, current_height, min_age))
             .collect()
+    }
+
+    /// The single selectability predicate, shared by `spendable` and
+    /// `available_utxos`.
+    ///
+    /// These two were separate copies of the same filter. Any rule added to one
+    /// and not the other produces a wallet whose displayed balance disagrees
+    /// with what it can actually spend — and for the quarantine rule
+    /// specifically, the dangerous direction is silent: a quarantined output
+    /// excluded from the balance but still reachable by selection would be spent
+    /// without ever appearing to the user.
+    ///
+    /// Keeping the predicate in one place also means a NEW selection path added
+    /// later inherits every rule instead of having to remember them — the
+    /// "enumerate every reader" discipline of WP-009 §4 rule 2, applied before an
+    /// incident rather than after one.
+    fn is_selectable(&self, u: &UTXO, current_height: u64, min_age: u64) -> bool {
+        !u.spent
+            && !u.quarantined
+            && current_height >= u.height.saturating_add(min_age)
+            && u.lock_height.map_or(true, |lh| current_height >= lh)
+            && !self.is_reserved(&(u.tx_hash, u.output_index), current_height)
+    }
+
+    /// Total value sitting in quarantine (WP-018).
+    ///
+    /// Reported SEPARATELY from `spendable` rather than hidden. A user who
+    /// cannot see an output cannot decide about it, and unexplained missing
+    /// money destroys trust in a wallet faster than any dust attack.
+    pub fn quarantined_balance(&self) -> Amount {
+        self.utxos
+            .values()
+            .filter(|u| u.quarantined && !u.spent)
+            .map(|u| u.amount)
+            .sum()
+    }
+
+    /// Unspent outputs currently held in quarantine, for display.
+    pub fn quarantined_utxos(&self) -> Vec<&UTXO> {
+        self.utxos
+            .values()
+            .filter(|u| u.quarantined && !u.spent)
+            .collect()
+    }
+
+    /// Release an output from quarantine, making it selectable.
+    ///
+    /// Returns `true` if a quarantined output was found and released.
+    ///
+    /// CALLER CONTRACT: this is an *informed consent* transition, not a
+    /// convenience toggle. Because every Transfer carries exactly two inputs
+    /// (WP-011 §3.2), an accepted output cannot be spent in isolation — spending
+    /// it places it in a transaction with one other of the user's outputs, and
+    /// whoever sent it can then infer that the other output is theirs too. A UI
+    /// calling this MUST have said so in those terms. A generic "accept funds?"
+    /// prompt would be a lie by omission (WP-018 §4.3).
+    pub fn accept_quarantined(&mut self, key: &(Hash, u8)) -> bool {
+        match self.utxos.get_mut(key) {
+            Some(u) if u.quarantined => {
+                u.quarantined = false;
+                true
+            }
+            _ => false,
+        }
     }
 
     // === Reservation API (Item 1: in-flight UTXO tracking) =============
@@ -464,7 +532,102 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            quarantined: false,
         }
+    }
+
+    fn add_utxo(b: &mut Balance, u: UTXO) {
+        b.utxos.insert((u.tx_hash, u.output_index), u);
+    }
+
+    /// A quarantined output must be invisible to BOTH selection chokepoints.
+    ///
+    /// The dangerous asymmetry is silent: an output excluded from the balance
+    /// but still reachable by `available_utxos` would be spent without ever
+    /// having appeared to the user. Both must agree, which is why they share
+    /// `is_selectable`.
+    #[test]
+    fn quarantined_utxo_is_excluded_from_balance_and_selection() {
+        let mut b = Balance::default();
+
+        let mut clean = make_utxo(5_000, 1, false);
+        clean.output_index = 0;
+        add_utxo(&mut b, clean);
+
+        let mut dirty = make_utxo(700, 1, false);
+        dirty.output_index = 1;
+        dirty.quarantined = true;
+        add_utxo(&mut b, dirty);
+
+        assert_eq!(
+            b.spendable(100, 0),
+            Amount::from_atomic(5_000),
+            "quarantined value must not count as spendable"
+        );
+        let available = b.available_utxos(100, 0);
+        assert_eq!(
+            available.len(),
+            1,
+            "quarantined output must not be selectable"
+        );
+        assert!(
+            available.iter().all(|u| !u.quarantined),
+            "no selection path may return a quarantined output"
+        );
+
+        // …but it must remain VISIBLE. Hiding it entirely would leave the user
+        // unable to decide about money they can see is missing.
+        assert_eq!(b.quarantined_balance(), Amount::from_atomic(700));
+        assert_eq!(b.quarantined_utxos().len(), 1);
+    }
+
+    #[test]
+    fn accepting_a_quarantined_utxo_makes_it_selectable() {
+        let mut b = Balance::default();
+        let mut u = make_utxo(700, 1, false);
+        u.quarantined = true;
+        let key = (u.tx_hash, u.output_index);
+        add_utxo(&mut b, u);
+
+        assert_eq!(b.spendable(100, 0), Amount::ZERO);
+        assert!(b.accept_quarantined(&key), "accept must find the output");
+
+        assert_eq!(
+            b.spendable(100, 0),
+            Amount::from_atomic(700),
+            "an accepted output is ordinary and spendable"
+        );
+        assert_eq!(b.quarantined_balance(), Amount::ZERO);
+
+        // Idempotent: accepting an already-accepted output reports no change
+        // rather than silently succeeding, so a UI cannot double-count consent.
+        assert!(!b.accept_quarantined(&key));
+    }
+
+    /// Quarantine must survive a save/load round-trip.
+    ///
+    /// A flag that reset on reload would silently un-quarantine every held
+    /// output at the next wallet open — invisible, and it would undo the whole
+    /// feature.
+    #[test]
+    fn quarantine_flag_survives_serialization() {
+        let mut u = make_utxo(700, 1, false);
+        u.quarantined = true;
+
+        let encoded = serde_json::to_string(&u).expect("serialize");
+        let decoded: UTXO = serde_json::from_str(&encoded).expect("deserialize");
+        assert!(decoded.quarantined, "quarantine must persist across reload");
+
+        // And a wallet written BEFORE the field existed must still load, taking
+        // the pre-existing behaviour rather than failing to open.
+        let legacy = encoded.replace(",\"quarantined\":true", "");
+        assert!(
+            !legacy.contains("quarantined"),
+            "test setup: the field must actually be absent"
+        );
+        let from_legacy: UTXO =
+            serde_json::from_str(&legacy).expect("pre-field wallet files must still load");
+        assert!(!from_legacy.quarantined);
     }
 
     #[test]
@@ -546,6 +709,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            quarantined: false,
         }
     }
 

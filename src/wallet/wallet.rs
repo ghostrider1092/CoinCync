@@ -1608,6 +1608,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            quarantined: false,
         });
         wallet.history.add(TransactionRecord::incoming(
             Hash::from_bytes([5u8; 32]),

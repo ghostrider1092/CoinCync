@@ -1742,7 +1742,45 @@ pub fn decrypted_to_utxo(
         lock_height: decrypted.output.lock_height,
         subaddress_account: decrypted.subaddress_index.map(|(a, _)| a),
         subaddress_index: decrypted.subaddress_index.map(|(_, i)| i),
+        // Dust quarantine (WP-018). Classified HERE because this is the only
+        // place a UTXO is constructed, so every received output passes through
+        // it and no second path can bypass the policy.
+        quarantined: should_quarantine_amount(decrypted.amount),
     })
+}
+
+/// Wallet-policy threshold below which a received output starts in quarantine
+/// (WP-018 §4.1).
+///
+/// DELIBERATELY NOT `constants::MIN_OUTPUT_AMOUNT`. That is a consensus
+/// chain-bloat floor; this is a wallet privacy policy. They answer different
+/// questions — "may this output exist?" versus "did the user ask for it?" — and
+/// tying them would let a consensus change silently alter wallet spending
+/// behaviour.
+///
+/// 10x the consensus floor: small enough that ordinary payments are unaffected,
+/// large enough to cover the cheap-output range an attacker would use.
+///
+/// This is a placeholder for real expectation-matching (does this correspond to
+/// a payment the user was waiting for?), which needs UX that does not exist yet.
+/// Amount alone cannot tell a hostile output from a small legitimate one, so
+/// this MUST become user-adjustable before the feature is surfaced.
+pub const QUARANTINE_AMOUNT_THRESHOLD: u64 = crate::constants::MIN_OUTPUT_AMOUNT * 10;
+
+/// True if an output of this size should start life quarantined.
+///
+/// Conservative by design: over-eager quarantine presents to the user as "my
+/// payment never arrived", which teaches them to switch the feature off — a
+/// worse privacy outcome than the attack it prevents (WP-018 §4.4).
+///
+/// COINBASE: not special-cased, and does not need to be. Block rewards are
+/// orders of magnitude above this threshold — even the perpetual tail emission
+/// (0.6 CYNC = 6e11 atomic units) exceeds it by ~5 orders — so a miner's own
+/// rewards never quarantine. Adding an `is_coinbase` branch would mean
+/// threading the flag through `DecryptedOutput` for a case the arithmetic
+/// already covers, i.e. a second code path to keep in sync for no gain.
+fn should_quarantine_amount(amount: u64) -> bool {
+    amount < QUARANTINE_AMOUNT_THRESHOLD
 }
 
 #[cfg(test)]

@@ -109,7 +109,7 @@ Title · Status · Layer
 | WP-015 | Dead-man's switch and auto-churn | Churn **Shipped**; switch **Placeholder** |
 | WP-016 | Subaddresses with per-subaddress view keys | Gated (mainnet-disabled, W-1) |
 | WP-017 | Private light-wallet sync: the digest protocol | Shipped |
-| WP-018 | Dust quarantine | **Proposed** |
+| WP-018 | Dust quarantine | Shipped (core; no CLI surface yet) |
 
 ### Part III — Network & infrastructure
 
