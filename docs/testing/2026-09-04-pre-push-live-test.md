@@ -70,22 +70,71 @@ check on each. Had that check been wrong there, the reorg would have aborted.
 
 ---
 
+## Round 2 — the money path (RingCT send)
+
+Run after the above, on the same branch. This was the gap the first round left
+open, and it is the path that moves money.
+
+| # | Check | Result |
+|---|---|---|
+| 13 | Wallet scan detects mined coinbase (stealth addresses) | 689 outputs / 47 598 CYNC |
+| 14 | **RingCT/CLSAG send, uniform shape** | `Inputs: 2  Outputs: 2`, 3395 bytes, fee 7 160 000 atomic — accepted |
+| 15 | Transaction mined into a block | Confirmed, `block 8ed4e16b…` |
+| 16 | Recipient detects the payment by stealth scan | w2 found its outputs unaided |
+| 17 | **Spend of RECEIVED funds (not coinbase)** | w2 → w1, `Inputs: 2 Outputs: 2`, accepted and mined |
+| 18 | Balances reconcile | w2: 110 received − 25 sent − 0.00000716 fee = **84.9999 CYNC** ✓ |
+
+**Check 17 is the one that matters.** WP-016 §4.1 makes the point that "receive
+works" is half a feature and the dangerous half, because it is the half that
+takes custody. A wallet that can detect a payment but not spend it looks healthy
+and loses money. Detect → spend → change round-trips correctly for main
+addresses. (Subaddresses remain gated off mainnet for exactly the failure this
+check rules out for the main path — see WP-016.)
+
+### Two observations, neither a defect
+
+- **Decoy pool floor.** A send on a very young chain fails with
+  `Insufficient decoy outputs: 76 available, 126 needed`. Correct behaviour — the
+  ring cannot be built from a pool that small — but the error is the first thing
+  a new-chain operator will hit, and 126 candidates for one 2-input send is a
+  steeper floor than `BOOTSTRAP_MIN_RING_SIZE = 11` suggests. Worth a friendlier
+  message.
+- **Benign warning on a peerless node.** `P2P transaction rejected by mempool:
+  Duplicate key image`, emitted when Dandelion++'s fail-safe fluff re-offers a
+  locally-submitted tx that `send_raw_transaction` already admitted. Harmless —
+  the tx is already in the mempool and does get mined — but it reads like a
+  failure in the log.
+
 ## Not covered
 
 Stated plainly rather than implied by omission:
 
-- **Transaction send (RingCT/CLSAG spend) was NOT tested in this run.** Coinbase
-  maturity plus a wallet scan cycle is a separate exercise. The prior session's
-  live test covered it; this run did not re-verify it against the current branch.
 - **Dust quarantine end-to-end** — the CLI was exercised, but no output was
   actually quarantined and released, because regtest coinbase rewards are far
   above the threshold.
 - No stratum/pool test, no Tor transport test, no light-wallet sync test.
+- No subaddress send (gated off mainnet; W-1).
 - Regtest only. No mainnet-parameter run.
 
-## Process note
+## Process notes
 
-An early attempt at the reorg test was invalidated by my own sloppiness: repeated
+**Two false alarms, both mine, both from checking the wrong thing.**
+
+1. I reported a transaction as "never mined" after finding the mempool empty and
+   `tx_count=1` in recent blocks. The tx was submitted at height 290; I inspected
+   blocks near 867 — roughly 570 blocks past where it landed. It had been mined
+   almost immediately. Regtest produces ~3 blocks/second, so a transaction is
+   essentially never observable in the mempool.
+2. My confirmation wait loop polled `get_transaction` until the response
+   contained `"height"`. That field is not in the response shape, so the loop
+   could never terminate regardless of chain state.
+
+Both produced confident, wrong conclusions from real output. The lesson is the
+same one as the reorg fixture below: **verify the instrument before trusting a
+negative result.** An absence of evidence from a check you have not validated is
+evidence about the check.
+
+**Fixture hygiene.** An early attempt at the reorg test was invalidated by my own sloppiness: repeated
 restarts left stale heights and leftover peer state, so heights I sampled did not
 match what the nodes had actually reached, and the "divergence" I started
 investigating was an artifact. The clean run cloned the chain directory at a
