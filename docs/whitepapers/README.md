@@ -128,7 +128,7 @@ Title · Status · Layer
 | # | Paper | Status |
 |---|---|---|
 | **WP-100** | **Solved-issues ledger: every failure found, and the assumption it died on** | Living |
-| WP-101 | Safe-by-default threat model (adopted from the project design draft) | Living |
+| WP-101 | Threat-model index: which adversary each mechanism defeats, and its real status | Living |
 
 ---
 
