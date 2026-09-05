@@ -4,8 +4,11 @@ Regtest, two nodes, release binaries built from the branch head. Run because thi
 session changed consensus in four places and a green unit suite is not evidence
 that a daemon runs.
 
-**Headline: the live run found two bugs that 1184 passing unit tests did not,
-one of which stopped the node from starting at all.**
+**Headline: three rounds, 30 checks. The live run found FOUR defects that 1184
+passing unit tests did not — one that stopped the node booting, one that made a
+documented audit path impossible, one where the CLI told users the opposite of
+the truth about an irreversible key disclosure, and one silent consensus-rule
+mismatch. Plus one unfixed finding (memo padding) that needs an owner decision.**
 
 ---
 
@@ -105,16 +108,128 @@ check rules out for the main path — see WP-016.)
   the tx is already in the mempool and does get mined — but it reads like a
   failure in the log.
 
-## Not covered
+---
 
-Stated plainly rather than implied by omission:
+## Round 3 — memos, disclosure, quarantine, subaddress gate, light-sync, stratum, mainnet params
 
-- **Dust quarantine end-to-end** — the CLI was exercised, but no output was
-  actually quarantined and released, because regtest coinbase rewards are far
-  above the threshold.
-- No stratum/pool test, no Tor transport test, no light-wallet sync test.
-- No subaddress send (gated off mainnet; W-1).
-- Regtest only. No mainnet-parameter run.
+| # | Check | Result |
+|---|---|---|
+| 19 | **Encrypted memo round-trip** (WP-014) | `"invoice-4471 rent september"` decrypted by recipient only; 27 plaintext → 55 wire bytes (27 + 28 overhead) |
+| 20 | **Dust quarantine end-to-end** (WP-018) | 5 000 000-atomic output auto-quarantined on receipt; listed; **refused** without confirmation; released on `accept`; flag persisted |
+| 21 | Disclosure — balance proof | 2 631-byte proof that a UTXO ≥ 1 CYNC, without revealing 54.99 CYNC |
+| 22 | Disclosure — **unanchored** verify warns | `⚠ NOT ANCHORED TO CHAIN: this does not prove the commitment corresponds to any real on-chain output` |
+| 23 | Disclosure — **anchored** verify | `ANCHORED + VALID — range proof holds AND the commitment is on chain` |
+| 24 | Disclosure — **anchor mismatch rejected** | Wrong output → `ANCHOR MISMATCH: the range proof is well-formed but its commitment does NOT match` |
+| 25 | Disclosure — verifier-privacy warning (WP-013 §3.4) | `⚠ PRIVACY: … That node now knows you care about this output` |
+| 26 | Subaddress **mainnet gate** (W-1) | Refused: "funds received at a subaddress would be permanently unspendable" |
+| 27 | Light-sync digests (WP-017) | 21 blocks for a 21-block range; digest carries `is_coinbase` (the H-4 fix) and `view_tag` |
+| 28 | Light-sync range cap | 500-block request clamped to 100 |
+| 29 | Stratum pool server | `Starting Stratum pool on 127.0.0.1:23333 (block_production=true)` |
+| 30 | Mainnet genesis parameters | `c9eb73ab…fe07635c` — matches `MAINNET_GENESIS_HASH` byte for byte |
+
+**Check 24 is the one worth dwelling on.** The three-valued `AnchorVerdict` from
+WP-013 §3.5 is doing real work: it distinguishes "the math is fine but this is
+not the output you named" from "the proof is broken". A boolean would have
+merged them, and an auditor needs to tell a mistake from an attempt.
+
+---
+
+## Round 3 bugs found
+
+### 3. `scoped-view-key` told the user the opposite of the truth — FIXED (`3d463489`)
+
+The CLI printed:
+
+> "It lets the holder see every output your wallet received in this height range
+> — **and nothing outside it**."
+
+That is false, and it was proven live: exporting two scoped keys with ranges
+`1180..1200` and `1..50` produced the **byte-identical** `view_secret`. The
+height range is metadata in a JSON blob; the key material is the wallet's full
+view secret. `from_height`/`to_height` are honoured by our own scanner
+(`disclose scan-scoped`) and by nothing else.
+
+The source was already honest — `wallet/key_epoch.rs` says "The key material is
+the same — the scope is enforced by the wallet scanner", and WP-013 §3.6
+documents it. **The CLI contradicted its own source and told the user the
+opposite.**
+
+This is the most user-dangerous shape of defect in the whole session. Sharing a
+view key is a deliberate, irreversible act taken on the strength of exactly that
+sentence. A user disclosing "a tax year" to an accountant was in fact disclosing
+everything, forever, and had been told they were not.
+
+Warning rewritten to state what the key does, that it cannot be revoked, and to
+point at the disclosure *proofs* as the primitive that actually binds against an
+adversarial recipient. No behaviour change — the export was always the full
+secret.
+
+### 4. Compile-time feature vs `--network` mismatch — GUARDED (`257a452a`)
+
+`MIN_OUTPUT_AGE_HARDFORK_HEIGHT` is selected by `#[cfg(feature = "testnet")]`,
+and `min_output_age_at_height(height)` takes **no network parameter**. So a
+binary built `--features testnet` and started `--network mainnet` silently
+enforces testnet maturity (10 blocks instead of 100) and would disagree with
+correctly-built peers about which spends are valid — a chain split with no
+symptom until it happens. `FEE_DISTRIBUTION_HEIGHT`, `CONSENSUS_CHECKPOINTS` and
+the `ROLLING_FINALITY_*` heights are gated the same way.
+
+This is the F31 SEV-A shape that already bit this project (the 2026-07-04
+partition trap). F31 was fixed for `max_reorg_depth` by reading the runtime
+network; these constants were left compile-time and unguarded.
+
+The official release build (`--features "${NETWORK}"`) never produces a
+mismatch, so this only fires on a hand-built binary — which is exactly the case
+nothing else catches. Now a fail-closed startup check naming the rebuild command.
+
+---
+
+## Round 3 finding NOT fixed — memo padding (owner decision)
+
+**Memos are not padded.** WP-014 §3.4 and WP-011 §3.3 both state that honest
+wallets pad memos to the 256-byte cap, sourced from the claim in
+`constants.rs:207`:
+
+> "Honest wallets pad memos up to this cap via the MAX_MEMO_SIZE = 256 +
+> MEMO_OVERHEAD constants"
+
+No wallet code does this. `transaction/builder.rs:570` calls
+`encrypt_memo(memo_bytes, …)` with the raw plaintext, and outputs without a memo
+get an empty field. Live: a 27-byte memo produced 55 wire bytes; an unmemo'd
+output produces 0.
+
+So both memo **presence** and memo **length** are directly observable on chain,
+which partitions the anonymity set exactly as WP-011 §1 warns — the users who
+attach memos are identifiable as memo users, and length leaks content class.
+
+Not fixed here because it is a **wire-format decision, not a bug fix**:
+
+- Padding the plaintext to the cap needs a length-preserving encoding (e.g. a
+  2-byte length prefix), which changes the encrypted-memo format. Safe
+  pre-launch, but it is a format change.
+- It only fixes *length*. Presence still leaks (0 bytes vs 284). Closing that
+  needs every output to carry a fixed-size memo field — a consensus uniformity
+  rule with a real size cost on every transaction.
+
+Recommendation: pad to the cap now (cheap, pre-launch, removes the length leak),
+and treat "every output carries a memo-sized field" as a separate consensus
+decision. Either way the three documents claiming padding already happens must be
+corrected — that is not optional, since two of them are whitepapers.
+
+---
+
+## Still not covered after round 3
+
+- **Tor transport** — no Tor daemon available in this environment; only flag
+  parsing could be checked, which is not worth calling a test.
+- **Subaddress receive→spend on regtest** — the mainnet gate was verified; the
+  underlying W-1 unspendability was not re-demonstrated, since it is a known and
+  documented defect and the gate is what protects users.
+- **Stratum share submission** — the pool server starts and listens; no miner
+  client connected, so share handling and the WP-023 nonce ledger are untested
+  live.
+- **Mainnet chain run** — genesis parameters verified; no mainnet chain was
+  built or mined.
 
 ## Process notes
 
