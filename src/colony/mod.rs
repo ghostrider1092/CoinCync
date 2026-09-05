@@ -50,3 +50,18 @@ pub mod locust;
 // Healing caste: living-bridge partition recovery — netgroup-diverse,
 // freshness-weighted reconnection-target selection. Pure selection core.
 pub mod army_ant;
+
+// ── The act-phase spine (trust before action) ────────────────────────────────
+//
+// These two are not castes; they are the shared infrastructure every caste must
+// pass through before any advice becomes an action, so the act phase cannot
+// itself become an attack surface. Built as pure decision cores; wired ahead of
+// (not after) any caste being allowed to act.
+//
+// honeybee: quorum-gated trust. Independence-weighted, cross-dimension,
+// fault-budgeted confidence — nothing acts on a forgeable single signal.
+pub mod honeybee;
+// guards: the non-bypassable middleware — kill switch, confidence gate, rate
+// limit, max-dwell (anti "trap me in defensive mode"), and the diversity floor a
+// response may never cross.
+pub mod guards;
