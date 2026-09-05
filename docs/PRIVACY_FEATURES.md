@@ -13,6 +13,16 @@ adversary each feature defeats) and [`src/protocol/privacy-model.md`](src/protoc
 later 2026. "Live" below means *live on testnet and in the default node/wallet
 build* — it does not mean a mainnet deployment exists yet.
 
+**Runtime source of truth:** this document is the narrative; the *authoritative,
+machine-checkable* status is served live by the node. Query the
+**`get_privacy_features`** RPC (backed by `crypto::privacy_connector`'s read-only
+registry) for each feature's current state — `active`, `gated-inert`, or
+`disabled` — plus `connector_audited`. If this doc and that endpoint ever
+disagree, the endpoint is correct and this doc is stale. The experimental,
+consensus-touching schemes are additionally routed only through the
+`privacy_connector` boundary (kill switch + mainnet-audit interlock + activation
+height), so nothing gated can activate silently.
+
 ## Status legend
 
 | Mark | Meaning |

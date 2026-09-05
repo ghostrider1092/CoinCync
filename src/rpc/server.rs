@@ -755,8 +755,9 @@ pub async fn start_rpc_server(
                 // Health / monitoring
                 "status":                  status,
                 "health_score":            health_score,
-                // Per-process zombie detection (see rpc::node_api::count_cyncd_processes
-                // for the availability flag rationale).
+                // Per-process zombie detection is not implemented here; the
+                // `process_count_available: false` flag below signals that the
+                // count is a placeholder, not a real measurement.
                 "process_count":           1u32,
                 "process_count_available": false,
                 "has_zombies":             false,
@@ -1422,6 +1423,40 @@ pub async fn start_rpc_server(
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_privacy_features ──────────────────────────────────
+    // Full, HONEST status of every privacy feature: which are live, which
+    // are gated-inert pending external audit, and which are disabled. This
+    // is the single source of truth the community can query so nothing is
+    // over-claimed — the opposite of shipping half-finished features
+    // silently. Backed by the privacy connector's read-only registry.
+    module.register_method("get_privacy_features", |_params, state, _ext| {
+        use crate::crypto::privacy_connector::{
+            privacy_feature_registry, ConnectorGate, FeatureStatus, CONNECTOR_AUDITED,
+        };
+        let height = state.chain.stats().height;
+        // `None` activation height => gated consensus schemes report as inert,
+        // which is the truthful state until they are audited + scheduled.
+        let gate = ConnectorGate::new(state.chain.network(), height, None);
+        let features: Vec<_> = privacy_feature_registry(&gate)
+            .into_iter()
+            .map(|f| {
+                let status = match f.status {
+                    FeatureStatus::Active => "active",
+                    FeatureStatus::GatedInert => "gated-inert",
+                    FeatureStatus::Disabled => "disabled",
+                };
+                json!({ "name": f.name, "status": status, "note": f.note })
+            })
+            .collect();
+        Ok::<_, ErrorObjectOwned>(json!({
+            "connector_audited": CONNECTOR_AUDITED,
+            "network": format!("{:?}", state.chain.network()),
+            "height": height,
+            "features": features,
+        }))
+    })
+    .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_shielded_anchor ───────────────────────────────────
     // Light wallets query this to get the current Merkle root they
     // should anchor their spend proofs against.
@@ -1616,8 +1651,8 @@ pub async fn start_rpc_server(
     // (`white_peers` / `grey_peers`) are JSON `null` on the P0
     // server because the thin stats struct from `P2PNode`
     // doesn't surface the split yet — returning `null` rather
-    // than `0` is the honest signal, per the silent-stub fix
-    // in `rpc::node_api::get_network_info`.
+    // than `0` is the honest signal (avoids reporting a fabricated
+    // zero as if it were a real inbound/outbound split).
     module
         .register_method("get_network_info", |_params, state, _ext| {
             let connections = state
