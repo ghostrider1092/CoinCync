@@ -50,32 +50,66 @@ The origin is hidden because the node that *fluffs* is not the node that
 
 ### 3.2 Per-epoch mode decision
 
-Each **epoch (~10 minutes)** the node makes a single random decision: stem mode
-or fluff mode. **All transactions received in that epoch follow the same
-decision.**
+Each epoch — **600 s base plus 0–30 s jitter**, so epoch boundaries are not
+network-synchronised — the node makes a single random decision: stem mode, or
+fluff mode with probability **20 %**. Every **relayed** transaction in that epoch
+follows the same decision.
 
-This is the subtle and important part. If a node decided per transaction, its own
-transactions could be routed differently from relayed ones, and the difference
-would be observable — reintroducing exactly the attribution the protocol
-prevents. A uniform per-epoch decision means a node's behaviour toward its own
-transaction is indistinguishable from its behaviour toward everyone else's.
+The decision is per *epoch*, not per transaction, because per-transaction routing
+would let an observer compare how a node treats different transactions and infer
+which ones it originated.
+
+**Local transactions are the deliberate exception: they always stem, even during
+a fluff epoch** (`always_stem_local`, following Monero). This is the opposite of
+what a naive uniformity argument suggests, and the reason is that the naive
+argument optimises the wrong thing:
+
+- If your own transaction followed fluff mode, then 20 % of the time you would
+  **broadcast your own transaction directly from your own node** — immediate,
+  unambiguous origin attribution. That is the exact attack this protocol exists
+  to stop.
+- Always stemming locally costs a narrower leak instead: a hostile *first stem
+  relay* could infer "this came from that node" if it independently knew the
+  sender was in a fluff epoch — which it does not directly observe.
+
+A guaranteed leak 20 % of the time is worse than a conditional leak that requires
+the adversary to be your chosen relay *and* to know your epoch mode. The trade is
+recorded here rather than smoothed into a uniformity story, because the design
+genuinely is non-uniform at this point and a reader checking the code would
+otherwise find the paper wrong.
+
+*(An earlier revision of this paper claimed all transactions, local included,
+follow the epoch decision. That was written from the module's summary comment and
+is incorrect; corrected after reading `add_local_tx`.)*
 
 ### 3.3 Two fixed relay peers per epoch (quasi-4-regular graph)
 
-At epoch start the node selects **two outbound relay peers**, and inbound peers
-are **deterministically mapped** to one of the two (per-inbound-edge routing).
-This approximates the quasi-4-regular graph the Dandelion++ analysis assumes.
+At epoch start the node shuffles its **outbound** peers and takes up to two as
+relays, approximating the quasi-4-regular graph the Dandelion++ analysis assumes.
+Selection uses the OS CSPRNG, not a thread RNG — stem-peer choice is a privacy
+boundary, and a predictable RNG state would let an observer fingerprint which
+peer a node picked.
+
+Inbound peers are assigned to one of the two relays **lazily and
+load-balanced**: on first contact an inbound edge goes to whichever relay
+currently has fewer inbound peers mapped to it, and that assignment is then
+**stable for the rest of the epoch**. Local transactions use a single relay index
+chosen at random for the epoch.
 
 The properties that matter:
 
 - **Stability within an epoch** prevents an adversary from learning the stem
   graph by observing many transactions from one node — the routes do not vary
   per transaction.
-- **Deterministic inbound mapping** means the same inbound edge always forwards
-  to the same relay, so an adversary cannot probe by sending many transactions
-  and watching the path change.
+- **A stable per-edge assignment** means the same inbound edge always forwards to
+  the same relay, so an adversary cannot probe by sending many transactions and
+  watching the path change.
 - **Rotation between epochs** limits how long a compromised relay sits on a
   node's path.
+
+*(Assignment is stable, not a deterministic function of the peer id: it depends
+on the order edges are first seen. The anti-probing property above depends only
+on stability, which holds.)*
 
 ### 3.4 Exponential embargo timers
 
@@ -91,6 +125,50 @@ will be. With fixed or uniform timers, the originating node — which started it
 timer first — systematically times out first and fluffs its own transaction,
 which is precisely the attribution the protocol exists to prevent. Memorylessness
 removes that ordering bias.
+
+Mean **39 s**, capped at **180 s**, floored at 5 s. Monero made this same
+correction — from Poisson to exponential — in PR #9295.
+
+### 3.5 The second timer: randomised stem forwarding
+
+There are **two** exponential timers, not one, and the second is easy to miss.
+
+The embargo (§3.4) decides when to *give up* on a stem path. A separate
+exponentially distributed delay, mean **5 s** and capped at 30 s, decides when to
+*forward* a stem transaction to the next hop.
+
+Without it, every stem transaction would be forwarded on the node's next
+housekeeping tick — a fixed 10-second cadence. That fixed cadence is a **timing
+signature**: an observer watching a node emit stem forwards on a predictable
+clock can separate the transaction that started at that node from ones merely
+passing through, which defeats stem routing at the timing layer while the routing
+layer is working perfectly.
+
+This matches Monero's `CRYPTONOTE_DANDELIONPP_FLUSH_AVERAGE` (5 s), verified
+against `src/cryptonote_config.h:113`. It is the same principle as WP-012's
+timing jitter and WP-015's Poisson churn intervals: **a mechanism with a schedule
+must randomise that schedule, or the schedule identifies the mechanism**
+(WP-009 §4 rule 5).
+
+### 3.6 Stempool bounds and flood eviction
+
+The stempool holds at most **10 000** entries. Which entry gets evicted when it
+fills is a privacy decision, not a housekeeping one.
+
+Evicting strictly by age — the obvious policy — is exploitable. A node's **own**
+transactions are older than an attacker's freshly injected flood by definition,
+so oldest-first eviction means an attacker who floods the stempool **evicts the
+victim's own transactions first**. Those transactions then never fluff and
+silently disappear: the sender sees their payment vanish with no error.
+
+The policy therefore evicts the oldest **peer-sourced** entry first, and only
+falls back to local entries when no peer-sourced entry exists. An attacker's
+flood now consumes its own oldest entries before touching anything local.
+
+A related check, `has_adequate_privacy`, reports whether the node has at least
+**3** peers — below that, stem routing has too few paths to provide meaningful
+origin protection, and the node should be treated as unprotected rather than
+assumed safe.
 
 ---
 
@@ -119,11 +197,25 @@ favour the originator.
   only. If the transaction graph itself leaks (weak decoys, non-uniform amounts),
   origination privacy does not help.
 
-**Live status.** The implementation is present and follows the published
-parameterisation. We have **not** run an adversarial network-level evaluation
-(e.g. an instrumented multi-node deployment measuring attribution accuracy), so
-the guarantee here rests on correct implementation of a published protocol rather
-than on our own measurement.
+**Verification status (2026-09-04).** The implementation was read end to end
+against this paper rather than against its own summary comment. Confirmed
+present and correct: exponential embargo with the memoryless justification and
+the Monero PR #9295 correction, two relay peers selected with the OS CSPRNG,
+stable per-inbound-edge routing, epoch rotation with jitter, the separate
+exponential stem-forward delay, and the flood-resistant stempool eviction policy.
+It is a faithful implementation, and in two respects (the second timer, the
+eviction fix) more complete than this paper originally described.
+
+The review also found this paper wrong in one place — §3.2 claimed local
+transactions follow the epoch's fluff decision; they always stem. That is
+corrected above, and it is the reason the verification was done by reading the
+code rather than the doc comment.
+
+**Not verified.** We have **not** run an adversarial network-level evaluation —
+no instrumented multi-node deployment measuring actual attribution accuracy
+against a partial adversary. The guarantee rests on correct implementation of a
+published protocol, not on our own measurement. Parameters follow Monero's and
+have not been re-derived for CoinCync's topology or transaction rate.
 
 ---
 
@@ -131,10 +223,20 @@ than on our own measurement.
 
 | Component | Location |
 |---|---|
-| Epoch mode decision, stem/fluff routing, relay selection, embargo timers | `src/network/dandelion.rs` |
-| Relay/broadcast integration | `src/network/node.rs`, `src/bin/node.rs` |
+| Epoch rotation, relay selection, stem/fluff routing, both timers, stempool | `src/network/dandelion.rs` |
+| `DANDELION_STEMS` 2, `FLUFF_PROBABILITY` 20, `EPOCH_BASE` 600 s + `JITTER` 30 s, `EMBARGO_MEAN` 39 s / `MAX` 180 s | `src/constants.rs` |
+| `STEM_FORWARD_MEAN_SECS` 5, `MAX_STEMPOOL` 10 000, `MIN_PEERS_FOR_PRIVACY` 3 | `src/network/dandelion.rs` |
+| Relay/broadcast integration, outbound peer registration | `src/network/node.rs`, `src/network/node/dispatch/control.rs`, `src/bin/node.rs` |
 | Mempool admission of fluffed transactions | `src/mempool.rs`, `src/bin/node.rs` |
 | Transport privacy options (Tor/onion/proxy) | node CLI (`--tor`, `--onion-only`, `--proxy`) |
+
+**Tests.** The module's own suite covers stem-loop detection, fluff-epoch
+immediate fluffing, embargo timeout, per-inbound-edge routing, epoch rotation and
+inbound-map clearing, diffusion confirmation, the no-relay-peers fallback, and
+the stempool limit.
+
+**Failure record.** H16-FIX (fixed stem-forward cadence → timing signature),
+P5-D2 (stempool flood evicted the victim's own local transactions).
 
 ---
 
