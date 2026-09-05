@@ -73,7 +73,21 @@ pub(super) async fn handle_version(
     // median so a single node's clock skew cannot desync its future-block
     // acceptance from the network. Median-of-many + hard-capped, so a few lying
     // or skewed peers can't move it. See crate::net_time.
-    {
+    //
+    // OUTBOUND ONLY. Inbound peers are attacker-CHOSEN: anyone can open
+    // connections to us and report whatever timestamp they like. Sampling them
+    // would let an attacker who fills enough inbound slots dominate the median
+    // and shift our future-block acceptance boundary by up to the ±70-minute
+    // cap — reintroducing, under attacker control, the very acceptance desync
+    // this feature exists to prevent. Outbound peers are ones WE chose, so the
+    // sample set is not attacker-selected. This is why Bitcoin's
+    // `GetAdjustedTime` samples outbound only; the original patch did not make
+    // the distinction.
+    //
+    // Cost of being conservative: a node with fewer than MIN_SAMPLES outbound
+    // peers keeps an offset of 0 — today's raw-local-clock behaviour, which is
+    // the safe default.
+    if peers.get(&peer_id).map(|p| p.outbound).unwrap_or(false) {
         let now = chrono::Utc::now().timestamp();
         crate::net_time::record_peer_offset(version.timestamp as i64 - now);
     }
