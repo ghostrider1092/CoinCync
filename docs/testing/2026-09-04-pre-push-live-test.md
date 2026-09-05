@@ -184,7 +184,44 @@ nothing else catches. Now a fail-closed startup check naming the rebuild command
 
 ---
 
-## Round 3 finding NOT fixed — memo padding (owner decision)
+## Round 4 — memo padding (the round-3 finding, now fixed and verified)
+
+Resolved by the project's own design charter, which lists under *mandatory
+uniformity*: "fixed ring size, uniform fees, **padded sizes**." Padding was not
+an open design question — it was a stated commitment the code did not meet.
+
+Implementing it surfaced a **second** defect in the same forty lines:
+`MAX_MEMO_SIZE` was a hardcoded 256 while consensus caps the *encrypted* field
+at 256, so a maximum-size memo encrypted to 284 and the network refused it. The
+documented maximum memo was unusable. Verified live: a 240-byte memo drew
+`encrypted_memo too large: 268 bytes (max 256)`; 228 was the real limit. A
+builder that accepts what the verifier rejects is the WP-009 §2.3 rule-asymmetry
+class — the **third** instance in this project, after the decoy sampler and the
+difficulty target.
+
+| # | Check | Result |
+|---|---|---|
+| 31 | Memo length no longer observable | Memos of **2, 27 and 200** bytes all produce exactly **256** on-chain bytes |
+| 32 | Padded memos decrypt correctly | `"hi"`, `"invoice-4471 rent september"`, and a 228-byte memo all round-trip |
+| 33 | **Legacy memos still readable** | Pre-fix 55-byte memos still decrypt — padded plaintext is always exactly the padded size, so any other length is unambiguously legacy |
+| 34 | Builder cap matches consensus | Max-size memo now encrypts to exactly the consensus cap; over-cap refused by the wallet, not the network |
+| 35 | Presence leak still present (expected) | Per-output sizes read `[256, 0]` — the change output carries no memo |
+
+The fix derives the padded size from `MAX_OUTPUT_MEMO_SIZE` with a compile-time
+assertion, so the asymmetry is **unrepresentable** rather than merely fixed. Two
+pre-existing tests had been *pinning the bug in place* by asserting
+`encrypted.len() == nonce + memo.len() + tag` — i.e. requiring the wire size to
+reveal the memo length.
+
+Three documents that claimed padding already happened were corrected
+(`8adfb5de`), including the hash-locked `constants.rs`, which required a
+deliberate re-lock — the WP-007 gate working as intended on a comment-only edit.
+
+**Still open:** memo *presence* leaks (256 bytes vs an empty field). Closing it
+needs a fixed-size memo field on every output — a consensus rule with a real
+per-transaction size cost, and a separate decision.
+
+## Superseded — the original round-3 write-up of this finding
 
 **Memos are not padded.** WP-014 §3.4 and WP-011 §3.3 both state that honest
 wallets pad memos to the 256-byte cap, sourced from the claim in
