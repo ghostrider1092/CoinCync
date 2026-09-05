@@ -304,6 +304,17 @@ fn mine_block(
             .expect("nonce space exhausted — target unexpectedly hard");
     }
 
+    // Supply commitment (WP-006 §4.4): the chain rejects any block whose header
+    // commitment does not match its own cumulative-supply computation. These
+    // fixtures mine only low heights on testnet, all below FEE_DISTRIBUTION_HEIGHT
+    // (525), so no fees are burned and total_burned is 0. total_minted is the sum
+    // of the emission schedule through this height; genesis seeds the running
+    // total with reward(0), so the sum starts at height 0.
+    let total_minted: u128 = (0..=height)
+        .map(|h| calculate_block_reward(h).as_atomic() as u128)
+        .sum();
+    let supply_commitment = coincync::emission::supply_commitment(height, total_minted, 0);
+
     let header = BlockHeader {
         network_magic: magic,
         version: block_version_at_height(height),
@@ -316,13 +327,28 @@ fn mine_block(
         nonce,
         target,
         miner_pubkey,
-        supply_commitment: [0u8; 32],
+        supply_commitment,
         checkpoint_vote: None,
         spark_set_root: [0u8; 32],
         mw_kernel_root: [0u8; 32],
     };
 
     Block::new(header, transactions)
+}
+
+/// The block's PoW hash — the value the equal-work fork-choice tiebreak orders
+/// on. NOTE: this is deliberately NOT `Block::hash()`. The tiebreak was moved
+/// off the (miner-grindable) block hash onto the PoW hash, so any test that
+/// wants to control which of two equal-work siblings wins must order on THIS.
+fn pow_hash_of(b: &Block) -> Hash {
+    compute_pow_hash(
+        PowAlgorithm::RandomX,
+        &b.header.anchor,
+        b.header.nonce,
+        &b.header.tx_root,
+        b.header.height,
+    )
+    .expect("PoW hash must recompute (build with --features randomx)")
 }
 
 fn diff_block(b: &Block) -> DifficultyBlock {
@@ -472,11 +498,16 @@ fn reorg_tip_double_spend_is_rejected() {
         build_coinbase(12, &filler_spend_pk, &filler_view_pk, claimable_fees(12, fee));
 
     // F12 and B12 have equal cumulative work; the fork-choice tiebreak picks
-    // the lexicographically-SMALLER tip hash. To keep the honest B12 as tip
-    // when F12 is added (so the reorg is driven by F13, not F12), re-mine
-    // F12 with bumped timestamps until F12.hash > B12.hash. Varying F12's
-    // timestamp does NOT change F12's target (its difficulty window excludes
-    // itself), so this is free of consensus side effects.
+    // the lexicographically-SMALLER *PoW* hash (not the block hash — the
+    // tiebreak was moved off the grindable block hash). To keep the honest B12
+    // as tip when F12 is added (so the reorg is driven by F13, not F12), re-mine
+    // F12 with bumped timestamps until F12's PoW hash is LARGER than B12's, so
+    // F12 loses the tiebreak. Varying F12's timestamp does NOT change F12's
+    // target (its difficulty window excludes itself), so this is free of
+    // consensus side effects. (Ordering on block.hash() here made the test flaky:
+    // block-hash order is uncorrelated with PoW-hash order, so F12 won the
+    // tiebreak on ~half of runs and became the tip instead of a side branch.)
+    let b12_pow = pow_hash_of(&b12);
     let mut f12_ts = base_ts + 12 * spacing + 1;
     let f12 = loop {
         let candidate = mine_block(
@@ -488,7 +519,7 @@ fn reorg_tip_double_spend_is_rejected() {
             spend_public,
             magic,
         );
-        if candidate.hash().as_bytes() > b12.hash().as_bytes() {
+        if pow_hash_of(&candidate).as_bytes() > b12_pow.as_bytes() {
             break candidate;
         }
         f12_ts += 1;

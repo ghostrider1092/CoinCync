@@ -108,6 +108,18 @@ pub fn mine_block(
             .expect("nonce space exhausted — target unexpectedly hard");
     }
 
+    // Supply commitment (WP-006 §4.4): the chain rejects any block whose header
+    // commitment does not match its own cumulative-supply computation. These
+    // harnesses are coinbase-only (no fee burns), so total_burned is 0 and
+    // total_minted is just the sum of the emission schedule through this height.
+    // Genesis seeds the running total with reward(0) (see chain.rs init_genesis),
+    // so the sum starts at height 0. Height 0 itself commits to all-zero, which
+    // the shared `supply_commitment` owns — but mine_block only builds height ≥ 1.
+    let total_minted: u128 = (0..=height)
+        .map(|h| calculate_block_reward(h).as_atomic() as u128)
+        .sum();
+    let supply_commitment = coincync::emission::supply_commitment(height, total_minted, 0);
+
     let header = BlockHeader {
         network_magic: magic,
         version: block_version_at_height(height),
@@ -120,7 +132,7 @@ pub fn mine_block(
         nonce,
         target,
         miner_pubkey,
-        supply_commitment: [0u8; 32],
+        supply_commitment,
         checkpoint_vote: None,
         spark_set_root: [0u8; 32],
         mw_kernel_root: [0u8; 32],
