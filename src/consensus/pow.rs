@@ -1114,55 +1114,63 @@ mod randomx_cache {
 
 /// Derive a stable RandomX key from height, bound to the chain's genesis hash.
 ///
-/// AUDIT (R-2 fix, 2026-07-02): the fallback path (when
-/// `bind_randomx_genesis_for_network` was never called) used to
-/// consult `COINCYNC_NETWORK` and default to testnet ENTIRELY
-/// SILENTLY. If a binary forgot to call the bind function (which
-/// happened during the 2026-06-27 rc3 deploy), the whole PoW chain
-/// derived from the wrong genesis and looked like network-wide
-/// invalid-PoW. Now:
-/// 1. The first time the fallback fires, emit an ERROR-level log
-///    (via `std::sync::Once`) so ops see it. Deduplicated so the
-///    hot path isn't flooded, but LOUD once.
-/// 2. Structured `tracing::error!` with the specific reason so the
-///    log is greppable in observability tooling.
-/// 3. Behavior unchanged (still falls back), because panicking here
-///    would kill mining/validation loops mid-block. But the fall-
-///    back is no longer silent, which was the whole R-2 issue.
+/// FAIL-CLOSED (WP-004 §4, 2026-09-05): if `bind_randomx_genesis_for_network`
+/// was never called, PRODUCTION now aborts rather than guessing the genesis.
 ///
-/// See `bind_randomx_genesis_for_network` at L109; the correct call
-/// site is `coincync-node`/`coincync-miner` process startup.
+/// History: the R-2 fix (2026-07-02) made an unbound fallback loud but still
+/// falling back — it consulted `COINCYNC_NETWORK` and defaulted to testnet.
+/// That env-var path is itself the footgun: a mainnet daemon with the var
+/// unset (or set wrong) would derive an ENTIRE chain's PoW from the wrong
+/// genesis and silently mine/validate against the wrong network. A guessed
+/// genesis is never acceptable for consensus, so the fallback is removed:
+/// - Production (`cfg(not(test))`): log FATAL and `std::process::abort()`.
+///   Being unbound is a startup bug that manifests deterministically on the
+///   first hash, so this fails at init, never mid-chain, and can never fork.
+/// - Tests (`cfg(test)`): unit tests exercise PoW without a startup bind step,
+///   so use the testnet genesis deterministically (no env var). Integration
+///   tests that mine call `bind_randomx_genesis_for_network` first and so never
+///   reach this arm.
+///
+/// See `bind_randomx_genesis_for_network` at L109; the correct call site is
+/// `coincync-node` (and any miner) process startup.
 #[cfg(feature = "randomx")]
 fn randomx_key_for_height(height: u64) -> [u8; 32] {
     use crate::primitives::hash_domain;
     let epoch = height / RANDOMX_KEY_EPOCH;
     let genesis_bytes: [u8; 32] = RANDOMX_GENESIS_BYTES.get().copied().unwrap_or_else(|| {
-        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-        WARN_ONCE.call_once(|| {
-            let network_env = std::env::var("COINCYNC_NETWORK")
-                .ok()
-                .unwrap_or_else(|| "<unset>".to_string());
+        #[cfg(test)]
+        {
+            // Test-only: no process-startup bind step. Deterministic testnet
+            // genesis (NO env var). Production aborts in the arm below.
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    target: "consensus_pow",
+                    "randomx genesis unbound in a test build; using testnet genesis"
+                );
+            });
+            crate::testnet::TESTNET_GENESIS_HASH
+        }
+        #[cfg(not(test))]
+        {
             tracing::error!(
                 target: "consensus_pow",
                 event = "randomx_genesis_not_bound",
-                network_env = %network_env,
-                "RANDOMX GENESIS NOT BOUND: bind_randomx_genesis_for_network was \
-                 never called before PoW derivation; falling back to \
-                 COINCYNC_NETWORK env var ('{}'). If this daemon is producing \
-                 rejected blocks, the wrong-genesis fallback is why. Restart the \
-                 binary and ensure bind_randomx_genesis_for_network is invoked \
-                 during process init, BEFORE the first block is mined or verified.",
-                network_env
+                "FATAL: bind_randomx_genesis_for_network was never called before \
+                 PoW derivation. Refusing to derive proof-of-work from an unbound \
+                 (guessed) genesis — that would mine or validate against the wrong \
+                 chain. This is a startup bug: the binary must call \
+                 bind_randomx_genesis_for_network during process init, before the \
+                 first block is mined or verified. Aborting."
             );
-        });
-        let network = std::env::var("COINCYNC_NETWORK")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            // Match `coincync-node`'s default `--network testnet` when unset.
-            .unwrap_or_else(|| "testnet".to_string());
-        match network.as_str() {
-            "testnet" | "regtest" => crate::testnet::TESTNET_GENESIS_HASH,
-            _ => crate::mainnet::MAINNET_GENESIS_HASH,
+            // Also to stderr: the tracing subscriber may not be installed yet at
+            // first-PoW time, and this must reach the operator regardless.
+            eprintln!(
+                "FATAL: RandomX genesis not bound before PoW derivation; aborting \
+                 (see the consensus_pow log). This is a build/startup bug, not a \
+                 runtime condition."
+            );
+            std::process::abort();
         }
     });
 
