@@ -2769,10 +2769,32 @@ async fn cmd_disclose_scoped_view_key(
     println!();
     println!("{}", scoped.to_json());
     println!();
-    println!("⚠ This key contains a VIEW SECRET. It lets the holder see every");
-    println!("  output your wallet received in this height range — and nothing");
-    println!("  outside it. It cannot spend. Share only with the intended auditor,");
-    println!("  who imports it as a read-only view bounded to this height range.");
+    // WP-013 §3.6. The height range is NOT a cryptographic bound: the exported
+    // `view_secret` is this wallet's full view secret, byte-identical no matter
+    // which range is requested (verified live 2026-09-05 — two exports with
+    // ranges 1180..1200 and 1..50 produced the same secret). `from_height` /
+    // `to_height` are honoured by OUR scanner (`disclose scan-scoped`) and by
+    // nothing else; a recipient running their own scanner sees the wallet's
+    // entire history, past and future.
+    //
+    // This warning previously read "…and nothing outside it" — the opposite of
+    // the truth, about an irreversible disclosure. Sharing a view key is a
+    // considered act taken on the strength of exactly this sentence, so it has
+    // to say what the key actually does.
+    println!("⚠ THIS KEY DISCLOSES YOUR ENTIRE VIEW HISTORY — NOT JUST THIS RANGE.");
+    println!();
+    println!("  The height range is a REQUEST, not a cryptographic limit. The key");
+    println!("  material above is your full view secret: a holder who runs their own");
+    println!("  scanner, instead of `disclose scan-scoped`, can decrypt every output");
+    println!("  this wallet has EVER received or will receive. The range is honoured");
+    println!("  only by cooperating software.");
+    println!();
+    println!("  It cannot spend, and it cannot be revoked once shared.");
+    println!();
+    println!("  Share it only with someone you would trust with your whole receive");
+    println!("  history. If you need a bound that holds against an adversarial");
+    println!("  recipient, use a disclosure PROOF instead (`disclose balance`,");
+    println!("  `verify-ownership`) — those are cryptographic; this is not.");
     Ok(())
 }
 
