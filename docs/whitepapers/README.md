@@ -62,6 +62,7 @@ Title · Status · Layer
 | WP-006 | Cumulative-work determinism: why two honest nodes must agree on total work | Shipped |
 | WP-007 | Consensus integrity by build gate: the critical-files hash lock | Shipped |
 | WP-008 | Miner-signed rolling checkpoints (soft finality) | Gated |
+| **WP-009** | **Privacy feature composition: how seven privacy features share one transaction** | Shipped (2 gated exceptions) |
 
 ### Part II — Privacy & wallet
 
