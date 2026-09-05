@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use tracing::{info, warn};
@@ -43,6 +43,8 @@ use coincync::colony::army_ant::{self, BridgeCandidate};
 use coincync::colony::centipede::{self, Leg};
 use coincync::colony::cicada::CicadaSchedule;
 use coincync::colony::forager::{advise, observe_round};
+use coincync::colony::guards::{self, ActionKind, ActionRequest, GuardParams, GuardState, PeerEffect};
+use coincync::colony::honeybee::{self, EvidenceKind, Observation, QuorumParams, Threat};
 use coincync::colony::locust::Locust;
 use coincync::colony::pheromone::PheromoneMap;
 use coincync::colony::sensor::{classify, NetSignal};
@@ -687,6 +689,123 @@ fn castes_observe_report(
     info!("caste/firefly (observe): armed; needs live peer-pulse feed (node integration phase)");
 }
 
+/// The act-phase spine, run over live signals: turn the detection castes'
+/// output into quorum evidence, let honeybee decide whether any threat is
+/// *corroborated* (not just detected by one caste), and — only then — ask the
+/// guards whether the response would be permitted. Logs the verdict; applies
+/// nothing.
+///
+/// This is what makes the per-caste `WOULD do X` logs above safe to eventually
+/// act on: a single caste's detection (e.g. `spider` seeing eclipse-shaped
+/// topology, which an attacker controls) is deliberately NOT enough. Confidence
+/// only rises with independent, cross-dimension corroboration beyond the fault
+/// budget, and even then the diversity floor / rate limit / kill switch stand
+/// between advice and action.
+///
+/// `now` is the caller's clock; `guards` is persistent across ticks so rate
+/// limits and dwell actually span time. `changes no node behavior` — the guard
+/// decision is logged, never enforced (act wiring is a later, reviewed phase).
+/// Wall-clock unix seconds, for the spine's freshness TTL and guard windows.
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn colony_spine_report(
+    adapter: &CoincyncAdapter,
+    fleet: bool,
+    now: u64,
+    guard_state: &mut GuardState,
+) {
+    let qp = QuorumParams::standard();
+    let gp = GuardParams::standard();
+
+    let peers = adapter.fleet_peers();
+    let local_height = adapter.tip_state().map(|t| t.height).unwrap_or(0);
+    let agg = if fleet { adapter.aggregate_fleet_health().ok() } else { None };
+
+    let mut obs: Vec<Observation> = Vec::new();
+
+    // Local vantage (source_group 0): spider's topology signatures and sensor's
+    // fleet classification are each ONE observer on ONE dimension — never enough
+    // alone, by construction.
+    if let Some(a) = &agg {
+        let sigs = spider::assess(&sentinel_reading(a, &peers));
+        if sigs.contains(&ThreatSignature::EclipsePressure) {
+            obs.push(Observation { threat: Threat::Eclipse, kind: EvidenceKind::LocalTopology, source_group: 0, observed_at: now });
+        }
+        if sigs.contains(&ThreatSignature::FloodPattern) {
+            obs.push(Observation { threat: Threat::Flood, kind: EvidenceKind::LocalTopology, source_group: 0, observed_at: now });
+        }
+        if sigs.contains(&ThreatSignature::PartitionOnset) {
+            obs.push(Observation { threat: Threat::Partition, kind: EvidenceKind::LocalTopology, source_group: 0, observed_at: now });
+        }
+        if matches!(classify(a), NetSignal::PartitionSuspected(_)) {
+            obs.push(Observation { threat: Threat::Partition, kind: EvidenceKind::FleetHealth, source_group: 0, observed_at: now });
+        }
+    }
+
+    // Independent per-peer evidence (PeerLiveness dimension). Each fleet host is
+    // a distinct source_group by netgroup, so genuine corroboration across hosts
+    // is what lifts confidence — while spam from one vantage cannot. Unreachable
+    // or divergent hosts are partition evidence.
+    for p in &peers {
+        let group = netgroup_of(&p.rpc_url) as u64 + 1; // +1 so it never collides with vantage 0
+        match adapter.probe_peer(p) {
+            Err(_) => obs.push(Observation { threat: Threat::Partition, kind: EvidenceKind::PeerLiveness, source_group: group, observed_at: now }),
+            Ok(t) if local_height.abs_diff(t.height) > 5 => {
+                obs.push(Observation { threat: Threat::Partition, kind: EvidenceKind::PeerLiveness, source_group: group, observed_at: now })
+            }
+            Ok(_) => {}
+        }
+    }
+
+    let verdicts = honeybee::assess_all(&obs, now, &qp);
+    if verdicts.is_empty() {
+        info!(
+            raw_observations = obs.len(),
+            "colony/spine: no threat reached quorum confidence — nothing would act (single-caste detections are not enough)"
+        );
+        return;
+    }
+
+    for (threat, conf) in verdicts {
+        // The response each threat maps to, and its effect on peer diversity so
+        // the floor can be checked. All Posture actions (subject to max-dwell).
+        let (label, effect) = match threat {
+            Threat::Partition => ("army_ant-bridge", diversity_after_bridge(adapter, &peers)),
+            Threat::Eclipse => ("peer-rotate", diversity_after_bridge(adapter, &peers)),
+            Threat::Flood => ("mantis-escalate", PeerEffect::None),
+        };
+        let req = ActionRequest { label, kind: ActionKind::Posture, confidence: conf, min_confidence: 50, peer_effect: effect };
+        match guards::authorize(&req, guard_state, now, &gp) {
+            Ok(()) => warn!(
+                ?threat, confidence = conf, action = label,
+                "colony/spine: threat corroborated AND guard-authorized — WOULD act (not applied; act wiring is a later phase)"
+            ),
+            Err(reason) => info!(
+                ?threat, confidence = conf, action = label, ?reason,
+                "colony/spine: threat corroborated but guard withheld the response"
+            ),
+        }
+    }
+}
+
+/// Netgroup diversity the peer set would retain after a bridge/rotate response,
+/// as a [`PeerEffect`] for the guard's diversity floor. Conservative: the count
+/// of distinct netgroups among currently-reachable fleet peers.
+fn diversity_after_bridge(adapter: &CoincyncAdapter, peers: &[FleetPeer]) -> PeerEffect {
+    let mut groups: Vec<u16> = Vec::new();
+    for p in peers {
+        if adapter.probe_peer(p).is_ok() {
+            let g = netgroup_of(&p.rpc_url);
+            if !groups.contains(&g) {
+                groups.push(g);
+            }
+        }
+    }
+    PeerEffect::ResultingNetgroups(groups.len() as u32)
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
@@ -721,6 +840,9 @@ fn main() -> anyhow::Result<()> {
     // rounds; --castes-observe gates the whole thing, off by default.
     let mut cicada_sched = CicadaSchedule::new(CICADA_HOUSEKEEPING_BASE_SECS);
     let mut locust = Locust::new();
+    // Persistent across ticks so the guards' rate limits and max-dwell actually
+    // span time rather than resetting every round.
+    let mut guard_state = GuardState::new();
     let castes_active = cli.castes_observe;
     if castes_active {
         info!("biomimetic castes: OBSERVE mode (read-only; each caste logs what it WOULD do, nothing sent)");
@@ -741,6 +863,7 @@ fn main() -> anyhow::Result<()> {
         }
         if castes_active {
             castes_observe_report(&adapter, fleet, &mut cicada_sched, &mut locust);
+            colony_spine_report(&adapter, fleet, unix_now(), &mut guard_state);
         }
         return Ok(());
     }
@@ -779,6 +902,7 @@ fn main() -> anyhow::Result<()> {
         }
         if castes_active {
             castes_observe_report(&adapter, fleet, &mut cicada_sched, &mut locust);
+            colony_spine_report(&adapter, fleet, unix_now(), &mut guard_state);
         }
         // Sleep the interval in small slices so shutdown stays responsive.
         let mut slept = Duration::ZERO;
