@@ -707,8 +707,9 @@ impl AddressManager {
 
 /// UPnP port forwarding (optional)
 pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
-    use igd::aio::search_gateway;
-    use igd::PortMappingProtocol;
+    use igd_next::aio::tokio::search_gateway;
+    use igd_next::PortMappingProtocol;
+    use std::net::SocketAddr;
 
     info!("Attempting UPnP port mapping...");
 
@@ -722,12 +723,12 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
         .await
         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
-    // Add port mapping
+    // Add port mapping. igd-next takes a `SocketAddr` (v4 or v6).
     gateway
         .add_port(
             PortMappingProtocol::TCP,
             external_port,
-            SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), internal_port),
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), internal_port)),
             3600, // 1 hour lease
             "CoinCync",
         )
