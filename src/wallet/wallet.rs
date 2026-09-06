@@ -370,14 +370,38 @@ impl Wallet {
         // `.zeroize()` after deserialization at each sidecar path.
         let utxo_path = self.path.with_extension("utxos");
         if utxo_path.exists() {
-            if let Ok(bytes) = std::fs::read(&utxo_path) {
-                let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
-                if let Ok(utxos) = serde_json::from_slice::<Vec<UTXO>>(&json_bytes) {
-                    for utxo in utxos {
-                        self.balance.add_utxo(utxo);
-                    }
+            // #90 (junbyjun1238): the UTXO sidecar is critical persisted state.
+            // If it exists but can't be read/decrypted/deserialized, we must NOT
+            // keep the advanced `scanned_height` from the main file alongside an
+            // empty UTXO set — that silently hides owned outputs until a manual
+            // rescan. Detect the failure explicitly and reset the scan position
+            // so the next scan re-materializes every output from a safe height.
+            let restored = match std::fs::read(&utxo_path) {
+                Ok(bytes) => {
+                    let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
+                    let ok = match serde_json::from_slice::<Vec<UTXO>>(&json_bytes) {
+                        Ok(utxos) => {
+                            for utxo in utxos {
+                                self.balance.add_utxo(utxo);
+                            }
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                    json_bytes.zeroize();
+                    ok
                 }
-                json_bytes.zeroize();
+                Err(_) => false,
+            };
+            if !restored {
+                tracing::warn!(
+                    "wallet: UTXO sidecar {:?} exists but could not be restored \
+                     (corrupt/unreadable/wrong-password); resetting scan state so \
+                     a full rescan re-discovers owned outputs rather than leaving \
+                     an advanced scanned_height over an empty UTXO set (#90)",
+                    utxo_path
+                );
+                self.scanned_height = 0;
             }
         }
 
@@ -385,14 +409,25 @@ impl Wallet {
         // See R-111 note above; same pattern.
         let history_path = self.path.with_extension("history");
         if history_path.exists() {
+            let mut restored = false;
             if let Ok(bytes) = std::fs::read(&history_path) {
                 let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
                 if let Ok(records) = serde_json::from_slice::<Vec<TransactionRecord>>(&json_bytes) {
                     for record in records {
                         self.history.add(record);
                     }
+                    restored = true;
                 }
                 json_bytes.zeroize();
+            }
+            if !restored {
+                // Non-critical: history is display metadata. Surface it rather
+                // than silently ignoring (#90) — a full scan repopulates it.
+                tracing::warn!(
+                    "wallet: history sidecar {:?} exists but could not be restored; \
+                     transaction history may be incomplete until the next scan (#90)",
+                    history_path
+                );
             }
         }
 
@@ -407,6 +442,7 @@ impl Wallet {
         // R-111 fix: zeroize decrypted plaintext after use.
         let reservations_path = self.path.with_extension("reservations");
         if reservations_path.exists() {
+            let mut restored = false;
             if let Ok(bytes) = std::fs::read(&reservations_path) {
                 let mut json_bytes = Self::decrypt_sidecar(&bytes, password);
                 if let Ok(entries) = serde_json::from_slice::<
@@ -415,8 +451,18 @@ impl Wallet {
                 {
                     self.balance
                         .restore_reservations(entries, self.scanned_height);
+                    restored = true;
                 }
                 json_bytes.zeroize();
+            }
+            if !restored {
+                // Non-critical: stale reservations expire anyway. Surface the
+                // failure instead of ignoring it silently (#90).
+                tracing::warn!(
+                    "wallet: reservations sidecar {:?} exists but could not be \
+                     restored; in-flight reservations were not recovered (#90)",
+                    reservations_path
+                );
             }
         }
 
@@ -1566,6 +1612,36 @@ mod tests {
         assert!(wallet.is_unlocked());
         assert!(!mnemonic.is_empty());
         assert!(path.exists());
+    }
+
+    /// Regression for #90 (junbyjun1238): when the UTXO sidecar exists but can't
+    /// be restored (corrupt/unreadable/wrong-password), `unlock()` must reset the
+    /// scan position rather than keep the advanced `scanned_height` from the main
+    /// file over an empty UTXO set (which silently hides owned outputs).
+    #[test]
+    fn unlock_resets_scan_state_on_corrupt_utxo_sidecar_issue_90() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.wallet");
+        let (mut wallet, _) = Wallet::create(path.clone(), Some("pw"), "testnet").unwrap();
+
+        // Advance the scan height and persist it in the main wallet file.
+        wallet.set_scanned_height(1000);
+        wallet.save(Some("pw")).unwrap();
+        assert_eq!(wallet.scanned_height(), 1000);
+
+        // A corrupt UTXO sidecar sitting next to the wallet.
+        let utxo_path = path.with_extension("utxos");
+        std::fs::write(&utxo_path, b"neither valid ciphertext nor json").unwrap();
+
+        // Reopen + unlock: the advanced scanned_height must be reset to 0 so a
+        // clean rescan re-discovers owned outputs.
+        let mut reopened = Wallet::open(path.clone()).unwrap();
+        reopened.unlock("pw").unwrap();
+        assert_eq!(
+            reopened.scanned_height(),
+            0,
+            "a corrupt UTXO sidecar must reset the scan state (#90)"
+        );
     }
 
     #[test]

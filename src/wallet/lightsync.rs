@@ -229,8 +229,11 @@ impl SyncCheckpoint {
     /// [`CheckpointAuth::Authenticated`]**; [`Unverifiable`](CheckpointAuth::Unverifiable)
     /// and [`Forged`](CheckpointAuth::Forged) must both fall back to a normal
     /// scan (and `Forged` should additionally distrust the peer).
-    pub fn authenticate(&self) -> CheckpointAuth {
-        self.authenticate_against(crate::constants::expected_checkpoint_hash(self.height))
+    pub fn authenticate(&self, network: crate::config::NetworkType) -> CheckpointAuth {
+        self.authenticate_against(crate::constants::expected_checkpoint_hash(
+            network,
+            self.height,
+        ))
     }
 
     /// Core of [`authenticate`](Self::authenticate), split out so the
@@ -508,8 +511,18 @@ impl LightWalletSync {
         found
     }
 
-    /// Scan multiple block digests in parallel using rayon
-    pub fn scan_digests_parallel(&mut self, digests: &[BlockDigest]) -> Vec<DecryptedOutput> {
+    /// Scan multiple block digests in parallel using rayon.
+    ///
+    /// #87 (junbyjun1238): the batch is validated for ordering, height
+    /// contiguity, and `prev_hash` linkage BEFORE anything is scanned or
+    /// `last_scanned` is advanced. A batch that fails validation returns
+    /// `Err(..)` and leaves the scanner's position untouched, so the wallet
+    /// never advances past blocks it hasn't actually scanned.
+    pub fn scan_digests_parallel(
+        &mut self,
+        digests: &[BlockDigest],
+    ) -> Result<Vec<DecryptedOutput>, DigestSequenceError> {
+        validate_digest_sequence(digests)?;
         let start = std::time::Instant::now();
 
         let keys = self.scan_keys.clone();
@@ -550,12 +563,12 @@ impl LightWalletSync {
             .sum::<u64>();
         self.stats.scan_time_ms += start.elapsed().as_millis() as u64;
 
-        // Update position to last digest
+        // Update position to last digest (only reached once the batch validated).
         if let Some(last) = digests.last() {
             self.last_scanned = last.height;
         }
 
-        all_found
+        Ok(all_found)
     }
 
     /// Estimate bandwidth needed for a height range
@@ -568,6 +581,37 @@ impl LightWalletSync {
         let output_bytes = OutputDigest::estimated_size();
         (block_count as usize) * (header_bytes + (avg_outputs_per_block as usize) * output_bytes)
     }
+}
+
+/// Why a supplied `BlockDigest` sequence was rejected (#87). A rejected batch
+/// must not advance the scanner's position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DigestSequenceError {
+    /// Heights are not strictly increasing by exactly 1 (a gap or out-of-order
+    /// digest). `expected` is `prev.height + 1`; `got` is the digest's height.
+    NonContiguous { expected: u64, got: u64 },
+    /// A digest's `prev_hash` does not link to the preceding digest's `hash`.
+    BrokenLink { height: u64 },
+}
+
+/// Validate that a batch of digests is ordered, height-contiguous, and
+/// hash-linked before it is scanned (#87, junbyjun1238). Consecutive digests
+/// must satisfy `cur.height == prev.height + 1` and `cur.prev_hash == prev.hash`.
+/// A single digest (or empty batch) is trivially valid.
+fn validate_digest_sequence(digests: &[BlockDigest]) -> Result<(), DigestSequenceError> {
+    for window in digests.windows(2) {
+        let (prev, cur) = (&window[0], &window[1]);
+        if cur.height != prev.height + 1 {
+            return Err(DigestSequenceError::NonContiguous {
+                expected: prev.height + 1,
+                got: cur.height,
+            });
+        }
+        if cur.prev_hash != prev.hash {
+            return Err(DigestSequenceError::BrokenLink { height: cur.height });
+        }
+    }
+    Ok(())
 }
 
 // =============================================================================
@@ -1051,9 +1095,11 @@ mod tests {
     fn test_parallel_scan() {
         let (view_secret, spend_public) = make_test_keys();
 
-        // Create multiple digests
+        // Create multiple digests, properly hash-linked so the batch passes
+        // sequence validation (#87).
         let mut digests = Vec::new();
         let mut expected_total = 0u64;
+        let mut prev_hash = Hash::from_bytes([0u8; 32]);
 
         for h in 1..=5 {
             let amount = h * 100_000;
@@ -1074,7 +1120,7 @@ mod tests {
                 version: 1,
                 height: h,
                 timestamp: 1000 + h * 30,
-                prev_hash: Hash::from_bytes([0u8; 32]),
+                prev_hash,
                 tx_root: tx.hash(),
                 anchor: Hash::from_bytes([0u8; 32]),
                 algorithm: 0,
@@ -1088,6 +1134,7 @@ mod tests {
             };
 
             let block = Block::new(header, vec![tx]);
+            prev_hash = block.hash();
             digests.push(BlockDigest::from_block(&block));
             expected_total += amount;
         }
@@ -1095,12 +1142,104 @@ mod tests {
         let keys = ScanKeys::new(view_secret, spend_public, 0);
         let mut sync = LightWalletSync::new(vec![keys]);
 
-        let found = sync.scan_digests_parallel(&digests);
+        let found = sync
+            .scan_digests_parallel(&digests)
+            .expect("a properly linked, contiguous batch must validate");
         assert_eq!(found.len(), 5);
 
         let total: u64 = found.iter().map(|o| o.amount).sum();
         assert_eq!(total, expected_total);
         assert!(found.iter().all(|output| output.output_locator.is_some()));
+    }
+
+    /// Build a hash-linked digest at `height` with the given `prev_hash` (#87 tests).
+    fn mk_digest(
+        height: u64,
+        prev_hash: Hash,
+        view_secret: &SecretKey,
+        spend_public: &PublicKey,
+    ) -> BlockDigest {
+        let (output, _) = create_test_output(view_secret, spend_public, 100_000, 0);
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![output],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height,
+            timestamp: 1000 + height * 30,
+            prev_hash,
+            tx_root: tx.hash(),
+            anchor: Hash::from_bytes([0u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: *spend_public,
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        BlockDigest::from_block(&Block::new(header, vec![tx]))
+    }
+
+    /// #87 (junbyjun1238): a batch with a height gap must be rejected and must
+    /// NOT advance `last_scanned`.
+    #[test]
+    fn scan_digests_parallel_rejects_gap_issue_87() {
+        let (vs, sp) = make_test_keys();
+        let d1 = mk_digest(100, Hash::from_bytes([0u8; 32]), &vs, &sp);
+        let d3 = mk_digest(102, d1.hash, &vs, &sp); // skips height 101
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(vs, sp, 0)]);
+        let res = sync.scan_digests_parallel(&[d1, d3]);
+        assert!(
+            matches!(
+                res,
+                Err(DigestSequenceError::NonContiguous {
+                    expected: 101,
+                    got: 102
+                })
+            ),
+            "a gap must be rejected"
+        );
+        assert_eq!(sync.last_scanned, 0, "position must not advance on rejection");
+    }
+
+    /// #87: a batch whose `prev_hash` does not link the preceding digest's hash
+    /// must be rejected.
+    #[test]
+    fn scan_digests_parallel_rejects_broken_link_issue_87() {
+        let (vs, sp) = make_test_keys();
+        let d1 = mk_digest(1, Hash::from_bytes([0u8; 32]), &vs, &sp);
+        let d2 = mk_digest(2, Hash::from_bytes([0xAB; 32]), &vs, &sp); // wrong prev_hash
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(vs, sp, 0)]);
+        let res = sync.scan_digests_parallel(&[d1, d2]);
+        assert!(
+            matches!(res, Err(DigestSequenceError::BrokenLink { height: 2 })),
+            "a broken prev_hash link must be rejected"
+        );
+        assert_eq!(sync.last_scanned, 0);
+    }
+
+    /// #87: an out-of-order batch must be rejected.
+    #[test]
+    fn scan_digests_parallel_rejects_out_of_order_issue_87() {
+        let (vs, sp) = make_test_keys();
+        let d2 = mk_digest(2, Hash::from_bytes([0u8; 32]), &vs, &sp);
+        let d1 = mk_digest(1, d2.hash, &vs, &sp);
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(vs, sp, 0)]);
+        let res = sync.scan_digests_parallel(&[d2, d1]); // heights 2 then 1
+        assert!(matches!(
+            res,
+            Err(DigestSequenceError::NonContiguous { .. })
+        ));
+        assert_eq!(sync.last_scanned, 0);
     }
 
     #[test]
@@ -1182,7 +1321,10 @@ mod tests {
             1,
             Hash::from_bytes([4u8; 32]),
         );
-        assert_ne!(cp.authenticate(), CheckpointAuth::Authenticated);
+        assert_ne!(
+            cp.authenticate(crate::config::NetworkType::Testnet),
+            CheckpointAuth::Authenticated
+        );
     }
 
     #[test]
