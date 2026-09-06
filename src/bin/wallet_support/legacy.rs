@@ -104,6 +104,22 @@ enum Command {
         /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
+        /// Emit a single JSON object instead of human-readable lines.
+        /// Stable machine-readable interface for the GUI / tooling — avoids
+        /// fragile scraping of the display format.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Decode a CoinCync address string into its spend/view public keys.
+    /// Stateless — no wallet required. The GUI uses this to resolve a
+    /// recipient address to raw pubkeys before `send`.
+    AddressInfo {
+        /// The address to decode (tCYNC… / CYNC…).
+        address: String,
+        /// Emit a single JSON object instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show balance snapshot from the wallet file (does NOT resync).
@@ -501,6 +517,9 @@ async fn main() {
                 .unwrap_or_else(|_| cli.log_level.parse().unwrap()),
         )
         .with_target(false)
+        // Diagnostics go to stderr; stdout is reserved for command output so
+        // `--json` (and any machine consumer) gets a clean, parseable stream.
+        .with_writer(std::io::stderr)
         .init();
 
     let network = match cli.network.as_str() {
@@ -523,7 +542,10 @@ async fn main() {
         }
         Command::Open { password } => cmd_open(&wallet_path, password).await,
         Command::Info { password } => cmd_info(&wallet_path, password, &cli.node, network).await,
-        Command::Address { password } => cmd_address(&wallet_path, password, network).await,
+        Command::Address { password, json } => {
+            cmd_address(&wallet_path, password, network, json).await
+        }
+        Command::AddressInfo { address, json } => cmd_address_info(&address, json),
         Command::Balance { password } => cmd_balance(&wallet_path, password).await,
         Command::ShowSeed { password } => cmd_show_seed(&wallet_path, password).await,
         Command::Scan {
@@ -1058,6 +1080,7 @@ async fn cmd_address(
     path: &PathBuf,
     password: Option<String>,
     network: Network,
+    json: bool,
 ) -> Result<(), String> {
     if !wallet_exists(path) {
         return Err(format!("no wallet at {:?}", path));
@@ -1077,15 +1100,61 @@ async fn cmd_address(
     };
     let addr =
         coincync::primitives::Address::new(prim_network, epoch.spend_public, epoch.view_public);
-    println!("Address:       {}", addr);
-    println!(
-        "Spend public:  {}",
-        hex::encode(epoch.spend_public.as_bytes())
-    );
-    println!(
-        "View public:   {}",
-        hex::encode(epoch.view_public.as_bytes())
-    );
+    let spend_public = hex::encode(epoch.spend_public.as_bytes());
+    let view_public = hex::encode(epoch.view_public.as_bytes());
+
+    if json {
+        // Stable machine-readable interface (consumed by the GUI). Field names
+        // are part of the contract — do not rename without updating callers.
+        let out = serde_json::json!({
+            "address": addr.to_string(),
+            "spend_public": spend_public,
+            "view_public": view_public,
+        });
+        println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    } else {
+        println!("Address:       {}", addr);
+        println!("Spend public:  {}", spend_public);
+        println!("View public:   {}", view_public);
+    }
+    Ok(())
+}
+
+/// Decode an address string into its component public keys. Stateless — no
+/// wallet is opened. Human output keeps the "Spend public:" / "View public:"
+/// lines for backward compatibility; `--json` is the stable machine interface.
+fn cmd_address_info(address: &str, json: bool) -> Result<(), String> {
+    use std::str::FromStr;
+    let addr = coincync::primitives::Address::from_str(address)
+        .map_err(|e| format!("invalid address: {}", e))?;
+    let spend = hex::encode(addr.spend_public_key.as_bytes());
+    let view = hex::encode(addr.view_public_key.as_bytes());
+    let network = format!("{:?}", addr.network).to_lowercase();
+    let atype = format!("{:?}", addr.address_type);
+    let payment_id = addr.payment_id.map(hex::encode);
+
+    if json {
+        // Stable machine interface (consumed by the GUI). Field names are part
+        // of the contract — do not rename without updating callers.
+        let out = serde_json::json!({
+            "address": address,
+            "network": network,
+            "address_type": atype,
+            "spend_public": spend,
+            "view_public": view,
+            "payment_id": payment_id,
+        });
+        println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    } else {
+        println!("Address:       {}", address);
+        println!("Network:       {}", network);
+        println!("Type:          {}", atype);
+        println!("Spend public:  {}", spend);
+        println!("View public:   {}", view);
+        if let Some(pid) = payment_id {
+            println!("Payment ID:    {}", pid);
+        }
+    }
     Ok(())
 }
 
