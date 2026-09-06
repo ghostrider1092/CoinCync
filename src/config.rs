@@ -219,13 +219,14 @@ impl NetworkType {
         }
     }
 
-    /// Height of the `MIN_OUTPUT_AGE` 10→100 hard fork. `u64::MAX` means the
-    /// fork never activates (output age stays 10).
+    /// Height of the `MIN_OUTPUT_AGE` 10→100 hard fork. Mainnet activates at
+    /// genesis (0); testnet/regtest activate at block 5,000 (the v2.0.0-testnet
+    /// scheduled fork, ≈7 days past the 2026-09-04 genesis reset).
     /// (constants::MIN_OUTPUT_AGE_HARDFORK_HEIGHT)
     pub const fn min_output_age_hardfork_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => 0,
-            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+            NetworkType::Testnet | NetworkType::Regtest => 5_000,
         }
     }
 

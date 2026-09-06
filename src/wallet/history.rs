@@ -538,10 +538,10 @@ mod tests {
         assert_eq!(record.direction, TxDirection::Incoming);
         assert_eq!(record.block_height, block_height);
         // unlock_height = block_height + min_output_age_at_height(block_height).
-        // Pre-fork (testnet placeholder MIN_OUTPUT_AGE_HARDFORK_HEIGHT=u64::MAX)
-        // this is 100 + 10 = 110. Mainnet (HARDFORK_HEIGHT=0) it's 100 + 100 = 200.
-        // Computing from the helper keeps the test correct on both feature
-        // configurations and on whatever activation height we eventually set.
+        // This block_height is below the testnet fork height (5000), so testnet
+        // resolves the pre-fork age 10 (100 + 10 = 110); mainnet (HARDFORK_HEIGHT=0)
+        // resolves 100 (100 + 100 = 200). Computing from the helper keeps the test
+        // correct on both feature configurations.
         let expected_unlock =
             block_height + crate::constants::min_output_age_at_height(block_height);
         assert_eq!(record.unlock_height, expected_unlock);
