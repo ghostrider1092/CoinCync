@@ -661,12 +661,22 @@ impl Mempool {
             let mut simulated = self.current_size.saturating_sub(replaced_freed);
             if simulated + size > self.max_size {
                 let mut attempts = 0usize;
-                for (_, cand_hash) in self.by_fee.iter() {
+                for (&(cand_fee_rate, _), cand_hash) in self.by_fee.iter() {
                     if simulated + size <= self.max_size || attempts >= MAX_EVICTION_ATTEMPTS {
                         break;
                     }
                     if to_replace.contains(cand_hash) {
                         continue; // already counted in replaced_freed above
+                    }
+                    // #88 fix: never evict a resident whose fee rate is >= the
+                    // incoming tx's. `by_fee` is ascending, so once a candidate's
+                    // rate reaches the incoming rate, no cheaper candidate
+                    // remains — stop, and let the fit check below reject if we
+                    // still can't make room. Without this, a tx that merely meets
+                    // the fullness-based dynamic minimum could evict strictly
+                    // higher-fee-rate transactions, degrading mempool fee quality.
+                    if cand_fee_rate >= new_fee_rate {
+                        break;
                     }
                     if let Some(e) = self.transactions.get(cand_hash) {
                         simulated = simulated.saturating_sub(e.size);
