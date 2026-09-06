@@ -2,6 +2,26 @@
 
 All notable changes to CoinCync are recorded here.
 
+## 2026-09-06 — Final testnet preparation (`v2.0.0-testnet`)
+
+Release-engineering and readiness work ahead of the final public testnet (the
+2.0.0 mainnet code built with testnet consensus params).
+
+- **Fixed — Linux release binaries carried the wrong consensus params on
+  testnet tags.** The reproducible Docker path (`docker/builder.Dockerfile` via
+  `scripts/build-in-docker.sh`) built DEFAULT (mainnet) features and never
+  threaded `testnet`, so a `*-testnet` tag would have shipped Linux binaries
+  with **mainnet** consensus constants. The build now branches on a
+  `BUILD_TESTNET` arg: `coincync-node`/`coincync-wallet` build with
+  `--features "randomx testnet"` and the miner via `coincync-rig`'s forwarding
+  `testnet` feature. The mainnet path is unchanged and remains byte-for-byte
+  reproducible. `release.yml` drives it from the tag (`--testnet` when the tag
+  contains `testnet`). Windows/macOS already threaded the feature correctly.
+- **Added — `docs/architecture/MAINNET_LAUNCH_CHECKLIST.md`**, the operator
+  go/no-go runbook (resolves a dangling reference from `src/network/dns_seeds.rs`):
+  seed/DNS provisioning, genesis ceremony, consensus finalization, and release
+  steps for the 2026-10-01 mainnet genesis.
+
 ## 2026-05-18 — Apple-style discipline shift (docs only, no code changes to production)
 
 Internal organizational change to release + roadmap discipline. No protocol changes, no consensus changes, no behavior changes.

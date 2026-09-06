@@ -104,12 +104,32 @@ RUN if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
 # refuses to even read it. We use --locked so a stale lockfile errors
 # loudly instead of silently fetching a different version.
 #
-# Default features only. The audit / supply-chain claim is about the
-# default release profile, not feature combinations — those are the
-# user's choice.
+# BUILD_TESTNET selects the consensus feature set:
+#   - unset/empty (mainnet, the default): the workspace builds with its
+#     DEFAULT features (`randomx`, no `testnet`). This path is byte-for-byte
+#     IDENTICAL to every prior reproducible release — do not change it.
+#   - "1" (testnet): the two consensus binaries (`coincync-node`,
+#     `coincync-wallet`) build with `--features "randomx testnet"`, and the
+#     miner links the parent `testnet` feature via `coincync-rig`'s own
+#     `testnet = ["coincync/testnet"]` forward. Without this, a `*-testnet`
+#     tag would ship binaries carrying MAINNET consensus constants.
+#     `cyncswap`/`coord` define no `testnet` feature (network is a runtime
+#     arg for them), so they build the same either way.
+#
+# The audit / supply-chain claim is about the default (mainnet) release
+# profile; a testnet build is reproduced with the matching
+# `--build-arg BUILD_TESTNET=1` (see scripts/build-in-docker.sh --testnet).
+ARG BUILD_TESTNET=""
 RUN . /src/.source_date_epoch && \
     export SOURCE_DATE_EPOCH && \
-    cargo build --release --workspace --locked --bins && \
+    if [ -n "$BUILD_TESTNET" ]; then \
+        cargo build --release --locked --features "randomx testnet" \
+            --bin coincync-node --bin coincync-wallet && \
+        cargo build --release --locked -p coincync-rig --features testnet && \
+        cargo build --release --locked -p coincync-swap --bin cyncswap ; \
+    else \
+        cargo build --release --workspace --locked --bins ; \
+    fi && \
     cargo build --release --locked \
         -p coincync-frost-coordinator \
         --features "server cli" \
