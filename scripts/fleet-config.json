@@ -1,68 +1,65 @@
 {
-  "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node listed here will have every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) run scripts/sync-fleet-config.sh, (3) verify every node converges. See docs/operations/fleet-config.md (TODO) for the runbook.",
-  "_last_changed": "2026-07-12 — killed randomx2 (dead 2d), added random-2 (149.28.173.29 Sydney) as replacement miner; fleet-wide --external-ip added (was missing -> self-dials + IPv6 advertising = connection starvation).",
+  "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node in `nodes` has every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) keep TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs) in sync with the seed/relay-role entries here, (3) run scripts/sync-fleet-config.sh, (4) verify every node converges. See docs/operations/fleet-config.md for the runbook.",
+  "_last_changed": "2026-09-06 — consolidated to Hetzner. The entire Vultr fleet (seed1/2/3, explorer, api, miners, relays) was decommissioned (unreachable since 2026-07-27) and is moved to `deactivated`. The single live public seed is the Hetzner box 2.28.1.75:28080, matching TESTNET_SEED_NODES / TESTNET_FALLBACK. The residential home node stays DNS-only (privacy) and is intentionally not listed here. Append additional Hetzner boxes as the fleet is re-provisioned.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
-  "_rpc_bind_policy": "Per-host RPC bind address. 127.0.0.1 means loopback-only (RPC only reachable from localhost; safer default; assumes nginx or stunnel for any public exposure). 0.0.0.0 means listen on all interfaces (public RPC). Keep loopback unless the host is intentionally serving public RPC (api node has nginx; seed1/seed2 historically served fleet members directly).",
+  "_rpc_bind_policy": "Per-host RPC bind address. 127.0.0.1 means loopback-only (RPC only reachable from localhost; safer default; assumes nginx or stunnel for any public exposure). 0.0.0.0 means listen on all interfaces (public RPC). Keep loopback unless the host is intentionally serving public RPC behind nginx.",
   "nodes": {
     "seed1": {
-      "ip": "216.128.156.239",
-      "rpc_bind": "0.0.0.0",
-      "role": "seed",
-      "notes": "Vultr 4 vCPU / 7.2 GB / 150 GB. Re-provisioned 2026-06-26 as upgrade from the 1 vCPU box at 104.207.140.83 (which was itself a 2026-06-25 replacement for the OOM-cycled 4 GB 66.135.23.193). 4 vCPU drains gossip backlogs faster. Public-facing via api.coincync.network nginx upstream."
-    },
-    "seed2": {
-      "ip": "140.82.57.168",
-      "rpc_bind": "0.0.0.0",
-      "role": "seed",
-      "notes": "Vultr."
-    },
-    "seed3": {
-      "ip": "45.32.251.6",
+      "ip": "2.28.1.75",
       "rpc_bind": "127.0.0.1",
       "role": "seed",
-      "notes": "Vultr 3.3GB. Re-provisioned 2026-06-18 after the original 207.148.111.76 host-key rotation issue; new IP. RPC loopback-only — seed role doesn't need exposed RPC."
-    },
-    "explorer": {
-      "ip": "207.148.6.50",
-      "rpc_bind": "127.0.0.1",
-      "role": "explorer",
-      "notes": "Vultr. Runs the public block-explorer frontend. RPC loopback-only — frontend proxies via local nginx."
-    },
-    "api": {
-      "ip": "95.179.165.225",
-      "rpc_bind": "0.0.0.0",
-      "role": "api",
-      "notes": "Vultr. Hosts the public api.coincync.network nginx reverse proxy + faucet + frost-coord."
-    },
-    "randomx": {
-      "ip": "173.199.93.21",
-      "rpc_bind": "127.0.0.1",
-      "role": "miner",
-      "notes": "Vultr 4 vCPU / 7.2 GB / 150 GB. Runs coincync-rig solo-mining at ~520 H/s on 3 threads (v1.0.11.7). Provisioned 2026-06-20 as replacement for the destroyed miner box (149.248.37.11). RPC loopback-only — rig polls from same box. Wallet keys live on operator dev box at C:\\Users\\unkno\\.coincync\\wallets\\miner2.wallet."
-    },
-    "relay1": {
-      "ip": "208.85.17.18",
-      "rpc_bind": "127.0.0.1",
-      "role": "relay",
-      "notes": "Vultr 2 vCPU / 3.3 GB / 94 GB. Provisioned 2026-06-26 as first non-mining gossip-resilience node. Pure coincync-node, no rig. RPC loopback-only — not in public proxy rotation. role=relay treated same as seed by render-systemd-unit.sh (api is the only excluded role)."
-    },
-    "relay2": {
-      "ip": "70.34.250.31",
-      "rpc_bind": "127.0.0.1",
-      "role": "relay",
-      "notes": "Vultr 2 vCPU / 3.3 GB / 75 GB. Provisioned 2026-06-26 as second relay paired with relay1 for gossip redundancy. Different region from relay1. Pure coincync-node, no rig."
-    },
-    "random-2": {
-      "ip": "149.28.173.29",
-      "rpc_bind": "127.0.0.1",
-      "role": "miner",
-      "notes": "Vultr 2 vCPU / 8 GB, Sydney AU (APAC). Provisioned 2026-07-12 as replacement for killed randomx2 (45.32.79.234). Restores second-miner redundancy after that node was connectivity-starved/dead 2+ days. Same payout address as randomx. New /16 + APAC region adds subnet + geo diversity."
+      "notes": "Hetzner (EU) — stable public testnet seed. Sole live public bootstrap node as of 2026-09-06. RPC loopback-only (seed role doesn't need exposed RPC; front with nginx and set rpc_bind 0.0.0.0 only if this box intentionally serves public RPC). Must stay in sync with TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs)."
     }
   },
   "deactivated": {
-    "_description": "Nodes that were once in the fleet but no longer participate. Kept here for historical reference; NOT added to addnode lists. Re-activate by moving back into `nodes` and re-running sync-fleet-config.sh.",
+    "_description": "Nodes that were once in the fleet but no longer participate. Kept for historical reference; NOT added to addnode lists. Re-activate by moving back into `nodes`, syncing the code seed lists, and re-running sync-fleet-config.sh.",
+    "vultr-seed1": {
+      "ip": "216.128.156.239",
+      "role": "seed",
+      "notes": "Vultr 4 vCPU / 7.2 GB. Decommissioned in the 2026-07-27 Vultr fleet teardown; consolidated to Hetzner 2026-09-06. Old IP must not appear in any addnode list or known-hosts entry."
+    },
+    "vultr-seed2": {
+      "ip": "140.82.57.168",
+      "role": "seed",
+      "notes": "Vultr. Decommissioned 2026-07-27; consolidated to Hetzner."
+    },
+    "vultr-seed3": {
+      "ip": "45.32.251.6",
+      "role": "seed",
+      "notes": "Vultr 3.3GB. Decommissioned 2026-07-27; consolidated to Hetzner."
+    },
+    "vultr-explorer": {
+      "ip": "207.148.6.50",
+      "role": "explorer",
+      "notes": "Vultr. Ran the public block-explorer frontend. Decommissioned 2026-07-27."
+    },
+    "vultr-api": {
+      "ip": "95.179.165.225",
+      "role": "api",
+      "notes": "Vultr. Hosted the public api.coincync.network nginx reverse proxy + faucet + frost-coord. Decommissioned 2026-07-27."
+    },
+    "vultr-randomx": {
+      "ip": "173.199.93.21",
+      "role": "miner",
+      "notes": "Vultr 4 vCPU / 7.2 GB. Solo miner. Decommissioned 2026-07-27."
+    },
+    "vultr-relay1": {
+      "ip": "208.85.17.18",
+      "role": "relay",
+      "notes": "Vultr 2 vCPU. Gossip-resilience relay. Decommissioned 2026-07-27."
+    },
+    "vultr-relay2": {
+      "ip": "70.34.250.31",
+      "role": "relay",
+      "notes": "Vultr 2 vCPU. Second relay for gossip redundancy. Decommissioned 2026-07-27."
+    },
+    "vultr-random-2": {
+      "ip": "149.28.173.29",
+      "role": "miner",
+      "notes": "Vultr 2 vCPU / 8 GB, Sydney AU. Second miner for APAC/geo diversity. Decommissioned 2026-07-27."
+    },
     "london": {
       "ip": "TBD",
       "role": "seed",
@@ -71,18 +68,18 @@
     "miner": {
       "ip": "149.248.37.11",
       "role": "miner",
-      "notes": "DESTROYED 2026-06-20 by operator. Original Vultr CPU-optimized 4GB / 2 vCPU AMD EPYC-Turin box. Was the solo miner from 2026-06-15 → 2026-06-20 (5 days). Replaced by `randomx` (173.199.93.21) which has 4 vCPU and 7.2 GB. The old IP must not appear in any addnode list or known-hosts entry."
+      "notes": "DESTROYED 2026-06-20 by operator. Original Vultr solo miner. The old IP must not appear in any addnode list or known-hosts entry."
     },
     "randomx2": {
       "ip": "45.32.79.234",
-      "rpc_bind": "127.0.0.1",
       "role": "miner",
-      "notes": "KILLED 2026-07-12 by operator — dead miner 2+ days (last block Jul 9), connectivity-starved (missing --external-ip -> self-dials, plus box-level flakiness). Replaced by random-2 (149.28.173.29 Sydney). Old IP 45.32.79.234 must NOT appear in any addnode list."
+      "notes": "KILLED 2026-07-12 by operator — dead miner 2+ days, connectivity-starved. The old IP must NOT appear in any addnode list."
     }
   },
   "_history": {
     "seed3_207.148.111.76": "DESTROYED 2026-06-18. Original Vultr seed3 was rotated/decommissioned after the 2026-06-06 host-key change. Replaced by a fresh box at 45.32.251.6. The old IP should not appear in any addnode list or known-hosts entry.",
-    "miner_149.248.37.11": "DESTROYED 2026-06-20. Original solo-miner box. Operator triggered upgrade to a larger spec; new miner is `randomx` at 173.199.93.21 (see nodes). The old IP must not appear in any addnode list or known-hosts entry. Mining wallet was rotated to fresh keys at the same time (see _last_changed).",
-    "seed1_104.207.140.83": "REPLACED 2026-06-26. Provisioned 2026-06-25 as fix for the OOM-cycled 66.135.23.193 box, but the 1 vCPU could not drain gossip backlogs fast enough — by 2026-06-26 02:50 UTC seed1 had 300KB+ send-queue backlogs to multiple peers and public RPC was 34 blocks behind miner. Replaced with 4 vCPU box at 216.128.156.239. The 1 vCPU box should be destroyed."
+    "miner_149.248.37.11": "DESTROYED 2026-06-20. Original solo-miner box. Operator triggered upgrade to a larger spec. The old IP must not appear in any addnode list or known-hosts entry.",
+    "seed1_104.207.140.83": "REPLACED 2026-06-26. The 1 vCPU box could not drain gossip backlogs fast enough; replaced with a 4 vCPU box at 216.128.156.239. The 1 vCPU box should be destroyed.",
+    "vultr_fleet_teardown_2026-07-27": "The entire Vultr fleet (216.128.156.239, 140.82.57.168, 45.32.251.6, 207.148.6.50, 95.179.165.225, 173.199.93.21, 208.85.17.18, 70.34.250.31, 149.28.173.29) went unreachable and was decommissioned. Bootstrap consolidated onto the Hetzner box 2.28.1.75. None of the old IPs may appear in any addnode list or known-hosts entry."
   }
 }
