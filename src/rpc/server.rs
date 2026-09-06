@@ -1439,7 +1439,7 @@ pub async fn start_rpc_server(
         .register_method("get_burn_stats", |_params, state, _ext| {
             let stats = state.chain.stats();
             let height = stats.height;
-            let is_active = height >= crate::constants::FEE_DISTRIBUTION_HEIGHT;
+            let is_active = height >= state.chain.network().fee_distribution_height();
 
             let burn_pct = crate::constants::FEE_BURN_NORMAL_PERCENT;
             let miner_pct = crate::constants::FEE_MINER_NORMAL_PERCENT;
@@ -1458,7 +1458,7 @@ pub async fn start_rpc_server(
 
             Ok::<_, ErrorObjectOwned>(json!({
                 "active": is_active,
-                "activation_height": crate::constants::FEE_DISTRIBUTION_HEIGHT,
+                "activation_height": state.chain.network().fee_distribution_height(),
                 "current_height": height,
                 "miner_pct_normal": miner_pct,
                 "burn_pct_normal": burn_pct,

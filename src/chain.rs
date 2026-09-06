@@ -1637,7 +1637,7 @@ impl Blockchain {
                         // `oh` (its txs were just read above), so its fee-burn is
                         // well-defined. Computed before the stat mutations so the
                         // immutable borrow of `inner.blocks` is released first.
-                        let fee_burn = block_fee_burn(&orphan_block);
+                        let fee_burn = block_fee_burn(self.network, &orphan_block);
                         // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                         //
                         // AUDIT (2026-07-02): third site of the self-defeating supply-
@@ -2128,7 +2128,7 @@ impl Blockchain {
                     inner.stats.total_burned = inner
                         .stats
                         .total_burned
-                        .checked_add(block_fee_burn(&block))
+                        .checked_add(block_fee_burn(self.network, &block))
                         .unwrap_or_else(|| {
                             panic!(
                                 "CONSENSUS CORRUPTION: total_burned overflow on block \
@@ -2344,7 +2344,7 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height >= crate::constants::ROLLING_FINALITY_ENABLE_HEIGHT {
+                    if block.header.height >= self.network.rolling_finality_enable_height() {
                         // CIP-009.D attestations live in the coinbase
                         // transaction's `extra` field. Pre-activation
                         // miners typically have no coinbase or an empty
@@ -2500,7 +2500,7 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height >= crate::constants::ROLLING_FINALITY_ENFORCE_HEIGHT
+                    if block.header.height >= self.network.rolling_finality_enforce_height()
                         && rf.would_reorg_violate_finality(fork_point)
                     {
                         let soft_final = rf.current_soft_final_height().unwrap_or(0);
@@ -2642,6 +2642,7 @@ impl Blockchain {
                                 // in the cache under `oh`; compute its fee-burn
                                 // before mutating stats to release the borrow.
                                 let fee_burn = block_fee_burn(
+                                    self.network,
                                     inner.blocks.get(&oh).expect(
                                         "disconnected block is in cache; its txs were just read",
                                     ),
@@ -2887,7 +2888,7 @@ impl Blockchain {
                         inner.stats.total_burned = inner
                             .stats
                             .total_burned
-                            .checked_add(block_fee_burn(fork_block))
+                            .checked_add(block_fee_burn(self.network, fork_block))
                             .unwrap_or_else(|| {
                                 panic!(
                                     "CONSENSUS CORRUPTION: total_burned overflow on reorg \
@@ -2978,7 +2979,7 @@ impl Blockchain {
                                 let emission = calculate_block_reward(fork_block.header.height);
                                 // Burn accumulator, in lockstep with the supply
                                 // subtract below (undoing this fork block's add).
-                                let fee_burn = block_fee_burn(fork_block);
+                                let fee_burn = block_fee_burn(self.network, fork_block);
                                 // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                                 //
                                 // AUDIT (2026-07-01): the previous error arm zeroed the supply
@@ -3177,7 +3178,7 @@ impl Blockchain {
                             let emission = calculate_block_reward(fork_block.header.height);
                             // Burn accumulator, in lockstep with the supply
                             // subtract below (undoing this fork block's add).
-                            let fee_burn = block_fee_burn(fork_block);
+                            let fee_burn = block_fee_burn(self.network, fork_block);
                             // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                             //
                             // AUDIT (2026-07-02): fourth (and final located) site of
@@ -3298,7 +3299,7 @@ impl Blockchain {
                         inner.stats.total_burned = inner
                             .stats
                             .total_burned
-                            .checked_add(block_fee_burn(&block))
+                            .checked_add(block_fee_burn(self.network, &block))
                             .unwrap_or_else(|| {
                                 panic!(
                                     "CONSENSUS CORRUPTION: total_burned overflow on reorg tip \
@@ -4283,7 +4284,7 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
 ///     `congested = congestion_pct >= CONGESTION_THRESHOLD` — the same
 ///     `size = block.size()` the validator uses.
 ///   * burn = `distribute_fee(total_fees, congested).burned`.
-fn block_fee_burn(block: &Block) -> u128 {
+fn block_fee_burn(network: crate::config::NetworkType, block: &Block) -> u128 {
     let total_fees: crate::primitives::Amount = block
         .transactions
         .iter()
@@ -4292,9 +4293,9 @@ fn block_fee_burn(block: &Block) -> u128 {
         .sum();
 
     // Below activation, or no fees: nothing burned — miner claims all fees.
-    if block.height() < crate::constants::FEE_DISTRIBUTION_HEIGHT
-        || total_fees.as_atomic() == 0
-    {
+    // Runtime-network hardening: resolve the activation height from the runtime
+    // network so burn accounting matches the validator (which does the same).
+    if block.height() < network.fee_distribution_height() || total_fees.as_atomic() == 0 {
         return 0;
     }
 
@@ -4369,6 +4370,15 @@ pub fn create_genesis_block() -> Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Runtime-network hardening: `block_fee_burn` now resolves the activation
+    // height from the network. These tests use `crate::constants::FEE_DISTRIBUTION_HEIGHT`
+    // (the compiled const) as their boundary, so pass the compiled network —
+    // pinned equal to that const by the drift guard in constants.rs.
+    #[cfg(feature = "testnet")]
+    const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Testnet;
+    #[cfg(not(feature = "testnet"))]
+    const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Mainnet;
 
     fn state_for_genesis(block: &Block) -> ChainStateData {
         ChainStateData {
@@ -4973,18 +4983,18 @@ mod tests {
         )
         .burned
         .as_atomic() as u128;
-        assert_eq!(block_fee_burn(&b), expected);
+        assert_eq!(block_fee_burn(TEST_NET, &b), expected);
         // Concrete: 3_000_000 fees × 30% normal burn = 900_000.
-        assert_eq!(block_fee_burn(&b), 900_000);
+        assert_eq!(block_fee_burn(TEST_NET, &b), 900_000);
 
         // Zero fees → nothing burned.
-        assert_eq!(block_fee_burn(&burn_test_block(act + 10, 2, &[])), 0);
-        assert_eq!(block_fee_burn(&burn_test_block(act + 10, 3, &[0])), 0);
+        assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act + 10, 2, &[])), 0);
+        assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act + 10, 3, &[0])), 0);
 
         // Below the activation height miners claim all fees, nothing burned
         // (only reachable when activation > 0 — the testnet feature).
         if act > 0 {
-            assert_eq!(block_fee_burn(&burn_test_block(act - 1, 4, &fees)), 0);
+            assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act - 1, 4, &fees)), 0);
         }
     }
 
@@ -4999,12 +5009,12 @@ mod tests {
         let b2 = burn_test_block(act + 2, 22, &[1_000_000]);
         let b3 = burn_test_block(act + 3, 23, &[4_000_000]);
 
-        let sum = |bs: &[&Block]| -> u128 { bs.iter().map(|b| block_fee_burn(b)).sum() };
+        let sum = |bs: &[&Block]| -> u128 { bs.iter().map(|b| block_fee_burn(TEST_NET, b)).sum() };
 
         // Apply A the way every connect site does: += block_fee_burn.
         let mut stats = ChainStats::default();
         for blk in [&a1, &a2] {
-            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(blk)).unwrap();
+            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(TEST_NET, blk)).unwrap();
         }
         assert_eq!(stats.total_burned, sum(&[&a1, &a2]));
         assert!(stats.total_burned > 0, "chain A must burn something");
@@ -5012,14 +5022,14 @@ mod tests {
         // Reorg: disconnect A in reverse order, then apply B — the exact
         // -=/+= pattern wired at the reorg disconnect/apply sites.
         for blk in [&a2, &a1] {
-            stats.total_burned = stats.total_burned.checked_sub(block_fee_burn(blk)).unwrap();
+            stats.total_burned = stats.total_burned.checked_sub(block_fee_burn(TEST_NET, blk)).unwrap();
         }
         assert_eq!(
             stats.total_burned, 0,
             "apply-then-disconnect must return to the pre-apply value (+=/-= symmetry)"
         );
         for blk in [&b1, &b2, &b3] {
-            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(blk)).unwrap();
+            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(TEST_NET, blk)).unwrap();
         }
         // Reorg-correct: total_burned == Σ burn over the NEW canonical chain,
         // NOT path-dependent on the disconnected A branch.
@@ -5036,15 +5046,20 @@ mod tests {
         // to genesis and assert total_burned returns to 0.
         let chain = Blockchain::new();
         chain.init_genesis().unwrap();
-        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        // Use the CHAIN's runtime network for both the activation height and the
+        // burn computation: block_fee_burn now follows the chain's network, so
+        // the test must too (else it diverges under a feature set where the
+        // compiled network differs from the chain's runtime network).
+        let net = chain.network();
+        let act = net.fee_distribution_height();
         let h1 = act.max(1);
         let h2 = h1 + 1;
         let genesis_hash = chain.tip_hash();
 
         let b1 = burn_test_block(h1, 31, &[3_000_000]);
         let b2 = burn_test_block(h2, 32, &[5_000_000]);
-        let burn1 = block_fee_burn(&b1);
-        let burn2 = block_fee_burn(&b2);
+        let burn1 = block_fee_burn(net, &b1);
+        let burn2 = block_fee_burn(net, &b2);
         assert!(burn1 > 0 && burn2 > 0, "staged blocks must burn fees");
 
         {
@@ -5093,13 +5108,16 @@ mod tests {
         let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
         let genesis_hash = chain.init_genesis().unwrap();
 
-        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        // Resolve activation + burn from the chain's runtime network (Testnet
+        // here), matching what the chain's disconnect path uses.
+        let net = chain.network();
+        let act = net.fee_distribution_height();
         let h1 = act.max(1);
         let h2 = h1 + 1;
         let b1 = burn_test_block(h1, 31, &[3_000_000]);
         let b2 = burn_test_block(h2, 32, &[5_000_000]);
-        let burn1 = block_fee_burn(&b1);
-        let burn2 = block_fee_burn(&b2);
+        let burn1 = block_fee_burn(net, &b1);
+        let burn2 = block_fee_burn(net, &b2);
         let diff1 = calculate_difficulty_from_target(&b1.header.target);
         let diff2 = calculate_difficulty_from_target(&b2.header.target);
         assert!(burn1 > 0 && burn2 > 0, "staged blocks must burn fees");

@@ -249,7 +249,8 @@ pub fn build_block_from_template(
         signal_bits,
     )?;
     let block_size = assembled_block_size(&sizing_coinbase, &mempool_txs);
-    let claimable_fees = claimable_fees_for_block_size(height, total_fees, block_size);
+    let claimable_fees =
+        claimable_fees_for_block_size(fallback_network, height, total_fees, block_size);
     let coinbase = build_coinbase_with_fees(
         height,
         payout_spend_pub,
@@ -318,11 +319,18 @@ fn parse_template_transactions(template: &Value) -> Vec<Transaction> {
 /// Sizing on the mempool alone (omitting the coinbase and header overhead) let a
 /// candidate near `CONGESTION_THRESHOLD` compute a different miner share than the
 /// validator, so the builder overclaimed and the daemon rejected its own block.
-pub fn claimable_fees_for_block_size(height: u64, total_fees: u64, block_size: usize) -> u64 {
+pub fn claimable_fees_for_block_size(
+    network: NetworkType,
+    height: u64,
+    total_fees: u64,
+    block_size: usize,
+) -> u64 {
     if total_fees == 0 {
         return 0;
     }
-    if height < crate::constants::FEE_DISTRIBUTION_HEIGHT {
+    // Runtime-network hardening: resolve the activation height from the runtime
+    // network so the builder and the validator agree regardless of build flags.
+    if height < network.fee_distribution_height() {
         return total_fees;
     }
     let congestion_pct = (block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128;

@@ -649,6 +649,30 @@ pub const FEE_DISTRIBUTION_HEIGHT: u64 = 525;
 #[cfg(not(feature = "testnet"))]
 pub const FEE_DISTRIBUTION_HEIGHT: u64 = 0;
 
+// ── Drift guard (runtime-network hardening) ──────────────────────────────────
+// Consensus-critical call sites now resolve these activation heights from the
+// *runtime* network via `NetworkType::*_height()` (see src/config.rs) so a
+// node and miner built with different features can't silently fork. These
+// compile-time consts remain only as the compiled-network convenience; the
+// asserts below pin each to the runtime resolver's value for the compiled
+// network, so the two definitions can never drift out of sync.
+#[cfg(feature = "testnet")]
+const _: () = {
+    use crate::config::NetworkType::Testnet as N;
+    assert!(FEE_DISTRIBUTION_HEIGHT == N.fee_distribution_height());
+    assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
+    assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
+    assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+};
+#[cfg(not(feature = "testnet"))]
+const _: () = {
+    use crate::config::NetworkType::Mainnet as N;
+    assert!(FEE_DISTRIBUTION_HEIGHT == N.fee_distribution_height());
+    assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
+    assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
+    assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+};
+
 // =============================================================================
 // Ring Size by Height
 // =============================================================================
@@ -716,8 +740,7 @@ pub fn effective_ring_size(height: u64, available_outputs: usize) -> usize {
 /// Mainnet consensus checkpoints. Pre-launch: empty.
 /// Populated post-launch via the release process; each release ships
 /// with checkpoints up to ~2 weeks before the release date.
-#[cfg(not(feature = "testnet"))]
-pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
+pub const MAINNET_CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
     // (height, block_hash_bytes)
     // Empty as of 2026-05-08; populate at first post-launch release.
 ];
@@ -725,11 +748,21 @@ pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
 /// Testnet consensus checkpoints. Empty as of 2026-05-08. Testnet
 /// generally won't carry checkpoints (the chain resets between test
 /// cycles), but the table exists so the validator code path is
-/// exercised on the same data shape mainnet will use.
-#[cfg(feature = "testnet")]
-pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
+/// exercised on the same data shape mainnet will use. Regtest reuses it.
+pub const TESTNET_CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
     // (height, block_hash_bytes)
 ];
+
+/// Compiled-network checkpoint table, kept as the compiled-network default.
+/// Runtime-network hardening: consensus and wallet code resolve the table from
+/// the RUNTIME network via `NetworkType::consensus_checkpoints()`, so a binary
+/// built for one network but run as another uses the correct checkpoints. This
+/// alias is `==` the runtime resolver's value for the compiled network by
+/// construction (it selects the same per-network table).
+#[cfg(not(feature = "testnet"))]
+pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = MAINNET_CONSENSUS_CHECKPOINTS;
+#[cfg(feature = "testnet")]
+pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = TESTNET_CONSENSUS_CHECKPOINTS;
 
 /// Look up the expected block hash at a given height, if a checkpoint
 /// exists for it. Returns None when:
@@ -742,11 +775,15 @@ pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
 ///
 /// Implementation: binary search since the table is sorted by height.
 /// O(log n) where n is the checkpoint count (expected: dozens).
-pub fn expected_checkpoint_hash(height: u64) -> Option<&'static [u8; 32]> {
-    CONSENSUS_CHECKPOINTS
+pub fn expected_checkpoint_hash(
+    network: crate::config::NetworkType,
+    height: u64,
+) -> Option<&'static [u8; 32]> {
+    let table = network.consensus_checkpoints();
+    table
         .binary_search_by_key(&height, |&(h, _)| h)
         .ok()
-        .map(|idx| &CONSENSUS_CHECKPOINTS[idx].1)
+        .map(|idx| &table[idx].1)
 }
 
 // =============================================================================
@@ -815,19 +852,24 @@ pub const ROLLING_FINALITY_ENFORCE_HEIGHT: u64 = 50_000;
 ///   3. Validator/wallet code uses `is_activated(name, h)` to gate
 ///      the new rule.
 ///   4. Document in the corresponding CIP.
-fn activation_height(name: &str) -> Option<u64> {
-    // Per CIP-007 Mode A: the testnet vs mainnet activation heights
-    // can differ. We pick at compile time via the `testnet` feature.
-    #[cfg(feature = "testnet")]
-    let entries: &[(&str, u64)] = &[
+fn activation_height(network: crate::config::NetworkType, name: &str) -> Option<u64> {
+    use crate::config::NetworkType;
+    // Per CIP-007 Mode A: testnet vs mainnet activation heights can differ.
+    // Runtime-network hardening: resolve the table from the RUNTIME network so a
+    // binary built for one network but run as another (or a mismatched
+    // node/miner pair) gates activations consistently. Regtest reuses testnet.
+    let testnet_entries: &[(&str, u64)] = &[
         // Format: (activation_name, testnet_height)
         // Empty as of 2026-05-08 — first activation queued: ring_bump_v2.
     ];
-    #[cfg(not(feature = "testnet"))]
-    let entries: &[(&str, u64)] = &[
+    let mainnet_entries: &[(&str, u64)] = &[
         // Format: (activation_name, mainnet_height)
         // Empty as of 2026-05-08.
     ];
+    let entries = match network {
+        NetworkType::Mainnet => mainnet_entries,
+        NetworkType::Testnet | NetworkType::Regtest => testnet_entries,
+    };
     entries.iter().find(|(n, _)| *n == name).map(|(_, h)| *h)
 }
 
@@ -838,8 +880,8 @@ fn activation_height(name: &str) -> Option<u64> {
 /// means "this rule never activates," which is the correct
 /// fail-safe for a forward-compat code path that hasn't been
 /// scheduled yet).
-pub fn is_activated(name: &str, height: u64) -> bool {
-    match activation_height(name) {
+pub fn is_activated(network: crate::config::NetworkType, name: &str, height: u64) -> bool {
+    match activation_height(network, name) {
         Some(activation_h) => height >= activation_h,
         None => false,
     }
@@ -1216,6 +1258,14 @@ pub const STRICT_RING_MEMBER_HEIGHT: u64 = 100;
 mod tests {
     use super::*;
 
+    // Runtime-network hardening: activation/checkpoint lookups now take the
+    // network. The compiled network's table equals the `CONSENSUS_CHECKPOINTS`
+    // alias, so use it to keep these tests exact.
+    #[cfg(feature = "testnet")]
+    const NET: crate::config::NetworkType = crate::config::NetworkType::Testnet;
+    #[cfg(not(feature = "testnet"))]
+    const NET: crate::config::NetworkType = crate::config::NetworkType::Mainnet;
+
     #[test]
     fn test_supply_cap_is_100m() {
         assert_eq!(TOTAL_SUPPLY_TARGET, 100_000_000);
@@ -1349,7 +1399,7 @@ mod tests {
             "any-random-string",
         ] {
             assert!(
-                activation_height(name).is_none(),
+                activation_height(NET, name).is_none(),
                 "CIP-007 activation '{}' is registered — staged-mainnet plan says \
                  NO activations ship in v1.0. Either remove the entry, or remove \
                  this test in the same PR that schedules it (deliberate two-place \
@@ -1361,7 +1411,7 @@ mod tests {
         // And every height returns false for any name.
         for h in [0u64, 1, 100, 1_000_000, u64::MAX / 2] {
             assert!(
-                !is_activated("any-name", h),
+                !is_activated(NET, "any-name", h),
                 "is_activated MUST return false for unregistered names at every \
                  height — the fail-safe semantics CIP-007 depends on"
             );
@@ -1418,17 +1468,17 @@ mod tests {
         // The production table can be empty (pre-launch); confirm
         // empty-table behavior: every lookup returns None.
         if CONSENSUS_CHECKPOINTS.is_empty() {
-            assert!(expected_checkpoint_hash(0).is_none());
-            assert!(expected_checkpoint_hash(1).is_none());
-            assert!(expected_checkpoint_hash(1_000_000).is_none());
+            assert!(expected_checkpoint_hash(NET, 0).is_none());
+            assert!(expected_checkpoint_hash(NET, 1).is_none());
+            assert!(expected_checkpoint_hash(NET, 1_000_000).is_none());
         } else {
             // If checkpoints exist, the first must be findable.
             let (first_h, _) = CONSENSUS_CHECKPOINTS[0];
-            assert!(expected_checkpoint_hash(first_h).is_some());
+            assert!(expected_checkpoint_hash(NET, first_h).is_some());
             // A height NOT in the table must return None.
             // Pick a height that's clearly between or after entries.
             let last_h = CONSENSUS_CHECKPOINTS[CONSENSUS_CHECKPOINTS.len() - 1].0;
-            assert!(expected_checkpoint_hash(last_h + 1_000_000).is_none());
+            assert!(expected_checkpoint_hash(NET, last_h + 1_000_000).is_none());
         }
     }
 }
