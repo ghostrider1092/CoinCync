@@ -1,4 +1,11 @@
-//! Forward-secret view keys for CoinCync 1.0
+//! Epoch-scoped view keys for CoinCync 1.0
+//!
+//! SECURITY NOTE (naming, M2): these are *epoch-scoped*, NOT forward-secret.
+//! Each epoch's `key_data` is derived deterministically as
+//! `H("COINCYNC_VIEWKEY_v2", view_secret ‖ epoch)`, so compromising the
+//! long-term `view_secret` derives every epoch key, past and future. There is
+//! no ratchet and thus no forward secrecy — treat `view_secret` as the single
+//! root secret it is.
 //!
 //! AUDIT (R-14 SURGICAL FIX, 2026-07-03): `AmountCapped(u64)` and
 //! `SingleUse` are now enforced via `ViewKey::authorize_scan(amount)`
@@ -9,10 +16,11 @@
 //! for AmountCapped (each scan reduces the remaining budget by
 //! the amount it observed). Callers who mint a
 //! `ViewKeyScope::AmountCapped(1_000_000)` and hand it out MUST
-//! use the `authorize_scan` API before decrypting — the deprecated
-//! `is_valid_for_epoch` gate is retained for backward compat with
-//! `EpochOnly` and `TimeRange` callers, but returns false for
-//! the two enforced variants once their budget/use is exhausted.
+//! use the `authorize_scan` API before decrypting — the read-only
+//! `is_valid_for_epoch` gate is retained for `EpochOnly` and
+//! `TimeRange` callers, but now ALWAYS returns false for the two
+//! enforced variants (M2 fix) so it can never be used to authorize a
+//! budgeted key without consuming the budget.
 
 use crate::primitives::{hash_domain, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -26,7 +34,7 @@ pub enum ViewKeyScope {
     SingleUse,
 }
 
-/// Forward-secret view key.
+/// Epoch-scoped view key (see the module note: epoch-scoped, not forward-secret).
 ///
 /// SECURITY (A6-VIEWKEY): `key_data` is excluded from `Serialize` to prevent
 /// accidental exposure in logs, RPC responses, or JSON dumps. The field is
@@ -130,8 +138,9 @@ impl<'de> Deserialize<'de> for ViewKey {
 }
 
 impl ViewKey {
-    /// Derive a forward-secret view key from a wallet's view_secret,
-    /// an epoch, and a scope.
+    /// Derive an epoch-scoped view key from a wallet's view_secret,
+    /// an epoch, and a scope. (Epoch-scoped, not forward-secret — see the
+    /// module note; `view_secret` derives every epoch's key.)
     ///
     /// AUDIT (R-12 fix, 2026-07-02): the pre-fix code did
     ///   `[view_secret.as_bytes().as_slice(), &epoch.to_le_bytes()].concat()`
@@ -178,12 +187,21 @@ impl ViewKey {
         }
     }
 
+    /// Read-only epoch-relevance check.
+    ///
+    /// SECURITY (M2 fix): this cannot authorize the stateful scopes — a
+    /// `&self` check can neither decrement an `AmountCapped` budget nor fire
+    /// the `SingleUse` flag — so for those two variants it returns `false` and
+    /// callers MUST use [`ViewKey::authorize_scan`]. Previously it returned
+    /// `true` while budget remained, so a caller gating on it alone got
+    /// unlimited scans (the budget was never consumed). Use it only for the
+    /// stateless `EpochOnly` / `TimeRange` scopes.
     pub fn is_valid_for_epoch(&self, epoch: u64) -> bool {
         match self.scope {
             ViewKeyScope::EpochOnly(e) => epoch == e,
             ViewKeyScope::TimeRange { start, end } => epoch >= start && epoch <= end,
-            ViewKeyScope::AmountCapped(cap) => epoch == self.epoch && self.consumed_amount < cap,
-            ViewKeyScope::SingleUse => epoch == self.epoch && !self.single_use_fired,
+            // Stateful scopes are not authorizable read-only — force authorize_scan.
+            ViewKeyScope::AmountCapped(_) | ViewKeyScope::SingleUse => false,
         }
     }
 
@@ -278,6 +296,35 @@ mod tests {
         let vk_range = ViewKey::derive(&secret, 3, ViewKeyScope::TimeRange { start: 3, end: 7 });
         assert!(vk_range.is_valid_for_epoch(5));
         assert!(!vk_range.is_valid_for_epoch(8));
+    }
+
+    /// M2 regression: `is_valid_for_epoch` must NOT authorize the stateful
+    /// scopes read-only (it would never consume the budget). Only
+    /// `authorize_scan` gates those, and it enforces the cap / single-use.
+    #[test]
+    fn is_valid_for_epoch_is_failclosed_for_stateful_scopes() {
+        let secret = SecretKey::from_bytes([7u8; 32]);
+
+        // AmountCapped: read-only check is always false, even with budget left.
+        let mut capped = ViewKey::derive(&secret, 4, ViewKeyScope::AmountCapped(1_000));
+        assert!(
+            !capped.is_valid_for_epoch(4),
+            "AmountCapped must not be authorizable read-only"
+        );
+        assert!(capped.authorize_scan(4, 600).is_ok());
+        assert!(
+            capped.authorize_scan(4, 600).is_err(),
+            "second scan exceeds the 1000 budget and must be denied"
+        );
+
+        // SingleUse: read-only check is always false; authorize_scan fires once.
+        let mut single = ViewKey::derive(&secret, 9, ViewKeyScope::SingleUse);
+        assert!(!single.is_valid_for_epoch(9));
+        assert!(single.authorize_scan(9, 1).is_ok());
+        assert!(
+            single.authorize_scan(9, 1).is_err(),
+            "SingleUse must fire exactly once"
+        );
     }
 
     #[test]

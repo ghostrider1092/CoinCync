@@ -289,12 +289,19 @@ pub struct OwnershipProof {
 
 /// Create a proof of ownership for a transaction output.
 ///
+/// SECURITY — anti-replay (M1): this proof is a transferable bearer token. Its
+/// only freshness binding is `message`. For any interactive/authorization use,
+/// the VERIFIER must supply a unique, unpredictable challenge as `message` and
+/// reject a proof that doesn't carry it — otherwise a captured proof can be
+/// replayed to another verifier (or re-presented later) for the same output.
+/// A constant or prover-chosen `message` provides no replay protection.
+///
 /// # Arguments
 /// * `tx_hash` - Hash of the transaction containing the output
 /// * `output_index` - Index of the output
 /// * `stealth_address` - The on-chain stealth address (public key)
 /// * `one_time_secret` - The secret key for this stealth address
-/// * `message` - Challenge message (binds proof to a specific context)
+/// * `message` - Verifier-chosen fresh challenge (see the anti-replay note above)
 pub fn create_ownership_proof(
     tx_hash: &Hash,
     output_index: u8,
@@ -655,11 +662,17 @@ pub struct SourceProof {
 
 /// Create a proof that a key image was generated from your secret key.
 ///
+/// SECURITY — anti-replay (M1): like the ownership proof, this is a
+/// transferable bearer token whose only freshness binding is `message`. For
+/// interactive/authorization use the VERIFIER must supply a unique,
+/// unpredictable challenge as `message` and reject any proof not carrying it;
+/// a constant or prover-chosen `message` gives no replay protection.
+///
 /// # Arguments
 /// * `secret_key` - The secret key x
 /// * `public_key` - The corresponding public key P = x*G
 /// * `key_image` - The key image I = x*H_p(P)
-/// * `message` - Context-binding message
+/// * `message` - Verifier-chosen fresh challenge (see the anti-replay note above)
 pub fn create_source_proof(
     secret_key: &SecretKey,
     public_key: &PublicKey,
@@ -903,8 +916,23 @@ impl DisclosureProof {
         }
     }
 
-    /// Verify the contained proof (dispatches to the appropriate verifier)
-    pub fn verify(&self) -> Result<bool> {
+    /// Verify ONLY that the contained proof is internally cryptographically
+    /// consistent — the range-proof math holds and the Schnorr/DLEQ signatures
+    /// verify.
+    ///
+    /// SECURITY (issues #252 / #253 — H1): this does **not** prove the
+    /// referenced commitment / stealth address / key image is a real output in
+    /// CoinCync's canonical chain. Every such reference is read from
+    /// prover-supplied data, so a prover can produce an internally-consistent
+    /// proof over a commitment they invented. **Never use this result as a
+    /// compliance or trust decision.** For a sound decision, resolve a
+    /// [`ChainAnchor`] from your own trusted chain view and use the
+    /// `verify_*_anchored` functions (or [`DisclosureProof::verify_anchored`]).
+    ///
+    /// The expiry gate below is an advisory convenience only: `expires_at` is
+    /// unauthenticated container metadata (H2) and MUST NOT be relied on as a
+    /// security control.
+    pub fn verify_internal_consistency(&self) -> Result<bool> {
         if self.is_expired() {
             return Ok(false);
         }
@@ -932,6 +960,32 @@ impl DisclosureProof {
                 verify_source_proof(&inner)
             }
         }
+    }
+
+    /// Fail-closed verification entry point.
+    ///
+    /// SECURITY (H1): the previous `verify()` returned an *unanchored* result —
+    /// it would return `Ok(true)` for a cryptographically-consistent proof over
+    /// a commitment / key the prover invented, which is not a sound trust
+    /// decision (issues #252 / #253). To make that footgun unreachable through
+    /// the obvious entry point, this now hard-fails and directs the caller to an
+    /// anchored verifier. If you genuinely only need the offline crypto check,
+    /// call [`DisclosureProof::verify_internal_consistency`] explicitly.
+    #[deprecated(
+        note = "unanchored verification is not a sound trust decision (H1); \
+                use verify_*_anchored with a ChainAnchor, or \
+                verify_internal_consistency() for the offline check only"
+    )]
+    pub fn verify(&self) -> Result<bool> {
+        Err(Error::CryptoError(
+            "DisclosureProof::verify() is unanchored and is not a sound trust \
+             decision (H1, issues #252/#253): a prover can pass it with a \
+             commitment/key they invented. Resolve a ChainAnchor from your own \
+             trusted chain view and use verify_*_anchored, or call \
+             verify_internal_consistency() if you explicitly only need the \
+             offline cryptographic check."
+                .into(),
+        ))
     }
 }
 
@@ -1366,8 +1420,8 @@ mod tests {
         assert_eq!(recovered.proof_type, DisclosureType::Ownership);
         assert_eq!(recovered.prover_label, "test proof");
 
-        // Verify recovered proof
-        assert!(recovered.verify().unwrap());
+        // Verify recovered proof (offline internal-consistency check)
+        assert!(recovered.verify_internal_consistency().unwrap());
     }
 
     #[test]
@@ -1381,7 +1435,7 @@ mod tests {
         let container = DisclosureProof::from_ownership(&ownership, "expired", Some(1)).unwrap();
 
         assert!(container.is_expired());
-        assert!(!container.verify().unwrap());
+        assert!(!container.verify_internal_consistency().unwrap());
     }
 
     #[test]
@@ -1398,7 +1452,7 @@ mod tests {
         tampered.proof_type = DisclosureType::Source;
 
         // Should fail because the inner data is an OwnershipProof, not a SourceProof
-        let result = tampered.verify();
+        let result = tampered.verify_internal_consistency();
         assert!(result.is_err() || !result.unwrap());
     }
 
@@ -1418,7 +1472,7 @@ mod tests {
             "Proof with timestamp=1 should be expired"
         );
         assert!(
-            !container.verify().unwrap(),
+            !container.verify_internal_consistency().unwrap(),
             "Expired proof must fail verification"
         );
 
@@ -1431,7 +1485,7 @@ mod tests {
         let valid_container =
             DisclosureProof::from_ownership(&ownership, "valid", Some(future_ts)).unwrap();
         assert!(!valid_container.is_expired());
-        assert!(valid_container.verify().unwrap());
+        assert!(valid_container.verify_internal_consistency().unwrap());
     }
 
     // ---- Chain anchoring (issues #252 / #253) ----
