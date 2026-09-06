@@ -999,9 +999,19 @@ mod tests {
         let fee = 7_160_000u64;
         let small_block = 1_000usize; // far below the congestion threshold
 
+        // Runtime-network hardening: the builder now resolves the activation
+        // height from the runtime network. Use the network whose resolver equals
+        // the compiled `FEE_DISTRIBUTION_HEIGHT` (pinned equal by the drift guard
+        // in constants.rs) so this test's boundaries stay exact.
+        #[cfg(feature = "testnet")]
+        let net = coincync::config::NetworkType::Testnet;
+        #[cfg(not(feature = "testnet"))]
+        let net = coincync::config::NetworkType::Mainnet;
+        assert_eq!(net.fee_distribution_height(), FEE_DISTRIBUTION_HEIGHT);
+
         // No fees → nothing claimable, regardless of height/size.
         assert_eq!(
-            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, 0, small_block),
+            claimable_fees_for_block_size(net, FEE_DISTRIBUTION_HEIGHT, 0, small_block),
             0
         );
 
@@ -1014,7 +1024,7 @@ mod tests {
 
         // At/after activation, a small block gets the non-congested split.
         assert_eq!(
-            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, fee, small_block),
+            claimable_fees_for_block_size(net, FEE_DISTRIBUTION_HEIGHT, fee, small_block),
             non_congested,
             "small block → non-congested split"
         );
@@ -1025,12 +1035,12 @@ mod tests {
         // must size the block identically.
         let just_below = (CONGESTION_THRESHOLD.saturating_sub(1) as usize * MAX_BLOCK_SIZE) / 100;
         assert_eq!(
-            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, fee, just_below),
+            claimable_fees_for_block_size(net, FEE_DISTRIBUTION_HEIGHT, fee, just_below),
             non_congested,
             "just below threshold → non-congested"
         );
         assert_eq!(
-            claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT, fee, MAX_BLOCK_SIZE),
+            claimable_fees_for_block_size(net, FEE_DISTRIBUTION_HEIGHT, fee, MAX_BLOCK_SIZE),
             congested,
             "a full block → congested split"
         );
@@ -1042,7 +1052,7 @@ mod tests {
         // Before activation the miner claims the WHOLE fee regardless of size.
         if FEE_DISTRIBUTION_HEIGHT > 0 {
             assert_eq!(
-                claimable_fees_for_block_size(FEE_DISTRIBUTION_HEIGHT - 1, fee, MAX_BLOCK_SIZE),
+                claimable_fees_for_block_size(net, FEE_DISTRIBUTION_HEIGHT - 1, fee, MAX_BLOCK_SIZE),
                 fee,
                 "below activation the miner claims the full fee, no burn"
             );
