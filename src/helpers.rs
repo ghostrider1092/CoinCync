@@ -95,11 +95,24 @@ impl RateLimiter {
         }
     }
 
-    /// Wait until operation is allowed
-    // L-8: TODO — replace busy-wait with tokio::time::Interval or governor crate.
+    /// Wait until an operation is allowed.
+    ///
+    /// #89 (junbyjun1238): rather than polling `try_acquire()` every 10ms, when
+    /// the current 1-second window is exhausted this sleeps until that window
+    /// resets (`window_start + 1s`) and then retries. That's the earliest moment
+    /// a slot can free up, so it wakes at most once or twice per wait instead of
+    /// ~100 times/second. `try_acquire`'s behavior is unchanged.
     pub async fn acquire(&mut self) {
-        while !self.try_acquire() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        loop {
+            if self.try_acquire() {
+                return;
+            }
+            // The window is full (and, since `try_acquire` resets an elapsed
+            // window, not yet elapsed) — the next slot opens at the reset point.
+            let reset_at = self.window_start + Duration::from_secs(1);
+            let wait = reset_at.saturating_duration_since(Instant::now());
+            // A 1ms floor keeps the loop cooperative if we wake a hair early.
+            tokio::time::sleep(wait.max(Duration::from_millis(1))).await;
         }
     }
 }
@@ -247,6 +260,25 @@ mod tests {
         assert!(limiter.try_acquire());
         assert!(limiter.try_acquire());
         assert!(!limiter.try_acquire()); // Should be rate limited
+    }
+
+    /// #89 (junbyjun1238): `acquire()` blocks when the window is exhausted and
+    /// resumes once the 1-second window resets — without busy-polling. This
+    /// exercises the async waiting path: the first two calls pass immediately,
+    /// and the third must wait roughly until the window resets.
+    #[tokio::test]
+    async fn acquire_waits_for_window_reset_issue_89() {
+        let mut limiter = RateLimiter::new(2);
+        limiter.acquire().await; // 1/2 — immediate
+        limiter.acquire().await; // 2/2 — immediate
+        let before = std::time::Instant::now();
+        limiter.acquire().await; // must block until the ~1s window resets
+        let waited = before.elapsed();
+        assert!(
+            waited >= Duration::from_millis(500),
+            "rate-limited acquire should wait for the window to reset, waited {:?}",
+            waited
+        );
     }
 
     #[test]
