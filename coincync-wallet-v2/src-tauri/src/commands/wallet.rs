@@ -63,12 +63,17 @@ pub(crate) fn validate_address(
         s.wallet_bin.clone()
     };
 
-    match wallet_cli(&bin, &["address-info", &addr], "") {
+    match wallet_cli(&bin, &["address-info", &addr, "--json"], "") {
         Ok(info) => {
-            let lower = info.to_lowercase();
-            let addr_type = if lower.contains("integrated") {
+            // Read the address type from the stable JSON field rather than
+            // substring-matching the whole display output.
+            let atype = serde_json::from_str::<serde_json::Value>(info.trim())
+                .ok()
+                .and_then(|v| v["address_type"].as_str().map(|s| s.to_lowercase()))
+                .unwrap_or_default();
+            let addr_type = if atype.contains("integrated") {
                 "integrated"
-            } else if lower.contains("subaddress") {
+            } else if atype.contains("subaddress") {
                 "subaddress"
             } else {
                 "stealth"

@@ -62,23 +62,25 @@ pub(crate) fn send_transaction(
     // FIX #35: Get spend and view keys from the address and fail closed if parsing fails.
     // The wallet CLI 'send' command needs --to-spend and --to-view as hex public keys.
     let (spend_hex, view_hex) = if params.to.starts_with("tCYNC") || params.to.starts_with("CYNC") {
-        let info = wallet_cli(&bin, &["address-info", &params.to], "")
+        // Parse the CLI's stable `--json` interface instead of scraping display
+        // text — robust to output-format changes and log noise.
+        let info = wallet_cli(&bin, &["address-info", &params.to, "--json"], "")
             .map_err(WalletError::from_cli_error)?;
-        let spend = info
-            .lines()
-            .find(|l| l.contains("Spend"))
-            .and_then(|l| l.split_whitespace().last())
-            .map(|s| s.to_string())
-            .ok_or_else(|| WalletError::InvalidAddress {
-                reason: "address-info output missing spend key".into(),
+        let parsed: serde_json::Value =
+            serde_json::from_str(info.trim()).map_err(|e| WalletError::InvalidAddress {
+                reason: format!("address-info: could not parse JSON ({e})"),
             })?;
-        let view = info
-            .lines()
-            .find(|l| l.contains("View"))
-            .and_then(|l| l.split_whitespace().last())
+        let spend = parsed["spend_public"]
+            .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| WalletError::InvalidAddress {
-                reason: "address-info output missing view key".into(),
+                reason: "address-info JSON missing spend_public".into(),
+            })?;
+        let view = parsed["view_public"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| WalletError::InvalidAddress {
+                reason: "address-info JSON missing view_public".into(),
             })?;
         (spend, view)
     } else {
