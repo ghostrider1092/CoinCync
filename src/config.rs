@@ -198,6 +198,80 @@ impl NetworkType {
         self.params().data_dir_name
     }
 
+    // ── Consensus activation heights (runtime-network-resolved) ──────────
+    //
+    // These heights differ per network. They MUST be resolved from the
+    // *runtime* network (this enum), never from a compile-time `#[cfg(feature)]`
+    // constant: the daemon selects its network at runtime via `--network`, so a
+    // binary compiled for one network but run as another — or a node and miner
+    // built with different features — would otherwise silently disagree and
+    // fork. Regtest mirrors testnet's schedule (regtest is a local test
+    // network). The compile-time consts in `constants.rs` are kept only as the
+    // compiled-network convenience/default; a `const _` drift-guard there pins
+    // each to the matching value below.
+
+    /// Height at which the miner/burn fee split is enforced. Before it, the
+    /// coinbase may claim all fees. (constants::FEE_DISTRIBUTION_HEIGHT)
+    pub const fn fee_distribution_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 0,
+            NetworkType::Testnet | NetworkType::Regtest => 525,
+        }
+    }
+
+    /// Height of the `MIN_OUTPUT_AGE` 10→100 hard fork. `u64::MAX` means the
+    /// fork never activates (output age stays 10).
+    /// (constants::MIN_OUTPUT_AGE_HARDFORK_HEIGHT)
+    pub const fn min_output_age_hardfork_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 0,
+            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+        }
+    }
+
+    /// Height at which rolling-finality attestations begin being recorded.
+    /// (constants::ROLLING_FINALITY_ENABLE_HEIGHT)
+    pub const fn rolling_finality_enable_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 25_000,
+            NetworkType::Testnet | NetworkType::Regtest => 50_000,
+        }
+    }
+
+    /// Height at which the rolling-finality reorg rule is enforced.
+    /// (constants::ROLLING_FINALITY_ENFORCE_HEIGHT)
+    pub const fn rolling_finality_enforce_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 50_000,
+            NetworkType::Testnet | NetworkType::Regtest => 75_000,
+        }
+    }
+
+    /// Minimum age (in blocks) a ring-member/decoy output must have, resolved
+    /// from the runtime network. Mirrors `constants::min_output_age_at_height`
+    /// but keyed on this network's hard-fork height rather than the compile-time
+    /// one, so a node and miner built with different features agree.
+    pub const fn min_output_age(&self, height: u64) -> u64 {
+        if height < self.min_output_age_hardfork_height() {
+            crate::constants::MIN_OUTPUT_AGE
+        } else {
+            crate::constants::MIN_OUTPUT_AGE_POST_FORK
+        }
+    }
+
+    /// The consensus-checkpoint table for this network, resolved at runtime so a
+    /// binary built for one network but run as another uses the correct
+    /// checkpoints. Regtest reuses testnet's (empty) table. Both tables are
+    /// empty pre-launch; mainnet is populated via the release process.
+    pub const fn consensus_checkpoints(&self) -> &'static [(u64, [u8; 32])] {
+        match self {
+            NetworkType::Mainnet => crate::constants::MAINNET_CONSENSUS_CHECKPOINTS,
+            NetworkType::Testnet | NetworkType::Regtest => {
+                crate::constants::TESTNET_CONSENSUS_CHECKPOINTS
+            }
+        }
+    }
+
     /// 4-byte magic identifier stamped into every P2P message and block header.
     /// Different per network so testnet blocks/messages are rejected instantly
     /// on mainnet (and vice versa) before any expensive validation.

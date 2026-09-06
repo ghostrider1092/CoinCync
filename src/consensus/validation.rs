@@ -187,7 +187,7 @@ pub fn validate_block_with_checkpoint_for_network(
     if !check_block_network_magic(block, expected_network, &mut result) {
         return Ok(result);
     }
-    if !check_block_consensus_checkpoint(block, &mut result) {
+    if !check_block_consensus_checkpoint(expected_network, block, &mut result) {
         return Ok(result);
     }
 
@@ -297,7 +297,11 @@ pub fn validate_block_with_checkpoint_for_network(
     // tripping any validation. With `checked_add`, the overflow is rejected
     // outright via `Error::AmountOverflow`, classified by the IronConsensus
     // classifier as `IronVerdict::Bad`, and the peer is struck.
-    let max_coinbase = if block.height() >= crate::constants::FEE_DISTRIBUTION_HEIGHT
+    // Runtime-network hardening: resolve the fee-distribution activation height
+    // from `expected_network` (the runtime `--network`) rather than the
+    // compile-time const, so a node and miner built with different features
+    // agree on when the miner/burn split applies.
+    let max_coinbase = if block.height() >= expected_network.fee_distribution_height()
         && total_fees.as_atomic() > 0
     {
         let congestion_pct = ((size as u128 * 100) / MAX_BLOCK_SIZE as u128) as u64;
@@ -775,8 +779,15 @@ fn check_block_network_magic(
 /// them; fast-sync checkpoints just speed up verification.
 ///
 /// Returns `false` on failure — checkpoint mismatch is fatal.
-fn check_block_consensus_checkpoint(block: &Block, result: &mut BlockValidation) -> bool {
-    if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(block.height()) {
+fn check_block_consensus_checkpoint(
+    network: crate::config::NetworkType,
+    block: &Block,
+    result: &mut BlockValidation,
+) -> bool {
+    // Runtime-network hardening: resolve the checkpoint table from the runtime
+    // network so a binary run as a different network uses the right checkpoints.
+    if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(network, block.height())
+    {
         let actual_hash = block.hash();
         if actual_hash.as_bytes() != expected_hash {
             result.add_error(format!(
@@ -1293,7 +1304,7 @@ pub fn validate_transaction_for_network(
     check_tx_io_ratio_legacy(tx)?;
     check_tx_uniform_shape(tx, current_height)?;
     check_tx_no_double_spend(tx, utxos)?;
-    check_tx_ring_members(tx, utxos, current_height, v1_0_12_active)?;
+    check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
     check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
     check_tx_ring_signatures(tx)?;
     check_tx_range_proofs(tx, current_height)?;
@@ -1609,6 +1620,7 @@ fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
 /// since we already have (tx, utxos, current_height) in scope here. See
 /// the inline docstring below for the full rationale.
 fn check_tx_ring_members(
+    network: crate::config::NetworkType,
     tx: &Transaction,
     utxos: &UtxoSet,
     current_height: u64,
@@ -1685,6 +1697,7 @@ fn check_tx_ring_members(
                         )));
                     }
                     check_ring_member_coinbase_maturity(
+                        network,
                         output_ref.is_coinbase,
                         output_ref.height,
                         current_height,
@@ -1716,6 +1729,7 @@ fn check_tx_ring_members(
                             // got the post-fork 100-block floor. Now both
                             // branches use the shared helper below.
                             check_ring_member_coinbase_maturity(
+                                network,
                                 idx_entry.is_coinbase,
                                 idx_entry.height,
                                 current_height,
@@ -1775,6 +1789,7 @@ fn check_tx_ring_members(
 /// blocks) uses the same pattern — enforced identically wherever a
 /// coinbase output is spent, whether live or historical.
 fn check_ring_member_coinbase_maturity(
+    network: crate::config::NetworkType,
     is_coinbase: bool,
     output_height: u64,
     current_height: u64,
@@ -1785,7 +1800,9 @@ fn check_ring_member_coinbase_maturity(
         return Ok(());
     }
     let age = current_height.saturating_sub(output_height);
-    let required = crate::constants::min_output_age_at_height(current_height);
+    // Runtime-network hardening: resolve the required maturity from the runtime
+    // network so builds with different features agree on ring-member maturity.
+    let required = network.min_output_age(current_height);
     if age < required {
         return Err(Error::InvalidTransaction(format!(
             "Input {} ring member {} references immature coinbase output \
@@ -2588,6 +2605,14 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
 mod tests {
     use super::*;
 
+    // Runtime-network hardening: maturity/ring checks now take the network.
+    // Use the compiled network (pinned equal to the compile-time consts by the
+    // drift guard in constants.rs) so these tests keep their exact semantics.
+    #[cfg(feature = "testnet")]
+    const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Testnet;
+    #[cfg(not(feature = "testnet"))]
+    const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Mainnet;
+
     /// A single-output non-coinbase tx whose three per-output curve fields
     /// (stealth_address, tx_public_key, commitment) are all the Ristretto
     /// basepoint — a guaranteed valid, non-identity point. Used to exercise
@@ -2837,11 +2862,11 @@ mod tests {
         // Non-coinbase outputs: maturity check must be a no-op regardless
         // of age or current_height. Only coinbase outputs are gated.
         assert!(check_ring_member_coinbase_maturity(
-            /* is_coinbase */ false, /* output_height */ 0, /* current_height */ 0,
+            TEST_NET, /* is_coinbase */ false, /* output_height */ 0, /* current_height */ 0,
             0, 0,
         )
         .is_ok());
-        assert!(check_ring_member_coinbase_maturity(false, 100, 100, 0, 0,).is_ok());
+        assert!(check_ring_member_coinbase_maturity(TEST_NET, false, 100, 100, 0, 0,).is_ok());
     }
 
     #[test]
@@ -2854,7 +2879,8 @@ mod tests {
         let required = crate::constants::min_output_age_at_height(current);
         let output_height = current - required; // exactly at maturity
         assert!(
-            check_ring_member_coinbase_maturity(true, output_height, current, 0, 0,).is_ok(),
+            check_ring_member_coinbase_maturity(TEST_NET, true, output_height, current, 0, 0,)
+                .is_ok(),
             "coinbase at exactly minimum age must validate"
         );
     }
@@ -2870,7 +2896,7 @@ mod tests {
         // meaningful, just needs different arithmetic.
         assert!(required > 0, "test invariant: required age > 0");
         let output_height = current - required + 1; // one block too young
-        let err = check_ring_member_coinbase_maturity(true, output_height, current, 3, 7)
+        let err = check_ring_member_coinbase_maturity(TEST_NET, true, output_height, current, 3, 7)
             .expect_err("immature coinbase must be rejected");
         let msg = err.to_string();
         assert!(
