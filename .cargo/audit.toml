@@ -5,6 +5,13 @@ ignore = [
   # Upstream chain still depends on atomic-polyfill as of frost-core 3.0.0.
   # Re-evaluate on every dependency refresh.
   "RUSTSEC-2023-0089",
+  # RUSTSEC-2026-0253 (lru: panic-safety use-after-free in LruCache::pop):
+  # An "unsound" WARNING, not a vulnerability. Dev/tooling only — transitive
+  # via ratatui 0.30 -> ratatui-core -> lru 0.16 (the coincync-rig TUI
+  # dashboard), NOT in the consensus/wallet/RPC runtime path. `lru` is pinned
+  # to 0.16.x by ratatui-core, so it can't be bumped without a ratatui major
+  # bump. Re-evaluate when ratatui updates its `lru` dependency.
+  "RUSTSEC-2026-0253",
 ]
 
 # Yanked-crate checks are intentionally disabled.
