@@ -304,6 +304,10 @@ coincync = { path = ".", features = ["test-utilities"] }
 name = "crypto_hot_paths"
 harness = false
 
+[[bench]]
+name = "consensus_hot_paths"
+harness = false
+
 [profile.release]
 opt-level     = 3
 lto           = "thin"
