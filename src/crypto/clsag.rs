@@ -92,6 +92,13 @@ fn clsag_hash(
     hasher.update(b"CLSAG_");
     hasher.update(prefix);
 
+    // Ring size, length-framed. Committing `n` and length-prefixing the
+    // variable-length `message` (below) makes the transcript unambiguous, so an
+    // attacker-chosen ring/message can't produce a cross-instance collision by
+    // shifting the concatenation boundaries. (Hardening; message is a
+    // fixed-length tx signing hash in the consensus path.)
+    hasher.update((ring.len() as u64).to_le_bytes());
+
     // Ring members
     for member in ring {
         hasher.update(member.public_key.to_bytes());
@@ -102,7 +109,8 @@ fn clsag_hash(
     hasher.update(key_image.to_bytes());
     hasher.update(commitment_image.to_bytes());
 
-    // Message
+    // Message, length-framed.
+    hasher.update((message.len() as u64).to_le_bytes());
     hasher.update(message);
 
     // L and R values
@@ -112,42 +120,57 @@ fn clsag_hash(
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Round hash for CLSAG
-fn clsag_round_hash(
+/// Aggregation-coefficient hash for CLSAG.
+///
+/// SECURITY (C-1 fix, key-image malleability): both aggregation coefficients
+/// bind the *entire* public statement — the ring size, every ring public key
+/// and commitment, the key image `I`, the commitment image `D`, and the
+/// pseudo-output `C'` — each under its own domain tag (`_0` for `mu_p`, `_1`
+/// for `mu_c`). Binding `D` (which the previous `clsag_round_hash` omitted from
+/// both coefficients) is what defeats the forgery: an attacker can no longer
+/// pick an arbitrary key image `I'` and solve `D' = mu_c^{-1}(w·Hp(P) − mu_p·I')`,
+/// because any change to `D'` now changes both coefficients, so no closed-form
+/// solution exists. This matches Monero's CLSAG construction, which hashes both
+/// `I` and `D` into `mu_P` and `mu_C`. All inputs are fixed-width (ring size is
+/// length-framed) so the transcript is unambiguous.
+fn clsag_agg_hash(
+    tag: &[u8],
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
-    message: &[u8],
 ) -> Scalar {
     let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_round");
+    hasher.update(b"CLSAG_agg");
+    hasher.update(tag);
 
+    hasher.update((ring.len() as u64).to_le_bytes());
     for member in ring {
         hasher.update(member.public_key.to_bytes());
         hasher.update(member.commitment.to_bytes());
     }
 
     hasher.update(key_image.to_bytes());
+    hasher.update(commitment_image.to_bytes());
     hasher.update(pseudo_output.to_bytes());
-    hasher.update(message);
 
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Compute aggregate key coefficients
+/// Compute the two aggregate key coefficients `(mu_p, mu_c)`.
+///
+/// Each is an independent random-oracle evaluation over the full statement
+/// (see [`clsag_agg_hash`]); `mu_c` is NOT derived from `mu_p`. The message is
+/// intentionally not bound here — it is bound in the per-round challenge
+/// ([`clsag_hash`]) exactly as in Monero CLSAG.
 fn compute_aggregate_coefficients(
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
-    message: &[u8],
 ) -> (Scalar, Scalar) {
-    let mu_p = clsag_round_hash(ring, key_image, pseudo_output, message);
-
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_agg_1");
-    hasher.update(mu_p.as_bytes());
-    let mu_c = Scalar::from_bytes_mod_order_wide(&hasher.finalize().into());
-
+    let mu_p = clsag_agg_hash(b"_0", ring, key_image, commitment_image, pseudo_output);
+    let mu_c = clsag_agg_hash(b"_1", ring, key_image, commitment_image, pseudo_output);
     (mu_p, mu_c)
 }
 
@@ -202,8 +225,10 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
     let hp = hash_to_point(&expected_public.to_bytes());
     let commitment_image = PublicPoint::from_point(blinding_diff.as_scalar() * hp);
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) = compute_aggregate_coefficients(ring, &key_image, pseudo_output, message);
+    // Compute aggregate coefficients. C-1 fix: bind the commitment image `D`
+    // (`commitment_image`, computed just above) into both coefficients.
+    let (mu_p, mu_c) =
+        compute_aggregate_coefficients(ring, &key_image, &commitment_image, pseudo_output);
 
     // Generate random alpha
     let alpha = SecretScalar::random(rng);
@@ -401,9 +426,15 @@ pub fn clsag_verify(
         return false;
     }
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) =
-        compute_aggregate_coefficients(ring, &signature.key_image, pseudo_output, message);
+    // Compute aggregate coefficients. C-1 fix: the commitment image `D` from
+    // the signature is now bound into both coefficients, so an attacker cannot
+    // attach an arbitrary key image and solve for a matching `D`.
+    let (mu_p, mu_c) = compute_aggregate_coefficients(
+        ring,
+        &signature.key_image,
+        &signature.commitment_image,
+        pseudo_output,
+    );
 
     // Compute aggregate public keys (must match signing formulation)
     // W_i = mu_p * P_i + mu_c * (C_i - C')
@@ -660,6 +691,128 @@ fn simple_hash(
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    /// SECURITY REGRESSION (C-1 — CLSAG key-image malleability).
+    ///
+    /// A signer who legitimately owns a ring member must NOT be able to attach
+    /// an *arbitrary* key image to an otherwise-valid CLSAG signature. The key
+    /// image is the only value double-spend detection dedups on
+    /// (`consensus::validation`), so if it is attacker-chosen the same output
+    /// can be spent under unlimited distinct key images → undetected
+    /// double-spend / supply inflation.
+    ///
+    /// Root cause (pre-fix): the aggregation coefficients `mu_p`/`mu_c` did not
+    /// bind the commitment image `D`, so an attacker could pick any key image
+    /// `I'` and solve `D' = mu_c^{-1} (w·Hp(P) − mu_p·I')` to satisfy the
+    /// real-index verification closure. This test performs exactly that
+    /// construction; the verifier MUST reject it.
+    #[test]
+    fn clsag_rejects_arbitrary_forged_key_image() {
+        use curve25519_dalek::traits::Identity;
+
+        let value = 1000u64;
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(value, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(value, &z_pseudo);
+        let blinding_diff = *z_real.as_scalar() - *z_pseudo.as_scalar();
+
+        let decoy1 = SecretScalar::random(&mut OsRng);
+        let decoy2 = SecretScalar::random(&mut OsRng);
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(
+                decoy1.to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+            RingMember::new(
+                decoy2.to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        let real_index = 0usize;
+        let n = ring.len();
+        let message = b"key-image malleability forgery PoC";
+
+        let hp = hash_to_point(&public.to_bytes());
+        let honest_ki = KeyImage::from_secret(&secret);
+
+        // Attacker chooses an ARBITRARY key image I' = (x + 1)·Hp(P), which is a
+        // valid non-identity point but is NOT the canonical x·Hp(P).
+        let forged_ki_point = (*secret.as_scalar() + Scalar::ONE) * hp;
+        let forged_ki = KeyImage::from_bytes(forged_ki_point.compress().to_bytes())
+            .expect("forged key image is a valid ristretto point");
+        assert_ne!(forged_ki.to_bytes(), honest_ki.to_bytes());
+        assert_ne!(forged_ki_point, RistrettoPoint::identity());
+
+        // Coefficients. Pre-fix these depended on I' but not on D', which made
+        // the forgery solvable. Post-fix they bind D', so the attacker faces a
+        // circular dependency (D' is derived from the coefficients, but the
+        // coefficients now depend on D'). Here we mount the direct attack: the
+        // attacker computes coefficients under a guessed D (identity) and solves
+        // D' from them; the verifier then recomputes coefficients from the real
+        // D' ≠ guess, so the closure no longer holds and the forgery is rejected.
+        let guessed_d = PublicPoint::identity();
+        let (mu_p, mu_c) =
+            compute_aggregate_coefficients(&ring, &forged_ki, &guessed_d, &pseudo_output);
+
+        // Aggregate secret w = mu_p·x + mu_c·(z_real − z_pseudo), known to the
+        // rightful owner of ring member 0.
+        let w = mu_p * (*secret.as_scalar()) + mu_c * blinding_diff;
+
+        // Solve D' so that mu_p·I' + mu_c·D' = w·Hp(P): the R-side closes.
+        let forged_d_point = mu_c.invert() * (w * hp - mu_p * forged_ki_point);
+        let forged_d = PublicPoint::from_point(forged_d_point);
+        assert_ne!(forged_d_point, RistrettoPoint::identity());
+
+        // Rebuild the CLSAG challenge ring with the forged (I', D').
+        let aggregate_keys: Vec<RistrettoPoint> = ring
+            .iter()
+            .map(|m| {
+                let p = m.public_key.as_point();
+                let c_diff = m.commitment.sub(&pseudo_output);
+                mu_p * p + mu_c * c_diff.as_point().as_point()
+            })
+            .collect();
+        let aggregate_key_image =
+            mu_p * forged_ki.as_point().as_point() + mu_c * forged_d_point;
+
+        let alpha = *SecretScalar::random(&mut OsRng).as_scalar();
+        let mut responses: Vec<Scalar> = (0..n)
+            .map(|_| *SecretScalar::random(&mut OsRng).as_scalar())
+            .collect();
+
+        let l_real = alpha * generator();
+        let r_real = alpha * hp;
+        let mut challenges = vec![Scalar::ZERO; n];
+        challenges[(real_index + 1) % n] =
+            clsag_hash(b"c", &ring, &forged_ki, &forged_d, message, &l_real, &r_real);
+        for offset in 1..n {
+            let i = (real_index + offset) % n;
+            let next = (i + 1) % n;
+            let hp_i = hash_to_point(&ring[i].public_key.to_bytes());
+            let l_i = responses[i] * generator() + challenges[i] * aggregate_keys[i];
+            let r_i = responses[i] * hp_i + challenges[i] * aggregate_key_image;
+            challenges[next] =
+                clsag_hash(b"c", &ring, &forged_ki, &forged_d, message, &l_i, &r_i);
+        }
+        responses[real_index] = alpha - challenges[real_index] * w;
+
+        let forged_sig = ClsagSignature {
+            key_image: forged_ki,
+            commitment_image: forged_d,
+            c1: challenges[1].to_bytes(),
+            responses: responses.iter().map(|s| s.to_bytes()).collect(),
+        };
+
+        assert!(
+            !clsag_verify(message, &ring, &pseudo_output, &forged_sig),
+            "CLSAG accepted a signature with an arbitrary forged key image \
+             (key-image malleability, C-1) — enables double-spend / inflation"
+        );
+    }
 
     #[test]
     fn test_simple_ring_signature() {
