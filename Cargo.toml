@@ -148,7 +148,9 @@ reqwest    = { version = "0.12", default-features = false, features = ["json", "
 # â”€â”€ Networking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 hickory-resolver = "0.26"
 socket2            = "0.6"
-igd                = { version = "0.12", features = ["aio"] }
+# igd-next (maintained fork on hyper 1.x) replaces the unmaintained `igd`
+# 0.12, whose hyper 0.14 pulled h2 0.3.x (RUSTSEC-2026-0258, no 0.3 fix).
+igd-next           = { version = "0.17", features = ["aio_tokio"] }
 tokio-socks        = "0.5"
 snow               = "0.9"
 
