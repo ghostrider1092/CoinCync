@@ -13,9 +13,11 @@
 ## Abstract
 
 CoinCync's wallet already exposes FROST M-of-N threshold signatures
-through six CLI subcommands: `multisig-gen`, `multisig-info`,
-`multisig-round1`, `multisig-round2`, `multisig-aggregate`, and
-`multisig-send`. These are the cryptographic primitives. They are not
+through five CLI subcommands: `multisig-gen`, `multisig-info`,
+`multisig-round1`, `multisig-round2`, and `multisig-aggregate`. (A sixth,
+`multisig-send`, was removed in v1 — it was a print-only stub that never
+submitted a transaction; an on-chain multi-sig spend path ships post-launch.)
+These are the cryptographic primitives. They are not
 the user experience: M participants cannot run a real M-of-N signing
 flow unless they have a way to exchange round-1 commitments and
 round-2 signature shares between them, with proper session state and

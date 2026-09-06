@@ -243,28 +243,18 @@ enum Command {
         output: String,
     },
 
-    /// Multi-sig Send: build + submit a privacy transaction using threshold key shares.
-    /// Reconstructs the group key from M shares, signs CLSAG, submits, then zeroizes.
-    MultisigSend {
-        /// Paths to M key share files (minimum threshold signers).
-        #[arg(long, num_args = 1..)]
-        key_shares: Vec<String>,
-        /// Recipient spend public key (64-hex).
-        #[arg(long)]
-        to_spend: String,
-        /// Recipient view public key (64-hex).
-        #[arg(long)]
-        to_view: String,
-        /// Amount in atomic CYNC units.
-        #[arg(long)]
-        amount: u64,
-    },
+    // NOTE: `multisig-send` was removed for v1. It was a print-only stub —
+    // it reconstructed the group secret, printed the recipient/amount, and
+    // returned success WITHOUT building or broadcasting any transaction, so it
+    // reported a spend that never happened. The rest of the multisig flow
+    // (gen / round1 / round2 / aggregate / info — real FROST signing) stays.
+    // A real multisig spend path ships post-launch with an audit.
 
     // NOTE: `set-recovery` / `check-recovery` (the dead-man's switch) were
     // removed for v1. The recovery metadata was inert — there is NO consensus
     // rule letting a recovery address spend after the timeout, so the feature
     // could not do what its name promised. A real recovery-spend path is a
-    // post-launch consensus feature. Use a seed backup or multisig meanwhile.
+    // post-launch consensus feature. Use a seed backup meanwhile.
 
     /// Enable auto-churn: automatic self-sends at random intervals to poison
     /// the transaction graph. Runs as a background loop until stopped.
@@ -556,12 +546,6 @@ async fn main() {
             output_dir,
         } => cmd_multisig_gen(threshold, total, &output_dir, network).await,
         Command::MultisigInfo { share_file } => cmd_multisig_info(&share_file).await,
-        Command::MultisigSend {
-            key_shares,
-            to_spend,
-            to_view,
-            amount,
-        } => cmd_multisig_send(&key_shares, &to_spend, &to_view, amount, &cli.node).await,
         Command::MultisigRound1 { share_file, output } => {
             cmd_multisig_round1(&share_file, &output).await
         }
@@ -1824,74 +1808,7 @@ async fn cmd_multisig_gen(
     println!("  1. multisig-round1   --share-file <their-share.json>   (nonces + commitment)");
     println!("  2. multisig-round2   --share-file <their-share.json> ... (signature share)");
     println!("  3. multisig-aggregate ...                              (combine shares)");
-    println!("  or multisig-send ... to reconstruct the group key from M shares and submit.");
-
-    Ok(())
-}
-
-async fn cmd_multisig_send(
-    key_share_files: &[String],
-    to_spend_hex: &str,
-    _to_view_hex: &str,
-    amount: u64,
-    _node: &str,
-) -> Result<(), String> {
-    use coincync::wallet::multisig;
-
-    // Load key shares
-    let mut shares = Vec::new();
-    for f in key_share_files {
-        let ks: multisig::KeyShare = serde_json::from_str(
-            &std::fs::read_to_string(f).map_err(|e| format!("read {}: {}", f, e))?,
-        )
-        .map_err(|e| format!("parse: {}", e))?;
-        shares.push(ks);
-    }
-
-    if shares.is_empty() {
-        return Err("no key shares provided".into());
-    }
-
-    let config = &shares[0].config;
-    println!(
-        "Multi-sig send: {}-of-{} threshold",
-        config.threshold, config.total
-    );
-    println!("  Shares loaded: {}", shares.len());
-    println!("  Group key:     {}", hex::encode(config.group_public_key));
-
-    // Reconstruct the group secret directly into a ZeroizeOnDrop wrapper.
-    println!(
-        "  Reconstructing group secret from {} shares...",
-        shares.len()
-    );
-    let secret =
-        multisig::reconstruct_group_secret(&shares).map_err(|e| format!("reconstruct: {}", e))?;
-    println!("  Group secret reconstructed (will zeroize on drop)");
-
-    // From here, use the reconstructed key like a normal wallet send
-    // The CLSAG signing happens inside create_privacy_transaction
-    // which calls clsag_sign with the secret key
-    println!();
-    println!(
-        "  Recipient: {}...{}",
-        &to_spend_hex[..8],
-        &to_spend_hex[to_spend_hex.len() - 4..]
-    );
-    println!("  Amount:    {} atomic CYNC", amount);
-    println!();
-    println!("  Note: Full multi-sig CLSAG integration uses the reconstructed");
-    println!("  group key for standard CLSAG signing. The key is zeroized");
-    println!("  immediately after the transaction is built.");
-    println!();
-    println!("  For production: implement threshold CLSAG where the group");
-    println!("  key is NEVER reconstructed (requires custom FROST ciphersuite).");
-
-    // `secret` drops here — SecretScalar's ZeroizeOnDrop impl wipes
-    // the underlying Scalar on the way out.
-    drop(secret);
-    println!();
-    println!("  Group secret: ZEROIZED (via SecretScalar::Drop)");
+    println!("  (On-chain multisig spend is deferred to a post-launch release.)");
 
     Ok(())
 }

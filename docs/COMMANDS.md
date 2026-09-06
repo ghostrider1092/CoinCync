@@ -99,9 +99,6 @@ Commands:
   multisig-round1     FROST round 1: nonces + commitments
   multisig-round2     FROST round 2: signature share
   multisig-aggregate  Combine signature shares into final sig
-  multisig-send       Threshold-signed privacy transaction
-  set-recovery        Configure dead man's switch recovery address
-  check-recovery      Check recovery status of UTXOs
   auto-churn          Random self-sends to poison the tx graph
 
 Common options:
@@ -166,15 +163,6 @@ coincync-wallet --network testnet \
 
 (You'll be prompted for the seed phrase + a new password.)
 
-**Set up a dead man's switch (auto-recovery if wallet goes silent):**
-
-```bash
-coincync-wallet --wallet ~/.coincync/wallets/me.wallet \
-  set-recovery \
-  --address <backup-spend-pubkey-64hex> \
-  --timeout 50000
-```
-
 **Multi-sig (M-of-N FROST) flow — three signers, threshold 2:**
 
 ```bash
@@ -194,13 +182,18 @@ coincync-wallet multisig-round2 \
   --message <tx-hash-hex> \
   --output ./sig-share-0.json
 
-# Aggregate + submit
+# Aggregate signature shares into the final signature
 coincync-wallet multisig-aggregate \
   --shares ./sig-share-0.json ./sig-share-1.json \
   --output ./final-sig.json
-
-coincync-wallet --node <RPC> multisig-send ...
 ```
+
+> **Note (v1):** the FROST commands above produce a valid aggregate signature,
+> but broadcasting an on-chain multi-sig *spend* is deferred to a post-launch
+> release (the previous `multisig-send` did not actually submit a transaction and
+> was removed). Likewise the dead-man's-switch commands (`set-recovery` /
+> `check-recovery`) were removed — their metadata had no consensus spend path.
+> Use a seed backup for recovery meanwhile.
 
 ---
 
