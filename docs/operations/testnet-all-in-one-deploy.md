@@ -199,6 +199,42 @@ curl -sS https://api.coincync.network/faucet/health | head
 
 ---
 
+## Making the testnet alive: block production (NOT on this box)
+
+The Hetzner box is a **seed** — it relays blocks and serves the sites, but it
+does **not** mine, so it never produces a block on its own. A testnet is only
+"alive" (height climbing, faucet fundable, transactions confirming) while a
+**miner** is running somewhere and peered to this seed. Keep the miner **off**
+the public box (dedicate its cycles to the node + nginx); run it on a separate
+machine — e.g. your home/dev box, which can stay behind NAT and never needs a
+public IP.
+
+On the **miner machine** (not the Hetzner box):
+
+```bash
+# 1. A local testnet node that dials the Hetzner seed (outbound only — no
+#    inbound/public exposure needed):
+coincync-node --network testnet --data-dir ~/.coincync \
+  --rpc-bind 127.0.0.1:28081 --addnode 2.28.1.75:28080
+
+# 2. A wallet + payout address (once):
+coincync-wallet create            # save the seed phrase
+coincync-wallet address           # copy the tCYNC... address
+
+# 3. Mine to it (RandomX CPU). --threads 0 auto-detects cores:
+coincync-rig run-solo --network testnet \
+  --node http://127.0.0.1:28081 --address tCYNC<your-address> --threads 0
+```
+
+Blocks found on the miner propagate over that peer link to the Hetzner seed,
+which gossips them to the rest of the network — so `explorer.coincync.network`
+starts climbing and the chain is live. **Fund the faucet** (step 7) by sending
+mined testnet CYNC from this wallet to the faucet's printed hot-wallet address.
+
+> One miner + one seed is a valid *minimal* live testnet, but it stalls if the
+> miner goes offline. Add a second miner and/or seed for resilience once the
+> basics are proven.
+
 ## Scaling past one box
 
 When you add Hetzner seeds: provision the box, run step 2 on it, add its IP to
