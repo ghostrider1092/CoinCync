@@ -146,7 +146,7 @@ pub(super) async fn process_message(
         }
 
         MessageType::ChainWork => {
-            control::handle_chain_work(peer_id, payload, peers, sync).await?;
+            control::handle_chain_work(peer_id, payload, peers, sync, chain).await?;
         }
 
         MessageType::Verack => {
