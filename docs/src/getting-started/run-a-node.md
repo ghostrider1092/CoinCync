@@ -30,10 +30,10 @@ chmod +x coincync-node
 
 ```bash
 ./coincync-node --network testnet --data-dir ~/.coincync \
-    --addnode 2.28.1.75:28080
+    --addnode 2.29.34.197:28080
 ```
 
-The `--addnode` flag points at the public testnet seed (Hetzner, Falkenstein DE — `2.28.1.75:28080`), an explicit fallback for the case where DNS seed resolution fails. **Use it for first sync.** Without a reachable peer, your node starts at genesis (height 0), mines its own divergent chain, and rejects its own blocks once it diverges from the public tip. Once fully synced, you can drop the `--addnode` flag on subsequent restarts and rely on DNS (`seed1.coincync.network`). Add more `--addnode` peers as the community brings up additional seeds.
+The `--addnode` flag points at the public testnet seed (Hetzner, Falkenstein DE — `2.29.34.197:28080`), an explicit fallback for the case where DNS seed resolution fails. **Use it for first sync.** Without a reachable peer, your node starts at genesis (height 0), mines its own divergent chain, and rejects its own blocks once it diverges from the public tip. Once fully synced, you can drop the `--addnode` flag on subsequent restarts and rely on DNS (`seed1.coincync.network`). Add more `--addnode` peers as the community brings up additional seeds.
 
 That's it. The node will:
 
@@ -60,7 +60,7 @@ rm -rf ~/.coincync/testnet/chain ~/.coincync/testnet/blocks
 
 # Restart with the explicit peer, then wait until synced to the current tip before mining
 ./coincync-node --network testnet --data-dir ~/.coincync \
-    --addnode 2.28.1.75:28080
+    --addnode 2.29.34.197:28080
 ```
 
 ## What success looks like

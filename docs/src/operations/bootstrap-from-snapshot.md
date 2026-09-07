@@ -131,7 +131,7 @@ ls testnet/   # should show CURRENT, MANIFEST-*, LOG, *.sst, *.log, etc.
 
 ```bash
 coincync-node --network testnet \
-  --addnode 2.28.1.75:28080
+  --addnode 2.29.34.197:28080
 ```
 
 (The `--addnode` flag points at the public testnet seed — same as in
@@ -148,7 +148,7 @@ INFO  Loaded chain database at height 14800
 INFO  Tip hash: <matches manifest>
 INFO  Verifying against hardcoded checkpoints...
 INFO  Checkpoint match at height 14000 ✓
-INFO  Connected to peer 2.28.1.75:28080
+INFO  Connected to peer 2.29.34.197:28080
 INFO  Sync started — target height 14823
 INFO  Applied block at height 14801
 INFO  Applied block at height 14802
@@ -198,7 +198,7 @@ tar -xzf "$dest\${base}.tar.gz"
 
 # 7: start node (with the public seed — same as Linux)
 coincync-node --network testnet `
-  --addnode 2.28.1.75:28080
+  --addnode 2.29.34.197:28080
 ```
 
 ## FAQ

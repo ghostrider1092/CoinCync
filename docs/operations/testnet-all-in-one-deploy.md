@@ -4,7 +4,7 @@ How to bring up the full CoinCync **testnet** — the seed node **and** all publ
 sites (landing, docs, explorer, api, faucet) — on one Hetzner box.
 
 **Target:** `cync-node-hel1` — Hetzner CPX22 (2 vCPU / ~4 GB / 80 GB),
-Falkenstein DE, public IP `2.28.1.75`, Debian 12.
+Falkenstein DE, public IP `2.29.34.197`, Debian 12.
 
 All web services run behind nginx on this box and reverse-proxy to the node's
 **loopback** RPC (`127.0.0.1:28081`). Nothing but P2P (28080) and HTTPS (443)
@@ -20,7 +20,7 @@ scripts support that; here everything is co-located.
 ## 0. Prerequisites
 
 - DNS control for `coincync.network` (testnet). You will point records at
-  `2.28.1.75`.
+  `2.29.34.197`.
 - **Hetzner Cloud Firewall** (and/or `ufw`) allowing inbound:
   - `28080/tcp` — P2P (public)
   - `80/tcp`, `443/tcp` — HTTP/HTTPS (nginx; 80 is for certbot + redirect)
@@ -47,7 +47,7 @@ download from the GitHub Release for the `v2.0.0-testnet` tag, or build them and
 # On a build host with Docker:
 bash scripts/build-in-docker.sh --testnet --out ./out
 # Verify, then copy node + wallet + faucet-relevant bins to the box:
-scp out/coincync-node out/coincync-wallet root@2.28.1.75:/usr/local/bin/
+scp out/coincync-node out/coincync-wallet root@2.29.34.197:/usr/local/bin/
 ```
 
 Confirm it's a testnet binary (must print the testnet genesis):
@@ -97,7 +97,7 @@ echo "RPC key: $KEY"   # you'll pass this to the explorer installer in step 6
 
 ## 4. DNS records
 
-Point these A records at `2.28.1.75`:
+Point these A records at `2.29.34.197`:
 
 | Record | Purpose |
 |--------|---------|
@@ -166,7 +166,7 @@ Stage the binaries where `install-faucet.sh` expects them, then install and
 
 ```bash
 sudo cp /usr/local/bin/coincync-wallet /tmp/coincync-wallet
-scp out/coincync-faucet root@2.28.1.75:/tmp/coincync-faucet   # from your build host
+scp out/coincync-faucet root@2.29.34.197:/tmp/coincync-faucet   # from your build host
 cd /opt/coincync && sudo bash scripts/install-faucet.sh
 # It prints the hot-wallet address — mine/send testnet CYNC to it before use.
 ```
@@ -239,7 +239,7 @@ On the **miner machine** (not the Hetzner box):
 # 1. A local testnet node that dials the Hetzner seed (outbound only — no
 #    inbound/public exposure needed):
 coincync-node --network testnet --data-dir ~/.coincync \
-  --rpc-bind 127.0.0.1:28081 --addnode 2.28.1.75:28080
+  --rpc-bind 127.0.0.1:28081 --addnode 2.29.34.197:28080
 
 # 2. A wallet + payout address (once):
 coincync-wallet create            # save the seed phrase
