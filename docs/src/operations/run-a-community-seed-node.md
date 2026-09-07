@@ -100,9 +100,7 @@ ExecStart=/root/coincync/target/release/coincync-node \
     --network testnet \
     --p2p-bind 0.0.0.0:28080 \
     --rpc-bind 127.0.0.1:28081 \
-    --addnode 66.135.23.193:28080 \
-    --addnode 140.82.57.168:28080 \
-    --addnode 207.148.111.76:28080 \
+    --addnode 2.28.1.75:28080 \
     --log-level info
 Restart=on-failure
 RestartSec=10
