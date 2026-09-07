@@ -552,8 +552,18 @@ fn compute_view_tag(tx_pub: &PublicKey, view_pub: &PublicKey, output_index: u8) 
     hash.as_bytes()[0]
 }
 
-/// Check if an output belongs to a given (view_pub, spend_pub) pair.
-/// This is the slow ECDH check — only called when view tag matches.
+/// SECURITY / CONTRACT (audit 2026-09-07): this is **NOT** an ownership check —
+/// despite the name it does not (and with only PUBLIC keys server-side, cannot)
+/// verify ownership via ECDH. It is a **view-tag candidate filter**: it returns
+/// `true` for every output whose view tag already matched, and the CLIENT must
+/// do the real ECDH verification and discard non-matching outputs.
+///
+/// This function is currently DEAD CODE — no `/wallet/*` route wires it. Before
+/// it is ever wired: (1) rename it to reflect the candidate-filter contract so
+/// no caller mistakes it for an ownership gate, (2) ensure the endpoint does the
+/// client-side ECDH verification, and (3) add an explicit result cap + per-IP
+/// rate limit (an unauthenticated scan endpoint returning candidates is a DoS
+/// and metadata-leak surface). Fail-closed on any doubt.
 fn is_output_for_keys(
     _tx_pub: &PublicKey,
     _stealth: &PublicKey,
@@ -561,17 +571,9 @@ fn is_output_for_keys(
     _spend_pub: &PublicKey,
     _output_index: u8,
 ) -> bool {
-    // Simplified ownership check:
-    // The full check requires the view SECRET key for ECDH.
-    // Since we only have the PUBLIC keys here, we can't do the real
-    // ECDH check. The wallet must send the view SECRET key (encrypted)
-    // for server-side scanning, OR do client-side scanning with digests.
-    //
-    // For now, outputs that pass the view tag filter are returned as
-    // candidates — the wallet does final verification client-side.
-    // This gives ~0.4% false positive rate (1/256), which is acceptable
-    // for a light wallet (the wallet discards non-matching outputs).
-    true // All view-tag-matching outputs are returned as candidates
+    // View-tag candidate filter only (see the contract above). ~0.4% (1/256)
+    // false-positive rate; the wallet does the final ECDH check client-side.
+    true
 }
 
 // ═══════════════════════════════════════════════════════════════════════

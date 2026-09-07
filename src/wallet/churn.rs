@@ -126,7 +126,10 @@ impl ChurnEngine {
         let lambda = 1.0 / mean;
         let distribution = Exp::new(lambda)
             .unwrap_or_else(|_| Exp::new(1.0 / 3_600.0).expect("positive fallback rate"));
-        let sample = distribution.sample(&mut rand::thread_rng()) as u64;
+        // SEC (2026-09-07): OsRng (not thread_rng) for privacy-affecting churn
+        // timing — aligns with the project's stated discipline of reading the OS
+        // CSPRNG directly for privacy-critical randomness.
+        let sample = distribution.sample(&mut rand::rngs::OsRng) as u64;
 
         sample.clamp(
             self.config.min_interval_secs,
@@ -141,7 +144,9 @@ impl ChurnEngine {
             return 0;
         }
 
-        let percentage = rand::thread_rng()
+        // SEC (2026-09-07): OsRng for the privacy-affecting churn amount (see
+        // `next_interval_secs`).
+        let percentage = rand::rngs::OsRng
             .gen_range(self.config.min_amount_pct..=self.config.max_amount_pct)
             as u64;
         let amount =

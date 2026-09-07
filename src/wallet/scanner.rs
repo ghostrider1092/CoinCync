@@ -652,6 +652,22 @@ impl WalletScanner {
                     } else {
                         0
                     };
+                    // SEC (2026-09-07): coinbase commitments are zero-blinding, so
+                    // the plaintext amount must reconstruct output.commitment —
+                    // parity with the non-coinbase ghost-balance defense. Rejects a
+                    // forged/inflated coinbase amount instead of surfacing it as
+                    // unspendable ghost balance.
+                    let expected_commitment =
+                        crate::crypto::PedersenCommitment::commit(amount, &BlindingFactor::zero())
+                            .to_bytes();
+                    if expected_commitment != output.commitment {
+                        tracing::warn!(
+                            "scanner coinbase: stealth match but commitment recompute \
+                             mismatch (claimed amount {}) — skipping.",
+                            amount
+                        );
+                        continue;
+                    }
                     return Some(DecryptedOutput {
                         tx_hash,
                         output_index,
@@ -683,6 +699,22 @@ impl WalletScanner {
                     } else {
                         0
                     };
+                    // SEC (2026-09-07): coinbase commitments are zero-blinding, so
+                    // the plaintext amount must reconstruct output.commitment —
+                    // parity with the non-coinbase ghost-balance defense. Rejects a
+                    // forged/inflated coinbase amount instead of surfacing it as
+                    // unspendable ghost balance.
+                    let expected_commitment =
+                        crate::crypto::PedersenCommitment::commit(amount, &BlindingFactor::zero())
+                            .to_bytes();
+                    if expected_commitment != output.commitment {
+                        tracing::warn!(
+                            "scanner coinbase: stealth match but commitment recompute \
+                             mismatch (claimed amount {}) — skipping.",
+                            amount
+                        );
+                        continue;
+                    }
                     return Some(DecryptedOutput {
                         tx_hash,
                         output_index,

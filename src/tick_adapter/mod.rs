@@ -455,6 +455,7 @@ impl ChainAdapter for CoincyncAdapter {
             &header.target,
             &header.anchor,
             header.algorithm,
+            &header.pow_binding(),
         ) {
             Ok(()) => Ok(true),
             Err(crate::error::Error::PowValidation(_)) => Ok(false),

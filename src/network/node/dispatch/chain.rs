@@ -454,6 +454,7 @@ pub(super) async fn handle_blocks(
                     &block.header.tx_root,
                     &block.header.anchor,
                     block.header.algorithm,
+                    &block.header.pow_binding(),
                 ) {
                     Ok(h) => h,
                     Err(_) => {
@@ -634,6 +635,7 @@ pub(super) async fn handle_block_data(
             &block.header.tx_root,
             &block.header.anchor,
             block.header.algorithm,
+            &block.header.pow_binding(),
         ) {
             Ok(h) => h,
             Err(_) => {

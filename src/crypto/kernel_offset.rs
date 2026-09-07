@@ -116,6 +116,11 @@ impl KernelOffset {
             Some(p) => p,
             None => return false,
         };
+        // SEC (2026-09-07): reject an identity excess point (defense in depth —
+        // identity compresses to the all-zero Ristretto encoding).
+        if excess_point.compress().to_bytes() == [0u8; 32] {
+            return false;
+        }
         let offset_scalar = match self.as_scalar() {
             Some(s) => s,
             None => return false,
@@ -140,6 +145,10 @@ impl KernelOffset {
             Some(p) => p,
             None => return false,
         };
+        // SEC (2026-09-07): reject an identity R point (defense in depth).
+        if r_point.compress().to_bytes() == [0u8; 32] {
+            return false;
+        }
         let s_scalar: Scalar = match Scalar::from_canonical_bytes(s_bytes).into() {
             Some(s) => s,
             None => return false,

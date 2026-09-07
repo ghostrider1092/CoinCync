@@ -245,6 +245,7 @@ pub fn validate_block_with_checkpoint_for_network(
                     &block.header.target,
                     &block.header.anchor,
                     block.header.algorithm,
+                    &block.header.pow_binding(),
                 ) {
                     Ok(()) => {
                         tracing::debug!("Block {} PoW verified successfully", block.height());

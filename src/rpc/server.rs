@@ -605,6 +605,16 @@ pub async fn start_rpc_server(
             "RPC Bearer authentication enforced on POST (loopback={}, auth_enabled={})",
             listen_loopback, config.auth_enabled
         );
+    } else if api_key_arc.is_some() {
+        // SEC: an API key is configured but not enforced (loopback bind with
+        // auth_enabled=false). Warn loudly so an operator who set a key doesn't
+        // wrongly believe the RPC is authenticated.
+        warn!(
+            "RPC api_key is configured but NOT enforced (loopback={}, auth_enabled={}). \
+             The RPC is UNAUTHENTICATED. Set auth_enabled=true (or bind non-loopback) to \
+             require the Bearer token.",
+            listen_loopback, config.auth_enabled
+        );
     }
 
     let state = RpcState {
@@ -2249,7 +2259,7 @@ pub async fn start_rpc_server(
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── verify_keyimage_uniqueness ──────────────────────────────
-    module.register_method("verify_keyimage_uniqueness", |_params, state, _ext| {
+    module.register_blocking_method("verify_keyimage_uniqueness", |_params, state, _ext| {
         let chain_height = state.chain.height();
         if chain_height > MAX_RPC_KEYIMAGE_SCAN_CHAIN_HEIGHT {
             return Err(ErrorObjectOwned::owned(
@@ -2288,7 +2298,7 @@ pub async fn start_rpc_server(
 
     // ── check_zero_commitments_in_range ─────────────────────────
     module
-        .register_method("check_zero_commitments_in_range", |params, state, _ext| {
+        .register_blocking_method("check_zero_commitments_in_range", |params, state, _ext| {
             let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
                 ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
             })?;
@@ -2332,7 +2342,7 @@ pub async fn start_rpc_server(
 
     // ── verify_signatures_in_range ──────────────────────────────
     module
-        .register_method("verify_signatures_in_range", |params, state, _ext| {
+        .register_blocking_method("verify_signatures_in_range", |params, state, _ext| {
             let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
                 ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
             })?;
@@ -2374,7 +2384,7 @@ pub async fn start_rpc_server(
 
     // ── verify_range_proofs_in_range ────────────────────────────
     module
-        .register_method("verify_range_proofs_in_range", |params, state, _ext| {
+        .register_blocking_method("verify_range_proofs_in_range", |params, state, _ext| {
             let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
                 ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
             })?;
@@ -2413,7 +2423,7 @@ pub async fn start_rpc_server(
 
     // ── verify_commitment_balance_in_range ──────────────────────
     module
-        .register_method(
+        .register_blocking_method(
             "verify_commitment_balance_in_range",
             |params, state, _ext| {
                 let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
@@ -2459,7 +2469,7 @@ pub async fn start_rpc_server(
 
     // ── full_chain_audit ────────────────────────────────────────
     module
-        .register_method("full_chain_audit", |params, state, _ext| {
+        .register_blocking_method("full_chain_audit", |params, state, _ext| {
             let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
                 ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
             })?;
@@ -2568,6 +2578,20 @@ pub async fn start_rpc_server(
     let rpc_rate_limiter =
         std::sync::Arc::new(crate::rpc::ratelimit::RateLimiter::new(rate_limiter_config));
     let bearer_validator = bearer_validator.with_rate_limiter(rpc_rate_limiter);
+
+    // SEC: on a non-loopback bind, the per-IP limiter only sees a real client IP
+    // when COINCYNC_RPC_XFF_PROXY_ACK=1 (behind a trusted proxy that sets
+    // X-Forwarded-For). Without it, every request resolves to 127.0.0.1 and is
+    // whitelisted — so the app-layer limiter is effectively INERT. Bearer auth
+    // still gates access; warn so the operator relies on the proxy/auth, not on
+    // a limiter that isn't actually throttling.
+    if !listen_loopback && !rpc_env_bool("COINCYNC_RPC_XFF_PROXY_ACK").unwrap_or(false) {
+        warn!(
+            "RPC per-IP rate limiter is INERT on this public bind: COINCYNC_RPC_XFF_PROXY_ACK \
+             is not set, so all requests resolve to loopback (whitelisted). Ensure a trusted \
+             reverse proxy throttles, then set COINCYNC_RPC_XFF_PROXY_ACK=1 to enable per-IP limiting."
+        );
+    }
 
     let server = ServerBuilder::default()
         .max_connections(config.max_connections)
