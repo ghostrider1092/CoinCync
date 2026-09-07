@@ -92,14 +92,13 @@ server {
         proxy_set_header Authorization "Bearer \$coincync_rpc_key";
     }
 
-    # Node Health dashboard fan-out routes — 2026-06-06 rewritten to
-    # live Vultr fleet. Old routes (lon, sfo, nyc1, fra, nyc3, tor, ric,
-    # atl, ams, syd) pointed at decommissioned boxes.
-    location = /health/seed1    { proxy_pass http://66.135.23.193:28081;   proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/seed2    { proxy_pass http://140.82.57.168:28081;   proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/seed3    { proxy_pass http://207.148.111.76:28081;  proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/explorer { proxy_pass http://207.148.6.50:28081;    proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
-    location = /health/api      { proxy_pass http://95.179.165.225:28081;  proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
+    # Node health fan-out. 2026-09-06: consolidated to the single Hetzner box
+    # (cync-node-hel1, Falkenstein) — the former Vultr fleet routes pointed at
+    # decommissioned boxes. All health routes resolve to the local node over
+    # loopback. Add a `location = /health/<id>` per node here — and a matching
+    # row in the explorer frontend node arrays (01-core/07-map/08-globe) — as
+    # the fleet is re-provisioned.
+    location = /health/hel1     { proxy_pass http://127.0.0.1:28081;       proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
 
     # Keep legacy endpoints alive if external tools still call these.
     location = /api {

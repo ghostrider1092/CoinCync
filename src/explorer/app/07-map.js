@@ -1,10 +1,6 @@
 // ── WORLD MAP (D3 - replaced by Globe.gl) ───────────────────
 const MNODES=[
-  {n:'seed1',   id:'1a2b',lat:40.74, lng:-74.17, role:'Seed (US-East)'},
-  {n:'seed2',   id:'3c4d',lat:52.37, lng:4.90,   role:'Seed (Europe)'},
-  {n:'seed3',   id:'5e6f',lat:35.68, lng:139.69, role:'Seed (Asia-Pacific)'},
-  {n:'explorer',id:'7a8b',lat:32.78, lng:-96.80, role:'Explorer · Monitor'},
-  {n:'api',     id:'9c0d',lat:50.11, lng:8.68,   role:'Public API · Relay'},
+  {n:'hel1',    id:'hel1',lat:50.48, lng:12.37, role:'Seed (Falkenstein, DE)'},
 ];
 let _mz=null,_ms=null,_md=false;
 function initMap(){
