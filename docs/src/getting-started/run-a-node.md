@@ -43,7 +43,7 @@ That's it. The node will:
 4. Start the JSON-RPC server on `127.0.0.1:28081`
 5. Connect to the explicit seed IPs (and DNS seeds if those resolve), then begin syncing
 
-Sync from genesis takes 30-60 min depending on bandwidth — public testnet tip is currently around height 13,700. Watch `journalctl -u coincync-node -f` or the stdout log for `Imported block at height N` lines climbing toward the tip.
+Sync from genesis is quick on the current testnet (reset to genesis on 2026-09-04, so the chain is still short). Watch `journalctl -u coincync-node -f` or the stdout log for `Imported block at height N` lines climbing toward the tip. Check the live tip any time with the `get_info` RPC (below).
 
 Stop the node with `Ctrl-C`. Restart it later — chain state is on disk; it picks up where it left off.
 
@@ -58,7 +58,7 @@ killall coincync-node coincync-rig 2>/dev/null
 # Wipe the local (wrong-fork) chain data — wallet at ~/.coincync/testnet/wallets/ stays
 rm -rf ~/.coincync/testnet/chain ~/.coincync/testnet/blocks
 
-# Restart with explicit peers, wait for sync to ~13,700+ before mining
+# Restart with the explicit peer, then wait until synced to the current tip before mining
 ./coincync-node --network testnet --data-dir ~/.coincync \
     --addnode 2.28.1.75:28080
 ```
