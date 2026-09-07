@@ -199,6 +199,30 @@ curl -sS https://api.coincync.network/faucet/health | head
 
 ---
 
+## Cutting an existing seed over to the September reset
+
+If the box is **already running an older binary on the pre-reset chain** (e.g.
+`CoinCync/1.0.12` at some height N — check with `get_peers` / the node's
+`user_agent`), it is on a **different genesis** than the current code
+(`d2240fea`, the 2026-09-04 reset). New-code nodes cannot sync it — you must
+reset the box onto the new genesis. **This discards the old chain** (a
+throwaway pre-reset testnet):
+
+```bash
+sudo systemctl stop coincync-node
+# Discard the old-chain data (back it up first only if you truly want it):
+sudo rm -rf /var/lib/coincync/testnet
+# Install the new testnet binary (from the v2.0.0-testnet release or scp'd build):
+sudo install -m0755 coincync-node /usr/local/bin/coincync-node
+sudo systemctl start coincync-node
+# Confirm it re-inited at the reset genesis, height 0:
+/usr/local/bin/coincync-node print-genesis-hash
+# → d2240feaa1f5aa29f25f4c9f3b6948368a9a3607443d637660637d28a00d82da
+```
+
+The seed is now on the fresh chain at height 0. It will stay at 0 until a
+**miner** (next section) produces blocks — that's expected.
+
 ## Making the testnet alive: block production (NOT on this box)
 
 The Hetzner box is a **seed** — it relays blocks and serves the sites, but it
