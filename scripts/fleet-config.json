@@ -1,16 +1,16 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node in `nodes` has every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) keep TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs) in sync with the seed/relay-role entries here, (3) run scripts/sync-fleet-config.sh, (4) verify every node converges. See docs/operations/fleet-config.md for the runbook.",
-  "_last_changed": "2026-09-06 — consolidated to Hetzner. The entire Vultr fleet (seed1/2/3, explorer, api, miners, relays) was decommissioned (unreachable since 2026-07-27) and is moved to `deactivated`. The single live public seed is the Hetzner box 2.28.1.75:28080, matching TESTNET_SEED_NODES / TESTNET_FALLBACK. The residential home node stays DNS-only (privacy) and is intentionally not listed here. Append additional Hetzner boxes as the fleet is re-provisioned.",
+  "_last_changed": "2026-09-07 — migrated the seed from the CPX22 (4 GB) box 2.28.1.75 to a CPX32 (8 GB) box 2.29.34.197 after the smaller box OOM-killed the node. Also cut the seed onto the d2240fea (September 2026 reset) chain. The single live public seed is now 2.29.34.197:28080, matching TESTNET_SEED_NODES / TESTNET_FALLBACK. The residential home node stays DNS-only (privacy) and is intentionally not listed. Append additional Hetzner boxes as seeds #2/#3 are provisioned.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
   "_rpc_bind_policy": "Per-host RPC bind address. 127.0.0.1 means loopback-only (RPC only reachable from localhost; safer default; assumes nginx or stunnel for any public exposure). 0.0.0.0 means listen on all interfaces (public RPC). Keep loopback unless the host is intentionally serving public RPC behind nginx.",
   "nodes": {
     "seed1": {
-      "ip": "2.28.1.75",
+      "ip": "2.29.34.197",
       "rpc_bind": "127.0.0.1",
       "role": "seed",
-      "notes": "Hetzner (EU) — stable public testnet seed. Sole live public bootstrap node as of 2026-09-06. RPC loopback-only (seed role doesn't need exposed RPC; front with nginx and set rpc_bind 0.0.0.0 only if this box intentionally serves public RPC). Must stay in sync with TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs)."
+      "notes": "Hetzner (EU, Falkenstein) CPX32 (8 GB) — stable public testnet seed on the d2240fea (September 2026) chain. Sole live public bootstrap node as of 2026-09-07. Replaced the CPX22 (4 GB) box 2.28.1.75, which OOM-killed the node. RPC loopback-only. Must stay in sync with TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs)."
     }
   },
   "deactivated": {

@@ -41,7 +41,7 @@ pub const MAINNET_FALLBACK: &[&str] = &[
     // 2026-07-27) that would otherwise ship as dead mainnet bootstrap peers.
     // Append the launch VPS fleet here as it is provisioned. The residential
     // home node stays DNS-only (privacy) and is intentionally NOT listed.
-    "2.28.1.75:19080", // Hetzner (EU) — stable public seed
+    "2.29.34.197:19080", // Hetzner (EU) placeholder — replace with real mainnet seed IPs before launch
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
@@ -106,7 +106,9 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     // 2026-07-27). Replaced with the current stable public box. Kept in sync
     // with `testnet::TESTNET_SEED_NODES` (testnet_fallback_matches_seed_nodes).
     // Append re-provisioned VPS boxes here; the home node stays DNS-only.
-    "2.28.1.75:28080", // Hetzner (EU) — stable public seed
+    // 2026-09-07: migrated 2.28.1.75 (CPX22) -> 2.29.34.197 (CPX32, 8 GB) after
+    // the 4 GB box OOM-killed the node. Must match testnet::TESTNET_SEED_NODES.
+    "2.29.34.197:28080", // Hetzner (EU, Falkenstein) — stable public seed
 ];
 
 // NOTE (2026-08-16 dead-code sweep): removed `resolve_seeds`,

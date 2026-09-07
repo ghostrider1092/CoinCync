@@ -61,7 +61,10 @@ pub const TESTNET_SEED_NODES: &[&str] = &[
     // `testnet_fallback_matches_seed_nodes` test enforces this). The home node
     // is residential and stays DNS-only (privacy); append VPS boxes here as the
     // testnet fleet is re-provisioned.
-    "2.28.1.75:28080", // Hetzner (EU) — stable public seed
+    // 2026-09-07: migrated 2.28.1.75 (CPX22, 4 GB) -> 2.29.34.197 (CPX32, 8 GB).
+    // The CPX22 OOM-killed the node (RandomX full-dataset + UTXO exceeded 4 GB);
+    // the CPX32 runs it comfortably. Old box decommissioned.
+    "2.29.34.197:28080", // Hetzner (EU, Falkenstein) — stable public seed
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;
