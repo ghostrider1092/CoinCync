@@ -443,6 +443,9 @@ pub async fn run_solo(
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
                             m.record_block_find(now);
+                            // Authoritative "your blocks" ledger for the
+                            // dashboard: this height, accepted now.
+                            m.record_accepted_block(height, now);
                         }
                         info!(blocks_found, "orchestrator: block accepted");
                     }

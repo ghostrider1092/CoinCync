@@ -1,5 +1,7 @@
 # ── Build artifacts ─────────────────────────────────────────────────
 /target/
+# Isolated tool workspaces keep their own target/ (own [workspace] table).
+tools/*/target/
 **/*.rs.bk
 *.pdb
 *.exe
