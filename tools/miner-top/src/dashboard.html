@@ -278,6 +278,8 @@
       <section class="view" id="view-chain" hidden><div class="wrap">
         <div class="phead">Miner <span>›</span> <span class="crumb">Chain</span></div>
         <div class="grid" id="chSummary"></div>
+        <div class="phead" style="margin:2px 0 10px;color:var(--muted)">Privacy &amp; node health</div>
+        <div class="grid" id="chPrivacy" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))"></div>
         <div class="sect"><div class="sh"><h2>Recent blocks</h2><span class="meta" id="chMeta">—</span></div>
           <div style="overflow-x:auto"><table>
             <thead><tr><th>Height</th><th>Age</th><th>Difficulty</th><th>Reward</th><th>Txs</th><th>Size</th><th>Hash</th></tr></thead>
@@ -451,7 +453,8 @@
     var g=document.getElementById("wkSummary");
     var pt=(latest&&latest.per_thread)||[];
     var hs=hist.map(function(s){return s.hash;});
-    var share=(latest&&latest.net_hashrate>0)?(latest.hashrate/latest.net_hashrate*100):null;
+    var nhTot=(latest&&latest.net_hashrate>0)?latest.net_hashrate:((latest&&latest.net_hashrate_est)||0);
+    var share=(latest&&nhTot>0)?(latest.hashrate/nhTot*100):null;
     var avg=pt.length?latest.hashrate/pt.length:0;
     var defs=[
       ["Total hashrate",latest?fmtHash(latest.hashrate):"—","rig",""],
@@ -494,15 +497,29 @@
     var g=document.getElementById("chSummary");
     if(latest){
       var mp=latest.mempool_txs||0;
+      // Prefer the rig's reported net hashrate; else the interval-based estimate.
+      var nh=(latest.net_hashrate>0)?latest.net_hashrate:(latest.net_hashrate_est||0);
+      var nhLabel=(latest.net_hashrate>0)?"network":"est · from block times";
       var defs=[
         ["Height",String(latest.net_height),"chain tip",""],
         ["Difficulty",fmtDiff(latest.net_diff),"per block",""],
-        ["Net hashrate",latest.net_hashrate>0?fmtHash(latest.net_hashrate):"—","network",""],
+        ["Net hashrate",nh>0?fmtHash(nh):"—",nhLabel,""],
         ["Tip age",fmtDur(latest.tip_age_s),"since last block",latest.tip_age_s>600?"neg":"pos"],
         ["Mempool",mp+(mp===1?" tx":" txs"),fmtBytes(latest.mempool_bytes||0),""],
         ["Peers",String(latest.connections||latest.peers||0),"in "+(latest.incoming||0)+" · out "+(latest.outgoing||0),""]
       ];
       g.innerHTML=defs.map(function(d){return '<div class="cell"><div class="k">'+d[0]+'</div><div class="v num '+d[3]+'">'+d[1]+'</div><div class="s">'+d[2]+'</div></div>';}).join("");
+      // Privacy & node health (privacy chain: the anonymity set is the headline).
+      var hs=latest.health_score;
+      var st=latest.node_status||"";
+      var priv=[
+        ["Anonymity set",latest.anon_set?Number(latest.anon_set).toLocaleString():"—","decoy pool","pos"],
+        ["Ring size",latest.ring_size?String(latest.ring_size):"—","per input",""],
+        ["Available outputs",latest.available_outputs?Number(latest.available_outputs).toLocaleString():"—","spendable set",""],
+        ["Node health",(hs==null)?"—":Math.round(hs*100)+"%","self-assessed",(hs!=null&&hs<0.5)?"neg":((hs!=null)?"pos":"")],
+        ["Node status",st?esc(st):"—","reported by node",(st==="stalled"||st==="degraded")?"neg":(st?"pos":"")]
+      ];
+      document.getElementById("chPrivacy").innerHTML=priv.map(function(d){return '<div class="cell"><div class="k">'+d[0]+'</div><div class="v num '+d[3]+'">'+d[1]+'</div><div class="s">'+d[2]+'</div></div>';}).join("");
     }
     var body=document.getElementById("chBody"), empty=document.getElementById("chEmpty");
     var rb=(latest&&latest.recent_blocks)||[];

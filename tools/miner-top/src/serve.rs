@@ -271,6 +271,32 @@ fn data_json(state: &Mutex<State>) -> String {
         })
         .collect();
 
+    // Estimated network hashrate from ACTUAL recent block intervals (honest for
+    // a small off-equilibrium testnet, vs difficulty/target-time which assumes
+    // blocks land on schedule). net_hashrate ≈ difficulty ÷ avg block interval.
+    let net_hashrate_est = {
+        let rb = &d.recent_blocks; // newest-first
+        if rb.len() >= 2 && d.net_diff > 0.0 {
+            let newest = rb.first().map(|b| b.ts).unwrap_or(0);
+            let oldest = rb.last().map(|b| b.ts).unwrap_or(0);
+            let span = newest.saturating_sub(oldest) as f64;
+            let n = (rb.len() - 1) as f64;
+            if span > 0.0 {
+                Some(d.net_diff / (span / n))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    // health_score < 0 means the node didn't report it → null (show "—").
+    let health = if d.health_score < 0.0 {
+        None
+    } else {
+        Some(d.health_score)
+    };
+
     // Maintainer colony/guard status → JSON (null when no sidecar is wired, so
     // the dashboard never shows the Colony tab in the community build).
     let colony = s.colony.as_ref().map(|c| {
@@ -330,6 +356,13 @@ fn data_json(state: &Mutex<State>) -> String {
         "outgoing": d.outgoing,
         "white_peers": d.white_peers,
         "grey_peers": d.grey_peers,
+        // privacy + node health (Chain tab)
+        "anon_set": d.anon_set,
+        "ring_size": d.ring_size,
+        "available_outputs": d.available_outputs,
+        "health_score": health,
+        "node_status": d.node_status,
+        "net_hashrate_est": net_hashrate_est,
         // your blocks + mined balance (Blocks tab)
         "my_blocks": my_blocks,
         "mined_blocks": total_blocks,

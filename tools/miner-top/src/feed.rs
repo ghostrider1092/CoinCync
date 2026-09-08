@@ -136,6 +136,12 @@ pub struct RealData {
     pub tip_age_s: u64,
     pub synced: bool,
     pub peers: u32,
+    // node get_info — privacy + health (surfaced in the Chain tab)
+    pub anon_set: u64,           // anonymity_set
+    pub ring_size: u32,          // effective_ring_size
+    pub available_outputs: u64,  // spendable output set size
+    pub health_score: f64,       // node self-assessed health (0..1); -1 = absent
+    pub node_status: String,     // node's own status string (e.g. "ok"/"stalled")
     // node get_block_range — recent chain blocks (Chain tab explorer)
     pub recent_blocks: Vec<ChainBlock>,
     // node get_mempool_info
@@ -359,6 +365,20 @@ pub fn poll(rig_url: &str, node_url: &str) -> RealData {
                         .or_else(|| r.get("synced").and_then(|x| x.as_bool()))
                         .unwrap_or(false);
                     d.peers = r.get("peer_count").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                    // Privacy + health (privacy chain: surface the anonymity set).
+                    d.anon_set = r.get("anonymity_set").and_then(|x| x.as_u64()).unwrap_or(0);
+                    d.ring_size =
+                        r.get("effective_ring_size").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                    d.available_outputs =
+                        r.get("available_outputs").and_then(|x| x.as_u64()).unwrap_or(0);
+                    // -1.0 marks "absent" so the UI shows "—" instead of a fake 0.
+                    d.health_score =
+                        r.get("health_score").and_then(|x| x.as_f64()).unwrap_or(-1.0);
+                    d.node_status = r
+                        .get("status")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
                 }
             }
         }
