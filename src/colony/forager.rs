@@ -18,6 +18,7 @@
 
 use tick::{ChainAdapter, ChainTipState};
 
+use crate::colony::guard::telemetry::{sanitize_tip, Untrusted};
 use crate::colony::pheromone::{PeerKey, PheromoneMap};
 
 // Deposit weights (fixed-point; one round's max = 700, well under SCORE_MAX).
@@ -50,6 +51,33 @@ pub fn deposit_for_probe<Id>(local_height: u64, tip: &ChainTipState<Id>) -> u32 
     d
 }
 
+/// Probe every fleet peer once and return the per-peer pheromone deposits from
+/// the public tip signals — the read-only, map-free core shared by
+/// [`observe_round`] and any Act host that fuels its own pheromone map.
+///
+/// Reads only (`tip_state` + `probe_peer`); sends nothing, touches no
+/// transaction. Each probe is peer-supplied telemetry, so it is wrapped
+/// `Untrusted` and clamped by `sanitize_tip` before scoring reads it — a lying
+/// peer can at most report the maximum honest value, never an out-of-band one.
+/// Height/difficulty are left untouched (fork choice validates those). An
+/// unreachable peer yields no entry (its existing score decays via evaporation).
+pub fn probe_deposits<A: ChainAdapter>(adapter: &A) -> Vec<(PeerKey, u32)> {
+    // Our own tip height — the reference the peers are scored against. If the
+    // local RPC is down, fall back to 0 (every reachable peer then counts as
+    // at-or-ahead, the safe reading when we can't see our own tip).
+    let local_height = adapter.tip_state().map(|t| t.height).unwrap_or(0);
+
+    let mut deposits = Vec::new();
+    for peer in adapter.fleet_peers() {
+        let key = PeerKey(peer.name.clone());
+        if let Ok(tip) = adapter.probe_peer(&peer) {
+            let tip = sanitize_tip(Untrusted::new(tip));
+            deposits.push((key, deposit_for_probe(local_height, &tip)));
+        }
+    }
+    deposits
+}
+
 /// Run one observe round: probe every fleet peer, deposit pheromone from
 /// the public tip signals, evaporate, and return the ranked recommendation
 /// (highest-scored peers first).
@@ -58,20 +86,8 @@ pub fn deposit_for_probe<Id>(local_height: u64, tip: &ChainTipState<Id>) -> u32 
 /// probe_peer) and mutates the local pheromone `map`. It sends nothing to
 /// the node and never touches a transaction. The caller logs the result.
 pub fn observe_round<A: ChainAdapter>(adapter: &A, map: &mut PheromoneMap) -> Vec<(PeerKey, u32)> {
-    // Our own tip height — the reference the peers are scored against. If
-    // the local RPC is down, fall back to 0 (every reachable peer then
-    // counts as at-or-ahead, which is the safe/expected reading when we
-    // can't see our own tip).
-    let local_height = adapter.tip_state().map(|t| t.height).unwrap_or(0);
-
-    for peer in adapter.fleet_peers() {
-        let key = PeerKey(peer.name.clone());
-        match adapter.probe_peer(&peer) {
-            Ok(tip) => map.deposit(key, deposit_for_probe(local_height, &tip)),
-            // Unreachable this round: no deposit. Evaporation decays the
-            // peer's existing score, so persistent unreachability drops it.
-            Err(_) => {}
-        }
+    for (key, amount) in probe_deposits(adapter) {
+        map.deposit(key, amount);
     }
 
     map.evaporate();
@@ -128,6 +144,31 @@ mod tests {
             peer_count: 3,
             tip_age_secs,
         }
+    }
+
+    #[test]
+    fn adversarial_probe_is_clamped_before_scoring() {
+        // A lying peer reports out-of-band telemetry: a tip "aged" u64::MAX
+        // seconds and a fake astronomical peer count. `observe_round` wraps
+        // every probe `Untrusted` and runs `sanitize_tip` before scoring, so
+        // what reaches `deposit_for_probe` is already clamped into honest
+        // ranges.
+        let lying = ChainTipState {
+            height: 100,
+            difficulty: 1,
+            tip_id: BlockIdBytes(Hash::from_bytes([0u8; 32])),
+            is_synced: true,
+            peer_count: u32::MAX,
+            tip_age_secs: u64::MAX,
+        };
+        let clean = sanitize_tip(Untrusted::new(lying));
+        // Clamped to honest maxima, not passed through raw.
+        assert_eq!(clean.tip_age_secs, 60 * 60 * 24 * 30);
+        assert_eq!(clean.peer_count, 100_000);
+        // Scoring sees the clamped value: the (still-ancient) tip earns no
+        // freshness bonus, exactly as an honestly-stale peer would.
+        let d = deposit_for_probe(100, &clean);
+        assert_eq!(d, W_REACHABLE + W_AT_OR_AHEAD + W_SYNCED);
     }
 
     #[test]
