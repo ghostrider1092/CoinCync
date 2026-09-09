@@ -198,7 +198,12 @@ fn data_json(state: &Mutex<State>) -> String {
     // block is COINBASE_MATURITY deep. Reward is the fixed per-block emission
     // passed at launch (`--reward`), so no spend keys ever touch this box.
     let tip = d.net_height;
-    let mut matured_blocks = 0u64;
+    // Pending = blocks still inside the COINBASE_MATURITY window. Those are always
+    // the most-recent blocks, so they are ALWAYS present in the rig's accepted-
+    // block ledger ring (the 100-block window is far smaller than the 256-entry
+    // ring) — making this count EXACT even after older, matured blocks were
+    // evicted from the ring. The per-block rows below are the recent ledger
+    // history the table renders.
     let mut pending_blocks = 0u64;
     let my_blocks: Vec<serde_json::Value> = d
         .my_blocks
@@ -206,9 +211,7 @@ fn data_json(state: &Mutex<State>) -> String {
         .map(|b| {
             let depth = tip.saturating_sub(b.height);
             let matured = depth >= COINBASE_MATURITY;
-            if matured {
-                matured_blocks += 1;
-            } else {
+            if !matured {
                 pending_blocks += 1;
             }
             serde_json::json!({
@@ -220,7 +223,14 @@ fn data_json(state: &Mutex<State>) -> String {
             })
         })
         .collect();
-    let total_blocks = d.my_blocks.len() as u64;
+    // Total from the CUMULATIVE accepted counter (accurate past the 256-block
+    // ring cap), clamped to at least the pending count for safety. Matured =
+    // total − pending: everything no longer in the maturity window is spendable.
+    // This is why the balance stays correct even after 835+ blocks, while the
+    // table above only shows the most recent ~256.
+    let total_blocks = d.blocks_accepted.max(pending_blocks);
+    let matured_blocks = total_blocks.saturating_sub(pending_blocks);
+    let ledger_shown = d.my_blocks.len() as u64;
     let mined_total = total_blocks as f64 * s.reward;
     let mined_matured = matured_blocks as f64 * s.reward;
     let mined_pending = pending_blocks as f64 * s.reward;
@@ -366,6 +376,7 @@ fn data_json(state: &Mutex<State>) -> String {
         // your blocks + mined balance (Blocks tab)
         "my_blocks": my_blocks,
         "mined_blocks": total_blocks,
+        "ledger_shown": ledger_shown,
         "matured_blocks": matured_blocks,
         "pending_blocks": pending_blocks,
         "mined_total": mined_total,

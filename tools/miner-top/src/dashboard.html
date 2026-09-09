@@ -122,6 +122,8 @@
   .balcell.lead{background:linear-gradient(135deg,rgba(63,207,142,.07),transparent)}
   .balcell.lead .v{color:var(--green)}
   .coin{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;box-shadow:0 0 0 3px var(--teal-soft)}
+  .balnote{font-size:10.5px;color:var(--dim);margin:-6px 0 14px;line-height:1.45}
+  .balnote b{color:var(--muted);font-weight:600}
   /* badges */
   .badge{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:20px;display:inline-block;line-height:1.5}
   .badge.mat{background:var(--teal-soft);color:var(--green)}
@@ -215,6 +217,7 @@
       <section class="view" id="view-overview"><div class="wrap">
       <div class="phead">Miner <span>›</span> <span class="crumb">rig-01</span> <span class="star">★</span></div>
       <div class="balrow" id="balrow"></div>
+      <div class="balnote"><b>Estimate</b> — this rig's accepted blocks × block reward, not a wallet balance. Excludes other rigs mining the same address, any coins spent, and exact per-height emission. For your true on-chain total, use a view-only wallet.</div>
       <div class="idrow">
         <div class="idcell idmain">
           <div class="avatar">◆</div>
@@ -266,6 +269,7 @@
       <section class="view" id="view-blocks" hidden><div class="wrap">
         <div class="phead">Miner <span>›</span> <span class="crumb">Blocks &amp; rewards</span></div>
         <div class="balrow" id="balrow2"></div>
+        <div class="balnote"><b>Estimate</b> — this rig's accepted blocks × block reward, not a wallet balance. Excludes other rigs mining the same address, any coins spent, and exact per-height emission. For your true on-chain total, use a view-only wallet.</div>
         <div class="sect"><div class="sh"><h2>Your blocks</h2><span class="meta" id="blkMeta">—</span></div>
           <div style="overflow-x:auto"><table>
             <thead><tr><th>Height</th><th>Found</th><th>Reward</th><th>Confirmations</th><th>Status</th></tr></thead>
@@ -433,8 +437,8 @@
     else{var rem=Math.min.apply(null,pend.map(function(b){return (latest.maturity||100)-b.confirmations;}));nextMat="in "+Math.max(0,rem)+" blocks";}
     var eta=latest.eta_seconds, luck=latest.luck_pct, acc=latest.accept_rate;
     var cells=[
-      ['lead','<span class="coin"></span>Mined balance',fmtCoins(total)+' <small>CYNC</small>',nb+' block'+(nb===1?'':'s')+' · solo'],
-      ['','Matured · spendable','<span class="pos">'+fmtCoins(mat)+'</span> <small>CYNC</small>',mb+' block'+(mb===1?'':'s')+' confirmed'],
+      ['lead','<span class="coin"></span>Est. mined · this rig',fmtCoins(total)+' <small>CYNC</small>',nb+' block'+(nb===1?'':'s')+' accepted'],
+      ['','Matured · est.','<span class="pos">'+fmtCoins(mat)+'</span> <small>CYNC</small>',mb+' block'+(mb===1?'':'s')+' past maturity'],
       ['','Pending · maturing','<span class="'+(pen>0?'':'')+'" style="color:'+(pen>0?'var(--amber)':'var(--fg)')+'">'+fmtCoins(pen)+'</span> <small>CYNC</small>',pb>0?nextMat:'nothing maturing'],
       ['','Est. next block',eta==null?'—':fmtDur(eta),'at current hashrate'],
       ['','Luck',luck==null?'—':luck.toFixed(0)+'%','landed vs expected'],
@@ -482,7 +486,9 @@
     document.getElementById("matN").textContent=(latest&&latest.maturity)||100;
     var body=document.getElementById("blkBody"), empty=document.getElementById("blkEmpty");
     var mine=(latest&&latest.my_blocks)||[];
-    document.getElementById("blkMeta").textContent=latest?(latest.mined_blocks+" landed · "+latest.matured_blocks+" matured · "+latest.pending_blocks+" pending"):"—";
+    var blkMeta=latest?(latest.mined_blocks+" landed · "+latest.matured_blocks+" matured · "+latest.pending_blocks+" pending"):"—";
+    if(latest&&latest.ledger_shown!=null&&latest.ledger_shown<latest.mined_blocks)blkMeta+=" · table shows recent "+latest.ledger_shown;
+    document.getElementById("blkMeta").textContent=blkMeta;
     empty.hidden=mine.length>0;
     body.innerHTML=mine.map(function(b){
       var mat=b.matured, need=(latest.maturity||100);
