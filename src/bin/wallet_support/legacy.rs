@@ -1089,10 +1089,27 @@ async fn cmd_integrated_address(
         None => rand::rngs::OsRng.fill_bytes(&mut pid),
     }
 
-    let prim_network = match network {
-        Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+    // jun #50 review: derive the address prefix from the wallet's PERSISTED
+    // network, not the CLI --network flag — otherwise a mainnet wallet run with
+    // `--network testnet` would emit a testnet-prefixed address from mainnet
+    // keys (and vice versa). Warn if the flag disagrees so the mismatch is
+    // visible rather than silently ignored.
+    let prim_network = match data.network.as_str() {
+        "mainnet" => coincync::primitives::Network::Mainnet,
+        "testnet" | "regtest" => coincync::primitives::Network::Testnet,
+        other => return Err(format!("wallet has unknown network '{other}'")),
     };
+    let flag_network = match network {
+        Network::Mainnet => "mainnet",
+        Network::Testnet => "testnet",
+        Network::Regtest => "regtest",
+    };
+    if data.network != flag_network {
+        eprintln!(
+            "warning: --network {flag_network} ignored; using the wallet's own network '{}'",
+            data.network
+        );
+    }
     let mut addr =
         coincync::primitives::Address::new(prim_network, epoch.spend_public, epoch.view_public);
     addr.address_type = coincync::primitives::AddressType::Integrated;

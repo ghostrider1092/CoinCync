@@ -129,10 +129,14 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     // address type (subaddress flag), and any embedded payment ID directly, so a
     // user can pay a generated integrated address without hand-passing the hex
     // flags. Otherwise fall back to the explicit --to-spend/--to-view flags.
+    // Captured from --address (if given) so we can validate it against the
+    // wallet's own network once the wallet is opened below (jun #50 review).
+    let mut recipient_network: Option<coincync::primitives::Network> = None;
     let (to_spend, to_view, subaddress, payment_id): (PublicKey, PublicKey, bool, Option<[u8; 8]>) =
         if let Some(addr_str) = address.as_deref() {
             let addr = Address::from_string(addr_str.trim())
                 .map_err(|e| format!("invalid --address: {e}"))?;
+            recipient_network = Some(addr.network);
             let is_sub = addr.address_type == AddressType::Subaddress;
             // An integrated address carries its own payment ID; a --payment-id
             // flag passed alongside must not silently override it.
@@ -181,6 +185,26 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
 
     let password = resolve_password(password, false)?;
     let mut wallet = Wallet::open(wallet_path).map_err(|error| format!("open wallet: {error}"))?;
+
+    // jun #50 review: reject an --address whose network doesn't match this
+    // wallet's. Paying a mainnet address from a testnet wallet (or vice versa)
+    // sends to keys that are unspendable on this chain — the funds are burned.
+    if let Some(net) = recipient_network {
+        let wallet_net = wallet.network_name().to_string();
+        let addr_net = match net {
+            coincync::primitives::Network::Mainnet => "mainnet",
+            coincync::primitives::Network::Testnet => "testnet",
+        };
+        // A testnet-prefixed address is valid on both testnet and regtest
+        // wallets (regtest shares the testnet address prefix).
+        let ok = wallet_net.as_str() == addr_net
+            || (addr_net == "testnet" && wallet_net == "regtest");
+        if !ok {
+            return Err(format!(
+                "--address is a {addr_net} address but this wallet is {wallet_net}; refusing to send"
+            ));
+        }
+    }
     wallet
         .unlock(password.as_str())
         .map_err(|error| format!("unlock wallet: {error}"))?;

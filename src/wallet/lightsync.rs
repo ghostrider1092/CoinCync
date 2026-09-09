@@ -141,13 +141,25 @@ impl BlockDigest {
                 outputs.push(OutputDigest::from_output(output, tx_hash, idx as u8));
                 any_output = true;
             }
-            // Integrated-address payment ID (issue #50): carry the encrypted
-            // extra entry on the tx's first output digest so a light client that
-            // owns it can recover the payment ID (its tx_public_key is the ECDH
-            // key the ID was encrypted to).
+            // Integrated-address payment ID (issue #50, jun review): the builder
+            // encrypts the ID with the ECDH channel of the *recipient* output —
+            // the first output carrying a recipient view key — which is NOT
+            // necessarily this tx's output 0 (a dummy/decoy output can precede
+            // it). Attaching the blob only to `first_output_pos` would leave the
+            // recipient (owning a later output) unable to recover it, since each
+            // output has its own tx_public_key / ECDH key.
+            //
+            // from_block cannot tell which output is the recipient (that needs
+            // the recipient's view key), so carry the encrypted blob on EVERY
+            // output of the tx. On scan, only the output the wallet actually owns
+            // decrypts to a valid PAYMENT_ID_LEN plaintext; the copies on decoy
+            // outputs fail the length filter and yield None. Small, and correct
+            // regardless of output ordering.
             if any_output {
                 if let Some(enc) = crate::transaction::payment_id::find_encrypted(&tx.extra) {
-                    outputs[first_output_pos].encrypted_payment_id = enc;
+                    for out in &mut outputs[first_output_pos..] {
+                        out.encrypted_payment_id = enc.clone();
+                    }
                 }
             }
         }
@@ -663,6 +675,26 @@ fn scan_output_digest_with_keys(
                 continue;
             }
 
+            // Integrated-address payment ID (issue #50, jun review): recover it
+            // on the SUBADDRESS path too — otherwise subaddress recipients
+            // silently lose it. Same ECDH channel as the primary path.
+            let payment_id = if output.encrypted_payment_id.is_empty() {
+                None
+            } else {
+                crate::crypto::decrypt_memo(
+                    &output.encrypted_payment_id,
+                    key_set.view_secret.as_bytes(),
+                    output.tx_public_key.as_bytes(),
+                )
+                .ok()
+                .filter(|v| v.len() == crate::transaction::payment_id::PAYMENT_ID_LEN)
+                .map(|v| {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(&v);
+                    a
+                })
+            };
+
             let tx_output = TxOutput {
                 stealth_address: output.stealth_address,
                 tx_public_key: output.tx_public_key,
@@ -683,7 +715,7 @@ fn scan_output_digest_with_keys(
                 shared_secret,
                 key_epoch: key_set.epoch,
                 subaddress_index: matched_subaddr,
-                payment_id: None,
+                payment_id,
             });
         }
     }
@@ -1018,6 +1050,77 @@ mod tests {
             found[0].payment_id,
             Some(pid),
             "light-sync must recover the integrated-address payment id"
+        );
+    }
+
+    #[test]
+    fn test_scan_digest_recovers_payment_id_with_dummy_output_first() {
+        // jun #50 review: a decoy/dummy output can precede the integrated-address
+        // recipient, so the builder encrypts the payment ID to the recipient's
+        // channel (output[1]) while from_block historically attached the blob
+        // only to output[0]. The recipient (owning output[1]) must still recover
+        // it — from_block now carries the blob on every output of the tx.
+        let (view_secret, spend_public) = make_test_keys();
+        let view_public = PublicKey::from_bytes(
+            CurveSecretScalar::from_bytes(*view_secret.as_bytes())
+                .to_public()
+                .to_bytes(),
+        );
+
+        // Dummy output at index 0, owned by someone else (fresh random keys).
+        let (other_view, other_spend) = make_test_keys();
+        let (dummy_out, _dummy_secret) =
+            create_test_output(&other_view, &other_spend, 1_000_000, 0);
+
+        // Recipient output at index 1, owned by the test wallet.
+        let amount = 3_000_000u64;
+        let (recip_out, recip_secret) = create_test_output(&view_secret, &spend_public, amount, 1);
+
+        // Payment ID encrypted to the RECIPIENT output's ECDH channel (index 1).
+        let pid = [9u8, 8, 7, 6, 5, 4, 3, 2];
+        let enc =
+            crate::crypto::encrypt_memo(&pid, recip_secret.as_bytes(), view_public.as_bytes())
+                .expect("encrypt payment id");
+        let extra = crate::transaction::payment_id::encode_extra(&enc);
+
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Coinbase,
+            inputs: vec![],
+            outputs: vec![dummy_out, recip_out], // dummy FIRST, recipient second
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height: 1,
+            timestamp: 1000,
+            prev_hash: Hash::from_bytes([0u8; 32]),
+            tx_root: tx.hash(),
+            anchor: Hash::from_bytes([0u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: spend_public,
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        let block = Block::new(header, vec![tx]);
+        let digest = BlockDigest::from_block(&block);
+
+        let keys = ScanKeys::new(view_secret, spend_public, 0);
+        let mut sync = LightWalletSync::new(vec![keys]);
+        let found = sync.scan_digest(&digest);
+        assert_eq!(found.len(), 1, "recipient output (index 1) is found");
+        assert_eq!(found[0].amount, amount);
+        assert_eq!(
+            found[0].payment_id,
+            Some(pid),
+            "payment id recovered even though a dummy output precedes the recipient"
         );
     }
 
