@@ -1,0 +1,33 @@
+[Unit]
+Description=CoinCync testnet node (single-box: RPC on loopback for a co-located rig)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coincync
+Group=coincync
+# No --rpc-bind => the network default loopback (127.0.0.1:28081), so the RPC is
+# reachable only by the rig on this same box — no auth or firewall needed for it.
+# P2P is public and joins the testnet mesh via the seed. REST/explorer disabled.
+ExecStart=/usr/local/bin/coincync-node \
+  --network testnet \
+  --data-dir /var/lib/coincync \
+  --addnode 2.29.34.197:28080 \
+  --rest-disable
+
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/coincync
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

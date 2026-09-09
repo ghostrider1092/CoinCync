@@ -1,0 +1,14 @@
+# coincync-tick adapter config — shared node box (two-box testnet).
+#
+# Personal mode: the sidecar reads only THIS host's local node for tip / health /
+# mempool / forager signals. Read-only — it only queries RPC, never writes chain
+# state or feeds peers.
+deployment_mode = "personal"
+
+# The local node this host reads. Loopback: the node runs on the same box.
+local_rpc_url = "http://127.0.0.1:28081"
+
+# Bearer token for the local node's RPC. Because the node now runs WITH auth
+# (COINCYNC_RPC_API_KEY set), even loopback reads must present the key. Put the
+# SAME key value (bare, no "Bearer " prefix) in this file, chmod 600.
+local_rpc_token_path = "/etc/coincync/rpc.key"

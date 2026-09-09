@@ -1,0 +1,40 @@
+[Unit]
+Description=CoinCync tick sidecar (health monitor + colony, read-only)
+After=coincync-node.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coincync
+Group=coincync
+
+# Read-only, advisory, non-consensus. The colony kill switch is left DISARMED
+# (we do NOT set COINCYNC_COLONY_ACT_ENABLED) — every caste action stays gated;
+# the sidecar only observes and logs. --colony-act just hosts the (gated) Act
+# loop so the maintainer /colony view has data.
+#
+# /metrics + /colony bind to loopback only. /colony additionally requires the
+# maintainer Bearer token in /etc/coincync/maintainer.token (fails closed: no
+# token file => /colony returns 503). The tick reads the local node's RPC with
+# the shared API key via the config's local_rpc_token_path.
+ExecStart=/usr/local/bin/coincync-tick \
+  --config /etc/coincync/coincync-tick.toml \
+  --colony-act --castes-observe --colony-advise \
+  --metrics-listen 127.0.0.1:9200 \
+  --maintainer-token-file /etc/coincync/maintainer.token \
+  --interval 5
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening — the tick writes nothing.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
