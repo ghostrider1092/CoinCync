@@ -158,7 +158,19 @@ impl RpcClient {
 ///
 /// Coincync's real response has many more fields; we deserialize only
 /// what we consume so a future extension doesn't break the tick.
+///
+/// ## Dual field names (`is_synced`/`synced`, `mempool_size`/`tx_pool_size`)
+///
+/// The node's `get_info` emits BOTH the canonical name AND a legacy alias for
+/// two fields, **in the same response**. A `#[serde(alias = "…")]` cannot
+/// express that: when both names are present serde rejects the whole decode
+/// with `duplicate field`, which silently turned every probe into an
+/// "unreachable" result (empty tips, difficulty 0, forager scoring nothing).
+/// So we deserialize into [`GetInfoResponseRaw`], which captures each name as a
+/// distinct optional field, and reconcile — canonical wins, legacy is the
+/// fallback. This parses all of: canonical-only, legacy-only, and both-present.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(from = "GetInfoResponseRaw")]
 pub struct GetInfoResponse {
     /// Chain tip height.
     pub height: u64,
@@ -167,23 +179,53 @@ pub struct GetInfoResponse {
     pub total_difficulty: String,
     /// Hex-encoded 32-byte hash of the tip block.
     pub top_hash: String,
-    /// True if the local node considers itself in sync with the
-    /// network tip.
-    #[serde(alias = "synced")]
+    /// True if the local node considers itself in sync with the network tip.
     pub is_synced: bool,
     /// Current outbound peer count.
     pub peer_count: u32,
     /// Seconds since the tip's timestamp. `None` when the local clock
     /// is unreliable.
-    #[serde(default)]
     pub tip_age_secs: Option<u64>,
-    /// Number of transactions in the local mempool. Optional so a
-    /// missing field (older node without the count) parses cleanly.
-    /// Coincync's `get_info` emits both `mempool_size` and
-    /// `tx_pool_size` as back-compat aliases; either satisfies this
-    /// field.
-    #[serde(default, alias = "tx_pool_size")]
+    /// Number of transactions in the local mempool. `None` when the node
+    /// reports neither `mempool_size` nor `tx_pool_size`.
     pub mempool_size: Option<usize>,
+}
+
+/// Wire-shape capture that tolerates the node emitting the canonical name, the
+/// legacy alias, or BOTH for the dual-named fields (see [`GetInfoResponse`]).
+/// Every alias is its own optional field, so no name ever collides.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GetInfoResponseRaw {
+    height: u64,
+    total_difficulty: String,
+    top_hash: String,
+    #[serde(default)]
+    is_synced: Option<bool>,
+    #[serde(default)]
+    synced: Option<bool>,
+    peer_count: u32,
+    #[serde(default)]
+    tip_age_secs: Option<u64>,
+    #[serde(default)]
+    mempool_size: Option<usize>,
+    #[serde(default)]
+    tx_pool_size: Option<usize>,
+}
+
+impl From<GetInfoResponseRaw> for GetInfoResponse {
+    fn from(r: GetInfoResponseRaw) -> Self {
+        GetInfoResponse {
+            height: r.height,
+            total_difficulty: r.total_difficulty,
+            top_hash: r.top_hash,
+            // Canonical name wins; legacy `synced` is the fallback; absent both
+            // → not synced (the safe reading).
+            is_synced: r.is_synced.or(r.synced).unwrap_or(false),
+            peer_count: r.peer_count,
+            tip_age_secs: r.tip_age_secs,
+            mempool_size: r.mempool_size.or(r.tx_pool_size),
+        }
+    }
 }
 
 impl GetInfoResponse {
@@ -441,6 +483,38 @@ mod tests {
         let client = RpcClient::new(url, None).expect("build");
         let info = get_info(&client).expect("get_info");
         assert!(info.is_synced);
+    }
+
+    #[test]
+    fn get_info_accepts_both_is_synced_and_synced_present() {
+        // Regression: the REAL node emits BOTH `is_synced` and `synced` (and
+        // both `mempool_size` and `tx_pool_size`) in the same response. A
+        // `#[serde(alias)]` decoded that as a "duplicate field" error, so every
+        // probe silently failed as unreachable. The raw-reconciliation decode
+        // must accept both names present and prefer the canonical one.
+        let body = r#"{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "height": 112,
+                "total_difficulty": "21841225",
+                "top_hash": "bc7596388ae7ab038a361461cc2f5f0f49c28ba560042a0827ab7403d5513a2c",
+                "is_synced": true,
+                "synced": true,
+                "peer_count": 3,
+                "tip_age_secs": 42,
+                "mempool_size": 0,
+                "tx_pool_size": 0
+            }
+        }"#
+        .to_string();
+        let url = spawn_one_shot_server(body, 200);
+        let client = RpcClient::new(url, None).expect("build");
+        let info = get_info(&client).expect("both names present must decode");
+        assert!(info.is_synced);
+        assert_eq!(info.peer_count, 3);
+        assert_eq!(info.difficulty_u128(), 21_841_225);
+        assert_eq!(info.mempool_size, Some(0));
     }
 
     #[test]

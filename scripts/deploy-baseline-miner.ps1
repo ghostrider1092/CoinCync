@@ -137,6 +137,7 @@ id -u coincync >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr
 # Append/replace the BASELINE_MINER_ADDRESS line in the existing
 # coincync env file. Idempotent — won't duplicate on re-run.
 ENV_FILE=/etc/coincync/coincync.env
+mkdir -p /etc/coincync
 touch `"`$ENV_FILE`"
 chmod 0640 `"`$ENV_FILE`"
 chown root:coincync `"`$ENV_FILE`"
@@ -158,6 +159,9 @@ systemctl status coincync-baseline-miner.service --no-pager -n 10 || true
 "@
 
 Write-Host "Running install on remote..." -ForegroundColor Cyan
+# PowerShell here-strings use CRLF; a remote bash chokes on `set -o pipefail\r`
+# ("invalid option name"). Strip CR so the remote sees clean LF-terminated lines.
+$install = $install -replace "`r", ""
 $ErrorActionPreference = 'Continue'
 try {
   & ssh @sshOpts "root@${ApiIp}" $install 2>&1 | ForEach-Object { Write-Host $_ }

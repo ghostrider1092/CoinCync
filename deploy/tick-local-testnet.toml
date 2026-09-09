@@ -1,0 +1,26 @@
+# coincync-tick config — local fresh-chain testnet (d2240fea).
+#
+# Points the sidecar at the LOCAL synced node so the fleet castes reason about
+# real tip/health/forager signals instead of personal-mode zeros. Read-only:
+# the tick only queries RPC; it never writes chain state or feeds peers.
+#
+# Run (from the repo root):
+#   COINCYNC_COLONY_ACT_ENABLED=1 ./target/debug/coincync-tick \
+#     --config deploy/tick-local-testnet.toml \
+#     --colony-act --castes-observe --colony-advise --interval 5
+
+# Fleet mode turns on the fleet-aggregate read paths (spider/sensor/centipede).
+# In this HealthTick binary it only enables extra read-only probes — RescueTick's
+# notice-broadcast path is intentionally NOT wired here, so nothing is sent.
+deployment_mode = "fleet"
+
+# The reachable node RPC endpoints, one per fleet entry (see fleet-config below).
+fleet_config_path = 'C:\Users\unkno\dev\CoinCync\deploy\fleet-local-testnet.json'
+
+# The local node this host reads for its own tip/health/mempool.
+local_rpc_url = "http://127.0.0.1:28081"
+
+# No bearer needed for the local node (loopback, auth disabled). This Windows
+# path won't exist, so the tick logs "running without auth" and proceeds —
+# harmless for an unauthenticated loopback RPC.
+local_rpc_token_path = 'C:\Users\unkno\dev\CoinCync\deploy\rpc-token'

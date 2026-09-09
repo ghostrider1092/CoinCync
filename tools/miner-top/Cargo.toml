@@ -1,0 +1,41 @@
+# Standalone demo crate — isolated from the parent CoinCync workspace via its
+# own [workspace] table, so it never affects the main build or Cargo.lock.
+# Build/run with:  cd tools/miner-top && cargo run --release
+[package]
+name = "coincync-miner-top"
+version = "0.1.0"
+edition = "2021"
+description = "btop-style terminal dashboard for CoinCync's RandomX CPU miner"
+license = "MIT"
+# `cargo run` launches the live TUI; the headless HTML renderer is `--bin render`.
+default-run = "miner-top"
+
+[lib]
+name = "coincync_miner_top"
+path = "src/lib.rs"
+
+[[bin]]
+name = "miner-top"
+path = "src/main.rs"
+
+[[bin]]
+name = "render"
+path = "src/bin/render.rs"
+
+[[bin]]
+name = "miner-gui"
+path = "src/bin/gui.rs"
+
+[dependencies]
+ratatui = "0.29"
+# Real-data mode: parse the node's get_info JSON. The HTTP client itself is
+# std-only (TcpStream), so this is the only added dependency.
+serde_json = "1"
+# Native desktop app (miner-gui): a WebView2 window showing the polished web
+# dashboard — opens as its own app window, no browser to launch. `tao` = the
+# windowing, `wry` = the embedded webview (WebView2 on Windows, built into Win11).
+tao = "0.30"
+wry = "0.45"
+
+# Isolate from the parent workspace (see header).
+[workspace]

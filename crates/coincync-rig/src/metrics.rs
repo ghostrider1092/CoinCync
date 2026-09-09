@@ -11,6 +11,8 @@
 //!   coincync_rig_current_template_height   gauge   — height we're mining toward
 //!   coincync_rig_current_hashrate_hps      gauge   — hashes/sec last iteration
 //!   coincync_rig_threads                   gauge   — active worker threads
+//!   coincync_rig_thread_hashrate_hps       gauge   — per-thread hps (labeled)
+//!   coincync_rig_accepted_block            gauge   — accept ts per landed height
 //!
 //! The only consumer cost is one TCP accept per scrape. Default Prometheus
 //! scrape is 15s, so this is essentially free.
@@ -34,6 +36,11 @@ pub const HASHRATE_RING_SIZE: usize = 60;
 /// per-hour testnet rate is ~360 entries; 512 is a comfortable upper
 /// bound.
 pub const BLOCK_FINDS_RING_SIZE: usize = 512;
+
+/// How many recent accepted-block records (height + accept timestamp) to keep
+/// for the dashboard's "your blocks" table. A solo rig lands blocks rarely, so
+/// 256 is many days of history and costs a few KiB.
+pub const ACCEPTED_BLOCKS_RING_SIZE: usize = 256;
 
 /// Atomic counters/gauges shared between the orchestrator (writer) and
 /// the metrics HTTP server / TUI (readers). Cheap to clone (one Arc
@@ -79,6 +86,13 @@ pub struct MetricsState {
     /// heatmap reads this; thermal throttling on a single core surfaces
     /// here as a cool cell while siblings run hot.
     pub per_thread_hashrate_hps: Mutex<Vec<u64>>,
+    /// Heights this rig actually landed (block accepted by the daemon), paired
+    /// with the accept timestamp (Unix seconds). This is the authoritative
+    /// answer to "which blocks did *I* mine" — the rig knows exactly what it
+    /// submitted and got acked, so the dashboard needn't guess by parsing
+    /// coinbase pubkeys out of chain blocks. Newest last. Read-only telemetry:
+    /// no key material, just heights the operator already sees in the log.
+    pub accepted_blocks: Mutex<VecDeque<(u64, u64)>>,
 }
 
 impl MetricsState {
@@ -103,7 +117,20 @@ impl MetricsState {
             hashrate_ring: Mutex::new(VecDeque::with_capacity(HASHRATE_RING_SIZE)),
             block_finds: Mutex::new(VecDeque::with_capacity(BLOCK_FINDS_RING_SIZE)),
             per_thread_hashrate_hps: Mutex::new(Vec::new()),
+            accepted_blocks: Mutex::new(VecDeque::with_capacity(ACCEPTED_BLOCKS_RING_SIZE)),
         })
+    }
+
+    /// Record a block this rig landed: `height` accepted at `unix_secs`. Called
+    /// by the orchestrator right after the daemon acks a submit. Bounded ring —
+    /// oldest record is evicted at capacity.
+    pub fn record_accepted_block(&self, height: u64, unix_secs: u64) {
+        if let Ok(mut ring) = self.accepted_blocks.lock() {
+            if ring.len() >= ACCEPTED_BLOCKS_RING_SIZE {
+                ring.pop_front();
+            }
+            ring.push_back((height, unix_secs));
+        }
     }
 
     /// Replace the per-thread hashrate snapshot with a fresh reading.
@@ -247,6 +274,55 @@ impl MetricsState {
             "Active worker threads.",
             self.threads.load(Ordering::Relaxed),
         );
+        m(
+            &mut s,
+            "coincync_rig_network_hashrate_hps",
+            "gauge",
+            "Total network hashrate as reported by the daemon's get_info.",
+            self.network_hashrate_hps.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_paused",
+            "gauge",
+            "1 if mining is paused, else 0.",
+            self.paused.load(Ordering::Relaxed) as u64,
+        );
+
+        // Per-thread hashrate: one labeled series per worker thread, so a
+        // dashboard can show the per-core breakdown the rig already tracks for
+        // its own TUI. Emitted only when a sample exists (an idle/pre-first-
+        // iteration rig has none).
+        let per_thread = self.per_thread_hashrate_samples();
+        if !per_thread.is_empty() {
+            s.push_str("# HELP coincync_rig_thread_hashrate_hps Per-thread hashes/sec from the last mining iteration.\n");
+            s.push_str("# TYPE coincync_rig_thread_hashrate_hps gauge\n");
+            for (i, v) in per_thread.iter().enumerate() {
+                s.push_str(&format!(
+                    "coincync_rig_thread_hashrate_hps{{thread=\"{i}\"}} {v}\n"
+                ));
+            }
+        }
+
+        // Accepted-block ledger: one labeled series per block this rig landed,
+        // value = accept timestamp (Unix seconds). The dashboard reads these to
+        // render the "your blocks" table and to split mined rewards into
+        // matured/pending by comparing each height to the current tip. Emitted
+        // only when the rig has actually landed a block.
+        let accepted = self
+            .accepted_blocks
+            .lock()
+            .map(|r| r.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if !accepted.is_empty() {
+            s.push_str("# HELP coincync_rig_accepted_block Accept timestamp (unix s) of a block this rig landed, labeled by height.\n");
+            s.push_str("# TYPE coincync_rig_accepted_block gauge\n");
+            for (height, ts) in accepted {
+                s.push_str(&format!(
+                    "coincync_rig_accepted_block{{height=\"{height}\"}} {ts}\n"
+                ));
+            }
+        }
 
         s
     }

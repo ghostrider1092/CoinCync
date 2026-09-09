@@ -19,6 +19,22 @@
 //! node behavior. Later phases (advise/act, scouts, termite healing) are
 //! designed but not built.
 
+// Act-phase safety guard layer: global kill switch (default OFF), per-action
+// rate limits, diversity floors, and untrusted-telemetry sanitizers. EVERY Act
+// a caste performs routes through `guard::ColonyGuards::authorize`. Non-consensus.
+pub mod guard;
+
+// Advise phase: one unified `Recommendation` type every caste maps to, plus the
+// `to_action()` bridge to the guard layer. Advisory only — producing a
+// recommendation changes nothing until it clears `guard::authorize`.
+pub mod advise;
+
+// Act phase: the gated bridge from caste decision cores to node effects. Every
+// caste's recommendation routes through `guard::authorize`; the actuator (node
+// seams) is touched ONLY on Allow. Default-OFF — a disarmed kill switch makes a
+// full round a no-op. Non-consensus, public-signal-only.
+pub mod act;
+
 pub mod forager;
 pub mod pheromone;
 pub mod sensor;
