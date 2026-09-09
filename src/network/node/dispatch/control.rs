@@ -69,14 +69,6 @@ pub(super) async fn handle_version(
             return Ok(());
         }
     };
-    // audit M-4: feed this peer's clock offset into the network-adjusted-time
-    // median so a single node's clock skew cannot desync its future-block
-    // acceptance from the network. Median-of-many + hard-capped, so a few lying
-    // or skewed peers can't move it. See crate::net_time.
-    {
-        let now = chrono::Utc::now().timestamp();
-        crate::net_time::record_peer_offset(version.timestamp as i64 - now);
-    }
     {
         // SECURITY (NET-001 + eclipse-attack defense): Detect
         // self-connection via nonce match — but DON'T permanently
@@ -125,6 +117,19 @@ pub(super) async fn handle_version(
             senders.remove(&peer_id);
             let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
             return Ok(());
+        }
+
+        // audit M-4 (jun review): record this OUTBOUND peer's clock offset for
+        // the network-adjusted-time median — only now that the self-connection
+        // check and version.validate() have passed, only for peers we dialed
+        // (an attacker can't make us dial them), and keyed by IP so one peer
+        // contributes at most one sample however many Version messages it sends.
+        // See crate::net_time.
+        if let Some((addr, outbound)) = peers.get(&peer_id).map(|p| (p.addr, p.outbound)) {
+            if outbound {
+                let now = chrono::Utc::now().timestamp();
+                crate::net_time::record_peer_offset(addr.ip(), version.timestamp as i64 - now);
+            }
         }
 
         // Clone before awaiting so a full queue cannot hold a map guard.
