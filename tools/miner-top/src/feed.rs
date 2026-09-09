@@ -174,21 +174,10 @@ fn parse_url(u: &str) -> Option<(String, u16, String)> {
     Some((host, port, if path.is_empty() { "/".into() } else { path.to_string() }))
 }
 
-/// Send a raw HTTP/1.1 request (Connection: close) and return the response body.
+/// Send a raw HTTP/1.1 request and return the body only for a successful status.
 fn http(host: &str, port: u16, req: &str) -> Option<String> {
-    let mut s = TcpStream::connect((host, port)).ok()?;
-    s.set_read_timeout(Some(Duration::from_secs(4))).ok()?;
-    s.set_write_timeout(Some(Duration::from_secs(4))).ok()?;
-    s.write_all(req.as_bytes()).ok()?;
-    // Bounded read: cap the body so a hostile/broken endpoint can't OOM us.
-    let mut raw = Vec::new();
-    (&mut s).take(MAX_RESPONSE_BYTES + 1).read_to_end(&mut raw).ok()?;
-    if raw.len() as u64 > MAX_RESPONSE_BYTES {
-        return None; // oversized — refuse rather than trust it
-    }
-    let buf = String::from_utf8_lossy(&raw);
-    // Body is everything after the header terminator.
-    buf.splitn(2, "\r\n\r\n").nth(1).map(|b| b.to_string())
+    let (status, body) = http_with_status(host, port, req)?;
+    (200..300).contains(&status).then_some(body)
 }
 
 fn http_get(host: &str, port: u16, path: &str) -> Option<String> {
@@ -559,4 +548,70 @@ pub fn poll_colony(tick_url: &str, token: &str) -> Colony {
             .collect();
     }
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn mock_response(status: u16, body: &str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() <= 8192);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (url, server)
+    }
+
+    #[test]
+    fn metrics_success_records_hashrate() {
+        let (url, server) = mock_response(200, "coincync_rig_current_hashrate_hps 1234\n");
+        let data = poll(&url, "http://127.0.0.1:invalid");
+        server.join().unwrap();
+        assert!(data.ok_rig);
+        assert_eq!(data.hashrate, 1234.0);
+        let mut tracker = Tracker::new(10);
+        tracker.record(&data);
+        assert_eq!(tracker.samples().len(), 1);
+    }
+
+    #[test]
+    fn metrics_http_errors_do_not_record_samples() {
+        for status in [404, 503] {
+            // Even a metrics-shaped error body must not count as live data.
+            let (url, server) = mock_response(status, "coincync_rig_current_hashrate_hps 1234\n");
+            let data = poll(&url, "http://127.0.0.1:invalid");
+            server.join().unwrap();
+            assert!(!data.ok_rig, "HTTP {status} must leave the rig offline");
+            let mut tracker = Tracker::new(10);
+            tracker.record(&data);
+            assert!(tracker.samples().is_empty());
+        }
+    }
+
+    #[test]
+    fn colony_retains_auth_and_disabled_statuses() {
+        for status in [401, 503] {
+            let (url, server) = mock_response(status, "{}");
+            let colony = poll_colony(&url, "test-token");
+            server.join().unwrap();
+            assert!(colony.reachable);
+            assert!(!colony.authorized);
+            assert_eq!(colony.disabled, status == 503);
+        }
+    }
 }
