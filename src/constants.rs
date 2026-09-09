@@ -461,22 +461,22 @@ pub const MIN_OUTPUT_AGE_POST_FORK: u64 = 100;
 /// value (`MIN_OUTPUT_AGE` = 10); heights AT OR ABOVE this value
 /// use `MIN_OUTPUT_AGE_POST_FORK` = 100.
 ///
-/// **TESTNET — `u64::MAX` is a placeholder.** The actual activation
-/// height is picked in the pre-tag PR for the v1.0.10-testnet cut.
-/// Per `docs/launch/v1.0.10-CHECKLIST.md` §0, the height should be
-/// the current testnet tip + ~5,000 blocks (≈7 days at 120s) so
-/// operators have a real window to upgrade before the rule changes
-/// under them. While the placeholder is `u64::MAX`, behavior is
-/// strictly identical to pre-fork — `min_output_age_at_height` always
-/// returns 10 — so this guard ships safely in pre-cut commits and
-/// only "turns on" when the height is set.
+/// **TESTNET — `5_000`.** The `v2.0.0-testnet` cut activates the 10→100
+/// output-age fork at block 5,000 (≈7 days at 120s after the 2026-09-04
+/// genesis reset), giving operators a real window to upgrade before the
+/// maturity rule tightens under them. Heights strictly below 5,000 keep
+/// the pre-fork value (`MIN_OUTPUT_AGE` = 10); at or above 5,000 the floor
+/// is `MIN_OUTPUT_AGE_POST_FORK` = 100. Nodes still on an older
+/// never-activating (`u64::MAX`) build will diverge at height 5,000 —
+/// that divergence *is* the scheduled hard fork; operators upgrade before
+/// then.
 ///
 /// **MAINNET — `0`.** The new value is active from genesis; there's
 /// no behavior to migrate because mainnet hasn't launched yet (target
 /// 2026-10-01 per `project_staged_mainnet`). New mainnet wallets see
 /// 100 as the maturity floor from block 1.
 #[cfg(feature = "testnet")]
-pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = u64::MAX;
+pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = 5_000;
 #[cfg(not(feature = "testnet"))]
 pub const MIN_OUTPUT_AGE_HARDFORK_HEIGHT: u64 = 0;
 

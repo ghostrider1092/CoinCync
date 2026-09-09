@@ -140,12 +140,17 @@ pub fn verify_hardcoded_checkpoint(height: u64, hash: &Hash) -> Option<bool> {
 
 // ── Emission ─────────────────────────────────────────────────────────────────
 
-pub mod emission {
-    pub const INITIAL_REWARD: u64 = 50_000_000_000;
-    pub const TAIL_EMISSION: u64 = 600_000_000;
-    pub const TAIL_EMISSION_HEIGHT: u64 = 2_000_000;
-    pub const ANNUAL_DECAY: u64 = 8500;
-}
+// Removed the `pub mod emission { ... }` block that previously lived here,
+// completing the 2026-07-02 audit cleanup that already removed the identical
+// block from `mainnet.rs` (see the note there). It was dead code — zero
+// references across the repo — and its `TAIL_EMISSION = 600_000_000`
+// (0.0006 CYNC) contradicted the authoritative
+// `constants::TAIL_EMISSION = 600_000_000_000` (0.6 CYNC) by 1000×. The live
+// emission curve reads `crate::constants::TAIL_EMISSION` (src/emission/curve.rs).
+// The mainnet-side note deferred this removal only because `testnet.rs` is
+// `critical_files.lock`-protected; it is removed here as part of the
+// v2.0.0-testnet lock regeneration. Per-network emission overrides, if ever
+// needed, belong in `constants.rs` — the single source of truth.
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
