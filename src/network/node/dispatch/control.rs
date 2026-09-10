@@ -253,6 +253,7 @@ pub(super) async fn handle_chain_work(
     payload: &[u8],
     peers: &DashMap<PeerId, PeerInfo>,
     sync: &RwLock<ChainSync>,
+    chain: &SharedBlockchain,
 ) -> Result<()> {
     // Firework Phase 2: a CAP_CHAINWORK peer told us its cumulative
     // work + tip. Feed it into the sync manager's peer-work table so
@@ -276,9 +277,29 @@ pub(super) async fn handle_chain_work(
                     peer.height = cw.height;
                     peer.tip_hash = cw.best_hash;
                 }
+                // A peer advertising our EXACT tip cannot be on a heavier
+                // chain — equal tip ⇒ equal cumulative work. Numeric
+                // total_difficulty drift (self-heals on restart) must NOT be
+                // treated as "a heavier chain exists", or it latches
+                // work_behind and gates the miner forever (fix for the
+                // 2026-09-07 stuck-`synced=false` wedge). Only a DIFFERENT tip
+                // is a candidate heavier chain, so its claim is fed to the
+                // capped peer-work table. NOTE: this same-tip fix does NOT by
+                // itself substantiate a different-tip claim — a peer advertising
+                // a heavier DIFFERENT tip it cannot back (e.g. answering the
+                // follow-up GetHeaders with an empty/bogus Headers set) is only
+                // partially handled: the subsequent fetch penalizes some, but not
+                // all, non-delivering peers. Fully validating different-tip work
+                // claims (and banning peers that advertise work they can't
+                // deliver) remains a separate, open concern.
+                let on_our_tip = cw.best_hash == chain.tip_hash();
                 {
                     let mut s = sync.write().await;
-                    s.update_peer_difficulty_for(peer_id, cw.total_difficulty);
+                    if on_our_tip {
+                        s.clear_peer_difficulty(peer_id);
+                    } else {
+                        s.update_peer_difficulty_for(peer_id, cw.total_difficulty);
+                    }
                     s.update_peer_height_for(peer_id, cw.height);
                 }
                 trace!(

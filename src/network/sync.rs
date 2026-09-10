@@ -538,6 +538,27 @@ impl ChainSync {
             .max(self.peer_heights.values().copied().max().unwrap_or(0))
     }
 
+    /// Drop a peer's cumulative-work claim WITHOUT touching its height.
+    ///
+    /// Called when a peer advertises our EXACT tip hash: an equal tip means
+    /// equal cumulative work by definition, so any numeric `total_difficulty`
+    /// drift (two nodes on the same chain deriving slightly different
+    /// accumulator values — a known drift that self-heals only on restart via
+    /// `Blockchain::recompute_total_difficulty`) is NOT evidence of a heavier
+    /// chain. Feeding it into the peer-work table sets `work_behind`, which
+    /// vetoes `is_synced()` and gates the miner *forever* (a live seed sat at
+    /// `local_height == max_peer_height` yet `synced=false` on 2026-09-07,
+    /// because none of the expire/ban/prune clearers fire for a connected,
+    /// re-advertising, same-tip peer). Recompute `best_known_difficulty` so
+    /// `work_behind`/`is_synced` recover.
+    pub fn clear_peer_difficulty(&mut self, peer_id: PeerId) {
+        let had = self.peer_difficulties.remove(&peer_id).is_some();
+        self.peer_difficulty_seen_at.remove(&peer_id);
+        if had {
+            self.recompute_best_difficulty();
+        }
+    }
+
     pub fn remove_peer_height(&mut self, peer_id: &PeerId) {
         self.peer_heights.remove(peer_id);
         self.peer_difficulties.remove(peer_id);
@@ -2095,6 +2116,79 @@ mod tests {
             "a heavier-work peer must trigger a header sync"
         );
         assert_eq!(sync.best_known_difficulty(), 5_000);
+    }
+
+    /// Regression (2026-09-07 stuck-`synced=false` wedge): a peer on our EXACT
+    /// tip that advertises a numerically-drifted (higher) `total_difficulty`
+    /// latches `best_known_difficulty` above local and pins `work_behind`
+    /// forever (none of the expire/ban/prune clearers fire for a connected,
+    /// re-advertising, same-tip peer). `clear_peer_difficulty` — invoked by the
+    /// ChainWork handler when the peer's `best_hash` equals our tip — must drop
+    /// that claim so `best_known_difficulty` recovers to local work.
+    #[test]
+    fn same_tip_peer_work_drift_is_cleared() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        // A same-tip peer whose accumulator drifted higher first gets recorded
+        // (this is the wedge: best_known latches above local -> work_behind).
+        sync.update_peer_difficulty_for(peers[0], 1_050);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_050,
+            "drifted claim latches best_known above local (the wedge)"
+        );
+        // The handler recognizes the peer is on our tip and drops the claim.
+        sync.clear_peer_difficulty(peers[0]);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_000,
+            "clearing a same-tip peer's work drift must recover best_known to \
+             local so work_behind / is_synced can un-wedge"
+        );
+    }
+
+    /// Mirrors the ChainWork handler's dispatch across MULTIPLE peers: the
+    /// handler routes a same-tip peer to `clear_peer_difficulty` and a
+    /// different-tip peer to `update_peer_difficulty_for`. Clearing the same-tip
+    /// peer must recompute `best_known_difficulty` over the REMAINING peers — it
+    /// must NOT collapse to local work and discard a genuinely-heavier
+    /// different-tip peer's claim. (A naive "reset to local on clear" would mask a
+    /// real heavier chain the node still needs to sync to.)
+    #[test]
+    fn clearing_same_tip_peer_preserves_other_peers_higher_work() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+
+        // Peer A: on our tip but accumulator-drifted higher — the wedge input the
+        // handler routes to clear_peer_difficulty.
+        sync.update_peer_difficulty_for(peers[0], 1_050);
+        // Peer B: a DIFFERENT tip with genuinely heavier work — the handler routes
+        // this to update_peer_difficulty_for; it is a real sync candidate.
+        sync.update_peer_difficulty_for(peers[1], 9_000);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            9_000,
+            "best_known reflects the genuinely-heavier peer B"
+        );
+
+        // The handler drops peer A's same-tip drift claim.
+        sync.clear_peer_difficulty(peers[0]);
+
+        // Peer B's heavier claim MUST survive — clearing one peer recomputes over
+        // the rest, it does not reset to local work.
+        assert_eq!(
+            sync.best_known_difficulty(),
+            9_000,
+            "clearing a same-tip peer must preserve another peer's higher-work \
+             claim, not collapse best_known to local"
+        );
+        assert_eq!(
+            sync.best_peer_by_difficulty(),
+            Some((peers[1], 9_000)),
+            "peer B remains the heaviest-work sync target after A is cleared"
+        );
     }
 
     /// A peer at-or-below our own work is not a sync target: it must NOT
