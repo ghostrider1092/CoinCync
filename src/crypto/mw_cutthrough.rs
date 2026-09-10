@@ -247,12 +247,21 @@ impl CutThroughEngine {
         prunable
     }
 
-    /// Verify a kernel set: `sum(kernel.excess_points) == sum(fees) * H`.
+    /// Verify a kernel set. Two independent checks, both required:
     ///
-    /// If the equation holds, the entire pruned kernel set represents a
-    /// valid balance even though every input / output pair was deleted.
-    /// Any kernel whose excess fails to decompress as a curve point
-    /// rejects the whole set.
+    /// 1. **Per-kernel excess signature** — each kernel must prove
+    ///    knowledge of the blinding `x` where `excess = x*G + fee*H`
+    ///    (see [`verify_kernel_signature`]). This is what makes the
+    ///    aggregate check below sound: without it, kernels can carry
+    ///    canceling `±v*H` components that hide value creation while the
+    ///    sum still lands on `fee_sum*H`.
+    /// 2. **Aggregate balance** — `sum(kernel.excess) == sum(fees) * H`.
+    ///    Per Grin, the pruned kernel set's cumulative excess must commit
+    ///    to the total fee on the value generator `H` (the blinding
+    ///    components cancel across a balanced set).
+    ///
+    /// Any kernel whose excess fails to decompress, or whose signature is
+    /// missing/invalid, rejects the whole set.
     pub fn verify_kernel_set(kernels: &[MwKernel]) -> Result<()> {
         // sum(excess_points)
         let mut excess_sum = RistrettoPoint::identity();
@@ -261,6 +270,11 @@ impl CutThroughEngine {
             let p = k
                 .excess_point()
                 .ok_or_else(|| Error::MwCutthroughVerifyFailed)?;
+            // Per-kernel soundness: reject any kernel that cannot prove its
+            // excess is fee*H plus a pure blinding it knows the key to.
+            if !verify_kernel_signature(k) {
+                return Err(Error::MwCutthroughVerifyFailed);
+            }
             excess_sum += p;
             fee_sum = fee_sum.checked_add(k.fee).ok_or(Error::AmountOverflow)?;
         }
@@ -344,6 +358,141 @@ pub fn compute_kernel_excess(output_blindings: &[Scalar], input_blindings: &[Sca
     (G * excess).compress().to_bytes()
 }
 
+// ─── Kernel excess signature ───────────────────────────────────────────
+//
+// SOUNDNESS FIX (kernel excess-signature verification): a kernel's public
+// excess is `excess = x*G + fee*H`, where `x` is the pure blinding-factor
+// difference `sum(r_out) - sum(r_in)` and `fee` is the declared fee. The
+// signature proves the signer knows `x` — i.e. that `excess - fee*H` is a
+// pure `x*G` point with NO hidden value on `H`.
+//
+// Without this proof, `verify_kernel_set` (which only checks the aggregate
+// `sum(excess) == sum(fee)*H`) admits inflation: two kernels can carry
+// `+v*H` and `-v*H` components that cancel in the aggregate while each
+// hides value creation. Requiring a G-based Schnorr signature over
+// `excess - fee*H` makes any residual `H` component unsignable, so each
+// kernel individually proves it created no value beyond its stated fee.
+//
+// Feature-gated (`sketch-cut-through`, off by default) and inert
+// (`register_cut_through_candidate` has no production caller) — no v1.0
+// activation impact. Hand-rolled Schnorr: needs external review before the
+// cut-through feature is ever turned on.
+
+const KERNEL_SIG_NONCE_TAG: &[u8] = b"coincync/mw-kernel-nonce/v1";
+const KERNEL_SIG_CHALLENGE_TAG: &[u8] = b"coincync/mw-kernel-sig/v1";
+
+fn kernel_scalar_from(tag: &[u8], parts: &[&[u8]]) -> Scalar {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(tag);
+    for p in parts {
+        hasher.update(p);
+    }
+    let mut wide = [0u8; 64];
+    hasher.finalize_xof().fill(&mut wide);
+    Scalar::from_bytes_mod_order_wide(&wide)
+}
+
+/// Fiat-Shamir challenge for a kernel signature. Binds the nonce point,
+/// the public key `P = excess - fee*H`, and the fee/height so a signature
+/// can never be lifted onto a kernel with a different fee or height.
+fn kernel_sig_challenge(r_point: &RistrettoPoint, pubkey: &RistrettoPoint, fee: u64, height: u64) -> Scalar {
+    kernel_scalar_from(
+        KERNEL_SIG_CHALLENGE_TAG,
+        &[
+            r_point.compress().as_bytes(),
+            pubkey.compress().as_bytes(),
+            &fee.to_le_bytes(),
+            &height.to_le_bytes(),
+        ],
+    )
+}
+
+/// Deterministic (RFC-6979-style) nonce so signing needs no RNG and can't
+/// reuse a nonce across distinct messages.
+fn kernel_sig_nonce(blinding_excess: &Scalar, fee: u64, height: u64) -> Scalar {
+    kernel_scalar_from(
+        KERNEL_SIG_NONCE_TAG,
+        &[
+            blinding_excess.as_bytes(),
+            &fee.to_le_bytes(),
+            &height.to_le_bytes(),
+        ],
+    )
+}
+
+/// Sign a kernel: prove knowledge of the blinding excess `x` where the
+/// kernel's public excess is `x*G + fee*H`. Returns a 64-byte `R || s`
+/// Schnorr signature over base `G`.
+pub fn sign_kernel(blinding_excess: &Scalar, fee: u64, height: u64) -> Vec<u8> {
+    let pubkey = G * blinding_excess; // P = x*G  (= excess - fee*H)
+    let k = kernel_sig_nonce(blinding_excess, fee, height);
+    let r_point = G * k;
+    let e = kernel_sig_challenge(&r_point, &pubkey, fee, height);
+    let s = k + e * blinding_excess;
+    let mut sig = Vec::with_capacity(64);
+    sig.extend_from_slice(r_point.compress().as_bytes());
+    sig.extend_from_slice(s.as_bytes());
+    sig
+}
+
+/// Verify a kernel's excess signature: recompute the public key
+/// `P = excess - fee*H` and check the Schnorr equation `s*G == R + e*P`.
+/// Returns `false` on any malformed field. A residual `H` component in the
+/// excess makes `P` un-signable over base `G`, so this rejects value
+/// inflation hidden in the excess.
+pub fn verify_kernel_signature(kernel: &MwKernel) -> bool {
+    let excess = match kernel.excess_point() {
+        Some(p) => p,
+        None => return false,
+    };
+    if kernel.signature.len() != 64 {
+        return false;
+    }
+    let h = crate::crypto::curve::generator_h();
+    let pubkey = excess - h * Scalar::from(kernel.fee); // should be x*G
+
+    let mut r_bytes = [0u8; 32];
+    r_bytes.copy_from_slice(&kernel.signature[..32]);
+    let mut s_bytes = [0u8; 32];
+    s_bytes.copy_from_slice(&kernel.signature[32..]);
+
+    let r_point = match CompressedRistretto(r_bytes).decompress() {
+        Some(p) => p,
+        None => return false,
+    };
+    let s: Scalar = match Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes)) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let e = kernel_sig_challenge(&r_point, &pubkey, kernel.fee, kernel.height);
+    G * s == r_point + pubkey * e
+}
+
+/// Build a fully-signed kernel from the transaction's output/input
+/// blinding factors, fee, and height. The public excess is
+/// `x*G + fee*H` with `x = sum(r_out) - sum(r_in)`, and the signature
+/// proves knowledge of `x`.
+pub fn build_signed_kernel(
+    output_blindings: &[Scalar],
+    input_blindings: &[Scalar],
+    fee: u64,
+    height: u64,
+) -> MwKernel {
+    let out_sum: Scalar = output_blindings.iter().sum();
+    let in_sum: Scalar = input_blindings.iter().sum();
+    let blinding_excess = out_sum - in_sum; // x
+    let h = crate::crypto::curve::generator_h();
+    let excess_point = G * blinding_excess + h * Scalar::from(fee); // x*G + fee*H
+    let signature = sign_kernel(&blinding_excess, fee, height);
+    MwKernel {
+        excess: excess_point.compress().to_bytes(),
+        signature,
+        fee,
+        height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,50 +549,114 @@ mod tests {
 
     #[test]
     fn verify_kernel_set_zero_fee_pass() {
-        // Zero-fee kernel set where all kernels have identity excess.
-        // sum(identity) == 0 * H == identity. Passes.
+        // Zero-fee, zero-blinding kernels: excess = identity, fee = 0.
+        // Each carries a valid signature (x = 0). sum(identity) == 0*H.
         let kernels = vec![
-            MwKernel {
-                excess: RistrettoPoint::identity().compress().to_bytes(),
-                signature: vec![],
-                fee: 0,
-                height: 1,
-            },
-            MwKernel {
-                excess: RistrettoPoint::identity().compress().to_bytes(),
-                signature: vec![],
-                fee: 0,
-                height: 2,
-            },
+            build_signed_kernel(&[], &[], 0, 1),
+            build_signed_kernel(&[], &[], 0, 2),
         ];
         assert!(CutThroughEngine::verify_kernel_set(&kernels).is_ok());
     }
 
     #[test]
-    fn verify_kernel_set_wrong_fee_fail() {
-        // Kernels claim fee but excess is identity — equation fails.
-        let kernels = vec![MwKernel {
-            excess: RistrettoPoint::identity().compress().to_bytes(),
-            signature: vec![],
-            fee: 100,
-            height: 1,
-        }];
-        assert!(CutThroughEngine::verify_kernel_set(&kernels).is_err());
+    fn verify_kernel_set_balanced_with_fee_pass() {
+        // A balanced kernel: excess = fee*H (x = 0), valid signature.
+        // sum(excess) == fee*H. Passes both signature + balance checks.
+        let kernels = vec![build_signed_kernel(&[], &[], 42, 1)];
+        assert!(CutThroughEngine::verify_kernel_set(&kernels).is_ok());
     }
 
     #[test]
-    fn verify_kernel_set_matching_excess_and_fee_pass() {
-        // Build a kernel whose excess commits to fee*H on the value
-        // generator. This is the "balanced MW transaction" case.
+    fn verify_kernel_set_unbalanced_fails() {
+        // A correctly-SIGNED kernel whose blinding excess is non-zero
+        // (x != 0). Its signature is valid, but sum(excess) = x*G != 0*H,
+        // so the aggregate balance check rejects it.
+        let x = random_scalar();
+        let kernel = build_signed_kernel(&[x], &[], 0, 1);
+        assert!(verify_kernel_signature(&kernel), "sig itself must be valid");
+        assert!(CutThroughEngine::verify_kernel_set(&[kernel]).is_err());
+    }
+
+    #[test]
+    fn verify_kernel_set_rejects_unsigned_kernel() {
+        // A balancing kernel (excess = fee*H) with NO signature must be
+        // rejected — this is exactly the case the pre-fix verifier accepted.
         use crate::crypto::curve::generator_h;
         let fee: u64 = 42;
-        let excess_point = generator_h() * Scalar::from(fee);
-        let kernels = vec![MwKernel {
-            excess: excess_point.compress().to_bytes(),
-            signature: vec![],
+        let kernel = MwKernel {
+            excess: (generator_h() * Scalar::from(fee)).compress().to_bytes(),
+            signature: vec![], // unsigned
             fee,
             height: 1,
-        }];
-        assert!(CutThroughEngine::verify_kernel_set(&kernels).is_ok());
+        };
+        assert!(CutThroughEngine::verify_kernel_set(&[kernel]).is_err());
+    }
+
+    #[test]
+    fn verify_kernel_set_rejects_hidden_value_inflation() {
+        // The inflation attack the signature closes: two kernels carrying
+        // canceling +v*H / -v*H components. Their excesses still SUM to
+        // fee_sum*H (so the aggregate balance check alone would pass), but
+        // each hides value creation. Neither can be signed (excess - fee*H
+        // has an H component with no G discrete log), so verification fails.
+        use crate::crypto::curve::generator_h;
+        let h = generator_h();
+        let hidden = Scalar::from(5u64); // smuggled value
+        let (fee_a, fee_b) = (10u64, 20u64);
+
+        // excess_a = (fee_a + hidden)*H ; excess_b = (fee_b - hidden)*H
+        let excess_a = h * (Scalar::from(fee_a) + hidden);
+        let excess_b = h * (Scalar::from(fee_b) - hidden);
+
+        // Document that the aggregate balance equation DOES hold — i.e. the
+        // old check would have been fooled.
+        let fee_sum = fee_a + fee_b;
+        assert_eq!(
+            (excess_a + excess_b).compress(),
+            (h * Scalar::from(fee_sum)).compress(),
+            "crafted kernels balance in aggregate (old check passes)"
+        );
+
+        let kernels = vec![
+            MwKernel {
+                excess: excess_a.compress().to_bytes(),
+                signature: vec![], // no valid signature can exist for this excess
+                fee: fee_a,
+                height: 1,
+            },
+            MwKernel {
+                excess: excess_b.compress().to_bytes(),
+                signature: vec![],
+                fee: fee_b,
+                height: 2,
+            },
+        ];
+        assert!(
+            CutThroughEngine::verify_kernel_set(&kernels).is_err(),
+            "hidden-value inflation MUST be rejected by the excess signature"
+        );
+    }
+
+    #[test]
+    fn sign_verify_kernel_roundtrip() {
+        // A signed kernel verifies; tampering fee or signature breaks it.
+        let x = random_scalar();
+        let kernel = build_signed_kernel(&[x], &[], 7, 5);
+        assert!(verify_kernel_signature(&kernel));
+
+        // Wrong fee → challenge/pubkey mismatch → reject.
+        let mut bad_fee = kernel.clone();
+        bad_fee.fee = 8;
+        assert!(!verify_kernel_signature(&bad_fee));
+
+        // Flipped signature byte → reject.
+        let mut bad_sig = kernel.clone();
+        bad_sig.signature[0] ^= 0x01;
+        assert!(!verify_kernel_signature(&bad_sig));
+
+        // Truncated signature → reject.
+        let mut short_sig = kernel.clone();
+        short_sig.signature.truncate(63);
+        assert!(!verify_kernel_signature(&short_sig));
     }
 }
