@@ -177,6 +177,22 @@ fn handle(mut stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
 fn data_json(state: &Mutex<State>) -> String {
     let s = state.lock().unwrap();
     let d = &s.latest;
+    // Per-block reward for the mined estimate: an explicit `--reward` (s.reward > 0)
+    // wins; otherwise derive it from the node's OWN latest block so the estimate is
+    // populated automatically. Without this, a dashboard launched without `--reward`
+    // shows 0.0000 CYNC next to real accepted blocks, which reads as a bug when it is
+    // not one. `recent_blocks` is already fetched, so this needs no extra RPC; it
+    // falls back to 0 (honestly "unknown") only when the node is unreachable.
+    const ATOMIC_PER_CYNC: f64 = 1_000_000_000_000.0; // 1 CYNC = 1e12 atomic
+    let reward = if s.reward > 0.0 {
+        s.reward
+    } else {
+        d.recent_blocks
+            .iter()
+            .max_by_key(|b| b.height)
+            .map(|b| b.reward_atomic as f64 / ATOMIC_PER_CYNC)
+            .unwrap_or(0.0)
+    };
     let history: Vec<serde_json::Value> = s
         .history
         .iter()
@@ -219,7 +235,7 @@ fn data_json(state: &Mutex<State>) -> String {
                 "ts": b.ts,
                 "confirmations": depth,
                 "matured": matured,
-                "reward": s.reward,
+                "reward": reward,
             })
         })
         .collect();
@@ -231,9 +247,9 @@ fn data_json(state: &Mutex<State>) -> String {
     let total_blocks = d.blocks_accepted.max(pending_blocks);
     let matured_blocks = total_blocks.saturating_sub(pending_blocks);
     let ledger_shown = d.my_blocks.len() as u64;
-    let mined_total = total_blocks as f64 * s.reward;
-    let mined_matured = matured_blocks as f64 * s.reward;
-    let mined_pending = pending_blocks as f64 * s.reward;
+    let mined_total = total_blocks as f64 * reward;
+    let mined_matured = matured_blocks as f64 * reward;
+    let mined_pending = pending_blocks as f64 * reward;
 
     // ── Derived operator stats ────────────────────────────────────────────
     // Expected solo seconds to a block = difficulty / hashrate. Undefined
@@ -354,7 +370,7 @@ fn data_json(state: &Mutex<State>) -> String {
         "synced": d.synced,
         "peers": d.peers,
         "address": s.address,
-        "reward": s.reward,
+        "reward": reward,
         "history": history,
         // chain / mempool / network (Chain tab)
         "recent_blocks": recent_blocks,
