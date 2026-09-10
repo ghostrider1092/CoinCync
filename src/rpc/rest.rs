@@ -117,6 +117,15 @@ static EMISSION_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 static RECENT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+// SEC (2026-09-07): transaction submit drives full CLSAG + Bulletproofs+
+// verification in the backend, but was the only expensive REST endpoint with
+// NO self-rate-limit. Give it the same global + per-IP fixed-window limiter,
+// tighter than the read endpoints since each request is heavy validation.
+const SUBMIT_MAX_REQ_PER_SEC: u32 = 5;
+static SUBMIT_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
+static SUBMIT_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
+static SUBMIT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 // ─── Shared State ────────────────────────────────────────────────────────────
 
@@ -915,10 +924,22 @@ struct SubmitTxBody {
 /// POST /api/v1/transaction/submit — broadcast a transaction
 async fn submit_transaction(
     State(st): State<RestState>,
+    headers: HeaderMap,
     Json(body): Json<SubmitTxBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // SECURITY: Validate tx_hex is actually hex and not oversized
-    if body.tx_hex.len() > 2 * 1024 * 1024 || !body.tx_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+    // SEC: rate-limit before the expensive backend verification (unauthenticated
+    // endpoint driving full CLSAG + Bulletproofs+ validation).
+    let client_ip = client_ip_from_headers(&headers);
+    enforce_fixed_window_limit(
+        &SUBMIT_WINDOW_SEC,
+        &SUBMIT_WINDOW_COUNT,
+        SUBMIT_MAX_REQ_PER_SEC,
+    )?;
+    enforce_ip_fixed_window_limit(&SUBMIT_IP_WINDOW, &client_ip, SUBMIT_MAX_REQ_PER_SEC)?;
+
+    // SECURITY: Validate tx_hex is actually hex and not oversized (1 MiB cap,
+    // matching the message).
+    if body.tx_hex.len() > 1024 * 1024 || !body.tx_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Invalid tx_hex: must be hex, max 1MB"})),

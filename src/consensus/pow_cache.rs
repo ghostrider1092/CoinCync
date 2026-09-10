@@ -38,6 +38,11 @@ pub fn pow_preimage_key(
     timestamp: u64,
     nonce: u64,
     tx_root: &Hash,
+    // audit §1: the anchor (hence the RandomX input) now depends on the header
+    // binding, so malleated variants that share (prev,height,ts,nonce,tx_root)
+    // but differ in a bound field have DIFFERENT PoW hashes and MUST NOT collapse
+    // to one cache entry.
+    binding: &Hash,
 ) -> [u8; 32] {
     let h = hash_concat(&[
         b"coincync/pow-preimage/v1",
@@ -46,6 +51,7 @@ pub fn pow_preimage_key(
         &timestamp.to_le_bytes(),
         &nonce.to_le_bytes(),
         tx_root.as_bytes(),
+        binding.as_bytes(),
     ]);
     *h.as_bytes()
 }
@@ -94,6 +100,7 @@ static POW_VERIFY_CACHE: Lazy<Mutex<PowVerifyCache>> =
 /// the RandomX output; the caller compares it against the (context-validated)
 /// target — this intentionally does NOT take `target` (that is what lets all
 /// target-variants share one cache entry).
+#[allow(clippy::too_many_arguments)]
 pub fn pow_hash_cached(
     prev_hash: &Hash,
     height: u64,
@@ -102,8 +109,10 @@ pub fn pow_hash_cached(
     tx_root: &Hash,
     claimed_anchor: &Hash,
     claimed_algo: u8,
+    // audit §1: header-binding digest (`BlockHeader::pow_binding`).
+    binding: &Hash,
 ) -> Result<Hash> {
-    let anchor = compute_full_anchor(prev_hash, height, timestamp)?;
+    let anchor = compute_full_anchor(prev_hash, height, timestamp, binding)?;
     if anchor.mixed_hash != *claimed_anchor {
         return Err(Error::PowValidation(
             PowVerifyError::AnchorMismatch {
@@ -123,7 +132,7 @@ pub fn pow_hash_cached(
         ));
     }
 
-    let key = pow_preimage_key(prev_hash, height, timestamp, nonce, tx_root);
+    let key = pow_preimage_key(prev_hash, height, timestamp, nonce, tx_root, binding);
     if let Some(h) = POW_VERIFY_CACHE.lock().get(&key) {
         return Ok(h); // cache hit → NO RandomX (all variants of this solution collapse here)
     }
@@ -146,15 +155,18 @@ mod tests {
         let txr = Hash::from_bytes([2u8; 32]);
         // The key does not even take target/miner_pubkey/etc., so every variant
         // of one solution shares it — the amplification-collapse property.
-        let k = pow_preimage_key(&ph, 5, 1000, 42, &txr);
-        assert_eq!(k, pow_preimage_key(&ph, 5, 1000, 42, &txr), "deterministic");
+        let bind = Hash::from_bytes([3u8; 32]);
+        let k = pow_preimage_key(&ph, 5, 1000, 42, &txr, &bind);
+        assert_eq!(k, pow_preimage_key(&ph, 5, 1000, 42, &txr, &bind), "deterministic");
         // Each genuine RandomX-input field MUST change the key (else we'd cache
         // across truly different solutions).
-        assert_ne!(k, pow_preimage_key(&ph, 5, 1001, 42, &txr), "timestamp");
-        assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 43, &txr), "nonce");
-        assert_ne!(k, pow_preimage_key(&ph, 6, 1000, 42, &txr), "height");
-        assert_ne!(k, pow_preimage_key(&Hash::from_bytes([9u8; 32]), 5, 1000, 42, &txr), "prev_hash");
-        assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 42, &Hash::from_bytes([9u8; 32])), "tx_root");
+        assert_ne!(k, pow_preimage_key(&ph, 5, 1001, 42, &txr, &bind), "timestamp");
+        assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 43, &txr, &bind), "nonce");
+        assert_ne!(k, pow_preimage_key(&ph, 6, 1000, 42, &txr, &bind), "height");
+        assert_ne!(k, pow_preimage_key(&Hash::from_bytes([9u8; 32]), 5, 1000, 42, &txr, &bind), "prev_hash");
+        assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 42, &Hash::from_bytes([9u8; 32]), &bind), "tx_root");
+        // audit §1: a different header-binding must change the key.
+        assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 42, &txr, &Hash::from_bytes([9u8; 32])), "binding");
     }
 
     #[test]

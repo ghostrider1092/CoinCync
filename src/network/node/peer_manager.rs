@@ -23,7 +23,7 @@ use super::super::sync::ChainSync;
 use super::super::traffic_shaping::TrafficShaper;
 use super::chain_state::ChainStateReader;
 use super::connection::handle_connection;
-use super::constants::{CONNECT_TIMEOUT, MAX_INBOUND};
+use super::constants::{CONNECT_TIMEOUT, INBOUND_HANDSHAKE_SLACK, MAX_INBOUND};
 use super::runtime::wait_for_shutdown;
 use super::types::NodeEvent;
 use super::PeerMessage;
@@ -103,6 +103,13 @@ pub(super) fn spawn_listener_acceptor(
 
     tokio::spawn(async move {
         let mut connections = JoinSet::new();
+        // SEC (2026-09-07): bound CONCURRENT inbound connection tasks — including
+        // those still in the Noise handshake, which the post-handshake
+        // `MAX_INBOUND` count cannot see. A permit is taken at accept time and
+        // released when the connection task ends, so an IP-diverse half-open
+        // flood can no longer hold unbounded tasks + ~64 KiB handshake buffers.
+        let inbound_permits =
+            Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND + INBOUND_HANDSHAKE_SLACK));
         loop {
             let accepted = tokio::select! {
                 biased;
@@ -208,6 +215,21 @@ pub(super) fn spawn_listener_acceptor(
                         acceptor_tracker.connections_from(&addr.ip())
                     );
 
+                    // SEC: take an in-flight permit before spawning the handshake
+                    // task. If the concurrent-inbound cap is reached, reject
+                    // (untrack the IP) instead of spawning an unbounded task.
+                    let permit = match Arc::clone(&inbound_permits).try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            debug!(
+                                "In-flight inbound connection cap reached; rejecting {}",
+                                addr
+                            );
+                            acceptor_tracker.untrack_connection(&addr);
+                            continue;
+                        }
+                    };
+
                     let peer_id = generate_peer_id();
                     let peers = acceptor_peers.clone();
                     let senders = acceptor_senders.clone();
@@ -221,6 +243,10 @@ pub(super) fn spawn_listener_acceptor(
                     let conn_traffic_shaper = Arc::clone(&acceptor_traffic_shaper);
 
                     connections.spawn(async move {
+                        // Hold the permit for the whole connection lifetime; it is
+                        // released here when the task ends (handshake fail or peer
+                        // disconnect), freeing an in-flight slot.
+                        let _permit = permit;
                         let result = handle_connection(
                             stream,
                             peer_id,

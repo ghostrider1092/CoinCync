@@ -204,9 +204,12 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
         .decompress()
         .ok_or_else(|| Error::CryptoError("Invalid adjusted commitment".into()))?;
 
-    let r_point = CompressedRistretto(proof.schnorr_r)
-        .decompress()
-        .ok_or_else(|| Error::CryptoError("Invalid Schnorr R point".into()))?;
+    // SEC (2026-09-07): reject non-canonical AND identity R (defense in depth —
+    // identity nonce points have no legitimate use in these Fiat-Shamir Schnorr
+    // proofs). Matches the scalar-side PeerScalar migration.
+    let r_point = *crate::crypto::PeerPoint::decode_non_identity(proof.schnorr_r)
+        .map_err(|_| Error::CryptoError("Invalid Schnorr R point (non-canonical or identity)".into()))?
+        .as_point();
 
     // Compute delta = C - threshold*H
     // H is the value generator (generator_h in our convention)
@@ -365,6 +368,11 @@ pub fn verify_ownership_proof(proof: &OwnershipProof) -> Result<bool> {
     // Decompress points
     let r_point = PublicPoint::from_bytes(proof.schnorr_r)
         .ok_or_else(|| Error::CryptoError("Invalid Schnorr R point".into()))?;
+    // SEC (2026-09-07): reject identity R (defense in depth — an identity nonce
+    // point has no legitimate use in this Fiat-Shamir Schnorr proof).
+    if r_point.is_identity() {
+        return Err(Error::CryptoError("Schnorr R point is identity".into()));
+    }
 
     let p_point = PublicPoint::from_bytes(*proof.stealth_address.as_bytes())
         .ok_or_else(|| Error::CryptoError("Invalid stealth address point".into()))?;
@@ -752,6 +760,10 @@ pub fn verify_source_proof(proof: &SourceProof) -> Result<bool> {
         .ok_or_else(|| Error::CryptoError("Invalid R1 point".into()))?;
     let r2 = PublicPoint::from_bytes(proof.r2)
         .ok_or_else(|| Error::CryptoError("Invalid R2 point".into()))?;
+    // SEC (2026-09-07): reject identity nonce points R1/R2 (defense in depth).
+    if r1.is_identity() || r2.is_identity() {
+        return Err(Error::CryptoError("Schnorr R1/R2 point is identity".into()));
+    }
     let p = PublicPoint::from_bytes(*proof.public_key.as_bytes())
         .ok_or_else(|| Error::CryptoError("Invalid public key point".into()))?;
     let i = PublicPoint::from_bytes(proof.key_image.to_bytes())

@@ -649,6 +649,23 @@ fn detect_coinbase_digest(output: &OutputDigest, keys: &ScanKeys) -> Option<Decr
     } else {
         0
     };
+    // SEC (2026-09-07): coinbase commitments are zero-blinding, so the plaintext
+    // amount must reconstruct output.commitment — parity with the non-coinbase
+    // ghost-balance defense above. Rejects a forged/inflated coinbase amount
+    // rather than surfacing it as unspendable ghost balance. Logged at WARN
+    // (security-visible), matching the R-103 elevation in the full scanner.
+    let expected_commitment =
+        crate::crypto::PedersenCommitment::commit(amount, &BlindingFactor::zero()).to_bytes();
+    if expected_commitment != output.commitment {
+        tracing::warn!(
+            "lightsync coinbase: stealth match but commitment recompute mismatch \
+             (tx={}, output_idx={}, claimed amount {}) — skipping.",
+            output.tx_hash.to_hex(),
+            output.output_index,
+            amount,
+        );
+        return None;
+    }
     Some(DecryptedOutput {
         tx_hash: output.tx_hash,
         output_index: output.output_index,
@@ -1362,7 +1379,11 @@ mod tests {
         let output = TxOutput {
             stealth_address: spend_public, // old-format coinbase → direct match
             tx_public_key: spend_public,
-            commitment: [0u8; 32],               // zero-blinding placeholder
+            // audit 2026-09-07: coinbase is zero-blinding, so the commitment MUST
+            // equal commit(amount, 0) — the light scanner now verifies this, so
+            // the test uses the real commitment rather than a placeholder.
+            commitment: crate::crypto::PedersenCommitment::commit(reward, &BlindingFactor::zero())
+                .to_bytes(),
             encrypted_amount: reward.to_le_bytes().to_vec(), // PLAINTEXT LE amount
             view_tag: 0,
             lock_height: None,

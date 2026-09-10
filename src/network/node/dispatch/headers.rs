@@ -202,6 +202,7 @@ fn validate_header_batch(
             &header.target,
             &header.anchor,
             header.algorithm,
+            &header.pow_binding(),
         )
         .map_err(|error| reject(error.to_string(), MisbehaviorType::InvalidBlockPoW))?;
 
@@ -286,9 +287,13 @@ mod tests {
 
     fn mine_easy_header(mut header: BlockHeader) -> BlockHeader {
         header.algorithm = PowAlgorithm::RandomX as u8;
-        header.anchor = compute_full_anchor(&header.prev_hash, header.height, header.timestamp)
-            .expect("anchor")
-            .mixed_hash;
+        // audit §1: bind the header fields into the anchor (binding excludes
+        // anchor/nonce, so compute it before setting them).
+        let binding = header.pow_binding();
+        header.anchor =
+            compute_full_anchor(&header.prev_hash, header.height, header.timestamp, &binding)
+                .expect("anchor")
+                .mixed_hash;
 
         for nonce in 0..u64::MAX {
             header.nonce = nonce;

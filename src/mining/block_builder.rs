@@ -229,8 +229,9 @@ pub fn build_block_from_template(
         Hash::from_difficulty(difficulty)
     };
 
-    // Sequential-padding anchor — must match the validator exactly.
-    let anchor_result = compute_full_anchor(&prev_hash, height, timestamp)?;
+    // Sequential-padding anchor is computed below, AFTER the header is built —
+    // audit §1: the anchor now binds the header fields via `pow_binding()`, so we
+    // need the finished header first (the binding excludes anchor/nonce).
 
     let mempool_txs = parse_template_transactions(template);
 
@@ -268,15 +269,16 @@ pub fn build_block_from_template(
 
     let network_magic = resolve_network_magic(template, fallback_network)?;
 
-    let header = BlockHeader {
+    let mut header = BlockHeader {
         network_magic,
         version: block_version_at_height(height),
         height,
         timestamp,
         prev_hash,
         tx_root,
-        anchor: anchor_result.mixed_hash,
-        algorithm: anchor_result.algorithm as u8,
+        // Placeholder — set below once the binding-derived anchor is computed.
+        anchor: Hash::zero(),
+        algorithm: 0,
         nonce: 0,
         target,
         miner_pubkey: *payout_spend_pub,
@@ -285,6 +287,14 @@ pub fn build_block_from_template(
         spark_set_root: [0u8; 32],
         mw_kernel_root: [0u8; 32],
     };
+
+    // audit §1: derive the anchor from the header binding so every consensus
+    // field is committed to by the PoW. The validator recomputes the SAME
+    // binding from this header, so the anchor matches.
+    let binding = header.pow_binding();
+    let anchor_result = compute_full_anchor(&prev_hash, height, timestamp, &binding)?;
+    header.anchor = anchor_result.mixed_hash;
+    header.algorithm = anchor_result.algorithm as u8;
 
     Ok(CandidateBlock {
         header,
@@ -494,9 +504,15 @@ mod tests {
         let expect_root = merkle_root(&[cb.hash()]);
         assert_eq!(candidate.header.tx_root, expect_root, "tx_root binds the coinbase");
 
-        // Anchor must equal the validator's compute_full_anchor for this block.
-        let anchor = compute_full_anchor(&candidate.header.prev_hash, height, candidate.header.timestamp)
-            .expect("anchor");
+        // Anchor must equal the validator's compute_full_anchor for this block —
+        // audit §1: recompute with the header binding, proving miner==validator.
+        let anchor = compute_full_anchor(
+            &candidate.header.prev_hash,
+            height,
+            candidate.header.timestamp,
+            &candidate.header.pow_binding(),
+        )
+        .expect("anchor");
         assert_eq!(candidate.header.anchor, anchor.mixed_hash, "anchor matches consensus");
 
         // Assembling with a nonce yields a block whose merkle root verifies.

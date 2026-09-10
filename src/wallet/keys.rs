@@ -470,8 +470,20 @@ impl SparkSpendKey {
 }
 
 /// Read-only Spark scan key. Detects incoming Spark coins.
+///
+/// AUDIT (2026-09-07): `.0: Scalar` is SECRET — it links every incoming Spark
+/// payment. Missed by the R-80 zeroization sweep; the `Drop` below wipes it on
+/// drop, matching [`IncomingViewingKey`]. Only ever serialized inside the
+/// encrypted wallet blob.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SparkScanKey(pub Scalar);
+
+impl Drop for SparkScanKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
 
 impl SparkScanKey {
     /// Derive a Spark address with a given 11-byte diversifier.

@@ -149,7 +149,14 @@ pub fn spark_serial_tag(serial: &Scalar) -> RistrettoPoint {
 /// A minted Spark coin. Held in the wallet; only the owner knows
 /// the serial. Once the serial is revealed (via a spend's serial
 /// tag) the coin is burned.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// SECURITY (audit 2026-09-07): `serial` and `randomness` are SECRET (revealing
+/// `serial` burns the coin and links it). `Debug` is redacted (manual impl
+/// below) and the secrets are zeroized on drop. NOTE for when
+/// `sketch-lelantus-spark` is enabled: `serial_scalar`/`randomness_scalar` still
+/// use `Scalar::from_bytes_mod_order` (non-canonical acceptance) — migrate them
+/// to `from_canonical_bytes` (a Result/Option return) before activation.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SparkNote {
     /// Pedersen commitment `C = v*G + s*H + r*K`, compressed.
     pub commitment: [u8; 32],
@@ -165,6 +172,29 @@ pub struct SparkNote {
     pub height: u64,
     /// Unique index into the global accumulator.
     pub coin_id: u64,
+}
+
+impl std::fmt::Debug for SparkNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // SECURITY: never print the secret serial/randomness.
+        f.debug_struct("SparkNote")
+            .field("commitment", &self.commitment)
+            .field("value", &self.value)
+            .field("serial", &"<redacted>")
+            .field("randomness", &"<redacted>")
+            .field("diversifier", &self.diversifier)
+            .field("height", &self.height)
+            .field("coin_id", &self.coin_id)
+            .finish()
+    }
+}
+
+impl Drop for SparkNote {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.serial.zeroize();
+        self.randomness.zeroize();
+    }
 }
 
 impl SparkNote {

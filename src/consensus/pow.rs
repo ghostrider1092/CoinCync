@@ -54,9 +54,14 @@ const SEQ_PAD_CACHE_MAX: usize = 10_000;
 /// Restructuring to two parallel collections keyed by the actual key
 /// (not a synthetic seq) makes lookup truly O(1) without changing the
 /// semantics or the FIFO eviction order.
+// Cache key gained the PoW header-binding hash (audit §1, 2026-09-07): two
+// headers sharing (prev_hash, height, timestamp) but differing in a bound field
+// have DIFFERENT anchors, so they must not collide in this cache.
+type AnchorKey = (Hash, u64, u64, Hash);
+
 struct SeqPadCache {
-    anchors: std::collections::HashMap<(Hash, u64, u64), Anchor>,
-    insertion_order: VecDeque<(Hash, u64, u64)>,
+    anchors: std::collections::HashMap<AnchorKey, Anchor>,
+    insertion_order: VecDeque<AnchorKey>,
 }
 
 impl SeqPadCache {
@@ -68,7 +73,7 @@ impl SeqPadCache {
     }
 
     /// O(1) lookup by key.
-    fn get(&self, key: &(Hash, u64, u64)) -> Option<&Anchor> {
+    fn get(&self, key: &AnchorKey) -> Option<&Anchor> {
         self.anchors.get(key)
     }
 
@@ -79,7 +84,7 @@ impl SeqPadCache {
     /// the same key but different value would corrupt the FIFO order,
     /// but anchors are deterministic from the key so the value would
     /// be the same anyway.)
-    fn insert(&mut self, key: (Hash, u64, u64), anchor: Anchor) {
+    fn insert(&mut self, key: AnchorKey, anchor: Anchor) {
         if self.anchors.contains_key(&key) {
             return;
         }
@@ -216,8 +221,18 @@ fn blake3_mix(sequential: &Hash, prev_hash: &Hash) -> Hash {
 }
 
 /// Compute full anchor with metadata.
-pub fn compute_full_anchor(prev_hash: &Hash, height: u64, timestamp: u64) -> Result<Anchor> {
-    let cache_key = (*prev_hash, height, timestamp);
+/// `binding` is [`BlockHeader::pow_binding`] — the digest of the header fields
+/// not otherwise bound by the PoW. Folding it into the anchor seed binds those
+/// fields to the proof of work (audit §1, 2026-09-07), closing block-hash
+/// malleability. The miner and validator MUST pass the same binding (both derive
+/// it from the final header), or the anchor-mismatch check in `verify_pow` fails.
+pub fn compute_full_anchor(
+    prev_hash: &Hash,
+    height: u64,
+    timestamp: u64,
+    binding: &Hash,
+) -> Result<Anchor> {
+    let cache_key = (*prev_hash, height, timestamp, *binding);
 
     {
         let cache = SEQ_PAD_CACHE.lock();
@@ -230,6 +245,7 @@ pub fn compute_full_anchor(prev_hash: &Hash, height: u64, timestamp: u64) -> Res
         prev_hash.as_bytes(),
         &height.to_le_bytes(),
         &timestamp.to_le_bytes(),
+        binding.as_bytes(),
     ]);
 
     let sequential = compute_sequential_padding(&seed, SEQ_PAD_ITERATIONS);
@@ -1256,6 +1272,7 @@ impl std::fmt::Display for PowVerifyError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_pow(
     prev_hash: &Hash,
     height: u64,
@@ -1265,8 +1282,12 @@ pub fn verify_pow(
     target: &Hash,
     claimed_anchor: &Hash,
     claimed_algo: u8,
+    // audit §1: header-binding digest (`BlockHeader::pow_binding`). Recomputing
+    // the anchor from it makes the anchor-mismatch check below reject any block
+    // whose bound header fields were mutated after finding a valid PoW.
+    binding: &Hash,
 ) -> Result<()> {
-    let anchor = compute_full_anchor(prev_hash, height, timestamp).map_err(|e| {
+    let anchor = compute_full_anchor(prev_hash, height, timestamp, binding).map_err(|e| {
         crate::error::Error::PowValidation(
             PowVerifyError::AnchorComputation(e.to_string()).to_string(),
         )
@@ -1367,26 +1388,37 @@ mod tests {
         let height = 100;
         let ts = 1_700_000_000u64;
 
-        let a1 = compute_full_anchor(&prev1, height, ts).unwrap();
-        let a2 = compute_full_anchor(&prev1, height, ts).unwrap();
+        let bind = Hash::from_bytes([9u8; 32]);
+
+        let a1 = compute_full_anchor(&prev1, height, ts, &bind).unwrap();
+        let a2 = compute_full_anchor(&prev1, height, ts, &bind).unwrap();
         assert_eq!(a1.mixed_hash, a2.mixed_hash, "must be deterministic");
 
-        let a3 = compute_full_anchor(&prev2, height, ts).unwrap();
+        let a3 = compute_full_anchor(&prev2, height, ts, &bind).unwrap();
         assert_ne!(
             a1.mixed_hash, a3.mixed_hash,
             "different prev_hash must give different anchor"
         );
 
-        let a4 = compute_full_anchor(&prev1, height + 1, ts).unwrap();
+        let a4 = compute_full_anchor(&prev1, height + 1, ts, &bind).unwrap();
         assert_ne!(
             a1.mixed_hash, a4.mixed_hash,
             "different height must give different anchor"
         );
 
-        let a5 = compute_full_anchor(&prev1, height, ts + 1).unwrap();
+        let a5 = compute_full_anchor(&prev1, height, ts + 1, &bind).unwrap();
         assert_ne!(
             a1.mixed_hash, a5.mixed_hash,
             "different timestamp must give different anchor"
+        );
+
+        // audit §1: a different header-binding MUST give a different anchor —
+        // this is what binds the header fields to the PoW.
+        let bind2 = Hash::from_bytes([10u8; 32]);
+        let a6 = compute_full_anchor(&prev1, height, ts, &bind2).unwrap();
+        assert_ne!(
+            a1.mixed_hash, a6.mixed_hash,
+            "different pow_binding must give different anchor"
         );
     }
 
@@ -1410,7 +1442,7 @@ mod tests {
         };
 
         for i in 0..(SEQ_PAD_CACHE_MAX + 100) {
-            let key = (Hash::from_bytes([i as u8; 32]), i as u64, 0u64);
+            let key = (Hash::from_bytes([i as u8; 32]), i as u64, 0u64, Hash::zero());
             cache.insert(key, dummy_anchor.clone());
         }
 
@@ -1422,7 +1454,7 @@ mod tests {
             "anchors and insertion_order must stay in lockstep"
         );
 
-        let oldest_key = (Hash::from_bytes([0u8; 32]), 0u64, 0u64);
+        let oldest_key = (Hash::from_bytes([0u8; 32]), 0u64, 0u64, Hash::zero());
         assert!(
             cache.get(&oldest_key).is_none(),
             "oldest entry should be evicted"
@@ -1433,6 +1465,7 @@ mod tests {
             Hash::from_bytes([newest_i; 32]),
             (SEQ_PAD_CACHE_MAX + 99) as u64,
             0u64,
+            Hash::zero(),
         );
         assert!(
             cache.get(&newest_key).is_some(),

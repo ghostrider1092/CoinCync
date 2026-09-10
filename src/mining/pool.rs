@@ -861,11 +861,24 @@ async fn process_stratum_request(
                     }
                 };
 
-                // Compute anchor for this block
+                // Compute anchor for this block.
+                //
+                // TODO(audit §1, 2026-09-07): this stratum share-validation path
+                // does NOT reconstruct the full block header — `BlockTemplate`
+                // lacks `miner_pubkey`/`supply_commitment`/`checkpoint_vote`/Phase-2
+                // roots — so it cannot compute the real `pow_binding`. It already
+                // uses a simplified `tx_root` (see below), i.e. it is NOT the
+                // network block-submission path (that goes through
+                // `mining::block_builder`, which binds correctly). A zero binding
+                // keeps this approximate share check self-consistent; the pool
+                // path must be reworked to build the real header before it can
+                // validate network-valid blocks.
+                let binding = crate::primitives::Hash::zero();
                 let anchor = match compute_full_anchor(
                     &prev_hash,
                     job.block_template.height,
                     job.block_template.timestamp,
+                    &binding,
                 ) {
                     Ok(a) => a,
                     Err(e) => {

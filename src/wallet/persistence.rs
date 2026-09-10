@@ -221,25 +221,55 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                      wallet file may inherit parent-directory ACLs."
                 ),
             }
-            let user = std::env::var("USERNAME").unwrap_or_else(|_| "Users".to_string());
-            let grant = format!("{user}:F");
-            match std::process::Command::new("icacls")
-                .args([path_str, "/grant:r", &grant])
-                .status()
-            {
-                Ok(s) if s.success() => {}
-                Ok(s) => tracing::error!(
+            // SEC (2026-09-07): resolve the CURRENT user to grant. Never fall
+            // back to the local "Users" group — with inheritance already
+            // stripped, `Users:F` would leave the secret wallet (and its
+            // sidecars) readable/writable by every local account. `USERNAME`
+            // can be empty/unset in service/CI/container contexts, so fall back
+            // to `whoami` (prints DOMAIN\user), and if even that fails, refuse
+            // the grant (fail-closed: deny-by-default is safer than world-access).
+            let user = std::env::var("USERNAME")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+                .or_else(|| {
+                    std::process::Command::new("whoami")
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
+            match user {
+                Some(user) => {
+                    let grant = format!("{user}:F");
+                    match std::process::Command::new("icacls")
+                        .args([path_str, "/grant:r", &grant])
+                        .status()
+                    {
+                        Ok(s) if s.success() => {}
+                        Ok(s) => tracing::error!(
+                            target: "wallet::persistence::R94",
+                            path = path_str,
+                            exit = ?s.code(),
+                            "R-94: icacls /grant:r returned non-zero — restrictive \
+                             ACL may not have applied."
+                        ),
+                        Err(e) => tracing::error!(
+                            target: "wallet::persistence::R94",
+                            path = path_str,
+                            error = %e,
+                            "R-94: icacls /grant:r failed to spawn."
+                        ),
+                    }
+                }
+                None => tracing::error!(
                     target: "wallet::persistence::R94",
                     path = path_str,
-                    exit = ?s.code(),
-                    "R-94: icacls /grant:r returned non-zero — restrictive \
-                     ACL may not have applied."
-                ),
-                Err(e) => tracing::error!(
-                    target: "wallet::persistence::R94",
-                    path = path_str,
-                    error = %e,
-                    "R-94: icacls /grant:r failed to spawn."
+                    "R-94: could not resolve the current user (USERNAME unset and \
+                     `whoami` failed) — REFUSING to grant the 'Users' group access. \
+                     Inheritance is stripped (deny-by-default); grant the intended \
+                     account explicitly: `icacls {path_str} /grant:r <user>:F`."
                 ),
             }
         } else {
@@ -1350,6 +1380,17 @@ pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
         .read_exact(&mut ct_len_bytes)
         .map_err(|e| Error::WalletNotFound(e.to_string()))?;
     let ct_len = u32::from_le_bytes(ct_len_bytes) as usize;
+    // SEC (2026-09-07): bound the attacker-controlled ciphertext length BEFORE
+    // allocating, so a crafted/corrupt v4 file can't force a multi-GB allocation
+    // (OOM) on open. Same 100 MiB ceiling the v3 loader applies to its analogous
+    // length field.
+    const MAX_WALLET_CIPHERTEXT: usize = 100 * 1024 * 1024;
+    if ct_len > MAX_WALLET_CIPHERTEXT {
+        return Err(Error::WalletNotFound(format!(
+            "v4 wallet ciphertext length {} exceeds {}-byte limit (corrupt or malicious file)",
+            ct_len, MAX_WALLET_CIPHERTEXT
+        )));
+    }
 
     let mut ciphertext = vec![0u8; ct_len];
     cursor
