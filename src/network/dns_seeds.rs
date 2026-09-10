@@ -41,7 +41,7 @@ pub const MAINNET_FALLBACK: &[&str] = &[
     // 2026-07-27) that would otherwise ship as dead mainnet bootstrap peers.
     // Append the launch VPS fleet here as it is provisioned. The residential
     // home node stays DNS-only (privacy) and is intentionally NOT listed.
-    "2.28.1.75:19080", // Hetzner (EU) — stable public seed
+    "2.29.34.197:19080", // Hetzner (EU) placeholder — replace with real mainnet seed IPs before launch
 ];
 
 pub const TESTNET_FALLBACK: &[&str] = &[
@@ -56,10 +56,13 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     //
     // ## Policy: which hosts go in the fallback?
     //
-    // Active `seed`-role + `miner`-role + `explorer`-role nodes only.
-    // `api` role intentionally EXCLUDED — the api box (95.179.165.225)
-    // runs nginx-only with no P2P listener; including it would cause
-    // every new operator to waste a connection slot on a refused dial.
+    // Every active `nodes` entry EXCEPT `api` role — i.e. seed, relay,
+    // miner, and explorer, all of which run a coincync-node P2P listener.
+    // `api` is intentionally EXCLUDED — the api box (95.179.165.225 in the
+    // former fleet) ran nginx-only with no P2P listener; including it would
+    // cause every new operator to waste a connection slot on a refused dial.
+    // This is exactly the set the tick adapter's `to_fleet_peers` probes and
+    // the set the `testnet_fallback_matches_fleet_config` test enforces.
     //
     // Explorer is a deliberate exception to the original "pure-seed
     // only" policy: it's been stable since launch and gives operators
@@ -103,7 +106,9 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     // 2026-07-27). Replaced with the current stable public box. Kept in sync
     // with `testnet::TESTNET_SEED_NODES` (testnet_fallback_matches_seed_nodes).
     // Append re-provisioned VPS boxes here; the home node stays DNS-only.
-    "2.28.1.75:28080", // Hetzner (EU) — stable public seed
+    // 2026-09-07: migrated 2.28.1.75 (CPX22) -> 2.29.34.197 (CPX32, 8 GB) after
+    // the 4 GB box OOM-killed the node. Must match testnet::TESTNET_SEED_NODES.
+    "2.29.34.197:28080", // Hetzner (EU, Falkenstein) — stable public seed
 ];
 
 // NOTE (2026-08-16 dead-code sweep): removed `resolve_seeds`,
@@ -160,6 +165,46 @@ mod tests {
             "TESTNET_FALLBACK (in dns_seeds.rs) and TESTNET_SEED_NODES (in testnet.rs) must \
              contain the same entries. Drift between them re-creates the bug class fixed in \
              2026-06-21 PR (operators bootstrap via stale list while the other was updated)."
+        );
+    }
+
+    /// TESTNET_FALLBACK must match the P2P-dialable nodes in the operator-side
+    /// `scripts/fleet-config.json` (the fleet topology source of truth). The
+    /// file is embedded at compile time (`include_str!`) so this runs with no
+    /// filesystem/CWD dependency. This is the check the TESTNET_FALLBACK doc
+    /// comment promises: it catches the drift that left fleet-config.json
+    /// pointing at the decommissioned Vultr fleet while the code had already
+    /// consolidated onto the Hetzner seed. Every active role **except `api`**
+    /// counts — `api` is nginx-only with no P2P listener. This matches both the
+    /// TESTNET_FALLBACK policy above and the tick adapter's `to_fleet_peers`
+    /// (`src/tick_adapter/fleet_config.rs`), which excludes exactly `api`.
+    #[test]
+    fn testnet_fallback_matches_fleet_config() {
+        let raw = include_str!("../../scripts/fleet-config.json");
+        let cfg: serde_json::Value =
+            serde_json::from_str(raw).expect("scripts/fleet-config.json must parse as JSON");
+        let port = cfg["p2p_port"]
+            .as_u64()
+            .expect("fleet-config.json must set an integer p2p_port");
+        let nodes = cfg["nodes"]
+            .as_object()
+            .expect("fleet-config.json must have a `nodes` object");
+        let fleet_peers: HashSet<String> = nodes
+            .values()
+            .filter(|n| n["role"].as_str() != Some("api"))
+            .map(|n| {
+                let ip = n["ip"].as_str().expect("each fleet node needs a string `ip`");
+                format!("{}:{}", ip, port)
+            })
+            .collect();
+        let fallback: HashSet<String> = TESTNET_FALLBACK.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            fallback, fleet_peers,
+            "TESTNET_FALLBACK (dns_seeds.rs) and the non-api nodes in \
+             scripts/fleet-config.json must contain the same ip:port entries. Drift means the \
+             fleet tooling (sync-fleet-config.sh / tick monitor) dials a different peer set than \
+             the compiled bootstrap fallback — the staleness that left the file on the dead \
+             Vultr fleet."
         );
     }
 
