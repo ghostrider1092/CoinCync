@@ -2148,6 +2148,49 @@ mod tests {
         );
     }
 
+    /// Mirrors the ChainWork handler's dispatch across MULTIPLE peers: the
+    /// handler routes a same-tip peer to `clear_peer_difficulty` and a
+    /// different-tip peer to `update_peer_difficulty_for`. Clearing the same-tip
+    /// peer must recompute `best_known_difficulty` over the REMAINING peers — it
+    /// must NOT collapse to local work and discard a genuinely-heavier
+    /// different-tip peer's claim. (A naive "reset to local on clear" would mask a
+    /// real heavier chain the node still needs to sync to.)
+    #[test]
+    fn clearing_same_tip_peer_preserves_other_peers_higher_work() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+
+        // Peer A: on our tip but accumulator-drifted higher — the wedge input the
+        // handler routes to clear_peer_difficulty.
+        sync.update_peer_difficulty_for(peers[0], 1_050);
+        // Peer B: a DIFFERENT tip with genuinely heavier work — the handler routes
+        // this to update_peer_difficulty_for; it is a real sync candidate.
+        sync.update_peer_difficulty_for(peers[1], 9_000);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            9_000,
+            "best_known reflects the genuinely-heavier peer B"
+        );
+
+        // The handler drops peer A's same-tip drift claim.
+        sync.clear_peer_difficulty(peers[0]);
+
+        // Peer B's heavier claim MUST survive — clearing one peer recomputes over
+        // the rest, it does not reset to local work.
+        assert_eq!(
+            sync.best_known_difficulty(),
+            9_000,
+            "clearing a same-tip peer must preserve another peer's higher-work \
+             claim, not collapse best_known to local"
+        );
+        assert_eq!(
+            sync.best_peer_by_difficulty(),
+            Some((peers[1], 9_000)),
+            "peer B remains the heaviest-work sync target after A is cleared"
+        );
+    }
+
     /// A peer at-or-below our own work is not a sync target: it must NOT
     /// flip us out of Synced, and its claim must be dropped.
     #[test]

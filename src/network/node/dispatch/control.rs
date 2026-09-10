@@ -283,9 +283,15 @@ pub(super) async fn handle_chain_work(
                 // treated as "a heavier chain exists", or it latches
                 // work_behind and gates the miner forever (fix for the
                 // 2026-09-07 stuck-`synced=false` wedge). Only a DIFFERENT tip
-                // is a candidate heavier chain, and that path is substantiated
-                // by the subsequent GetHeaders/fetch (which bans a peer that
-                // can't deliver the chain it claimed).
+                // is a candidate heavier chain, so its claim is fed to the
+                // capped peer-work table. NOTE: this same-tip fix does NOT by
+                // itself substantiate a different-tip claim — a peer advertising
+                // a heavier DIFFERENT tip it cannot back (e.g. answering the
+                // follow-up GetHeaders with an empty/bogus Headers set) is only
+                // partially handled: the subsequent fetch penalizes some, but not
+                // all, non-delivering peers. Fully validating different-tip work
+                // claims (and banning peers that advertise work they can't
+                // deliver) remains a separate, open concern.
                 let on_our_tip = cw.best_hash == chain.tip_hash();
                 {
                     let mut s = sync.write().await;
