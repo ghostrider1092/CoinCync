@@ -235,7 +235,12 @@ pub(super) async fn send_to_peer(
     data: Vec<u8>,
 ) -> bool {
     match peer_sender(senders, peer_id) {
-        Some(sender) => sender.send(data).await.is_ok(),
+        // C2: NON-BLOCKING. `send_to_peer` is called by the single shared message
+        // processor; a `.send().await` here blocks that processor whenever ONE
+        // peer's bounded queue is full (a peer that stopped reading), freezing all
+        // P2P handling. `try_send` instead reports a full queue as a failed send
+        // (peers can re-request); the peer's write arm drops it via WRITE_TIMEOUT.
+        Some(sender) => sender.try_send(data).is_ok(),
         None => false,
     }
 }
@@ -390,5 +395,35 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+    }
+
+    // C2 regression: `send_to_peer` is called by the single shared message
+    // processor, so it must NEVER block on one peer -- a full per-peer queue
+    // (a peer that stopped reading) must be a fast failed-send, not an await.
+    #[tokio::test]
+    async fn send_to_peer_does_not_block_when_queue_is_full() {
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let peer: PeerId = [7u8; 32];
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1); // rx kept, never drained
+        senders.insert(peer, tx);
+
+        // First send fills the single slot.
+        assert!(send_to_peer(&senders, &peer, vec![1]).await);
+
+        // A second send would block a `.send().await`; `try_send` returns false
+        // immediately. Bound it with a timeout to PROVE it doesn't hang.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send_to_peer(&senders, &peer, vec![2]),
+        )
+        .await;
+        assert_eq!(
+            res,
+            Ok(false),
+            "send_to_peer must return false (not block) when the peer queue is full"
+        );
+
+        // Unknown peer -> false, no panic.
+        assert!(!send_to_peer(&senders, &[9u8; 32], vec![3]).await);
     }
 }

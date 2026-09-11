@@ -19,7 +19,7 @@ use super::super::noise::{
 use super::super::peer::{PeerId, PeerInfo};
 use super::super::protocol::{Message, MessageType};
 use super::super::traffic_shaping::TrafficShaper;
-use super::constants::PEER_QUEUE_SIZE;
+use super::constants::{PEER_QUEUE_SIZE, WRITE_TIMEOUT};
 use super::types::NodeEvent;
 use super::PeerMessage;
 
@@ -495,9 +495,28 @@ pub(super) async fn handle_connection(
                         }
                     }
                     let payload = &data[HEADER_SIZE..];
-                    if let Err(e) = framer.write_message(msg_type, payload).await {
-                        debug!("Write error to peer {:?}: {}", &peer_id[..4], e);
-                        break;
+                    // C2: bound the write. A peer that stops reading fills its TCP
+                    // receive window; without a timeout this `.await` blocks the
+                    // write arm forever, the send queue fills, and the shared
+                    // processor then blocks on `send_to_peer`. Drop a stalled peer.
+                    match tokio::time::timeout(
+                        WRITE_TIMEOUT,
+                        framer.write_message(msg_type, payload),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            debug!("Write error to peer {:?}: {}", &peer_id[..4], e);
+                            break;
+                        }
+                        Err(_) => {
+                            debug!(
+                                "Write timeout to peer {:?}; dropping stalled peer",
+                                &peer_id[..4]
+                            );
+                            break;
+                        }
                     }
                     // Track outbound bytes for telemetry (get_peers RPC, sync diagnostics).
                     // Without this, bytes_sent stays at 0 forever — masking real propagation
