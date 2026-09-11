@@ -318,8 +318,30 @@ pub(super) async fn handle_verack(
         crate::metrics::PEER_HANDSHAKE.observe(elapsed);
     }
 
-    if let Some(mut peer) = peers.get_mut(&peer_id) {
-        peer.state = PeerState::Connected;
+    // M-P1: a Verack completes the handshake ONLY if a valid Version was received
+    // first (state == VersionReceived). A bare Verack must NOT flip a peer to
+    // Connected -- that would skip protocol-version / user-agent / self-connection
+    // validation and expose every post-handshake handler (incl. the C2 freeze) to
+    // a 13-byte pre-handshake frame. Rejecting the out-of-order Verack here also
+    // closes the Verack-replay IBD wedge: a replayed Verack on an already-Connected
+    // peer no longer re-runs the GetHeaders/slot logic below.
+    let advanced = peers
+        .get_mut(&peer_id)
+        .map(|mut peer| {
+            if peer.state == PeerState::VersionReceived {
+                peer.state = PeerState::Connected;
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+    if !advanced {
+        debug!(
+            "Ignoring out-of-order Verack from peer {:?} (no prior Version / already connected)",
+            &peer_id[..4]
+        );
+        return Ok(());
     }
 
     // Register outbound peers for Dandelion++ relay selection
