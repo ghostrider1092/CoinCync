@@ -169,6 +169,34 @@ pub fn validate_block_with_checkpoint_for_network(
     checkpoint_height: Option<u64>,
     expected_network: crate::config::NetworkType,
 ) -> Result<BlockValidation> {
+    // Default: full (active-chain) validation.
+    validate_block_ctx(
+        block,
+        prev_block,
+        utxos,
+        checkpoint_height,
+        expected_network,
+        true,
+    )
+}
+
+/// Block validation with an explicit UTXO-context flag (C1).
+///
+/// `contextual == false` skips the per-transaction checks that compare against
+/// the active UTXO set (see `validate_transaction_for_network_ctx`). Use it ONLY
+/// for the pre-storage validation of a competing FORK block; the reorg loop
+/// re-runs this with `contextual == true` against the rewound fork-point state
+/// before any fork can win. PoW, header, difficulty, size/weight/count,
+/// coinbase, merkle root, and per-tx crypto (ring sigs / range proofs /
+/// balance) are ALWAYS checked regardless of `contextual`.
+pub fn validate_block_ctx(
+    block: &Block,
+    prev_block: Option<&Block>,
+    utxos: &UtxoSet,
+    checkpoint_height: Option<u64>,
+    expected_network: crate::config::NetworkType,
+    contextual: bool,
+) -> Result<BlockValidation> {
     // AUDIT (2026-07-01, follow-on to H1): validate_block was a ~600-line
     // monolith of 19 distinct checks. Refactored to a driver + named
     // sub-check helpers that mirror validate_transaction's structure. Each
@@ -713,8 +741,13 @@ pub fn validate_block_with_checkpoint_for_network(
                     return Some((idx, "Multiple coinbase transactions".to_string()));
                 }
 
-                match validate_transaction_for_network(tx, utxos, block.height(), expected_network)
-                {
+                match validate_transaction_for_network_ctx(
+                    tx,
+                    utxos,
+                    block.height(),
+                    expected_network,
+                    contextual,
+                ) {
                     Ok(_) => None,
                     Err(e) => Some((idx, e.to_string())),
                 }
@@ -1269,6 +1302,38 @@ pub fn validate_transaction_for_network(
     current_height: u64,
     expected_network: crate::config::NetworkType,
 ) -> Result<()> {
+    // Default (active-chain) validation: run every check, including the ones
+    // that compare against the active UTXO set.
+    validate_transaction_for_network_ctx(tx, utxos, current_height, expected_network, true)
+}
+
+/// Transaction validation with an explicit UTXO-context flag.
+///
+/// C1 FIX: when `contextual` is `false`, the three checks that are meaningful
+/// only against a *specific* UTXO snapshot -- key-image double-spend
+/// (`check_tx_no_double_spend`), duplicate-stealth-vs-chain and ring-member
+/// existence (`check_tx_ring_members`), and available-count-derived ring size
+/// (`check_tx_ring_size_and_unique_members`) -- are SKIPPED. All context-free
+/// checks (version, curve points, I/O counts/ratio/shape, ring signatures,
+/// range proofs, balance) still run.
+///
+/// This is used ONLY for the pre-storage validation of a COMPETING FORK block
+/// (parent != active tip). Such a block's transactions are meaningful against
+/// the fork-point UTXO state, NOT the active tip: e.g. an ordinary natural fork
+/// where two miners mine the same mempool tx would otherwise be rejected as
+/// "duplicate key image" against the active chain, never stored, and the honest
+/// peer serving it banned -- the node could then never reorg onto a heavier
+/// branch (permanent partition). The reorg loop re-runs FULL (`contextual=true`)
+/// validation against the rewound fork-point UTXO set before any fork can win,
+/// so soundness (no double-spend can be *applied*) is preserved. PoW is still
+/// fully verified pre-storage, so this is not a free-DoS surface.
+pub(crate) fn validate_transaction_for_network_ctx(
+    tx: &Transaction,
+    utxos: &UtxoSet,
+    current_height: u64,
+    expected_network: crate::config::NetworkType,
+    contextual: bool,
+) -> Result<()> {
     let v1_0_12_active = v1_0_12_rules_active(expected_network, current_height);
     // AUDIT (2026-06-30 H1): the previous single-function form was 640
     // lines and reviewer-hostile. Broken into named sub-checks. Evaluation
@@ -1304,9 +1369,14 @@ pub fn validate_transaction_for_network(
     check_tx_input_output_counts(tx, v1_0_12_active)?;
     check_tx_io_ratio_legacy(tx)?;
     check_tx_uniform_shape(tx, current_height)?;
-    check_tx_no_double_spend(tx, utxos)?;
-    check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
-    check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+    // C1: the three active-UTXO-relative checks. Skipped for pre-storage
+    // validation of a competing fork block (see the doc comment); re-run in
+    // full by the reorg loop against the rewound fork-point UTXO set.
+    if contextual {
+        check_tx_no_double_spend(tx, utxos)?;
+        check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
+        check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+    }
     check_tx_ring_signatures(tx)?;
     check_tx_range_proofs(tx, current_height)?;
     check_tx_balance_proof(tx)?;

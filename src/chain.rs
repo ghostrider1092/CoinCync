@@ -1965,12 +1965,25 @@ impl Blockchain {
                         None
                     }
                 });
-            let validation = crate::consensus::validate_block_with_checkpoint_for_network(
+            // C1 FIX: a COMPETING FORK block (parent != active tip) is validated
+            // against `inner.utxos`, which is the ACTIVE chain's UTXO set -- the
+            // wrong snapshot for that block. The active-UTXO-relative checks
+            // (key-image double-spend, duplicate-stealth-vs-chain, ring-member
+            // existence, available-count ring size) would false-reject an
+            // ordinary natural fork that shares a mempool tx with the active
+            // branch, the block would never be stored, and the honest peer
+            // serving it banned -- leaving the node unable to ever reorg onto a
+            // heavier branch (permanent partition). For fork blocks we therefore
+            // defer those checks (`contextual = false`); the reorg loop re-runs
+            // FULL validation against the rewound fork-point UTXO set before the
+            // fork can win. PoW and all context-free/crypto checks still run here.
+            let validation = crate::consensus::validate_block_ctx(
                 &block,
                 parent.as_ref(),
                 &inner.utxos,
                 cp,
                 self.network,
+                is_main_chain,
             )
             .map_err(|e| Error::InvalidState(format!("Block validation error: {}", e)))?;
             if !validation.valid {

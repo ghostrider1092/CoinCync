@@ -288,9 +288,37 @@ fn mine_block(
     let prev_hash = prev.hash();
     let tx_hashes: Vec<Hash> = transactions.iter().map(|t| t.hash()).collect();
     let tx_root = merkle_root(&tx_hashes);
-    let anchor = compute_full_anchor(&prev_hash, height, timestamp)
+
+    // audit section 1: the anchor binds the header's otherwise-unbound fields
+    // via `pow_binding()`. Build the header (anchor placeholder), derive the
+    // binding, then the anchor -- exactly as the production miner/validator do
+    // (`mining/block_builder.rs`). `pow_binding` does not read `anchor`, so
+    // there is no circular dependency. (This helper previously called the
+    // pre-binding 3-arg `compute_full_anchor`, which stopped compiling once the
+    // binding param landed on main; this file is `#[ignore]`, so CI never
+    // caught the breakage.)
+    let mut header = BlockHeader {
+        network_magic: magic,
+        version: block_version_at_height(height),
+        height,
+        timestamp,
+        prev_hash,
+        tx_root,
+        anchor: Hash::from_bytes([0u8; 32]),
+        algorithm: PowAlgorithm::RandomX as u8,
+        nonce: 0,
+        target,
+        miner_pubkey,
+        supply_commitment: [0u8; 32],
+        checkpoint_vote: None,
+        spark_set_root: [0u8; 32],
+        mw_kernel_root: [0u8; 32],
+    };
+    let binding = header.pow_binding();
+    let anchor = compute_full_anchor(&prev_hash, height, timestamp, &binding)
         .expect("anchor computation must succeed")
         .mixed_hash;
+    header.anchor = anchor;
 
     let mut nonce = 0u64;
     loop {
@@ -301,26 +329,9 @@ fn mine_block(
         }
         nonce = nonce
             .checked_add(1)
-            .expect("nonce space exhausted — target unexpectedly hard");
+            .expect("nonce space exhausted; target unexpectedly hard");
     }
-
-    let header = BlockHeader {
-        network_magic: magic,
-        version: block_version_at_height(height),
-        height,
-        timestamp,
-        prev_hash,
-        tx_root,
-        anchor,
-        algorithm: PowAlgorithm::RandomX as u8,
-        nonce,
-        target,
-        miner_pubkey,
-        supply_commitment: [0u8; 32],
-        checkpoint_vote: None,
-        spark_set_root: [0u8; 32],
-        mw_kernel_root: [0u8; 32],
-    };
+    header.nonce = nonce;
 
     Block::new(header, transactions)
 }
@@ -598,6 +609,219 @@ fn reorg_tip_double_spend_is_rejected() {
         stats_after.tip_hash,
         b12.hash(),
         "stats tip_hash must remain B12"
+    );
+}
+
+// =============================================================================
+// Regression (C1): a competing fork block that shares a VALID tx with the
+// active chain must be STORABLE and REORG-able
+// =============================================================================
+//
+// The ordinary, non-adversarial case: one valid transaction X (spending the
+// attacker's own matured coinbases K+K2) is mined into the honest main-chain
+// block M12. A competing miner mines the SAME X into a fork block F12 off the
+// same parent B11 (a natural fork -- both saw X in the mempool). A second fork
+// block F13 then makes {F12,F13} heavier than {M12}.
+//
+// The C1 bug: block validation runs every candidate against the ACTIVE chain's
+// UTXO set. After M12 is applied, X's key images are on the active chain, so
+// F12 is rejected Invalid("duplicate key image detected"), never stored; F13 is
+// then a permanent orphan and the node can NEVER reorg onto the heavier fork
+// (and it bans the honest peer that served F12). This is triggered by a plain
+// 1-block natural fork with a shared tx -- no attacker required.
+//
+// The fix defers the active-UTXO checks for fork blocks (contextual=false) to
+// the reorg loop, which re-validates against the rewound fork-point state. So
+// F12 must store as AcceptedFork, and adding F13 must reorg the node onto the
+// fork (X moves from M12 to F12; its key images are un-marked when M12 is
+// disconnected and re-marked when F12 is connected).
+//
+//   B1..B11 -- M12(X)                          (main, tip after M12)
+//         \---- F12(X) -- F13(coinbase)         (fork, wins on length)
+#[test]
+#[ignore = "real-PoW mining, slow; run with --features testnet -- --ignored"]
+fn natural_fork_sharing_a_tx_can_be_stored_and_reorged() {
+    std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+    coincync::consensus::bind_randomx_genesis_for_network(NetworkType::Testnet);
+
+    let chain = Blockchain::new();
+    chain.init_genesis().expect("genesis init");
+    let genesis = chain.get_block_by_height(0).expect("genesis block");
+    let magic = NetworkType::Testnet.magic_bytes();
+    chain
+        .restore_state(0, genesis.hash(), 1)
+        .expect("seed cumulative-work genesis base = 1");
+
+    let (spend_secret, spend_public) = generate_keypair();
+    let (view_secret, view_public) = generate_keypair();
+    let (_filler_spend_sk, filler_spend_pk) = generate_keypair();
+    let (_filler_view_sk, filler_view_pk) = generate_keypair();
+    let (_r_spend_sk, r_spend_pk) = generate_keypair();
+    let (_r_view_sk, r_view_pk) = generate_keypair();
+
+    let base_ts = genesis.header.timestamp;
+    let spacing = 3600u64;
+
+    // Main chain B1..B11: K@1, K2@2 (attacker), fillers 3..11. Both mature by 12.
+    let mut chain_blocks: Vec<Block> = vec![genesis.clone()];
+    let mut k_stealth: Option<StealthAddress> = None;
+    let mut k2_stealth: Option<StealthAddress> = None;
+    let mut parent = genesis.clone();
+    for h in 1..=11u64 {
+        let ts = base_ts + h * spacing;
+        let target = if h == 1 {
+            Hash::from_difficulty(500)
+        } else {
+            chain.next_target()
+        };
+        let (coinbase, stealth) = if h == 1 || h == 2 {
+            build_coinbase(h, &spend_public, &view_public, 0)
+        } else {
+            build_coinbase(h, &filler_spend_pk, &filler_view_pk, 0)
+        };
+        match h {
+            1 => k_stealth = Some(stealth),
+            2 => k2_stealth = Some(stealth),
+            _ => {}
+        }
+        let block = mine_block(&parent, h, ts, target, vec![coinbase], spend_public, magic);
+        let status = chain.add_block(block.clone()).expect("add_block B*");
+        assert!(
+            matches!(status, BlockStatus::Accepted),
+            "B{h} (got {status:?})"
+        );
+        parent = block.clone();
+        chain_blocks.push(block);
+    }
+    let b11 = parent.clone();
+    assert_eq!(chain.height(), 11);
+
+    let targets = [
+        SpendTarget {
+            stealth: k_stealth.expect("K stealth"),
+            amount: calculate_block_reward(1).as_atomic(),
+            height: 1,
+        },
+        SpendTarget {
+            stealth: k2_stealth.expect("K2 stealth"),
+            amount: calculate_block_reward(2).as_atomic(),
+            height: 2,
+        },
+    ];
+    let fee = 50_000_000u64;
+    let t12 = chain.next_target();
+
+    // One VALID spend X of K+K2 -- the shared transaction.
+    let x = build_double_spend(
+        &targets,
+        &view_secret,
+        &spend_secret,
+        &r_spend_pk,
+        &r_view_pk,
+        fee,
+        12,
+    );
+    let k_key_image = x.inputs[0].key_image;
+
+    // Honest main block M12 = coinbase + X, off B11.
+    let (m12_coinbase, _) =
+        build_coinbase(12, &filler_spend_pk, &filler_view_pk, claimable_fees(12, fee));
+    let m12 = mine_block(
+        &b11,
+        12,
+        base_ts + 12 * spacing,
+        t12,
+        vec![m12_coinbase, x.clone()],
+        spend_public,
+        magic,
+    );
+    let status_m12 = chain.add_block(m12.clone()).expect("add_block M12");
+    assert!(
+        matches!(status_m12, BlockStatus::Accepted),
+        "M12 (coinbase + X) must extend the main chain (got {status_m12:?})"
+    );
+    assert_eq!(chain.tip_hash(), m12.hash(), "tip must be M12");
+    // X is now on the active chain -> K+K2 key images are marked spent.
+    assert!(
+        chain.is_spent(&k_key_image),
+        "X applied: K spent on the active chain"
+    );
+
+    // Competing fork F12 = coinbase + the SAME X, off B11. Bump the timestamp so
+    // F12.hash > M12.hash -> F12 loses the equal-work tiebreak and is stored as a
+    // side branch (no premature reorg to F12).
+    let (f12_coinbase, _) =
+        build_coinbase(12, &filler_spend_pk, &filler_view_pk, claimable_fees(12, fee));
+    let mut f12_ts = base_ts + 12 * spacing + 1;
+    let f12 = loop {
+        let candidate = mine_block(
+            &b11,
+            12,
+            f12_ts,
+            t12,
+            vec![f12_coinbase.clone(), x.clone()],
+            spend_public,
+            magic,
+        );
+        if candidate.hash().as_bytes() > m12.hash().as_bytes() {
+            break candidate;
+        }
+        f12_ts += 1;
+    };
+
+    let status_f12 = chain.add_block(f12.clone()).expect("add_block F12");
+
+    // CORE C1 ASSERTION: pre-fix this is Invalid("duplicate key image detected")
+    // because F12's X shares K+K2's key images with the already-applied M12. The
+    // fix must store it as a side branch instead.
+    assert!(
+        !matches!(status_f12, BlockStatus::Invalid(_)),
+        "C1: a fork block sharing a valid tx with the active chain must NOT be \
+         rejected Invalid -- it was ({status_f12:?}). The node could otherwise \
+         never reorg onto a heavier competing branch."
+    );
+    assert!(
+        matches!(status_f12, BlockStatus::AcceptedFork),
+        "C1: F12 must be stored as AcceptedFork (got {status_f12:?})"
+    );
+    assert_eq!(
+        chain.tip_hash(),
+        m12.hash(),
+        "tip still M12 (F12 lost the tiebreak)"
+    );
+
+    // F13 off F12 (coinbase-only) makes the fork heavier -> reorg.
+    let mut dblocks: Vec<DifficultyBlock> = (0..=11u64)
+        .map(|h| diff_block(&chain_blocks[h as usize]))
+        .collect();
+    dblocks.push(diff_block(&f12));
+    let t13 = calculate_difficulty(&dblocks, 13);
+    let (f13_coinbase, _) = build_coinbase(13, &filler_spend_pk, &filler_view_pk, 0);
+    let f13 = mine_block(
+        &f12,
+        13,
+        f12_ts + spacing,
+        t13,
+        vec![f13_coinbase],
+        spend_public,
+        magic,
+    );
+    let status_f13 = chain.add_block(f13.clone()).expect("add_block F13");
+
+    // REORG ASSERTION: the node reorgs onto the heavier fork.
+    assert_eq!(
+        chain.tip_hash(),
+        f13.hash(),
+        "C1: adding F13 must reorg the node onto the heavier fork (tip=F13). \
+         add_block returned {status_f13:?}; tip is {} at height {}.",
+        chain.tip_hash().to_hex(),
+        chain.height(),
+    );
+    assert_eq!(chain.height(), 13, "height must be 13 after the reorg");
+    // X survived the reorg (moved from M12 to F12) -> K is still spent.
+    assert!(
+        chain.is_spent(&k_key_image),
+        "X remains on the canonical chain via F12 after the reorg; K spent"
     );
 }
 
