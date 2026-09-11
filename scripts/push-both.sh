@@ -1,36 +1,44 @@
 #!/usr/bin/env bash
 #
-# push-both.sh — push ONE branch to the project's public home(s).
+# push-both.sh — push ONE branch to BOTH of the project's homes, kept in sync.
 #
-#   • GitHub    (ghostrider1092/CoinCync)  remote: mirror  (HTTPS/gh)
+#   • GitHub    (ghostrider1092/CoinCync)   remote: origin
+#   • Codeberg  (ghostrider1092/Coincync)   remote: codeberg   ← NLnet review target
 #
-# Codeberg was REMOVED 2026-08-20: Codeberg's usage policy prohibits
-# cryptocurrency/blockchain projects, so it was never a valid home (the old
-# "crypto-tolerant" label here was wrong) and pushing there risked a ToS
-# takedown. NLnet/NGI0 does not require Codeberg — it is host-agnostic. If you
-# want a non-GitHub fallback that ACTUALLY tolerates the project, use one that
-# permits it (GitLab.com, sourcehut, a self-hosted Forgejo/Gitea, or Radicle) —
-# NOT Codeberg — and wire it into the optional block below.
+# Codeberg is re-enabled 2026-09-10 as the NLnet/NGI0 review target. NOTE: Codeberg's
+# usage policy is unfriendly to cryptocurrency projects, so the mirror there carries a
+# standing ToS-takedown risk — it is used because it is the agreed review host, an
+# ACCEPTED risk, not an oversight. GitHub (origin) remains the canonical tree.
+#
+# The two MUST stay in sync. On 2026-09-10 they had silently diverged (Codeberg was
+# ~9 days / 65 commits behind, so reviewers would have seen stale code); they were
+# reconciled with a union merge. Always push with THIS script so both homes advance
+# together and never drift apart again.
 #
 # Usage:  scripts/push-both.sh <branch>
 #
-# SAFETY: this pushes only the single named branch (explicit refspec). It never
-# uses --all / --mirror, so the held-supply branch and any other local-only
-# branch never leave this machine. Do not "fix" that by adding --all.
+# SAFETY: pushes only the single named branch (explicit refspec). It never uses
+# --all / --mirror / --force, so local-only branches never leave this machine and a
+# remote is never rewound. Do not "fix" that by adding --all or --force.
 set -euo pipefail
 
 branch="${1:?usage: scripts/push-both.sh <branch>}"
 
-echo "→ GitHub mirror (ghostrider1092/CoinCync) …"
-git push mirror "$branch:refs/heads/$branch"
+for remote in origin codeberg; do
+  if ! git remote get-url "$remote" >/dev/null 2>&1; then
+    echo "✗ remote '$remote' is not configured. Add it first, e.g.:" >&2
+    echo "    git remote add origin   https://github.com/ghostrider1092/CoinCync.git" >&2
+    echo "    git remote add codeberg https://codeberg.org/ghostrider1092/Coincync.git" >&2
+    exit 1
+  fi
+done
 
-# ── Optional second home (a REAL crypto-tolerant forge — NOT Codeberg) ────────
-# Add the remote once, e.g.:
-#   git remote add fallback git@gitlab.com:<you>/coincync.git
-# then uncomment (keep the explicit single-branch refspec — never --all):
-#
-# echo "→ fallback forge …"
-# git push fallback "$branch:refs/heads/$branch"
-# ─────────────────────────────────────────────────────────────────────────────
+echo "→ GitHub (origin) …"
+git push origin "$branch:refs/heads/$branch"
+echo "✓ '$branch' → GitHub."
 
-echo "✓ '$branch' pushed to the GitHub mirror."
+echo "→ Codeberg (codeberg) …"
+git push codeberg "$branch:refs/heads/$branch"
+echo "✓ '$branch' → Codeberg."
+
+echo "✓ '$branch' pushed to BOTH homes (GitHub + Codeberg)."
