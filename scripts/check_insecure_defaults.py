@@ -81,11 +81,11 @@ def main() -> int:
     if "COINCYNC_BOOTSTRAP_SIGNING_PUBKEY" not in preflight:
         failures.append("scripts/preflight_bootstrap_manifest.py must validate signing pubkey env var")
 
-    rpc_server = read("src/rpc/server.rs")
-    if "rpc_auth_enabled" not in rpc_server:
-        failures.append("src/rpc/server.rs should expose rpc_auth_enabled in info responses for operator verification")
-    if "metadata_minimized" not in rpc_server:
-        failures.append("src/rpc/server.rs should expose metadata_minimized runtime posture in info responses")
+    rpc_status = read("src/rpc/handlers/node.rs")
+    if "rpc_auth_enabled" not in rpc_status:
+        failures.append("src/rpc/handlers/node.rs should expose rpc_auth_enabled in info responses for operator verification")
+    if "metadata_minimized" not in rpc_status:
+        failures.append("src/rpc/handlers/node.rs should expose metadata_minimized runtime posture in info responses")
 
     if failures:
         print("Insecure default checks failed:", file=sys.stderr)
