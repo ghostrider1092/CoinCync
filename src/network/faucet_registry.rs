@@ -38,6 +38,33 @@
 //!   valid for one CANNOT be replayed as another; see
 //!   [`signed_registry`] for the domain-separation guarantee.
 //! - Schema version `1`. Bumped on incompatible layout changes.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `FaucetEntry` serde** — INVARIANT: an entry round-trips through JSON and
+//!   an absent optional description deserializes cleanly. THREAT: a strict parser
+//!   rejects valid signed directories, breaking the wallet faucet list.
+//!   TESTS: `faucet_entry_round_trips_through_json`, `faucet_entry_accepts_missing_description`.
+//! - **§2 `FaucetRegistry` as `RegistryPayload`** — INVARIANT: the payload implements
+//!   the registry contract (network, schema, timestamp) correctly and round-trips with
+//!   many entries. THREAT: a malformed payload passes verification or a valid one is dropped.
+//!   TESTS: `faucet_registry_implements_registry_payload_correctly`,
+//!   `faucet_registry_round_trips_with_multiple_entries`.
+//! - **§3 namespace isolation** — INVARIANT: the faucet-registry signature namespace
+//!   is distinct from the peer-snapshot namespace. THREAT: cross-service signature
+//!   reuse lets a snapshot signature authorize a forged faucet directory.
+//!   TESTS: `namespace_differs_from_peer_snapshot`.
+//! - **§4 `maintainer_pubkey_from_env`** — INVARIANT: only a well-formed 32-byte hex
+//!   key is accepted; wrong lengths are rejected (returns `None`). THREAT: a truncated
+//!   or garbage env key is silently treated as a valid trust anchor.
+//!   TESTS: `maintainer_pubkey_from_env_accepts_32_byte_hex`, `maintainer_pubkey_from_env_rejects_wrong_length`.
+//! - **§5 `fetch_verified_faucet_registry`** — INVARIANT: fetch delegates to the
+//!   signed-registry verify path and is soft-fail (errors never crash the wallet).
+//!   THREAT: an unreachable/hostile IPFS gateway takes down the wallet, or an unsigned
+//!   directory is displayed as trusted. TESTS: (gap — async IPFS fetch has no unit
+//!   harness; verification is covered in `signed_registry` tests).
 
 use serde::{Deserialize, Serialize};
 

@@ -21,6 +21,53 @@
 //! ## References
 //! - Bitcoin BIP 158: Compact Block Filters
 //! - `bitcoin-master/src/blockfilter.{h,cpp}` — GCS implementation
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `BlockFilter::from_block`** — INVARIANT: the filter encodes every
+//!   output stealth address in the block, keyed deterministically off the
+//!   block hash.
+//!   THREAT: an address omitted from the filter set is a false negative — the
+//!   owning personal node never learns to fetch the block.
+//!   TESTS: (gap — no direct test constructs a `Block` and calls `from_block`).
+//! - **§2 `BlockFilter::match_any` (no false negatives)** — INVARIANT: any
+//!   address that was encoded into the filter must test positive against it.
+//!   THREAT: a false negative here is a funds-visibility bug — the personal
+//!   node silently misses a block that pays it.
+//!   TESTS: `test_gcs_encode_decode_match`.
+//! - **§3 `derive_sip_key` / `hash_element` (deterministic hashing)** —
+//!   INVARIANT: the same block hash always derives the same key, and the same
+//!   element under the same key always hashes to the same range value, for
+//!   both the encoder and the matcher.
+//!   THREAT: nondeterminism between encode-time and match-time hashing would
+//!   make every filter a false negative for its own elements.
+//!   TESTS: (gap — no test isolates `derive_sip_key`/`hash_element` directly;
+//!   only exercised indirectly via `test_gcs_encode_decode_match`).
+//! - **§4 `gcs_encode`** — INVARIANT: hashed elements are sorted, deduplicated,
+//!   and delta-encoded; an empty element set encodes to empty bytes.
+//!   THREAT: an encoding bug (e.g. unsorted deltas) breaks the merge-join
+//!   decoder in `gcs_match_any`, causing missed matches.
+//!   TESTS: `test_empty_filter`.
+//! - **§5 `gcs_match_any` (empty guard + merge-join correctness)** —
+//!   INVARIANT: an empty filter or empty `n_elements` returns `false`
+//!   immediately; otherwise every encoded element that is also queried is
+//!   found by the merge-join walk.
+//!   THREAT: a false negative allows a matching block to be skipped; a
+//!   panicking or diverging decoder on truncated data is a DoS surface.
+//!   TESTS: `test_gcs_encode_decode_match`, `test_empty_filter`.
+//! - **§6 `golomb_rice_encode` / `golomb_rice_decode` (roundtrip)** —
+//!   INVARIANT: `decode(encode(v)) == v` for every representable value.
+//!   THREAT: an asymmetric codec corrupts every delta after the first
+//!   mismatch, silently producing false negatives across the whole filter.
+//!   TESTS: `test_golomb_rice_roundtrip`.
+//! - **§7 `BitWriter` / `BitReader` (bit-level I/O)** — INVARIANT: bits
+//!   written are read back in the same order and count, including a
+//!   zero-padded final byte.
+//!   THREAT: a bit-alignment bug corrupts every downstream Golomb-Rice value,
+//!   not just the one being (de)serialized.
+//!   TESTS: `test_bit_writer_reader_roundtrip`.
 
 use crate::consensus::Block;
 use crate::primitives::{hash_domain, Hash};

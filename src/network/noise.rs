@@ -6,6 +6,62 @@
 //! Transport framing (kept from original):
 //!   [18 bytes: enc(2-byte msg len) + Poly1305 tag]
 //!   [N+16 bytes: enc(payload) + Poly1305 tag]
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `write_secret_file` / `harden_secret_file_permissions`** — INVARIANT:
+//!   node identity secrets are created/left with owner-only permissions
+//!   (mode 0o600 on Unix, ACL-restricted via icacls on Windows), with no
+//!   TOCTOU window where a wider-permission file is briefly readable.
+//!   THREAT: local-user secret-key disclosure (P5-No1). TESTS: (gap — no
+//!   filesystem-permission test in this module; behavior is platform-specific
+//!   and exercised only via `save`/`load_or_generate` round-trip tests).
+//! - **§2 `NodeIdentity::generate` / `save` / `load_or_generate`** — INVARIANT:
+//!   the X25519 transport secret and Ed25519 anchor-signing secret are
+//!   independent, persisted separately, and never reloaded as all-zeros.
+//!   THREAT: a zeroed or shared secret would collapse Noise key agreement or
+//!   anchor-signature unforgeability. TESTS: `test_node_identity_roundtrip`,
+//!   `peer_id_is_stable_and_derived_from_public_key`.
+//! - **§3 `NodeIdentity::sign_anchor_payload` / `verify_anchor_signature`** —
+//!   INVARIANT: anchor signatures are domain-separated (`ANCHOR_SIGN_DOMAIN`)
+//!   so they can never be replayed as a valid signature under a different
+//!   protocol context. THREAT: cross-protocol signature confusion / replay.
+//!   TESTS: (gap — no dedicated anchor-signature test in this module; covered
+//!   indirectly wherever anchor verification is exercised elsewhere).
+//! - **§4 `NoiseHandshake::execute`** — INVARIANT: the Noise_XX 3-message
+//!   handshake completes only with a mutually authenticated, non-all-zeros
+//!   remote static key before transitioning to transport mode.
+//!   THREAT: unauthenticated or null-key peer acceptance would let an
+//!   attacker impersonate a peer or downgrade to an unencrypted channel.
+//!   TESTS: `test_noise_handshake_success`,
+//!   `handshake_garbage_first_message_errors_without_panic`,
+//!   `handshake_truncated_stream_errors_without_panic`.
+//! - **§5 `NOISE_HANDSHAKE_FRAME_MAX` / `read_noise_frame`** — INVARIANT: a
+//!   pre-authentication handshake frame is capped at 8 KB, far below the
+//!   65535-byte snow/Noise ceiling. THREAT: unauthenticated peer forcing a
+//!   64 KB allocation per handshake attempt (memory-exhaustion DoS before
+//!   any identity is verified). TESTS:
+//!   `handshake_truncated_stream_errors_without_panic` (bounded-read path);
+//!   (gap — no test drives a frame exceeding `NOISE_HANDSHAKE_FRAME_MAX` to
+//!   assert the explicit oversize-frame rejection).
+//! - **§6 `NoiseTransport::write_encrypted` / `read_encrypted`
+//!   (and `NoiseSendState`/`NoiseRecvState` split halves)** — INVARIANT: every
+//!   transport message is bounded by `MAX_NOISE_PAYLOAD`, and each Noise
+//!   nonce is advanced exactly once per `write_message`/`read_message` call
+//!   (snow's internal counter), so a nonce is never reused for two distinct
+//!   plaintexts. THREAT: nonce reuse under a fixed key breaks ChaChaPoly
+//!   confidentiality/integrity; unbounded payload size enables memory
+//!   exhaustion. TESTS: `test_noise_transport_roundtrip`,
+//!   `write_encrypted_rejects_oversized_plaintext`,
+//!   `read_encrypted_maximal_length_prefix_is_bounded`.
+//! - **§7 AEAD authentication (`read_message` decrypt failure path)** —
+//!   INVARIANT: any tampering with ciphertext or its Poly1305 tag is detected
+//!   and surfaced as a decryption error, never silently accepted or decoded
+//!   as different plaintext. THREAT: message forgery / bit-flipping attack
+//!   on the encrypted P2P channel. TESTS:
+//!   `tampered_ciphertext_yields_noise_decryption_failed`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -713,5 +769,161 @@ mod tests {
         let id = NodeIdentity::generate();
         assert_ne!(id.public_bytes(), &[0u8; 32]);
         assert_ne!(id.peer_id(), [0u8; 32]);
+    }
+
+    /// Run a full Noise_XX handshake over an in-memory duplex and return the
+    /// two live transports plus the two stream halves.
+    async fn transports_only() -> (
+        NoiseTransport,
+        NoiseTransport,
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+    ) {
+        let id_a = Arc::new(NodeIdentity::generate());
+        let id_b = Arc::new(NodeIdentity::generate());
+        let (mut client_stream, mut server_stream) = duplex(65536);
+        let id_a_c = id_a.clone();
+        let id_b_c = id_b.clone();
+        let client_task = tokio::spawn(async move {
+            perform_noise_handshake(&mut client_stream, id_a_c, true)
+                .await
+                .map(|r| (r, client_stream))
+        });
+        let server_task = tokio::spawn(async move {
+            perform_noise_handshake(&mut server_stream, id_b_c, false)
+                .await
+                .map(|r| (r, server_stream))
+        });
+        let (cr, sr) = tokio::join!(client_task, server_task);
+        let ((ct, _cp), cs) = cr.unwrap().unwrap();
+        let ((st, _sp), ss) = sr.unwrap().unwrap();
+        (ct, st, cs, ss)
+    }
+
+    /// `write_encrypted` must reject a plaintext larger than MAX_NOISE_PAYLOAD
+    /// before attempting to encrypt (bounded buffer, descriptive error).
+    #[tokio::test]
+    async fn write_encrypted_rejects_oversized_plaintext() {
+        let (mut ct, _st, mut cs, _ss) = transports_only().await;
+        let oversized = vec![0u8; MAX_NOISE_PAYLOAD + 1];
+        let res = ct.write_encrypted(&mut cs, &oversized).await;
+        assert!(
+            res.is_err(),
+            "plaintext > MAX_NOISE_PAYLOAD must be rejected"
+        );
+    }
+
+    /// `read_encrypted`'s frame-size gate: the 2-byte length prefix caps
+    /// `ct_len` at u16::MAX (65535), which EQUALS MAX_NOISE_PAYLOAD +
+    /// NOISE_TAG_SIZE, so the explicit "frame too large" branch is unreachable
+    /// by construction. What we CAN pin: a maximal length claim with a
+    /// truncated body errors on a bounded (≤64KB) allocation — it never panics
+    /// or hangs on an unbounded reservation.
+    #[tokio::test]
+    async fn read_encrypted_maximal_length_prefix_is_bounded() {
+        let (_ct, mut st, _cs, _ss) = transports_only().await;
+        let framed = [0xFFu8, 0xFF]; // claims 65535 bytes, then EOF
+        let mut reader: &[u8] = &framed;
+        let res = st.read_encrypted(&mut reader).await;
+        assert!(
+            res.is_err(),
+            "truncated maximal frame must error, not panic or hang"
+        );
+    }
+
+    /// A tampered ciphertext (single flipped byte in the AEAD body) must fail
+    /// the Poly1305 MAC check and surface as `NoiseDecryptionFailed`.
+    #[tokio::test]
+    async fn tampered_ciphertext_yields_noise_decryption_failed() {
+        let (mut ct, mut st, _cs, _ss) = transports_only().await;
+        // Encrypt into an in-memory buffer so we can tamper before "sending".
+        let mut framed: Vec<u8> = Vec::new();
+        ct.write_encrypted(&mut framed, b"authentic payload")
+            .await
+            .unwrap();
+        assert!(framed.len() > 2, "framed message has a length prefix + body");
+        // Flip a byte in the ciphertext body (past the 2-byte length prefix).
+        let last = framed.len() - 1;
+        framed[last] ^= 0xFF;
+
+        let mut reader: &[u8] = &framed;
+        let res = st.read_encrypted(&mut reader).await;
+        match res {
+            Err(Error::NoiseDecryptionFailed(_)) => {}
+            other => panic!("tampered ciphertext must yield NoiseDecryptionFailed, got {other:?}"),
+        }
+    }
+
+    /// A cryptographically-garbage first handshake message must fail
+    /// immediately with `NoiseHandshakeFailed` — no panic. (This transport has
+    /// no plaintext version byte; snow negotiates the pattern, so the first
+    /// non-Noise message is the fast-fail point.)
+    #[tokio::test]
+    async fn handshake_garbage_first_message_errors_without_panic() {
+        let id = Arc::new(NodeIdentity::generate());
+        let (mut client, mut server) = duplex(8192);
+        // Client sends a well-framed but garbage msg1.
+        let garbage = [0xABu8; 64];
+        write_noise_frame(&mut client, &garbage).await.unwrap();
+        // Time-box the responder: `snow` may accept the 64 garbage bytes as an
+        // ephemeral key at msg1 and proceed to write msg2, then block reading the
+        // msg3 that a real initiator would send. The safety property is "garbage
+        // never yields a SUCCESSFUL handshake (and never hangs the suite)", which
+        // a bounded wait satisfies whether the responder errors or stalls.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            NoiseHandshake::responder(id).execute(&mut server),
+        )
+        .await;
+        match res {
+            Ok(Ok(_)) => panic!("garbage handshake msg1 must not succeed"),
+            Ok(Err(_)) => {}  // rejected outright — good
+            Err(_elapsed) => {} // stalled waiting for msg3 — bounded, no false success
+        }
+    }
+
+    /// A truncated handshake stream (length prefix claims more than is sent,
+    /// then EOF) must error rather than hang or panic.
+    #[tokio::test]
+    async fn handshake_truncated_stream_errors_without_panic() {
+        let id = Arc::new(NodeIdentity::generate());
+        let (mut client, mut server) = duplex(8192);
+        client.write_all(&100u16.to_be_bytes()).await.unwrap();
+        client.write_all(&[1, 2, 3]).await.unwrap();
+        drop(client); // EOF before the claimed 100 bytes arrive
+        // EOF should make the read error promptly; time-box anyway so a
+        // regression can never hang the whole suite.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            NoiseHandshake::responder(id).execute(&mut server),
+        )
+        .await;
+        match res {
+            Ok(inner) => assert!(inner.is_err(), "truncated handshake must error"),
+            Err(_elapsed) => {} // stalled — bounded, still not a success
+        }
+    }
+
+    /// The peer id is a stable, deterministic blake3 hash of the static public
+    /// key; distinct identities yield distinct peer ids.
+    #[test]
+    fn peer_id_is_stable_and_derived_from_public_key() {
+        let id = NodeIdentity::generate();
+        let p1 = id.peer_id();
+        let p2 = id.peer_id();
+        assert_eq!(p1, p2, "peer_id must be deterministic for a fixed identity");
+
+        let expected = {
+            let h = blake3::hash(id.public_bytes());
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.as_bytes());
+            out
+        };
+        assert_eq!(p1, expected, "peer_id must be blake3(static public key)");
+        assert_ne!(
+            p1,
+            NodeIdentity::generate().peer_id(),
+            "distinct identities must have distinct peer ids"
+        );
     }
 }

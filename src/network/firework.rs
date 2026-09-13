@@ -26,6 +26,29 @@
 //! message discriminant survived. This module reintroduces the negotiation
 //! as the foundation for Phase 2 total-difficulty sync trust
 //! (see docs/architecture/sync-total-difficulty-trust-design.md).
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `has_cap`** — INVARIANT: a capability check is a strict bitmask
+//!   match; unknown bits present in `caps` never affect the result for a
+//!   known `cap`.
+//!   THREAT: capability confusion causing a node to assume an unsupported
+//!   feature is present on a peer.
+//!   TESTS: `local_node_advertises_chainwork`,
+//!   `unknown_bits_do_not_affect_known_queries`.
+//! - **§2 `local_capabilities`** — INVARIANT: the OR-set this node
+//!   advertises in its own Flare exactly matches what it actually supports.
+//!   THREAT: an advertised-but-unsupported capability would let a peer
+//!   extend chain-work sync trust (Phase 2) to a node that can't honor it.
+//!   TESTS: `local_node_advertises_chainwork`.
+//! - **§3 zero-capabilities backward compatibility** — INVARIANT: a peer
+//!   that never sent a Flare (`capabilities == 0`) is reported as supporting
+//!   zero features, and nothing disconnects for the missing Flare.
+//!   THREAT: breaking interoperability with older nodes or external
+//!   implementations that predate the capability layer.
+//!   TESTS: `zero_capabilities_supports_nothing`.
 
 /// Peer advertises its cumulative chain work via the `ChainWork` message
 /// (Phase 2 total-difficulty sync trust). A peer with this capability lets

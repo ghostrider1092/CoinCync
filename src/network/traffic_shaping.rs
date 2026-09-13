@@ -20,6 +20,39 @@
 //! > violated.
 //!
 //! Network metadata is an "effect" — traffic analysis is a search.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `normalize_size` / `denormalize` (size normalization)** — INVARIANT:
+//!   payloads pad to the smallest fitting standard bucket and round-trip exactly;
+//!   an unmarked payload is rejected. THREAT: packet length leaks message type
+//!   (block vs tx) to a passive observer. TESTS: `normalize_round_trips`,
+//!   `normalized_limit_picks_smallest_fit`, `normalization_accounts_for_outer_overhead`,
+//!   `denormalize_rejects_unmarked_payload`, `noise_record_input_fits_largest_bucket`.
+//! - **§2 `apply_jitter` / `shape`** — INVARIANT: when disabled the shaper is a
+//!   pure pass-through (no correctness change), and shaping only pads/delays.
+//!   THREAT: timing correlation across nodes, or shaping corrupting the payload.
+//!   TESTS: `disabled_shaper_passes_through`, `normalize_large_payload`.
+//! - **§3 `generate_padding_packet` / `is_padding_packet`** — INVARIANT: padding
+//!   packets are correctly framed with the network magic and randomized per call.
+//!   THREAT: predictable/static padding is trivially filtered out by a DPI box.
+//!   TESTS: `padding_packet_is_properly_framed`, `padding_packet_random_per_call`.
+//! - **§4 `run_padding_loop` / `run_padding_loop_broadcast`** — INVARIANT: the loop
+//!   emits per-peer packets each tick, honors the enabled flag, and never blocks on
+//!   a slow peer. THREAT: a full/slow peer stalls the whole constant-rate cover.
+//!   TESTS: `broadcast_loop_emits_packets_per_peer_per_tick`,
+//!   `broadcast_loop_skips_ticks_when_disabled`, `broadcast_loop_does_not_block_on_full_peer`.
+//! - **§5 `DummyTrafficPacer::submit` / `run` (constant-rate pacing)** — INVARIANT:
+//!   exactly one packet leaves per slot, real traffic preferred and dummy used only
+//!   as filler. THREAT: bursty output re-exposes the activity the padding hides.
+//!   TESTS: `pacer_emits_exactly_one_packet_per_slot`, `pacer_prefers_real_then_falls_back_to_dummy`,
+//!   `collect_until_empty`.
+//! - **§6 pacer bounded queue / overflow** — INVARIANT: the pacer queue is bounded;
+//!   on overflow it signals the caller to direct-send rather than dropping silently.
+//!   THREAT: unbounded queue growth (memory DoS) or dropped real messages.
+//!   TESTS: `pacer_bounded_queue_signals_caller_to_direct_send`.
 
 use crate::colony::stick_insect::{padded_len, SIZE_BUCKETS};
 use rand::Rng;

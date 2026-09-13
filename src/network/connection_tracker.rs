@@ -24,6 +24,42 @@
 //!   from the node maintenance loop to reap zero-count entries that
 //!   leaked due to missed untrack calls, and caps total tracked IPs
 //!   at 10 000 to prevent unbounded growth under DoS.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `new` / construction**  — INVARIANT: a fresh tracker holds zero tracked
+//!   IPs and its memory budget starts fully available.
+//!   THREAT: a mis-initialized budget silently admits unbounded buffers.
+//!   TESTS: `new_tracker_is_empty`.
+//! - **§2 `try_track_connection` / `can_accept` (per-IP Sybil cap)** — INVARIANT:
+//!   inbound connections from a single IP are capped; the (N+1)-th is refused.
+//!   THREAT: one host opens unlimited sockets to eclipse/DoS the node.
+//!   TESTS: `per_ip_limit_enforced_by_try_track`, `test_connection_tracker_per_ip_limit`.
+//! - **§3 `untrack_connection` / `cleanup_stale_entries`** — INVARIANT: releasing a
+//!   connection decrements the count and zero-count IPs are pruned, so slots and
+//!   the map never leak. THREAT: leaked counts wedge the cap shut against honest peers.
+//!   TESTS: `untrack_removes_entry_when_count_reaches_zero`, `cleanup_removes_zero_count_entries`.
+//! - **§4 outbound-subnet cap (`try_track_outbound_subnet*`)** — INVARIANT: outbound
+//!   connections per /16 (or v6 group) are capped and admission is atomic under races.
+//!   THREAT: all outbound slots land in one attacker-controlled subnet (eclipse).
+//!   TESTS: `outbound_subnet_cap_admits_up_to_max_then_rejects`, `outbound_subnet_cap_is_per_subnet`,
+//!   `outbound_subnet_concurrent_admission_does_not_exceed_cap`.
+//! - **§5 `reconcile_outbound_subnets` / `untrack_outbound_subnet`** — INVARIANT:
+//!   reconciliation against the live set frees leaked subnet slots and an empty live
+//!   set zeroes every counter. THREAT: leaked outbound counts permanently block new dials.
+//!   TESTS: `untrack_outbound_subnet_releases_slot`, `reconcile_frees_leaked_outbound_slots`,
+//!   `reconcile_with_empty_live_set_zeroes_all_counters`.
+//! - **§6 memory budget (`allocate` / `deallocate`)** — INVARIANT: allocations never
+//!   exceed the budget; a rejected growth leaves existing reservations intact.
+//!   THREAT: an attacker forces unbounded inbound-buffer allocation (memory DoS).
+//!   TESTS: `allocate_respects_budget`, `failed_reservation_growth_preserves_existing_bytes`.
+//! - **§7 reservation RAII (`slot` / reservation drop)** — INVARIANT: a reservation
+//!   returns its bytes/slot exactly once on drop, including under panic and task cancel.
+//!   THREAT: dropped-without-release reservations slow-leak the budget to zero.
+//!   TESTS: `reservation_releases_bytes_on_drop`, `slot_decrements_through_panic_unwind`,
+//!   `slot_drops_on_tokio_task_cancel`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -1,9 +1,50 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `to_socket_addr`** — INVARIANT: port `0` and unspecified IPv6 are
+//!   never converted to a dialable address; IPv4-mapped IPv6 is unwrapped to
+//!   plain IPv4.
+//!   THREAT: an undialable address occupying an address-book slot and
+//!   padding an attacker's per-/16 quota with entries that can never become
+//!   a useful outbound peer (H7 dial-starvation/eclipse).
+//!   TESTS: `converts_wire_addresses`.
+//! - **§2 `is_routable` (IPv4 rejection)** — INVARIANT: loopback, multicast,
+//!   unspecified, RFC1918 private ranges, link-local, CGNAT (100.64/10),
+//!   documentation/benchmark ranges, and the broadcast address are all
+//!   rejected as non-gossip-worthy.
+//!   THREAT: gossiping private/reserved addresses lets a peer waste other
+//!   nodes' outbound slots on unreachable targets, or probe internal networks.
+//!   TESTS: `rejects_unroutable_ipv4`.
+//! - **§3 `is_routable` (IPv4 acceptance)** — INVARIANT: ordinary public
+//!   IPv4 addresses are accepted for gossip.
+//!   THREAT: an overly broad reject list would starve the address book of
+//!   legitimate peers, indirectly aiding eclipse by shrinking peer diversity.
+//!   TESTS: `accepts_routable_ipv4`.
+//! - **§4 `is_routable` (IPv6 rejection)** — INVARIANT: unique-local
+//!   (`fc00::/7`), link-local (`fe80::/10`), documentation (`2001:db8::/32`),
+//!   and IPv4-compatible (but not IPv4-mapped) IPv6 are all rejected.
+//!   THREAT: same as §2 for the IPv6 address space — non-routable ranges
+//!   gossiped as public peers waste dial attempts and probe local networks.
+//!   TESTS: `rejects_unroutable_ipv6`.
+//! - **§5 `is_routable` (IPv6 acceptance)** — INVARIANT: ordinary global
+//!   unicast IPv6 addresses are accepted for gossip.
+//!   THREAT: as §3, an overly broad IPv6 reject list would shrink peer
+//!   diversity and aid eclipse attempts.
+//!   TESTS: `accepts_routable_ipv6`.
+
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use super::super::protocol::NetAddr;
 
 /// Convert a wire address to a socket address, rejecting unspecified IPv6.
 pub(super) fn to_socket_addr(net_addr: &NetAddr) -> Option<SocketAddr> {
+    // H7 (dial starvation / eclipse): reject port 0 — it is undialable, so it
+    // would occupy a book slot and pad an attacker's per-/16 netgroup quota
+    // with entries that can never become a useful outbound peer.
+    if net_addr.port == 0 {
+        return None;
+    }
     let ip = Ipv6Addr::from(net_addr.ip);
 
     if let Some(v4) = ip.to_ipv4_mapped() {

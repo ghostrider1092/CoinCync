@@ -1,3 +1,75 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `spawn_maintenance` panic/clean-exit supervisor** — INVARIANT: if
+//!   the inner maintenance loop ever exits (panic, clean return, or
+//!   cancellation not caused by shutdown), a CRITICAL log line fires so the
+//!   condition is externally observable; it never fails silently.
+//!   THREAT: a poisoned lock or panic inside the loop killing ping/dandelion
+//!   /scoring/ban-flush while `systemd is-active` still reports healthy — the
+//!   2026-06-19 production silent-hang incident this comment documents.
+//!   TESTS: (gap — no test panics the inner loop and asserts the supervisor
+//!   logs CRITICAL rather than exiting quietly).
+//! - **§2 `run_ping_tick`** — INVARIANT: every ping interval, a keepalive is
+//!   sent to all current senders and expired tx-absence entries are pruned,
+//!   using a best-effort send (dead channels don't abort the tick).
+//!   THREAT: without periodic pings, `PEER_TIMEOUT`-based liveness on the
+//!   remote side evicts us even on a healthy link; without pruning, the
+//!   tx-absence cache grows unbounded between hard-cap evictions.
+//!   TESTS: (gap in this file — `TxAbsenceCache::prune`'s bound is exercised
+//!   indirectly by `evicts_oldest_entry_at_the_hard_cap` in tx_absence.rs,
+//!   but no test drives this tick's TTL-based prune path specifically).
+//! - **§3 `run_dandelion_tick`** — INVARIANT: locally-queued transactions are
+//!   drained into the stem pool, the live outbound peer set is refreshed
+//!   before each tick, and `stem_relay`/`fluff` actions are sent to exactly
+//!   the target peer (stem) or all peers (fluff) with no duplication.
+//!   THREAT: stalled or misrouted Dandelion++ actions would either leak the
+//!   originating peer (broken stem privacy) or fail to propagate a
+//!   transaction at all.
+//!   TESTS: `local_tx_enters_stempool`, `embargo_timeout_produces_actions`,
+//!   `diffusion_confirmation_removes_from_stempool`,
+//!   `multiple_txs_tracked_independently` (network_security.rs; these prove
+//!   the underlying `DandelionRouter` state machine this tick drives).
+//! - **§4 `run_cleanup_tick`** — INVARIANT: peers idle past `PEER_TIMEOUT` are
+//!   fully torn down (tracker/sync/orphan-flood/event) each cleanup interval,
+//!   and peer scores decay/auto-ban/expire on the same cadence.
+//!   THREAT: a peer that silently stopped responding but never explicitly
+//!   disconnected would occupy a connection slot indefinitely, and unbounded
+//!   score/ban-list growth would eventually exhaust memory.
+//!   TESTS: (gap — no test drives a stale peer through this tick and asserts
+//!   full teardown, or asserts `decay_all`/`auto_ban_bad_peers` firing here).
+//! - **§5 `run_tip_announce_tick`** — INVARIANT: the current tip is
+//!   re-announced via `InvBlock` on a fixed interval, and is a no-op when the
+//!   tip is still the zero hash (no chain yet).
+//!   THREAT: the 2026-06-27 gossip bug this fixes — peers that missed the
+//!   original tip announcement (e.g. connected after it fired) would never
+//!   learn the current tip and stall in sync.
+//!   TESTS: (gap — no test asserts periodic re-announcement or the
+//!   zero-hash no-op guard).
+//! - **§6 `flush_ban_list`** — INVARIANT: the ban list is persisted to disk
+//!   every interval regardless of whether it changed; a save failure is
+//!   logged, never panics the maintenance loop.
+//!   THREAT: an unpersisted ban list is lost on restart, letting a
+//!   previously-banned peer reconnect immediately after a crash.
+//!   TESTS: (gap — no test exercises this tick's periodic flush or its
+//!   failure-logging path).
+//! - **§7 `rotate_outbound_peer`** — INVARIANT: when more than 3 outbound
+//!   peers are connected, the single longest-connected outbound peer is
+//!   dropped each rotation interval; 3 or fewer outbound peers is a no-op.
+//!   THREAT: a patient eclipse attacker holding long-lived outbound slots
+//!   indefinitely; periodic forced churn bounds how long any one outbound
+//!   peer set can persist. Closes audit MEDIUM #28.
+//!   TESTS: (gap — no test asserts the oldest-outbound selection or the
+//!   `<= 3` no-op threshold).
+//! - **§8 `emit_heartbeat`** — INVARIANT: one INFO line per tick reporting a
+//!   monotonically increasing counter and current peer/outbound counts, so an
+//!   external watchdog can detect a frozen maintenance loop.
+//!   THREAT: the silent-hang failure mode from §1 going undetected for hours
+//!   (17h in the referenced production incident) instead of ~30s.
+//!   TESTS: (gap — no test asserts heartbeat emission or its counter
+//!   monotonicity).
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

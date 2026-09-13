@@ -12,6 +12,45 @@
 //! reasoning.) The reverse `parent_by_hash` map turns "find and remove
 //! an arbitrary orphan" into an O(log n) operation instead of the
 //! previous O(n) scan across every parent bucket.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `add`** — INVARIANT: the pool never holds more than
+//!   `MAX_ORPHAN_SIZE` entries; once at capacity, `evict_oldest` runs before
+//!   the new block is inserted.
+//!   THREAT: an unbounded orphan pool lets an attacker flood a node with
+//!   parentless blocks to exhaust memory.
+//!   TESTS: (gap — no test in `src/` or `tests/` constructs an `OrphanPool`
+//!   directly and drives it past `MAX_ORPHAN_SIZE`; grep for `OrphanPool`
+//!   found only this file. `tier5_orphan_block_without_parent_not_added_to_main`
+//!   in `tests/tier5_chain_reorg.rs` exercises orphan detection at the
+//!   `chain::add_block` level, not this pool's capacity bound).
+//! - **§2 `evict_oldest`** — INVARIANT: eviction always removes the entry
+//!   with the smallest insertion sequence number (strict oldest-first LRU),
+//!   via the `oldest_first` BTreeMap index rather than a linear scan.
+//!   THREAT: evicting anything other than the true oldest entry would let a
+//!   flood of new orphans push out arbitrary (possibly still-relevant)
+//!   entries, or regress to the prior O(n²) scan under load.
+//!   TESTS: (gap — no test exists for this function; candidate name
+//!   `mark_block_orphan_lru_evicts_at_max_orphan_blocks` was checked via
+//!   grep across `src/` and `tests/` and does not exist).
+//! - **§3 `take_children`** — INVARIANT: reconnecting a parent's children
+//!   removes each returned block from all three indices
+//!   (`by_parent`, `parent_by_hash`, `seq_by_hash`/`oldest_first`) together,
+//!   leaving no dangling entries.
+//!   THREAT: a partial removal would leak index entries, letting a stale
+//!   `parent_by_hash`/`seq_by_hash` pair reference a block no longer in
+//!   `by_parent`, corrupting later `contains`/eviction decisions.
+//!   TESTS: (gap — no test exists for this function).
+//! - **§4 `expire`** — INVARIANT: only entries received strictly before
+//!   `current_height - ORPHAN_TTL_BLOCKS` are dropped, and only after
+//!   `current_height >= ORPHAN_TTL_BLOCKS` (no underflow on a young chain).
+//!   THREAT: an unguarded subtraction would underflow `current_height` on a
+//!   short chain (panic/wraparound); no TTL at all would let stale orphans
+//!   accumulate forever.
+//!   TESTS: (gap — no test exists for this function).
 
 use crate::consensus::Block;
 use crate::primitives::Hash;

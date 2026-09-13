@@ -970,4 +970,433 @@ mod tests {
         };
         assert!(msg.validate().is_ok());
     }
+
+    // ── Test helpers (audit test-plan additions) ────────────────────────
+    use crate::consensus::BlockHeader;
+    use crate::primitives::{Amount, PublicKey};
+    use crate::transaction::TxType;
+
+    /// The full set of wire discriminants `TryFrom<u8>` accepts. This is the
+    /// authoritative list mirrored from the `TryFrom` impl; any drift between
+    /// this and the impl is a wire-compatibility break the sweep tests catch.
+    const VALID_DISCRIMINANTS: &[u8] = &[
+        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 60, 61, 62,
+        63, 64, 65, 70, 71, 80, 81, 99,
+    ];
+
+    /// n distinct hashes (varying the first two bytes so counts up to ~65k
+    /// stay unique — matters only where dedup is enforced, but cheap to keep).
+    fn distinct_hashes(n: usize) -> Vec<Hash> {
+        (0..n)
+            .map(|i| {
+                let mut b = [0u8; 32];
+                b[0] = (i & 0xff) as u8;
+                b[1] = ((i >> 8) & 0xff) as u8;
+                Hash::from_bytes(b)
+            })
+            .collect()
+    }
+
+    fn version_msg(version: u32, user_agent: String) -> VersionMessage {
+        VersionMessage {
+            version,
+            services: 1,
+            timestamp: 0,
+            nonce: 0,
+            user_agent,
+            start_height: 0,
+            best_hash: Hash::zero(),
+        }
+    }
+
+    fn tiny_header() -> BlockHeader {
+        BlockHeader {
+            network_magic: MAINNET_MAGIC,
+            version: 0,
+            height: 0,
+            timestamp: 0,
+            prev_hash: Hash::zero(),
+            tx_root: Hash::zero(),
+            anchor: Hash::zero(),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::zero(),
+            miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        }
+    }
+
+    fn tiny_tx() -> Transaction {
+        Transaction {
+            version: 0,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    fn tiny_block() -> Block {
+        Block {
+            header: tiny_header(),
+            transactions: vec![],
+        }
+    }
+
+    fn tiny_addr() -> NetAddr {
+        NetAddr {
+            services: 0,
+            ip: [0u8; 16],
+            port: 0,
+            timestamp: 0,
+        }
+    }
+
+    // ── MessageType discriminant + max_size properties ──────────────────
+
+    /// Every defined discriminant maps to a variant and round-trips back to
+    /// the same byte (`try_from(x as u8) as u8 == x`), guarding discriminant
+    /// stability for the whole enum, not just ChainWork==51.
+    #[test]
+    fn message_type_try_from_accepts_and_round_trips_all_defined_discriminants() {
+        for &b in VALID_DISCRIMINANTS {
+            let variant = MessageType::try_from(b)
+                .unwrap_or_else(|_| panic!("discriminant {} must be accepted", b));
+            assert_eq!(variant as u8, b, "discriminant {} must round-trip", b);
+        }
+        assert_eq!(
+            VALID_DISCRIMINANTS.len(),
+            32,
+            "expected 32 defined message types"
+        );
+    }
+
+    /// Every byte NOT in the defined set is rejected — full 0..=255 sweep,
+    /// covering all gaps (4-9, 16-19, 25-29, 32-39, 42-49, 52-59, 66-69,
+    /// 72-79, 82-98, 100-255).
+    #[test]
+    fn message_type_try_from_rejects_all_undefined_bytes() {
+        for b in 0u8..=255 {
+            let expected_ok = VALID_DISCRIMINANTS.contains(&b);
+            assert_eq!(
+                MessageType::try_from(b).is_ok(),
+                expected_ok,
+                "byte {} acceptance mismatch",
+                b
+            );
+        }
+    }
+
+    /// Every message type's per-command cap is positive and never exceeds the
+    /// global MAX_MESSAGE_SIZE (the framer relies on this ordering).
+    #[test]
+    fn every_max_size_is_positive_and_within_global_cap() {
+        for &b in VALID_DISCRIMINANTS {
+            let variant = MessageType::try_from(b).unwrap();
+            let cap = variant.max_size();
+            assert!(cap > 0, "{:?} max_size must be > 0", variant);
+            assert!(
+                cap <= MAX_MESSAGE_SIZE,
+                "{:?} max_size {} exceeds MAX_MESSAGE_SIZE {}",
+                variant,
+                cap,
+                MAX_MESSAGE_SIZE
+            );
+        }
+    }
+
+    // ── MessageHeader validate / verify_checksum / round-trip ───────────
+
+    #[test]
+    fn message_header_validate_rejects_wrong_magic() {
+        let header = MessageHeader::new(MAINNET_MAGIC, MessageType::Ping, &[1, 2, 3]);
+        let wrong_magic = [0xAA, 0xBB, 0xCC, 0xDD];
+        assert!(header.validate(wrong_magic).is_err());
+    }
+
+    #[test]
+    fn message_header_validate_rejects_length_over_max() {
+        let mut header = MessageHeader::new(MAINNET_MAGIC, MessageType::Blocks, &[]);
+        header.length = (MAX_MESSAGE_SIZE + 1) as u32;
+        assert!(matches!(
+            header.validate(MAINNET_MAGIC),
+            Err(Error::MessageTooLarge)
+        ));
+    }
+
+    #[test]
+    fn message_header_validate_accepts_good_magic_and_length() {
+        let header = MessageHeader::new(MAINNET_MAGIC, MessageType::Ping, &[1, 2, 3]);
+        assert!(header.validate(MAINNET_MAGIC).is_ok());
+    }
+
+    /// verify_checksum must fail on any single-bit flip in the payload AND on
+    /// any single-bit flip in the stored checksum.
+    #[test]
+    fn verify_checksum_fails_on_single_bit_flip() {
+        let payload: Vec<u8> = (0u8..64).collect();
+        let header = MessageHeader::new(MAINNET_MAGIC, MessageType::Blocks, &payload);
+        assert!(header.verify_checksum(&payload));
+
+        for bit in 0..(payload.len() * 8) {
+            let mut flipped = payload.clone();
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            assert!(
+                !header.verify_checksum(&flipped),
+                "flip at bit {} must fail checksum",
+                bit
+            );
+        }
+
+        // Flipping the stored checksum also fails against the true payload.
+        for i in 0..4 {
+            let mut bad = header.clone();
+            bad.checksum[i] ^= 0x01;
+            assert!(!bad.verify_checksum(&payload));
+        }
+    }
+
+    /// `to_bytes` then re-parse of the leading header yields identical
+    /// magic/type/length/checksum.
+    #[test]
+    fn to_bytes_then_reparse_header_is_identical() {
+        let payload = vec![0xABu8; 200];
+        let msg = Message::new(MAINNET_MAGIC, MessageType::Blocks, payload.clone());
+        let bytes = msg.to_bytes().unwrap();
+        let parsed: MessageHeader =
+            borsh::from_slice(&bytes[..MessageHeader::SIZE]).expect("header must reparse");
+        assert_eq!(parsed.magic, msg.header.magic);
+        assert_eq!(parsed.msg_type, msg.header.msg_type);
+        assert_eq!(parsed.length, msg.header.length);
+        assert_eq!(parsed.length as usize, payload.len());
+        assert_eq!(parsed.checksum, msg.header.checksum);
+    }
+
+    // ── VersionMessage::validate ────────────────────────────────────────
+
+    /// user_agent boundary: exactly MAX_USER_AGENT_LENGTH (256) passes, 257
+    /// is rejected.
+    #[test]
+    fn version_validate_user_agent_boundary_256_ok_257_err() {
+        let ok = version_msg(PROTOCOL_VERSION, "a".repeat(MAX_USER_AGENT_LENGTH));
+        assert!(ok.validate().is_ok());
+
+        let too_long = version_msg(PROTOCOL_VERSION, "a".repeat(MAX_USER_AGENT_LENGTH + 1));
+        assert!(matches!(
+            too_long.validate(),
+            Err(Error::ProtocolError(_))
+        ));
+    }
+
+    /// Protocol versions below MIN and above MAX are rejected; MIN and MAX
+    /// themselves are accepted.
+    #[test]
+    fn version_validate_rejects_unsupported_protocol_versions() {
+        let below = version_msg(MIN_SUPPORTED_PROTOCOL_VERSION - 1, "x".into());
+        assert!(matches!(
+            below.validate(),
+            Err(Error::UnsupportedProtocolVersion { .. })
+        ));
+
+        let above = version_msg(MAX_SUPPORTED_PROTOCOL_VERSION + 1, "x".into());
+        assert!(matches!(
+            above.validate(),
+            Err(Error::UnsupportedProtocolVersion { .. })
+        ));
+
+        assert!(version_msg(MIN_SUPPORTED_PROTOCOL_VERSION, "x".into())
+            .validate()
+            .is_ok());
+        assert!(version_msg(MAX_SUPPORTED_PROTOCOL_VERSION, "x".into())
+            .validate()
+            .is_ok());
+    }
+
+    // ── Per-message count / length caps ─────────────────────────────────
+
+    #[test]
+    fn get_headers_validate_locator_boundary_64_ok_65_err() {
+        let ok = GetHeadersMessage {
+            locator: distinct_hashes(MAX_LOCATOR_SIZE),
+            stop_hash: Hash::zero(),
+            nonce: 0,
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = GetHeadersMessage {
+            locator: distinct_hashes(MAX_LOCATOR_SIZE + 1),
+            stop_hash: Hash::zero(),
+            nonce: 0,
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn headers_validate_boundary_2000_ok_2001_err() {
+        let ok = HeadersMessage {
+            headers: vec![tiny_header(); MAX_HEADERS_RESPONSE],
+            nonce: 0,
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = HeadersMessage {
+            headers: vec![tiny_header(); MAX_HEADERS_RESPONSE + 1],
+            nonce: 0,
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn get_blocks_validate_boundary_500_ok_501_err() {
+        let ok = GetBlocksMessage {
+            hashes: distinct_hashes(MAX_BLOCK_HASHES),
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = GetBlocksMessage {
+            hashes: distinct_hashes(MAX_BLOCK_HASHES + 1),
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn blocks_validate_boundary_500_ok_501_err() {
+        let ok = BlocksMessage {
+            blocks: vec![tiny_block(); MAX_BLOCK_HASHES],
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = BlocksMessage {
+            blocks: vec![tiny_block(); MAX_BLOCK_HASHES + 1],
+        };
+        assert!(matches!(
+            too_many.validate(),
+            Err(Error::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn not_found_validate_boundary_500_ok_501_err() {
+        let ok = NotFoundMessage {
+            hashes: distinct_hashes(MAX_BLOCK_HASHES),
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = NotFoundMessage {
+            hashes: distinct_hashes(MAX_BLOCK_HASHES + 1),
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn txs_validate_boundary_100_ok_101_err() {
+        let ok = TxsMessage {
+            transactions: vec![tiny_tx(); MAX_TXS_PER_MESSAGE],
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = TxsMessage {
+            transactions: vec![tiny_tx(); MAX_TXS_PER_MESSAGE + 1],
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn addr_validate_boundary_1000_ok_1001_err() {
+        let ok = AddrMessage {
+            addresses: vec![tiny_addr(); MAX_ADDR_SIZE],
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = AddrMessage {
+            addresses: vec![tiny_addr(); MAX_ADDR_SIZE + 1],
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    /// InvMessage: exactly MAX_INV_SIZE distinct hashes passes; one more fails
+    /// on the size cap (distinct hashes so the dup check is not what trips).
+    #[test]
+    fn inv_validate_exactly_max_size_passes_plus_one_fails() {
+        let ok = InvMessage {
+            inventory: distinct_hashes(MAX_INV_SIZE)
+                .into_iter()
+                .map(|hash| InvVector { inv_type: 1, hash })
+                .collect(),
+        };
+        assert!(ok.validate().is_ok());
+
+        let too_many = InvMessage {
+            inventory: distinct_hashes(MAX_INV_SIZE + 1)
+                .into_iter()
+                .map(|hash| InvVector { inv_type: 1, hash })
+                .collect(),
+        };
+        assert!(too_many.validate().is_err());
+    }
+
+    /// RejectMessage caps all three variable fields, including the
+    /// historically-unbounded `message`.
+    #[test]
+    fn reject_validate_rejects_oversized_message_reason_and_data() {
+        let base = || RejectMessage {
+            message: "ok".into(),
+            code: 1,
+            reason: "ok".into(),
+            data: vec![],
+        };
+        // Well-formed at the caps passes.
+        let at_cap = RejectMessage {
+            message: "a".repeat(MAX_REJECT_REASON_LENGTH),
+            code: 1,
+            reason: "b".repeat(MAX_REJECT_REASON_LENGTH),
+            data: vec![0u8; MAX_REJECT_DATA_SIZE],
+        };
+        assert!(at_cap.validate().is_ok());
+
+        let mut long_message = base();
+        long_message.message = "a".repeat(MAX_REJECT_REASON_LENGTH + 1);
+        assert!(long_message.validate().is_err());
+
+        let mut long_reason = base();
+        long_reason.reason = "a".repeat(MAX_REJECT_REASON_LENGTH + 1);
+        assert!(long_reason.validate().is_err());
+
+        let mut long_data = base();
+        long_data.data = vec![0u8; MAX_REJECT_DATA_SIZE + 1];
+        assert!(long_data.validate().is_err());
+    }
+
+    /// Borsh decode of each Vec/String-bearing message given an absurd length
+    /// prefix (u32::MAX) with no following bytes must return Err promptly
+    /// rather than pre-allocating gigabytes. A hang/OOM here is the bug this
+    /// guards against; a fast `Err` return is the pass condition.
+    #[test]
+    fn borsh_decode_with_absurd_length_prefix_errs_without_preallocating() {
+        let absurd = u32::MAX.to_le_bytes();
+
+        // Types whose FIRST field is the Vec/String — the absurd prefix sits
+        // at offset 0.
+        assert!(borsh::from_slice::<InvMessage>(&absurd).is_err());
+        assert!(borsh::from_slice::<AddrMessage>(&absurd).is_err());
+        assert!(borsh::from_slice::<TxsMessage>(&absurd).is_err());
+        assert!(borsh::from_slice::<HeadersMessage>(&absurd).is_err());
+        assert!(borsh::from_slice::<GetBlocksMessage>(&absurd).is_err());
+        assert!(borsh::from_slice::<NotFoundMessage>(&absurd).is_err());
+        assert!(borsh::from_slice::<GetHeadersMessage>(&absurd).is_err());
+        assert!(borsh::from_slice::<BlocksMessage>(&absurd).is_err());
+        // RejectMessage.message is a String (length-prefixed) at offset 0.
+        assert!(borsh::from_slice::<RejectMessage>(&absurd).is_err());
+
+        // VersionMessage: fixed fields (u32 + 3×u64 = 28 bytes) precede the
+        // user_agent String length prefix.
+        let mut version_bytes = vec![0u8; 4 + 8 + 8 + 8];
+        version_bytes.extend_from_slice(&absurd);
+        assert!(borsh::from_slice::<VersionMessage>(&version_bytes).is_err());
+    }
 }

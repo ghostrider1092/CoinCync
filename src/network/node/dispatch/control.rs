@@ -1,3 +1,62 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `handle_version` (size / parse / self-connect gating)** — INVARIANT:
+//!   oversized, unparseable, or `validate()`-failing Version messages score
+//!   misbehavior and disconnect before any peer state is trusted; a
+//!   self-connection nonce match disconnects WITHOUT scoring, since the nonce
+//!   is replayable from any peer that saw our outbound Version.
+//!   THREAT: NET-001 eclipse-attack surface (scoring a replayed nonce would let
+//!   an attacker blacklist arbitrary addresses as "self"); M5 unbounded
+//!   user_agent OOM.
+//!   TESTS: `handle_version_oversized_scores_oversized_and_disconnects`,
+//!   `handle_version_unparseable_scores_protocol_violation_and_disconnects`,
+//!   `handle_version_self_connection_disconnects_without_scoring`,
+//!   `handle_version_failing_validate_scores_and_disconnects`.
+//! - **§2 `handle_version` (user_agent sanitization + state)** — INVARIANT:
+//!   peer-supplied `user_agent` has control characters stripped before it is
+//!   ever stored, and height/tip/state are recorded only after validation
+//!   passes.
+//!   THREAT: stored-XSS-class injection reaching any unescaped consumer of
+//!   `get_peers` (explorer UIs, scripts, monitors).
+//!   TESTS: `handle_version_happy_sets_state_strips_control_chars_and_sends_verack_flare`.
+//! - **§3 `handle_flare`** — INVARIANT: Flare capability advertisement is
+//!   advisory-only; oversized or malformed payloads are dropped silently and
+//!   never cause a disconnect or misbehavior score.
+//!   THREAT: a pre-Firework peer sending an unhandled/malformed Flare must not
+//!   be penalized, or every legacy-compatible peer would be punished.
+//!   TESTS: `handle_flare_oversized_is_silently_ignored`,
+//!   `handle_flare_with_chainwork_cap_stores_and_sends_chain_work`,
+//!   `handle_flare_without_chainwork_cap_stores_but_sends_nothing`.
+//! - **§4 `handle_chain_work`** — INVARIANT: ChainWork is stored as an
+//!   unauthenticated claim that only feeds peer-work/height bookkeeping for
+//!   header-source selection; oversized or malformed payloads are silently
+//!   dropped and never disconnect the peer.
+//!   THREAT: a peer over-claiming cumulative work to bias header-fetch source
+//!   selection (fork-choice adoption itself recomputes real PoW downstream).
+//!   TESTS: `handle_chain_work_oversized_is_silently_ignored`,
+//!   `handle_chain_work_updates_peer_height_and_tip`,
+//!   `handle_chain_work_malformed_is_silently_ignored`.
+//! - **§5 `handle_verack`** — INVARIANT: handshake completion always sends
+//!   GetAddr, and a behind peer gets at most one in-flight GetHeaders — a
+//!   replayed Verack while a request is pending must not re-issue GetHeaders.
+//!   THREAT: duplicate/uncapped GetHeaders requests wasting bandwidth or
+//!   re-triggering a sync wedge.
+//!   TESTS: `handle_verack_connects_and_sends_getaddr_without_getheaders_when_not_behind`,
+//!   `handle_verack_behind_peer_issues_getheaders_and_replay_does_not_reissue`.
+//! - **§6 `handle_ping` / `handle_pong`** — INVARIANT: a malformed (<8-byte)
+//!   Ping scores ProtocolViolation and never elicits a Pong; a well-formed
+//!   Ping echoes its nonce exactly; Pong itself is a no-op.
+//!   THREAT: P5-N5 malformed-ping spam evading misbehavior scoring.
+//!   TESTS: `handle_ping_malformed_scores_and_sends_no_pong`,
+//!   `handle_ping_echoes_nonce_as_pong`, `handle_pong_is_a_noop`.
+//! - **§7 `handle_reject`** — INVARIANT: Reject only adjusts peer reputation by
+//!   a fixed benign-disagreement penalty and never feeds the ban scorer.
+//!   THREAT: legitimate protocol disagreement being over-penalized into an
+//!   accidental ban.
+//!   TESTS: `handle_reject_adjusts_reputation_only`.
+
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, trace, warn};
@@ -403,5 +462,423 @@ pub(super) fn handle_reject(peer_id: PeerId, peers: &DashMap<PeerId, PeerInfo>) 
     // Reject can reflect benign disagreement, so it must not feed the ban scorer.
     if let Some(mut peer) = peers.get_mut(&peer_id) {
         peer.adjust_reputation(-5);
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use crate::chain::Blockchain;
+    use crate::network::firework::CAP_CHAINWORK;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    const MAGIC: [u8; 4] = [1, 2, 3, 4];
+
+    fn addr_for(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    fn genesis_chain() -> SharedBlockchain {
+        let chain = Arc::new(Blockchain::new());
+        chain.init_genesis().expect("genesis");
+        chain
+    }
+
+    fn peers_with(peer_id: PeerId, addr: SocketAddr, outbound: bool) -> DashMap<PeerId, PeerInfo> {
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, outbound));
+        peers
+    }
+
+    // ─── handle_version ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_version_oversized_scores_oversized_and_disconnects() {
+        let peer_id = [1u8; 32];
+        let addr = addr_for(30001);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, _srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = vec![0u8; 1025]; // > MAX_VERSION_MSG_SIZE (1024)
+        handle_version(
+            peer_id, &payload, MAGIC, 999, &peers, &senders, &sync, &event_tx, &chain, &scorer,
+        )
+        .await
+        .unwrap();
+
+        assert!(peers.get(&peer_id).is_none(), "peer removed");
+        assert!(senders.get(&peer_id).is_none(), "sender removed");
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(NodeEvent::PeerDisconnected(p)) if p == peer_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_version_unparseable_scores_protocol_violation_and_disconnects() {
+        let peer_id = [2u8; 32];
+        let addr = addr_for(30002);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = vec![0u8; 3]; // too short to borsh-decode a VersionMessage
+        handle_version(
+            peer_id, &payload, MAGIC, 999, &peers, &senders, &sync, &event_tx, &chain, &scorer,
+        )
+        .await
+        .unwrap();
+
+        assert!(peers.get(&peer_id).is_none());
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(NodeEvent::PeerDisconnected(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_version_self_connection_disconnects_without_scoring() {
+        // NET-001: a nonce match disconnects but must NOT poison the address
+        // book / scorer (the nonce is replayable, so scoring it would let an
+        // attacker blacklist arbitrary addresses = eclipse surface).
+        let peer_id = [3u8; 32];
+        let addr = addr_for(30003);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let our_nonce = 0xABCD_1234u64;
+        let vm = VersionMessage::with_nonce(5, Hash::zero(), our_nonce);
+        let payload = borsh::to_vec(&vm).unwrap();
+        handle_version(
+            peer_id, &payload, MAGIC, our_nonce, &peers, &senders, &sync, &event_tx, &chain,
+            &scorer,
+        )
+        .await
+        .unwrap();
+
+        assert!(peers.get(&peer_id).is_none());
+        // No misbehavior recorded — the self-connection branch never scores.
+        assert!(scorer.read().await.get(&addr).is_none());
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(NodeEvent::PeerDisconnected(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_version_failing_validate_scores_and_disconnects() {
+        let peer_id = [4u8; 32];
+        let addr = addr_for(30004);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let (event_tx, _event_rx) = broadcast::channel(4);
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let mut vm = VersionMessage::with_nonce(5, Hash::zero(), 123);
+        vm.version = 0; // below MIN_SUPPORTED_PROTOCOL_VERSION → validate() fails
+        let payload = borsh::to_vec(&vm).unwrap();
+        handle_version(
+            peer_id, &payload, MAGIC, 999, &peers, &senders, &sync, &event_tx, &chain, &scorer,
+        )
+        .await
+        .unwrap();
+
+        assert!(peers.get(&peer_id).is_none());
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+    }
+
+    #[tokio::test]
+    async fn handle_version_happy_sets_state_strips_control_chars_and_sends_verack_flare() {
+        let peer_id = [5u8; 32];
+        let addr = addr_for(30005);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let (event_tx, _event_rx) = broadcast::channel(4);
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let tip = Hash::from_bytes([9u8; 32]);
+        let mut vm = VersionMessage::with_nonce(42, tip, 123);
+        vm.user_agent = "ok\u{7}bad".to_string(); // embedded control char
+        let payload = borsh::to_vec(&vm).unwrap();
+        handle_version(
+            peer_id, &payload, MAGIC, 999, &peers, &senders, &sync, &event_tx, &chain, &scorer,
+        )
+        .await
+        .unwrap();
+
+        let peer = peers.get(&peer_id).unwrap();
+        assert_eq!(peer.state, PeerState::VersionReceived);
+        assert_eq!(peer.height, 42);
+        assert_eq!(peer.tip_hash, tip);
+        assert_eq!(peer.user_agent, "okbad", "control chars stripped");
+        assert!(!peer.user_agent.chars().any(|c| c.is_control()));
+        drop(peer);
+        assert!(scorer.read().await.get(&addr).unwrap().validated);
+        // Verack + Flare sent, in that order.
+        assert!(srx.try_recv().is_ok(), "verack sent");
+        assert!(srx.try_recv().is_ok(), "flare sent");
+    }
+
+    // ─── handle_ping / pong / reject ─────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_ping_malformed_scores_and_sends_no_pong() {
+        let peer_id = [6u8; 32];
+        let addr = addr_for(30006);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = vec![0u8; 4]; // < 8 bytes
+        handle_ping(peer_id, &payload, MAGIC, &peers, &senders, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+        assert!(srx.try_recv().is_err(), "no pong for malformed ping");
+    }
+
+    #[tokio::test]
+    async fn handle_ping_echoes_nonce_as_pong() {
+        let peer_id = [7u8; 32];
+        let addr = addr_for(30007);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let nonce = 0x1122_3344_5566_7788u64;
+        let payload = nonce.to_le_bytes().to_vec();
+        handle_ping(peer_id, &payload, MAGIC, &peers, &senders, &scorer)
+            .await
+            .unwrap();
+
+        let sent = srx.try_recv().expect("pong sent");
+        assert_eq!(sent, Message::pong(MAGIC, nonce).to_bytes().unwrap());
+    }
+
+    #[test]
+    fn handle_pong_is_a_noop() {
+        handle_pong();
+    }
+
+    #[test]
+    fn handle_reject_adjusts_reputation_only() {
+        let peer_id = [8u8; 32];
+        let addr = addr_for(30008);
+        let peers = peers_with(peer_id, addr, false);
+        handle_reject(peer_id, &peers);
+        assert_eq!(peers.get(&peer_id).unwrap().reputation, 95);
+    }
+
+    // ─── handle_flare ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_flare_oversized_is_silently_ignored() {
+        let peer_id = [9u8; 32];
+        let addr = addr_for(30009);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain = genesis_chain();
+
+        let payload = vec![0u8; 33]; // > MAX_FLARE_MSG_SIZE (32)
+        handle_flare(peer_id, &payload, MAGIC, &peers, &senders, &chain)
+            .await
+            .unwrap();
+
+        assert!(peers.get(&peer_id).is_some(), "no disconnect");
+        assert_eq!(peers.get(&peer_id).unwrap().capabilities, 0);
+        assert!(srx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_flare_with_chainwork_cap_stores_and_sends_chain_work() {
+        let peer_id = [10u8; 32];
+        let addr = addr_for(30010);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain = genesis_chain();
+
+        let payload = borsh::to_vec(&FlareMessage {
+            capabilities: CAP_CHAINWORK,
+        })
+        .unwrap();
+        handle_flare(peer_id, &payload, MAGIC, &peers, &senders, &chain)
+            .await
+            .unwrap();
+
+        assert_eq!(peers.get(&peer_id).unwrap().capabilities, CAP_CHAINWORK);
+        assert!(srx.try_recv().is_ok(), "ChainWork sent to CAP_CHAINWORK peer");
+    }
+
+    #[tokio::test]
+    async fn handle_flare_without_chainwork_cap_stores_but_sends_nothing() {
+        let peer_id = [11u8; 32];
+        let addr = addr_for(30011);
+        let peers = peers_with(peer_id, addr, false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain = genesis_chain();
+
+        let caps = 1u64 << 40; // unknown bit, not CAP_CHAINWORK
+        let payload = borsh::to_vec(&FlareMessage { capabilities: caps }).unwrap();
+        handle_flare(peer_id, &payload, MAGIC, &peers, &senders, &chain)
+            .await
+            .unwrap();
+
+        assert_eq!(peers.get(&peer_id).unwrap().capabilities, caps);
+        assert!(srx.try_recv().is_err());
+    }
+
+    // ─── handle_chain_work ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_chain_work_oversized_is_silently_ignored() {
+        let peer_id = [12u8; 32];
+        let addr = addr_for(30012);
+        let peers = peers_with(peer_id, addr, false);
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+
+        let payload = vec![0u8; 257]; // > MAX_CHAINWORK_MSG_SIZE (256)
+        handle_chain_work(peer_id, &payload, &peers, &sync)
+            .await
+            .unwrap();
+
+        assert_eq!(peers.get(&peer_id).unwrap().height, 0, "unchanged");
+    }
+
+    #[tokio::test]
+    async fn handle_chain_work_updates_peer_height_and_tip() {
+        let peer_id = [13u8; 32];
+        let addr = addr_for(30013);
+        let peers = peers_with(peer_id, addr, false);
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+
+        let tip = Hash::from_bytes([3u8; 32]);
+        let payload = borsh::to_vec(&ChainWorkMessage {
+            total_difficulty: 12345,
+            height: 77,
+            best_hash: tip,
+        })
+        .unwrap();
+        handle_chain_work(peer_id, &payload, &peers, &sync)
+            .await
+            .unwrap();
+
+        let peer = peers.get(&peer_id).unwrap();
+        assert_eq!(peer.height, 77);
+        assert_eq!(peer.tip_hash, tip);
+    }
+
+    #[tokio::test]
+    async fn handle_chain_work_malformed_is_silently_ignored() {
+        let peer_id = [14u8; 32];
+        let addr = addr_for(30014);
+        let peers = peers_with(peer_id, addr, false);
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+
+        let payload = vec![0u8; 3]; // <= 256 but not a valid ChainWorkMessage
+        handle_chain_work(peer_id, &payload, &peers, &sync)
+            .await
+            .unwrap();
+
+        assert_eq!(peers.get(&peer_id).unwrap().height, 0);
+    }
+
+    // ─── handle_verack ───────────────────────────────────────────────
+
+    fn dandelion() -> RwLock<DandelionRouter> {
+        RwLock::new(DandelionRouter::new())
+    }
+
+    #[tokio::test]
+    async fn handle_verack_connects_and_sends_getaddr_without_getheaders_when_not_behind() {
+        let peer_id = [15u8; 32];
+        let addr = addr_for(30015);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::VersionReceived;
+        info.height = 0;
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let dand = dandelion();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+
+        assert_eq!(peers.get(&peer_id).unwrap().state, PeerState::Connected);
+        assert!(!sync.read().await.headers_request_pending());
+        assert!(srx.try_recv().is_ok(), "GetAddr sent");
+        assert!(srx.try_recv().is_err(), "no GetHeaders when not behind");
+    }
+
+    #[tokio::test]
+    async fn handle_verack_behind_peer_issues_getheaders_and_replay_does_not_reissue() {
+        let peer_id = [16u8; 32];
+        let addr = addr_for(30016);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::VersionReceived;
+        info.height = 100; // ahead of our genesis-only chain (height 0)
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let dand = dandelion();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+
+        assert!(sync.read().await.headers_request_pending(), "GetHeaders issued");
+        assert!(srx.try_recv().is_ok(), "GetAddr sent");
+        assert!(srx.try_recv().is_ok(), "GetHeaders sent");
+        assert!(srx.try_recv().is_err());
+
+        // Replay: a request is already in flight, so begin_headers_request
+        // returns None and no second GetHeaders is issued (no sync wedge).
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+        assert!(srx.try_recv().is_ok(), "GetAddr re-sent on replay");
+        assert!(srx.try_recv().is_err(), "no second GetHeaders on replay");
+        assert!(sync.read().await.headers_request_pending());
     }
 }

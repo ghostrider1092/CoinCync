@@ -1,3 +1,63 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `normalize_noise_record`/`denormalize_noise_record`** — INVARIANT:
+//!   a decrypted Noise record is accepted only at a canonical traffic-shaper
+//!   bucket size; non-bucket sizes are rejected rather than silently accepted.
+//!   THREAT: a malformed/padded record slipping through as valid plaintext,
+//!   or a covert channel via off-bucket sizes.
+//!   TESTS: `noise_record_rejects_noncanonical_wire_size`,
+//!   `normalized_noise_record_round_trip_uses_bucket_size`.
+//! - **§2 `noise_bridge`/`noise_bridge_reader`/`noise_bridge_writer`** —
+//!   INVARIANT: encrypt and decrypt directions run as two independent tasks,
+//!   never inside one `select!`, because `read_encrypted`'s two sequential
+//!   `read_exact` calls are not cancellation-safe.
+//!   THREAT: a cancelled read mid-handshake permanently desyncs the AEAD
+//!   nonce, silently breaking all subsequent decryption for the peer.
+//!   TESTS: (gap — no test drives a mid-read cancellation of the reader task
+//!   to confirm the writer task is unaffected).
+//! - **§3 `cleanup_connection`** — INVARIANT: a peer/sender map entry is only
+//!   removed by the connection task that still owns it (matched via
+//!   `connection_token` / `same_channel`); a superseding reconnection is
+//!   never evicted by its predecessor's teardown.
+//!   THREAT: a slow-closing stale connection racing a fresh reconnect could
+//!   delete the live peer's state and desync `PeerDisconnected` events.
+//!   TESTS: `cleanup_removes_the_connection_that_owns_the_entries`,
+//!   `stale_cleanup_preserves_a_replacement_connection`,
+//!   `cleanup_identity_does_not_keep_the_send_channel_open`.
+//! - **§4 `handle_connection` Noise handshake + trusted-peer allowlist** —
+//!   INVARIANT: when `trusted_peers` is configured, only a Noise-authenticated
+//!   remote static key present in that allowlist may complete the connection;
+//!   plaintext is rejected outright in that mode.
+//!   THREAT: encryption bypass or impersonation of a trusted static key would
+//!   let an unauthenticated attacker to reach a peer meant to be closed-set.
+//!   TESTS: (gap — no unit/integration test drives the trusted-peer
+//!   allowlist rejection path; it requires a real Noise_XX handshake).
+//! - **§5 `handle_connection` canonical peer_id resolution** — INVARIANT:
+//!   once a Noise handshake succeeds, `peer_id` is replaced by the
+//!   authenticated remote static key everywhere (`info.id`, `peers`,
+//!   `senders`) so `pick_scored_peer` and map lookups can't split identity.
+//!   THREAT: a TCP-level id surviving alongside the Noise-derived id would
+//!   let one physical peer register twice, subverting per-peer accounting
+//!   (bans, eclipse slots, tx-absence scoping).
+//!   TESTS: (gap — no test asserts `info.id`/map-key convergence after a
+//!   successful handshake).
+//! - **§6 `handle_connection` connection loop backpressure** — INVARIANT: the
+//!   read side always uses the inactivity-timed `read_budgeted_message_timeout`
+//!   (never a bare read) so a peer trickling partial frames cannot pin the
+//!   slot forever; writes never bypass `MessageFramer`'s framing/size checks.
+//!   THREAT: A Slowloris-style partial-frame peer starving connection slots.
+//!   TESTS: (gap — Slowloris timeout behavior is asserted only by comment
+//!   here; size-cap enforcement is exercised in framing.rs, not this file).
+//! - **§7 WIRETRACE instrumentation (`COINCYNC_WIRE_TRACE`)** — INVARIANT:
+//!   the env-gated per-packet trace line is purely observational — it must
+//!   never alter what is sent or change control flow when disabled or enabled.
+//!   THREAT: a tracing hook accidentally gating or delaying real traffic would
+//!   corrupt propagation timing it is meant only to observe.
+//!   TESTS: (gap — no test asserts wire-trace emission is a no-op on the
+//!   send path).
+
 use std::sync::Arc;
 use std::time::Duration;
 

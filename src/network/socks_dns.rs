@@ -41,6 +41,69 @@
 //! anycast). Override with `COINCYNC_SOCKS_DNS_RESOLVER=ip:port`.
 //! Multiple comma-separated resolvers are tried in order; first success
 //! wins.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `resolve_via_socks5`** — INVARIANT: the function refuses to run
+//!   when `proxy.is_active()` is false, and never returns an empty
+//!   `Ok(vec![])` (empty results are upgraded to `Err`). THREAT: silently
+//!   falling through to un-proxied resolution, or callers mistaking "no
+//!   records" for "resolved to nothing" and skipping the hardcoded-seed
+//!   fallback. TESTS: `resolve_via_socks5_rejects_inactive_proxy`.
+//! - **§2 `query_one` (DNS-over-TCP through the SOCKS5 CONNECT tunnel)** —
+//!   INVARIANT: every DNS query and response leaves/enters the process only
+//!   through the SOCKS5 tunnel (`Socks5Stream::connect[_with_password]`) —
+//!   there is no direct-socket code path to the resolver. THREAT: DNS-leak
+//!   (the exact bug this module fixes, see module docs) — a leaked DNS
+//!   query would deanonymize a Tor-mode user's bootstrap lookups. TESTS:
+//!   (gap — no test intercepts the actual socket to assert traffic never
+//!   bypasses the proxy; this is enforced by the absence of any direct
+//!   resolver-socket API in this module, exercised end-to-end only via
+//!   `resolve_via_socks5_rejects_inactive_proxy`'s kill-switch check).
+//! - **§3 `query_one` outbound/inbound length-prefix bounds** — INVARIANT:
+//!   the RFC 7766 2-byte length prefix on both the outbound query and the
+//!   inbound response is validated against `(0, MAX_DNS_RESPONSE]` before
+//!   any `read_exact`/`write_all` of the body, so a malicious or buggy
+//!   resolver can never force an unbounded allocation via `resp_len`.
+//!   THREAT: memory-exhaustion DoS from a compromised/malicious DNS
+//!   resolver or a MITM on the exit hop. TESTS: (gap — no test drives
+//!   `query_one` against a fake resolver stream; the bound is exercised
+//!   indirectly via `parse_response_rejects_truncated_header` /
+//!   `parse_response_rejects_absurd_answer_count`, which cover the parser
+//!   but not the length-prefix read itself).
+//! - **§4 `build_query`** — INVARIANT: hostname length (`<= 253`) and each
+//!   DNS label length (`<= 63`, RFC 1035 §2.3.4) are enforced before any
+//!   bytes are placed on the wire. THREAT: a malformed/oversized hostname
+//!   producing a malformed DNS query the resolver could misparse or hang
+//!   on. TESTS: `build_query_a_record_shape`, `build_query_aaaa_qtype_is_28`,
+//!   `build_query_rejects_oversized_label`, `build_query_accepts_trailing_dot`.
+//! - **§5 `parse_response` (header/section bounds)** — INVARIANT: every
+//!   offset walked while parsing the header, question, and answer sections
+//!   is checked against `buf.len()` before being dereferenced; a truncated
+//!   or lying `ANCOUNT`/`RDLENGTH` is rejected rather than over-read.
+//!   THREAT: a malicious resolver response causing an out-of-bounds read /
+//!   panic (DoS) or memory disclosure. TESTS:
+//!   `parse_response_rejects_truncated_header`,
+//!   `parse_response_rejects_absurd_answer_count`,
+//!   `parse_response_rejects_rdata_overrun`,
+//!   `parse_response_extracts_a_record`.
+//! - **§6 `parse_response` transaction-ID / RCODE handling** — INVARIANT: a
+//!   response whose ID doesn't match the query's is rejected outright;
+//!   NXDOMAIN (RCODE 3) is treated as an empty, non-error result distinct
+//!   from a resolver-side failure. THREAT: DNS response spoofing/injection
+//!   (off-path or malicious-resolver) being accepted as authoritative.
+//!   TESTS: `parse_response_rejects_wrong_id`,
+//!   `parse_response_treats_nxdomain_as_empty`.
+//! - **§7 `skip_name` (compression-pointer loop guard)** — INVARIANT: name
+//!   traversal is bounded by both `buf.len()` and a fixed step counter
+//!   (256), so a crafted compression-pointer cycle cannot loop forever.
+//!   THREAT: a malicious response with a self-referential/cyclic
+//!   compression pointer hanging the resolver-response parser (DoS).
+//!   TESTS: (gap — no test constructs a compression-pointer cycle to drive
+//!   `skip_name`'s step-counter bound directly; covered only incidentally
+//!   by the RDATA/header truncation tests above).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -546,6 +609,77 @@ mod tests {
         // Default port for DNS is 53
         for r in &list {
             assert!(r.port() > 0);
+        }
+    }
+
+    /// A truncated DNS response header (fewer than the 12 mandatory bytes)
+    /// must be rejected, not indexed out of bounds.
+    #[test]
+    fn parse_response_rejects_truncated_header() {
+        let short = [0u8; 8];
+        assert!(
+            parse_response(&short, 0x1234, QueryType::A).is_err(),
+            "truncated DNS header must be rejected"
+        );
+    }
+
+    /// An absurd ANCOUNT (65535) with no answer bytes must be rejected by the
+    /// bounds-checked walker — never allocate per the claimed count or panic.
+    #[test]
+    fn parse_response_rejects_absurd_answer_count() {
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&0x1234u16.to_be_bytes()); // ID
+        resp.extend_from_slice(&0x8180u16.to_be_bytes()); // QR+RD+RA, RCODE 0
+        resp.extend_from_slice(&0u16.to_be_bytes()); // QDCOUNT 0
+        resp.extend_from_slice(&0xFFFFu16.to_be_bytes()); // ANCOUNT 65535 (absurd)
+        resp.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+        resp.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+                                                     // No answer bytes follow.
+        assert!(
+            parse_response(&resp, 0x1234, QueryType::A).is_err(),
+            "absurd ANCOUNT with no RDATA must be rejected, not over-read"
+        );
+    }
+
+    /// An answer whose RDLENGTH runs past the end of the packet must be
+    /// rejected at the RDATA bounds check.
+    #[test]
+    fn parse_response_rejects_rdata_overrun() {
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&0x1234u16.to_be_bytes());
+        resp.extend_from_slice(&0x8180u16.to_be_bytes());
+        resp.extend_from_slice(&0u16.to_be_bytes()); // QDCOUNT 0
+        resp.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT 1
+        resp.extend_from_slice(&0u16.to_be_bytes());
+        resp.extend_from_slice(&0u16.to_be_bytes());
+        // Answer: compression pointer, type A, class IN, TTL, RDLENGTH=4, but
+        // NO rdata bytes follow.
+        resp.extend_from_slice(&[0xC0, 0x0C]);
+        resp.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
+        resp.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+        resp.extend_from_slice(&60u32.to_be_bytes()); // TTL
+        resp.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH claims 4 bytes
+        assert!(
+            parse_response(&resp, 0x1234, QueryType::A).is_err(),
+            "RDATA length exceeding the buffer must be rejected"
+        );
+    }
+
+    /// `resolve_via_socks5` with an inactive proxy fails fast with ConfigError
+    /// and performs no network I/O.
+    #[tokio::test]
+    async fn resolve_via_socks5_rejects_inactive_proxy() {
+        let proxy = ProxyConfig::default(); // enabled = false → inactive
+        assert!(!proxy.is_active());
+        let res = resolve_via_socks5(
+            "seed1.coincync.network",
+            &proxy,
+            Duration::from_secs(1),
+        )
+        .await;
+        match res {
+            Err(Error::ConfigError(_)) => {}
+            other => panic!("inactive proxy must yield ConfigError, got {other:?}"),
         }
     }
 

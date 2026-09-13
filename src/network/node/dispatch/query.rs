@@ -1,3 +1,60 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `bounded_height_range`** — INVARIANT: the returned range never
+//!   exceeds `requested_end`, `chain_tip`, or `start + max_items - 1`, and
+//!   `start > requested_end`, `start > chain_tip`, or `max_items == 0` yields
+//!   `None` rather than an inverted or unbounded range.
+//!   THREAT: an inverted or unbounded height range driving unbounded
+//!   per-height disk reads and filter/digest recomputation.
+//!   TESTS: `bounded_range_is_empty_past_the_chain_tip`,
+//!   `bounded_range_applies_request_and_chain_limits`,
+//!   `bounded_range_rejects_reverse_or_zero_sized_requests`.
+//! - **§2 `handle_get_filters` (byte-budget cap)** — INVARIANT: accumulated
+//!   *encoded* filter bytes never exceed `MAX_QUERY_RESPONSE_BYTES`,
+//!   regardless of how many items `bounded_height_range` would otherwise
+//!   allow.
+//!   THREAT: an output-dense height range producing a response near
+//!   `MAX_MESSAGE_SIZE` despite the item-count cap.
+//!   TESTS: (gap — no dedicated unit test for the byte-budget short-circuit
+//!   in `handle_get_filters`).
+//! - **§3 `handle_get_output_digests`** — INVARIANT: the request range is
+//!   capped at `MAX_DIGEST_BLOCKS_PER_REQ` and the response at
+//!   `MAX_QUERY_RESPONSE_BYTES`; the server never learns which specific
+//!   outputs interest the requesting wallet, only the height range.
+//!   THREAT: a light-wallet privacy leak (address-set exposure as in
+//!   BIP-157) or unbounded per-request disk/CPU amplification.
+//!   TESTS: (gap — no dedicated unit test for `handle_get_output_digests`).
+//! - **§4 `handle_get_filter_checkpoints` (bucket cache)** — INVARIANT:
+//!   checkpoints are rebuilt at most once per 1000-block bucket
+//!   (`CHECKPOINT_CACHE`) and the response is capped at `MAX_CHECKPOINTS`
+//!   entries.
+//!   THREAT: a zero-body, cheap-to-send request being replayed to force
+//!   repeated O(chain_height) disk reads and filter recomputation.
+//!   TESTS: (gap — no dedicated unit test for the checkpoint cache/bucket
+//!   behavior).
+//! - **§5 `handle_get_key_image_status` (pre-parse payload cap)** —
+//!   INVARIANT: a payload over `MAX_KI_QUERY_PAYLOAD` is rejected before
+//!   `borsh::from_slice` runs, so a large declared length can't force an
+//!   oversized allocation ahead of the `take(100)` truncation.
+//!   THREAT: a crafted length-prefixed payload triggering a large pre-parse
+//!   allocation regardless of the eventual 100-item cap.
+//!   TESTS: `handle_get_key_image_status_drops_oversized_payload_before_parsing`.
+//! - **§6 `handle_get_key_image_status` (query cap + response)** —
+//!   INVARIANT: at most 100 key images are checked per request, and a valid
+//!   request receives a `KeyImageStatus` response.
+//!   THREAT: unbounded per-request DB lookups from an oversized key-image
+//!   list.
+//!   TESTS: `handle_get_key_image_status_answers_valid_request`.
+//! - **§7 `handle_response`** — INVARIANT: response-typed messages
+//!   (`Filters`/`OutputDigests`/`FilterCheckpoints`/`KeyImageStatus`) are a
+//!   pure no-op on a full node and never fall through into request-handling
+//!   logic.
+//!   THREAT: request/response message-type confusion enabling a reflection
+//!   or double-processing path.
+//!   TESTS: (gap — no dedicated unit test for `handle_response`).
+
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -389,5 +446,54 @@ mod tests {
     fn bounded_range_rejects_reverse_or_zero_sized_requests() {
         assert_eq!(bounded_height_range(9, 8, 10, 100), None);
         assert_eq!(bounded_height_range(0, 0, 0, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use crate::chain::Blockchain;
+    use std::sync::Arc;
+
+    const MAGIC: [u8; 4] = [1, 2, 3, 4];
+
+    fn genesis_chain() -> SharedBlockchain {
+        let chain: SharedBlockchain = Arc::new(Blockchain::new());
+        chain.init_genesis().expect("genesis");
+        chain
+    }
+
+    #[tokio::test]
+    async fn handle_get_key_image_status_drops_oversized_payload_before_parsing() {
+        let peer_id = [1u8; 32];
+        let chain = genesis_chain();
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+
+        let payload = vec![0u8; 8 * 1024 + 1]; // > MAX_KI_QUERY_PAYLOAD
+        handle_get_key_image_status(peer_id, &payload, MAGIC, &chain, &senders)
+            .await
+            .unwrap();
+
+        assert!(srx.try_recv().is_err(), "oversized KI query dropped, no response");
+    }
+
+    // multi-thread: the handler uses tokio::task::block_in_place for the DB read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handle_get_key_image_status_answers_valid_request() {
+        let peer_id = [2u8; 32];
+        let chain = genesis_chain();
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+
+        let key_images: Vec<[u8; 32]> = vec![[0u8; 32]];
+        let payload = borsh::to_vec(&key_images).unwrap();
+        handle_get_key_image_status(peer_id, &payload, MAGIC, &chain, &senders)
+            .await
+            .unwrap();
+
+        assert!(srx.try_recv().is_ok(), "KeyImageStatus response sent");
     }
 }

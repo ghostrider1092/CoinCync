@@ -1,3 +1,55 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `send_to_peer`** — INVARIANT: the returned bool exactly reflects
+//!   delivery outcome — `true` only on a successful enqueue, `false` for a
+//!   missing or closed peer channel, never a false positive.
+//!   THREAT: a caller trusting a false "sent" result would believe a message
+//!   reached a peer it never did (silent message loss).
+//!   TESTS: `send_to_peer_returns_true_when_send_succeeds`,
+//!   `send_to_peer_returns_false_when_peer_missing`,
+//!   `send_to_peer_returns_false_when_channel_closed`.
+//! - **§2 `send_to_peer` lock-free await on backpressure** — INVARIANT: the
+//!   DashMap shard guard is dropped before awaiting channel capacity, so a
+//!   parked send never blocks unrelated map inserts/removes.
+//!   THREAT: holding a shard lock across a bounded-channel `.await` would let
+//!   one congested peer stall inserts for every other peer sharing that shard.
+//!   TESTS: `send_to_peer_does_not_block_dashmap_insert_on_full_channel`.
+//! - **§3 `send_to`** — INVARIANT: a missing peer is a silent no-op (`Ok(())`)
+//!   while a closed channel surfaces as `Error::ConnectionFailed`, matching
+//!   callers that need to distinguish "gone" from "never existed".
+//!   THREAT: mis-signaling closed-vs-missing would cause callers to retry a
+//!   dead peer forever or silently swallow a real disconnect.
+//!   TESTS: `send_to_preserves_missing_and_closed_peer_contracts`.
+//! - **§4 `broadcast_raw` no-await-under-iterator + partial delivery** —
+//!   INVARIANT: no `.await` occurs while a DashMap iterator/entry guard is
+//!   live, and one full/slow peer channel never blocks delivery to any other
+//!   peer in the same broadcast pass.
+//!   THREAT: a single congested peer stalling propagation to the whole mesh
+//!   (the historical "sync-stall" class of bug this function's comments
+//!   reference).
+//!   TESTS: `full_peer_queue_does_not_block_other_broadcast_delivery`.
+//! - **§5 `broadcast_raw` chronic-stall ban (`STALL_THRESHOLD`)** —
+//!   INVARIANT: a peer whose send queue is full on `STALL_THRESHOLD`
+//!   consecutive broadcasts is banned rather than retried forever.
+//!   THREAT: an unresponsive or malicious peer permanently occupying a
+//!   connection slot while contributing nothing to propagation.
+//!   TESTS: (gap — no test drives `consecutive_full` to `STALL_THRESHOLD`
+//!   and asserts the resulting `ban_peer` call).
+//! - **§6 `announce_chain_work`** — INVARIANT: the ChainWork advertisement is
+//!   sent only to peers whose capability bitset actually has `CAP_CHAINWORK`.
+//!   THREAT: broadcasting to non-capable peers wastes bandwidth and can
+//!   confuse peers that don't understand the message type.
+//!   TESTS: (gap — no test exercises the capability filter in this file).
+//! - **§7 `queue_transaction`** — INVARIANT: a locally-originated transaction
+//!   always enters the Dandelion++ stem phase (`add_local_tx`) rather than
+//!   being flooded directly, preserving sender-anonymity intent.
+//!   THREAT: skipping stem routing for local txs would deanonymize the
+//!   broadcasting node as the transaction's origin.
+//!   TESTS: `local_tx_enters_stempool` (network_security.rs; exercises the
+//!   same `DandelionRouter::add_local_tx` this function calls).
+
 use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
