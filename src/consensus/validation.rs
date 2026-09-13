@@ -5,6 +5,129 @@
 //! Uses rayon for parallel cryptographic verification to maximize throughput
 //! on multi-core systems. Transaction signatures and range proofs are verified
 //! concurrently when validating blocks.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it names the code element(s) it covers,
+//! the INVARIANT it guarantees, the THREAT it defends (with the incident name
+//! where known), and the TESTS that prove it. The `// §N …` tags on the
+//! sub-check doc-comments and the two group banners below let a reviewer align
+//! each code section with its entry here. (Renders in `cargo doc`.)
+//!
+//! Block-level pipeline (driver `validate_block_with_checkpoint_for_network`):
+//!
+//! - **§1 `check_block_network_magic`, `check_block_consensus_checkpoint`** —
+//!   INVARIANT: a block is bound to THIS node's network and cannot contradict a
+//!   hardcoded (height, hash) checkpoint; both run before any crypto.
+//!   THREAT: cross-network contamination (FIX #43); reorg past a consensus
+//!   checkpoint (CIP-009 Path B). TESTS: `test_runtime_network_magic_enforced`,
+//!   `test_genesis_validation`, `cross_network_block_is_rejected_at_first_check`.
+//! - **§2 `validate_header` → `check_header_version_min`, `check_header_vs_prev`,
+//!   `check_header_checkpoint_vote`, `check_header_future_timestamp`** —
+//!   INVARIANT: version stays in `[min, MAX_BLOCK_VERSION]`, height/prev_hash/
+//!   timestamp are strictly monotonic vs parent, votes point to past heights,
+//!   timestamp is within `MAX_TIMESTAMP_DRIFT` (genesis exempt).
+//!   THREAT: H1 version-cap chain-brick; version-downgrade; timestamp warp.
+//!   TESTS: `block_with_version_0_rejected`, `invalid_version_rejected`,
+//!   `non_monotone_height_rejected`, `non_monotone_timestamp_rejected`,
+//!   `bad_prev_hash_on_child_rejected`, `child_block_skipping_one_height_rejected`,
+//!   `timestamp_exactly_at_drift_boundary_accepted`,
+//!   `timestamp_one_past_drift_boundary_rejected`,
+//!   `timestamp_far_in_future_rejected_for_non_genesis`.
+//! - **§3 PoW gate (inline) + `validate_difficulty_target`** — INVARIANT: every
+//!   non-genesis block gets full `verify_pow` unless the compile-time
+//!   `insecure-fast-sync` feature is on AND it is below checkpoint; target sits
+//!   within loose sanity bounds (~32x / ~256x) paired with strict ASERT at the
+//!   chain level. THREAT: silent PoW-skip DoS (below-checkpoint flood in a
+//!   normal build); artificially-easy targets.
+//!   TESTS: `difficulty_target_is_valid_hash` (PoW verify covered in `pow.rs`;
+//!   skip-DoS + sanity-bounds branches flagged MISSING in the test-plan).
+//! - **§4 `check_block_size`, `check_block_weight`, `check_block_tx_count`** —
+//!   INVARIANT: byte size ≤ `MAX_BLOCK_SIZE`, ring-sig weight ≤ 4×`MAX_BLOCK_SIZE`
+//!   (runs even under fast-sync, FIX #46), tx count ≤ `MAX_TXS_PER_BLOCK`.
+//!   THREAT: CPU-exhaustion / block-flood DoS. TESTS: `oversized_tx_rejected`
+//!   (dedicated block-size/weight/tx-count cases flagged MISSING in the plan).
+//! - **§5 coinbase structure & inflation (inline `max_coinbase`, per-output
+//!   loop) + `check_block_has_coinbase`, `check_block_first_tx_is_coinbase`,
+//!   `check_block_tail_supply`** — INVARIANT: coinbase claims EXACTLY
+//!   reward+miner-share; each output commits to `commit(declared, 0)` on-curve;
+//!   sums use `checked_add`; reward stays in `[TAIL_EMISSION, reward(0)]`.
+//!   THREAT: coinbase inflation — per-output blinding-cancellation (C19-FIX),
+//!   output-sum overflow (#41), max_coinbase overflow (M4); post-year-12 tail
+//!   chain-halt. TESTS: `block_with_oversized_coinbase_rejected`,
+//!   `coinbase_with_extra_outputs_rejected`,
+//!   `tail_supply_gate_does_not_halt_after_year_12`,
+//!   `tail_supply_gate_rejects_out_of_band_rewards`.
+//! - **§6 `check_block_merkle_root`, `check_block_privacy_policy`** —
+//!   INVARIANT: recomputed merkle root equals `header.tx_root`; every
+//!   non-coinbase tx is committed + stealthed + shielded (Constitution Art. III).
+//!   THREAT: tx substitution/reorder; transparent-output leakage.
+//!   TESTS: `block_with_wrong_merkle_root_rejected`,
+//!   `transfer_with_zero_stealth_address_rejected_even_on_skip_crypto`,
+//!   `transfer_with_zero_commitment_rejected`, `transfer_with_no_inputs_rejected`.
+//! - **§7 `check_block_duplicate_tx_hashes`, `check_block_duplicate_key_images`
+//!   + cross-tx stealth loop (inline, v1.0.12)** — INVARIANT: no tx hash, key
+//!   image, or stealth address repeats anywhere in the block. THREAT: in-block
+//!   double-spend; cross-tx duplicate-stealth lookup-poisoning (cfc680b7).
+//!   TESTS: `mempool_rejects_duplicate_keyimage`,
+//!   `duplicate_key_images_in_same_tx_rejected` (cross-tx stealth flagged MISSING).
+//! - **§8 dynamic congestion fee (inline)** — INVARIANT: each non-coinbase tx
+//!   pays ≥ `size·MIN_FEE_PER_BYTE·congestion_multiplier/100`, computed with
+//!   `checked_mul` and the SHARED `fee_market::congestion_multiplier` table.
+//!   THREAT: below-market block stuffing; overflow-clamp reject-all (FIX #42);
+//!   validator/wallet multiplier drift. TESTS: MISSING (see test-plan).
+//!
+//! Transaction-level sub-checks (driver `validate_transaction_for_network`):
+//!
+//! - **§9 `check_tx_version_range`, `check_tx_v2_activation`,
+//!   `check_tx_input_output_counts`, `check_tx_io_ratio_legacy`,
+//!   `check_tx_uniform_shape`** — INVARIANT: `1 ≤ version ≤ MAX_TX_VERSION`
+//!   (before coinbase early-return); V2 only at/after activation; non-empty,
+//!   bounded in/out; post-activation Transfer/Churn is 2-in/2-out or 2-in/3-out.
+//!   THREAT: unknown-version fork injection; malformed/dust shapes reducing the
+//!   anonymity set (M6). TESTS: `invalid_version_rejected`,
+//!   `nonstandard_version_is_rejected`, `v2_tx_rejected_before_activation_height`,
+//!   `v1_tx_accepted_before_activation`, `empty_outputs_rejected`,
+//!   `excessive_outputs_rejected`, `excessive_inputs_rejected`.
+//! - **§10 `check_output_curve_points`** — INVARIANT: `stealth_address`,
+//!   `tx_public_key`, and `commitment` are each non-identity and on the
+//!   Ristretto curve (explicit all-zero reject + `from_bytes`). THREAT: H-19
+//!   unspendable/burn outputs, stealth-ECDH deanonymization, balance-equation
+//!   break. TESTS: `output_curve_points_accepts_valid_points`,
+//!   `identity_tx_public_key_is_rejected`, `noncurve_tx_public_key_is_rejected`.
+//! - **§11 `check_tx_no_double_spend`, `check_tx_ring_members` →
+//!   `check_ring_member_coinbase_maturity`, `check_ring_member_time_lock`** —
+//!   INVARIANT: no in-tx/chain key-image reuse; every ring member exists on
+//!   chain with a matching commitment, mature coinbase, and satisfied time-lock.
+//!   THREAT: double-spend; forged-commitment inflation (CRIT-R4-1); immature/
+//!   locked-decoy anonymity leak; per-output stealth collision (5aeb27dd).
+//!   TESTS: `duplicate_key_images_in_same_tx_rejected`,
+//!   `key_image_double_spend_prevented`,
+//!   `ring_member_coinbase_matures_after_min_age`,
+//!   `ring_member_coinbase_immature_below_floor`,
+//!   `ring_member_time_lock_before_unlock_rejected`,
+//!   `ring_member_time_lock_past_unlock_ok`.
+//! - **§12 `check_tx_ring_size_and_unique_members`** — INVARIANT: ring length
+//!   equals `effective_ring_size`, keyed (post v1.0.12) on the DETERMINISTIC
+//!   `total_outputs_ever() − reorg_disconnects_total()`; members unique.
+//!   THREAT: ring-size determinism fork in the bootstrap window (1d27d3c8);
+//!   duplicate-member privacy/forgery degradation. TESTS:
+//!   `ring_size_at_minimum_accepted`, `ring_size_below_minimum_rejected`,
+//!   `ring_10_rejected_always` (the reorg-history differential flagged MISSING).
+//! - **§13 `check_tx_ring_signatures` → `verify_ring_signature`;
+//!   `check_tx_range_proofs` → `verify_output_range_proofs`;
+//!   `check_tx_balance_proof` → `verify_balance_proof`** — INVARIANT:
+//!   `input.key_image == signature.key_image` BEFORE the cache; every ring
+//!   member / pseudo-output / commitment is on-curve; range proofs verify;
+//!   `Σ pseudo == Σ outputs + fee` with NO identity pseudo-output.
+//!   THREAT: C-2 key-image↔signature unbinding (supply inflation); FIX #44
+//!   identity pseudo-output balance collapse; poisoned-cache false-accept.
+//!   TESTS: `valid_amount_proof_verifies`, `aggregated_multi_output_verifies`,
+//!   `garbage_proof_rejected`, `mismatched_amount_fails_verification`,
+//!   `bitcoin_2018_inflation` (C-2 and #44 direct vectors flagged MISSING).
+//!
+//! `validate_transaction_basic` is the contextless mempool-admission mirror of
+//! §9–§13; it shares `check_output_curve_points` (§10) and the constitutional
+//! ring/range-proof floor.
 
 use super::difficulty::max_target;
 use super::fee_market::{congestion_multiplier, distribute_fee};
@@ -202,7 +325,7 @@ pub fn validate_block_with_checkpoint_for_network(
     // Validate header
     validate_header(&block.header, prev_block.map(|b| &b.header), &mut result);
 
-    // CRITICAL SECURITY: Validate Proof of Work
+    // §3  CRITICAL SECURITY: Validate Proof of Work
     // Skip PoW verification for genesis block (height 0)
     if block.height() > 0 {
         if let Some(prev) = prev_block {
@@ -235,7 +358,11 @@ pub fn validate_block_with_checkpoint_for_network(
                         block.height()
                     );
                 }
-                // Full PoW verification including VDF anchor recomputation
+                // Full PoW verification including VDF anchor recomputation.
+                // TEST-ONLY: the `test-fast-pow` feature (INSECURE, off by
+                // default) removes this so the multi-node simkit harness mines
+                // instantly; production builds are byte-identical after cfg-strip.
+                #[cfg(not(feature = "test-fast-pow"))]
                 match verify_pow(
                     &prev.header.hash(),
                     block.height(),
@@ -257,7 +384,10 @@ pub fn validate_block_with_checkpoint_for_network(
             }
 
             // CRITICAL: Verify difficulty target is correct for this height
-            // This prevents miners from using artificially easy targets
+            // This prevents miners from using artificially easy targets.
+            // TEST-ONLY: also skipped under `test-fast-pow` so a trivial target
+            // is accepted by the instant-mining harness.
+            #[cfg(not(feature = "test-fast-pow"))]
             validate_difficulty_target(block, prev_block, &mut result);
         } else {
             // Non-genesis block without parent - already caught in header validation
@@ -278,7 +408,7 @@ pub fn validate_block_with_checkpoint_for_network(
     check_block_merkle_root(block, &tx_hashes, &mut result);
     check_block_privacy_policy(block, &mut result);
 
-    // Validate coinbase reward
+    // §5  Validate coinbase reward
     let expected_reward = calculate_block_reward(block.height());
     let total_fees: Amount = block
         .transactions
@@ -545,7 +675,7 @@ pub fn validate_block_with_checkpoint_for_network(
         }
     }
 
-    // v1.0.12 protocol upgrade (gated by HARD_FORK_V1_0_12_HEIGHT):
+    // §7  v1.0.12 protocol upgrade (gated by HARD_FORK_V1_0_12_HEIGHT):
     // reject blocks where two distinct txs create the same stealth
     // address as an output.
     //
@@ -592,7 +722,7 @@ pub fn validate_block_with_checkpoint_for_network(
         return Ok(result);
     }
 
-    // SECURITY: Validate dynamic fees based on block congestion.
+    // §8  SECURITY: Validate dynamic fees based on block congestion.
     // Static minimum (size * MIN_FEE_PER_BYTE) is always required, but when the
     // block is heavily utilized, transactions must pay the congestion premium.
     // This prevents miners from filling blocks with below-market-rate transactions.
@@ -730,7 +860,7 @@ pub fn validate_block_with_checkpoint_for_network(
     Ok(result)
 }
 
-// ── validate_block sub-checks (AUDIT 2026-07-01, follow-on to H1) ──
+// ── §1–§8  validate_block sub-checks (AUDIT 2026-07-01, follow-on to H1) ──
 //
 // Each helper is called in the same order the previous monolithic
 // function used, with bit-identical error strings. Helpers that return
@@ -738,7 +868,7 @@ pub fn validate_block_with_checkpoint_for_network(
 // checks would produce meaningless errors (matches the original's
 // `return Ok(result)` short-circuit pattern).
 
-/// FIRST CHECK: network magic. A 4-byte comparison that catches
+/// §1  FIRST CHECK: network magic. A 4-byte comparison that catches
 /// misconfigured peers, cross-network attacks, and testnet/mainnet
 /// contamination instantly. Runs before any expensive crypto.
 ///
@@ -770,7 +900,7 @@ fn check_block_network_magic(
     true
 }
 
-/// CIP-009 Path B consensus checkpoint: reject any block at a hardcoded
+/// §1  CIP-009 Path B consensus checkpoint: reject any block at a hardcoded
 /// (height, hash) pair whose hash doesn't match. Runs before any
 /// cryptographic verification.
 ///
@@ -805,14 +935,14 @@ fn check_block_consensus_checkpoint(
     true
 }
 
-/// Block size within `MAX_BLOCK_SIZE`.
+/// §4  Block size within `MAX_BLOCK_SIZE`.
 fn check_block_size(size: usize, result: &mut BlockValidation) {
     if size > MAX_BLOCK_SIZE {
         result.add_error(format!("Block too large: {} > {}", size, MAX_BLOCK_SIZE));
     }
 }
 
-/// Block weight accounts for ring-signature verification cost, not
+/// §4  Block weight accounts for ring-signature verification cost, not
 /// just byte size. Weight = sum of (ring_members_count * RING_SIG_WEIGHT
 /// + byte_size) per tx. Max weight is 4× the max block size
 /// (prevents CPU-exhaustion attacks).
@@ -842,7 +972,7 @@ fn check_block_weight(block: &Block, result: &mut BlockValidation) {
     }
 }
 
-/// Transaction count within `MAX_TXS_PER_BLOCK`.
+/// §4  Transaction count within `MAX_TXS_PER_BLOCK`.
 fn check_block_tx_count(block: &Block, result: &mut BlockValidation) {
     if block.transactions.len() > MAX_TXS_PER_BLOCK {
         result.add_error(format!(
@@ -853,7 +983,7 @@ fn check_block_tx_count(block: &Block, result: &mut BlockValidation) {
     }
 }
 
-/// Block has at least one transaction (a coinbase).
+/// §5  Block has at least one transaction (a coinbase).
 ///
 /// Returns `false` if the block has no transactions — no later check
 /// would make sense.
@@ -865,7 +995,7 @@ fn check_block_has_coinbase(block: &Block, result: &mut BlockValidation) -> bool
     true
 }
 
-/// First transaction must be a coinbase.
+/// §5  First transaction must be a coinbase.
 fn check_block_first_tx_is_coinbase(block: &Block, result: &mut BlockValidation) {
     match block.transactions.first() {
         Some(first_tx) if !first_tx.is_coinbase() => {
@@ -879,7 +1009,7 @@ fn check_block_first_tx_is_coinbase(block: &Block, result: &mut BlockValidation)
     }
 }
 
-/// Merkle root of transaction hashes matches the header's `tx_root`.
+/// §6  Merkle root of transaction hashes matches the header's `tx_root`.
 fn check_block_merkle_root(block: &Block, tx_hashes: &[Hash], result: &mut BlockValidation) {
     let computed_root = merkle_root(tx_hashes);
     if computed_root != block.header.tx_root {
@@ -887,7 +1017,7 @@ fn check_block_merkle_root(block: &Block, tx_hashes: &[Hash], result: &mut Block
     }
 }
 
-/// Constitution Article III (mandatory privacy): every non-coinbase
+/// §6  Constitution Article III (mandatory privacy): every non-coinbase
 /// tx must have Pedersen-committed amounts, a stealth address, and at
 /// least one privacy-preserving input. Structural check only — no
 /// ring-sig / range-proof verification here.
@@ -897,7 +1027,7 @@ fn check_block_privacy_policy(block: &Block, result: &mut BlockValidation) {
     }
 }
 
-/// H6 defense-in-depth: bound the emission curve's output for this block's
+/// §5  H6 defense-in-depth: bound the emission curve's output for this block's
 /// height within `[TAIL_EMISSION, calculate_block_reward(0)]`. This is
 /// redundant with the emission-curve calculation but catches a mis-calibrated
 /// curve:
@@ -937,7 +1067,7 @@ fn check_block_tail_supply(block: &Block, expected_reward: Amount, result: &mut 
     }
 }
 
-/// Duplicate transaction hashes within a block — a malicious miner
+/// §7  Duplicate transaction hashes within a block — a malicious miner
 /// could try to include the same tx twice to double-count fees or
 /// cause state inconsistencies.
 ///
@@ -952,7 +1082,7 @@ fn check_block_duplicate_tx_hashes(tx_hashes: &[Hash], result: &mut BlockValidat
     }
 }
 
-/// Phase 1 key image validation: reject blocks with in-block duplicate
+/// §7  Phase 1 key image validation: reject blocks with in-block duplicate
 /// key images. Phase 2 (per-tx UTXO check) runs in `validate_transaction`.
 ///
 /// Fast O(n) HashSet check — rejects blocks with internal double-spends
@@ -968,7 +1098,7 @@ fn check_block_duplicate_key_images(block: &Block, result: &mut BlockValidation)
     }
 }
 
-/// Validate block header.
+/// §2  Validate block header.
 ///
 /// AUDIT (2026-07-01, follow-on to validate_block refactor): split into
 /// named sub-checks that mirror `validate_block_with_checkpoint_for_network`'s
@@ -987,7 +1117,7 @@ fn validate_header(
     check_header_future_timestamp(header, result);
 }
 
-/// FIX #47: treat `block_version_at_height` as a MINIMUM, not strict
+/// §2  FIX #47: treat `block_version_at_height` as a MINIMUM, not strict
 /// equality. Previously `header.version != expected_version` rejected any
 /// version-bump block mined the block BEFORE fork activation — a miner
 /// producing a V2 block at `activation_height - 1` was refused even
@@ -1002,9 +1132,24 @@ fn check_header_version_min(header: &BlockHeader, result: &mut BlockValidation) 
             header.version, min_version, header.height
         ));
     }
+    // H1 (chain-brick defense): cap the UPPER bound. Without it a single block
+    // declaring an arbitrarily high version (e.g. 255) ratchets the monotonic
+    // version floor in `check_header_vs_prev` above what honest miners produce,
+    // permanently bricking block production. Only versions the software
+    // recognizes (<= MAX_BLOCK_VERSION) may be mined; higher versions are
+    // rejected. `min_version <= version <= MAX_BLOCK_VERSION` still permits the
+    // FIX #47 smooth-activation case (mining the next scheduled version one
+    // block before its activation height).
+    if header.version > crate::constants::MAX_BLOCK_VERSION {
+        result.add_error(format!(
+            "Block version {} exceeds maximum recognized version {}",
+            header.version,
+            crate::constants::MAX_BLOCK_VERSION
+        ));
+    }
 }
 
-/// Header-vs-previous-header checks:
+/// §2  Header-vs-previous-header checks:
 /// * Version cannot decrease (downgrade attack protection).
 /// * Height must be exactly `prev.height + 1`.
 /// * `prev_hash` must equal `prev.hash()`.
@@ -1047,7 +1192,7 @@ fn check_header_vs_prev(
     }
 }
 
-/// SECURITY (CC-L1): `checkpoint_vote` must reference a height that
+/// §2  SECURITY (CC-L1): `checkpoint_vote` must reference a height that
 /// already exists — not the current block's height and not any future
 /// height. Voting for a block that hasn't been mined yet is either a
 /// bug or an attack.
@@ -1062,7 +1207,7 @@ fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidati
     }
 }
 
-/// Reject block timestamps too far in the future.
+/// §2  Reject block timestamps too far in the future.
 ///
 /// SPEC: the bound is INCLUSIVE — `timestamp == current_time +
 /// MAX_TIMESTAMP_DRIFT` is accepted, only strictly-greater is rejected.
@@ -1107,7 +1252,7 @@ fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidat
     }
 }
 
-/// Validate that block's difficulty target is correct — INTENTIONALLY LOOSE
+/// §3  Validate that block's difficulty target is correct — INTENTIONALLY LOOSE
 /// sanity gate, paired with the strict ASERT check at the chain level.
 ///
 /// ## Two-layer difficulty-validation design
@@ -1313,7 +1458,7 @@ pub fn validate_transaction_for_network(
     Ok(())
 }
 
-// ── validate_transaction sub-checks (AUDIT 2026-06-30 H1) ──────────
+// ── §9–§13  validate_transaction sub-checks (AUDIT 2026-06-30 H1) ──────────
 //
 // Each sub-check is called in the exact same order the previous monolithic
 // function used. Errors are the same types. Semantic behavior is identical.
@@ -1321,7 +1466,7 @@ pub fn validate_transaction_for_network(
 // they retain access to file-private types and don't force `pub(crate)`
 // changes on internal helpers.
 
-/// Version range: `1 <= tx.version <= MAX_TX_VERSION`.
+/// §9  Version range: `1 <= tx.version <= MAX_TX_VERSION`.
 ///
 /// Runs BEFORE the coinbase early-return so a coinbase with an unknown
 /// version can't sneak past.
@@ -1346,7 +1491,7 @@ fn check_tx_version_range(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
-/// V2 transactions are only valid at or above `V2_TX_ACTIVATION_HEIGHT`.
+/// §9  V2 transactions are only valid at or above `V2_TX_ACTIVATION_HEIGHT`.
 /// V1 transactions remain valid at all heights (backward compat).
 /// Rejecting V2 below activation prevents pre-fork asset tx injection.
 fn check_tx_v2_activation(tx: &Transaction, current_height: u64) -> Result<()> {
@@ -1360,7 +1505,7 @@ fn check_tx_v2_activation(tx: &Transaction, current_height: u64) -> Result<()> {
     Ok(())
 }
 
-/// Non-empty inputs + outputs, both within `MAX_TX_INPUTS`/`MAX_TX_OUTPUTS`.
+/// §9  Non-empty inputs + outputs, both within `MAX_TX_INPUTS`/`MAX_TX_OUTPUTS`.
 ///
 /// `v1_0_12_active` gates the encrypted_amount and encrypted_memo size checks.
 fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Result<()> {
@@ -1457,7 +1602,7 @@ fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Resul
     Ok(())
 }
 
-/// Legacy 32:1 input/output ratio check.
+/// §9  Legacy 32:1 input/output ratio check.
 ///
 /// AUDIT (2026-06-30 M4): redundant with `check_tx_uniform_shape`, which
 /// enforces exact 2-in/2-out or 2-in/3-out for the dominant Transfer/Churn
@@ -1499,7 +1644,7 @@ fn check_tx_io_ratio_legacy(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
-/// Uniform-shape enforcement (M6, forward-looking bug fix).
+/// §9  Uniform-shape enforcement (M6, forward-looking bug fix).
 ///
 /// CoinCync has TWO standard transaction shapes that BOTH form their own
 /// anonymity set:
@@ -1565,7 +1710,7 @@ fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
     Ok(())
 }
 
-/// Double-spend check: in-tx duplicate key_images + chain-level key_image
+/// §11  Double-spend check: in-tx duplicate key_images + chain-level key_image
 /// collision.
 ///
 /// 2026-06-03 bug fix: previously only checked against
@@ -1595,7 +1740,7 @@ fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
     Ok(())
 }
 
-/// Validate every ring member of every input.
+/// §11  Validate every ring member of every input.
 ///
 /// SECURITY (CRIT-5 + HIGH-4): ring members must (a) exist as an output on
 /// this chain, (b) have a commitment matching the on-chain output, (c)
@@ -1772,7 +1917,7 @@ fn check_tx_ring_members(
     Ok(())
 }
 
-/// Coinbase maturity check for a ring member.
+/// §11  Coinbase maturity check for a ring member.
 ///
 /// Extracted 2026-07-01: previously duplicated between the live-UTXO
 /// and spent-output-index branches of `check_tx_ring_members`, with a
@@ -1814,7 +1959,7 @@ fn check_ring_member_coinbase_maturity(
     Ok(())
 }
 
-/// Time-lock check for a ring member.
+/// §11  Time-lock check for a ring member.
 ///
 /// Extracted 2026-07-01: previously duplicated between the live-UTXO
 /// and spent-output-index branches of `check_tx_ring_members`.
@@ -1841,7 +1986,7 @@ fn check_ring_member_time_lock(
     Ok(())
 }
 
-/// Ring size matches `effective_ring_size(current_height, output_count)`
+/// §12  Ring size matches `effective_ring_size(current_height, output_count)`
 /// AND ring members are unique per-input.
 ///
 /// Duplicate public keys would reduce the effective ring size, degrading
@@ -1946,7 +2091,7 @@ fn check_tx_ring_size_and_unique_members(
     Ok(())
 }
 
-/// Verify every input's CLSAG ring signature in parallel via rayon.
+/// §13  Verify every input's CLSAG ring signature in parallel via rayon.
 ///
 /// SECURITY: uses `SeqCst` ordering on the shared failure flag so threads
 /// see the "abort" signal reliably. Relaxed ordering could let threads
@@ -1973,7 +2118,7 @@ fn check_tx_ring_signatures(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
-/// Verify range proofs for all outputs (proves amounts are non-negative).
+/// §13  Verify range proofs for all outputs (proves amounts are non-negative).
 ///
 /// C-2 fix: passes `current_height` to enforce the Bulletproofs+ activation
 /// gate — pre-activation uses the legacy proof format, post-activation
@@ -1985,7 +2130,7 @@ fn check_tx_range_proofs(tx: &Transaction, current_height: u64) -> Result<()> {
     Ok(())
 }
 
-/// Verify balance proof: sum(input commitments) == sum(output commitments)
+/// §13  Verify balance proof: sum(input commitments) == sum(output commitments)
 /// + fee_commitment. Core privacy-preserving balance check via Pedersen
 /// commitment arithmetic.
 fn check_tx_balance_proof(tx: &Transaction) -> Result<()> {
@@ -1996,7 +2141,7 @@ fn check_tx_balance_proof(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
-/// Verify CLSAG ring signature for a transaction input with caching
+/// §13  Verify CLSAG ring signature for a transaction input with caching
 ///
 /// Uses verification cache for speedup during sync.
 /// Cache key is hash of (message, signature_data).
@@ -2092,7 +2237,7 @@ pub(crate) fn verify_ring_signature(
     valid
 }
 
-/// Verify range proofs for all outputs with caching
+/// §13  Verify range proofs for all outputs with caching
 ///
 /// Uses verification cache for 10-50x speedup during sync.
 /// Cache key is hash of (proof_data, commitment_data).
@@ -2165,7 +2310,7 @@ pub(crate) fn verify_output_range_proofs(tx: &Transaction, current_height: u64) 
     valid
 }
 
-/// Verify balance proof using Pedersen commitment arithmetic
+/// §13  Verify balance proof using Pedersen commitment arithmetic
 ///
 /// For a valid transaction: sum(pseudo_output_commitments) = sum(output_commitments) + fee_commitment
 ///
@@ -2360,7 +2505,7 @@ pub fn validate_all_transactions(
 /// Bump this on each hard fork that introduces a new version.
 const MAX_TX_VERSION: u8 = 2;
 
-/// Reject outputs whose curve-point fields are the identity point or not a
+/// §10  Reject outputs whose curve-point fields are the identity point or not a
 /// valid Ristretto point. Shared by the mempool path
 /// (`validate_transaction_basic`) and the block path
 /// (`validate_transaction_for_network`) so the two cannot drift.
@@ -2946,5 +3091,1356 @@ mod tests {
             "error must include the input+member indices, got: {}",
             msg
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // AUDIT TEST-PLAN BACKFILL (2026-09-11)
+    //
+    // Fills the `[ ]` (MISSING) rows of docs/audit/test-plan/consensus.md
+    // for validation.rs. Consensus-critical inflation / malleability
+    // vectors and the block/tx sub-check helpers. Uses ONLY real APIs,
+    // fields and error strings visible in this file. Crypto/tx builders
+    // mirror the established style in tests/adversarial.rs (make_secret /
+    // make_ring / make_output shape) rather than rolling new primitives.
+    // ═══════════════════════════════════════════════════════════════════
+
+    use crate::config::NetworkType;
+    use crate::crypto::{
+        BlindingFactor, ClsagSignature, KeyImage as CryptoKeyImage, PedersenCommitment,
+        SecretScalar,
+    };
+    use crate::primitives::{KeyImage, PublicKey};
+    use crate::transaction::{RingMemberRef, TxInput, TxOutput};
+
+    // ── shared builders ────────────────────────────────────────────────
+
+    /// A guaranteed-valid, non-identity Ristretto point (distinct per seed).
+    fn point_bytes(seed: u8) -> [u8; 32] {
+        SecretScalar::from_bytes([seed | 1; 32]).to_public().to_bytes()
+    }
+
+    /// Transparent (zero-blinding) commitment to `amount` — the exact form an
+    /// honest coinbase output must carry (per the C19-FIX per-output check).
+    fn zero_blinding_commitment(amount: u64) -> [u8; 32] {
+        PedersenCommitment::commit(amount, &BlindingFactor::zero()).to_bytes()
+    }
+
+    fn a_valid_output() -> TxOutput {
+        TxOutput {
+            stealth_address: PublicKey::from_bytes(point_bytes(41)),
+            tx_public_key: PublicKey::from_bytes(point_bytes(42)),
+            commitment: zero_blinding_commitment(1_000),
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        }
+    }
+
+    fn coinbase_output(amount: u64, commitment: [u8; 32]) -> TxOutput {
+        TxOutput {
+            stealth_address: PublicKey::from_bytes(point_bytes(51)),
+            tx_public_key: PublicKey::from_bytes(point_bytes(52)),
+            commitment,
+            encrypted_amount: amount.to_le_bytes().to_vec(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        }
+    }
+
+    fn coinbase_tx(outputs: Vec<TxOutput>) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: TxType::Coinbase,
+            inputs: vec![],
+            outputs,
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    fn dummy_clsag(n: usize, ki: CryptoKeyImage) -> ClsagSignature {
+        ClsagSignature {
+            key_image: ki,
+            commitment_image: SecretScalar::from_bytes([3; 32]).to_public(),
+            c1: [1u8; 32],
+            responses: vec![[2u8; 32]; n],
+        }
+    }
+
+    fn ring_of(n: usize, base: u8) -> Vec<RingMemberRef> {
+        (0..n)
+            .map(|i| RingMemberRef {
+                public_key: PublicKey::from_bytes(point_bytes(base.wrapping_add(i as u8))),
+                commitment: zero_blinding_commitment(1),
+            })
+            .collect()
+    }
+
+    /// A structurally-complete non-coinbase input (no valid crypto — for the
+    /// structural sub-checks that never call into CLSAG verification).
+    fn input_with_ki(ki_seed: u8, ring: Vec<RingMemberRef>) -> TxInput {
+        let secret = SecretScalar::from_bytes([ki_seed | 1; 32]);
+        let cki = CryptoKeyImage::from_secret(&secret);
+        let n = ring.len();
+        TxInput {
+            key_image: KeyImage::from_bytes(cki.to_bytes()),
+            ring_members: ring,
+            signature: dummy_clsag(n, cki),
+            pseudo_output_commitment: point_bytes(200),
+        }
+    }
+
+    /// Child block carrying this build's compile-time network magic, chained
+    /// onto `prev` (height/prev_hash/timestamp all consistent so header checks
+    /// pass and later sub-checks are reached).
+    fn child_block(height: u64, txs: Vec<Transaction>, prev: &Block) -> Block {
+        let mut h = block_at_height(height).header;
+        h.prev_hash = prev.header.hash();
+        h.timestamp = 1_000_000;
+        Block::new(h, txs)
+    }
+
+    // ── validate_block: coinbase inflation vectors (consensus-critical) ──
+
+    #[test]
+    fn coinbase_per_output_blinding_cancellation_rejected_c19() {
+        // C19-FIX: two outputs whose blindings cancel in the SUM (b1 + b2 = 0)
+        // but whose per-output commitments are commit(a, b) ≠ commit(a, 0).
+        // The per-output check must reject even though the aggregate looks right.
+        let prev = block_at_height(0);
+        let reward = calculate_block_reward(1).as_atomic();
+        let a0 = reward / 2;
+        let a1 = reward - a0;
+        let b = BlindingFactor::from_bytes([7u8; 32]);
+        let neg_b = BlindingFactor::zero().sub(&b);
+        let c0 = PedersenCommitment::commit(a0, &b).to_bytes();
+        let c1 = PedersenCommitment::commit(a1, &neg_b).to_bytes();
+        let cb = coinbase_tx(vec![coinbase_output(a0, c0), coinbase_output(a1, c1)]);
+        let block = child_block(1, vec![cb], &prev);
+
+        let utxos = UtxoSet::new();
+        let result = validate_block(&block, Some(&prev), &utxos).unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("commitment mismatch") && e.contains("inflation")),
+            "per-output blinding-cancellation must be rejected by the C19 per-output check, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn coinbase_output_sum_overflow_rejected_fix41() {
+        // FIX #41: declared output amounts summing past u64::MAX must be caught
+        // by checked_add, not silently clamped. Commitments are honest (zero
+        // blinding) so ONLY the overflow error should surface.
+        let prev = block_at_height(0);
+        let cb = coinbase_tx(vec![
+            coinbase_output(u64::MAX, zero_blinding_commitment(u64::MAX)),
+            coinbase_output(2, zero_blinding_commitment(2)),
+        ]);
+        let block = child_block(1, vec![cb], &prev);
+        let utxos = UtxoSet::new();
+        let result = validate_block(&block, Some(&prev), &utxos).unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("Coinbase output sum overflow")),
+            "coinbase output-sum overflow must be rejected as inflation, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn coinbase_max_overflow_reward_plus_fees_rejected_m4() {
+        // M4: reward + total_fees near u64::MAX must be rejected via checked_add,
+        // not saturated. A single non-coinbase tx carrying fee == u64::MAX makes
+        // reward + fees overflow → early "Coinbase max overflow".
+        // Driven via Regtest at height 1 (< fee_distribution_height 525) so the
+        // else-branch `reward.checked_add(total_fees)` is taken and overflow is
+        // guaranteed regardless of the compiled network feature.
+        let prev = child_block(0, vec![], &block_at_height(0));
+        let cb = coinbase_tx(vec![coinbase_output(1_000, zero_blinding_commitment(1_000))]);
+        let mut fee_tx = coinbase_tx(vec![a_valid_output()]);
+        fee_tx.tx_type = TxType::Transfer;
+        fee_tx.fee = Amount::from_atomic(u64::MAX);
+        let mut block = child_block(1, vec![cb, fee_tx], &prev);
+        block.header.network_magic = NetworkType::Regtest.magic_bytes();
+        let utxos = UtxoSet::new();
+        let result = validate_block_with_checkpoint_for_network(
+            &block,
+            Some(&prev),
+            &utxos,
+            None,
+            NetworkType::Regtest,
+        )
+        .unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("Coinbase max overflow")),
+            "reward+fees overflow must be rejected (M4), got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn coinbase_identity_output_commitment_rejected() {
+        // Identity (all-zero) commitment decompresses to the identity point and
+        // must be rejected explicitly.
+        let prev = block_at_height(0);
+        let reward = calculate_block_reward(1).as_atomic();
+        let cb = coinbase_tx(vec![coinbase_output(reward, [0u8; 32])]);
+        let block = child_block(1, vec![cb], &prev);
+        let utxos = UtxoSet::new();
+        let result = validate_block(&block, Some(&prev), &utxos).unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("identity point")),
+            "identity coinbase commitment must be rejected, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn coinbase_noncurve_output_commitment_rejected() {
+        // All-0xFF is a non-canonical encoding that fails to decompress.
+        let prev = block_at_height(0);
+        let reward = calculate_block_reward(1).as_atomic();
+        let cb = coinbase_tx(vec![coinbase_output(reward, [0xFFu8; 32])]);
+        let block = child_block(1, vec![cb], &prev);
+        let utxos = UtxoSet::new();
+        let result = validate_block(&block, Some(&prev), &utxos).unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("not on curve")),
+            "non-curve coinbase commitment must be rejected, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn coinbase_total_not_equal_to_max_coinbase_rejected() {
+        // Honest per-output commitments but the declared total ≠ reward+fees.
+        let prev = block_at_height(0);
+        let reward = calculate_block_reward(1).as_atomic();
+        let wrong = reward + 1;
+        let cb = coinbase_tx(vec![coinbase_output(wrong, zero_blinding_commitment(wrong))]);
+        let block = child_block(1, vec![cb], &prev);
+        let utxos = UtxoSet::new();
+        let result = validate_block(&block, Some(&prev), &utxos).unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("doesn't match expected")),
+            "coinbase over-claim must be rejected, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn coinbase_exact_reward_produces_no_coinbase_amount_error() {
+        // Companion happy case: a coinbase declaring exactly the reward with an
+        // honest commitment must NOT produce any coinbase amount/commitment error
+        // (PoW/difficulty errors are expected and orthogonal).
+        let prev = block_at_height(0);
+        let reward = calculate_block_reward(1).as_atomic();
+        let cb = coinbase_tx(vec![coinbase_output(reward, zero_blinding_commitment(reward))]);
+        let block = child_block(1, vec![cb], &prev);
+        let utxos = UtxoSet::new();
+        let result = validate_block(&block, Some(&prev), &utxos).unwrap();
+        assert!(
+            !result.errors.iter().any(|e| {
+                e.contains("commitment mismatch")
+                    || e.contains("doesn't match expected")
+                    || e.contains("output sum overflow")
+                    || e.contains("identity point")
+            }),
+            "honest coinbase must not trip any coinbase inflation check, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn coinbase_encrypted_amount_wrong_length_rejected_post_fork() {
+        // v1.0.12: post-fork coinbase encrypted_amount must be EXACTLY 8 bytes.
+        // Driven via the Regtest runtime network (v1_0_12 always active) so the
+        // result is independent of the compiled `testnet` feature.
+        let prev = child_block(0, vec![], &block_at_height(0));
+        let reward = calculate_block_reward(1).as_atomic();
+        let mut out = coinbase_output(reward, zero_blinding_commitment(reward));
+        out.encrypted_amount = vec![0u8; 9]; // one byte too long
+        let mut block = child_block(1, vec![coinbase_tx(vec![out])], &prev);
+        block.header.network_magic = NetworkType::Regtest.magic_bytes();
+        let utxos = UtxoSet::new();
+        let result = validate_block_with_checkpoint_for_network(
+            &block,
+            Some(&prev),
+            &utxos,
+            None,
+            NetworkType::Regtest,
+        )
+        .unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("invalid amount encoding") && e.contains("exactly 8 bytes")),
+            "post-fork coinbase amount must be exactly 8 bytes, got: {:?}",
+            result.errors
+        );
+    }
+
+    // ── validate_block: cross-tx duplicate stealth (v1_0_12, cfc680b7) ──
+
+    #[test]
+    fn cross_tx_duplicate_stealth_address_in_block_rejected() {
+        let clash = point_bytes(88);
+        let mk_transfer = |stealth: [u8; 32]| Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                stealth_address: PublicKey::from_bytes(stealth),
+                tx_public_key: PublicKey::from_bytes(point_bytes(60)),
+                commitment: zero_blinding_commitment(1),
+                encrypted_amount: vec![0u8; 8],
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            }],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let prev = child_block(0, vec![], &block_at_height(0));
+        let reward = calculate_block_reward(1).as_atomic();
+        let cb = coinbase_tx(vec![coinbase_output(reward, zero_blinding_commitment(reward))]);
+        let mut block = child_block(1, vec![cb, mk_transfer(clash), mk_transfer(clash)], &prev);
+        block.header.network_magic = NetworkType::Regtest.magic_bytes();
+        let utxos = UtxoSet::new();
+        let result = validate_block_with_checkpoint_for_network(
+            &block,
+            Some(&prev),
+            &utxos,
+            None,
+            NetworkType::Regtest,
+        )
+        .unwrap();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("Cross-tx duplicate stealth address")),
+            "two txs creating the same stealth address must be rejected, got: {:?}",
+            result.errors
+        );
+    }
+
+    // ── block-level duplicate detection sub-checks ──────────────────────
+
+    #[test]
+    fn check_block_duplicate_tx_hashes_rejects_repeat() {
+        let h = Hash::from_bytes([9u8; 32]);
+        let mut result = BlockValidation::ok();
+        check_block_duplicate_tx_hashes(&[h, h], &mut result);
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Duplicate transaction hash")));
+    }
+
+    #[test]
+    fn check_block_duplicate_key_images_across_two_txs_rejected() {
+        let shared_ring = ring_of(2, 30);
+        let tx1 = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, shared_ring.clone())],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![1],
+        };
+        // Second tx re-uses the SAME key image (same ki seed) in a different tx.
+        let tx2 = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, shared_ring)],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![2],
+        };
+        let block = Block::new(block_at_height(1).header, vec![tx1, tx2]);
+        let mut result = BlockValidation::ok();
+        check_block_duplicate_key_images(&block, &mut result);
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Duplicate key image in block")));
+    }
+
+    // ── header / block structural sub-checks ────────────────────────────
+
+    #[test]
+    fn check_block_network_magic_rejects_nonzero_magic_on_non_genesis() {
+        let mut block = block_at_height(1);
+        block.header.network_magic = [0u8; 4]; // zero magic only exempt at height 0
+        let mut result = BlockValidation::ok();
+        let ok = check_block_network_magic(&block, TEST_NET, &mut result);
+        assert!(!ok, "non-genesis block with zero magic must be rejected");
+        assert!(result.errors.iter().any(|e| e.contains("Wrong network magic")));
+    }
+
+    #[test]
+    fn check_header_vs_prev_rejects_version_downgrade() {
+        let prev = block_at_height(0);
+        let mut prev_header = prev.header.clone();
+        prev_header.version = 2;
+        let mut header = block_at_height(1).header;
+        header.version = 1; // downgrade v2 -> v1
+        header.prev_hash = prev_header.hash();
+        header.timestamp = prev_header.timestamp + 1;
+        let mut result = BlockValidation::ok();
+        check_header_vs_prev(&header, Some(&prev_header), &mut result);
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("version cannot decrease")));
+    }
+
+    #[test]
+    fn check_header_version_min_accepts_version_above_minimum_fix47() {
+        // FIX #47: version >= min is accepted (smooth activation), only < min
+        // is rejected. Height 0 has min_version 1; version 2 (the next scheduled
+        // version, mined early for smooth activation) is fine — it is within
+        // [min_version, MAX_BLOCK_VERSION].
+        let mut header = block_at_height(0).header;
+        header.version = 2;
+        let mut result = BlockValidation::ok();
+        check_header_version_min(&header, &mut result);
+        assert!(result.valid, "version above minimum must be accepted: {:?}", result.errors);
+    }
+
+    /// H1 (chain-brick defense): a block version above MAX_BLOCK_VERSION is
+    /// rejected. Without this cap, one block declaring version 255 ratchets the
+    /// monotonic version floor (`check_header_vs_prev`) above what honest miners
+    /// produce, permanently bricking block production.
+    #[test]
+    fn check_header_version_min_rejects_version_above_max_h1() {
+        for bad in [
+            crate::constants::MAX_BLOCK_VERSION + 1,
+            crate::constants::MAX_BLOCK_VERSION + 5,
+            255,
+        ] {
+            let mut header = block_at_height(0).header;
+            header.version = bad;
+            let mut result = BlockValidation::ok();
+            check_header_version_min(&header, &mut result);
+            assert!(
+                !result.valid,
+                "version {bad} above MAX_BLOCK_VERSION must be rejected"
+            );
+            assert!(
+                result.errors.iter().any(|e| e.contains("exceeds maximum")),
+                "expected an 'exceeds maximum' error for version {bad}, got {:?}",
+                result.errors
+            );
+        }
+        // Boundary: exactly MAX_BLOCK_VERSION is still accepted.
+        let mut ok_header = block_at_height(0).header;
+        ok_header.version = crate::constants::MAX_BLOCK_VERSION;
+        let mut ok = BlockValidation::ok();
+        check_header_version_min(&ok_header, &mut ok);
+        assert!(ok.valid, "version == MAX_BLOCK_VERSION must be accepted: {:?}", ok.errors);
+    }
+
+    #[test]
+    fn check_header_checkpoint_vote_future_height_rejected_past_accepted() {
+        // Future height (>= block height) rejected.
+        let mut header = block_at_height(10).header;
+        header.checkpoint_vote = Some((15, Hash::zero()));
+        let mut r_future = BlockValidation::ok();
+        check_header_checkpoint_vote(&header, &mut r_future);
+        assert!(!r_future.valid);
+        assert!(r_future
+            .errors
+            .iter()
+            .any(|e| e.contains("future height")));
+        // Past height accepted.
+        header.checkpoint_vote = Some((5, Hash::zero()));
+        let mut r_past = BlockValidation::ok();
+        check_header_checkpoint_vote(&header, &mut r_past);
+        assert!(r_past.valid, "past-height checkpoint vote must be accepted");
+    }
+
+    #[test]
+    fn check_header_future_timestamp_genesis_exempt() {
+        let mut header = block_at_height(0).header; // height 0
+        header.timestamp = u64::MAX / 2; // absurd future
+        let mut result = BlockValidation::ok();
+        check_header_future_timestamp(&header, &mut result);
+        assert!(
+            !result.errors.iter().any(|e| e.contains("too far in future")),
+            "genesis (height 0) must be exempt from the future-timestamp check, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn check_block_size_rejects_oversized_block() {
+        let mut result = BlockValidation::ok();
+        check_block_size(crate::constants::MAX_BLOCK_SIZE + 1, &mut result);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("Block too large")));
+    }
+
+    #[test]
+    fn check_block_weight_rejects_excess_ring_sig_weight() {
+        // Weight = tx.size() + ring_members * 256, capped at 4 * MAX_BLOCK_SIZE.
+        // 40_000 ring members => ~10 MiB weight >> 8 MiB cap. Ring members use
+        // cheap byte-only constructors (weight only counts len).
+        let ring: Vec<RingMemberRef> = (0..40_000u32)
+            .map(|i| RingMemberRef {
+                public_key: PublicKey::from_bytes([(i & 0xFF) as u8; 32]),
+                commitment: [0u8; 32],
+            })
+            .collect();
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![TxInput {
+                key_image: KeyImage::from_bytes([1u8; 32]),
+                ring_members: ring,
+                signature: dummy_clsag(0, CryptoKeyImage::from_secret(&SecretScalar::from_bytes([1; 32]))),
+                pseudo_output_commitment: [0u8; 32],
+            }],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let block = Block::new(block_at_height(1).header, vec![tx]);
+        let mut result = BlockValidation::ok();
+        check_block_weight(&block, &mut result);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("Block weight too high")));
+    }
+
+    #[test]
+    fn check_block_tx_count_rejects_excess() {
+        let txs: Vec<Transaction> = (0..crate::constants::MAX_TXS_PER_BLOCK + 1)
+            .map(|_| coinbase_tx(vec![]))
+            .collect();
+        let block = Block::new(block_at_height(1).header, txs);
+        let mut result = BlockValidation::ok();
+        check_block_tx_count(&block, &mut result);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("Too many transactions")));
+    }
+
+    // ── validate_difficulty_target sanity gate ──────────────────────────
+
+    #[test]
+    fn validate_difficulty_target_rejects_zero_target() {
+        let prev = block_at_height(0);
+        let mut block = block_at_height(1);
+        block.header.target = Hash::from_bytes([0u8; 32]);
+        let mut result = BlockValidation::ok();
+        validate_difficulty_target(&block, Some(&prev), &mut result);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("Target is zero")));
+    }
+
+    #[test]
+    fn validate_difficulty_target_rejects_out_of_bounds_ratio() {
+        // prev target ~2^112, block target ~2^120 => 256x swing, > 32x normal cap.
+        let mut prev = block_at_height(0);
+        let mut prev_t = [0u8; 32];
+        prev_t[1] = 1;
+        prev.header.target = Hash::from_bytes(prev_t);
+        let mut block = block_at_height(1);
+        let mut blk_t = [0u8; 32];
+        blk_t[0] = 1;
+        block.header.target = Hash::from_bytes(blk_t);
+        block.header.timestamp = prev.header.timestamp + 1; // normal (non-emergency) window
+        let mut result = BlockValidation::ok();
+        validate_difficulty_target(&block, Some(&prev), &mut result);
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Difficulty adjustment out of bounds")));
+    }
+
+    // ── PoW gate: silent-skip DoS fix ───────────────────────────────────
+
+    #[test]
+    fn below_checkpoint_block_still_pow_verified_without_fast_sync_feature() {
+        // The silent-skip fix: a below-checkpoint block in a build WITHOUT the
+        // insecure-fast-sync feature must STILL run full PoW verification.
+        // This build has no such feature, so verify_pow runs and (the block is
+        // unmined, anchor=0) fails — the presence of the PoW error proves the
+        // check was NOT skipped.
+        let prev = block_at_height(0);
+        let block = child_block(1, vec![coinbase_tx(vec![a_valid_output()])], &prev);
+        let utxos = UtxoSet::new();
+        let result =
+            validate_block_with_checkpoint(&block, Some(&prev), &utxos, Some(1_000)).unwrap();
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("Proof of work validation error")),
+            "below-checkpoint block must still be PoW-verified in a non-fast-sync build, got: {:?}",
+            result.errors
+        );
+    }
+
+    // ── v1_0_12_rules_active differential ───────────────────────────────
+
+    #[test]
+    fn v1_0_12_rules_active_network_differential() {
+        assert!(v1_0_12_rules_active(NetworkType::Mainnet, 0));
+        assert!(v1_0_12_rules_active(NetworkType::Regtest, 0));
+        let fork = crate::constants::HARD_FORK_V1_0_12_HEIGHT;
+        assert!(
+            !v1_0_12_rules_active(NetworkType::Testnet, fork.saturating_sub(1)),
+            "testnet below the fork height must NOT have v1.0.12 rules active"
+        );
+        assert!(
+            v1_0_12_rules_active(NetworkType::Testnet, fork),
+            "testnet at the fork height must have v1.0.12 rules active"
+        );
+    }
+
+    // ── check_output_curve_points: stealth & commitment branches (H-19) ─
+
+    #[test]
+    fn output_curve_points_rejects_zero_stealth_address() {
+        let v = valid_point_bytes();
+        let err = check_output_curve_points(&tx_with_output_points([0u8; 32], v, v))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stealth address is zero"), "got: {err}");
+    }
+
+    #[test]
+    fn output_curve_points_rejects_noncurve_stealth_address() {
+        let v = valid_point_bytes();
+        assert!(check_output_curve_points(&tx_with_output_points([0xFFu8; 32], v, v)).is_err());
+    }
+
+    #[test]
+    fn output_curve_points_rejects_zero_commitment() {
+        let v = valid_point_bytes();
+        let err = check_output_curve_points(&tx_with_output_points(v, v, [0u8; 32]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("commitment is zero"), "got: {err}");
+    }
+
+    #[test]
+    fn output_curve_points_rejects_noncurve_commitment() {
+        let v = valid_point_bytes();
+        assert!(check_output_curve_points(&tx_with_output_points(v, v, [0xFFu8; 32])).is_err());
+    }
+
+    // ── check_tx_input_output_counts: v1_0_12 length gates ──────────────
+
+    fn tx_one_input_one_output(out: TxOutput) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, ring_of(2, 30))],
+            outputs: vec![out],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    #[test]
+    fn input_output_counts_rejects_wrong_encrypted_amount_length_post_fork() {
+        let mut out = a_valid_output();
+        out.encrypted_amount = vec![0u8; 7];
+        let err = check_tx_input_output_counts(&tx_one_input_one_output(out), true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("encrypted_amount must be exactly 8 bytes"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn input_output_counts_rejects_oversized_memo_post_fork() {
+        let mut out = a_valid_output();
+        out.encrypted_memo = vec![0u8; crate::constants::MAX_OUTPUT_MEMO_SIZE + 1];
+        let err = check_tx_input_output_counts(&tx_one_input_one_output(out), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("encrypted_memo too large"), "got: {err}");
+    }
+
+    #[test]
+    fn input_output_counts_pre_fork_allows_longer_encrypted_amount() {
+        // Differential: pre-fork the exact-8 gate is NOT applied.
+        let mut out = a_valid_output();
+        out.encrypted_amount = vec![0u8; 12];
+        assert!(check_tx_input_output_counts(&tx_one_input_one_output(out), false).is_ok());
+    }
+
+    // ── check_tx_io_ratio_legacy ────────────────────────────────────────
+
+    #[test]
+    fn io_ratio_legacy_rejects_excess_input_ratio() {
+        let inputs: Vec<TxInput> = (0..33).map(|i| input_with_ki(i as u8, ring_of(2, 30))).collect();
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs,
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let err = check_tx_io_ratio_legacy(&tx).unwrap_err().to_string();
+        assert!(err.contains("Input/output ratio too high"), "got: {err}");
+    }
+
+    // ── check_tx_uniform_shape (M6) ─────────────────────────────────────
+
+    fn shaped_tx(ty: TxType, n_in: usize, n_out: usize) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: ty,
+            inputs: (0..n_in).map(|i| input_with_ki(i as u8, ring_of(2, 30))).collect(),
+            outputs: (0..n_out).map(|_| a_valid_output()).collect(),
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    #[test]
+    fn uniform_shape_accepts_standard_transfer_shapes() {
+        // UNIFORM_TX_SHAPE_HEIGHT == 0, so the rule is live at any height.
+        assert!(check_tx_uniform_shape(&shaped_tx(TxType::Transfer, 2, 2), 1).is_ok());
+        assert!(check_tx_uniform_shape(&shaped_tx(TxType::Transfer, 2, 3), 1).is_ok());
+    }
+
+    #[test]
+    fn uniform_shape_rejects_wrong_input_count() {
+        let err = check_tx_uniform_shape(&shaped_tx(TxType::Transfer, 3, 2), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exactly 2 inputs"), "got: {err}");
+    }
+
+    #[test]
+    fn uniform_shape_rejects_wrong_output_count() {
+        let err = check_tx_uniform_shape(&shaped_tx(TxType::Transfer, 2, 4), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outputs"), "got: {err}");
+    }
+
+    #[test]
+    fn uniform_shape_rejects_churn_with_asset_shape() {
+        // Churn with 3 outputs (asset shape) is specifically rejected.
+        let err = check_tx_uniform_shape(&shaped_tx(TxType::Churn, 2, 3), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Churn must have exactly 2 outputs"), "got: {err}");
+    }
+
+    #[test]
+    fn uniform_shape_exempts_non_transfer_churn_types() {
+        // Coinbase is neither Transfer nor Churn — shape rule does not apply.
+        assert!(check_tx_uniform_shape(&shaped_tx(TxType::Coinbase, 5, 5), 1).is_ok());
+    }
+
+    // ── check_ring_member_coinbase_maturity: min_output_age ramp ────────
+
+    #[test]
+    fn coinbase_maturity_min_output_age_network_differential() {
+        // The 10→100 ramp is compile-gated, but Mainnet (100) vs Testnet (10)
+        // exercise BOTH floors in a single build. An output aged 50 blocks is
+        // mature on testnet's floor (10) yet immature on mainnet's (100).
+        let current = 1_000u64;
+        let output_height = current - 50; // age 50
+        assert!(
+            check_ring_member_coinbase_maturity(
+                NetworkType::Testnet,
+                true,
+                output_height,
+                current,
+                0,
+                0
+            )
+            .is_ok(),
+            "age 50 must be mature under the testnet floor (10)"
+        );
+        let err = check_ring_member_coinbase_maturity(
+            NetworkType::Mainnet,
+            true,
+            output_height,
+            current,
+            0,
+            0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("immature coinbase"),
+            "age 50 must be immature under the mainnet floor (100), got: {err}"
+        );
+    }
+
+    // ── check_tx_ring_members: dup-stealth + non-existent output ─────────
+
+    #[test]
+    fn ring_members_rejects_in_tx_duplicate_stealth_address_v1_0_12() {
+        let clash = point_bytes(77);
+        let mk_out = || TxOutput {
+            stealth_address: PublicKey::from_bytes(clash),
+            tx_public_key: PublicKey::from_bytes(point_bytes(60)),
+            commitment: zero_blinding_commitment(1),
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, ring_of(2, 30))],
+            outputs: vec![mk_out(), mk_out()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let utxos = UtxoSet::new();
+        let err = check_tx_ring_members(NetworkType::Mainnet, &tx, &utxos, 0, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate stealth address"), "got: {err}");
+    }
+
+    #[test]
+    fn ring_members_rejects_nonexistent_output_after_strict_height() {
+        // At/after STRICT_RING_MEMBER_HEIGHT, a ring member whose stealth address
+        // exists in neither the live UTXO set nor the output index is rejected.
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, ring_of(1, 90))],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let utxos = UtxoSet::new();
+        let height = crate::constants::STRICT_RING_MEMBER_HEIGHT;
+        // v1_0_12_active = false to skip the output-collision precheck (empty
+        // UTXO makes it a no-op anyway) and isolate the non-existent-member path.
+        let err = check_tx_ring_members(NetworkType::Testnet, &tx, &utxos, height, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("references non-existent output"), "got: {err}");
+    }
+
+    #[test]
+    fn ring_members_rejects_commitment_mismatch_vs_onchain() {
+        // CRIT-R4-1: a ring member whose commitment differs from the on-chain
+        // UTXO's commitment is an inflation vector and must be rejected.
+        let mut utxos = UtxoSet::new();
+        let member_stealth = point_bytes(120);
+        let onchain = TxOutput {
+            stealth_address: PublicKey::from_bytes(member_stealth),
+            tx_public_key: PublicKey::from_bytes(point_bytes(121)),
+            commitment: zero_blinding_commitment(1_000),
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        utxos.add_output_ext(Hash::from_bytes([120u8; 32]), 0, onchain, 1, false);
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![TxInput {
+                key_image: KeyImage::from_bytes(
+                    CryptoKeyImage::from_secret(&SecretScalar::from_bytes([5; 32])).to_bytes(),
+                ),
+                ring_members: vec![RingMemberRef {
+                    public_key: PublicKey::from_bytes(member_stealth),
+                    commitment: zero_blinding_commitment(9_999), // ≠ on-chain
+                }],
+                signature: dummy_clsag(1, CryptoKeyImage::from_secret(&SecretScalar::from_bytes([5; 32]))),
+                pseudo_output_commitment: point_bytes(200),
+            }],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let err = check_tx_ring_members(NetworkType::Testnet, &tx, &utxos, 50, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("commitment mismatch"), "got: {err}");
+    }
+
+    // ── check_tx_ring_size_and_unique_members ───────────────────────────
+
+    #[test]
+    fn ring_size_rejects_duplicate_ring_member() {
+        // With an empty UTXO set at height 0, effective ring size is 2. Build
+        // an input of the right size but with two IDENTICAL members.
+        let expected = crate::constants::effective_ring_size(0, 0);
+        let dup_member = RingMemberRef {
+            public_key: PublicKey::from_bytes(point_bytes(31)),
+            commitment: zero_blinding_commitment(1),
+        };
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, vec![dup_member; expected])],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let utxos = UtxoSet::new();
+        let err = check_tx_ring_size_and_unique_members(&tx, &utxos, 0, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Duplicate ring member"), "got: {err}");
+    }
+
+    #[test]
+    fn ring_size_determinism_across_reorg_histories_1d27d3c8() {
+        // Two nodes reach the SAME canonical outputs-ever via different reorg
+        // histories: node A added 5; node B added 8 then disconnected 3. The
+        // v1.0.12 fix keys ring size off (total_outputs_ever - reorg_disconnects),
+        // so both require the SAME ring size — no fork. Raw total_outputs_ever
+        // would diverge (5 vs 8).
+        let mut a = UtxoSet::new();
+        for s in 0..5u8 {
+            let out = TxOutput {
+                stealth_address: PublicKey::from_bytes(point_bytes(s + 1)),
+                tx_public_key: PublicKey::from_bytes(point_bytes(s + 50)),
+                commitment: zero_blinding_commitment(1),
+                encrypted_amount: vec![0u8; 8],
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            };
+            a.add_output_ext(Hash::from_bytes([s; 32]), 0, out, s as u64, false);
+        }
+        let mut b = UtxoSet::new();
+        for s in 0..8u8 {
+            let out = TxOutput {
+                stealth_address: PublicKey::from_bytes(point_bytes(s + 1)),
+                tx_public_key: PublicKey::from_bytes(point_bytes(s + 50)),
+                commitment: zero_blinding_commitment(1),
+                encrypted_amount: vec![0u8; 8],
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            };
+            b.add_output_ext(Hash::from_bytes([s; 32]), 0, out, s as u64, false);
+        }
+        for s in 5..8u8 {
+            b.remove_output(&Hash::from_bytes([s; 32]), 0);
+        }
+        // Divergent raw counters, identical canonical value.
+        assert_ne!(a.total_outputs_ever(), b.total_outputs_ever());
+        assert_eq!(
+            a.total_outputs_ever() - a.reorg_disconnects_total(),
+            b.total_outputs_ever() - b.reorg_disconnects_total()
+        );
+        let available = (a.total_outputs_ever() - a.reorg_disconnects_total()) as usize;
+        let ring_size = crate::constants::effective_ring_size(0, available);
+        // Space seeds by 2: point_bytes derives its scalar from `[seed | 1; 32]`,
+        // so consecutive seeds (150,151) would collapse to the SAME point and the
+        // check would (correctly) reject the duplicate ring member. Stepping by 2
+        // keeps every `seed | 1` distinct.
+        let members: Vec<RingMemberRef> = (0..ring_size)
+            .map(|i| RingMemberRef {
+                public_key: PublicKey::from_bytes(point_bytes(150 + i as u8 * 2)),
+                commitment: zero_blinding_commitment(1),
+            })
+            .collect();
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, members)],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        // v1_0_12_active = true selects the deterministic canonical-outputs path.
+        assert!(check_tx_ring_size_and_unique_members(&tx, &a, 0, true).is_ok());
+        assert!(check_tx_ring_size_and_unique_members(&tx, &b, 0, true).is_ok());
+    }
+
+    // ── verify_ring_signature: key-image binding (C-2) + cache ──────────
+
+    fn vrs_tx(input: TxInput) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    fn vrs_input(
+        key_image: KeyImage,
+        sig_ki: CryptoKeyImage,
+        ring: Vec<RingMemberRef>,
+        pseudo: [u8; 32],
+    ) -> TxInput {
+        let n = ring.len();
+        TxInput {
+            key_image,
+            ring_members: ring,
+            signature: ClsagSignature {
+                key_image: sig_ki,
+                commitment_image: SecretScalar::from_bytes([3; 32]).to_public(),
+                c1: [1u8; 32],
+                responses: vec![[2u8; 32]; n],
+            },
+            pseudo_output_commitment: pseudo,
+        }
+    }
+
+    #[test]
+    fn ring_signature_rejects_key_image_binding_mismatch_c2() {
+        // input.key_image ≠ signature.key_image must fail BEFORE the cache.
+        let sig_ki = CryptoKeyImage::from_secret(&SecretScalar::from_bytes([5; 32]));
+        let input = vrs_input(
+            KeyImage::from_bytes([0xAAu8; 32]), // deliberately different
+            sig_ki,
+            ring_of(2, 30),
+            point_bytes(210),
+        );
+        assert_ne!(*input.key_image.as_bytes(), input.signature.key_image.to_bytes());
+        let tx = vrs_tx(input.clone());
+        assert!(!verify_ring_signature(&tx, &input, 0));
+    }
+
+    #[test]
+    fn ring_signature_rejects_noncurve_ring_member() {
+        let secret = SecretScalar::from_bytes([6; 32]);
+        let cki = CryptoKeyImage::from_secret(&secret);
+        let ring = vec![RingMemberRef {
+            public_key: PublicKey::from_bytes([0xFFu8; 32]), // non-curve
+            commitment: point_bytes(5),
+        }];
+        let input = vrs_input(KeyImage::from_bytes(cki.to_bytes()), cki, ring, point_bytes(211));
+        let tx = vrs_tx(input.clone());
+        assert!(!verify_ring_signature(&tx, &input, 0));
+    }
+
+    #[test]
+    fn ring_signature_rejects_noncurve_pseudo_output() {
+        let secret = SecretScalar::from_bytes([7; 32]);
+        let cki = CryptoKeyImage::from_secret(&secret);
+        let input = vrs_input(
+            KeyImage::from_bytes(cki.to_bytes()),
+            cki,
+            ring_of(2, 30),
+            [0xFFu8; 32], // non-curve pseudo-output
+        );
+        let tx = vrs_tx(input.clone());
+        assert!(!verify_ring_signature(&tx, &input, 0));
+    }
+
+    #[test]
+    fn ring_signature_cache_hit_matches_cold_verdict() {
+        // Valid points but a bogus signature => clsag_verify fails and caches
+        // false. A second call hits the cache and must return the SAME verdict
+        // (no false-accept via a poisoned cache). Unique seeds avoid collision
+        // with the global cache from other tests.
+        let secret = SecretScalar::from_bytes([123; 32]);
+        let cki = CryptoKeyImage::from_secret(&secret);
+        let input = vrs_input(
+            KeyImage::from_bytes(cki.to_bytes()),
+            cki,
+            ring_of(2, 199),
+            point_bytes(198),
+        );
+        let tx = vrs_tx(input.clone());
+        let cold = verify_ring_signature(&tx, &input, 0);
+        let hit = verify_ring_signature(&tx, &input, 0);
+        assert_eq!(cold, hit, "cache hit must equal the cold verdict");
+        assert!(!cold, "a bogus signature must verify as false");
+    }
+
+    // ── verify_balance_proof: identity / non-curve / empty (FIX #44) ─────
+
+    fn bp_tx(inputs: Vec<TxInput>, outputs: Vec<TxOutput>) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs,
+            outputs,
+            fee: Amount::from_atomic(10),
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    fn bp_input(pseudo: [u8; 32]) -> TxInput {
+        input_with_ki_pseudo(5, pseudo)
+    }
+
+    fn input_with_ki_pseudo(ki_seed: u8, pseudo: [u8; 32]) -> TxInput {
+        let mut i = input_with_ki(ki_seed, ring_of(2, 30));
+        i.pseudo_output_commitment = pseudo;
+        i
+    }
+
+    #[test]
+    fn balance_proof_rejects_identity_pseudo_output_fix44() {
+        let tx = bp_tx(vec![bp_input([0u8; 32])], vec![a_valid_output()]);
+        assert!(!verify_balance_proof(&tx));
+    }
+
+    #[test]
+    fn balance_proof_rejects_noncurve_pseudo_output() {
+        let tx = bp_tx(vec![bp_input([0xFFu8; 32])], vec![a_valid_output()]);
+        assert!(!verify_balance_proof(&tx));
+    }
+
+    #[test]
+    fn balance_proof_rejects_noncurve_output_commitment() {
+        let mut out = a_valid_output();
+        out.commitment = [0xFFu8; 32];
+        let tx = bp_tx(vec![bp_input(point_bytes(212))], vec![out]);
+        assert!(!verify_balance_proof(&tx));
+    }
+
+    #[test]
+    fn balance_proof_rejects_empty_inputs_and_outputs() {
+        let empty_in = bp_tx(vec![], vec![a_valid_output()]);
+        assert!(!verify_balance_proof(&empty_in));
+        let empty_out = bp_tx(vec![bp_input(point_bytes(213))], vec![]);
+        assert!(!verify_balance_proof(&empty_out));
+    }
+
+    /// AUDIT (inflation guard, crypto H2): the POSITIVE + inflation direction of
+    /// the real enforced balance check. The tests above only reject malformed
+    /// points; this pins the core no-inflation property on VALID curve points —
+    /// a value-balanced RingCT tx (Σ pseudo-outputs == Σ outputs + fee·H)
+    /// verifies, and adding a single atomic unit of value to an output is
+    /// rejected. This is the property a supposed "balance check" must actually
+    /// have; the unused, RingCT-incorrect `crypto::audit::verify_commitment_balance`
+    /// (which summed raw input commitments, not pseudo-outputs) was removed so it
+    /// could not be mistaken for this enforced check.
+    #[test]
+    fn balance_proof_accepts_balanced_and_rejects_inflation() {
+        use crate::crypto::{BlindingFactor, PedersenCommitment};
+        // bp_tx fixes fee = Amount::from_atomic(10).
+        let fee = 10u64;
+        let out_value = 1_000u64;
+        // Shared blinding r so the G-components cancel; the pseudo-output carries
+        // out_value + fee, the output carries out_value.
+        let r = BlindingFactor::from_bytes({
+            let mut b = [0u8; 32];
+            b[0] = 7;
+            b[1] = 9;
+            b
+        });
+        let pseudo = PedersenCommitment::commit(out_value + fee, &r).to_bytes();
+        let out_commit = PedersenCommitment::commit(out_value, &r).to_bytes();
+
+        let mut out = a_valid_output();
+        out.commitment = out_commit;
+        let tx = bp_tx(vec![bp_input(pseudo)], vec![out.clone()]);
+        assert!(
+            verify_balance_proof(&tx),
+            "a value-balanced tx (Σpseudo == Σout + fee·H) must verify"
+        );
+
+        // Inflation: same blinding, but the output secretly encodes one extra
+        // atomic unit of value → Σout + fee·H no longer equals Σpseudo.
+        let mut inflated = out;
+        inflated.commitment = PedersenCommitment::commit(out_value + 1, &r).to_bytes();
+        let tx_bad = bp_tx(vec![bp_input(pseudo)], vec![inflated]);
+        assert!(
+            !verify_balance_proof(&tx_bad),
+            "an output carrying one extra atomic unit must be rejected as inflation"
+        );
+    }
+
+    // ── verify_output_range_proofs: coinbase skip + empty proof ──────────
+
+    #[test]
+    fn range_proofs_coinbase_is_skipped() {
+        let cb = coinbase_tx(vec![coinbase_output(1_000, zero_blinding_commitment(1_000))]);
+        assert!(verify_output_range_proofs(&cb, 0));
+    }
+
+    #[test]
+    fn range_proofs_empty_proof_rejected_for_non_coinbase() {
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, ring_of(2, 30))],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![], // empty
+            extra: vec![],
+        };
+        assert!(!verify_output_range_proofs(&tx, 0));
+    }
+
+    // ── validate_all_transactions / validate_transactions_parallel ──────
+
+    fn ok_coinbase() -> Transaction {
+        // Coinbase short-circuits validate_transaction after the version check.
+        coinbase_tx(vec![a_valid_output()])
+    }
+
+    fn bad_version_coinbase() -> Transaction {
+        let mut t = coinbase_tx(vec![a_valid_output()]);
+        t.version = 0; // rejected by check_tx_version_range before the coinbase early-return
+        t
+    }
+
+    #[test]
+    fn validate_all_transactions_reports_first_failing_index() {
+        let utxos = UtxoSet::new();
+        let ok = validate_all_transactions(&[ok_coinbase(), ok_coinbase()], &utxos, 0);
+        assert!(ok.is_ok(), "all-valid batch must pass: {:?}", ok.err());
+        let bad = validate_all_transactions(&[ok_coinbase(), bad_version_coinbase()], &utxos, 0);
+        let msg = bad.unwrap_err().to_string();
+        assert!(msg.contains("Transaction 1 failed"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_transactions_parallel_preserves_order() {
+        let utxos = UtxoSet::new();
+        let results =
+            validate_transactions_parallel(&[ok_coinbase(), bad_version_coinbase(), ok_coinbase()], &utxos, 0);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, 0);
+        assert!(results[0].1.is_ok());
+        assert_eq!(results[1].0, 1);
+        assert!(results[1].1.is_err());
+        assert_eq!(results[2].0, 2);
+        assert!(results[2].1.is_ok());
+    }
+
+    // ── validate_transaction_basic granular gates ───────────────────────
+
+    fn basic_transfer(ring_size: usize) -> Transaction {
+        let secret = SecretScalar::from_bytes([5; 32]);
+        let cki = CryptoKeyImage::from_secret(&secret);
+        let ring: Vec<RingMemberRef> = (0..ring_size)
+            .map(|i| RingMemberRef {
+                public_key: PublicKey::from_bytes(point_bytes((i as u8).wrapping_add(100))),
+                commitment: zero_blinding_commitment(1),
+            })
+            .collect();
+        let mut tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![TxInput {
+                key_image: KeyImage::from_bytes(cki.to_bytes()),
+                ring_members: ring,
+                signature: dummy_clsag(ring_size, cki),
+                pseudo_output_commitment: point_bytes(9),
+            }],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![0u8; 64],
+            extra: vec![],
+        };
+        // Generous fixed fee with headroom so mutations that grow the tx (extra
+        // input, larger memo/amount) can't trip FeeTooLow before the check under
+        // test. Far above any min_fee for these ~1 KiB txs, below MAX_TX_SIZE's.
+        tx.fee = Amount::from_atomic(1_000_000_000);
+        tx
+    }
+
+    #[test]
+    fn basic_rejects_ring_below_constitutional_minimum_and_missing_proof() {
+        // ring size below BOOTSTRAP_MIN_RING_SIZE
+        let small = basic_transfer(crate::constants::BOOTSTRAP_MIN_RING_SIZE - 1);
+        let err = validate_transaction_basic(&small).unwrap_err().to_string();
+        assert!(err.contains("UNCONSTITUTIONAL: ring size"), "got: {err}");
+        // missing range proof
+        let mut no_proof = basic_transfer(crate::constants::BOOTSTRAP_MIN_RING_SIZE);
+        no_proof.range_proof = vec![];
+        let err = validate_transaction_basic(&no_proof).unwrap_err().to_string();
+        assert!(err.contains("missing range proof"), "got: {err}");
+    }
+
+    #[test]
+    fn basic_rejects_zero_and_duplicate_key_images() {
+        // zero key image
+        let mut zero_ki = basic_transfer(crate::constants::BOOTSTRAP_MIN_RING_SIZE);
+        zero_ki.inputs[0].key_image = KeyImage::from_bytes([0u8; 32]);
+        let err = validate_transaction_basic(&zero_ki).unwrap_err().to_string();
+        assert!(err.contains("zero key image"), "got: {err}");
+        // duplicate key image within tx
+        let mut dup = basic_transfer(crate::constants::BOOTSTRAP_MIN_RING_SIZE);
+        let clone_in = dup.inputs[0].clone();
+        dup.inputs.push(clone_in);
+        let err = validate_transaction_basic(&dup).unwrap_err().to_string();
+        assert!(err.contains("duplicate key image within transaction"), "got: {err}");
+    }
+
+    #[test]
+    fn basic_rejects_output_field_size_violations() {
+        // empty encrypted_amount => OutputTooSmall
+        let mut empty_amt = basic_transfer(crate::constants::BOOTSTRAP_MIN_RING_SIZE);
+        empty_amt.outputs[0].encrypted_amount = vec![];
+        assert!(matches!(
+            validate_transaction_basic(&empty_amt),
+            Err(Error::OutputTooSmall { .. })
+        ));
+        // encrypted_amount > 64
+        let mut big_amt = basic_transfer(crate::constants::BOOTSTRAP_MIN_RING_SIZE);
+        big_amt.outputs[0].encrypted_amount = vec![0u8; 65];
+        let err = validate_transaction_basic(&big_amt).unwrap_err().to_string();
+        assert!(err.contains("encrypted_amount too large"), "got: {err}");
+        // encrypted_memo > 256
+        let mut big_memo = basic_transfer(crate::constants::BOOTSTRAP_MIN_RING_SIZE);
+        big_memo.outputs[0].encrypted_memo = vec![0u8; 257];
+        let err = validate_transaction_basic(&big_memo).unwrap_err().to_string();
+        assert!(err.contains("encrypted_memo too large"), "got: {err}");
     }
 }

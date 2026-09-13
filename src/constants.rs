@@ -401,6 +401,20 @@ pub fn block_version_at_height(height: u64) -> u8 {
     }
 }
 
+/// Highest block-header `version` this software recognizes. It is the maximum
+/// value `block_version_at_height` can ever return across all heights.
+///
+/// H1 (chain-brick defense): the header version has a lower bound
+/// (`check_header_version_min`) and a no-downgrade rule (`check_header_vs_prev`
+/// rejects `version < prev.version`), but WITHOUT an upper bound a single block
+/// declaring an arbitrarily high version (e.g. 255) ratchets the monotonic
+/// version floor above what any honest miner produces (`block_version_at_height`
+/// caps at 2). Every subsequent honest block then fails the no-downgrade rule
+/// and block production is permanently bricked. Rejecting `version >
+/// MAX_BLOCK_VERSION` closes that. Bump this in lockstep with any future block
+/// version added to `block_version_at_height` (a coordinated hard fork).
+pub const MAX_BLOCK_VERSION: u8 = 2;
+
 // =============================================================================
 // Algorithm Selection
 // =============================================================================

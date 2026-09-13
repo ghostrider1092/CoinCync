@@ -166,3 +166,11 @@ start-seed.ps1
 # ── Internal turnover manual — local only, contains no secrets but
 #    is an internal handover doc; keep it out of the public mirror ──
 /local-notebook/
+
+# audit tooling — generated/transient artifacts
+*.log
+audit.html
+audit-bundle.zip
+docs/audit/sections.json
+docs/audit/invariants.json
+docs/audit/.coverage-history.json

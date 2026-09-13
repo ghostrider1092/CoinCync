@@ -40,6 +40,13 @@ const CRITICAL_FILES: &[&str] = &[
     "src/consensus/pow.rs",
     "src/consensus/validation.rs",
     "src/emission/curve.rs",
+    // Added 2026-09-12: consensus-critical files that were missing from the lock.
+    "src/mainnet.rs",         // mainnet genesis + initial difficulty + params
+    "src/emission/mod.rs",    // calculate_block_reward (subsidy / halving schedule)
+    "src/consensus/header.rs", // BlockHeader layout + pow_binding (anchor binding)
+    "src/consensus/block.rs",  // block-level validation (merkle, coinbase, key images)
+    "src/primitives/hash.rs",  // merkle_root + difficulty<->target encoding
+    "src/consensus/finality.rs", // max-reorg-depth / finality rule
 ];
 
 fn main() {

@@ -10,6 +10,75 @@
 //! - The PoW hash is RandomX over `(anchor || nonce || tx_root)`, with the
 //!   RandomX VM key derived from the block height's epoch and the
 //!   chain-specific genesis hash.
+//!
+//! ## Audit map
+//! Each `§` is a code section below (banners tagged `§N`); it states the
+//! INVARIANT it guarantees, the THREAT it defends, and the TESTS that prove it.
+//! (Renders in `cargo doc`.)
+//!
+//! - **§1 `compute_full_anchor` / `SeqPadCache`** — INVARIANT: the anchor is a
+//!   deterministic pure function of `(prev_hash, height, timestamp, binding)`; the
+//!   cache is keyed on all four (binding included) so two headers sharing
+//!   `(prev,height,ts)` but differing in a bound field get DISTINCT anchors and
+//!   never collide; a cache hit is byte-identical to a cold compute; re-insert of
+//!   an existing key is a no-op. THREAT: audit §1 PoW/anchor malleability — folding
+//!   `pow_binding` into the anchor seed binds the otherwise-unbound header fields to
+//!   the proof of work. TESTS: `test_full_anchor_deterministic_and_distinct`,
+//!   `compute_full_anchor_cache_hit_is_byte_identical`, `seq_pad_cache_eviction`,
+//!   `seq_pad_cache_reinsert_of_existing_key_is_noop`.
+//! - **§2 `verify_pow`** — INVARIANT: recomputes the anchor from `binding` and
+//!   rejects `AnchorMismatch` / `AlgorithmMismatch` / `TargetNotMet`; a mutated bound
+//!   header field changes the binding → the claimed anchor no longer matches →
+//!   rejected BEFORE any RandomX hashing. THREAT: audit §1 block-hash malleability —
+//!   reusing a valid PoW with a mutated bound field (e.g. `miner_pubkey`). TESTS:
+//!   `verify_pow_rejects_anchor_mismatch`, `verify_pow_rejects_algorithm_mismatch`,
+//!   `verify_pow_rejects_mutated_bound_field_via_binding`,
+//!   `verify_pow_target_not_met_when_hash_exceeds_target`.
+//! - **§3 `PowAlgorithm`** — INVARIANT: single RandomX variant; `from_index` /
+//!   `at_height` always RandomX; `from_str_opt` parses `randomx`/`rx`/`0`
+//!   case-insensitively and returns `None` on unknown; `is_available` is true iff
+//!   the `randomx` feature is built. THREAT: a stray second algorithm silently
+//!   parsed/accepted. TESTS: `test_pow_algorithm_single`,
+//!   `pow_algorithm_from_str_opt_parses_aliases_case_insensitively`,
+//!   `pow_algorithm_is_available_matches_randomx_feature`.
+//! - **§4 `randomx_key_for_height` / `randomx_seed_for_height` /
+//!   `bind_randomx_genesis_for_network`** — INVARIANT: the epoch key is constant
+//!   within an epoch (`height / RANDOMX_KEY_EPOCH`) and changes at the boundary,
+//!   bound to the network's genesis; the public seed wrapper equals the internal
+//!   derivation; binding is write-once — a conflicting second call is ignored and
+//!   warns, the same genesis is idempotent. THREAT: **R-2 mainnet-vs-testnet genesis
+//!   binding divergence** (the rc3 incident) — deriving PoW from the wrong genesis
+//!   makes the whole chain look like network-wide invalid PoW. TESTS:
+//!   `randomx_key_constant_within_epoch_changes_at_boundary`,
+//!   `randomx_key_mainnet_vs_testnet_genesis_diverges`,
+//!   `bind_randomx_genesis_is_idempotent_and_conflicting_second_call_ignored`.
+//! - **§5 `compute_pow_hash` / `compute_pow_hash_batch`** — INVARIANT: RandomX-only
+//!   (hard error when the feature is disabled); the batched miner path is
+//!   bit-identical to the single-shot validator path; empty nonces short-circuit to
+//!   an empty vec. THREAT: miner/validator hash divergence, or a RandomX-less build
+//!   silently proceeding. TESTS: `compute_pow_hash_errs_without_randomx_feature`,
+//!   `compute_pow_hash_batch_empty_nonces_is_empty`,
+//!   `compute_pow_hash_batch_matches_single_shot`.
+//! - **§6 `prewarm_next_epoch_if_near`** — INVARIANT: no-op far from a boundary,
+//!   triggers within `LOOKAHEAD_BLOCKS` (64) of the next epoch; a promoted prewarmed
+//!   dataset is byte-identical to a synchronous build (same seed → same dataset), so
+//!   promotion changes only WHEN work happens, never any hash. THREAT: an
+//!   epoch-boundary dataset rebuild stalling the mining / IBD validation hot path.
+//!   TESTS: `prewarm_next_epoch_if_near_is_noop_far_from_boundary`,
+//!   `prewarm_next_epoch_if_near_smoke_near_boundary`, `prewarm_lands_and_promotes`.
+//! - **§7 `work_from_target` / `meets_difficulty`** — INVARIANT: `max_target/target`
+//!   over the upper 128 bits; a zero upper-128 target returns `u128::MAX` (no
+//!   div-by-zero); monotonic — a smaller target never yields less work;
+//!   `meets_difficulty` delegates to `Hash::meets_difficulty`. THREAT: fork-choice
+//!   work miscount or a div-by-zero on a crafted target. TESTS:
+//!   `work_from_target_max_zero_and_monotonic`, `meets_difficulty_delegates_to_hash`.
+//! - **§8 `randomx_cache` VM pool** — INVARIANT: per-thread VMs built from one
+//!   shared dataset produce identical hashes across N threads; an epoch rotation
+//!   rebuilds each thread's VM; full-mem and light modes are bit-identical. THREAT:
+//!   a cross-thread VM sharing bug or a full-mem/light mode divergence forking
+//!   consensus between miners and light verifiers. TESTS:
+//!   `concurrent_threads_consistent_hashes`, `epoch_rotation_rebuilds_thread_vms`,
+//!   `fast_light_equivalence`.
 
 use crate::constants::SEQ_PAD_ITERATIONS;
 use crate::error::Result;
@@ -19,7 +88,7 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 // =============================================================================
-// Sequential Padding Cache — FIFO eviction via VecDeque
+// §1  Sequential Padding Cache — FIFO eviction via VecDeque
 // =============================================================================
 
 /// Maximum cache entries to prevent unbounded memory growth.
@@ -143,7 +212,7 @@ pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
 static RANDOMX_WARNING_SHOWN: std::sync::Once = std::sync::Once::new();
 
 // =============================================================================
-// PowAlgorithm — single variant, kept as an enum so match arms across the
+// §3  PowAlgorithm — single variant, kept as an enum so match arms across the
 // codebase still compile without surgery.
 // =============================================================================
 
@@ -334,7 +403,7 @@ pub fn compute_pow_hash_batch(
 }
 
 // =============================================================================
-// RandomX Support
+// §4-§6, §8  RandomX Support (epoch key derivation, hash + batch, prewarm, VM pool)
 // =============================================================================
 
 #[cfg(feature = "randomx")]
@@ -1228,7 +1297,7 @@ pub fn prewarm_next_epoch_if_near(current_height: u64) {
 }
 
 // =============================================================================
-// Verification
+// §2, §7  Verification (verify_pow, PowVerifyError, work_from_target)
 // =============================================================================
 
 #[derive(Debug, Clone)]
@@ -1471,5 +1540,427 @@ mod tests {
             cache.get(&newest_key).is_some(),
             "newest entry should be present"
         );
+    }
+
+    // ---- compute_full_anchor: cache-hit byte-identical to cold compute ----
+    #[test]
+    fn compute_full_anchor_cache_hit_is_byte_identical() {
+        // Unlikely-to-collide key so the first call is a cold miss (compute +
+        // cache) and the second is a cache hit through SEQ_PAD_CACHE.
+        let prev = Hash::from_bytes([0x77u8; 32]);
+        let bind = Hash::from_bytes([0x88u8; 32]);
+        let height = 424_242u64;
+        let ts = 987_654_321u64;
+
+        let cold = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+        let hit = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+
+        assert_eq!(cold.sequential_hash, hit.sequential_hash);
+        assert_eq!(
+            cold.mixed_hash, hit.mixed_hash,
+            "cache hit must return byte-identical anchor to the cold compute"
+        );
+        assert_eq!(cold.height, hit.height);
+        assert_eq!(cold.timestamp, hit.timestamp);
+    }
+
+    // ---- verify_pow: anchor / algorithm / §1 binding rejection (no hashing) ----
+    #[test]
+    fn verify_pow_rejects_anchor_mismatch() {
+        let prev = Hash::from_bytes([0x11u8; 32]);
+        let tx_root = Hash::from_bytes([0x22u8; 32]);
+        let target = Hash::from_bytes([0xFFu8; 32]);
+        let bind = Hash::from_bytes([0x33u8; 32]);
+        let (height, ts, nonce) = (7u64, 1_000u64, 42u64);
+
+        // Recompute the real anchor, then flip a byte so the claimed anchor is
+        // wrong. This is rejected BEFORE any RandomX hashing, so the test needs
+        // no `randomx` feature.
+        let real = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+        let mut wb = [0u8; 32];
+        wb.copy_from_slice(real.mixed_hash.as_bytes());
+        wb[0] ^= 0xFF;
+        let forged_anchor = Hash::from_bytes(wb);
+
+        let res = verify_pow(
+            &prev, height, ts, nonce, &tx_root, &target, &forged_anchor, 0, &bind,
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("Anchor mismatch"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn verify_pow_rejects_algorithm_mismatch() {
+        let prev = Hash::from_bytes([0x11u8; 32]);
+        let tx_root = Hash::from_bytes([0x22u8; 32]);
+        let target = Hash::from_bytes([0xFFu8; 32]);
+        let bind = Hash::from_bytes([0x33u8; 32]);
+        let (height, ts, nonce) = (7u64, 1_000u64, 42u64);
+
+        // Correct anchor but a non-zero claimed algorithm: rejected at the algo
+        // check, before hashing.
+        let real = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+        let res = verify_pow(
+            &prev,
+            height,
+            ts,
+            nonce,
+            &tx_root,
+            &target,
+            &real.mixed_hash,
+            1, // claimed_algo != RandomX(0)
+            &bind,
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("Algorithm mismatch"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn verify_pow_rejects_mutated_bound_field_via_binding() {
+        // Audit §1 malleability fix: reuse a valid PoW's anchor but present a
+        // DIFFERENT header binding (as if a bound header field like miner_pubkey
+        // was mutated after mining). The validator recomputes the anchor from the
+        // new binding, which no longer matches the claimed anchor -> AnchorMismatch.
+        // Caught before any RandomX hash, so no feature gate needed.
+        let prev = Hash::from_bytes([0x44u8; 32]);
+        let tx_root = Hash::from_bytes([0x55u8; 32]);
+        let target = Hash::from_bytes([0xFFu8; 32]);
+        let (height, ts, nonce) = (9u64, 2_000u64, 123u64);
+
+        let bind_original = Hash::from_bytes([0xA0u8; 32]);
+        let bind_mutated = Hash::from_bytes([0xA1u8; 32]);
+
+        let mined_anchor = compute_full_anchor(&prev, height, ts, &bind_original).unwrap();
+
+        let res = verify_pow(
+            &prev,
+            height,
+            ts,
+            nonce,
+            &tx_root,
+            &target,
+            &mined_anchor.mixed_hash, // reused from the original solution
+            0,
+            &bind_mutated, // attacker mutated a bound field
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("Anchor mismatch"),
+            "mutating a bound header field must break the anchor binding: {err}"
+        );
+    }
+
+    // ---- PowAlgorithm::from_str_opt / is_available ----
+    #[test]
+    fn pow_algorithm_from_str_opt_parses_aliases_case_insensitively() {
+        assert_eq!(
+            PowAlgorithm::from_str_opt("randomx"),
+            Some(PowAlgorithm::RandomX)
+        );
+        assert_eq!(
+            PowAlgorithm::from_str_opt("RandomX"),
+            Some(PowAlgorithm::RandomX),
+            "case-insensitive"
+        );
+        assert_eq!(PowAlgorithm::from_str_opt("rx"), Some(PowAlgorithm::RandomX));
+        assert_eq!(PowAlgorithm::from_str_opt("RX"), Some(PowAlgorithm::RandomX));
+        assert_eq!(PowAlgorithm::from_str_opt("0"), Some(PowAlgorithm::RandomX));
+        assert_eq!(PowAlgorithm::from_str_opt("yescrypt"), None);
+        assert_eq!(PowAlgorithm::from_str_opt(""), None);
+    }
+
+    #[test]
+    fn pow_algorithm_is_available_matches_randomx_feature() {
+        let a = PowAlgorithm::RandomX;
+        #[cfg(feature = "randomx")]
+        assert!(a.is_available(), "randomx feature enabled => available");
+        #[cfg(not(feature = "randomx"))]
+        assert!(!a.is_available(), "randomx feature disabled => unavailable");
+    }
+
+    // ---- SeqPadCache::insert re-insert no-op ----
+    #[test]
+    fn seq_pad_cache_reinsert_of_existing_key_is_noop() {
+        let mut cache = SeqPadCache::new();
+        let key = (
+            Hash::from_bytes([1u8; 32]),
+            1u64,
+            2u64,
+            Hash::from_bytes([3u8; 32]),
+        );
+        let first = Anchor {
+            sequential_hash: Hash::from_bytes([0xA1u8; 32]),
+            mixed_hash: Hash::from_bytes([0xA2u8; 32]),
+            algorithm: PowAlgorithm::RandomX,
+            height: 1,
+            timestamp: 2,
+        };
+        cache.insert(key, first.clone());
+        let order_len = cache.insertion_order.len();
+        let map_len = cache.anchors.len();
+
+        // Re-insert the same key with a DIFFERENT value: must be a no-op — neither
+        // grows the FIFO nor overwrites the stored anchor.
+        let second = Anchor {
+            sequential_hash: Hash::from_bytes([0xB1u8; 32]),
+            mixed_hash: Hash::from_bytes([0xB2u8; 32]),
+            algorithm: PowAlgorithm::RandomX,
+            height: 99,
+            timestamp: 99,
+        };
+        cache.insert(key, second);
+
+        assert_eq!(
+            cache.insertion_order.len(),
+            order_len,
+            "re-insert must not grow the FIFO order"
+        );
+        assert_eq!(cache.anchors.len(), map_len);
+        assert_eq!(
+            cache.get(&key).unwrap().mixed_hash,
+            first.mixed_hash,
+            "existing entry must be preserved, not overwritten"
+        );
+    }
+
+    // ---- work_from_target: boundaries + monotonicity ----
+    #[test]
+    fn work_from_target_max_zero_and_monotonic() {
+        // max_target = all-0xFF => upper 128 bits == u128::MAX => work == 1.
+        let max_t = Hash::from_bytes([0xFFu8; 32]);
+        assert_eq!(work_from_target(&max_t), 1, "max target => minimal work (1)");
+
+        // Upper 128 bits all zero (only a low byte set) => guarded to u128::MAX.
+        let mut low_only = [0u8; 32];
+        low_only[16] = 1;
+        assert_eq!(
+            work_from_target(&Hash::from_bytes(low_only)),
+            u128::MAX,
+            "zero upper-128 target must return u128::MAX (no div-by-zero)"
+        );
+
+        // All-zero target likewise => u128::MAX.
+        assert_eq!(work_from_target(&Hash::from_bytes([0u8; 32])), u128::MAX);
+
+        // Monotonicity: a smaller target yields >= work than a larger one.
+        let mut small_bytes = [0u8; 32];
+        small_bytes[15] = 0x01; // upper-128 value == 1 => work == u128::MAX
+        let small_t = Hash::from_bytes(small_bytes);
+        let mut big_bytes = [0u8; 32];
+        big_bytes[0] = 0xFF; // upper-128 value huge => tiny work
+        let big_t = Hash::from_bytes(big_bytes);
+        assert!(
+            work_from_target(&small_t) >= work_from_target(&big_t),
+            "smaller target must never yield less work"
+        );
+        assert!(work_from_target(&big_t) >= 1);
+    }
+
+    // ---- meets_difficulty free fn delegates to Hash::meets_difficulty ----
+    #[test]
+    fn meets_difficulty_delegates_to_hash() {
+        let h = Hash::from_bytes([0x10u8; 32]);
+        let t1 = Hash::from_bytes([0x80u8; 32]);
+        let t2 = Hash::from_bytes([0x01u8; 32]);
+        assert_eq!(meets_difficulty(&h, &t1), h.meets_difficulty(&t1));
+        assert_eq!(meets_difficulty(&h, &t2), h.meets_difficulty(&t2));
+    }
+
+    // ---- compute_pow_hash: hard error when randomx feature is disabled ----
+    #[cfg(not(feature = "randomx"))]
+    #[test]
+    fn compute_pow_hash_errs_without_randomx_feature() {
+        let res = compute_pow_hash(
+            PowAlgorithm::RandomX,
+            &Hash::zero(),
+            0,
+            &Hash::zero(),
+            0,
+        );
+        assert!(
+            res.is_err(),
+            "RandomX-only build must error when the feature is off"
+        );
+    }
+
+    // ---- compute_pow_hash_batch: empty nonces => empty vec (no hashing) ----
+    #[cfg(feature = "randomx")]
+    #[test]
+    fn compute_pow_hash_batch_empty_nonces_is_empty() {
+        let out = compute_pow_hash_batch(
+            PowAlgorithm::RandomX,
+            &Hash::zero(),
+            &[],
+            &Hash::zero(),
+            0,
+        )
+        .unwrap();
+        assert!(out.is_empty(), "empty nonce list must short-circuit to empty");
+    }
+
+    // ---- compute_pow_hash_batch: batch == per-nonce single-shot (real RandomX) ----
+    // #[ignore]: computes real RandomX hashes (builds a cache/dataset), same as the
+    // other randomx-gated tests here. Run with:
+    //   cargo test -p coincync --features "randomx testnet" -- --ignored batch_matches_single_shot
+    #[cfg(feature = "randomx")]
+    #[test]
+    #[ignore]
+    fn compute_pow_hash_batch_matches_single_shot() {
+        let anchor = Hash::from_bytes([0x5Au8; 32]);
+        let tx_root = Hash::from_bytes([0x6Bu8; 32]);
+        let height = 12u64;
+        let nonces = [1u64, 2, 3, 100];
+
+        let batch =
+            compute_pow_hash_batch(PowAlgorithm::RandomX, &anchor, &nonces, &tx_root, height)
+                .unwrap();
+        assert_eq!(batch.len(), nonces.len());
+        for (i, &nonce) in nonces.iter().enumerate() {
+            let single =
+                compute_pow_hash(PowAlgorithm::RandomX, &anchor, nonce, &tx_root, height).unwrap();
+            assert_eq!(batch[i], single, "batch output must equal single-shot at nonce {nonce}");
+        }
+    }
+
+    // ---- randomx key derivation: constant within epoch, changes at boundary ----
+    #[cfg(feature = "randomx")]
+    #[test]
+    fn randomx_key_constant_within_epoch_changes_at_boundary() {
+        let k0 = randomx_key_for_height(0);
+        let k_epoch_end = randomx_key_for_height(RANDOMX_KEY_EPOCH - 1);
+        assert_eq!(k0, k_epoch_end, "key is constant within an epoch");
+
+        let k_next = randomx_key_for_height(RANDOMX_KEY_EPOCH);
+        assert_ne!(k0, k_next, "key must change at the epoch boundary");
+
+        // Public wrapper must equal the internal derivation.
+        assert_eq!(randomx_seed_for_height(0), k0);
+        assert_eq!(randomx_seed_for_height(RANDOMX_KEY_EPOCH), k_next);
+    }
+
+    // ---- randomx key derivation: mainnet vs testnet genesis divergence (R-2) ----
+    #[cfg(feature = "randomx")]
+    #[test]
+    fn randomx_key_mainnet_vs_testnet_genesis_diverges() {
+        // The R-2 incident: forgetting to bind the network's genesis derived PoW
+        // keys from the wrong genesis. The two networks' genesis constants MUST
+        // differ, and that difference MUST flow into the epoch key.
+        assert_ne!(
+            crate::mainnet::MAINNET_GENESIS_HASH,
+            crate::testnet::TESTNET_GENESIS_HASH,
+            "mainnet and testnet genesis hashes must differ"
+        );
+
+        // Exercising the genesis->key path requires the unbound fallback (which
+        // reads COINCYNC_NETWORK). If some other test already bound the genesis
+        // OnceLock in this process, the fallback can't fire — skip the key-level
+        // assertion rather than produce a misleading result.
+        if RANDOMX_GENESIS_BYTES.get().is_some() {
+            eprintln!(
+                "randomx genesis already bound in this process; \
+                 skipping the fallback key-divergence check"
+            );
+            return;
+        }
+
+        let saved = std::env::var("COINCYNC_NETWORK").ok();
+        std::env::set_var("COINCYNC_NETWORK", "testnet");
+        let key_testnet = randomx_key_for_height(0);
+        std::env::set_var("COINCYNC_NETWORK", "mainnet");
+        let key_mainnet = randomx_key_for_height(0);
+        match saved {
+            Some(v) => std::env::set_var("COINCYNC_NETWORK", v),
+            None => std::env::remove_var("COINCYNC_NETWORK"),
+        }
+
+        assert_ne!(
+            key_testnet, key_mainnet,
+            "mainnet and testnet must derive different RandomX epoch keys"
+        );
+    }
+
+    // ---- bind_randomx_genesis_for_network: idempotent, conflicting 2nd call ignored ----
+    #[cfg(feature = "randomx")]
+    #[test]
+    fn bind_randomx_genesis_is_idempotent_and_conflicting_second_call_ignored() {
+        use crate::config::NetworkType;
+
+        // First bind sets the OnceLock (if not already set by another test).
+        bind_randomx_genesis_for_network(NetworkType::Testnet);
+        let after_first = *RANDOMX_GENESIS_BYTES
+            .get()
+            .expect("genesis must be bound after the first call");
+
+        // A conflicting second bind (different network) is ignored — the stored
+        // value never changes once set.
+        bind_randomx_genesis_for_network(NetworkType::Mainnet);
+        let after_conflict = *RANDOMX_GENESIS_BYTES.get().unwrap();
+        assert_eq!(
+            after_first, after_conflict,
+            "a conflicting second bind must be ignored (OnceLock is write-once)"
+        );
+
+        // Idempotent: re-binding the same genesis leaves it unchanged.
+        bind_randomx_genesis_for_network(NetworkType::Testnet);
+        assert_eq!(*RANDOMX_GENESIS_BYTES.get().unwrap(), after_conflict);
+    }
+
+    // ---- prewarm_next_epoch_if_near: no-op far from a boundary ----
+    #[cfg(feature = "randomx")]
+    #[test]
+    fn prewarm_next_epoch_if_near_is_noop_far_from_boundary() {
+        // Height 0 is a full epoch (2048) away from the next boundary, far beyond
+        // the 64-block lookahead, so this must NOT spawn a build — just return.
+        prewarm_next_epoch_if_near(0);
+        prewarm_next_epoch_if_near(RANDOMX_KEY_EPOCH / 2);
+        // Reaching here without panicking is the assertion; no dataset was built.
+    }
+
+    // ---- prewarm_next_epoch_if_near: smoke test within the lookahead window ----
+    // #[ignore]: crossing into the lookahead window spawns a real background
+    // RandomX dataset build. The prewarm/promotion state is private to
+    // `randomx_cache`, so this only asserts the near-boundary call doesn't panic;
+    // landing+promotion is covered by `randomx_cache::tests::prewarm_lands_and_promotes`.
+    #[cfg(feature = "randomx")]
+    #[test]
+    #[ignore]
+    fn prewarm_next_epoch_if_near_smoke_near_boundary() {
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        // One block before the first epoch boundary => within the 64-block window.
+        prewarm_next_epoch_if_near(RANDOMX_KEY_EPOCH - 1);
+        // Give the background builder a moment; nothing to assert beyond no-panic.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // ---- verify_pow: TargetNotMet when the hash exceeds an impossible target ----
+    // #[ignore]: computes a real RandomX hash. Uses an all-zero target (which no
+    // non-zero hash can meet) so it exercises the TargetNotMet branch WITHOUT
+    // mining a nonce. A genuinely-mined Ok(()) verification needs a miner fixture
+    // and is deferred.
+    #[cfg(feature = "randomx")]
+    #[test]
+    #[ignore]
+    fn verify_pow_target_not_met_when_hash_exceeds_target() {
+        let prev = Hash::from_bytes([0x21u8; 32]);
+        let tx_root = Hash::from_bytes([0x22u8; 32]);
+        let bind = Hash::from_bytes([0x23u8; 32]);
+        let (height, ts, nonce) = (5u64, 1_000u64, 7u64);
+
+        let anchor = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+        let impossible_target = Hash::from_bytes([0u8; 32]);
+
+        let res = verify_pow(
+            &prev,
+            height,
+            ts,
+            nonce,
+            &tx_root,
+            &impossible_target,
+            &anchor.mixed_hash,
+            0,
+            &bind,
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("meet target"), "unexpected error: {err}");
     }
 }
