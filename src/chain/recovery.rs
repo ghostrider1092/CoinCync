@@ -59,6 +59,13 @@ impl Blockchain {
             inner.stats.total_transactions = genesis.transactions.len() as u64;
             inner.stats.tip_hash = hash;
             inner.stats.total_supply = calculate_block_reward(0).as_atomic() as u128;
+            // Canonical cumulative-work base at genesis. This MUST be set here so a
+            // freshly initialised node reports the same total_difficulty (1) that
+            // it would report after a restart (the saved DB state below is 1, and
+            // recompute_total_difficulty(0) == 1). Omitting it left inner.stats at
+            // the default 0, so a fresh node advertised total_difficulty=0 to peers
+            // in ChainWorkMessage while a restarted node advertised 1.
+            inner.stats.total_difficulty = 1;
             // Genesis carries no fees (height 0 is below FEE_DISTRIBUTION_HEIGHT
             // and has no non-coinbase txs), so the burn accumulator starts at 0.
             inner.stats.total_burned = 0;

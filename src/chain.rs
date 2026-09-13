@@ -3930,6 +3930,15 @@ mod tests {
         let total_blocks = chain.stats().total_blocks;
         let utxos = chain.utxo_count();
 
+        // A freshly initialised node must already carry the canonical genesis
+        // cumulative-work base — identical to what a restart reports below (this
+        // pins the init_genesis total_difficulty fix).
+        assert_eq!(
+            chain.stats().total_difficulty,
+            1,
+            "fresh genesis chain must carry the canonical total_difficulty base"
+        );
+
         // Reopen over the same DB — must Load and restore the expected chain.
         let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
         assert_eq!(
@@ -3945,15 +3954,7 @@ mod tests {
             "block count not restored on reopen"
         );
         assert_eq!(reloaded.utxo_count(), utxos, "utxo set not restored on reopen");
-
-        // NOTE (separate pre-existing quirk, not a refactor regression): at
-        // genesis, `init_genesis` populates every `inner.stats` field EXCEPT
-        // `total_difficulty` (left at the default 0), while it saves the
-        // canonical base `1` to the DB. So a freshly-initialised node reports
-        // total_difficulty=0 but the same node reports the canonical 1 after a
-        // reload (see `recompute_total_difficulty`). This asserts the reloaded
-        // value is the canonical base; the fresh-init 0 is tracked as a separate
-        // behavior fix (issue #108 keeps fixes out of the refactor).
+        // Fresh-init and reloaded now agree on the canonical genesis base.
         assert_eq!(
             reloaded.stats().total_difficulty,
             1,
