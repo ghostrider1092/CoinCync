@@ -25,8 +25,34 @@ use rand::{CryptoRng, RngCore};
 
 use crate::crypto::ClsagSignature;
 use crate::error::{Error, Result};
-use crate::primitives::KeyImage;
+use crate::primitives::{KeyImage, PublicKey, SecretKey};
 use crate::transaction::{ClsagSignRequest, OneTimeKeyRef, TxSigner};
+
+/// Take the first 32 bytes of a device response as a fixed array.
+fn take_32(resp: &[u8]) -> Result<[u8; 32]> {
+    if resp.len() < 32 {
+        return Err(Error::CryptoError(
+            "device response too short (need 32 bytes)".into(),
+        ));
+    }
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&resp[..32]);
+    Ok(a)
+}
+
+/// Parse a 64-byte device response as two on-curve public keys.
+fn split_two_pubkeys(resp: &[u8]) -> Result<(PublicKey, PublicKey)> {
+    if resp.len() < 64 {
+        return Err(Error::CryptoError(
+            "device pubkey response too short (need 64 bytes)".into(),
+        ));
+    }
+    let first = PublicKey::from_bytes_checked(take_32(&resp[0..32])?)
+        .map_err(|_| Error::CryptoError("device public key #1 not on curve".into()))?;
+    let second = PublicKey::from_bytes_checked(take_32(&resp[32..64])?)
+        .map_err(|_| Error::CryptoError("device public key #2 not on curve".into()))?;
+    Ok((first, second))
+}
 
 /// APDU class byte for the CoinCync device app.
 pub const CLA: u8 = 0xE0;
@@ -135,6 +161,42 @@ impl<T: LedgerTransport> HardwareSigner<T> {
         }
         Ok((resp[0], resp[1], resp[2]))
     }
+
+    // ── read-only device ops (slice 3) ──────────────────────────────────────
+    // These fetch PUBLIC material the host needs for scanning and address
+    // display. The spend SECRET never leaves the device; the view secret is
+    // released only after on-device user confirmation.
+
+    /// Device-held public spend and view keys for this signer's account
+    /// (`GET_PUBLIC_KEYS`). Returns `(spend_public, view_public)`.
+    pub fn account_pubkeys(&self) -> Result<(PublicKey, PublicKey)> {
+        let resp = self.exchange(&Apdu::new(
+            ins::GET_PUBLIC_KEYS,
+            0,
+            0,
+            self.account.to_le_bytes().to_vec(),
+        ))?;
+        split_two_pubkeys(&resp)
+    }
+
+    /// Public keys `(D_i, C_i)` for a subaddress under `account`
+    /// (`GET_SUBADDRESS`).
+    pub fn subaddress_pubkeys(&self, account: u32, index: u32) -> Result<(PublicKey, PublicKey)> {
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&account.to_le_bytes());
+        data.extend_from_slice(&index.to_le_bytes());
+        let resp = self.exchange(&Apdu::new(ins::GET_SUBADDRESS, 0, 0, data))?;
+        split_two_pubkeys(&resp)
+    }
+
+    /// The account VIEW secret key for host-side output scanning
+    /// (`GET_VIEW_KEY`). Standard for Monero-family hardware wallets: the host
+    /// scans with the view key while the device holds the spend key and does all
+    /// signing. The device releases this only after on-screen user confirmation.
+    pub fn view_secret(&self) -> Result<SecretKey> {
+        let resp = self.exchange(&Apdu::new(ins::GET_VIEW_KEY, 0, 0, Vec::new()))?;
+        Ok(SecretKey::from_bytes(take_32(&resp)?))
+    }
 }
 
 impl<T: LedgerTransport> TxSigner for HardwareSigner<T> {
@@ -201,5 +263,52 @@ mod tests {
             response: Vec::new(),
         });
         assert!(signer.key_image(&OneTimeKeyRef { secret: None }).is_err());
+    }
+
+    #[test]
+    fn account_pubkeys_parses_two_oncurve_points() {
+        let spend = SecretKey::from_bytes([3u8; 32]).public_key();
+        let view = SecretKey::from_bytes([4u8; 32]).public_key();
+        let mut resp = Vec::new();
+        resp.extend_from_slice(spend.as_bytes());
+        resp.extend_from_slice(view.as_bytes());
+        let signer = HardwareSigner::new(MockTransport { response: resp });
+        let (s, v) = signer.account_pubkeys().unwrap();
+        assert_eq!(s.as_bytes(), spend.as_bytes());
+        assert_eq!(v.as_bytes(), view.as_bytes());
+    }
+
+    #[test]
+    fn subaddress_pubkeys_parses_device_response() {
+        let d = SecretKey::from_bytes([5u8; 32]).public_key();
+        let c = SecretKey::from_bytes([6u8; 32]).public_key();
+        let mut resp = Vec::new();
+        resp.extend_from_slice(d.as_bytes());
+        resp.extend_from_slice(c.as_bytes());
+        let signer = HardwareSigner::new(MockTransport { response: resp });
+        let (di, ci) = signer.subaddress_pubkeys(0, 7).unwrap();
+        assert_eq!((di.as_bytes(), ci.as_bytes()), (d.as_bytes(), c.as_bytes()));
+    }
+
+    #[test]
+    fn view_secret_parses_32_bytes() {
+        let signer = HardwareSigner::new(MockTransport {
+            response: vec![9u8; 32],
+        });
+        assert_eq!(signer.view_secret().unwrap().as_bytes(), &[9u8; 32]);
+    }
+
+    #[test]
+    fn pubkey_response_rejects_offcurve_or_short() {
+        // 64 bytes of non-point data must be rejected, not silently accepted.
+        let signer = HardwareSigner::new(MockTransport {
+            response: vec![0xFFu8; 64],
+        });
+        assert!(signer.account_pubkeys().is_err());
+        // A too-short response is rejected as well.
+        let short = HardwareSigner::new(MockTransport {
+            response: vec![1u8; 10],
+        });
+        assert!(short.account_pubkeys().is_err());
     }
 }
