@@ -66,10 +66,15 @@
 //!   `transfer_with_zero_commitment_rejected`, `transfer_with_no_inputs_rejected`.
 //! - **§7 `check_block_duplicate_tx_hashes`, `check_block_duplicate_key_images`
 //!   + cross-tx stealth loop (inline, v1.0.12)** — INVARIANT: no tx hash, key
-//!   image, or stealth address repeats anywhere in the block. THREAT: in-block
-//!   double-spend; cross-tx duplicate-stealth lookup-poisoning (cfc680b7).
-//!   TESTS: `mempool_rejects_duplicate_keyimage`,
-//!   `duplicate_key_images_in_same_tx_rejected` (cross-tx stealth flagged MISSING).
+//!   image, or stealth address repeats anywhere in the block; the in-block
+//!   duplicate-key-image scan is done exactly ONCE (issue #105 collapsed a
+//!   redundant second HashSet re-scan; iterate tx inputs directly, no per-tx
+//!   `Vec<KeyImage>`). THREAT: in-block double-spend; cross-tx duplicate-stealth
+//!   lookup-poisoning (cfc680b7).
+//!   TESTS: `check_block_duplicate_key_images_across_two_txs_rejected`,
+//!   `duplicate_key_image_in_block_is_reported_exactly_once_105`,
+//!   `duplicate_key_image_within_one_tx_in_block_rejected_105`,
+//!   `mempool_rejects_duplicate_keyimage` (cross-tx stealth flagged MISSING).
 //! - **§8 dynamic congestion fee (inline)** — INVARIANT: each non-coinbase tx
 //!   pays ≥ `size·MIN_FEE_PER_BYTE·congestion_multiplier/100`, computed with
 //!   `checked_mul` and the SHARED `fee_market::congestion_multiplier` table.
@@ -651,29 +656,19 @@ pub fn validate_block_with_checkpoint_for_network(
     }
 
     check_block_duplicate_tx_hashes(&tx_hashes, &mut result);
-    check_block_duplicate_key_images(block, &mut result);
 
     // SECURITY: Two-phase key image validation:
     //
-    // Phase 1 (here): Check for duplicate key images WITHIN this block
-    // - Fast O(n) check using HashSet
-    // - Rejects blocks with internal double-spends early
-    // - Avoids expensive cryptographic verification on obviously invalid blocks
+    // Phase 1 (here): reject duplicate key images WITHIN this block — a fast
+    // O(n) HashSet scan done ONCE by `check_block_duplicate_key_images`. Rejects
+    // internal double-spends before any expensive cryptographic verification.
     //
-    // Phase 2 (in validate_transaction): Check against GLOBAL UTXO set
-    // - Verifies each key image isn't already spent in the chain
-    // - Done via utxos.contains_key_image() in validate_transaction
-    // - Catches attempts to spend already-spent outputs
+    // Phase 2 (in validate_transaction): check against the GLOBAL UTXO set —
+    // `utxos.contains_key_image()` verifies each key image isn't already spent
+    // on-chain. Catches attempts to spend already-spent outputs.
     //
     // Both phases are required for full security.
-    let mut seen_key_images = std::collections::HashSet::new();
-    for tx in &block.transactions {
-        for ki in tx.key_images() {
-            if !seen_key_images.insert(ki) {
-                result.add_error(format!("Duplicate key image in block: {}", ki));
-            }
-        }
-    }
+    check_block_duplicate_key_images(block, &mut result);
 
     // §7  v1.0.12 protocol upgrade (gated by HARD_FORK_V1_0_12_HEIGHT):
     // reject blocks where two distinct txs create the same stealth
@@ -1086,13 +1081,16 @@ fn check_block_duplicate_tx_hashes(tx_hashes: &[Hash], result: &mut BlockValidat
 /// key images. Phase 2 (per-tx UTXO check) runs in `validate_transaction`.
 ///
 /// Fast O(n) HashSet check — rejects blocks with internal double-spends
-/// before expensive cryptographic verification.
+/// before expensive cryptographic verification. This is the SINGLE in-block
+/// duplicate-key-image scan for the whole block-validation path; iterate tx
+/// inputs directly (borrow each `key_image`) rather than materializing a
+/// `Vec<KeyImage>` per tx via `Transaction::key_images()`.
 fn check_block_duplicate_key_images(block: &Block, result: &mut BlockValidation) {
     let mut seen = std::collections::HashSet::new();
     for tx in &block.transactions {
-        for ki in tx.key_images() {
-            if !seen.insert(ki) {
-                result.add_error(format!("Duplicate key image in block: {}", ki));
+        for input in &tx.inputs {
+            if !seen.insert(&input.key_image) {
+                result.add_error(format!("Duplicate key image in block: {}", input.key_image));
             }
         }
     }
@@ -3493,6 +3491,75 @@ mod tests {
             extra: vec![2],
         };
         let block = Block::new(block_at_height(1).header, vec![tx1, tx2]);
+        let mut result = BlockValidation::ok();
+        check_block_duplicate_key_images(&block, &mut result);
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Duplicate key image in block")));
+    }
+
+    /// Regression (issue #105): the in-block duplicate-key-image scan was done
+    /// TWICE (a dedicated helper plus an inline HashSet re-scan), so a duplicate
+    /// was reported twice. After collapsing to the single helper, a duplicate
+    /// must still be rejected AND reported EXACTLY ONCE — this pins the redundant
+    /// second scan out, and guards against it silently returning.
+    #[test]
+    fn duplicate_key_image_in_block_is_reported_exactly_once_105() {
+        let shared_ring = ring_of(2, 30);
+        let tx1 = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, shared_ring.clone())],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![1],
+        };
+        let tx2 = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, shared_ring)],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![2],
+        };
+        let block = Block::new(block_at_height(1).header, vec![tx1, tx2]);
+        let mut result = BlockValidation::ok();
+        check_block_duplicate_key_images(&block, &mut result);
+        assert!(!result.valid, "a duplicated key image must reject the block");
+        let dup_errors = result
+            .errors
+            .iter()
+            .filter(|e| e.contains("Duplicate key image in block"))
+            .count();
+        assert_eq!(
+            dup_errors, 1,
+            "the collapsed single scan must report the duplicate exactly once, got {dup_errors}: {:?}",
+            result.errors
+        );
+    }
+
+    /// Regression (issue #105): a key image duplicated by two INPUTS OF THE SAME
+    /// tx within the block is still caught by the single scan (iterating tx
+    /// inputs directly, as the refactor now does).
+    #[test]
+    fn duplicate_key_image_within_one_tx_in_block_rejected_105() {
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![
+                input_with_ki(9, ring_of(2, 30)),
+                input_with_ki(9, ring_of(2, 50)), // same ki seed → same key image
+            ],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![7],
+        };
+        let block = Block::new(block_at_height(1).header, vec![tx]);
         let mut result = BlockValidation::ok();
         check_block_duplicate_key_images(&block, &mut result);
         assert!(!result.valid);
