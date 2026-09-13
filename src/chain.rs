@@ -3868,6 +3868,99 @@ mod tests {
         );
     }
 
+    /// #108 (failure boundary): a failed block application must leave chain state
+    /// byte-for-behavior unchanged. A block whose parent is unknown is rejected
+    /// (Orphan) before any state mutation, so tip, height, cumulative work, block
+    /// count and the UTXO set must all be exactly as they were.
+    #[test]
+    fn failed_block_application_leaves_chain_state_unchanged_108() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        chain.init_genesis().unwrap();
+
+        let tip_before = chain.tip().hash;
+        let height_before = chain.height();
+        let stats_before = chain.stats();
+        let utxo_before = chain.utxo_count();
+
+        // Unknown parent → rejected without touching state.
+        let orphan = walk_block(5, Hash::from_bytes([0xAB; 32]), 99);
+        let status = chain.add_block(orphan).unwrap();
+        assert!(
+            matches!(status, BlockStatus::Orphan | BlockStatus::Invalid(_)),
+            "a bad-parent block must be rejected (Orphan/Invalid), got {status:?}"
+        );
+
+        assert_eq!(chain.tip().hash, tip_before, "tip moved after a failed apply");
+        assert_eq!(chain.height(), height_before, "height moved after a failed apply");
+        assert_eq!(
+            chain.stats().total_difficulty,
+            stats_before.total_difficulty,
+            "total_difficulty moved after a failed apply"
+        );
+        assert_eq!(
+            chain.stats().total_blocks,
+            stats_before.total_blocks,
+            "total_blocks moved after a failed apply"
+        );
+        assert_eq!(chain.utxo_count(), utxo_before, "utxo set changed after a failed apply");
+    }
+
+    /// #108 (reopen): reopening the database restores the expected chain. After
+    /// genesis init, a fresh `Blockchain` over the SAME db must load (not fresh)
+    /// and report the identical tip, height, cumulative work, supply and UTXO
+    /// count via its public getters — i.e. the recovery path (load_from_database
+    /// + rebuild_utxo_set + recompute_total_difficulty + tip restore, now in
+    /// chain::recovery) reconstructs state faithfully.
+    #[test]
+    fn reopening_database_restores_expected_chain_108() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        assert_eq!(
+            chain.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Fresh
+        );
+        chain.init_genesis().unwrap();
+        let tip = chain.tip().hash;
+        let height = chain.height();
+        let supply = chain.stats().total_supply;
+        let total_blocks = chain.stats().total_blocks;
+        let utxos = chain.utxo_count();
+
+        // Reopen over the same DB — must Load and restore the expected chain.
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        assert_eq!(
+            reloaded.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Loaded
+        );
+        assert_eq!(reloaded.tip().hash, tip, "tip not restored on reopen");
+        assert_eq!(reloaded.height(), height, "height not restored on reopen");
+        assert_eq!(reloaded.stats().total_supply, supply, "supply not restored on reopen");
+        assert_eq!(
+            reloaded.stats().total_blocks,
+            total_blocks,
+            "block count not restored on reopen"
+        );
+        assert_eq!(reloaded.utxo_count(), utxos, "utxo set not restored on reopen");
+
+        // NOTE (separate pre-existing quirk, not a refactor regression): at
+        // genesis, `init_genesis` populates every `inner.stats` field EXCEPT
+        // `total_difficulty` (left at the default 0), while it saves the
+        // canonical base `1` to the DB. So a freshly-initialised node reports
+        // total_difficulty=0 but the same node reports the canonical 1 after a
+        // reload (see `recompute_total_difficulty`). This asserts the reloaded
+        // value is the canonical base; the fresh-init 0 is tracked as a separate
+        // behavior fix (issue #108 keeps fixes out of the refactor).
+        assert_eq!(
+            reloaded.stats().total_difficulty,
+            1,
+            "reopened genesis chain must carry the canonical total_difficulty base"
+        );
+    }
+
     #[test]
     fn load_from_database_rejects_blocks_without_chain_state() {
         let dir = tempfile::tempdir().unwrap();
