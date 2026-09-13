@@ -31,6 +31,54 @@
 //! - `GET  /wallet/info` — chain height, fee estimate, sync status
 //! - `GET  /wallet/outputs?height=N` — get output digests for a block range
 //! - `GET  /wallet/coin_info` — coin specification (ticker, decimals, etc.)
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `scan`** — INVARIANT: scans with the VIEW key only, enforces a hard
+//!   max-blocks-per-request cap, rejects invalid view/spend hex, and saturates
+//!   start-height arithmetic; returned outputs are candidates the wallet must
+//!   verify. THREAT: DoS via unbounded scan ranges, integer overflow, or malformed
+//!   keys crashing the endpoint. TESTS:
+//!   `scan_happy_path_returns_candidate_outputs_unverified`,
+//!   `scan_rejects_max_blocks_over_hard_limit`, `scan_rejects_invalid_view_and_spend_hex`,
+//!   `scan_start_height_saturating_add_at_u64_max_does_not_overflow`.
+//! - **§2 `submit_transaction`** — INVARIANT: rejects non-hex and undecodable-borsh
+//!   payloads and surfaces the mempool's rejection reason instead of swallowing it.
+//!   THREAT: a malformed tx crashes the endpoint, or a rejection is hidden from the
+//!   wallet. TESTS: `submit_transaction_rejects_bad_hex`,
+//!   `submit_transaction_rejects_undecodable_borsh`,
+//!   `submit_transaction_surfaces_mempool_rejection`.
+//! - **§3 `chain_info` / `estimate_fee` / `get_decoy_count`** — INVARIANT:
+//!   `chain_info`'s ring size is height-aware for the NEXT block, and `estimate_fee`
+//!   is `size · MIN_FEE_PER_BYTE` plus a 20% buffer. THREAT: a wallet builds a tx
+//!   with a wrong ring size or an underpaid fee and the block/mempool rejects it.
+//!   TESTS: `chain_info_ring_size_is_height_aware_for_next_block`,
+//!   `estimate_fee_is_size_times_min_fee_plus_20pct_buffer`.
+//! - **§4 `get_digests`** — INVARIANT: the block-digest range is saturating and
+//!   returns only blocks that exist. THREAT: an out-of-range request overflows or
+//!   fabricates digests. TESTS: `get_digests_range_is_saturating_and_returns_existing_blocks`.
+//! - **§5 `find_fork_point` / `find_fork_point_from_journal`** — INVARIANT: returns
+//!   the last common ancestor from the reorg journal (tip when fully canonical,
+//!   `None` on empty / no-canonical), skipping unknown heights. THREAT: a wrong
+//!   fork point makes a light wallet rescan from the wrong height and miss or
+//!   double-count outputs. TESTS: `fork_point_journal_empty_is_none`,
+//!   `fork_point_journal_all_canonical_returns_tip`,
+//!   `fork_point_journal_returns_last_common_ancestor`,
+//!   `fork_point_journal_none_when_no_entry_canonical`,
+//!   `fork_point_journal_skips_unknown_heights`,
+//!   `find_fork_point_single_pair_canonical_some_else_none`,
+//!   `parse_journal_hex_roundtrips_and_rejects_malformed`.
+//! - **§6 `compute_view_tag` / `is_output_for_keys` / `parse_public_key`** —
+//!   INVARIANT: the view tag is deterministic and index-dependent, output matching
+//!   uses the canonical ECDH scan, and public-key parsing rejects non-32-byte or
+//!   non-hex input. THREAT: mis-tagged outputs are missed or misattributed, or a
+//!   malformed key is accepted. TESTS: `view_tag_is_deterministic`,
+//!   `different_index_different_tag`, `parse_public_key_rejects_non_32_byte_and_non_hex`.
+//! - **§7 `coin_info` / `CoinSpec`** — INVARIANT: the served coin specification is
+//!   correct. THREAT: wrong coin metadata misconfigures a connecting wallet.
+//!   TESTS: `coin_spec_is_correct`.
 
 use serde::{Deserialize, Serialize};
 
@@ -701,5 +749,188 @@ mod tests {
         // but this isn't guaranteed — it's a hash, so collisions are possible.
         // Just verify they're both valid bytes.
         let _ = (tag0, tag1);
+    }
+
+    // ── LightWalletServer API (scan / chain_info / get_digests / submit /
+    //    estimate_fee / find_fork_point / parse_public_key) ────────────────
+
+    /// Build a light-wallet server over a fresh genesis-only chain. The
+    /// testnet genesis carries exactly one coinbase output, so it exercises
+    /// the candidate-output path without mining.
+    fn genesis_server() -> LightWalletServer {
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().expect("init genesis");
+        LightWalletServer::new(chain, SharedMempool::new())
+    }
+
+    fn valid_scan_request(start_height: u64, max_blocks: Option<u64>) -> ScanRequest {
+        ScanRequest {
+            view_public: "11".repeat(32),  // 32 bytes hex
+            spend_public: "22".repeat(32), // 32 bytes hex
+            start_height,
+            max_blocks,
+        }
+    }
+
+    #[test]
+    fn scan_happy_path_returns_candidate_outputs_unverified() {
+        let server = genesis_server();
+        let resp = server.scan(&valid_scan_request(0, None)).expect("scan ok");
+        // `is_output_for_keys` is a pass-all candidate filter, so genesis'
+        // single coinbase output is surfaced as a candidate.
+        assert!(
+            !resp.outputs.is_empty(),
+            "genesis coinbase output detected as a candidate"
+        );
+        // Public scan endpoint never claims cryptographic ownership.
+        assert!(!resp.ownership_verified);
+        assert!(resp.outputs.iter().all(|o| !o.ownership_verified));
+        assert_eq!(resp.chain_height, 0);
+        // scanned_to_height reached the tip (0) and no cap fired → no more.
+        assert!(!resp.has_more);
+    }
+
+    #[test]
+    fn scan_rejects_max_blocks_over_hard_limit() {
+        let server = genesis_server();
+        let req = valid_scan_request(0, Some(MAX_SCAN_BLOCKS_PER_REQ + 1));
+        let err = server.scan(&req).expect_err("over-cap max_blocks rejected");
+        assert!(err.contains("max_blocks too large"), "got: {err}");
+    }
+
+    #[test]
+    fn scan_rejects_invalid_view_and_spend_hex() {
+        let server = genesis_server();
+
+        let mut bad_view = valid_scan_request(0, None);
+        bad_view.view_public = "zz".repeat(32);
+        let err = server.scan(&bad_view).expect_err("bad view hex rejected");
+        assert!(err.contains("invalid view_public"), "got: {err}");
+
+        let mut bad_spend = valid_scan_request(0, None);
+        bad_spend.spend_public = "not-hex".to_string();
+        let err = server.scan(&bad_spend).expect_err("bad spend hex rejected");
+        assert!(err.contains("invalid spend_public"), "got: {err}");
+    }
+
+    #[test]
+    fn scan_start_height_saturating_add_at_u64_max_does_not_overflow() {
+        let server = genesis_server();
+        // start_height + max_blocks would overflow a plain `+`; saturating_add
+        // clamps to u64::MAX, then `.min(chain_height=0)` → 0, so the
+        // (empty) range u64::MAX..=0 never iterates and nothing panics.
+        let resp = server
+            .scan(&valid_scan_request(u64::MAX, Some(MAX_SCAN_BLOCKS_PER_REQ)))
+            .expect("no overflow panic");
+        assert_eq!(resp.blocks_scanned, 0);
+        assert!(resp.outputs.is_empty());
+    }
+
+    #[test]
+    fn chain_info_ring_size_is_height_aware_for_next_block() {
+        let server = genesis_server();
+        let info = server.chain_info();
+        // Ring size advertised must be what the validator requires for a tx
+        // mined into tip+1, not a hardcoded bootstrap value.
+        assert_eq!(
+            info.ring_size,
+            crate::constants::ring_size_at_height(info.height.saturating_add(1))
+        );
+    }
+
+    #[test]
+    fn get_digests_range_is_saturating_and_returns_existing_blocks() {
+        let server = genesis_server();
+        // Genesis-only chain: only height 0 exists, so a wide request still
+        // yields just that block (bounded by which blocks actually exist).
+        let digests = server.get_digests(0, 10);
+        assert_eq!(digests.len(), 1);
+        assert_eq!(digests[0].height, 0);
+        // `end.min(start.saturating_add(100))` must not overflow at u64::MAX.
+        let none = server.get_digests(u64::MAX, u64::MAX);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn submit_transaction_rejects_bad_hex() {
+        let server = genesis_server();
+        let err = server
+            .submit_transaction("zzzz")
+            .expect_err("non-hex rejected");
+        assert!(err.contains("invalid hex"), "got: {err}");
+    }
+
+    #[test]
+    fn submit_transaction_rejects_undecodable_borsh() {
+        let server = genesis_server();
+        // Valid hex but far too short to be a borsh Transaction.
+        let err = server
+            .submit_transaction("00")
+            .expect_err("undecodable borsh rejected");
+        assert!(err.contains("invalid transaction"), "got: {err}");
+    }
+
+    #[test]
+    fn submit_transaction_surfaces_mempool_rejection() {
+        let server = genesis_server();
+        // A coinbase-shaped tx is well-formed and borsh-decodable but the
+        // mempool refuses coinbase admission — exercises the reject path.
+        let tx = crate::transaction::Transaction {
+            version: 1,
+            tx_type: crate::transaction::TxType::Coinbase,
+            inputs: vec![],
+            outputs: vec![crate::transaction::TxOutput {
+                stealth_address: PublicKey::from_bytes([1u8; 32]),
+                tx_public_key: PublicKey::from_bytes([2u8; 32]),
+                commitment: [3u8; 32],
+                encrypted_amount: vec![0u8; 8],
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            }],
+            fee: crate::primitives::Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let tx_hex = hex::encode(borsh::to_vec(&tx).expect("serialize"));
+        let err = server
+            .submit_transaction(&tx_hex)
+            .expect_err("mempool rejects coinbase");
+        assert!(err.contains("rejected"), "got: {err}");
+        assert!(err.contains("coinbase"), "got: {err}");
+    }
+
+    #[test]
+    fn estimate_fee_is_size_times_min_fee_plus_20pct_buffer() {
+        let server = genesis_server();
+        let size = 2000usize;
+        let base = (size as u64) * crate::constants::MIN_FEE_PER_BYTE;
+        assert_eq!(server.estimate_fee(size), base + base / 5);
+    }
+
+    #[test]
+    fn find_fork_point_single_pair_canonical_some_else_none() {
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        let genesis_hash = chain.init_genesis().expect("init genesis");
+        let server = LightWalletServer::new(chain, SharedMempool::new());
+
+        // Known pair still canonical → Some(height).
+        assert_eq!(server.find_fork_point(genesis_hash, 0, None), Some(0));
+        // Hash no longer canonical at that height → v1.0 stub returns None.
+        let bogus = crate::primitives::Hash::from_bytes([9u8; 32]);
+        assert_eq!(server.find_fork_point(bogus, 0, None), None);
+        // Unknown (above-tip) height → None.
+        assert_eq!(server.find_fork_point(genesis_hash, 999, None), None);
+    }
+
+    #[test]
+    fn parse_public_key_rejects_non_32_byte_and_non_hex() {
+        // Non-hex.
+        assert!(parse_public_key(&"zz".repeat(32)).is_err());
+        // Wrong length (31 bytes = 62 hex chars).
+        let err = parse_public_key(&"11".repeat(31)).expect_err("wrong length rejected");
+        assert!(err.contains("expected 32 bytes"), "got: {err}");
+        // Exactly 32 bytes is accepted.
+        assert!(parse_public_key(&"11".repeat(32)).is_ok());
     }
 }

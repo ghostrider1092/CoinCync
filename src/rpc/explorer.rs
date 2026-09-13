@@ -30,6 +30,26 @@
 //! is intentionally a positive enumeration, not a "no external"
 //! assertion, so a future asset trimming pass can shrink the list
 //! incrementally and the test moves with it.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Single-function static-asset
+//! server, so it has genuinely few logical areas.)
+//!
+//! - **§1 `explorer_html` / embedded assets** — INVARIANT: the served page is
+//!   assembled from compile-time embedded HTML/CSS/JS and is non-trivial. THREAT:
+//!   a missing or empty embedded asset serves a broken explorer. TESTS:
+//!   `embedded_explorer_is_non_trivial`.
+//! - **§2 JS ↔ server method pinning** — INVARIANT: every `rpc('…')` the explorer
+//!   JS calls corresponds to a method registered on the JSON-RPC server. THREAT: a
+//!   future explorer rewrite calls an unregistered method → silent runtime breakage
+//!   and server/UI drift. TESTS: `explorer_js_calls_only_registered_methods`.
+//! - **§3 supply display precision** — INVARIANT: aggregate supply values render
+//!   through JS `BigInt`, not `f64`. THREAT: large supply totals lose precision or
+//!   overflow in the UI. TESTS: `explorer_supply_display_uses_bigint_for_aggregate_values`.
+//! - **§4 external origin allowlist** — INVARIANT: the embedded HTML enumerates its
+//!   external CDN origins explicitly. THREAT: an un-audited external script origin
+//!   slips into the page. TESTS: `explorer_html_lists_external_cdns`.
 
 /// The CoinCync block explorer document, assembled and embedded at compile time.
 pub const EXPLORER_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/explorer-index.html"));

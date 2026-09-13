@@ -353,3 +353,192 @@ fn recovery_extra_v2(
         ),
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Tests for the typed v2 dispatch path (wallet_support/v2.rs).
+//
+// This file is `include!`d into `mod app` alongside `legacy.rs`, so the
+// module lives at `app::v2_support_tests` and reaches the private CLI
+// types / helpers via `super::*`. A distinct module name avoids clashing
+// with `legacy.rs`'s own `#[cfg(test)]` module in the same parent.
+//
+// Deferred (documented, not implemented) — cannot run without I/O the
+// harness can't provide:
+//   * dispatch_v2() / run_send_command_v2() end-to-end — read the process
+//     argv, install a global tracing subscriber, spin a tokio runtime, and
+//     `cmd_send_v2` then talks to a live node (SpendCoordinator::for_node /
+//     get_decoy_distribution) against a funded wallet. Here we test the
+//     routing predicate, arg parsing, and the pure `payments_v2` /
+//     `parse_public_key_v2` / `validate_memo_v2` / `recovery_extra_v2`
+//     builders that feed the SendRequest instead.
+// ═══════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod v2_support_tests {
+    use super::*;
+    use clap::Parser as _;
+
+    const HEX32: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// A real, on-curve (spend_public, view_public) pair derived from a
+    /// freshly generated seed — needed wherever a helper actually validates
+    /// the point (parse_public_key_v2 / Payment construction).
+    fn real_key_pair() -> (coincync::primitives::PublicKey, coincync::primitives::PublicKey) {
+        let (_phrase, seed) = coincync::wallet::generate_mnemonic();
+        let keys = coincync::wallet::WalletKeys::from_seed(seed);
+        let epoch = keys.current().expect("fresh wallet has a current epoch");
+        (epoch.spend_public, epoch.view_public)
+    }
+
+    #[test]
+    fn dispatch_v2_routes_send_to_typed_path_and_others_fall_through() {
+        // Mirrors the exact `matches!` guard in `dispatch_v2`.
+        let send = Cli::try_parse_from([
+            "coincync-wallet",
+            "send",
+            "--to-spend",
+            HEX32,
+            "--to-view",
+            HEX32,
+            "--amount",
+            "1000",
+        ])
+        .expect("send parses");
+        assert!(
+            matches!(&send.command, Command::Send { .. }),
+            "Send must route to the typed v2 path"
+        );
+
+        for other in [
+            vec!["coincync-wallet", "info"],
+            vec!["coincync-wallet", "open"],
+            vec!["coincync-wallet", "balance"],
+            vec!["coincync-wallet", "privacy-stats"],
+        ] {
+            let cli = Cli::try_parse_from(other.clone()).expect("subcommand parses");
+            assert!(
+                !matches!(&cli.command, Command::Send { .. }),
+                "{other:?} must fall through to legacy main()"
+            );
+        }
+    }
+
+    #[test]
+    fn run_send_command_v2_parses_recipient_amount_and_password() {
+        // The fields `run_send_command_v2` destructures out of the parsed Cli
+        // to build SendCommandArguments.
+        let cli = Cli::try_parse_from([
+            "coincync-wallet",
+            "send",
+            "--password",
+            "s3cret",
+            "--to-spend",
+            HEX32,
+            "--to-view",
+            HEX32,
+            "--amount",
+            "4242",
+            "--fee-multiplier",
+            "2.5",
+        ])
+        .expect("send parses");
+
+        let Command::Send {
+            password,
+            to_spend,
+            to_view,
+            amount,
+            fee_multiplier,
+            split_output,
+            subaddress,
+            ..
+        } = cli.command
+        else {
+            panic!("expected Send");
+        };
+        assert_eq!(password.as_deref(), Some("s3cret"));
+        assert_eq!(to_spend, HEX32);
+        assert_eq!(to_view, HEX32);
+        assert_eq!(amount, 4242);
+        assert_eq!(fee_multiplier, 2.5);
+        assert!(!split_output);
+        assert!(!subaddress);
+    }
+
+    #[test]
+    fn payments_v2_single_output_carries_full_amount() {
+        let (sp, vp) = real_key_pair();
+        let payments = payments_v2(sp, vp, 1000, false, false);
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0].amount.as_atomic(), 1000);
+        assert!(!payments[0].is_subaddress);
+    }
+
+    #[test]
+    fn payments_v2_split_output_halves_sum_to_amount_with_odd_remainder_on_first() {
+        let (sp, vp) = real_key_pair();
+        let payments = payments_v2(sp, vp, 1001, true, false);
+        assert_eq!(payments.len(), 2);
+        // amount/2 + amount%2 on the first half, amount/2 on the second.
+        assert_eq!(payments[0].amount.as_atomic(), 501);
+        assert_eq!(payments[1].amount.as_atomic(), 500);
+        assert_eq!(
+            payments[0].amount.as_atomic() + payments[1].amount.as_atomic(),
+            1001
+        );
+    }
+
+    #[test]
+    fn payments_v2_subaddress_flag_marks_every_payment() {
+        let (sp, vp) = real_key_pair();
+        let payments = payments_v2(sp, vp, 2000, true, true);
+        assert_eq!(payments.len(), 2);
+        assert!(payments.iter().all(|p| p.is_subaddress));
+    }
+
+    #[test]
+    fn parse_public_key_v2_accepts_real_key_rejects_bad_hex_and_wrong_length() {
+        let (sp, _vp) = real_key_pair();
+        let good_hex = hex::encode(sp.as_bytes());
+        assert!(parse_public_key_v2(&good_hex, "to-spend").is_ok());
+
+        assert!(
+            parse_public_key_v2("zznothex", "to-spend").is_err(),
+            "non-hex must be rejected"
+        );
+        // 31 bytes (62 hex chars) — wrong length.
+        let short = "00".repeat(31);
+        assert!(
+            parse_public_key_v2(&short, "to-spend").is_err(),
+            "wrong-length key must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_memo_v2_accepts_within_limit_and_rejects_over_256() {
+        assert!(validate_memo_v2(None).unwrap().is_none());
+        let ok = "a".repeat(256);
+        assert_eq!(validate_memo_v2(Some(ok.clone())).unwrap(), Some(ok.into_bytes()));
+        let too_long = "a".repeat(257);
+        assert!(validate_memo_v2(Some(too_long)).is_err());
+    }
+
+    #[test]
+    fn recovery_extra_v2_requires_both_flags_or_neither() {
+        // Neither set -> empty extra.
+        assert!(recovery_extra_v2(None, None, 1).unwrap().is_empty());
+        // Exactly one set -> error, in both directions.
+        let addr = "00".repeat(32);
+        assert!(recovery_extra_v2(Some(addr.as_str()), None, 1).is_err());
+        assert!(recovery_extra_v2(None, Some(262800), 1).is_err());
+    }
+
+    #[test]
+    fn recovery_extra_v2_encodes_metadata_when_both_present() {
+        // Non-zero address: RecoveryMeta::validate rejects an all-zero one.
+        let addr = "01".repeat(32);
+        // 262800 blocks is within the RecoveryMeta min/max validity window.
+        let extra = recovery_extra_v2(Some(addr.as_str()), Some(262800), 1)
+            .expect("valid recovery config encodes");
+        assert!(!extra.is_empty(), "recovery metadata must be encoded into extra");
+    }
+}

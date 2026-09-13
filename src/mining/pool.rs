@@ -23,6 +23,53 @@
 //! - Share accounting with PPLNS payout scheme
 //! - Vardiff (variable difficulty) for miners
 //! - Job management and work distribution
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `PoolServer::start`** — INVARIANT: the unwired reference server refuses
+//!   to bind a public address without explicit operator acknowledgements
+//!   (fail-closed). THREAT: someone accidentally runs a non-consensus pool that
+//!   submits nothing to the chain. TESTS: `test_start_refuses_public_bind_without_acks`.
+//! - **§2 `create_job` / `create_job_notification`** — INVARIANT: a job is inserted
+//!   under a random id with the miner's initial target and rendered as a
+//!   Stratum V1 notification. THREAT: predictable/colliding job ids let a miner
+//!   replay another's job. TESTS:
+//!   `test_create_job_inserts_job_with_random_id_and_initial_target`.
+//! - **§3 `on_block_found` (PPLNS)** — INVARIANT: the after-fee reward is split
+//!   proportional to each login's share difficulty over the PPLNS window; an empty
+//!   window or zero total difficulty pays nothing; shares beyond 2× the window are
+//!   pruned. THREAT: payout theft or unbounded share-memory growth. TESTS:
+//!   `test_on_block_found_distributes_pplns_by_diff_ratio_after_fee`,
+//!   `test_on_block_found_empty_window_and_zero_total_diff_pay_nothing`,
+//!   `test_on_block_found_prunes_shares_beyond_double_pplns_window`.
+//! - **§4 `process_payout` / `get_balance`** — INVARIANT: a payout fires only above
+//!   the configured minimum and clears the balance atomically; an unknown address
+//!   yields `None`. THREAT: dust-spam payouts or a double payout. TESTS:
+//!   `test_process_payout_below_min_returns_none_atabove_pays_and_clears`,
+//!   `test_process_payout_unknown_address_returns_none`, `test_pool_balance`.
+//! - **§5 `process_stratum_request` (share submit)** — INVARIANT: `mining.submit`
+//!   rejects unauthorized (24), unknown job (21), duplicate (22), malformed
+//!   nonce/prev-hash/coinbase (20), and below-target (23) shares with the exact
+//!   Stratum error codes. THREAT: an invalid or replayed share is credited →
+//!   payout fraud. TESTS: `test_submit_unauthorized_returns_24`,
+//!   `test_submit_unknown_job_returns_21`, `test_submit_duplicate_share_returns_22`,
+//!   `test_submit_wrong_nonce_length_returns_20`, `test_submit_bad_prev_hash_returns_20`,
+//!   `test_submit_bad_nonce_format_returns_20`, `test_submit_bad_coinbase_returns_20`,
+//!   `test_submit_low_difficulty_share_returns_23`.
+//! - **§6 `process_stratum_request` (subscribe/authorize)** — INVARIANT: subscribe
+//!   and authorize set the connection flags; an unknown method returns `-1`.
+//!   THREAT: an unauthenticated connection is treated as authorized. TESTS:
+//!   `test_process_request_subscribe_and_authorize_set_flags`,
+//!   `test_unknown_method_returns_negative_one`.
+//! - **§7 `difficulty_to_target`** — INVARIANT: a share difficulty maps to the
+//!   target hash used to accept/reject shares. THREAT: a miscomputed target
+//!   credits below-work shares. TESTS: `test_difficulty_to_target`.
+//! - **§8 `PoolServer::new` / `PoolConfig` defaults** — INVARIANT: construction and
+//!   defaults are inert and safe. THREAT: an unsafe default (e.g. public bind)
+//!   ships silently. TESTS: `test_pool_config_default`, `test_pool_creation`,
+//!   `test_miner_connection_new`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1157,5 +1204,373 @@ mod tests {
 
         let balance = pool.get_balance("test_address").await;
         assert_eq!(balance, Amount::from_atomic(0));
+    }
+
+    // ---- shared helpers for process_stratum_request / submit tests ----
+
+    fn make_job(prev_hash: &str, coinbase: &str) -> MiningJob {
+        MiningJob {
+            job_id: "job01".into(),
+            block_template: BlockTemplate {
+                prev_hash: prev_hash.into(),
+                coinbase: coinbase.into(),
+                merkle_branch: Vec::new(),
+                version: 1,
+                nbits: 0x1e00_ffff,
+                timestamp: 1_700_000_000,
+                height: 100,
+                algorithm: 0,
+            },
+            target: difficulty_to_target(1000),
+            created_at: Instant::now(),
+        }
+    }
+
+    async fn jobs_map(job: MiningJob) -> Arc<RwLock<HashMap<String, MiningJob>>> {
+        let jobs = Arc::new(RwLock::new(HashMap::new()));
+        jobs.write().await.insert(job.job_id.clone(), job);
+        jobs
+    }
+
+    fn empty_pplns() -> Arc<RwLock<Vec<PplnsShare>>> {
+        Arc::new(RwLock::new(Vec::new()))
+    }
+
+    fn authed_miner() -> MinerConnection {
+        // extra_nonce1 == format!("{:08x}", 1) == "00000001" (8 hex chars)
+        let mut m = MinerConnection::new(1);
+        m.authorized = true;
+        m.address = "addr".into();
+        m
+    }
+
+    fn submit_req(id: u64, job_id: &str, xn2: &str, nonce: &str) -> StratumRequest {
+        StratumRequest {
+            id,
+            method: "mining.submit".into(),
+            params: serde_json::json!(["addr.rig1", job_id, xn2, "00000000", nonce]),
+        }
+    }
+
+    fn err_code(resp: &StratumResponse) -> i32 {
+        resp.error.as_ref().expect("expected a stratum error").code
+    }
+
+    // ---- on_block_found (PPLNS) ----
+
+    #[tokio::test]
+    async fn test_on_block_found_distributes_pplns_by_diff_ratio_after_fee() {
+        // pool_fee 1.0%, pplns_window 10000 (default)
+        let pool = MiningPool::new(PoolConfig::default());
+        {
+            let mut s = pool.pplns_shares.write().await;
+            *s = vec![
+                PplnsShare { address: "A".into(), difficulty: 100, height: 1, timestamp: 0 },
+                PplnsShare { address: "B".into(), difficulty: 300, height: 1, timestamp: 0 },
+            ];
+        }
+
+        // reward 1_000_000: fee = 1% = 10_000, net = 990_000.
+        // A: 100/400 * 990_000 = 247_500 ; B: 300/400 * 990_000 = 742_500.
+        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+
+        assert_eq!(pool.get_balance("A").await, Amount::from_atomic(247_500));
+        assert_eq!(pool.get_balance("B").await, Amount::from_atomic(742_500));
+        assert_eq!(pool.stats().await.blocks_found, 1);
+    }
+
+    #[tokio::test]
+    async fn test_on_block_found_empty_window_and_zero_total_diff_pay_nothing() {
+        // Empty window: block counted, but no payout.
+        let pool = MiningPool::new(PoolConfig::default());
+        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+        assert_eq!(pool.get_balance("A").await, Amount::from_atomic(0));
+        assert_eq!(pool.stats().await.blocks_found, 1);
+
+        // Zero total difficulty in window: early return, no payout.
+        let pool2 = MiningPool::new(PoolConfig::default());
+        *pool2.pplns_shares.write().await = vec![PplnsShare {
+            address: "A".into(),
+            difficulty: 0,
+            height: 1,
+            timestamp: 0,
+        }];
+        pool2.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+        assert_eq!(pool2.get_balance("A").await, Amount::from_atomic(0));
+    }
+
+    #[tokio::test]
+    async fn test_on_block_found_prunes_shares_beyond_double_pplns_window() {
+        let mut config = PoolConfig::default();
+        config.pplns_window = 2; // retained cap = 2 * 2 = 4
+        let pool = MiningPool::new(config);
+        {
+            let mut s = pool.pplns_shares.write().await;
+            *s = (0..10)
+                .map(|i| PplnsShare {
+                    address: "A".into(),
+                    difficulty: 1,
+                    height: i,
+                    timestamp: 0,
+                })
+                .collect();
+        }
+
+        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+
+        assert_eq!(pool.pplns_shares.read().await.len(), 4);
+    }
+
+    // ---- process_payout ----
+
+    #[tokio::test]
+    async fn test_process_payout_below_min_returns_none_atabove_pays_and_clears() {
+        let min = PoolConfig::default().min_payout; // 1 CYNC
+        let pool = MiningPool::new(PoolConfig::default());
+
+        // Below min_payout: None, balance retained.
+        pool.balances
+            .write()
+            .await
+            .insert("low".into(), Amount::from_atomic(500));
+        assert!(pool.process_payout("low").await.is_none());
+        assert_eq!(pool.get_balance("low").await, Amount::from_atomic(500));
+
+        // At/above min_payout: pays out, clears balance, updates total_paid.
+        pool.balances.write().await.insert("ok".into(), min);
+        assert_eq!(pool.process_payout("ok").await, Some(min));
+        assert_eq!(pool.get_balance("ok").await, Amount::from_atomic(0));
+        assert_eq!(pool.stats().await.total_paid, min);
+    }
+
+    #[tokio::test]
+    async fn test_process_payout_unknown_address_returns_none() {
+        let pool = MiningPool::new(PoolConfig::default());
+        assert!(pool.process_payout("nobody").await.is_none());
+    }
+
+    // ---- create_job ----
+
+    #[tokio::test]
+    async fn test_create_job_inserts_job_with_random_id_and_initial_target() {
+        let initial_difficulty = PoolConfig::default().initial_difficulty;
+        let pool = MiningPool::new(PoolConfig::default());
+
+        let job = pool.create_job(make_job(&"00".repeat(32), "00").block_template).await;
+
+        // Random 8-hex-char job id.
+        assert_eq!(job.job_id.len(), 8);
+        assert!(job.job_id.chars().all(|c| c.is_ascii_hexdigit()));
+        // Target derives from the pool's initial difficulty.
+        assert_eq!(
+            job.target.as_bytes(),
+            difficulty_to_target(initial_difficulty).as_bytes()
+        );
+        // Job is registered.
+        assert!(pool.jobs.read().await.contains_key(&job.job_id));
+    }
+
+    // ---- process_stratum_request: subscribe / authorize ----
+
+    #[tokio::test]
+    async fn test_process_request_subscribe_and_authorize_set_flags() {
+        let config = PoolConfig::default();
+        let jobs = Arc::new(RwLock::new(HashMap::new()));
+        let pplns = empty_pplns();
+        let mut miner = MinerConnection::new(1);
+
+        let sub = StratumRequest {
+            id: 1,
+            method: "mining.subscribe".into(),
+            params: serde_json::json!([]),
+        };
+        let resp = process_stratum_request(&sub, &mut miner, &jobs, &pplns, &config).await;
+        assert!(resp.error.is_none());
+        assert!(miner.subscribed);
+
+        let auth = StratumRequest {
+            id: 2,
+            method: "mining.authorize".into(),
+            params: serde_json::json!(["addr.rig1", "x"]),
+        };
+        let resp = process_stratum_request(&auth, &mut miner, &jobs, &pplns, &config).await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result, serde_json::json!(true));
+        assert!(miner.authorized);
+        assert_eq!(miner.address, "addr");
+        assert_eq!(miner.worker_name, "rig1");
+    }
+
+    // ---- process_stratum_request: submit error branches ----
+
+    #[tokio::test]
+    async fn test_submit_unauthorized_returns_24() {
+        let config = PoolConfig::default();
+        let jobs = jobs_map(make_job(&"00".repeat(32), "00")).await;
+        let pplns = empty_pplns();
+        let mut miner = MinerConnection::new(1); // not authorized
+
+        let req = submit_req(1, "job01", "0000", "0000");
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), 24);
+    }
+
+    #[tokio::test]
+    async fn test_submit_unknown_job_returns_21() {
+        let config = PoolConfig::default();
+        let jobs = Arc::new(RwLock::new(HashMap::new())); // no jobs
+        let pplns = empty_pplns();
+        let mut miner = authed_miner();
+
+        let req = submit_req(1, "missing", "0000", "0000");
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), 21);
+    }
+
+    #[tokio::test]
+    async fn test_submit_duplicate_share_returns_22() {
+        // The per-job (extra_nonce2, nonce) dedup set is populated before the
+        // prev_hash decode, so the first submit (even if it later errors on the
+        // invalid prev_hash) records the tuple; the replayed second submit is
+        // rejected as a duplicate [22] before any further validation.
+        let config = PoolConfig::default();
+        let jobs = jobs_map(make_job("xyz", "00")).await;
+        let pplns = empty_pplns();
+        let mut miner = authed_miner();
+
+        let req = submit_req(1, "job01", "0000", "0000");
+        let first = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_ne!(err_code(&first), 22); // first submit is not a duplicate
+
+        let second = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&second), 22);
+    }
+
+    #[tokio::test]
+    async fn test_submit_wrong_nonce_length_returns_20() {
+        // extra_nonce1(8) + xn2("00",2) + nonce("00",2) = 12 hex chars != 16.
+        let config = PoolConfig::default();
+        let jobs = jobs_map(make_job(&"00".repeat(32), "00")).await;
+        let pplns = empty_pplns();
+        let mut miner = authed_miner();
+
+        let req = submit_req(1, "job01", "00", "00");
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), 20);
+        assert!(resp.error.as_ref().unwrap().message.contains("nonce length"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_bad_prev_hash_returns_20() {
+        let config = PoolConfig::default();
+        let jobs = jobs_map(make_job("nothexnothex", "00")).await;
+        let pplns = empty_pplns();
+        let mut miner = authed_miner();
+
+        let req = submit_req(1, "job01", "0000", "0000");
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), 20);
+        assert!(resp.error.as_ref().unwrap().message.contains("prev_hash"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_bad_nonce_format_returns_20() {
+        // 16 chars total but not valid hex -> u64::from_str_radix fails.
+        let config = PoolConfig::default();
+        let jobs = jobs_map(make_job(&"00".repeat(32), "00")).await;
+        let pplns = empty_pplns();
+        let mut miner = authed_miner();
+
+        let req = submit_req(1, "job01", "0000", "zzzz");
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), 20);
+        assert!(resp.error.as_ref().unwrap().message.contains("nonce format"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_bad_coinbase_returns_20() {
+        // Valid prev_hash + valid 16-hex nonce reaches the coinbase decode
+        // (after the pure-blake3 anchor computation, before any PoW hash),
+        // where an invalid coinbase hex yields [20].
+        let config = PoolConfig::default();
+        let jobs = jobs_map(make_job(&"00".repeat(32), "zz")).await;
+        let pplns = empty_pplns();
+        let mut miner = authed_miner();
+
+        let req = submit_req(1, "job01", "0000", "0000");
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), 20);
+        assert!(resp.error.as_ref().unwrap().message.contains("coinbase"));
+    }
+
+    // Low-difficulty share [23] is only reachable once compute_pow_hash actually
+    // produces a hash, which requires the RandomX VM (without the `randomx`
+    // feature compute_pow_hash returns Err -> [20]). Gated on the feature and
+    // #[ignore]'d to mirror this file's RandomX-dependent e2e convention
+    // (e.g. stratum_submit_produces_block).
+    #[cfg(feature = "randomx")]
+    #[tokio::test]
+    #[ignore = "requires RandomX VM; mirrors #[ignore]'d e2e RandomX tests"]
+    async fn test_submit_low_difficulty_share_returns_23() {
+        let config = PoolConfig::default();
+        let jobs = jobs_map(make_job(&"00".repeat(32), "00")).await;
+        let pplns = empty_pplns();
+        let mut miner = authed_miner();
+        // ~8 leading zero bytes of target: a single hash effectively never meets it.
+        miner.difficulty = u64::MAX;
+
+        let req = submit_req(1, "job01", "0000", "0000");
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), 23);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_method_returns_negative_one() {
+        let config = PoolConfig::default();
+        let jobs = Arc::new(RwLock::new(HashMap::new()));
+        let pplns = empty_pplns();
+        let mut miner = MinerConnection::new(1);
+
+        let req = StratumRequest {
+            id: 9,
+            method: "mining.frobnicate".into(),
+            params: serde_json::json!([]),
+        };
+        let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
+        assert_eq!(err_code(&resp), -1);
+    }
+
+    // ---- MiningPool::start public-bind guard ----
+
+    #[tokio::test]
+    async fn test_start_refuses_public_bind_without_acks() {
+        // These two env vars are pool-specific and touched only by this test,
+        // so the sequential set/remove here does not race other unit tests.
+        std::env::remove_var("COINCYNC_POOL_PUBLIC_BIND_ACK");
+        std::env::remove_var("COINCYNC_POOL_TLS_PROXY_ACK");
+
+        let mut config = PoolConfig::default();
+        config.bind_address = "203.0.113.1:3333".parse().expect("valid non-loopback addr");
+
+        // No PUBLIC_BIND_ACK -> refused before any bind.
+        let mut pool = MiningPool::new(config.clone());
+        match pool.start().await {
+            Err(Error::InvalidState(msg)) => {
+                assert!(msg.contains("COINCYNC_POOL_PUBLIC_BIND_ACK"))
+            }
+            other => panic!("expected InvalidState(PUBLIC_BIND_ACK), got {:?}", other),
+        }
+
+        // PUBLIC_BIND_ACK set but no TLS_PROXY_ACK -> TLS guard fires next.
+        std::env::set_var("COINCYNC_POOL_PUBLIC_BIND_ACK", "1");
+        let mut pool2 = MiningPool::new(config);
+        match pool2.start().await {
+            Err(Error::InvalidState(msg)) => {
+                assert!(msg.contains("COINCYNC_POOL_TLS_PROXY_ACK"))
+            }
+            other => panic!("expected InvalidState(TLS_PROXY_ACK), got {:?}", other),
+        }
+
+        std::env::remove_var("COINCYNC_POOL_PUBLIC_BIND_ACK");
     }
 }

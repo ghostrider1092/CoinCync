@@ -1058,4 +1058,398 @@ mod tests {
         let min_fee = builder.calculate_min_fee();
         assert!(min_fee.as_atomic() > 0);
     }
+
+    // =========================================================================
+    // HELPERS — real curve points for inputs/outputs, mirroring the
+    // full_pipeline_real_crypto integration helpers.
+    // =========================================================================
+
+    fn generate_keypair() -> (SecretKey, PublicKey) {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        (
+            SecretKey::from_bytes(secret.to_bytes()),
+            PublicKey::from_bytes(public.to_bytes()),
+        )
+    }
+
+    fn make_spendable_input(amount: u64) -> SpendableInput {
+        let secret = SecretScalar::random(&mut OsRng);
+        SpendableInput {
+            tx_hash: Hash::from_bytes([7u8; 32]),
+            output_index: 0,
+            amount: Amount::from_atomic(amount),
+            one_time_secret: SecretKey::from_bytes(secret.to_bytes()),
+            blinding: BlindingFactor::random(&mut OsRng),
+            height: 1000,
+        }
+    }
+
+    fn make_decoys(count: usize) -> Vec<DecoyOutput> {
+        (0..count)
+            .map(|i| {
+                let s = SecretScalar::random(&mut OsRng);
+                let bf = BlindingFactor::random(&mut OsRng);
+                let commitment = PedersenCommitment::commit(1_000_000_000 + i as u64, &bf);
+                DecoyOutput {
+                    public_key: PublicKey::from_bytes(s.to_public().to_bytes()),
+                    commitment: commitment.to_bytes(),
+                    height: 500 + i as u64,
+                }
+            })
+            .collect()
+    }
+
+    fn make_recipient(amount: u64) -> Recipient {
+        let (_, spend) = generate_keypair();
+        let (_, view) = generate_keypair();
+        Recipient {
+            spend_public: spend,
+            view_public: view,
+            amount: Amount::from_atomic(amount),
+            lock_height: None,
+        }
+    }
+
+    // =========================================================================
+    // build() — input/output count guards, balance, overflow
+    // =========================================================================
+
+    #[test]
+    fn build_transfer_with_no_inputs_rejected() {
+        let b = TransactionBuilder::transfer();
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::InvalidInputCount { .. }),
+            "non-coinbase with no inputs must be InvalidInputCount, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_with_no_outputs_rejected() {
+        // Coinbase skips the input-count check, so this reaches the output guard.
+        let b = TransactionBuilder::new(TxType::Coinbase);
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::InvalidOutputCount { .. }),
+            "no outputs must be InvalidOutputCount, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_unbalanced_transaction_rejected() {
+        let mut b = TransactionBuilder::transfer();
+        b.add_input_at_position(make_spendable_input(10_000_000), make_decoys(2), 0)
+            .unwrap();
+        b.add_output(&make_recipient(5_000_000), 0, &mut OsRng).unwrap();
+        b.set_fee(Amount::ZERO); // 10_000_000 != 5_000_000 + 0
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::TransactionUnbalanced { .. }),
+            "input_sum != output_sum + fee must be TransactionUnbalanced, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_input_sum_overflow_rejected() {
+        // Two u64::MAX inputs overflow the checked input-sum (M-1 fix).
+        let mut b = TransactionBuilder::transfer();
+        b.add_input_at_position(make_spendable_input(u64::MAX), make_decoys(1), 0)
+            .unwrap();
+        b.add_input_at_position(make_spendable_input(u64::MAX), make_decoys(1), 0)
+            .unwrap();
+        b.add_dummy_output(&mut OsRng).unwrap();
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::AmountOverflow),
+            "input_sum overflow must be AmountOverflow, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_output_sum_overflow_rejected() {
+        // Two u64::MAX outputs overflow the checked output-sum.
+        let mut b = TransactionBuilder::new(TxType::Coinbase);
+        b.add_output(&make_recipient(u64::MAX), 0, &mut OsRng).unwrap();
+        b.add_output(&make_recipient(u64::MAX), 1, &mut OsRng).unwrap();
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::AmountOverflow),
+            "output_sum overflow must be AmountOverflow, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_output_plus_fee_overflow_rejected() {
+        // output_sum (u64::MAX) + fee (1) overflows outputs_plus_fee.
+        let mut b = TransactionBuilder::new(TxType::Coinbase);
+        b.add_output(&make_recipient(u64::MAX), 0, &mut OsRng).unwrap();
+        b.set_fee(Amount::from_atomic(1));
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::AmountOverflow),
+            "output_sum + fee overflow must be AmountOverflow, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn memo_attaches_to_first_recipient_output_and_skips_dummies() {
+        let mut rng = OsRng;
+        let recipient_amount = 2_000_000_000u64;
+        let mut b = TransactionBuilder::transfer()
+            .with_target_height(0)
+            .with_memo(b"hello world");
+        // Balance: input == dummy(0) + recipient + fee(0).
+        b.add_input_at_position(make_spendable_input(recipient_amount), make_decoys(2), 0)
+            .unwrap();
+        b.add_dummy_output(&mut rng).unwrap(); // index 0 — dummy, no recipient view key
+        b.add_output(&make_recipient(recipient_amount), 1, &mut rng)
+            .unwrap(); // index 1 — real recipient
+        b.set_fee(Amount::ZERO);
+        let tx = b.build(&mut rng).expect("balanced tx must build");
+        assert!(
+            tx.outputs[0].encrypted_memo.is_empty(),
+            "dummy output must carry no memo"
+        );
+        assert!(
+            !tx.outputs[1].encrypted_memo.is_empty(),
+            "memo must attach to the first recipient output only"
+        );
+    }
+
+    // =========================================================================
+    // add_input_at_position / add_input_random_position
+    // =========================================================================
+
+    #[test]
+    fn add_input_with_ring_size_below_two_rejected() {
+        let mut b = TransactionBuilder::transfer();
+        let err = b
+            .add_input_at_position(make_spendable_input(1_000_000), vec![], 0)
+            .err().unwrap();
+        assert!(
+            matches!(err, Error::InvalidRingSize { .. }),
+            "ring_size < 2 must be InvalidRingSize, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_input_with_real_position_out_of_range_rejected() {
+        let mut b = TransactionBuilder::transfer();
+        // ring_size = 2, real_position 5 is out of range.
+        let err = b
+            .add_input_at_position(make_spendable_input(1_000_000), make_decoys(1), 5)
+            .err().unwrap();
+        assert!(
+            matches!(err, Error::InvalidRingSize { .. }),
+            "real_position >= ring_size must be InvalidRingSize, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_input_places_real_output_at_requested_position() {
+        let mut b = TransactionBuilder::transfer();
+        let input = make_spendable_input(1_000_000);
+        let expected_pub = input.one_time_secret.public_key();
+        b.add_input_at_position(input, make_decoys(3), 2).unwrap();
+        let built = &b.inputs[0];
+        assert_eq!(built.real_index, 2, "real input at requested position");
+        assert_eq!(built.ring_refs.len(), 4, "ring_refs fill the whole ring");
+        assert_eq!(built.ring.len(), 4, "clsag_ring fills the whole ring");
+        assert_eq!(
+            built.ring_refs[2].public_key.as_bytes(),
+            expected_pub.as_bytes(),
+            "real output's public key sits at the requested ring position"
+        );
+    }
+
+    #[test]
+    fn add_input_invalid_decoy_public_key_errors_not_panics() {
+        // A6 fix: malformed decoy points return CryptoError instead of panicking.
+        let bad_decoy = DecoyOutput {
+            public_key: PublicKey::from_bytes([0xFFu8; 32]), // not a valid ristretto point
+            commitment: PedersenCommitment::commit(1, &BlindingFactor::random(&mut OsRng))
+                .to_bytes(),
+            height: 500,
+        };
+        let mut b = TransactionBuilder::transfer();
+        // real at position 0 → the invalid decoy is parsed at position 1.
+        let err = b
+            .add_input_at_position(make_spendable_input(1_000_000), vec![bad_decoy], 0)
+            .err().unwrap();
+        assert!(
+            matches!(err, Error::CryptoError(_)),
+            "invalid decoy public key must be CryptoError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_input_random_position_stays_in_range_and_varies() {
+        let ring_size = 4;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let mut b = TransactionBuilder::transfer();
+            b.add_input_random_position(
+                make_spendable_input(1_000_000),
+                make_decoys(ring_size - 1),
+                &mut OsRng,
+            )
+            .unwrap();
+            let idx = b.inputs[0].real_index;
+            assert!(idx < ring_size, "real_index {idx} must be in 0..{ring_size}");
+            seen.insert(idx);
+        }
+        assert!(
+            seen.len() > 1,
+            "random position must produce more than one distinct index over many draws"
+        );
+    }
+
+    // =========================================================================
+    // add_output / add_change / add_dummy_output
+    // =========================================================================
+
+    #[test]
+    fn add_output_beyond_max_outputs_rejected() {
+        let mut b = TransactionBuilder::transfer();
+        for _ in 0..MAX_TX_OUTPUTS {
+            b.add_dummy_output(&mut OsRng).unwrap();
+        }
+        assert_eq!(b.outputs.len(), MAX_TX_OUTPUTS);
+        let err = b
+            .add_output(&make_recipient(2_000_000), 0, &mut OsRng)
+            .err().unwrap();
+        assert!(
+            matches!(err, Error::InvalidOutputCount { .. }),
+            "adding past MAX_TX_OUTPUTS must be InvalidOutputCount, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_output_below_min_amount_rejected() {
+        let mut b = TransactionBuilder::transfer();
+        let err = b
+            .add_output(&make_recipient(MIN_OUTPUT_AMOUNT - 1), 0, &mut OsRng)
+            .err().unwrap();
+        assert!(
+            matches!(err, Error::OutputTooSmall { .. }),
+            "amount < MIN_OUTPUT_AMOUNT must be OutputTooSmall, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_output_invalid_view_key_errors_not_panics() {
+        // A6-STEALTH: malformed recipient keys return an error, never panic.
+        // The stealth generator validates the view point and returns
+        // InvalidPublicKey (the checked-key path) rather than crashing the node.
+        let (_, spend) = generate_keypair();
+        let recipient = Recipient {
+            spend_public: spend,
+            view_public: PublicKey::from_bytes([0xFFu8; 32]), // invalid point
+            amount: Amount::from_atomic(2_000_000),
+            lock_height: None,
+        };
+        let mut b = TransactionBuilder::transfer();
+        let err = b.add_output(&recipient, 0, &mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::InvalidPublicKey(_)),
+            "invalid recipient view key must be a clean error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_dummy_output_silently_skips_at_output_limit() {
+        let mut b = TransactionBuilder::transfer();
+        for _ in 0..MAX_TX_OUTPUTS {
+            b.add_dummy_output(&mut OsRng).unwrap();
+        }
+        assert_eq!(b.outputs.len(), MAX_TX_OUTPUTS);
+        // At the limit, add_dummy_output is a silent Ok no-op — not an error.
+        b.add_dummy_output(&mut OsRng).unwrap();
+        assert_eq!(
+            b.outputs.len(),
+            MAX_TX_OUTPUTS,
+            "dummy output must be silently skipped at the output limit"
+        );
+    }
+
+    #[test]
+    fn add_dummy_output_has_zero_amount() {
+        let mut b = TransactionBuilder::transfer();
+        b.add_dummy_output(&mut OsRng).unwrap();
+        assert_eq!(
+            b.outputs[0].amount,
+            Amount::ZERO,
+            "dummy output must commit to amount zero"
+        );
+    }
+
+    // =========================================================================
+    // with_target_height / with_extra
+    // =========================================================================
+
+    #[test]
+    fn with_target_height_sets_tx_version() {
+        use crate::constants::{block_version_at_height, V2_TX_ACTIVATION_HEIGHT};
+        let b0 = TransactionBuilder::transfer().with_target_height(0);
+        assert_eq!(b0.tx_version, block_version_at_height(0));
+        let b2 = TransactionBuilder::transfer().with_target_height(V2_TX_ACTIVATION_HEIGHT);
+        assert_eq!(
+            b2.tx_version,
+            block_version_at_height(V2_TX_ACTIVATION_HEIGHT)
+        );
+        assert_ne!(
+            b0.tx_version, b2.tx_version,
+            "tx_version must differ across the V2 activation height"
+        );
+    }
+
+    #[test]
+    fn with_extra_populates_extra_field() {
+        let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let b = TransactionBuilder::transfer().with_extra(bytes.clone());
+        assert_eq!(b.extra, bytes, "with_extra must populate tx.extra bytes");
+    }
+
+    // =========================================================================
+    // encrypt_amount / decrypt_amount edge cases
+    // =========================================================================
+
+    #[test]
+    fn decrypt_amount_wrong_length_returns_none() {
+        let (view_secret, _) = generate_keypair();
+        let (_, tx_public) = generate_keypair();
+        assert_eq!(decrypt_amount(&[0u8; 7], &tx_public, &view_secret, 0), None);
+        assert_eq!(decrypt_amount(&[0u8; 9], &tx_public, &view_secret, 0), None);
+        assert_eq!(decrypt_amount(&[], &tx_public, &view_secret, 0), None);
+    }
+
+    #[test]
+    fn encrypt_amount_invalid_view_point_returns_zero_fallback() {
+        let (tx_secret, _) = generate_keypair();
+        let bad_view = PublicKey::from_bytes([0xFFu8; 32]); // invalid ristretto point
+        let out = encrypt_amount(Amount::from_atomic(123), &tx_secret, &bad_view, 0);
+        assert_eq!(
+            out,
+            vec![0u8; 8],
+            "invalid view point must yield the 8-byte zero fallback"
+        );
+    }
+
+    // =========================================================================
+    // SimpleTransactionBuilder (deprecated)
+    // =========================================================================
+
+    #[test]
+    fn simple_builder_with_no_outputs_rejected() {
+        #[allow(deprecated)]
+        let err = {
+            let builder = SimpleTransactionBuilder::new(TxType::Transfer);
+            builder.build().err().unwrap()
+        };
+        assert!(
+            matches!(err, Error::InvalidOutputCount { .. }),
+            "SimpleTransactionBuilder with no outputs must be InvalidOutputCount, got {err:?}"
+        );
+    }
 }

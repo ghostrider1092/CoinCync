@@ -19,6 +19,119 @@
 //! `SubaddressManager`, `estimate_fee_with_multiplier`, `decrypt_asset_audit`,
 //! `list_asset_policies`, `mining::Miner`, and other symbols that do not
 //! exist in the trimmed 1.0 tree.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Method-level integration tests
+//! live in `tests/rpc_endpoints.rs`, `tests/rpc_endpoints_extra.rs`, and
+//! `tests/tier8_rpc_security.rs`; most are `#[tokio::test(flavor = "multi_thread")]`.)
+//!
+//! - **§1 `start_rpc_server` bind/exposure policy** — INVARIANT: the server refuses
+//!   to start with TLS enabled (unsupported here), with auth enabled but no API
+//!   key, or on a non-loopback bind lacking an API key and a TLS ack; loopback with
+//!   a key and auth disabled warns but starts. THREAT: an unauthenticated RPC
+//!   exposed on a public interface. TESTS: `start_rpc_server_refuses_tls_enabled`,
+//!   `start_rpc_server_refuses_auth_enabled_without_api_key`,
+//!   `start_rpc_server_refuses_non_loopback_without_api_key`,
+//!   `start_rpc_server_refuses_non_loopback_without_tls_ack`,
+//!   `start_rpc_server_warns_but_starts_on_loopback_with_key_and_auth_disabled`.
+//! - **§2 `BearerValidator` / `validate_bearer_header`** — INVARIANT: bearer tokens
+//!   are compared by hash and plaintext is never retained; a wrong/absent token is
+//!   401; a WS-upgrade GET with a valid token passes while a non-upgrade GET and
+//!   PUT/DELETE without auth are rejected; OPTIONS preflight is exempt; the previous
+//!   key is accepted during rotation. THREAT: auth bypass or token leakage via
+//!   retained plaintext. TESTS: `bearer_validator_rejects_non_upgrade_get_without_auth`,
+//!   `bearer_validator_accepts_ws_upgrade_get_with_auth`,
+//!   `bearer_validator_rejects_wrong_token_under_hashed_comparison`,
+//!   `bearer_validator_does_not_retain_plaintext`,
+//!   `bearer_validator_accepts_previous_key_during_rotation`,
+//!   `bearer_validator_rejects_put_method_with_401`,
+//!   `bearer_validator_rejects_delete_method_with_401`,
+//!   `bearer_validator_exempts_options_preflight_from_auth`.
+//! - **§3 public-bind auth enforcement** — INVARIANT: on a public bind `get_peers`
+//!   requires a bearer, a plain GET without upgrade is rejected, and a WS-upgrade
+//!   GET is rejected without a bearer but not unauthorized with one. THREAT:
+//!   unauthenticated access to peer/topology data. TESTS:
+//!   `rpc_public_bind_rejects_missing_bearer_for_get_peers`,
+//!   `rpc_public_bind_rejects_plain_get_without_upgrade`,
+//!   `rpc_public_bind_rejects_ws_upgrade_get_without_bearer`,
+//!   `rpc_public_bind_ws_upgrade_get_with_bearer_is_not_unauthorized`.
+//! - **§4 `client_ip_from_request` (XFF trust)** — INVARIANT: `X-Forwarded-For` is
+//!   honored ONLY when the proxy-ack env is set; otherwise the socket IP is used.
+//!   THREAT: IP spoofing to evade rate limits or forge a request origin. TESTS:
+//!   `client_ip_honors_xff_only_when_ack_set`, `client_ip_ignores_xff_without_ack`.
+//! - **§5 `serialize_peer_info` (metadata minimization)** — INVARIANT: on a public
+//!   bind peer info is metadata-minimized (sensitive fields redacted) by default and
+//!   exposed only on loopback or under an explicit override; the public response
+//!   shape is privacy-safe. THREAT: leaking peer IPs/topology that deanonymize the
+//!   network. TESTS: `peer_serialization_redacts_sensitive_fields_when_minimized`,
+//!   `peer_serialization_exposes_fields_when_not_minimized`,
+//!   `rpc_public_bind_defaults_to_metadata_minimized`,
+//!   `rpc_public_bind_get_peers_response_shape_is_privacy_safe`,
+//!   `rpc_public_bind_redacts_real_peer_fixture_fields`,
+//!   `rpc_loopback_exposes_peer_fixture_fields_when_not_minimized`,
+//!   `rpc_loopback_env_override_forces_metadata_minimization`.
+//! - **§6 `rpc_clamp_audit_range` (range-scan bounds)** — INVARIANT: audit/range
+//!   RPCs clamp the span to the max audit block span and reject inverted or oversized
+//!   ranges, saturating near `u64::MAX`. THREAT: a resource-exhaustion DoS via an
+//!   enormous range scan. TESTS: `get_block_range_span_capped_at_100`,
+//!   `get_block_range_u64_max_bounds_saturate`, `rpc_get_block_range_inverted`,
+//!   `check_zero_commitments_in_range_span_too_large_rejected`,
+//!   `check_zero_commitments_in_range_inverted_rejected`,
+//!   `verify_signatures_in_range_span_too_large_rejected`,
+//!   `verify_signatures_in_range_inverted_rejected`,
+//!   `verify_range_proofs_in_range_span_too_large_rejected`,
+//!   `verify_range_proofs_in_range_inverted_rejected`,
+//!   `verify_commitment_balance_in_range_span_too_large_rejected`,
+//!   `verify_commitment_balance_in_range_inverted_rejected`,
+//!   `full_chain_audit_span_too_large_rejected`, `full_chain_audit_inverted_rejected`.
+//! - **§7 `submit_block` / `send_raw_transaction` (write path)** — INVARIANT: both
+//!   reject garbage/empty hex and enforce a hex-length cap; an already-known block
+//!   returns already-known. THREAT: a malformed or oversized payload crashes or
+//!   floods the node. TESTS: `rpc_submit_block_garbage`, `rpc_submit_block_empty_hex`,
+//!   `rpc_send_raw_transaction_garbage`, `submit_block_already_known_returns_already_known`,
+//!   `submit_block_hex_length_cap_rejected`, `send_raw_transaction_hex_length_cap_rejected`.
+//! - **§8 nullifier / spark-serial spent queries** — INVARIANT: `is_nullifier_spent`
+//!   and `is_spark_serial_spent` require a 32-byte hex argument, rejecting
+//!   too-long/non-32-byte/non-hex input. THREAT: a malformed key-image query panics
+//!   or bypasses validation. TESTS: `is_nullifier_spent_hex_too_long_rejected`,
+//!   `is_nullifier_spent_non_32_byte_rejected`, `is_nullifier_spent_non_hex_rejected`,
+//!   `is_spark_serial_spent_hex_too_long_rejected`, `is_spark_serial_spent_non_32_byte_rejected`,
+//!   `is_spark_serial_spent_valid_returns_result`, `rpc_is_nullifier_spent_returns_result`.
+//! - **§9 block/tx read methods + param validation** — INVARIANT: `get_block_by_height`
+//!   / `get_block_by_hash` / `get_transaction` validate their params
+//!   (string/negative/no-params/`0x`-prefix/non-hex/too-long/future height) and
+//!   return well-formed errors rather than panicking; an unknown method returns a
+//!   JSON-RPC error. THREAT: a malformed query 500s or is silently mishandled.
+//!   TESTS: `rpc_get_block_by_height_valid`, `rpc_get_block_by_height_future`,
+//!   `rpc_get_block_by_height_string_param`, `rpc_get_block_by_height_negative`,
+//!   `rpc_get_block_by_height_no_params`, `rpc_get_block_by_hash_missing`,
+//!   `get_block_by_valid_hash_returns_block`, `get_block_non_hex_hash_rejected`,
+//!   `get_block_tolerates_0x_prefix`, `get_transaction_hex_too_long_rejected`,
+//!   `rpc_get_transaction_invalid_hex`, `rpc_unknown_method_returns_error`.
+//! - **§10 info / supply / stratum-posture reporting** — INVARIANT: `get_info` /
+//!   `get_blockchain_info` / `get_supply_info` expose the full documented field set,
+//!   supply decimals preserve values above `u64`, and the info reports the runtime
+//!   hardening and stratum posture honestly (hardened vs unhardened by bind/TLS).
+//!   THREAT: a misreported supply, or a falsely "hardened" posture masking an
+//!   exposed node. TESTS: `rpc_get_info_has_all_fields`, `rpc_get_supply_info_has_fields`,
+//!   `aggregate_supply_decimal_preserves_values_above_u64`,
+//!   `rpc_info_reports_runtime_hardening_posture`,
+//!   `rpc_info_reports_stratum_posture_hardened_when_not_public`,
+//!   `rpc_info_reports_stratum_posture_unhardened_when_public_without_tls`,
+//!   `rpc_info_reports_stratum_posture_hardened_with_native_tls`,
+//!   `rpc_blockchain_info_reports_stratum_posture_fields`.
+//! - **§11 `get_block_template` / `get_decoys` deprecation / decoy locators** —
+//!   INVARIANT: `get_block_template` embeds the correct network magic (mapping back
+//!   to a known network) per chain, the deprecated `get_decoys` returns a
+//!   deprecation error, and decoy locators are bound to a snapshot. THREAT: a
+//!   cross-network template mined, or a stale/unbound decoy set leaking correlation.
+//!   TESTS: `rpc_get_block_template_includes_network_magic_for_testnet_chain`,
+//!   `rpc_get_block_template_includes_network_magic_for_mainnet_chain`,
+//!   `rpc_get_block_template_includes_network_magic_for_regtest_chain`,
+//!   `rpc_get_block_template_network_magic_maps_to_known_network_testnet`,
+//!   `rpc_get_block_template_network_magic_maps_to_known_network_mainnet`,
+//!   `rpc_get_decoys_returns_deprecation_error`, `rpc_decoy_locators_are_bound_to_snapshot`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -2732,5 +2845,205 @@ mod tests {
             validator.validate(&mut bad).is_err(),
             "non-rotation key must still be rejected"
         );
+    }
+
+    // ── Serialize env-var-touching unit tests ────────────────────
+    // start_rpc_server and client_ip_from_request read process env vars;
+    // cargo runs unit tests in parallel, so guard the ones that mutate
+    // COINCYNC_RPC_TLS_PROXY_ACK / COINCYNC_RPC_XFF_PROXY_ACK. tokio::test
+    // here uses the current-thread runtime, so holding this std guard
+    // across .await is sound (the future is never required to be Send).
+    fn unit_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn fresh_chain_and_mempool() -> (crate::chain::SharedBlockchain, crate::mempool::SharedMempool) {
+        (
+            std::sync::Arc::new(crate::chain::Blockchain::new()),
+            crate::mempool::SharedMempool::new(),
+        )
+    }
+
+    // ── start_rpc_server fail-safe startup gates ─────────────────
+
+    #[tokio::test]
+    async fn start_rpc_server_refuses_tls_enabled() {
+        // Native TLS listener is not wired; tls_enabled=true must refuse.
+        let (chain, mempool) = fresh_chain_and_mempool();
+        let config = RpcConfig {
+            listen_addr: "127.0.0.1:19370".parse().unwrap(),
+            tls_enabled: true,
+            ..Default::default()
+        };
+        let res = start_rpc_server(chain, mempool, None, config).await;
+        assert!(res.is_err(), "tls_enabled=true must refuse to start");
+    }
+
+    #[tokio::test]
+    async fn start_rpc_server_refuses_auth_enabled_without_api_key() {
+        let (chain, mempool) = fresh_chain_and_mempool();
+        let config = RpcConfig {
+            listen_addr: "127.0.0.1:19371".parse().unwrap(),
+            auth_enabled: true,
+            api_key: None,
+            ..Default::default()
+        };
+        let res = start_rpc_server(chain, mempool, None, config).await;
+        assert!(res.is_err(), "auth_enabled without api_key must refuse");
+    }
+
+    #[tokio::test]
+    async fn start_rpc_server_refuses_non_loopback_without_api_key() {
+        let (chain, mempool) = fresh_chain_and_mempool();
+        let config = RpcConfig {
+            listen_addr: "0.0.0.0:19372".parse().unwrap(),
+            auth_enabled: false,
+            api_key: None,
+            ..Default::default()
+        };
+        let res = start_rpc_server(chain, mempool, None, config).await;
+        assert!(res.is_err(), "public bind without api_key must refuse");
+    }
+
+    #[tokio::test]
+    async fn start_rpc_server_refuses_non_loopback_without_tls_ack() {
+        let _guard = unit_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("COINCYNC_RPC_TLS_PROXY_ACK");
+        let (chain, mempool) = fresh_chain_and_mempool();
+        let config = RpcConfig {
+            listen_addr: "0.0.0.0:19373".parse().unwrap(),
+            auth_enabled: true,
+            api_key: Some("public-key".to_string()),
+            tls_enabled: false,
+            ..Default::default()
+        };
+        // api_key is present (passes the loopback/api_key gate) but there is
+        // no native TLS and no COINCYNC_RPC_TLS_PROXY_ACK: refuse so the
+        // Bearer token can't travel in cleartext.
+        let res = start_rpc_server(chain, mempool, None, config).await;
+        assert!(res.is_err(), "public bind without TLS or ack must refuse");
+    }
+
+    #[tokio::test]
+    async fn start_rpc_server_warns_but_starts_on_loopback_with_key_and_auth_disabled() {
+        // api_key set but auth_enabled=false on a loopback bind: the server
+        // starts UNAUTHENTICATED (warn path) rather than refusing.
+        let (chain, mempool) = fresh_chain_and_mempool();
+        let config = RpcConfig {
+            listen_addr: "127.0.0.1:19388".parse().unwrap(),
+            auth_enabled: false,
+            api_key: Some("configured-but-unenforced".to_string()),
+            ..Default::default()
+        };
+        let server = start_rpc_server(chain, mempool, None, config)
+            .await
+            .expect("loopback + api_key + auth_disabled must start (warn path)");
+        server.stop();
+    }
+
+    // ── client_ip_from_request — XFF gating ──────────────────────
+
+    #[test]
+    fn client_ip_honors_xff_only_when_ack_set() {
+        let _guard = unit_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("COINCYNC_RPC_XFF_PROXY_ACK", "1");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/rpc")
+            .header("x-forwarded-for", "203.0.113.7, 10.0.0.1")
+            .body(())
+            .expect("request");
+        let ip = client_ip_from_request(&req);
+        assert_eq!(
+            ip,
+            "203.0.113.7".parse::<std::net::IpAddr>().unwrap(),
+            "with ack set, the first XFF entry is honored"
+        );
+        std::env::remove_var("COINCYNC_RPC_XFF_PROXY_ACK");
+    }
+
+    #[test]
+    fn client_ip_ignores_xff_without_ack() {
+        let _guard = unit_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("COINCYNC_RPC_XFF_PROXY_ACK");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/rpc")
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(())
+            .expect("request");
+        let ip = client_ip_from_request(&req);
+        assert_eq!(
+            ip,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            "without ack, a spoofable XFF is ignored and we fall back to loopback"
+        );
+    }
+
+    // ── validator — method gating + preflight exemption ──────────
+
+    #[test]
+    fn bearer_validator_rejects_put_method_with_401() {
+        let mut validator = RpcBearerValidator::from_plaintext("secret-token");
+        let mut req = Request::builder()
+            .method("PUT")
+            .uri("/rpc")
+            .header(http::header::AUTHORIZATION, "Bearer secret-token")
+            .body(())
+            .expect("request");
+        let res = validator.validate(&mut req);
+        let resp = res.expect_err("PUT must be refused");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn bearer_validator_rejects_delete_method_with_401() {
+        let mut validator = RpcBearerValidator::from_plaintext("secret-token");
+        let mut req = Request::builder()
+            .method("DELETE")
+            .uri("/rpc")
+            .header(http::header::AUTHORIZATION, "Bearer secret-token")
+            .body(())
+            .expect("request");
+        let res = validator.validate(&mut req);
+        let resp = res.expect_err("DELETE must be refused");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn bearer_validator_exempts_options_preflight_from_auth() {
+        // OPTIONS carries no auth and must pass even with a token configured.
+        let mut validator = RpcBearerValidator::from_plaintext("secret-token");
+        let mut req = Request::builder()
+            .method("OPTIONS")
+            .uri("/rpc")
+            .body(())
+            .expect("request");
+        assert!(
+            validator.validate(&mut req).is_ok(),
+            "CORS preflight must be exempt from the Bearer check"
+        );
+    }
+
+    // ── serialize_peer_info — non-minimized (exposed) path ───────
+
+    #[test]
+    fn peer_serialization_exposes_fields_when_not_minimized() {
+        let mut p = crate::network::peer::PeerInfo::new(
+            [0x11; 32],
+            "203.0.113.5:30303".parse().expect("socket"),
+            true,
+        );
+        p.user_agent = "CoinCync/Exposed-UA".to_string();
+        p.bytes_recv = 4242;
+        p.bytes_sent = 2424;
+
+        let exposed = serialize_peer_info(&p, false);
+        assert_eq!(exposed["addr"], "203.0.113.5:30303");
+        assert_eq!(exposed["user_agent"], "CoinCync/Exposed-UA");
+        assert_eq!(exposed["bytes_recv"], 4242);
+        assert_eq!(exposed["bytes_sent"], 2424);
+        assert_eq!(exposed["metadata_minimized"], false);
     }
 }
