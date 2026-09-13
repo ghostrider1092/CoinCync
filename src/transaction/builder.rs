@@ -8,10 +8,10 @@
 //! - Amount encryption
 //! - Fee calculation and change handling
 
+use super::signer::{ClsagSignRequest, OneTimeKeyRef, SoftwareSigner, TxSigner};
 use super::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use crate::constants::{MAX_TX_INPUTS, MAX_TX_OUTPUTS, MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT};
 use crate::crypto::{
-    clsag_sign,
     create_aggregated_range_proof_for_height,
     // Encrypted memos
     encrypt_memo,
@@ -22,7 +22,6 @@ use crate::crypto::{
     ClsagRingMember,
     ClsagSignature,
     EcCommitment,
-    KeyImage as CryptoKeyImage,
     // Bulletproofs range proofs and commitments
     PedersenCommitment,
     PublicPoint,
@@ -519,8 +518,22 @@ impl TransactionBuilder {
         Ok((tx, secrets))
     }
 
-    /// Build and sign the transaction
+    /// Build and sign the transaction using the default in-process signer.
     pub fn build<R: RngCore + CryptoRng>(self, rng: &mut R) -> Result<Transaction> {
+        self.build_with_signer(&SoftwareSigner, rng)
+    }
+
+    /// Build and sign the transaction, delegating the spend-authority operations
+    /// (per-input key images and CLSAG signatures) to `signer`.
+    ///
+    /// [`build`](Self::build) calls this with [`SoftwareSigner`] — byte-for-byte
+    /// the previous inline behavior. A hardware wallet passes a device-backed
+    /// signer so the spend key never leaves the device.
+    pub fn build_with_signer<R: RngCore + CryptoRng, S: TxSigner>(
+        self,
+        signer: &S,
+        rng: &mut R,
+    ) -> Result<Transaction> {
         // Validate inputs/outputs
         if self.tx_type != TxType::Coinbase && self.inputs.is_empty() {
             return Err(Error::InvalidInputCount {
@@ -645,13 +658,12 @@ impl TransactionBuilder {
                 PedersenCommitment::commit(input.amount.as_atomic(), pseudo_bf).to_bytes();
             pre_pseudo_commitments.push(pseudo_commitment);
 
-            // Pre-compute CLSAG key image: I = x * Hp(x*G)
+            // Pre-compute CLSAG key image: I = x * Hp(x*G), via the signer.
             // Must use the per-output one_time_secret (not the master spend_secret) to
             // produce unique key images. Using spend_secret for all inputs yields identical
             // key images → "Duplicate key image in block" validation failure.
-            let secret_scalar = SecretScalar::from_bytes(*input.one_time_secret.as_bytes());
-            let clsag_ki = CryptoKeyImage::from_secret(&secret_scalar);
-            pre_key_images.push(KeyImage::from_bytes(clsag_ki.to_bytes()));
+            let key_ref = OneTimeKeyRef::from_secret(input.one_time_secret.clone());
+            pre_key_images.push(signer.key_image(&key_ref)?);
         }
 
         // SECURITY: builder MUST sign the exact preimage the verifier checks.
@@ -698,10 +710,9 @@ impl TransactionBuilder {
             let pseudo_bf = &pseudo_blindings[idx];
             let pseudo_output_commitment = pre_pseudo_commitments[idx];
 
-            // Convert one-time secret to EC scalar for CLSAG.
-            // This is the secret key corresponding to the stealth address at the real
+            // The one-time key corresponding to the stealth address at the real
             // ring position; must match the key image computed above.
-            let secret_scalar = SecretScalar::from_bytes(*input.one_time_secret.as_bytes());
+            let key_ref = OneTimeKeyRef::from_secret(input.one_time_secret.clone());
 
             // Blinding difference: r_real - r_pseudo (converted via bytes for cross-library compat)
             let diff_bf = input.blinding.sub(pseudo_bf);
@@ -713,13 +724,15 @@ impl TransactionBuilder {
                     Error::CryptoError("invalid pseudo-output commitment".into()),
                 )?);
 
-            let signature = clsag_sign(
-                &message,
-                &input.ring,
-                input.real_index,
-                &secret_scalar,
-                &blinding_diff,
-                &pseudo_output,
+            let signature = signer.sign_clsag_input(
+                &ClsagSignRequest {
+                    message: &message,
+                    ring: &input.ring,
+                    real_index: input.real_index,
+                    key: &key_ref,
+                    blinding_diff: &blinding_diff,
+                    pseudo_output: &pseudo_output,
+                },
                 rng,
             )?;
 
