@@ -865,37 +865,7 @@ pub async fn start_rpc_server(
     // docs/wallet-v2-reorg-handling-design.md §3.5.
     module
         .register_method("find_fork_point", |params, state, _ext| {
-            let (journal_hex,): (Vec<(u64, String)>,) =
-                params.parse().map_err(|e: ErrorObjectOwned| {
-                    ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-                })?;
-            // DoS guard: reject an oversized journal before any hex decode or
-            // chain lookups. A real wallet journal is a few thousand entries at
-            // most (see wallet::scanner::JOURNAL_MAX_DEFAULT).
-            const MAX_JOURNAL: usize = 4096;
-            if journal_hex.len() > MAX_JOURNAL {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!(
-                        "find_fork_point: journal too large ({} > {})",
-                        journal_hex.len(),
-                        MAX_JOURNAL
-                    ),
-                    None::<()>,
-                ));
-            }
-            let journal =
-                crate::rpc::lightwallet::parse_journal_hex(&journal_hex).map_err(|e| {
-                    ErrorObjectOwned::owned(-32602, format!("find_fork_point: {}", e), None::<()>)
-                })?;
-            // Layer 2: canonical-hash lookups under block_in_place — same
-            // rationale as get_block_by_height above.
-            let fork = tokio::task::block_in_place(|| {
-                crate::rpc::lightwallet::fork_point_in_journal(&journal, |h| {
-                    state.chain.get_block_hash(h)
-                })
-            });
-            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "fork_point": fork }))
+            crate::rpc::handlers::lightsync::find_fork_point(params, &state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
@@ -925,281 +895,19 @@ pub async fn start_rpc_server(
     // ignored.
     module
         .register_method("get_block_template", |_params, state, _ext| {
-            // SECURITY (runtime resilience, Layer 2): build_template_json iterates
-            // mempool and runs `chain.validate_transaction()` for every candidate
-            // (full ring sig + range proof verify). On a busy mempool this is the
-            // most CPU-heavy synchronous call in the RPC surface, and it runs
-            // many times per minute because the failover miner polls for fresh
-            // templates. `block_in_place` lets tokio's multi-thread runtime
-            // (Layer 1 forces 4 workers) keep scheduling other tasks during the
-            // call instead of monopolizing the worker thread.
-            let template = tokio::task::block_in_place(|| {
-                crate::mining::template::build_template_json(&state.chain, &state.mempool)
-            });
-            Ok::<_, ErrorObjectOwned>(template)
+            crate::rpc::handlers::write::get_block_template(&state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── submit_block ──────────────────────────────────────────
-    module.register_method("submit_block", |params, state, _ext| {
-        let (hex_block,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        // Bound the hex input length BEFORE hex::decode + borsh::from_slice.
-        // hex::decode allocates a Vec of half the input length; without this
-        // cap a caller could send a hex string many times larger than the
-        // consensus block limit and force the node to allocate + parse +
-        // borsh-decode data that would fail the block-size check anyway.
-        // The jsonrpsee body-size default covers the gross case, but a
-        // per-method cap stops authenticated callers (compromised API key,
-        // malicious miner) from wasting our hex+borsh decode budget on
-        // garbage that consensus would reject. Same pattern applied at
-        // `is_nullifier_spent` (~L1309).
-        //
-        // 2× MAX_BLOCK_SIZE covers hex-encoding overhead; 4× total (2 for
-        // hex, 2 for slack) leaves headroom for a max-size valid block plus
-        // any near-boundary encoding variance.
-        //
-        // (Bitcoin Core exposes a `submitblock` RPC and Monero exposes
-        // a `/sendrawtransaction` daemon endpoint as widely-referenced
-        // interfaces; the specific rejection paths / constants
-        // (`MAX_BLOCK_SERIALIZED_SIZE` / `MAX_TX_BLOB_SIZE`) were not
-        // re-verified against upstream this session, so the concrete
-        // enforcement claim is dropped. The 2× × 2 pre-decode cap
-        // stands on its own reasoning above.)
-        const MAX_HEX_BLOCK: usize = 2 * 2 * crate::constants::MAX_BLOCK_SIZE;
-        if hex_block.len() > MAX_HEX_BLOCK {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!("hex block too large: {} chars (max {})", hex_block.len(), MAX_HEX_BLOCK),
-                None::<()>,
-            ));
-        }
-        let block_bytes = hex::decode(&hex_block).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
-        })?;
-        let block: crate::consensus::Block = borsh::from_slice(&block_bytes).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("bad block encoding: {}", e), None::<()>)
-        })?;
-        let hash = block.hash();
-        let algo = crate::consensus::PowAlgorithm::from_index(block.header.algorithm);
-        let claimed_pow_hex = match crate::consensus::compute_pow_hash(
-            algo,
-            &block.header.anchor,
-            block.header.nonce,
-            &block.header.tx_root,
-            block.header.height,
-        ) {
-            Ok(h) => hex::encode(&h.as_bytes()[..8]),
-            Err(e) => format!("pow_err:{}", e),
-        };
-        warn!(
-            "submit_block candidate: h={} nonce={} magic={} prev={} anchor={} tx_root={} target={} pow={} algo={}",
-            block.header.height,
-            block.header.nonce,
-            hex::encode(block.header.network_magic),
-            hex::encode(&block.header.prev_hash.as_bytes()[..8]),
-            hex::encode(&block.header.anchor.as_bytes()[..8]),
-            hex::encode(&block.header.tx_root.as_bytes()[..8]),
-            hex::encode(&block.header.target.as_bytes()[..8]),
-            claimed_pow_hex,
-            block.header.algorithm,
-        );
-        // Clone for broadcast (process_block consumes the original); the
-        // clone cost is O(tx count), negligible for testnet.
-        let block_for_broadcast = block.clone();
-        // Snapshot tx list before process_block consumes the original.
-        // Used below to keep the mempool aligned with chain state — drop
-        // confirmed txs and shadow-evict any mempool tx whose key image
-        // collides with one just spent in this block. Without this sync
-        // (the wire-side equivalent runs in bin/node.rs after a
-        // BlockReceived event), a locally-mined block leaves stale txs
-        // in the mempool that poison every subsequent block template
-        // with "duplicate key image". Caused the 2026-05-08 chain stall
-        // at h=6001; see docs/launch/MONDAY_PRELAUNCH.md incident playbook.
-        let block_txs = block_for_broadcast.transactions.clone();
-        // process_block returns Ok(BlockStatus::...) even for Invalid/Orphan
-        // outcomes, so we must inspect the status and surface a failure
-        // when the block was not actually accepted. Without this, the
-        // miner sees a silent success while the chain never advances.
-        //
-        // SECURITY (runtime resilience, Layer 2): the wire-side BlockReceived
-        // handler in bin/node.rs routes its process_block through
-        // spawn_blocking. The locally-submitted path here uses
-        // `block_in_place` for the same effect from a sync RPC handler —
-        // tokio's multi-thread runtime can keep scheduling other tasks
-        // during full block validation (PoW recheck + per-tx crypto verify).
-        let process_result = tokio::task::block_in_place(|| state.chain.process_block(block));
-        match process_result {
-            Ok(status @ (crate::chain::BlockStatus::Accepted
-                        | crate::chain::BlockStatus::AcceptedFork
-                        | crate::chain::BlockStatus::AcceptedReorg { .. })) => {
-                // Mempool sync — same calls as the wire-side handler in
-                // bin/node.rs after BlockReceived. remove_confirmed drops
-                // mined txs AND shadow-evicts any mempool tx that shares
-                // a key image with a confirmed tx (the poison-tx scenario
-                // that stalled the chain at h=6001 on 2026-05-08).
-                state.mempool.remove_confirmed(&block_txs);
-                // On reorg, re-admit txs that were mined in disconnected
-                // blocks but are still spendable on the new chain.
-                if let crate::chain::BlockStatus::AcceptedReorg { orphaned_txs } = status {
-                    state.mempool.restore_orphaned(orphaned_txs, &state.chain);
-                }
-                state.mempool.set_height(state.chain.height());
-                // Shadow-evict mempool txs that no longer validate
-                // against the new chain state. Catches the cases
-                // remove_confirmed can't (hard-fork rule transition,
-                // reorg-induced input-coinbase maturity changes).
-                // Belt-and-suspenders for the miner-side filter in
-                // mining/template.rs:70-95.
-                state.mempool.shadow_evict_invalid(state.chain.as_ref());
+    module
+        .register_method("submit_block", |params, state, _ext| {
+            crate::rpc::handlers::write::submit_block(params, &state)
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
-                // Fire-and-forget P2P announcement so the block reaches
-                // other nodes; without this, locally-mined blocks stay
-                // local and the chain forks between the miner and its
-                // peers. We don't block the RPC response on propagation.
-                //
-                // Also refresh the handshake-side chain_height/chain_tip
-                // so subsequent peer Version messages advertise the new
-                // tip. The BlockReceived event handler in bin/node.rs
-                // does the same thing for blocks arriving from peers;
-                // locally-mined blocks come through this RPC path
-                // instead and would otherwise leave handshake state stale.
-                if let Some(p2p) = state.p2p.as_ref() {
-                    let p2p = p2p.clone();
-                    // Capture the publication sequence BEFORE the detached
-                    // spawn so an out-of-order completion can't regress the
-                    // P2P shadow to a stale tip (issue #249).
-                    let update = p2p.next_chain_update();
-                    tokio::spawn(async move {
-                        p2p.set_chain_state(update).await;
-                        if let Err(e) = p2p.broadcast_block(&block_for_broadcast).await {
-                            warn!("Block broadcast failed: {}", e);
-                        }
-                    });
-                }
-                Ok::<_, ErrorObjectOwned>(json!({
-                    "accepted": true,
-                    "hash": hex::encode(hash.as_bytes()),
-                }))
-            }
-            Ok(crate::chain::BlockStatus::AlreadyKnown) => {
-                // Even when the block is already known, advance the mempool's
-                // tracked chain height so activation-gated validation stays in
-                // sync. The wire-side handler in bin/node.rs does the same
-                // thing for AlreadyKnown — keeps the two paths symmetric.
-                state.mempool.set_height(state.chain.height());
-                Ok::<_, ErrorObjectOwned>(json!({
-                    "accepted": true,
-                    "status": "already_known",
-                    "hash": hex::encode(hash.as_bytes()),
-                }))
-            }
-            Ok(crate::chain::BlockStatus::Orphan) => {
-                warn!(
-                    "submit_block rejected orphan: h={} nonce={} hash={}",
-                    block_for_broadcast.header.height,
-                    block_for_broadcast.header.nonce,
-                    hex::encode(hash.as_bytes()),
-                );
-                Err(ErrorObjectOwned::owned(
-                    -32001,
-                    format!("block rejected: orphan (parent not in chain), hash={}", hex::encode(hash.as_bytes())),
-                    None::<()>,
-                ))
-            }
-            Ok(crate::chain::BlockStatus::Invalid(reason)) => {
-                warn!(
-                    "submit_block rejected invalid: h={} nonce={} reason={}",
-                    block_for_broadcast.header.height,
-                    block_for_broadcast.header.nonce,
-                    reason,
-                );
-                Err(ErrorObjectOwned::owned(
-                    -32001,
-                    format!("block rejected: {}", reason),
-                    None::<()>,
-                ))
-            }
-            Err(e) => {
-                warn!(
-                    "submit_block rejected error: h={} nonce={} err={}",
-                    block_for_broadcast.header.height,
-                    block_for_broadcast.header.nonce,
-                    e,
-                );
-                Err(ErrorObjectOwned::owned(
-                    -32001, format!("block rejected: {}", e), None::<()>,
-                ))
-            }
-        }
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
-
-    // ── send_raw_transaction ──────────────────────────────────
     module
         .register_method("send_raw_transaction", |params, state, _ext| {
-            let (hex_tx,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-            })?;
-            // Bound hex input length. Mirrors submit_block above and
-            // `is_nullifier_spent` at ~L1309. (Bitcoin Core exposes a
-            // `sendrawtransaction` RPC; the prior comment specifically
-            // cited `MAX_STANDARD_TX_WEIGHT` as the size cap primitive.
-            // That specific constant was not re-verified against upstream
-            // this session and is dropped. The 2× MAX_TX_SIZE × 2 cap
-            // below stands on its own reasoning: 2 for hex, 2 for slack;
-            // anything larger decodes to bytes larger than any valid tx
-            // and is rejected downstream, but the pre-check saves the
-            // allocation and the borsh parse.)
-            const MAX_HEX_TX: usize = 2 * 2 * crate::constants::MAX_TX_SIZE;
-            if hex_tx.len() > MAX_HEX_TX {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!(
-                        "hex tx too large: {} chars (max {})",
-                        hex_tx.len(),
-                        MAX_HEX_TX
-                    ),
-                    None::<()>,
-                ));
-            }
-            let tx_bytes = hex::decode(&hex_tx).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
-            })?;
-            let tx: crate::transaction::Transaction =
-                borsh::from_slice(&tx_bytes).map_err(|e| {
-                    ErrorObjectOwned::owned(-32602, format!("bad tx encoding: {}", e), None::<()>)
-                })?;
-            let hash = tx.hash();
-            let tx_for_broadcast = tx.clone();
-            // SECURITY (runtime resilience, Layer 2): mempool admit runs full
-            // crypto verify (ring sig + range proof) and walks the chain DB to
-            // check key-image conflicts. `block_in_place` lets tokio's multi-
-            // thread runtime keep scheduling other tasks during the validation.
-            let admit_result =
-                tokio::task::block_in_place(|| state.mempool.add_with_chain(tx, &state.chain));
-            match admit_result {
-                Ok(_) => {
-                    // Broadcast via Dandelion++ so other nodes see the tx
-                    if let Some(p2p) = state.p2p.as_ref() {
-                        let p2p = p2p.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = p2p.broadcast_transaction(tx_for_broadcast).await {
-                                warn!("Tx broadcast failed: {}", e);
-                            }
-                        });
-                    }
-                    Ok::<_, ErrorObjectOwned>(json!({
-                        "accepted": true,
-                        "hash": hex::encode(hash.as_bytes()),
-                    }))
-                }
-                Err(e) => Err(ErrorObjectOwned::owned(
-                    -32002,
-                    format!("tx rejected: {}", e),
-                    None::<()>,
-                )),
-            }
+            crate::rpc::handlers::write::send_raw_transaction(params, &state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
@@ -1584,42 +1292,7 @@ pub async fn start_rpc_server(
     // (`MessageType::GetOutputDigests`).
     module
         .register_method("get_output_digests", |params, state, _ext| {
-            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-            })?;
-            if end < start {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    "end must be >= start".to_string(),
-                    None::<()>,
-                ));
-            }
-            const MAX_DIGEST_BLOCKS: u64 = 100;
-            let chain_height = state.chain.height();
-            let end = end
-                .min(start.saturating_add(MAX_DIGEST_BLOCKS - 1))
-                .min(chain_height);
-            // `end` was just clamped to `min(chain_height)`, which can drop it
-            // below `start` when `start > chain_height` (the earlier guard saw
-            // the pre-clamp `end`). Use saturating math — matching the sibling
-            // range handlers — so the capacity calc can't underflow. The
-            // `start..=end` loop below is simply empty in that case.
-            let mut digests = Vec::with_capacity(
-                (end.saturating_sub(start).saturating_add(1) as usize)
-                    .min(MAX_DIGEST_BLOCKS as usize),
-            );
-            for h in start..=end {
-                if let Some(block) = state.chain.get_block_by_height(h) {
-                    digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));
-                }
-            }
-            let count = digests.len();
-            Ok::<_, ErrorObjectOwned>(json!({
-                "start": start,
-                "end": end,
-                "count": count,
-                "digests": digests,
-            }))
+            crate::rpc::handlers::lightsync::get_output_digests(params, &state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
@@ -1638,49 +1311,11 @@ pub async fn start_rpc_server(
     //
     // Params: optional [stride: u64] — emit one checkpoint every
     // `stride` blocks. Default 10000 (~14 days at 120s).
-    module.register_method("get_sync_checkpoints", |params, state, _ext| {
-        let requested: u64 = params.parse::<(u64,)>().map(|(s,)| s).unwrap_or(10_000);
-        let chain_height = state.chain.height();
-        // SECURITY (DoS): bound the work regardless of the requested stride.
-        // This method is in the REST allowlist (reachable UNAUTHENTICATED via
-        // POST /rpc), so a `stride=1` request must not force O(chain_height) DB
-        // reads + a chain_height-sized Vec — that scales attacker damage with
-        // chain height. Floor the stride so the loop yields at most
-        // MAX_CHECKPOINTS entries; the actual stride used is returned to the
-        // caller. Also run the synchronous DB scan under block_in_place so it
-        // can't monopolize a tokio worker (matches the other DB-scan handlers).
-        const MAX_CHECKPOINTS: u64 = 512;
-        let min_stride = chain_height.div_ceil(MAX_CHECKPOINTS).max(1);
-        let stride = requested.max(min_stride).min(50_000);
-        let checkpoints = tokio::task::block_in_place(|| {
-            let mut checkpoints = Vec::new();
-            let mut h = stride;
-            while h <= chain_height {
-                if let Some(block) = state.chain.get_block_by_height(h) {
-                    let block_hash = block.hash();
-                    let cp = crate::wallet::lightsync::SyncCheckpoint::new(
-                        h,
-                        block_hash,
-                        0, // total_outputs not tracked at this layer
-                        crate::primitives::Hash::default(), // utxo_hash deferred to Gap 2
-                    );
-                    checkpoints.push(cp);
-                }
-                h = match h.checked_add(stride) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
-            checkpoints
-        });
-        Ok::<_, ErrorObjectOwned>(json!({
-            "stride": stride,
-            "chain_height": chain_height,
-            "count": checkpoints.len(),
-            "checkpoints": checkpoints,
-            "auth_note": "Cross-check against CONSENSUS_CHECKPOINTS in src/constants.rs. Miner-signed authentication queued for v1.0.1 (CIP-009.D).",
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("get_sync_checkpoints", |params, state, _ext| {
+            crate::rpc::handlers::lightsync::get_sync_checkpoints(params, &state)
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_metrics ──────────────────────────────────────────
     //

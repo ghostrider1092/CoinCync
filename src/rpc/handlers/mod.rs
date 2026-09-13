@@ -13,4 +13,6 @@
 
 pub(crate) mod audit;
 pub(crate) mod chain;
+pub(crate) mod lightsync;
 pub(crate) mod status;
+pub(crate) mod write;
