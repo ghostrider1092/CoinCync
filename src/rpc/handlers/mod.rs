@@ -12,3 +12,4 @@
 //! from the previous inline closures.
 
 pub(crate) mod audit;
+pub(crate) mod chain;
