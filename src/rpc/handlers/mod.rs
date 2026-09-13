@@ -13,3 +13,4 @@
 
 pub(crate) mod audit;
 pub(crate) mod chain;
+pub(crate) mod status;
