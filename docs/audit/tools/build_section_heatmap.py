@@ -555,6 +555,416 @@ def load_invariant_manifest(path="docs/audit/invariants.json"):
     return {"path": "invariants (declared pipeline)", "subsystem": "invariants",
             "critical": True, "sections": secs}
 
+# ══════════════════════════════════════════════════════════════════════════════
+# NEXT-TIER CAPABILITIES (added): mutation testing, incident-replay, coverage
+# ratchet vs a base ref, blast-radius, and a one-shot `doctor` health score.
+# All self-contained — no external crates (no cargo-mutants), so the kit stays
+# portable to any Rust chain.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── (1) mutation testing: do the mapped tests actually KILL a planted bug? ─────
+# Green means "passing AND adversarial", but a test can assert a failure path and
+# still not pin down the real logic. Mutation testing plants small bugs in a
+# section's own source and checks the section's tests catch them. A surviving
+# mutant is a hole in the proof, no matter how green the swatch looks.
+MUTATORS = [
+    # (compiled regex, replacement) — chosen to usually still compile (compile
+    # failures are reported 'unviable' and excluded from the kill-rate, like
+    # cargo-mutants). Word/space anchors keep us off generics and turbofish.
+    (re.compile(r"(?<![<>=!])==(?!=)"), "!="),
+    (re.compile(r"(?<![<>=!])!=(?!=)"), "=="),
+    (re.compile(r"(?<=\s)>=(?=\s)"), ">"),
+    (re.compile(r"(?<=\s)<=(?=\s)"), "<"),
+    (re.compile(r"(?<=\s)>(?=\s)"), ">="),
+    (re.compile(r"(?<=\s)<(?=\s)"), "<="),
+    (re.compile(r"&&"), "||"),
+    (re.compile(r"\|\|"), "&&"),
+    (re.compile(r"\bsaturating_sub\b"), "saturating_add"),
+    (re.compile(r"\bsaturating_add\b"), "saturating_sub"),
+    (re.compile(r"\bchecked_sub\b"), "checked_add"),
+    (re.compile(r"\bwrapping_sub\b"), "wrapping_add"),
+    (re.compile(r"(?<=\s)\+(?=\s)"), "-"),
+    (re.compile(r"\btrue\b"), "false"),
+    (re.compile(r"\bfalse\b"), "true"),
+]
+
+def _brace_span(lines, open_line_idx):
+    """Given a 0-based line index at/just before a `{`, return the 1-based
+    [start,end] line range of the brace-balanced block (the function body)."""
+    text = "".join(lines)
+    # byte offset of the start of open_line_idx
+    off = sum(len(lines[i]) for i in range(open_line_idx))
+    b = text.find("{", off)
+    if b == -1:
+        return open_line_idx + 1, open_line_idx + 1
+    depth, i = 0, b
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    start_line = text.count("\n", 0, b) + 1
+    end_line = text.count("\n", 0, i) + 1
+    return start_line, end_line
+
+def _section_span(f, s, all_secs):
+    """[start,end] line range to mutate. Prefer the FUNCTION the section names
+    (`fn <name>`) so we plant bugs in exactly that logic; fall back to the
+    anchor→next-anchor window, hard-capped so a section never spans the file."""
+    lines = Path(f["path"]).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    nm = s["name"].split()[0].strip("`")
+    if re.match(r"^[A-Za-z_]\w*$", nm):
+        for i, ln in enumerate(lines):
+            if re.search(rf"\bfn\s+{re.escape(nm)}\b", ln):
+                start, end = _brace_span(lines, i)
+                if end - start <= 400:  # a plausible single function
+                    return start, end
+                break
+    start = code_line(f, s) or 1
+    nxt = None
+    for other in all_secs:
+        ln = code_line(f, other)
+        if ln and ln > start and (nxt is None or ln < nxt):
+            nxt = ln
+    end = min((nxt - 1) if nxt else start + 120, start + 120)  # hard cap 120 lines
+    return start, end
+
+def _gen_mutants(lines, start, end):
+    """Yield (line_idx, col, orig_tok, new_tok) for each planted mutation inside
+    the span, skipping comment and attribute lines."""
+    out = []
+    for i in range(start - 1, min(end, len(lines))):
+        raw = lines[i]
+        st = raw.lstrip()
+        if st.startswith("//") or st.startswith("#[") or st.startswith("#!"):
+            continue
+        code = raw.split("//", 1)[0]  # don't mutate trailing comments
+        for rx, repl in MUTATORS:
+            for m in rx.finditer(code):
+                out.append((i, m.start(), m.group(0), repl))
+    return out
+
+def run_mutation(files, query, max_mutants, timeout, spark, use_color):
+    def col(c, s): return f"{ANSI[c]}{s}{RST}" if use_color else s
+    def b(s): return f"{BOLD}{s}{RST}" if use_color else s
+    def dim(s): return f"{DIM}{s}{RST}" if use_color else s
+    hits = match_sections(files, query)
+    hits = [(f, s) for f, s in hits if "/" in f["path"] and Path(f["path"]).exists()]
+    if not hits:
+        return "  no source-backed section matched for mutation. Try --query <file>:§N\n"
+    out = ["", b("  Mutation testing") + dim("  (plant a bug in the section, does its own test catch it?)")]
+    for f, s in hits:
+        if not s["tests"]:
+            out.append(f"  {col('yellow','—')} {f['path']} §{s['num']} {s['name']}: no mapped test to run")
+            continue
+        p = Path(f["path"])
+        original = p.read_text(encoding="utf-8", errors="replace")
+        lines = original.splitlines(keepends=True)
+        span = _section_span(f, s, f["sections"])
+        mutants = _gen_mutants(lines, *span)
+        if not mutants:
+            out.append(f"  {col('grey','·')} {f['path']} §{s['num']} {s['name']}: no mutable operators in span")
+            continue
+        killed = survived = unviable = 0
+        surv_detail = []
+        picked = mutants[:max_mutants]
+        out.append("")
+        out.append("  " + b(f"{f['path']} §{s['num']} {s['name']}") +
+                   dim(f"   {len(picked)}/{len(mutants)} mutants · tests: {', '.join(s['tests'])}"))
+        try:
+            for (li, cols, orig_tok, new_tok) in picked:
+                ln = lines[li]
+                lines[li] = ln[:cols] + new_tok + ln[cols + len(orig_tok):]
+                p.write_text("".join(lines), encoding="utf-8")
+                verdict = _run_mutant(s["tests"], timeout, spark)
+                lines[li] = ln  # restore this line before the next mutant
+                loc = f"{f['path']}:{li+1}"
+                if verdict == "unviable":
+                    unviable += 1
+                elif verdict == "killed":
+                    killed += 1
+                else:
+                    survived += 1
+                    surv_detail.append((loc, orig_tok, new_tok))
+        finally:
+            p.write_text(original, encoding="utf-8")  # ALWAYS restore the file
+        scored = killed + survived
+        rate = (100 * killed // scored) if scored else 0
+        color = "green" if survived == 0 and scored else "red" if survived else "yellow"
+        out.append("     " + col(color, b(f"kill-rate {rate}%")) +
+                   dim(f"  ({killed} killed · {survived} survived · {unviable} unviable/uncompilable)"))
+        for loc, o, n in surv_detail:
+            out.append("       " + col("red", "survived") + dim(f"  {loc}   {o} -> {n}  (test never noticed)"))
+        if survived == 0 and scored:
+            out.append("     " + col("green", "✓ every planted bug was caught — this proof has teeth"))
+    out.append("")
+    out.append(dim("  slow by nature: each mutant recompiles. Scope with --query <file>:§N,"
+                   " cap with --max-mutants N.\n"))
+    return "\n".join(out)
+
+def _run_mutant(test_fns, timeout, spark):
+    """Run a section's tests against the currently-mutated tree.
+    → 'unviable' (compile error), 'killed' (a test failed), 'survived' (all pass)."""
+    env = dict(os.environ)
+    env.setdefault("LIBCLANG_PATH", "C:/Program Files/LLVM/bin")
+    env.setdefault("COINCYNC_RANDOMX_LIGHT_MODE", "1")
+    env.setdefault("RUST_MIN_STACK", "268435456")
+    llvm = "C:/Program Files/LLVM/bin"
+    if llvm not in env.get("PATH", ""):
+        env["PATH"] = llvm + os.pathsep + env.get("PATH", "")
+    feats = "testnet sketch-lelantus-spark" if spark else "testnet"
+    cmd = ["cargo", "test", "--lib", "--features", feats, "--",
+           "--include-ignored", *sorted(set(test_fns))]
+    try:
+        p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "killed"  # a mutant that hangs the tests is caught, too
+    except Exception:
+        return "unviable"
+    blob = p.stdout + "\n" + p.stderr
+    if "error[" in blob or "error:" in blob and "test result" not in blob:
+        return "unviable"
+    res = parse_test_text(blob)
+    if not res:
+        return "unviable"
+    if any(v == "FAILED" for v in res.values()):
+        return "killed"
+    return "survived"
+
+# ── (2) incident-replay corpus: is each past bug reproduced AND fixed? ─────────
+# THREAT: <tag> becomes executable. A replay test is either explicitly marked
+# with `// REPLAY: <tag>` above a #[test], or a test whose name ends in the tag
+# (e.g. ..._h2, ..._c1). --replay [tag] runs the reproduction and shows whether
+# the original bug is still fixed.
+_REPLAY_MARK_RE = re.compile(r"//\s*REPLAY:\s*([A-Za-z0-9][A-Za-z0-9-]*)")
+
+def build_replay_index(roots=("src", "tests")):
+    """tag -> list of (file, fn). Marker lines are authoritative; a trailing
+    `_tag` suffix on any #[test] fn is a fallback so existing tests count."""
+    idx = {}
+    for root in roots:
+        rp = Path(root)
+        if not rp.exists():
+            continue
+        for p in sorted(rp.rglob("*.rs")):
+            txt = p.read_text(encoding="utf-8", errors="replace")
+            lines = txt.splitlines()
+            for i, ln in enumerate(lines):
+                m = _REPLAY_MARK_RE.search(ln)
+                if m:
+                    for j in range(i, min(i + 6, len(lines))):
+                        fn = re.search(r"\bfn\s+(\w+)", lines[j])
+                        if fn:
+                            idx.setdefault(m.group(1), []).append(
+                                (str(p).replace("\\", "/"), fn.group(1)))
+                            break
+            # name-suffix fallback: fn foo_bar_h2 / _c1 / _1d27d3c8
+            for fn in re.findall(r"\bfn\s+(\w+)", txt):
+                tail = fn.rsplit("_", 1)[-1]
+                norm = None
+                if re.fullmatch(r"h\d+", tail): norm = tail.upper()
+                elif re.fullmatch(r"c\d+", tail): norm = tail[0].upper() + "-" + tail[1:]
+                elif re.fullmatch(r"[0-9a-f]{8}", tail): norm = tail
+                if norm:
+                    where = str(p).replace("\\", "/")
+                    if (where, fn) not in idx.get(norm, []):
+                        idx.setdefault(norm, []).append((where, fn))
+    return idx
+
+def run_replay(files, tag, no_run, results_log, timeout, spark, use_color):
+    def col(c, s): return f"{ANSI[c]}{s}{RST}" if use_color else s
+    def b(s): return f"{BOLD}{s}{RST}" if use_color else s
+    def dim(s): return f"{DIM}{s}{RST}" if use_color else s
+    replay = build_replay_index()
+    # every incident tag known to the audit maps, so we can flag ones with NO replay
+    mapped_tags = set()
+    for f in files:
+        for s in f["sections"]:
+            mapped_tags.update(s["tags"])
+    known = mapped_tags | set(INCIDENTS) | set(replay)
+    tags = [tag] if tag else sorted(known)
+    out = ["", b("  Incident replay") + dim("  (each past bug: reproduced and still fixed?)")]
+    to_run = sorted({fn for t in tags for _, fn in replay.get(t, [])})
+    if tag and not no_run and to_run:
+        sys.stderr.write(f"running {len(to_run)} replay test(s)…\n")
+        results = run_cargo_for(to_run, spark=spark)
+    else:
+        results = results_log
+    for t in tags:
+        entries = replay.get(t, [])
+        doc = INCIDENTS.get(t)
+        if not entries:
+            out.append(f"  {col('yellow','?')} {b(t):<28} " +
+                       col("yellow", "NO replay test") +
+                       (dim(f"   post-mortem: {doc}") if doc else dim("   (mark one with // REPLAY: %s)" % t)))
+            continue
+        sts = [results.get(fn) for _, fn in entries]
+        if any(x == "FAILED" for x in sts):
+            v, c = "REGRESSED", "red"
+        elif all(x == "ok" for x in sts):
+            v, c = "fixed ✓", "green"
+        elif any(x is None for x in sts):
+            v, c = "not run", "yellow"
+        else:
+            v, c = "ignored", "grey"
+        out.append(f"  {col(c, DOT[c])} {b(t):<28} {col(c, v)}"
+                   + dim(f"   {len(entries)} test(s)")
+                   + (dim(f" · {doc}") if doc else ""))
+        for where, fn in entries:
+            tl = find_line(where, f"fn {fn}(", f"fn {fn}<", f"fn {fn} ")
+            out.append("       " + dim(f"{fn}  {where}:{tl}" if tl else f"{fn}  {where}"))
+    covered = sum(1 for t in tags if replay.get(t))
+    out.append("")
+    out.append(dim(f"  {covered}/{len(tags)} incident tag(s) have a replay test. "
+                   f"Add one: // REPLAY: <tag> above a #[test].\n"))
+    return "\n".join(out)
+
+# ── (3) coverage ratchet vs a base ref: block color REGRESSIONS, not just red ──
+def run_ratchet(files, base_ref, use_color):
+    def col(c, s): return f"{ANSI[c]}{s}{RST}" if use_color else s
+    def b(s): return f"{BOLD}{s}{RST}" if use_color else s
+    try:
+        blob = subprocess.run(["git", "show", f"{base_ref}:docs/audit/sections.json"],
+                              capture_output=True, text=True, timeout=30).stdout
+        base = json.loads(blob) if blob.strip() else None
+    except Exception:
+        base = None
+    if not base:
+        print(f"  ratchet: no committed sections.json at {base_ref} — "
+              f"nothing to compare (PASS). Commit one on the base branch to enable.")
+        return 0
+    strong = ("green", "blue")
+    base_color = {}
+    for bf in base:
+        for bs in bf.get("sections", []):
+            base_color[(bf["path"], bs["num"])] = bs.get("color", "yellow")
+    regressions, new_red = [], []
+    for f in files:
+        for s in f["sections"]:
+            now = s["color"]
+            was = base_color.get((f["path"], s["num"]))
+            if was in strong and now not in strong:
+                regressions.append((f, s, was, now))
+            elif was is not None and was != "red" and now == "red":
+                new_red.append((f, s, was))
+    for f, s, was, now in regressions:
+        print(f"  {col('red','REGRESSED')} {f['path']} #{s['num']} {s['name']} -- {was} -> {now}")
+    for f, s, was in new_red:
+        print(f"  {col('red','NEW-RED')}   {f['path']} #{s['num']} {s['name']} -- {was} -> red")
+    bad = regressions or new_red
+    print(f"\n  ratchet vs {base_ref}: {'FAIL' if bad else 'PASS'} "
+          f"({len(regressions)} regressed, {len(new_red)} newly red)")
+    return 1 if bad else 0
+
+# ── (4) blast radius: what does this change put at risk, and what to re-run ────
+def run_impact(files, target, use_color):
+    def col(c, s): return f"{ANSI[c]}{s}{RST}" if use_color else s
+    def b(s): return f"{BOLD}{s}{RST}" if use_color else s
+    def dim(s): return f"{DIM}{s}{RST}" if use_color else s
+    tp = Path(target)
+    if tp.exists() and tp.is_file():
+        changed = {str(tp).replace("\\", "/")}
+        label = target
+    else:
+        changed = changed_files_since(target)
+        label = f"changes since {target}"
+    hit = [f for f in files if f["path"] in changed]
+    out = ["", b("  Blast radius") + dim(f"  ({label})")]
+    if not hit:
+        out.append("  no audited section touches that change.\n")
+        return "\n".join(out)
+    changed_tags, rerun = set(), set()
+    for f in hit:
+        mark = (CRIT + "▌" + RST) if (use_color and f["critical"]) else " "
+        out.append(f"  {mark} {b(f['path'])}")
+        for s in f["sections"]:
+            changed_tags.update(s["tags"])
+            rerun.update(s["tests"])
+            tg = ("  " + " ".join(col("yellow", t) for t in s["tags"])) if s["tags"] else ""
+            out.append(f"       §{s['num']} {s['name']}"
+                       + dim(f"   {len(s['tests'])} test(s)") + tg)
+    # invariants (and other sections) that share an incident/threat tag → also at risk
+    linked = []
+    for f in files:
+        if f in hit:
+            continue
+        for s in f["sections"]:
+            common = changed_tags & set(s["tags"])
+            if common:
+                linked.append((f, s, common))
+                rerun.update(s["tests"])
+    if linked:
+        out.append("  " + b("shares a threat tag (re-check these too):"))
+        for f, s, common in linked:
+            out.append(f"       {f['path']} §{s['num']} {s['name']}"
+                       + dim("   tags: " + ",".join(sorted(common))))
+    rerun = sorted(t for t in rerun if t)
+    out.append("")
+    if rerun:
+        out.append("  " + b("re-run command:"))
+        out.append("     " + col("green", "cargo test --lib --features testnet -- --include-ignored "
+                                  + " ".join(rerun)))
+    out.append("")
+    return "\n".join(out)
+
+# ── (5) doctor: one health score + the top risks, from the cached log ─────────
+def run_doctor(files, results, use_color):
+    def col(c, s): return f"{ANSI[c]}{s}{RST}" if use_color else s
+    def b(s): return f"{BOLD}{s}{RST}" if use_color else s
+    def dim(s): return f"{DIM}{s}{RST}" if use_color else s
+    for f in files:
+        for s in f["sections"]:
+            s["color"] = colorize(s, results)
+    tally = {c: 0 for c in COLOR}
+    crit_total = crit_strong = 0
+    reds, crit_weak = [], []
+    for f in files:
+        for s in f["sections"]:
+            tally[s["color"]] += 1
+            if s["color"] == "red":
+                reds.append((f, s))
+            if f["critical"]:
+                crit_total += 1
+                if s["color"] in ("green", "blue"):
+                    crit_strong += 1
+                elif s["color"] != "grey":
+                    crit_weak.append((f, s))
+    total = sum(tally.values()) or 1
+    strong = tally["green"] + tally["blue"]
+    # health: reward proven coverage, weight criticals double, hard-cap on any red
+    crit_ratio = (crit_strong / crit_total) if crit_total else 1.0
+    score = round(100 * (0.5 * strong / total + 0.5 * crit_ratio))
+    if reds:
+        score = min(score, 49)  # any live bug caps the grade
+    grade = ("A" if score >= 90 else "B" if score >= 75 else
+             "C" if score >= 60 else "D" if score >= 50 else "F")
+    gc = "green" if grade in ("A", "B") else "yellow" if grade in ("C", "D") else "red"
+    log_note = "" if results else dim("  (no --test-log given: colors are static; "
+                                      "pass --test-log lib_test.log for live status)")
+    out = ["", b("  Audit doctor") + dim("  — am I safe to ship?"), log_note,
+           "  " + col(gc, b(f"HEALTH {score}/100  ·  grade {grade}")),
+           f"  {col('green', str(strong)+' proven')}  {col('yellow', str(tally['yellow'])+' incomplete')}  "
+           f"{col('red', str(tally['red'])+' FAILING')}  {col('grey', str(tally['grey'])+' gated')}"
+           f"   {dim('· consensus-critical proven:')} {crit_strong}/{crit_total}"]
+    risks = [("red", f, s) for f, s in reds] + [("yellow", f, s) for f, s in crit_weak]
+    if risks:
+        out.append("  " + b("top risks:"))
+        for c, f, s in risks[:3]:
+            why = "TEST FAILING (live bug)" if c == "red" else "consensus-critical, unproven"
+            sline = code_line(f, s)
+            loc = f"{f['path']}:{sline}" if sline else f["path"]
+            out.append(f"     {col(c, DOT[c])} {f['path']} §{s['num']} {s['name']}  {dim(why)}  {dim(loc)}")
+    verdict = ("SHIP-BLOCKED — live bug(s)" if reds else
+               "REVIEW — consensus-critical gaps" if crit_weak else
+               "clear — no red, criticals proven")
+    out.append("")
+    out.append("  " + col(gc, b("verdict: " + verdict)))
+    out.append(dim("  next: --gaps (to-do)  ·  --replay (past bugs)  ·  --mutate <§> (proof strength)\n"))
+    return "\n".join(out), (1 if reds else 0)
+
 # ── main ─────────────────────────────────────────────────────────────────────
 def subsystem_of(rel):
     parts = rel.replace("\\", "/").split("/")
@@ -589,6 +999,20 @@ def main():
                     help="write an auditor handoff zip (sections.json + findings + log + manifest)")
     ap.add_argument("--trend", action="store_true",
                     help="on the full report, record + show the coverage delta since last run")
+    ap.add_argument("--mutate", default="",
+                    help="mutation-test a section (plant bugs, do its tests catch them?): <file|§N|test|tag>")
+    ap.add_argument("--max-mutants", type=int, default=12,
+                    help="cap mutants per section for --mutate (default 12; each recompiles)")
+    ap.add_argument("--mutant-timeout", type=int, default=1800,
+                    help="per-mutant cargo-test timeout in seconds (default 1800)")
+    ap.add_argument("--replay", nargs="?", const="__ALL__", default=None,
+                    help="run incident-replay tests; optional TAG (e.g. --replay C-2), else list all")
+    ap.add_argument("--ratchet", default="",
+                    help="fail if any section REGRESSED in color vs this base git ref (PR gate)")
+    ap.add_argument("--impact", default="",
+                    help="blast radius of a change: <file path> or a git ref — sections/tests at risk")
+    ap.add_argument("--doctor", action="store_true",
+                    help="one health score + top risks + ship verdict (uses --test-log)")
     a = ap.parse_args()
 
     files = []
@@ -626,6 +1050,35 @@ def main():
     if a.since:
         sys.stdout.write(render_since(files, changed_files_since(a.since), use_color))
         return
+
+    if a.mutate:
+        sys.stdout.write(run_mutation(files, a.mutate, a.max_mutants,
+                                      a.mutant_timeout, a.spark, use_color))
+        return
+
+    if a.replay is not None:
+        results = parse_test_log(Path(a.test_log)) if a.test_log else {}
+        tag = None if a.replay == "__ALL__" else a.replay
+        sys.stdout.write(run_replay(files, tag, a.no_run, results,
+                                    a.mutant_timeout, a.spark, use_color))
+        return
+
+    if a.impact:
+        sys.stdout.write(run_impact(files, a.impact, use_color))
+        return
+
+    if a.ratchet:
+        results = parse_test_log(Path(a.test_log)) if a.test_log else {}
+        for f in files:
+            for s in f["sections"]:
+                s["color"] = colorize(s, results)
+        sys.exit(run_ratchet(files, a.ratchet, use_color))
+
+    if a.doctor:
+        results = parse_test_log(Path(a.test_log)) if a.test_log else {}
+        report, code = run_doctor(files, results, use_color)
+        sys.stdout.write(report)
+        sys.exit(code)
 
     if a.lint:
         sys.stdout.write(render_lint(files, use_color))

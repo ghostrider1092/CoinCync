@@ -45,6 +45,47 @@ python $T --check --test-log lib_test.log    # CI ratchet: exit≠0 on red or cr
 python $T --since HEAD~1                      # sections whose CODE moved → re-review
 ```
 
+### Next-tier: is the proof actually strong? (5 more modes)
+
+The modes above tell you *where* a behaviour is tested and whether it's green.
+These five tell you whether that green is *trustworthy*, catch regressions, and
+turn the whole thing into one answer.
+
+```bash
+# (1) MUTATION TESTING — plant small bugs in a section's own source and check its
+#     mapped tests catch them. A surviving mutant is a hole no swatch reveals.
+python $T --mutate init_genesis              # by section/test/tag or file:§N
+python $T --mutate chain.rs:1 --max-mutants 20
+#   → kill-rate 75%  (3 killed · 1 survived · 0 unviable)
+#       survived  src/chain.rs:764   != -> ==   (the test never noticed)
+#   Slow: each mutant recompiles. Scope tight; cap with --max-mutants.
+
+# (2) INCIDENT REPLAY — every past bug ('THREAT: <tag>') should have a test that
+#     reproduces it and now passes. Marks a test with `// REPLAY: <tag>` above a
+#     #[test], or falls back to a `_tag` name suffix (…_h2, …_c1).
+python $T --replay                           # list every incident tag: fixed / no-replay
+python $T --replay C-2 --test-log lib_test.log   # run C-2's reproduction; still fixed?
+
+# (3) COVERAGE RATCHET — a PR gate that fails on a color REGRESSION (green→yellow),
+#     not only on outright red. Compares against the committed sections.json at a
+#     base ref, so a PR can never quietly lower proven coverage.
+python $T --ratchet origin/main --test-log lib_test.log
+
+# (4) BLAST RADIUS — what a change puts at risk + the exact tests to re-run. Takes
+#     a file path or a git ref; also cross-links sections sharing a threat tag.
+python $T --impact src/storage/utxos.rs
+python $T --impact HEAD~3                     # everything touched since HEAD~3
+
+# (5) DOCTOR — the "am I safe to ship?" button. One health score, the top 3 risks,
+#     and a ship verdict, from the cached log. Exits nonzero if any section is red.
+python $T --doctor --test-log lib_test.log
+#   → HEALTH 87/100 · grade B    verdict: REVIEW — consensus-critical gaps
+```
+
+A section only earns a clean mutation bill when **every** planted bug is caught;
+a live red section caps the doctor grade at F. Green + high kill-rate + a passing
+replay is a claim an auditor can trust.
+
 **Whole-codebase colored report:**
 ```bash
 python $T --test-log lib_test.log            # subsystem → file → §section swatches

@@ -8,6 +8,14 @@
 #   .\cov.ps1 --check              # CI gate (exit code)
 #   .\cov.ps1                      # whole-codebase report
 #
+#   next-tier:
+#   .\cov.ps1 --doctor             # one health score + top risks + ship verdict
+#   .\cov.ps1 --mutate init_genesis  # plant bugs in a section — do its tests catch them?
+#   .\cov.ps1 --replay C-2         # run a past bug's reproduction; is it still fixed?
+#   .\cov.ps1 --replay             #   ...or list every incident tag + whether it has a replay
+#   .\cov.ps1 --impact src\chain.rs  # blast radius: sections/tests a change puts at risk
+#   .\cov.ps1 --ratchet HEAD~1     # PR gate: fail on any color REGRESSION vs a base ref
+#
 # It sets the env, finds the tool + lib_test.log automatically, and (for a
 # query) uses the cached log so lookups are instant. Capture the log first with:
 #   cargo test --lib --features testnet | Tee-Object lib_test.log

@@ -47,6 +47,21 @@ jobs:
       - name: Section-coverage ratchet (fails on any RED section)
         run: python3 docs/audit/tools/build_section_heatmap.py --check --test-log lib_test.log --no-color
 
+      - name: Coverage regression gate (fails if a PR lowers any section's color)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" || true
+          python3 docs/audit/tools/build_section_heatmap.py \
+            --ratchet "origin/${GITHUB_BASE_REF}" --test-log lib_test.log --no-color
+
+      - name: Audit doctor — health score + ship verdict (informational)
+        if: always()
+        run: python3 docs/audit/tools/build_section_heatmap.py --doctor --test-log lib_test.log --no-color || true
+
+      - name: Incident replay coverage (informational)
+        if: always()
+        run: python3 docs/audit/tools/build_section_heatmap.py --replay --test-log lib_test.log --no-color || true
+
       - name: Coverage report + gaps (informational)
         if: always()
         run: |
